@@ -22,6 +22,7 @@ import com.sdh.healthcare.connector.core.storage.CommittedSections;
 import com.sdh.healthcare.connector.core.storage.SectionBatchWriter;
 import com.sdh.healthcare.connector.core.storage.SectionBatchWriter.EncryptedSection;
 import com.sdh.healthcare.connector.core.storage.SectionBatchWriter.WrittenSection;
+import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.LocalDate;
@@ -142,13 +143,13 @@ public final class IngestPipeline implements AutoCloseable {
      * @throws IllegalStateException if a different file is still splitting or archiving; finish or abandon it first
      */
     public SplitResult split(SeekableByteSource src) throws Exception {
-        String fingerprint = SourceFingerprint.of(src, ids);
+        String fingerprint = fingerprint(src);
         Checkpoint cp = checkpoint().orElse(null);
         if (cp != null && cp.fingerprint().equals(fingerprint) && cp.state() == Checkpoint.State.ARCHIVING) {
             return new SplitResult(cp.fileId(), cp.sectionCount(), cp);
         }
-        if (cp != null && cp.state() == Checkpoint.State.ARCHIVING) {
-            throw new IllegalStateException("File " + cp.fileId() + " is still being archived");
+        if (cp != null && cp.state().inProgress() && cp.state() != Checkpoint.State.SPLITTING) {
+            throw new IllegalStateException("File " + cp.fileId() + " is still " + cp.state());
         }
         if (cp != null && cp.state() == Checkpoint.State.SPLITTING) {
             if (!cp.fingerprint().equals(fingerprint)) {
@@ -160,6 +161,10 @@ public final class IngestPipeline implements AutoCloseable {
             LOG.info("file.resumed fileId={} nextSeq={} offset={} publishedSeq={}", cp.fileId(), cp.nextSeq(),
                     cp.resumeAt().offset(), cp.publishedSeq());
         } else {
+            if (src.size() > settings.split().limits().maxFileBytes()) {
+                // Rejected before ingestion (design §6.3): no checkpoint, no file.started.
+                throw new SplitException(ErrorCode.LIMIT_FILE_SIZE, 0);
+            }
             cp = Checkpoint.start(UuidV7.next(clock.millis()), fingerprint, settings.format(), src.size(),
                     clock.instant());
             commitCheckpoint(cp);
@@ -319,8 +324,26 @@ public final class IngestPipeline implements AutoCloseable {
                 && stored.get().state() == next.state();
     }
 
+    /** The keyed fingerprint used to recognise a source after a restart (design §5.1). */
+    public String fingerprint(SeekableByteSource src) throws IOException {
+        return SourceFingerprint.of(src, ids);
+    }
+
+    PipelineSettings settings() {
+        return settings;
+    }
+
+    Clock clock() {
+        return clock;
+    }
+
+    /** Seals and publishes messages now, waiting for acknowledgement. */
+    void publishNow(List<ConnectorMessage> messages) throws Exception {
+        publish(messages);
+    }
+
     /** A data-free checkpoint commit (new file, end of file, abandon). Idempotent. */
-    private void commitCheckpoint(Checkpoint next) throws Exception {
+    void commitCheckpoint(Checkpoint next) throws Exception {
         String encoded = codec.encode(next);
         settings.retry().call("storage.commit", RetryPolicy.TRANSIENT_STORAGE, attempt -> {
             if (attempt > 1) {
@@ -376,8 +399,14 @@ public final class IngestPipeline implements AutoCloseable {
                 acks.get(i).get();
             } catch (ExecutionException e) {
                 OutboundMessage om = outbound.get(i);
-                settings.retry().call("publish", ex -> !(ex instanceof InterruptedException),
-                        attempt -> get(send(om)));
+                try {
+                    settings.retry().call("publish", ex -> !(ex instanceof InterruptedException),
+                            attempt -> get(send(om)));
+                } catch (InterruptedException ie) {
+                    throw ie;
+                } catch (Exception failed) {
+                    throw new PublishFailedException(failed);
+                }
             }
         }
     }

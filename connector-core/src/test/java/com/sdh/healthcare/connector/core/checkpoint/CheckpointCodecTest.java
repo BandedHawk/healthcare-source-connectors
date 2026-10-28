@@ -47,6 +47,6 @@ class CheckpointCodecTest {
     void sequenceInvariantsAreEnforced() {
         Checkpoint c = sample();
         assertThatThrownBy(() -> new Checkpoint(c.fileId(), c.fingerprint(), c.format(), c.fileSize(), c.state(),
-                c.resumeAt(), 10, 9, 10, c.startedAt())).isInstanceOf(IllegalArgumentException.class);
+                c.resumeAt(), 10, 9, 10, c.startedAt(), null)).isInstanceOf(IllegalArgumentException.class);
     }
 }

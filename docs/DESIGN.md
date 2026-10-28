@@ -8,6 +8,8 @@ Revision 2026-10-28 (c): built the splitters (§6). Resume uses a `ResumePoint` 
 
 Revision 2026-10-28 (d): built the split phase of the pipeline (§9.4). Multi-chunk sections are read twice (hash, then encrypt) so memory stays at one chunk (§7.2). Commit retries check the checkpoint first so a batch is never appended twice (§9.2). The checkpoint gained `format`, `fileSize` and the `ABANDONED` state (§9.1). Fingerprints and checkpoint MACs use labelled HMACs (§5.1, §9.1). Archiving, failure handling and broker adapters are not built yet.
 
+Revision 2026-10-28 (e): built archiving and failure handling (§4.1, §11). Added the `FAILING` state, so the decision to fail a file is durable before anything else happens. Archive tables keep file-level values on a summary row (§8.2). The digest chain, the local fallback format and the completion order are now specified (§5.1, §11.1, §11.2). Broker adapters and the Camel wiring are not built yet.
+
 ---
 
 ## 1. Purpose
@@ -73,7 +75,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
     └── com.sdh.healthcare.connector.file
         ├── FileConnectorApplication
         ├── route/        Camel routes (directory discovery, housekeeping)
-        ├── source/       file fingerprinting, resumable reader
+        ├── source/       LocalSourceFile, DirectoryOutcomeRecorder (completed/ and failed/ records, local fallback)
         └── admin/        operator commands (restore, decrypt-fallback)
 ```
 
@@ -104,16 +106,23 @@ flowchart LR
 ```
 DISCOVERED → SPLITTING → ARCHIVING → COMPLETED
                 │            │
-                └────────────┴──→ FAILED
+                └────────────┴──→ FAILING → FAILED
+   (source gone while SPLITTING, or ARCHIVING with the archive unfinished) → ABANDONED
 ```
+
+The state lives in the `sections` checkpoint (§9.1). `FileProcessor` (`connector-core` `pipeline/`) runs the whole lifecycle.
 
 | State | Durable record | Restart behaviour |
 |---|---|---|
 | DISCOVERED | none | The file is still in the inbound directory, so it is simply picked up again |
-| SPLITTING | checkpoint in `sections` table properties | Resume at `resumeAt` and continue at `nextSeq`. Republish any committed-but-unpublished sections first |
-| ARCHIVING | checkpoint in `source_files` table properties | Continue archiving from the last archived block |
+| SPLITTING | `sections` checkpoint | Resume at `resumeAt` and continue at `nextSeq`. Republish any committed-but-unpublished sections first |
+| ARCHIVING | `sections` checkpoint + archive checkpoint on `source_files` | Continue archiving from the last archived block. If the archive is already done, finish without the source (§11.1) |
 | COMPLETED | `completed/<fileId>.json`; original deleted | Nothing to do |
+| FAILING | `sections` checkpoint with stage, error code and offset; archive checkpoint on `failed_files` | Finish failing the file; never retry splitting it |
 | FAILED | `failed/<fileId>.json` (+ `failed/<fileId>.enc` if fallback was used) | Nothing to do; operators take over |
+| ABANDONED | `sections` checkpoint | Nothing to do; `file.abandoned` was logged |
+
+**Startup (for the file connector):** if `FileProcessor.inProgress()` returns a checkpoint, fingerprint the inbound files and `process()` the match first. If there is no match, call `recoverWithoutSource()`.
 
 Files are processed **one at a time, oldest first**. This keeps ordering predictable and resume logic simple, and the work within a single file is already parallelised (§7).
 
@@ -132,9 +141,9 @@ Files are processed **one at a time, oldest first**. This keeps ordering predict
 |---|---|---|
 | `fileId` | UUIDv7, assigned at pickup and saved in the checkpoint | Correlates queue messages, telemetry and tables |
 | fingerprint | size + `HMAC(idKey, "sdh-fingerprint" ‖ 0 ‖ first 1 MiB ‖ last 1 MiB)` | Recognises the same file after a restart without reading all of it |
-| `fileDigest` | chained HMAC-SHA-256 over fixed 64 MiB blocks, computed during archiving | Integrity value sent in `file.completed` |
+| `fileDigest` | `base32` of a chained HMAC-SHA-256 over fixed 64 MiB blocks, computed during archiving | Integrity value sent in `file.completed` |
 
-The digest is chained, `H_i = HMAC(idKey, H_{i-1} ‖ block_i)`, so a restart only needs the last `H` value and the block number, both of which are saved in the archive checkpoint.
+The digest is chained, `H_i = HMAC(idKey, "sdh-file-digest" ‖ 0 ‖ H_{i-1} ‖ block_i)` with `H_{-1}` = 32 zero bytes, so a restart only needs the last `H` value and the block number, both of which are saved in the archive checkpoint. An empty file is one empty block. The digest depends only on content, not on `fileId` or how the archive was committed.
 
 ## 6. Splitting
 
@@ -284,8 +293,10 @@ The namespace is `sdh_ingest` (configurable). There are three tables, each with 
 
 - **Partitioning:** `day(ingested_at)`. Sort order `file_id, seq, chunk_index`, so readers prune files using min/max statistics.
 - **Parquet settings:** zstd level 1 for the whole table. Row group 128 MiB, target file size 512 MiB. The earlier plan to leave `ciphertext` uncompressed isn't possible: Iceberg sets the Parquet codec per table, not per column (spike finding). zstd passes incompressible ciphertext through at a small CPU cost and almost no size overhead.
-- **`source_files`** uses the same chunk layout, holding the raw original file bytes in 8 MiB chunks. It adds `original_name_enc` (the filename encrypted with the same envelope), `file_size`, `file_digest`, `section_count` and `completed_at`.
-- **`failed_files`** has the same layout as `source_files`, plus `failure_stage`, `failure_offset`, `failure_seq`, `error_code`, `failed_at` and `replaces_file_id` (set when an operator resubmits).
+- **`source_files`** holds the raw original in 8 MiB chunks, one row per chunk: `file_id`, `chunk_index`, `chunk_count`, `chunk_size`, `file_size`, `ciphertext`, `bdk_wrapped`, `kek_ref`, `batch_id`, `archived_at` (partition `day(archived_at)`, sort `file_id, chunk_index`). Chunk key = HKDF(BDK, fileId, seq 0); AAD = fileId ‖ 0 ‖ chunkIndex ‖ chunkCount.
+- **Summary row:** values known only at the end go on one row with `chunk_index = -1`, written in the final archive commit: `original_name_enc` (the filename, encrypted with seq −1), `file_digest`, `digest_block_size`, `section_count`, `started_at` and `completed_at`. A file with a summary row is fully archived.
+- **`failed_files`** has the same layout. Its summary row adds `failure_stage`, `failure_offset`, `failure_seq`, `error_code`, `failed_at` and `replaces_file_id`. `replaces_file_id` is not filled in yet; it waits for the admin resubmit flow.
+- **Archive progress:** commits happen every `archive.commit-bytes` (default 512 MiB, whole blocks). Each one carries the archive checkpoint `sdh.archive.<connectorId>` = {fileId, nextBlock, chainHash, done, digest, finishedAt}, MAC'd like the main checkpoint. `ArchiveReader` restores a file (or its tail from an offset) a few chunks at a time and re-checks the digest.
 
 ### 8.3 Commit batching
 
@@ -333,7 +344,7 @@ sdh.checkpoint.file-connector = {
 ```
 
 - **`resumeAt`:** the encoded `ResumePoint` of the last committed section (§6.1): the next offset, then any context offsets. Offsets only, no content.
-- **States:** `SPLITTING`, `ARCHIVING`, `COMPLETED`, `FAILED`, `ABANDONED` (the file disappeared while in progress, §5). The pipeline refuses a new file while another is `SPLITTING` or `ARCHIVING`.
+- **States:** see §4.1. A `FAILING` or `FAILED` checkpoint also carries `failureStage`, `errorCode`, `failureOffset` and `failedAt`. The pipeline refuses a new file while another is `SPLITTING`, `ARCHIVING` or `FAILING`.
 - **Labelled MACs:** checkpoint MACs and fingerprints prefix a label, so neither can ever equal a section ID made with the same key.
 - **Tamper detection:** the checkpoint is MAC'd with the ID key. If it fails verification, the service stops with `CHECKPOINT_TAMPERED` rather than guessing.
 - **Archive phase:** uses an equivalent property on `source_files`, recording `nextBlock`, `chainHash` and `bytesArchived`.
@@ -496,13 +507,42 @@ if (m instanceof SectionStored s) {
 | Retries exhausted, or a non-retryable error (parse error, limit exceeded) | Fail the file (below) |
 | Crash or kill at any point | Resume from the checkpoint (§9) |
 
-**Failing a file:**
-1. Already-committed and published sections stay where they are, each tied to its `file_id`.
-2. The whole original file is archived into `failed_files`. If storage or the KMS is unreachable, it is instead encrypted locally to `failed/<fileId>.enc` with the recovery public key. Only holders of the recovery private key can decrypt it, and no secret is needed on the host.
-3. The original is deleted and `failed/<fileId>.json` is written.
-4. An OpenTelemetry `file.failed` event is emitted with fileId, stage, byte offset, seq of the last committed section, error code and attempt count.
+**Classifying a failure:**
 
-**Operator tools** (`java -jar file-connector.jar admin …`). Every command emits an audit event naming the operator identity from the environment.
+| Cause | Stage | Error code |
+|---|---|---|
+| File over `max-file-bytes` (checked before any checkpoint or `file.started`) | `intake` | `LIMIT_FILE_SIZE` |
+| Splitter error | `split` | the splitter's `PARSE_*` / `LIMIT_*` code and offset |
+| Broker didn't acknowledge after retries | `publish` | `PUBLISH_FAILED` |
+| Reading the source failed | `split` or `archive` | `SOURCE_READ_FAILED` |
+| Storage, catalog or KMS still failing after retries | `split` or `archive` | `STORAGE_FAILED` |
+
+These never fail a file. They stop the process, which then restarts from the checkpoint: lease loss, `CommitStateUnknownException`, a tampered checkpoint, or a broken invariant (`IllegalStateException`).
+
+### 11.1 Completing a file
+
+After the split phase: archive the original to `source_files`, publish `file.completed`, write `completed/<fileId>.json`, delete the original, then commit `COMPLETED`. The original is deleted only after its archive is committed, and every step can be repeated (message ID dedup, records overwritten, deleting a missing file is fine). So a crash anywhere just repeats the remaining steps, and once the archive is done the source is no longer needed. A failure while archiving fails the file through §11.2, which archives it to `failed_files` instead.
+
+### 11.2 Failing a file
+1. Commit the decision: checkpoint `FAILING` with stage, code and offset. If storage is down this can't be recorded; the file still goes to the local fallback.
+2. Already-committed and published sections stay where they are, each tied to its `file_id`.
+3. The whole original is archived into `failed_files`. It goes to the local fallback `failed/<fileId>.enc` instead (§11.3) when the file is over `max-file-bytes`, when `FAILING` couldn't be recorded, or when the archive fails (storage or KMS unreachable). If even the fallback can't be written, the original is kept and the error propagates.
+4. Write `failed/<fileId>.json`, delete the original, log `file.failed` (fileId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the OpenTelemetry event comes with §12. Attempt count isn't recorded yet.
+
+### 11.3 Local fallback format
+
+`RecoveryEnvelope` (`connector-core` `crypto/`), streaming and any size:
+- **Header:** `"SDHFB1"` ‖ fileId ‖ SHA-256(recovery public key) ‖ an ephemeral EC public key.
+- **Key:** HKDF-SHA256 over the ECDH of the ephemeral and recovery keys, salted with the header hash.
+- **Records:** each is `u32 length ‖ nonce ‖ AES-256-GCM(zstd(plaintext)) ‖ tag`, with AAD = header hash ‖ record index ‖ last-record flag.
+- **Contents:** record 0 is JSON metadata (original name, size). The data follows in 8 MiB records.
+- **Integrity:** truncation, reordering, splicing and the wrong key are all detected.
+
+`DirectoryOutcomeRecorder` writes it to a hidden temp file and renames it into place only after a successful write and sync. Records are written the same way, with owner-only permissions.
+
+### 11.4 Operator tools
+
+`java -jar file-connector.jar admin …` (not built yet; `ArchiveReader` and `RecoveryEnvelope` do the decrypting). Every command emits an audit event naming the operator identity from the environment.
 - `restore --file-id X --to <dir> [--from-offset N]` decrypts an archived failed file, or only its unprocessed tail, into a directory for repair or resubmission. A resubmitted file gets a new fileId, and `replaces_file_id` is recorded.
 - `decrypt-fallback --file failed/<id>.enc --key recovery.pem` handles a file that was encrypted locally.
 - `status` shows the checkpoint, lease and in-progress file.

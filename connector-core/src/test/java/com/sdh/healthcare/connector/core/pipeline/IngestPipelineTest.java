@@ -257,7 +257,7 @@ class IngestPipelineTest {
         List<String> recs = records();
         IngestPipeline first = process(settings(), pub, hooks);
         assertThatThrownBy(() -> first.split(csv(recs)))
-                .isInstanceOfAny(SimulatedCrash.class, IOException.class);
+                .isInstanceOfAny(SimulatedCrash.class, PublishFailedException.class);
         first.close();
         UUID firstFileId = first.checkpoint().orElseThrow().fileId();
         assertThat(first.checkpoint().orElseThrow().state()).isEqualTo(Checkpoint.State.SPLITTING);

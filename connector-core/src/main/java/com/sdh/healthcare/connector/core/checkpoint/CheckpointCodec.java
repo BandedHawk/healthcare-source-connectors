@@ -1,63 +1,35 @@
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
+import com.sdh.healthcare.connector.core.crypto.MacedJson;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.text.ParseException;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * Checkpoint ⇄ JSON, with {@code "mac": HMAC(idKey, "sdh-checkpoint" ‖ 0 ‖ canonical JSON without mac)}.
- * The MAC is computed over a canonical form rebuilt from the parsed fields, so it doesn't depend on how
- * the stored JSON happens to be formatted.
- */
+/** Checkpoint ⇄ JSON with a MAC under the label {@code sdh-checkpoint} (design §9.1). */
 public final class CheckpointCodec {
-    private static final String LABEL = "sdh-checkpoint";
-
-    private final SectionIds ids;
+    private final MacedJson<Checkpoint> json;
 
     public CheckpointCodec(SectionIds ids) {
-        this.ids = ids;
+        this.json = new MacedJson<>(ids, "sdh-checkpoint", CheckpointCodec::canonical, CheckpointCodec::parse);
     }
 
     public String encode(Checkpoint c) {
-        Map<String, Object> m = canonical(c);
-        m.put("mac", mac(m));
-        return JSONObjectUtils.toJSONString(m);
+        return json.encode(c);
     }
 
     /** @throws CheckpointTamperedException if the MAC doesn't verify or a field is missing or malformed */
-    public Checkpoint decode(String json) {
-        Checkpoint c;
-        String mac;
+    public Checkpoint decode(String s) {
         try {
-            Map<String, Object> o = JSONObjectUtils.parse(json);
-            c = new Checkpoint(
-                    UUID.fromString(JSONObjectUtils.getString(o, "fileId")),
-                    JSONObjectUtils.getString(o, "fingerprint"),
-                    JSONObjectUtils.getString(o, "format"),
-                    JSONObjectUtils.getLong(o, "fileSize"),
-                    Checkpoint.State.valueOf(JSONObjectUtils.getString(o, "state")),
-                    ResumePoint.parse(JSONObjectUtils.getString(o, "resumeAt")),
-                    JSONObjectUtils.getLong(o, "nextSeq"),
-                    JSONObjectUtils.getLong(o, "committedSeq"),
-                    JSONObjectUtils.getLong(o, "publishedSeq"),
-                    Instant.parse(JSONObjectUtils.getString(o, "startedAt")));
-            mac = JSONObjectUtils.getString(o, "mac");
-        } catch (ParseException | RuntimeException e) {
+            return json.decode(s);
+        } catch (MacedJson.Tampered e) {
             throw new CheckpointTamperedException();
         }
-        if (mac == null || !MessageDigest.isEqual(mac.getBytes(StandardCharsets.US_ASCII),
-                mac(canonical(c)).getBytes(StandardCharsets.US_ASCII))) {
-            throw new CheckpointTamperedException();
-        }
-        return c;
     }
 
     private static Map<String, Object> canonical(Checkpoint c) {
@@ -72,12 +44,37 @@ public final class CheckpointCodec {
         m.put("committedSeq", c.committedSeq());
         m.put("publishedSeq", c.publishedSeq());
         m.put("startedAt", c.startedAt().toString());
+        if (c.failure() != null) {
+            m.put("failureStage", c.failure().stage());
+            m.put("errorCode", c.failure().code().name());
+            m.put("failureOffset", c.failure().offset());
+            m.put("failedAt", c.failure().failedAt().toString());
+        }
         return m;
     }
 
-    private String mac(Map<String, Object> canonical) {
-        byte[] json = JSONObjectUtils.toJSONString(canonical).getBytes(StandardCharsets.UTF_8);
-        return Base64.getUrlEncoder().withoutPadding()
-                .encodeToString(ids.newLabelledMac(LABEL).doFinal(json));
+    private static Checkpoint parse(Map<String, Object> o) {
+        try {
+            Checkpoint.Failure failure = o.containsKey("errorCode")
+                    ? new Checkpoint.Failure(JSONObjectUtils.getString(o, "failureStage"),
+                            ErrorCode.valueOf(JSONObjectUtils.getString(o, "errorCode")),
+                            JSONObjectUtils.getLong(o, "failureOffset"),
+                            Instant.parse(JSONObjectUtils.getString(o, "failedAt")))
+                    : null;
+            return new Checkpoint(
+                    UUID.fromString(JSONObjectUtils.getString(o, "fileId")),
+                    JSONObjectUtils.getString(o, "fingerprint"),
+                    JSONObjectUtils.getString(o, "format"),
+                    JSONObjectUtils.getLong(o, "fileSize"),
+                    Checkpoint.State.valueOf(JSONObjectUtils.getString(o, "state")),
+                    ResumePoint.parse(JSONObjectUtils.getString(o, "resumeAt")),
+                    JSONObjectUtils.getLong(o, "nextSeq"),
+                    JSONObjectUtils.getLong(o, "committedSeq"),
+                    JSONObjectUtils.getLong(o, "publishedSeq"),
+                    Instant.parse(JSONObjectUtils.getString(o, "startedAt")),
+                    failure);
+        } catch (ParseException e) {
+            throw new IllegalArgumentException(e);
+        }
     }
 }

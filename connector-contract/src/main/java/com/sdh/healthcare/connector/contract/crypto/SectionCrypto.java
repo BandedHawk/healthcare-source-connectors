@@ -103,6 +103,33 @@ public final class SectionCrypto {
         return Zstd.decompress(compressed, expectedLength);
     }
 
+    /**
+     * Like {@link #decryptChunk} for small values whose length isn't known up front (such as an encrypted
+     * filename): accepts any decompressed length up to {@code maxLength}.
+     */
+    public static byte[] decryptSmall(SecretKey key, UUID fileId, long seq, int chunkIndex, int chunkCount,
+            int maxLength, byte[] stored) {
+        if (stored.length < NONCE_BYTES + TAG_BITS / 8) {
+            throw new ChunkIntegrityException("Chunk too short");
+        }
+        byte[] compressed;
+        try {
+            Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, stored, 0, NONCE_BYTES));
+            c.updateAAD(aad(fileId, seq, chunkIndex, chunkCount));
+            compressed = c.doFinal(stored, NONCE_BYTES, stored.length - NONCE_BYTES);
+        } catch (javax.crypto.AEADBadTagException e) {
+            throw new ChunkIntegrityException("Chunk authentication failed");
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("Chunk decryption failed", e);
+        }
+        long size = Zstd.getFrameContentSize(compressed);
+        if (size < 0 || size > maxLength) {
+            throw new ChunkIntegrityException("Chunk length out of range");
+        }
+        return Zstd.decompress(compressed, (int) size);
+    }
+
     static byte[] aad(UUID fileId, long seq, int chunkIndex, int chunkCount) {
         return ByteBuffer.allocate(16 + 8 + 4 + 4)
                 .putLong(fileId.getMostSignificantBits())

@@ -2,6 +2,9 @@ package com.sdh.healthcare.connector.core.storage;
 
 import com.sdh.healthcare.connector.contract.table.SectionsTable;
 import java.util.Map;
+import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Schema;
+import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.Catalog;
@@ -31,6 +34,24 @@ public final class IngestTables {
     private IngestTables() {}
 
     public static Table sections(Catalog catalog, String namespace) {
+        return create(catalog, namespace, SectionsTable.DEFAULT_NAME, SectionsTable.SCHEMA, SectionsTable.SPEC,
+                SectionsTable.SORT_ORDER);
+    }
+
+    public static Table sourceFiles(Catalog catalog, String namespace) {
+        Schema s = ArchiveTables.SOURCE_FILES_SCHEMA;
+        return create(catalog, namespace, ArchiveTables.SOURCE_FILES, s, ArchiveTables.spec(s),
+                ArchiveTables.sortOrder(s));
+    }
+
+    public static Table failedFiles(Catalog catalog, String namespace) {
+        Schema s = ArchiveTables.FAILED_FILES_SCHEMA;
+        return create(catalog, namespace, ArchiveTables.FAILED_FILES, s, ArchiveTables.spec(s),
+                ArchiveTables.sortOrder(s));
+    }
+
+    private static Table create(Catalog catalog, String namespace, String name, Schema schema, PartitionSpec spec,
+            SortOrder order) {
         Namespace ns = Namespace.of(namespace);
         if (catalog instanceof SupportsNamespaces sn && !sn.namespaceExists(ns)) {
             try {
@@ -39,13 +60,13 @@ public final class IngestTables {
                 // created concurrently
             }
         }
-        TableIdentifier id = TableIdentifier.of(ns, SectionsTable.DEFAULT_NAME);
+        TableIdentifier id = TableIdentifier.of(ns, name);
         if (catalog.tableExists(id)) {
             return catalog.loadTable(id);
         }
-        return catalog.buildTable(id, SectionsTable.SCHEMA)
-                .withPartitionSpec(SectionsTable.SPEC)
-                .withSortOrder(SectionsTable.SORT_ORDER)
+        return catalog.buildTable(id, schema)
+                .withPartitionSpec(spec)
+                .withSortOrder(order)
                 .withProperties(PROPERTIES)
                 .create();
     }

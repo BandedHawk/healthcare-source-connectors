@@ -11,6 +11,11 @@ public enum ErrorCode {
     LIMIT_SECTION_SIZE,
     LIMIT_SECTION_COUNT,
 
+    // File failures that aren't about content (design §11)
+    SOURCE_READ_FAILED,
+    STORAGE_FAILED,
+    PUBLISH_FAILED,
+
     /** A saved resume point doesn't fit the file (wrong file, or a checkpoint from another splitter). */
     RESUME_INVALID,
 
