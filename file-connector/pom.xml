@@ -16,6 +16,8 @@
     <!-- Iceberg 1.12.0 is built against Jackson 2.22.2; Boot 4.1.2 would downgrade it to 2.21.x.
          Spring itself uses Jackson 3, so pinning Jackson 2 here only affects Iceberg. -->
     <jackson2.version>2.22.2</jackson2.version>
+    <!-- Same AWS SDK line Camel's SQS component is built with, so all SDK modules match. -->
+    <awssdk.version>2.50.2</awssdk.version>
   </properties>
 
   <dependencyManagement>
@@ -31,6 +33,13 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-dependencies</artifactId>
         <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${awssdk.version}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
@@ -96,9 +105,39 @@
       <artifactId>camel-spring-rabbitmq-starter</artifactId>
     </dependency>
 
+    <!-- Lease store (design §9.3). -->
+    <dependency>
+      <groupId>com.zaxxer</groupId>
+      <artifactId>HikariCP</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Object storage: S3FileIO for AWS S3, SeaweedFS and MinIO (design §8.1). -->
+    <dependency>
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-aws</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>apache-client</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.zonky.test</groupId>
+      <artifactId>embedded-postgres</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>

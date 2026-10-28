@@ -10,6 +10,8 @@ Revision 2026-10-28 (d): built the split phase of the pipeline (§9.4). Multi-ch
 
 Revision 2026-10-28 (e): built archiving and failure handling (§4.1, §11). Added the `FAILING` state, so the decision to fail a file is durable before anything else happens. Archive tables keep file-level values on a summary row (§8.2). The digest chain, the local fallback format and the completion order are now specified (§5.1, §11.1, §11.2). Broker adapters and the Camel wiring are not built yet.
 
+Revision 2026-10-28 (f): wired the file connector (§5, §5.2, §10.3, §14). Startup order, the Camel route, the broker adapters and the `local` key provider are built. Found and fixed a Camel default that broke oldest-first pickup (§5, §16). The configuration shape changed in a few places (§14). Cloud KMS providers, admin commands and OpenTelemetry export are not built yet.
+
 ---
 
 ## 1. Purpose
@@ -39,7 +41,8 @@ All versions were checked against Maven Central on 2026-10-28.
 | Hadoop (classes only) | 3.4.3 | Six jars, transitive dependencies excluded: `hadoop-common`, `hadoop-mapreduce-client-core`, `hadoop-shaded-guava`, `woodstox-core`, `stax2-api`, `commons-collections4` (§16) |
 | Jackson 2 | 2.22.2 | Used by Iceberg only (Spring uses Jackson 3). Pinned in `file-connector`, because Boot 4.1.2 would downgrade it to 2.21.x |
 | Nimbus JOSE+JWT | 10.10 | JWS/JWE message encryption and signing |
-| PostgreSQL | any supported | Lease store (§9.3). Can be the JDBC catalog's database |
+| PostgreSQL | any supported | Lease store (§9.3). Can be the JDBC catalog's database. Driver 42.7.14, HikariCP (Boot-managed, pool of 2) |
+| AWS SDK v2 | 2.50.2 | `s3` + `apache-client` for Iceberg's `S3FileIO` (`iceberg-aws`); same line as Camel's SQS client, imported as a BOM in `file-connector` |
 | OpenTelemetry | via Spring Boot 4 OpenTelemetry starter | OTLP export of traces, metrics, logs |
 | Maven | 3.9.16 via Maven Wrapper | The local install is 3.8.7 |
 | Spark | **Not used** | |
@@ -74,9 +77,13 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 └── file-connector/                      Spring Boot application + Docker image
     └── com.sdh.healthcare.connector.file
         ├── FileConnectorApplication
-        ├── route/        Camel routes (directory discovery, housekeeping)
+        ├── config/       ConnectorProperties (sdh.*), KeyMaterial (local key provider), PEM reading
+        ├── runtime/      ConnectorRuntime (startup order), ConnectorConfiguration (Spring wiring), FatalExit
+        ├── route/        InboundRoute (directory discovery)
+        ├── ingest/       InboundService (per-file handling, in-progress recovery, backoff)
+        ├── publish/      QueueType (broker adapters), CamelMessagePublisher
         ├── source/       LocalSourceFile, DirectoryOutcomeRecorder (completed/ and failed/ records, local fallback)
-        └── admin/        operator commands (restore, decrypt-fallback)
+        └── admin/        operator commands (restore, decrypt-fallback) — not built yet
 ```
 
 Each module has its own `.gitignore` for module-specific output.
@@ -128,10 +135,11 @@ Files are processed **one at a time, oldest first**. This keeps ordering predict
 
 ## 5. Directory handling (Camel)
 
-- **Consumer:** `camel-file` watches `sdh.file.inbound-dir`, non-recursive, with `sortBy=file:modified` and `maxMessagesPerPoll=1`.
-- **Partially written files:** a configurable read lock (`changed` by default) waits until the file size and modification time stay unchanged for `min-age`. A `.done`-marker mode and an include/exclude glob are also available.
+- **Consumer:** `camel-file` watches `sdh.file.inbound-dir`, non-recursive, with `sortBy=file:modified`, `maxMessagesPerPoll=1` and **`eagerMaxMessagesPerPoll=false`**. Without the last option Camel applies the one-file limit while scanning, before sorting, so "oldest first" depended on directory order. The spike route had this bug; the application test caught it.
+- **Re-offering:** `noop=true` and `idempotent=false`, so a file that couldn't be handled (for example, storage was down) is offered again on the next poll. Successful files are deleted by the processor, so they aren't seen twice.
+- **Partially written files:** a configurable read lock (`changed` by default) waits until the file size and modification time stay unchanged for `min-age`. With `read-lock: marker` the route waits for `<name>.done`, and the marker is deleted together with the original. `include` is an Ant-style pattern; hidden files are never picked up.
 - **Subdirectories:** `completed/` and `failed/` sit inside the inbound directory and are excluded from pickup.
-- **Startup:** if a checkpoint records an in-progress file, that file is processed before anything else. It is matched by fingerprint, not name. If the file has disappeared, a `file.abandoned` audit event is raised and the checkpoint is closed.
+- **Startup:** if a checkpoint records an in-progress file, that file is processed before anything else. It is matched by fingerprint, not name (size first, so only same-size files are hashed). If the file has disappeared, `FileProcessor.recoverWithoutSource()` finishes it if its archive is complete, or else raises `file.abandoned` and closes the checkpoint. The route is defined with `autoStartup(false)` and is started only after this recovery. The same check runs before every file, so a file left in progress by an earlier error is always finished first.
 - **Completion:** Camel's own move/delete options are switched off. The pipeline moves and deletes files itself, because a file is only finished once archiving has been committed.
 - **Finished-file records:** `completed/<fileId>.json` and `failed/<fileId>.json` contain no PHI: file ID, timestamps, section count, byte count, keyed file digest, and for failures the stage, offset and error code. The original filename never appears in either directory.
 
@@ -144,6 +152,25 @@ Files are processed **one at a time, oldest first**. This keeps ordering predict
 | `fileDigest` | `base32` of a chained HMAC-SHA-256 over fixed 64 MiB blocks, computed during archiving | Integrity value sent in `file.completed` |
 
 The digest is chained, `H_i = HMAC(idKey, "sdh-file-digest" ‖ 0 ‖ H_{i-1} ‖ block_i)` with `H_{-1}` = 32 zero bytes, so a restart only needs the last `H` value and the block number, both of which are saved in the archive checkpoint. An empty file is one empty block. The digest depends only on content, not on `fileId` or how the archive was committed.
+
+### 5.2 Process lifecycle
+
+`ConnectorRuntime` starts in a fixed order:
+1. **Validate configuration:** splitter options, queue type and URI, and key material, before touching storage.
+2. **Acquire the lease:** if another instance holds it, startup fails with `LEASE_HELD` and a non-zero exit.
+3. **Open storage:** open the catalog and create or load the three tables.
+4. **Fence:** fence every table with this instance's epoch.
+5. **Load keys:** unwrap or create the ID key.
+6. **Build the pipeline:** pipeline, archivers and `FileProcessor`.
+7. **Start pickup:** run in-progress recovery (§5), then start the route.
+
+Shutdown runs in reverse. The route is stopped first, so no file is in flight when the lease is released.
+
+**Errors per file** (`InboundService`):
+- **Fatal errors** (lease loss, unknown commit outcome, tampered checkpoint, broken invariant, any `Error`): `FatalExit` logs a PHI-free reason and the process exits with status 70.
+- **Anything else:** the file is left in place and the route thread sleeps with exponential backoff (from `retry.initial-backoff`, capped at 5 min), which pauses the pipeline. The next poll tries again.
+
+Nothing in this path logs a path or filename.
 
 ## 6. Splitting
 
@@ -239,12 +266,13 @@ public interface KeyProvider {
 }
 ```
 
-Implementations: `aws-kms`, `gcp-kms`, `azure-keyvault`, `vault-transit`, and `local`.
+Implementations: `aws-kms`, `gcp-kms`, `azure-keyvault`, `vault-transit`, and `local`. **Only `local` is built so far**; any other value fails startup with a clear message.
 
-- **`local`:** a PKCS#12 keystore for KEKs plus PEM files for signing and recipient keys.
+- **`local`** (`KeyMaterial` in `file-connector`): a PKCS#12 keystore whose entries are AES-256 secret keys, with entry aliases as the KEK refs. Plus PEM files for the signing key, the recipient key and the recovery key. The sections KEK must differ from the two archive KEKs. The signing key must be EC P-256. Encrypted PKCS#8 is read with the JDK alone, using PBES2 as written by `openssl pkcs8 -topk8 -v2 aes-256-cbc`; a test checks this against a real OpenSSL-generated key.
+- **One recipient at a time:** messages are sealed to a single configured recipient. Rotation means switching `kid`; readers accept several keys meanwhile (§10.2).
 - **Mixing providers:** wrapping and signing providers are configured independently, so a KMS can be used for one and PEM for the other.
 - **Protections in `local` mode:**
-  - The service refuses to start if a key file is group- or world-readable.
+  - The service refuses to start if the keystore or signing key file is accessible by group or others. Public key files are not checked.
   - Private PEMs must be encrypted PKCS#8, with the passphrase supplied from an environment variable or mounted secret.
   - Recipient PEM fingerprints must match the pinned values.
 
@@ -496,7 +524,30 @@ if (m instanceof SectionStored s) {
 | `artemis` | camel-jms + Artemis JMS client | JMSXGroupID = fileId | `_AMQ_DUPL_ID` |
 | `rabbitmq` | camel-spring-rabbitmq | single queue / consistent-hash exchange | `message_id`; optional `x-deduplication-header` for the dedup plugin |
 
-- **Acknowledgement:** publishing is synchronous until the broker acknowledges (Kafka acks=all, RabbitMQ publisher confirms, etc.).
+**What each adapter sets** (`QueueType`):
+- **Common metadata, every adapter:** `messageId`, `type`, `fileId` and `contentType` (`application/jose`). These are the only unencrypted values; the body is the JWE compact serialisation, sent as ASCII text.
+- **`kafka`:** header `CamelKafkaKey` = fileId.
+- **`sqs`:** exchange property `CamelAwsMessageGroupId` = fileId, and the exchange ID = messageId.
+- **`pubsub`:** `CamelGooglePubsubOrderingKey` = fileId; the metadata travels as attributes.
+- **`servicebus`:** `SessionId`, `MessageId`, `ContentType`, and the metadata as application properties.
+- **`eventhubs`:** `PartitionKey` = fileId; the metadata isn't carried.
+- **`artemis`:** `JMSXGroupID` = fileId and `_AMQ_DUPL_ID` = messageId.
+- **`rabbitmq`:** `MessageId` and `ContentType`.
+- **`camel`:** any endpoint with the common metadata only. Used for tests and for components without an adapter.
+
+**Options added when the URI doesn't set them** (an explicit setting always wins):
+- **`kafka`:** `requestRequiredAcks=all&enableIdempotence=true`.
+- **`sqs`, for `*.fifo` queues:** `messageGroupIdStrategy=usePropertyValue&messageDeduplicationIdStrategy=useExchangeId`.
+- **`pubsub`:** `messageOrderingEnabled=true`. Set a regional `pubsubEndpoint` as well.
+- **`rabbitmq`:** `confirm=enabled`. Spring AMQP also needs `spring.rabbitmq.publisher-confirm-type=correlated`.
+
+**Broker connections:**
+- **Artemis:** a JMS connection factory is created from `sdh.queue.artemis.*`.
+- **Other brokers:** connections come from the URI or the usual Camel and Spring component settings.
+
+**How messages are sent:**
+- **Order and acks:** `CamelMessagePublisher` calls the endpoint's async producer directly from the pipeline's single publish thread, so messages reach the client library in seq order and are acknowledged asynchronously. `ProducerTemplate.asyncSend` would hand them to a thread pool and lose the order.
+- **Done means durable:** a send counts as done only when the producer reports success.
 - **Message size:** messages are small, around 2–4 KB after JOSE encoding, well under the smallest limit (SQS 256 KB).
 
 ## 11. Failure handling
@@ -589,53 +640,70 @@ Attributes are restricted to an allow-list (fileId, format, error code, stage, c
 - **Reads per file:** each file is read **twice**, once to split and once to archive. This trade keeps both phases simply resumable, and the second read is sequential I/O.
 - **Throughput:** expected to be bound by disk read speed or object-store upload speed for large C-CDA and X12 files, and by HMAC/encryption for very many small CSV records.
 
-## 14. Configuration (illustrative)
+## 14. Configuration
+
+Bound to `ConnectorProperties`. Secrets come from environment variables, which Spring maps automatically (e.g. `SDH_CRYPTO_KEYSTORE_PASSWORD`, `SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE`, `SDH_LEASE_JDBC_PASSWORD`), or from a `configtree:` mount. Values shown are defaults where they exist.
 
 ```yaml
 sdh:
   connector-id: file-connector
+  encrypt-workers: 0              # 0 = one per CPU core
   file:
     inbound-dir: /data/inbound
-    read-lock: changed            # changed | marker
+    read-lock: changed            # changed | marker (<name>.done)
     min-age: 30s
-    include: "*"
+    poll-interval: 5s
+    include: "*"                  # Ant-style
   split:
-    format: ccda                  # ccda | x12 | fhir | csv | delimited | <plugin>
-    boundary: ClinicalDocument
-    namespace: urn:hl7-org:v3
-    csv: { header: true }
-    fhir: { ndjson-group-size: 0 }
-    delimited: { pattern: "^MSH\\|", mode: START }
-    limits: { max-file-bytes: 1TiB, max-section-bytes: 512MiB }
+    format: ccda                  # ccda | xml | x12 | fhir | csv | delimited | <plugin>
+    boundary: ClinicalDocument    # optional; format default
+    options:                      # format options from §6.2, nested keys become dotted names
+      namespace: urn:hl7-org:v3
+      csv: { header: true }       # → csv.header
+      fhir: { ndjson-group-size: 0 }
+      delimited: { pattern: "^MSH\\|", mode: START }
+    limits: { max-file-bytes: 1TB, max-section-bytes: 512MB }   # omitted = format defaults
   storage:
-    catalog: { type: rest, uri: https://polaris:8181/api/catalog, warehouse: sdh }
-    io: { type: s3, endpoint: https://seaweedfs:8333, path-style: true, region: us-east-1 }
+    catalog-name: sdh             # also sent in messages
     namespace: sdh_ingest
-    commit: { max-sections: 10000, max-bytes: 512MiB, max-interval: 30s }
-    retention: { sections: off, source-files: off, failed-files: off }
+    catalog:                      # Iceberg catalog properties, passed through unchanged
+      type: rest                  # rest | jdbc
+      uri: https://polaris:8181/api/catalog
+      warehouse: sdh
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
+      client: { region: us-east-1 }
+    commit: { max-sections: 10000, max-bytes: 512MB, max-interval: 30s }
+    archive: { commit-bytes: 512MB }
   lease:
-    store: jdbc
-    jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", table: sdh_lease }
+    name: file-connector
+    jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
     ttl: 60s
     renew-interval: 15s
     safety-margin: 10s
   crypto:
-    wrap-provider: aws-kms        # aws-kms | gcp-kms | azure-keyvault | vault-transit | local
+    wrap-provider: local          # only local is built so far
     sign-provider: local
+    keystore: { path: /run/secrets/keks.p12 }               # password: SDH_CRYPTO_KEYSTORE_PASSWORD
     keys:
-      sections-kek: arn:aws:kms:...:key/...
-      source-files-kek: ...
-      failed-files-kek: ...
-      signing: file:/run/secrets/signing.pem
-      recipients:
-        - { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
+      sections-kek: sections-kek/1                          # keystore alias
+      source-files-kek: source-files-kek/1
+      failed-files-kek: failed-files-kek/1
+      signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # passphrase: env
+      recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
       recovery-public: /run/secrets/recovery-public.pem
   queue:
-    type: kafka
+    type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
     uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"
+    artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
+  retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
 ```
 
-Every value can be overridden through environment variables or Spring config sources.
+Compared with the earlier sketch:
+- split options moved under `split.options`;
+- object storage settings are plain Iceberg catalog properties, replacing `storage.io`;
+- the signing key and recipient are single objects, not a list;
+- `storage.retention` and `lease.store` aren't read yet.
 
 ## 15. Testing
 
@@ -656,12 +724,12 @@ These are checked first, in a build spike before the full implementation. Spike 
 | # | Item | Status | Result |
 |---|---|---|---|
 | 1 | Java 25 with Iceberg/Parquet and Hadoop classes | **Passed** | Parquet write and read through Iceberg work on Java 25. A fully trimmed `hadoop-common` is not enough: `Configuration` needs Woodstox/StAX2, hadoop-shaded-guava and commons-collections4, and Parquet's read path needs `hadoop-mapreduce-client-core`. That is six jars in total, all with transitive dependencies excluded (§2). We don't use `HadoopFileIO`, so Hadoop's security code (`UserGroupInformation`/`Subject`, a known Java 23+ problem area) is never reached. Not yet tested: `S3FileIO` against a real object store (needs Docker, item 6) |
-| 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client |
+| 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5) |
 | 3 | Azure emulators | **Not run** | Needs Docker, which isn't available on the spike machine. Run under `-Pit` on a machine with Docker. The plan for gaps (real namespace) is unchanged |
 | 4 | Custom compaction | **Prototype passed** | Bin-pack via `RewriteFiles` + `validateFromSnapshot` through the fenced committer works. Finding: snapshot expiry must run standalone to delete files physically (§8.4) |
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |
 | 6 | New: fencing on REST and JDBC catalogs | **Passed** | Plain Iceberg transactions are not fenced, which the control test demonstrates. The compare-and-swap committer with snapshot markers is (§9.3) |
-| 7 | New: Testcontainers suite (SeaweedFS/MinIO + `S3FileIO`, brokers, LocalStack KMS, Vault) | **Not run** | Needs Docker; `-Pit` profile |
+| 7 | New: Testcontainers suite (SeaweedFS/MinIO + `S3FileIO`, brokers, LocalStack KMS, Vault) | **Not run** | Needs Docker; `-Pit` profile. `S3FileIO` and every broker client are now on the classpath and wired, but have only run against in-memory storage and a SEDA queue. The broker adapters' header choices are checked against the component constants, not against live brokers |
 
 **Spike follow-ups:** run items 3 and 7 on a machine with Docker. Check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
 

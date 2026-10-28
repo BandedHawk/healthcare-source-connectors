@@ -1,28 +1,50 @@
 package com.sdh.healthcare.connector.file.route;
 
+import com.sdh.healthcare.connector.file.config.ConnectorProperties;
+import com.sdh.healthcare.connector.file.ingest.InboundService;
+import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
+import java.nio.file.Path;
 import org.apache.camel.builder.RouteBuilder;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
+import org.apache.camel.component.file.GenericFile;
 
 /**
- * Directory discovery (design §5). Spike version: hands each settled file to the pipeline endpoint.
- * Camel never moves or deletes files; the pipeline does that once archiving has been committed.
+ * Directory discovery (design §5): one settled file at a time, oldest first, handed to {@link InboundService}.
+ *
+ * <ul>
+ *   <li>Oldest first: {@code eagerMaxMessagesPerPoll=false} makes Camel scan and sort every file before taking one;
+ *       by default the one-file limit applies during the scan, before sorting.</li>
+ *   <li>Camel never moves or deletes files ({@code noop}); the processor deletes an original once it is archived.</li>
+ *   <li>{@code idempotent=false}: a file that couldn't be handled is offered again on the next poll.</li>
+ *   <li>Hidden files, {@code completed/} and {@code failed/} are never picked up.</li>
+ *   <li>The route doesn't auto-start: it starts after startup recovery has finished any in-progress file.</li>
+ * </ul>
  */
-@Component
 public class InboundRoute extends RouteBuilder {
-    @Value("${sdh.file.inbound-dir}")
-    String inboundDir;
+    private final ConnectorProperties.File props;
+    private final InboundService service;
 
-    @Value("${sdh.file.min-age:30s}")
-    String minAge;
+    public InboundRoute(ConnectorProperties.File props, InboundService service) {
+        this.props = props;
+        this.service = service;
+    }
+
+    public String uri() {
+        String lock = switch (props.readLock()) {
+            case "changed" -> "&readLock=changed&readLockMinAge=" + props.minAge().toMillis()
+                    + "&readLockCheckInterval=1000";
+            case "marker" -> "&doneFileName=${file:name}.done";
+            default -> throw new IllegalArgumentException("sdh.file.read-lock must be 'changed' or 'marker'");
+        };
+        return "file:" + props.inboundDir() + "?noop=true&idempotent=false&recursive=false&sortBy=file:modified"
+                + "&maxMessagesPerPoll=1&eagerMaxMessagesPerPoll=false&delay=" + props.pollInterval().toMillis()
+                + "&exclude=^\\..*&antExclude=completed/**,failed/**&antInclude=" + props.include() + lock;
+    }
 
     @Override
     public void configure() {
-        fromF("file:%s?noop=true&recursive=false&sortBy=file:modified&maxMessagesPerPoll=1"
-                        + "&readLock=changed&readLockMinAge=%s&readLockCheckInterval=1000"
-                        + "&exclude=^\\..*&antExclude=completed/**,failed/**",
-                        inboundDir, minAge)
-                .routeId("inbound")
-                .to("direct:pipeline");
+        from(uri())
+                .routeId(ConnectorRuntime.InboundRouteIds.INBOUND)
+                .autoStartup(false)
+                .process(e -> service.handle(Path.of(e.getIn().getBody(GenericFile.class).getAbsoluteFilePath())));
     }
 }
