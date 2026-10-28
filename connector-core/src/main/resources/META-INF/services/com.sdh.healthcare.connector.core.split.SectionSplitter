@@ -1,0 +1,6 @@
+com.sdh.healthcare.connector.core.split.builtin.CcdaSplitter
+com.sdh.healthcare.connector.core.split.builtin.XmlSplitter
+com.sdh.healthcare.connector.core.split.builtin.X12Splitter
+com.sdh.healthcare.connector.core.split.builtin.FhirSplitter
+com.sdh.healthcare.connector.core.split.builtin.CsvSplitter
+com.sdh.healthcare.connector.core.split.builtin.DelimitedSplitter

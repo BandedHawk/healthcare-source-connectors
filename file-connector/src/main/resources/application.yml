@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: file-connector
+  main:
+    banner-mode: off
+
+camel:
+  main:
+    name: file-connector
+    # PHI hygiene (design §7.5): no body logging, tracing or message history.
+    tracing: false
+    backlog-tracing: false
+    message-history: false
+    log-mask: true
+    log-exhausted-message-body: false
+  springboot:
+    main-run-controller: true
+
+sdh:
+  file:
+    inbound-dir: /data/inbound
+    min-age: 30s

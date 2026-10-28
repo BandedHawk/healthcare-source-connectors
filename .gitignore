@@ -1,0 +1,17 @@
+target/
+*.class
+*.log
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+.DS_Store
+*.pem
+*.key
+*.p12
+*.jks
+.env
+.env.*
+!.mvn/wrapper/maven-wrapper.properties
