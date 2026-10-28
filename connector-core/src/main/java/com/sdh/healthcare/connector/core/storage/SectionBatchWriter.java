@@ -6,9 +6,14 @@ import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.split.ResumePoint;
+import com.sdh.healthcare.connector.core.split.Section;
+import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -35,8 +40,8 @@ import org.apache.iceberg.parquet.Parquet;
  * Writes one commit batch of sections to a single Parquet data file (design §7.2, §8.2).
  *
  * <p>One batch data key per batch, wrapped once. Every section is chunked, compressed and encrypted
- * with its own derived key. Spike scope: section bytes are passed in memory. The pipeline version will
- * stream byte ranges from the reader.
+ * with its own derived key. Sections are streamed from the source; at most one chunk is held in memory
+ * per section being processed.
  */
 public final class SectionBatchWriter implements AutoCloseable {
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -55,6 +60,7 @@ public final class SectionBatchWriter implements AutoCloseable {
     private final DataWriter<Record> writer;
     private final InternalRecordWrapper wrapper;
     private final List<WrittenSection> written = new ArrayList<>();
+    private long plaintextBytes;
 
     public SectionBatchWriter(Table table, KeyProvider keys, String kekRef, SectionIds ids, Instant ingestedAt) {
         this.table = table;
@@ -94,38 +100,137 @@ public final class SectionBatchWriter implements AutoCloseable {
         return wrapped.keyRef();
     }
 
+    /** Spike/test convenience: a section given as bytes in memory. */
     public WrittenSection add(SectionInput in) {
-        byte[] plain = in.plaintext();
-        int chunkCount = SectionCrypto.chunkCount(plain.length);
-        Mac mac = ids.newMac();
-        mac.update(plain);
-        String sectionId = SectionIds.encode(mac.doFinal());
-        SecretKey key = SectionCrypto.sectionKey(bdk, in.fileId(), in.seq());
-        for (int i = 0; i < chunkCount; i++) {
-            int from = i * SectionCrypto.CHUNK_SIZE;
-            byte[] chunk = Arrays.copyOfRange(plain, from, from + SectionCrypto.expectedChunkLength(plain.length, i));
-            GenericRecord r = GenericRecord.create(table.schema());
-            r.setField(SECTION_ID, sectionId);
-            r.setField(FILE_ID, in.fileId());
-            r.setField(SEQ, in.seq());
-            r.setField(CHUNK_INDEX, i);
-            r.setField(CHUNK_COUNT, chunkCount);
-            r.setField(SOURCE_OFFSET, in.sourceOffset());
-            r.setField(SOURCE_LENGTH, (long) plain.length);
-            r.setField(FORMAT, in.format());
-            r.setField(PLAINTEXT_LENGTH, (long) plain.length);
-            r.setField(CIPHERTEXT, ByteBuffer.wrap(
-                    SectionCrypto.encryptChunk(key, in.fileId(), in.seq(), i, chunkCount, chunk)));
-            r.setField(BDK_WRAPPED, ByteBuffer.wrap(wrapped.wrapped()));
-            r.setField(KEK_REF, wrapped.keyRef());
-            r.setField(BATCH_ID, batchId);
-            r.setField(INGESTED_AT, ingestedAt);
-            writer.write(r);
+        long len = in.plaintext().length;
+        Section section = new Section(in.sourceOffset(), len, List.of(new Section.SourceRange(0, len)),
+                ResumePoint.at(in.sourceOffset() + len));
+        try {
+            return add(in.fileId(), in.seq(), in.format(), section, SeekableByteSource.of(in.plaintext()));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
-        WrittenSection ws = new WrittenSection(sectionId, in.fileId(), in.seq(), in.sourceOffset(), plain.length,
-                in.format(), plain.length, chunkCount);
+    }
+
+    /** A section hashed and encrypted, ready to be written as rows. */
+    public record EncryptedSection(WrittenSection section, List<byte[]> chunks) {}
+
+    /**
+     * Reads, hashes and encrypts a section of at most one chunk. Thread-safe, so the pipeline runs it on a
+     * worker pool; the result is then passed to {@link #write} on the writer thread.
+     */
+    public EncryptedSection encryptSmall(UUID fileId, long seq, String format, Section section,
+            SeekableByteSource src) throws IOException {
+        long len = section.plaintextLength();
+        if (SectionCrypto.chunkCount(len) != 1) {
+            throw new IllegalArgumentException("Section spans more than one chunk");
+        }
+        byte[] plain = section.readAll(src);
+        if (plain.length != len) {
+            throw new IOException("Source ended inside a section");
+        }
+        try {
+            String sectionId = SectionIds.encode(ids.newMac().doFinal(plain));
+            SecretKey key = SectionCrypto.sectionKey(bdk, fileId, seq);
+            byte[] ct = SectionCrypto.encryptChunk(key, fileId, seq, 0, 1, plain);
+            return new EncryptedSection(new WrittenSection(sectionId, fileId, seq, section.sourceOffset(),
+                    section.sourceLength(), format, len, 1), List.of(ct));
+        } finally {
+            Arrays.fill(plain, (byte) 0);
+        }
+    }
+
+    /** Writes an encrypted section's rows. Writer thread only; sections must arrive in seq order. */
+    public WrittenSection write(EncryptedSection e) {
+        WrittenSection ws = e.section();
+        for (int i = 0; i < e.chunks().size(); i++) {
+            writeRow(ws, i, e.chunks().get(i));
+        }
         written.add(ws);
+        plaintextBytes += ws.plaintextLength();
         return ws;
+    }
+
+    /**
+     * Adds a section of any size, streaming it from {@code src}. Writer thread only.
+     *
+     * <p>A multi-chunk section is read twice: once to compute the section ID, which every chunk row
+     * carries, and once to encrypt and write. Memory therefore stays at one chunk however large the section
+     * is. The second pass re-checks the hash, so a source that changed in between fails the batch.
+     */
+    public WrittenSection add(UUID fileId, long seq, String format, Section section, SeekableByteSource src)
+            throws IOException {
+        long len = section.plaintextLength();
+        int chunkCount = SectionCrypto.chunkCount(len);
+        if (chunkCount == 1) {
+            return write(encryptSmall(fileId, seq, format, section, src));
+        }
+        byte[] buf = new byte[SectionCrypto.CHUNK_SIZE];
+        try {
+            Mac first = ids.newMac();
+            try (InputStream in = section.open(src)) {
+                for (int i = 0; i < chunkCount; i++) {
+                    first.update(buf, 0, readChunk(in, buf, len, i));
+                }
+            }
+            byte[] digest = first.doFinal();
+            WrittenSection ws = new WrittenSection(SectionIds.encode(digest), fileId, seq, section.sourceOffset(),
+                    section.sourceLength(), format, len, chunkCount);
+            SecretKey key = SectionCrypto.sectionKey(bdk, fileId, seq);
+            Mac second = ids.newMac();
+            try (InputStream in = section.open(src)) {
+                for (int i = 0; i < chunkCount; i++) {
+                    int n = readChunk(in, buf, len, i);
+                    second.update(buf, 0, n);
+                    writeRow(ws, i, SectionCrypto.encryptChunk(key, fileId, seq, i, chunkCount,
+                            Arrays.copyOf(buf, n)));
+                }
+            }
+            if (!MessageDigest.isEqual(digest, second.doFinal())) {
+                throw new IOException("Source changed while a section was being stored");
+            }
+            written.add(ws);
+            plaintextBytes += len;
+            return ws;
+        } finally {
+            Arrays.fill(buf, (byte) 0);
+        }
+    }
+
+    private static int readChunk(InputStream in, byte[] buf, long len, int index) throws IOException {
+        int expected = SectionCrypto.expectedChunkLength(len, index);
+        if (in.readNBytes(buf, 0, expected) != expected) {
+            throw new IOException("Source ended inside a section");
+        }
+        return expected;
+    }
+
+    private void writeRow(WrittenSection ws, int chunkIndex, byte[] ciphertext) {
+        GenericRecord r = GenericRecord.create(table.schema());
+        r.setField(SECTION_ID, ws.sectionId());
+        r.setField(FILE_ID, ws.fileId());
+        r.setField(SEQ, ws.seq());
+        r.setField(CHUNK_INDEX, chunkIndex);
+        r.setField(CHUNK_COUNT, ws.chunkCount());
+        r.setField(SOURCE_OFFSET, ws.sourceOffset());
+        r.setField(SOURCE_LENGTH, ws.sourceLength());
+        r.setField(FORMAT, ws.format());
+        r.setField(PLAINTEXT_LENGTH, ws.plaintextLength());
+        r.setField(CIPHERTEXT, ByteBuffer.wrap(ciphertext));
+        r.setField(BDK_WRAPPED, ByteBuffer.wrap(wrapped.wrapped()));
+        r.setField(KEK_REF, wrapped.keyRef());
+        r.setField(BATCH_ID, batchId);
+        r.setField(INGESTED_AT, ingestedAt);
+        writer.write(r);
+    }
+
+    /** Sum of plaintext lengths written so far; used for the {@code commit.max-bytes} threshold. */
+    public long plaintextBytes() {
+        return plaintextBytes;
+    }
+
+    public int size() {
+        return written.size();
     }
 
     public List<WrittenSection> written() {

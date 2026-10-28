@@ -6,6 +6,8 @@ Revision 2026-10-28 (b): added the `connector-queue-reader` consumer library and
 
 Revision 2026-10-28 (c): built the splitters (§6). Resume uses a `ResumePoint` (offset plus PHI-free context offsets) instead of a bare offset, saved in the checkpoint as `resumeAt` (§6.1, §9.1). Sections are lists of literal parts and source ranges. The FHIR splitter uses a byte-level structural scanner instead of Jackson. Added X12 `GS`/`ISA` boundaries and TA1 handling.
 
+Revision 2026-10-28 (d): built the split phase of the pipeline (§9.4). Multi-chunk sections are read twice (hash, then encrypt) so memory stays at one chunk (§7.2). Commit retries check the checkpoint first so a batch is never appended twice (§9.2). The checkpoint gained `format`, `fileSize` and the `ABANDONED` state (§9.1). Fingerprints and checkpoint MACs use labelled HMACs (§5.1, §9.1). Archiving, failure handling and broker adapters are not built yet.
+
 ---
 
 ## 1. Purpose
@@ -64,7 +66,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │       ├── crypto/       KMS/local KeyProvider implementations, ID HMAC
 │       ├── storage/      Iceberg catalog/FileIO setup, writers, compaction, retention
 │       ├── checkpoint/   checkpoint model, lease store, lease keeper, fenced committer
-│       ├── publish/      message model, JOSE encoding, broker adapters
+│       ├── publish/      MessagePublisher SPI, OutboundMessage (broker adapters live in the connector app, §10.3)
 │       ├── telemetry/    audit events, metrics, PHI-safe error codes
 │       └── pipeline/     source-agnostic ingest pipeline (read → split → encrypt → write → commit → publish)
 └── file-connector/                      Spring Boot application + Docker image
@@ -129,7 +131,7 @@ Files are processed **one at a time, oldest first**. This keeps ordering predict
 | Identifier | Definition | Purpose |
 |---|---|---|
 | `fileId` | UUIDv7, assigned at pickup and saved in the checkpoint | Correlates queue messages, telemetry and tables |
-| fingerprint | size + `HMAC(idKey, first 1 MiB ‖ last 1 MiB)` | Recognises the same file after a restart without reading all of it |
+| fingerprint | size + `HMAC(idKey, "sdh-fingerprint" ‖ 0 ‖ first 1 MiB ‖ last 1 MiB)` | Recognises the same file after a restart without reading all of it |
 | `fileDigest` | chained HMAC-SHA-256 over fixed 64 MiB blocks, computed during archiving | Integrity value sent in `file.completed` |
 
 The digest is chained, `H_i = HMAC(idKey, H_{i-1} ‖ block_i)`, so a restart only needs the last `H` value and the block number, both of which are saved in the archive checkpoint.
@@ -205,7 +207,7 @@ Using a separate KEK per table lets the retrieving system be given decrypt right
 2. A per-section key is derived as `HKDF-SHA256(BDK, info = "sdh-section" ‖ fileId ‖ seq)`. Exposing one section's key exposes nothing else.
 3. The section plaintext is cut into **8 MiB chunks**. The chunk count is known up front, because the splitter reports the section's byte length.
 4. Each chunk is **zstd-compressed, then encrypted** with AES-256-GCM, using a random 96-bit nonce and AAD = `fileId ‖ seq ‖ chunkIndex ‖ chunkCount`. The AAD prevents chunks being reordered, swapped between sections, or truncated.
-   - The section ID is not part of the AAD, because it isn't known until the whole section has been hashed. It is computed in the same streaming pass and written to every chunk row once the section is finished, before its batch is written.
+   - The section ID is not part of the AAD, because it isn't known until the whole section has been hashed, yet every chunk row carries it. A single-chunk section (the common case) is read once into memory, hashed and encrypted. A larger section is read **twice**: one pass computes the ID, the second encrypts and writes each chunk, and re-checks the hash so a source that changed in between fails the batch. Memory stays at one 8 MiB chunk per section in flight, whatever `max-section-bytes` is.
    - Compressing before encrypting is required, because ciphertext doesn't compress. It is safe here because no attacker-controlled input is mixed into the plaintext.
 
 ### 7.3 Section ID
@@ -325,11 +327,14 @@ sdh.checkpoint.file-connector = {
   "fileId": "...", "fingerprint": "...", "state": "SPLITTING",
   "resumeAt": "123456789:1024,5120", "nextSeq": 40211,
   "committedSeq": 40210, "publishedSeq": 39000,
-  "startedAt": "...", "mac": "HMAC(idKey, canonical JSON without mac)"
+  "format": "ccda", "fileSize": 987654321,
+  "startedAt": "...", "mac": "HMAC(idKey, \"sdh-checkpoint\" ‖ 0 ‖ canonical JSON without mac)"
 }
 ```
 
 - **`resumeAt`:** the encoded `ResumePoint` of the last committed section (§6.1): the next offset, then any context offsets. Offsets only, no content.
+- **States:** `SPLITTING`, `ARCHIVING`, `COMPLETED`, `FAILED`, `ABANDONED` (the file disappeared while in progress, §5). The pipeline refuses a new file while another is `SPLITTING` or `ARCHIVING`.
+- **Labelled MACs:** checkpoint MACs and fingerprints prefix a label, so neither can ever equal a section ID made with the same key.
 - **Tamper detection:** the checkpoint is MAC'd with the ID key. If it fails verification, the service stops with `CHECKPOINT_TAMPERED` rather than guessing.
 - **Archive phase:** uses an equivalent property on `source_files`, recording `nextBlock`, `chainHash` and `bytesArchived`.
 
@@ -354,6 +359,21 @@ On restart:
 **Duplicates:** at most one batch can be republished after a crash. That is the same worst case as before, since a crash part-way through publishing a batch already meant republishing it. Broker dedup (§10.3) removes the duplicates where the broker supports it, and downstream dedup handles the rest.
 
 **Unknown commit outcome:** if a commit ends with Iceberg's `CommitStateUnknownException`, the process stops and restarts from the checkpoint. The checkpoint shows whether that commit happened.
+
+**Retrying a commit:** other transient storage errors (I/O, `CommitFailedException`, 5xx, JDBC errors; an allow-list) are retried with backoff. Before each retry the pipeline re-reads the checkpoint, and if it already shows the batch the earlier attempt landed after all, so the batch is never appended twice.
+
+### 9.4 Pipeline (`connector-core` `pipeline/`, built)
+
+`IngestPipeline.split(source)` runs the split phase for one file and returns once every section is committed and published, with the checkpoint in `ARCHIVING`. The connector app supplies the source, the sections table, the `FencedCommitter`, keys, the sealer and a `MessagePublisher`.
+
+1. **Identify:** fingerprint the source. If it matches a `SPLITTING` checkpoint, resume; if it matches an `ARCHIVING` one, return straight away; otherwise assign a UUIDv7 and commit a fresh checkpoint before anything else.
+2. **Announce:** publish `file.started` (again on resume; message ID dedup handles the repeat), then republish any committed-but-unpublished range.
+3. **Split and encrypt:** single-chunk sections are hashed and encrypted on the worker pool, with at most `4 × workers` in flight; larger sections are processed inline (§7.2). Rows are written in seq order.
+4. **Commit:** at the first threshold (§8.3), data file + checkpoint in one fenced commit. The commit first waits for the previous batch's publishing and records its last seq as `publishedSeq`.
+5. **Publish:** the batch's messages are sealed on the worker pool and sent in seq order on a background thread while the next batch is split. Failed sends are retried one by one.
+6. **End of file:** wait for publishing, then a data-free commit to `ARCHIVING`.
+
+The ID key is created or unwrapped by `IdKeys` (table property `sdh.id-key`). Each audit log line carries only IDs, seqs, offsets and counts.
 
 ### 9.3 Single-instance lease and fencing
 
@@ -522,9 +542,9 @@ Attributes are restricted to an allow-list (fileId, format, error code, stage, c
 |---|---|
 | Reader | 1 thread, sequential; `FileChannel` with 4 MiB direct buffers |
 | Splitter | 1 thread |
-| Hash, compress, encrypt | worker pool sized to CPU cores; bounded queue for back-pressure |
+| Hash, compress, encrypt | worker pool sized to CPU cores, at most 4 × workers sections in flight; sections over one chunk run inline on the writer thread |
 | Iceberg writer | 1 thread, writes in seq order |
-| Publishing | virtual threads, with concurrency bounded per broker |
+| Publishing | one background thread per pipeline sends in seq order; sealing runs on the worker pool; the adapter's futures carry concurrency |
 
 - **Reads per file:** each file is read **twice**, once to split and once to archive. This trade keeps both phases simply resumable, and the second read is sequential I/O.
 - **Throughput:** expected to be bound by disk read speed or object-store upload speed for large C-CDA and X12 files, and by HMAC/encryption for very many small CSV records.

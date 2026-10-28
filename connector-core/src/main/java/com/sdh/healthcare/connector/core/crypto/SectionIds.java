@@ -27,6 +27,17 @@ public final class SectionIds {
         }
     }
 
+    /**
+     * An HMAC with the ID key, already fed a domain label. Used for checkpoint MACs and fingerprints, so
+     * those values can never collide with a section ID (which is unlabelled, design §7.3).
+     */
+    public Mac newLabelledMac(String label) {
+        Mac mac = newMac();
+        mac.update(label.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        mac.update((byte) 0);
+        return mac;
+    }
+
     public String of(byte[] plaintext) {
         return encode(newMac().doFinal(plaintext));
     }
