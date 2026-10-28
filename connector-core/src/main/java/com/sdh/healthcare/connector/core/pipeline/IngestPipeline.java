@@ -214,7 +214,15 @@ public final class IngestPipeline implements AutoCloseable {
                 batch.abandon();
             }
             if (inFlightPublish != null) {
-                inFlightPublish.cancel(true);
+                // Let the committed batch finish publishing rather than cut it off: if this file now fails, nothing
+                // would republish it later (a restart does, a failure doesn't).
+                try {
+                    inFlightPublish.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException ignored) {
+                    // reported by FileProcessor, which re-announces anything committed but unacknowledged
+                }
             }
         }
     }
@@ -335,6 +343,14 @@ public final class IngestPipeline implements AutoCloseable {
 
     Clock clock() {
         return clock;
+    }
+
+    /**
+     * Publishes {@code section.stored} for every section of {@code cp}'s file that is committed but not known to be
+     * acknowledged ({@code publishedSeq < seq <= committedSeq}). Duplicates are harmless (message ID dedup).
+     */
+    void announceCommitted(Checkpoint cp) throws Exception {
+        republish(cp);
     }
 
     /** Seals and publishes messages now, waiting for acknowledgement. */

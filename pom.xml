@@ -38,6 +38,7 @@
     <assertj.version>3.27.7</assertj.version>
     <embedded-postgres.version>2.2.2</embedded-postgres.version>
     <embedded-postgres-binaries.version>18.6.0</embedded-postgres-binaries.version>
+    <testcontainers.version>2.0.5</testcontainers.version>
   </properties>
 
   <dependencyManagement>
@@ -53,6 +54,13 @@
         <groupId>org.junit</groupId>
         <artifactId>junit-bom</artifactId>
         <version>${junit.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${testcontainers.version}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>
@@ -186,6 +194,15 @@
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-failsafe-plugin</artifactId>
+          <version>3.6.1</version>
+          <configuration>
+            <!-- Test the compiled classes, not the packaged jar: Spring Boot's repackaged jar keeps them under BOOT-INF/. -->
+            <classesDirectory>${project.build.outputDirectory}</classesDirectory>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-enforcer-plugin</artifactId>
           <version>3.6.3</version>
         </plugin>
@@ -217,12 +234,28 @@
   </build>
 
   <profiles>
-    <!-- Integration tests that need Docker (Testcontainers). Run with -Pit. -->
+    <!--
+      Integration tests that need a Docker API (Testcontainers): *IT classes, run by Failsafe.
+      With minikube (KVM2), use scripts/it-minikube.sh, which starts a VM and points DOCKER_HOST at it.
+    -->
     <profile>
       <id>it</id>
-      <properties>
-        <surefire.excludedGroups />
-      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>integration-test</goal>
+                  <goal>verify</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
     </profile>
   </profiles>
 </project>

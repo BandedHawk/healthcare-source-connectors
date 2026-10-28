@@ -12,6 +12,15 @@ Revision 2026-10-28 (e): built archiving and failure handling (§4.1, §11). Add
 
 Revision 2026-10-28 (f): wired the file connector (§5, §5.2, §10.3, §14). Startup order, the Camel route, the broker adapters and the `local` key provider are built. Found and fixed a Camel default that broke oldest-first pickup (§5, §16). The configuration shape changed in a few places (§14). Cloud KMS providers, admin commands and OpenTelemetry export are not built yet.
 
+Revision 2026-10-28 (g): added the Docker integration suite, which runs on minikube (KVM2) (§15). Running it against real services found five problems, all fixed:
+- the Camel Service Bus producer can't set per-message sessions or IDs;
+- both Azure clients reorder sends that are in flight together;
+- `S3FileIO` needs the AWS `kms` module;
+- SeaweedFS 4.x needs S3 identities;
+- committed sections could go unannounced when a file failed mid-publish.
+
+See §10.3, §8.1, §11.2 and §16. MinIO images are no longer published, so S3 is tested on SeaweedFS only.
+
 ---
 
 ## 1. Purpose
@@ -42,7 +51,8 @@ All versions were checked against Maven Central on 2026-10-28.
 | Jackson 2 | 2.22.2 | Used by Iceberg only (Spring uses Jackson 3). Pinned in `file-connector`, because Boot 4.1.2 would downgrade it to 2.21.x |
 | Nimbus JOSE+JWT | 10.10 | JWS/JWE message encryption and signing |
 | PostgreSQL | any supported | Lease store (§9.3). Can be the JDBC catalog's database. Driver 42.7.14, HikariCP (Boot-managed, pool of 2) |
-| AWS SDK v2 | 2.50.2 | `s3` + `apache-client` for Iceberg's `S3FileIO` (`iceberg-aws`); same line as Camel's SQS client, imported as a BOM in `file-connector` |
+| AWS SDK v2 | 2.50.2 | `s3`, `apache-client` and `kms` for Iceberg's `S3FileIO` (`iceberg-aws`). `kms` is needed even without SSE-KMS: `AwsProperties` loads KMS model classes on startup. Same line as Camel's SQS client, imported as a BOM in `file-connector` |
+| Testcontainers | 2.0.5 | `-Pit` only, run by Failsafe 3.6.1 (§15) |
 | OpenTelemetry | via Spring Boot 4 OpenTelemetry starter | OTLP export of traces, metrics, logs |
 | Maven | 3.9.16 via Maven Wrapper | The local install is 3.8.7 |
 | Spark | **Not used** | |
@@ -296,6 +306,10 @@ These are selected at run time.
 
 **Storage-side encryption:** server-side encryption (SSE-KMS / CMEK) is enabled where the store supports it, as a second layer beneath application encryption. For SeaweedFS, application encryption is the primary protection.
 
+**SeaweedFS:** S3 identities must be configured (`-s3.config`). SeaweedFS 4.x rejects signed requests otherwise, and the AWS SDK always signs. Use `s3.path-style-access: true`.
+
+**MinIO:** its community images are no longer published on Docker Hub or Quay, so it is no longer tested. It should still work as an S3 endpoint, but that's unverified.
+
 ### 8.2 Tables
 
 The namespace is `sdh_ingest` (configurable). There are three tables, each with its own KEK and access policy.
@@ -547,6 +561,14 @@ if (m instanceof SectionStored s) {
 
 **How messages are sent:**
 - **Order and acks:** `CamelMessagePublisher` calls the endpoint's async producer directly from the pipeline's single publish thread, so messages reach the client library in seq order and are acknowledged asynchronously. `ProducerTemplate.asyncSend` would hand them to a thread pool and lose the order.
+- **Service Bus uses the Azure SDK:** Camel 4.22's Service Bus producer ignores per-message SessionId, MessageId and ContentType headers; it only takes a fixed session ID from the endpoint. `ServiceBusPublisher` therefore sends through the Azure SDK sender that Camel already ships. Connection settings are still read from the configured Camel URI, so configuration is unchanged.
+- **One send at a time for the Azure brokers:** the Azure AMQP client, used for both Event Hubs and Service Bus, delivered sends that were in flight together out of order. The first message arrived, then the rest reversed. For these two `QueueType.keepsOrderWhenPipelined()` is false, and `Publishers.create` wraps them in `SequentialPublisher`: each send waits for the previous acknowledgement. Throughput on those brokers is bounded by round-trip time.
+- **Verified against real brokers:** for every adapter the integration tests check all of the following (§15):
+  - every message delivered;
+  - each file's messages in order;
+  - the ordering key;
+  - the allowed metadata;
+  - dedup, where the broker has it: Artemis `_AMQ_DUPL_ID`, SQS FIFO and Service Bus MessageId.
 - **Done means durable:** a send counts as done only when the producer reports success.
 - **Message size:** messages are small, around 2–4 KB after JOSE encoding, well under the smallest limit (SQS 256 KB).
 
@@ -578,7 +600,8 @@ After the split phase: archive the original to `source_files`, publish `file.com
 1. Commit the decision: checkpoint `FAILING` with stage, code and offset. If storage is down this can't be recorded; the file still goes to the local fallback.
 2. Already-committed and published sections stay where they are, each tied to its `file_id`.
 3. The whole original is archived into `failed_files`. It goes to the local fallback `failed/<fileId>.enc` instead (§11.3) when the file is over `max-file-bytes`, when `FAILING` couldn't be recorded, or when the archive fails (storage or KMS unreachable). If even the fallback can't be written, the original is kept and the error propagates.
-4. Write `failed/<fileId>.json`, delete the original, log `file.failed` (fileId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the OpenTelemetry event comes with §12. Attempt count isn't recorded yet.
+4. Announce every committed section: publish `section.stored` for any committed section not yet acknowledged. Once a file is `FAILED` no restart will republish it, so it must happen here. This is skipped when the broker itself is the failure, and a `publish.unannounced` range is logged instead. Also, when splitting stops, the in-flight publish of the last committed batch is now awaited rather than cancelled. A test that forces this race shows that, without the fix, the last batch was stored but never announced.
+5. Write `failed/<fileId>.json`, delete the original, log `file.failed` (fileId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the OpenTelemetry event comes with §12. Attempt count isn't recorded yet.
 
 ### 11.3 Local fallback format
 
@@ -710,12 +733,45 @@ Compared with the earlier sketch:
 | Level | Coverage |
 |---|---|
 | Unit | Each splitter, including boundaries spanning buffer edges, resume from every reported offset, malformed input and limits; crypto round-trips and AAD tamper detection; checkpoint MAC; message JOSE round-trip; lease keeper timing with a fake clock |
-| Integration without Docker (default build) | Embedded PostgreSQL binaries (`io.zonky.test:embedded-postgres`) for the lease store and JDBC catalog. Iceberg's `RESTCatalogAdapter` for REST catalog commit rules, in-process. `InMemoryFileIO`. Fencing tests run against both catalog types. End-to-end write → message → `connector-queue-reader` |
-| Integration (Testcontainers) | SeaweedFS and MinIO, Postgres JDBC catalog, Iceberg REST catalog fixture, Kafka, RabbitMQ, Artemis, LocalStack (SQS + KMS), Pub/Sub emulator, Azure Service Bus and Event Hubs emulators, Vault |
-| Crash and resume | Fault-injection points at every stage (after write, after commit, after publish, mid-archive). The process is killed and restarted, then the test checks that there are no gaps, no lost sections, and duplicates only within the documented window |
-| Throughput | Synthetic multi-GB C-CDA, X12 and CSV files, with records of MB/s and sections/s |
+| Integration without Docker (default build) | Embedded PostgreSQL binaries (`io.zonky.test:embedded-postgres`) for the lease store and JDBC catalog. Iceberg's `RESTCatalogAdapter` for REST catalog commit rules, in-process. `InMemoryFileIO`. Fencing tests run against both catalog types. End-to-end write → message → `connector-queue-reader`. The whole Spring Boot app with a SEDA queue (`FileConnectorApplicationTest`) |
+| Integration with Docker (`-Pit`) | See §15.1 |
+| Crash and resume | Fault-injection points at every stage (after write, after commit, mid-publish, before end of file, mid-archive, after delete, while failing), then a restart. The test checks that there are no gaps, no lost or duplicated rows, and duplicate messages only within one batch |
+| Throughput | Not built yet: synthetic multi-GB C-CDA, X12 and CSV files, with records of MB/s and sections/s |
 
-Integration tests run in a separate Maven profile (`-Pit`) because they need Docker.
+### 15.1 Docker integration suite (`-Pit`)
+
+`*IT` classes in `file-connector`, run by Failsafe only under `-Pit`; the default build never needs Docker. Images are pinned to releases at least two weeks old.
+
+| Test | Containers | Verifies |
+|---|---|---|
+| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename |
+| `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = fileId, metadata headers, per-file order, `acks=all` + idempotence |
+| `RabbitMqIT` | `rabbitmq:4.2.9-management-alpine` | `message_id`, content type, headers, publisher confirms (`CORRELATED`) |
+| `ArtemisIT` | `apache/activemq-artemis:2.44.0-alpine` | `JMSXGroupID`, and duplicates dropped by `_AMQ_DUPL_ID` |
+| `SqsIT` | `softwaremill/elasticmq-native:1.7.1` | FIFO MessageGroupId, and duplicates dropped by MessageDeduplicationId. ElasticMQ replaces LocalStack: it is SQS-compatible, light, and needs no account token |
+| `PubSubIT` | `gcr.io/google.com/cloudsdktool/google-cloud-cli:590.0.0-emulators` | Ordering key with message ordering enabled, attributes |
+| `ServiceBusIT` | `mcr.microsoft.com/azure-messaging/servicebus-emulator:2.0.0` + `mssql/server:2022-CU26-ubuntu-22.04` | Sessions per file in order, and duplicates dropped by MessageId. The emulator caps the dedup window at 5 min |
+| `EventHubsIT` | `mcr.microsoft.com/azure-messaging/eventhubs-emulator:2.2.0` + `azurite:3.35.0` | Each file in one partition, in order |
+
+**Running it on minikube with KVM2:** use `scripts/it-minikube.sh`, which needs no local Docker daemon. The script:
+- creates or starts a dedicated single-node profile `sdh-it` (`--driver=kvm2 --container-runtime=docker --no-kubernetes`, 6 CPUs, 12 GB, 60 GB disk; override with `SDH_IT_*`);
+- exports `minikube docker-env`;
+- runs `./mvnw -Pit verify`, passing any extra arguments through (e.g. `-Dit.test=KafkaIT`).
+
+`SDH_IT_STOP=1` stops the VM afterwards; `minikube delete -p sdh-it` removes it.
+
+**What makes minikube work:**
+- **Dedicated profile:** `docker-env` doesn't work on multi-node clusters, and the tests shouldn't share a cluster used for other work.
+- **Reachability:** containers run inside the VM, and Testcontainers reaches them at the VM's IP through DOCKER_HOST.
+- **No host mounts:** host paths don't exist in the VM, so config files (Service Bus, Event Hubs, SeaweedFS identities) are copied in with `Transferable`.
+- **Ryuk:** Testcontainers' cleanup container mounts the VM's own Docker socket.
+- **Status check:** `minikube status` exits non-zero without Kubernetes, so the script checks the host state instead.
+
+**Failsafe:** it tests `target/classes`, because Spring Boot's repackaged jar keeps classes under `BOOT-INF/`.
+
+**Time:** with images cached in the VM, the whole build (114 unit tests + 8 ITs) takes about 1 min 45 s. The first run pulls several GB of images.
+
+**Not covered yet:** KMS and Vault, until those key providers exist; an Iceberg REST catalog (Polaris) container; throughput tests.
 
 ## 16. Risks and verification items
 
@@ -723,15 +779,15 @@ These are checked first, in a build spike before the full implementation. Spike 
 
 | # | Item | Status | Result |
 |---|---|---|---|
-| 1 | Java 25 with Iceberg/Parquet and Hadoop classes | **Passed** | Parquet write and read through Iceberg work on Java 25. A fully trimmed `hadoop-common` is not enough: `Configuration` needs Woodstox/StAX2, hadoop-shaded-guava and commons-collections4, and Parquet's read path needs `hadoop-mapreduce-client-core`. That is six jars in total, all with transitive dependencies excluded (§2). We don't use `HadoopFileIO`, so Hadoop's security code (`UserGroupInformation`/`Subject`, a known Java 23+ problem area) is never reached. Not yet tested: `S3FileIO` against a real object store (needs Docker, item 6) |
+| 1 | Java 25 with Iceberg/Parquet and Hadoop classes | **Passed** | Parquet write and read through Iceberg work on Java 25. A fully trimmed `hadoop-common` is not enough: `Configuration` needs Woodstox/StAX2, hadoop-shaded-guava and commons-collections4, and Parquet's read path needs `hadoop-mapreduce-client-core`. That is six jars in total, all with transitive dependencies excluded (§2). We don't use `HadoopFileIO`, so Hadoop's security code (`UserGroupInformation`/`Subject`, a known Java 23+ problem area) is never reached. `S3FileIO` against SeaweedFS **passed** in `FullStackIT`, once the AWS `kms` module was added (§2) |
 | 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5) |
-| 3 | Azure emulators | **Not run** | Needs Docker, which isn't available on the spike machine. Run under `-Pit` on a machine with Docker. The plan for gaps (real namespace) is unchanged |
+| 3 | Azure emulators | **Passed** | Service Bus and Event Hubs emulators run under `-Pit` on minikube. They found two adapter bugs (§10.3): Camel's Service Bus producer can't set per-message sessions or IDs, and the Azure client reorders sends in flight together |
 | 4 | Custom compaction | **Prototype passed** | Bin-pack via `RewriteFiles` + `validateFromSnapshot` through the fenced committer works. Finding: snapshot expiry must run standalone to delete files physically (§8.4) |
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |
 | 6 | New: fencing on REST and JDBC catalogs | **Passed** | Plain Iceberg transactions are not fenced, which the control test demonstrates. The compare-and-swap committer with snapshot markers is (§9.3) |
-| 7 | New: Testcontainers suite (SeaweedFS/MinIO + `S3FileIO`, brokers, LocalStack KMS, Vault) | **Not run** | Needs Docker; `-Pit` profile. `S3FileIO` and every broker client are now on the classpath and wired, but have only run against in-memory storage and a SEDA queue. The broker adapters' header choices are checked against the component constants, not against live brokers |
+| 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. Not covered: MinIO (images no longer published), KMS and Vault (providers not built), a REST catalog container |
 
-**Spike follow-ups:** run items 3 and 7 on a machine with Docker. Check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
+**Spike follow-ups:** add KMS/Vault and REST-catalog ITs when those pieces exist. Check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
 
 ## 17. Out of scope (for now)
 

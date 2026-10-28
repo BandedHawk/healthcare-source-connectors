@@ -336,11 +336,22 @@ class IngestPipelineTest {
         final List<OutboundMessage> sent = Collections.synchronizedList(new ArrayList<>());
         final AtomicInteger calls = new AtomicInteger();
         volatile IntPredicate fail = n -> false;
+        /** Calls whose send takes a while; a send interrupted midway never reaches the broker. */
+        volatile IntPredicate slow = n -> false;
 
         @Override
         public CompletableFuture<Void> publish(OutboundMessage m) {
-            if (fail.test(calls.getAndIncrement())) {
+            int n = calls.getAndIncrement();
+            if (fail.test(n)) {
                 return CompletableFuture.failedFuture(new IOException("broker unavailable"));
+            }
+            if (slow.test(n)) {
+                try {
+                    Thread.sleep(300);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return CompletableFuture.failedFuture(e);
+                }
             }
             sent.add(m);
             return CompletableFuture.completedFuture(null);

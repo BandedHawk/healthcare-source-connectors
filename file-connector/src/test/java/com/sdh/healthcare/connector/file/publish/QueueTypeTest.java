@@ -55,9 +55,11 @@ class QueueTypeTest {
         assertThat(a.getIn().getHeader("JMSXGroupID")).isEqualTo(FILE.toString());
         assertThat(a.getIn().getHeader("_AMQ_DUPL_ID")).isEqualTo("sec-abc");
 
-        Exchange sb = apply(QueueType.SERVICEBUS);
-        assertThat(sb.getIn().getHeader("CamelAzureServiceBusSessionId")).isEqualTo(FILE.toString());
-        assertThat(sb.getIn().getHeader("CamelAzureServiceBusMessageId")).isEqualTo("sec-abc");
+        var sb = ServiceBusPublisher.toMessage(MSG);
+        assertThat(sb.getSessionId()).isEqualTo(FILE.toString());
+        assertThat(sb.getMessageId()).isEqualTo("sec-abc");
+        assertThat(sb.getContentType()).isEqualTo(OutboundMessage.CONTENT_TYPE);
+        assertThat(sb.getApplicationProperties()).containsEntry("type", "section.stored");
 
         Exchange ps = apply(QueueType.PUBSUB);
         assertThat(ps.getIn().getHeader("CamelGooglePubsubOrderingKey")).isEqualTo(FILE.toString());

@@ -48,21 +48,33 @@ public enum QueueType {
             e.getIn().setHeader("CamelGooglePubsubAttributes", metadata(m));
         }
     },
-    /** SessionId = fileId; MessageId = messageId (enable duplicate detection on the entity). */
+    /**
+     * SessionId = fileId; MessageId = messageId (enable duplicate detection on the entity). Sent by
+     * {@link ServiceBusPublisher}: the Camel producer can't set these per message.
+     */
     SERVICEBUS("azure-servicebus", Map.of()) {
         @Override
-        void decorate(Exchange e, OutboundMessage m) {
-            e.getIn().setHeader("CamelAzureServiceBusSessionId", m.fileId().toString());
-            e.getIn().setHeader("CamelAzureServiceBusMessageId", m.messageId());
-            e.getIn().setHeader("CamelAzureServiceBusContentType", OutboundMessage.CONTENT_TYPE);
-            e.getIn().setHeader("CamelAzureServiceBusApplicationProperties", new LinkedHashMap<>(metadata(m)));
+        void decorate(Exchange e, OutboundMessage m) {}
+
+        /** Same Azure AMQP client as Event Hubs, same reordering (found by ServiceBusIT). */
+        @Override
+        public boolean keepsOrderWhenPipelined() {
+            return false;
         }
     },
-    /** partitionKey = fileId; no broker-side dedup (messageId is inside the payload). */
+    /**
+     * partitionKey = fileId; no broker-side dedup (messageId is inside the payload). Sends one at a time: the Azure AMQP
+     * client reorders sends that are in flight together (found by EventHubsIT).
+     */
     EVENTHUBS("azure-eventhubs", Map.of()) {
         @Override
         void decorate(Exchange e, OutboundMessage m) {
             e.getIn().setHeader("CamelAzureEventHubsPartitionKey", m.fileId().toString());
+        }
+
+        @Override
+        public boolean keepsOrderWhenPipelined() {
+            return false;
         }
     },
     /** JMSXGroupID = fileId; Artemis duplicate detection via _AMQ_DUPL_ID = messageId. */
@@ -109,6 +121,14 @@ public enum QueueType {
 
     abstract void decorate(Exchange e, OutboundMessage m);
 
+    /**
+     * Whether messages sent back to back, without waiting for each acknowledgement, still arrive in order. Verified
+     * against each real broker by the integration tests. If false, the publisher waits for each ack before the next.
+     */
+    public boolean keepsOrderWhenPipelined() {
+        return true;
+    }
+
     Map<String, String> requiredOptions(String uri) {
         return defaults;
     }
@@ -147,7 +167,7 @@ public enum QueueType {
         return out.toString();
     }
 
-    static Map<String, String> metadata(OutboundMessage m) {
+    public static Map<String, String> metadata(OutboundMessage m) {
         Map<String, String> h = new LinkedHashMap<>();
         h.put("messageId", m.messageId());
         h.put("type", m.type().wireName());

@@ -259,8 +259,11 @@ class FileProcessorTest {
         assertThat(o.failure().offset()).isEqualTo(csv(7).length());
         assertThat(o.archive()).isEqualTo(ArchiveLocation.FAILED_FILES);
         assertThat(file.deleted).isTrue();
-        // Batches of 3: sections 0..5 were committed and published before the error.
-        assertThat(messages().stream().filter(SectionStored.class::isInstance)).hasSize(6);
+        // Batches of 3: sections 0..5 were committed before the error, and every one is announced (the last batch
+        // may be announced twice: once by its own publish, once on failure).
+        assertThat(messages().stream().filter(SectionStored.class::isInstance)
+                .map(m -> ((SectionStored) m).seq()).distinct().sorted().toList())
+                .containsExactly(0L, 1L, 2L, 3L, 4L, 5L);
         assertThat(messages().stream().filter(FileCompleted.class::isInstance)).isEmpty();
         assertThat(recorder.failed).singleElement().satisfies(r -> {
             assertThat(r.lastCommittedSeq()).isEqualTo(5);
@@ -277,6 +280,19 @@ class FileProcessorTest {
         FileProcessor next = process();
         assertThat(next.inProgress()).isEmpty();
         assertThat(next.process(new MemSource("ok.csv", csv(1))).result()).isEqualTo(Result.COMPLETED);
+    }
+
+    @Test
+    void sectionsCommittedJustBeforeAFailureAreStillAnnounced() throws Exception {
+        // Sends for the second batch (calls 4..6, after file.started and batch 1) are slow, so the parse error is hit
+        // while that batch is still publishing. Regression: the publish was cancelled mid-send, and the sections it
+        // hadn't sent yet were stored but never announced.
+        pub.slow = n -> n >= 4;
+        Outcome o = process().process(new MemSource("bad.csv", csv(7) + "8,\"never closed\n"));
+        assertThat(o.result()).isEqualTo(Result.FAILED);
+        assertThat(messages().stream().filter(SectionStored.class::isInstance)
+                .map(m -> ((SectionStored) m).seq()).distinct().sorted().toList())
+                .containsExactly(0L, 1L, 2L, 3L, 4L, 5L);
     }
 
     @Test

@@ -118,6 +118,7 @@ public final class FileProcessor {
                 }
             }
             case FAILING -> {
+                announceCommitted(cp, true);
                 Optional<Archiver.Result> done = failedArchiver.finished(cp.fileId());
                 if (done.isEmpty()) {
                     LOG.warn("file.failed_unarchived fileId={} (check failed/ for a local fallback)", cp.fileId());
@@ -210,6 +211,7 @@ public final class FileProcessor {
         boolean recorded = tryCommit(failing);
         UUID fileId = failing.fileId();
         Failure f = failing.failure();
+        announceCommitted(failing, recorded);
         String digest = null;
         ArchiveLocation location = ArchiveLocation.LOCAL_FALLBACK;
         if (recorded && f.code() != ErrorCode.LIMIT_FILE_SIZE) {
@@ -254,6 +256,27 @@ public final class FileProcessor {
             tryCommit(failing.failed());
         }
         return new Outcome(failing.fileId(), Result.FAILED, failing.sectionCount(), f, location);
+    }
+
+    /**
+     * Sections committed before a failure stay stored (design §11), so downstream must hear about every one of them.
+     * Publishing of the last batch may not have been acknowledged yet, and no restart will republish it once the file
+     * is FAILED, so it is done here. Skipped when the broker is the failure; the range is logged instead.
+     */
+    private void announceCommitted(Checkpoint failing, boolean storageAvailable) throws Exception {
+        if (failing.committedSeq() <= failing.publishedSeq()) {
+            return;
+        }
+        if (storageAvailable && failing.failure().code() != ErrorCode.PUBLISH_FAILED) {
+            try {
+                pipeline.announceCommitted(failing);
+                return;
+            } catch (Exception e) {
+                rethrowIfFatal(e);
+            }
+        }
+        LOG.warn("publish.unannounced fileId={} fromSeq={} toSeq={}", failing.fileId(), failing.publishedSeq() + 1,
+                failing.committedSeq());
     }
 
     /** Commits a checkpoint, reporting rather than throwing if storage is unavailable. */

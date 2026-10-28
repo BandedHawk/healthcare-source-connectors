@@ -1,6 +1,5 @@
 package com.sdh.healthcare.connector.file.publish;
 
-import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
@@ -17,9 +16,10 @@ import org.apache.camel.support.service.ServiceHelper;
  * <p>Uses the endpoint's async producer directly from the calling thread, so messages reach the client library in the
  * order they are published (a {@code ProducerTemplate.asyncSend} would hand them to a thread pool and lose order).
  * The future completes when the producer reports the send done, i.e. on broker acknowledgement for the
- * acknowledgement settings {@link QueueType} adds.
+ * acknowledgement settings {@link QueueType} adds. Create it through {@link Publishers}, which adds one-at-a-time
+ * sending for brokers whose client reorders pipelined sends.
  */
-public final class CamelMessagePublisher implements MessagePublisher, AutoCloseable {
+public final class CamelMessagePublisher implements ClosablePublisher {
     private final CamelContext camel;
     private final QueueType type;
     private final String uri;

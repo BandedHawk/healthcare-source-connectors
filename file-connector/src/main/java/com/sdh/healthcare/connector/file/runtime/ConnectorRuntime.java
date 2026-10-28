@@ -18,7 +18,8 @@ import com.sdh.healthcare.connector.core.storage.Archiver;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.config.KeyMaterial;
-import com.sdh.healthcare.connector.file.publish.CamelMessagePublisher;
+import com.sdh.healthcare.connector.file.publish.ClosablePublisher;
+import com.sdh.healthcare.connector.file.publish.Publishers;
 import com.sdh.healthcare.connector.file.publish.QueueType;
 import com.sdh.healthcare.connector.file.source.DirectoryOutcomeRecorder;
 import com.zaxxer.hikari.HikariConfig;
@@ -49,7 +50,7 @@ public final class ConnectorRuntime implements AutoCloseable {
     private final HikariDataSource dataSource;
     private final Catalog catalog;
     private final LeaseKeeper lease;
-    private final CamelMessagePublisher publisher;
+    private final ClosablePublisher publisher;
     private final IngestPipeline pipeline;
     private final FileProcessor processor;
     private final Table sections;
@@ -59,7 +60,7 @@ public final class ConnectorRuntime implements AutoCloseable {
     private final SectionIds ids;
 
     private ConnectorRuntime(CamelContext camel, HikariDataSource dataSource, Catalog catalog, LeaseKeeper lease,
-            CamelMessagePublisher publisher, IngestPipeline pipeline, FileProcessor processor, Table sections,
+            ClosablePublisher publisher, IngestPipeline pipeline, FileProcessor processor, Table sections,
             Table sourceFiles, Table failedFiles, KeyMaterial keys, SectionIds ids) {
         this.camel = camel;
         this.dataSource = dataSource;
@@ -124,7 +125,7 @@ public final class ConnectorRuntime implements AutoCloseable {
                     .withWorkers(workers)
                     .withRetry(retry);
             configureBroker(camel, queueType, p.queue());
-            CamelMessagePublisher publisher = new CamelMessagePublisher(camel, queueType, queueUri);
+            ClosablePublisher publisher = Publishers.create(camel, queueType, queueUri);
             Clock clock = Clock.systemUTC();
             IngestPipeline pipeline = new IngestPipeline(settings, sections, committer, keys.wrap(), ids, splitters,
                     new MessageSealer(keys.signer(), keys.signerKid(), keys.recipient(), keys.recipientKid()),
