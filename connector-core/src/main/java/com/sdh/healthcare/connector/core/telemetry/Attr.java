@@ -23,7 +23,9 @@ public enum Attr {
     BYTES("sdh.bytes"),
     EPOCH("sdh.epoch"),
     TABLE("sdh.table"),
-    ARCHIVE("sdh.archive");
+    ARCHIVE("sdh.archive"),
+    /** Who ran an operator command (design §11.4): an account name, never a person's details. */
+    OPERATOR("sdh.operator");
 
     private final String key;
 

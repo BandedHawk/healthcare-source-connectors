@@ -27,6 +27,10 @@ Revision 2026-10-28 (i): built observability (§12): OpenTelemetry traces, metri
 
 Revision 2026-10-28 (j): built the cloud key providers (§7.4) in a new `connector-kms` module: AWS KMS, Google Cloud KMS, Azure Key Vault and Vault Transit, for wrapping and for ES256 signing. Each is tested against an emulator or, for GCP, a fake KMS (§15.1).
 
+Revision 2026-10-28 (k): built the container image (§14.1) and `ContainerImageIT`, which runs it locked down (read-only root filesystem, noexec `/tmp`, no capabilities, secrets as a Kubernetes-style volume). It found that the packaged app exited right after starting: Camel 4 ignores the old `camel.springboot.main-run-controller` setting, now `camel.main.run-controller`. Key files may now be group-readable (0440), as Kubernetes secret volumes with an `fsGroup` always are (§7.4).
+
+Revision 2026-10-28 (l): built the operator commands `restore`, `decrypt-fallback` and `status` (§11.4). They are read-only, need `SDH_OPERATOR` and audit every run. Restores now always verify the digest, including partial ones. The image's JVM options moved to `/app/jvm.options`, shared with an `sdh-admin` wrapper (§14.1). Recording `replaces_file_id` on resubmission is not built yet.
+
 ---
 
 ## 1. Purpose
@@ -73,6 +77,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── pom.xml                              parent: dependency/plugin management, Java 25, enforcer
 ├── .gitignore                           excludes build output, IDE files, *.pem, *.key, *.p12, .env
 ├── mvnw, .mvn/wrapper/                  Maven 3.9.16
+├── scripts/                             it-minikube.sh (Docker suite), build-image.sh (image), minikube-env.sh (shared)
 ├── docs/DESIGN.md                       this document
 ├── connector-contract/                  library jar: the wire contract shared by writers and readers
 │   └── com.sdh.healthcare.connector.contract
@@ -92,7 +97,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │       ├── publish/      MessagePublisher SPI, OutboundMessage (broker adapters live in the connector app, §10.3)
 │       ├── telemetry/    Telemetry facade (spans, audit events, metrics), Attr allow-list, Fields, error codes
 │       └── pipeline/     source-agnostic ingest pipeline (read → split → encrypt → write → commit → publish)
-└── file-connector/                      Spring Boot application + Docker image
+└── file-connector/                      Spring Boot application + container image (Dockerfile, §14.1)
     └── com.sdh.healthcare.connector.file
         ├── FileConnectorApplication
         ├── config/       ConnectorProperties (sdh.*), KeyMaterial (local key provider), PEM reading
@@ -103,7 +108,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
         ├── publish/      QueueType (broker adapters), CamelMessagePublisher
         ├── telemetry/    OTLP exporters, AllowListSpanExporter, AuditOnlyLogRecordExporter, inbound age gauge
         ├── source/       LocalSourceFile, DirectoryOutcomeRecorder (completed/ and failed/ records, local fallback)
-        └── admin/        operator commands (restore, decrypt-fallback) — not built yet
+        └── admin/        operator commands: AdminCli (restore, decrypt-fallback, status), §11.4
 ```
 
 Each module has its own `.gitignore` for module-specific output.
@@ -316,7 +321,7 @@ Wrapping (the three KEKs) and signing are configured independently (`sdh.crypto.
 - **Keystore:** a PKCS#12 keystore whose entries are AES-256 secret keys, with entry aliases as the KEK refs. Plus PEM files for the signing key, the recipient key and the recovery key.
 - **Encrypted PEMs:** encrypted PKCS#8 is read with the JDK alone, using PBES2 as written by `openssl pkcs8 -topk8 -v2 aes-256-cbc`; a test checks this against a real OpenSSL-generated key.
 - **Protections:**
-  - The service refuses to start if the keystore or signing key file is accessible by group or others. Public key files are not checked.
+  - The service refuses to start if the keystore or signing key file is accessible by others, or writable or executable by group. Group read is allowed because Kubernetes secret volumes with an `fsGroup` are always at least 0440. Public key files are not checked.
   - Private PEMs must be encrypted PKCS#8, with the passphrase supplied from an environment variable or mounted secret.
   - Recipient PEM fingerprints must match the pinned values.
 
@@ -327,7 +332,7 @@ Wrapping (the three KEKs) and signing are configured independently (`sdh.crypto.
 - **Logging:** no PHI, filenames or exception messages from parsers are ever logged. Exceptions are mapped to stable error codes (`PARSE_UNBALANCED_ELEMENT`, `LIMIT_SECTION_SIZE`, …), and only the code, exception class, offset and seq are emitted.
 - **Camel:** body logging, tracing, message history and dead-letter body dumps are disabled.
 - **Temp files:** no plaintext is ever written to temporary files.
-- **Container:** runs as non-root with a read-only root filesystem, heap dumps disabled, and TLS everywhere (object store, catalog, KMS, brokers).
+- **Container:** runs as non-root with a read-only root filesystem; no heap dumps, core dumps, crash logs or JVM attach; and TLS everywhere (object store, catalog, KMS, brokers). See §14.1.
 
 ## 8. Storage
 
@@ -678,12 +683,31 @@ After the split phase: archive the original to `source_files`, publish `file.com
 
 `DirectoryOutcomeRecorder` writes it to a hidden temp file and renames it into place only after a successful write and sync. Records are written the same way, with owner-only permissions.
 
-### 11.4 Operator tools
+### 11.4 Operator tools (built)
 
-`java -jar file-connector.jar admin …` (not built yet; `ArchiveReader` and `RecoveryEnvelope` do the decrypting). Every command emits an audit event naming the operator identity from the environment.
-- `restore --file-id X --to <dir> [--from-offset N]` decrypts an archived failed file, or only its unprocessed tail, into a directory for repair or resubmission. A resubmitted file gets a new fileId, and `replaces_file_id` is recorded.
-- `decrypt-fallback --file failed/<id>.enc --key recovery.pem` handles a file that was encrypted locally.
-- `status` shows the checkpoint, lease and in-progress file.
+`java -jar file-connector.jar admin <command> …`; in the image, `sdh-admin <command>` (§14.1). The commands use the connector's own configuration (application.yml, environment, `SPRING_APPLICATION_JSON`; `--a.b=c` arguments override it) but start none of the connector: no Camel, no lease, and nothing is written to the tables or the lease store. Tables are loaded, never created, and the ID key is read, never created. So they are safe to run beside the running connector.
+
+| Command | Does |
+|---|---|
+| `restore --file-id X --to <dir> [--from-offset N \| --unprocessed] [--table failed\|source] [--original-name]` | Decrypts an archived file from `failed_files` (looked up first) or `source_files`. `--unprocessed` starts after the last committed section of a failed file, found from the summary row's `failure_seq` and that section's source range: the part that never reached downstream. A tail repeats no headers or envelopes before that point (an X12 interchange header, a CSV header row), so it may need them added before resubmission. For a failed file, the stage, error code, offset and last committed seq are printed first |
+| `decrypt-fallback --file failed/<id>.enc --key <recovery.pem> --to <dir> [--original-name]` | Decrypts a local fallback file (§11.3). The recovery private key must be an encrypted PKCS#8 PEM, with owner-only or group-read permissions as for the signing key (§7.4); its passphrase comes from `$SDH_RECOVERY_PASSPHRASE`, never an argument. Needs no catalog, lease or KMS |
+| `status` | Shows the lease (holder, epoch, time left, read with the database clock), the checkpoint (file in progress, state, percentage split, sections committed and published, failure details), each archive table's progress, and the inbound backlog. Each part is shown on its own, so an unreachable KMS still leaves the lease and backlog visible; the exit status is 1 if any part couldn't be read |
+
+**Output safety:**
+- Decrypted output goes to a hidden temporary file with owner-only permissions. It is renamed into place only after the digest (restore) or envelope integrity (fallback) has been verified, and deleted otherwise, so no unverified plaintext is left behind.
+- An existing file is never overwritten.
+- Output is named `<fileId>` (or `<fileId>.from-<offset>`). `--original-name` uses the archived name instead, reduced to its last path element so it can't write outside the directory. The command then doesn't print that name, because command output may end up in logs.
+- Every restore checks the digest, including partial ones: all chunks are decrypted either way.
+
+**Audit:**
+- `$SDH_OPERATOR` is required (letters, digits, `. _ @ + -`).
+- Every run emits `sdh.audit.admin.<command>` with `sdh.operator`, plus the file ID, table, offset and bytes as they become known, and `result=ok|failed` with the exception class.
+- Events go to the console and, when `sdh.telemetry.otlp.endpoint` is set, to the collector. Each event is exported straight away and flushed before exit.
+- `sdh.operator` was added to the attribute allow-list (§12).
+
+**Exit status:** 0 done, 1 failed, 2 usage error (an unknown option is an error, so a typo can't change what is restored).
+
+**Not built yet:** recording `replaces_file_id` when a repaired file is resubmitted. The connector gives a resubmitted file a new fileId like any other, and nothing yet carries the link from the operator to the intake. One option is a marker file next to the resubmitted file, read at intake. Until then, the operator records the link in the ticket and in the restore's audit event.
 
 ## 12. Observability and audit (OpenTelemetry, built)
 
@@ -848,12 +872,75 @@ Compared with the earlier sketch:
 - the signing key and recipient are single objects, not a list;
 - retention moved to `maintenance.retention`; `lease.store` isn't read yet.
 
+### 14.1 Container image (built)
+
+`file-connector/Dockerfile` builds the image from the packaged jar. `scripts/build-image.sh` runs Maven and then `docker build` against the minikube VM's Docker daemon, tagging `sdh/file-connector:<version>` (override with `SDH_IMAGE`; extra arguments go to `docker build`). Plain `docker build file-connector` works too.
+
+- **Base:** `eclipse-temurin:25-jre-noble`, with `25-jdk-noble` for the build stage. Production builds should pin both by digest (`--build-arg JRE_IMAGE=eclipse-temurin@sha256:…`).
+- **Layers:** Spring Boot's `-Djarmode=tools extract --layers`, copied as four layers with dependencies first, so a code change rebuilds a few hundred KB rather than 200 MB. The image is about 513 MB.
+- **User:** uid/gid 10001 (`sdh`), with no home directory or login shell. Everything under `/app` is root-owned and read-only to it; only `/data/inbound` belongs to it.
+- **Operator commands:** `/usr/local/bin/sdh-admin` runs `admin` (§11.4) with the same JVM options and `-Xmx512m`, so it fits beside the connector's JVM: `kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status`. With a read-only root filesystem, restore into `/tmp` (then `kubectl cp`) or the inbound volume. As a one-off container, arguments after the image name go to the app: `docker run … <image> admin status`.
+- **Health:** there is no HTTP endpoint. The process is the health signal: fatal conditions exit with status 70 (`FatalExit`) and the orchestrator restarts it.
+
+**JVM flags.** These are in `/app/jvm.options` (from `file-connector/docker/`), read by `ENTRYPOINT` as `java @/app/jvm.options -jar /app/app.jar`. `JDK_JAVA_OPTIONS` and `JAVA_TOOL_OPTIONS` are read before the command line, so they can add tuning (e.g. `-Xmx`) but can't undo these:
+
+| Flag | Why |
+|---|---|
+| `-XX:-HeapDumpOnOutOfMemoryError`, `-XX:+ExitOnOutOfMemoryError` | No heap dump; an out-of-memory process exits and is restarted clean |
+| `-XX:-CreateCoredumpOnCrash`, `-XX:ErrorFile=/dev/null` | No core dump, and no `hs_err` file (it holds raw memory near the crash) |
+| `-XX:+DisableAttachMechanism` | No `jcmd`, so no heap dump on demand |
+| `-XX:-UsePerfData` | No `hsperfdata` file in `/tmp` |
+| `-XX:MaxRAMPercentage=75` | Heap sized from the container memory limit |
+| `--enable-native-access=ALL-UNNAMED` | Java 25 otherwise warns when libraries load native code |
+| `-DZstdNativePath=…`, `-Dorg.xerial.snappy.lib.path/name=…` | zstd-jni (section and Parquet compression) and snappy-java (an optional Kafka codec) load from `/app/native`, unpacked at build time, instead of unpacking themselves into `/tmp`. So `/tmp` can be `noexec`. Other native code (Netty, lz4) falls back to Java when it can't load |
+
+**What the container needs at runtime:**
+
+| Path | Mount | Contents |
+|---|---|---|
+| `/data/inbound` | writable volume, shared with whatever delivers files | Inbound files; the app writes `completed/` and `failed/` (§5) |
+| `/tmp` | writable `emptyDir`/tmpfs; `noexec` is fine | `S3FileIO` stages multipart uploads here before sending them: the same bytes as the object store gets, with section payloads already encrypted. Allow about 1 GiB |
+| `/run/secrets` | read-only secret volume | Local mode: `keks.p12`, `signing.pem`, `recipient.pem`, `recovery.pem` (paths are configuration, §14). Mode 0400 or 0440 |
+| configuration | ConfigMap via `SPRING_CONFIG_ADDITIONAL_LOCATION`, or `SPRING_APPLICATION_JSON` | `sdh.*` (§14). Passwords and passphrases come from environment variables or a `configtree:` mount |
+
+**Kubernetes.** A sketch of the pod settings. It's untested on a cluster (the `sdh-it` profile runs no Kubernetes), but `ContainerImageIT` applies the same constraints in Docker:
+
+```yaml
+spec:
+  replicas: 1                          # the lease (§9.3) also stops a second instance
+  strategy: { type: Recreate }
+  template:
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001                 # secret files become root:10001 0440
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: file-connector
+          image: sdh/file-connector:0.1.0
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources: { limits: { memory: 2Gi } }
+          volumeMounts:
+            - { name: inbound, mountPath: /data/inbound }
+            - { name: tmp, mountPath: /tmp }
+            - { name: keys, mountPath: /run/secrets, readOnly: true }
+      volumes:
+        - { name: inbound, persistentVolumeClaim: { claimName: sdh-inbound } }
+        - { name: tmp, emptyDir: { sizeLimit: 1Gi } }
+        - { name: keys, secret: { secretName: sdh-connector-keys, defaultMode: 0440 } }
+```
+
 ## 15. Testing
 
 | Level | Coverage |
 |---|---|
 | Unit | Each splitter, including boundaries spanning buffer edges, resume from every reported offset, malformed input and limits; crypto round-trips and AAD tamper detection; checkpoint MAC; message JOSE round-trip; lease keeper timing with a fake clock |
-| Integration without Docker (default build) | Embedded PostgreSQL binaries (`io.zonky.test:embedded-postgres`) for the lease store and JDBC catalog. Iceberg's `RESTCatalogAdapter` for REST catalog commit rules, in-process. `InMemoryFileIO`. Fencing tests run against both catalog types. End-to-end write → message → `connector-queue-reader`. The whole Spring Boot app with a SEDA queue (`FileConnectorApplicationTest`) |
+| Integration without Docker (default build) | Embedded PostgreSQL binaries (`io.zonky.test:embedded-postgres`) for the lease store and JDBC catalog. Iceberg's `RESTCatalogAdapter` for REST catalog commit rules, in-process. `InMemoryFileIO`. Fencing tests run against both catalog types. End-to-end write → message → `connector-queue-reader`. The whole Spring Boot app with a SEDA queue (`FileConnectorApplicationTest`). The admin commands against data the running app wrote, while it holds the lease (`AdminCommandsTest`) |
 | Integration with Docker (`-Pit`) | See §15.1 |
 | Crash and resume | Fault-injection points at every stage (after write, after commit, mid-publish, before end of file, mid-archive, after delete, while failing), then a restart. The test checks that there are no gaps, no lost or duplicated rows, and duplicate messages only within one batch |
 | Throughput | Not built yet: synthetic multi-GB C-CDA, X12 and CSV files, with records of MB/s and sections/s |
@@ -874,6 +961,7 @@ Compared with the earlier sketch:
 | `EventHubsIT` | `mcr.microsoft.com/azure-messaging/eventhubs-emulator:2.2.0` + `azurite:3.35.0` | Each file in one partition, in order |
 | `AwsKmsIT` | `nsmithuk/local-kms:3.11.7` | `aws-kms` through `KeyMaterial.load`: KEK probes; an alias-referenced KEK records the real key ARN; tag tampering refused; a message signed through KMS opens with the KMS public key. local-kms replaces LocalStack (no account token) |
 | `AzureKeyVaultIT` | `nagyesta/lowkey-vault:7.3.112` | `azure-keyvault`: RSA-OAEP-256 wrapping records the versioned key ID; ES256 through Key Vault. Emulator workarounds, test-only: (1) versioned key IDs, because Lowkey rejects `wrapKey` on an unversioned ID, which real Key Vault accepts; (2) the KEK also gets `encrypt`/`decrypt`; (3) under minikube the client goes to the VM's IP, which isn't in Lowkey's certificate, so the test client trusts only self-signed certificates and skips hostname verification |
+| `ContainerImageIT` | the image built from `Dockerfile` + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | The image as deployed (§14.1): read-only root filesystem, `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the inbound directory is a volume that a second container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`. It checks that the process runs as 10001 and can't write outside its volumes; that a good and a bad file end in `completed/` and `failed/`; that downstream reads every section back from the host; that the console log has no PHI marker or filename; that `sdh-admin status` and `sdh-admin restore` work inside the running container without taking the lease; and that nothing native or `hs_err` was written to `/tmp`. The container log is saved to `target/container-image-it.log` |
 | `VaultTransitIT` | `hashicorp/vault:2.1.1` (dev mode) | `vault-transit` built purely from connector settings (address, token file): wrap with associated data, ES256 signing, message round trip; a wrong token fails startup naming the KEK and HTTP 403 |
 
 **Running it on minikube with KVM2:** use `scripts/it-minikube.sh`, which needs no local Docker daemon. The script:
@@ -881,7 +969,7 @@ Compared with the earlier sketch:
 - exports `minikube docker-env`;
 - runs `./mvnw -Pit verify`, passing any extra arguments through (e.g. `-Dit.test=KafkaIT`).
 
-`SDH_IT_STOP=1` stops the VM afterwards; `minikube delete -p sdh-it` removes it.
+`SDH_IT_STOP=1` stops the VM afterwards; `minikube delete -p sdh-it` removes it. `scripts/build-image.sh` uses the same VM (§14.1); both share `scripts/minikube-env.sh`.
 
 **What makes minikube work:**
 - **Dedicated profile:** `docker-env` doesn't work on multi-node clusters, and the tests shouldn't share a cluster used for other work.
@@ -892,11 +980,11 @@ Compared with the earlier sketch:
 
 **Failsafe:** it tests `target/classes`, because Spring Boot's repackaged jar keeps classes under `BOOT-INF/`.
 
-**Time:** with images cached in the VM, the whole build (114 unit tests + 8 ITs) takes about 1 min 45 s. The first run pulls several GB of images.
+**Time:** with images cached in the VM, the whole build (128 unit tests + 13 ITs, including building the image) takes about 2 min 40 s. The first run pulls several GB of images.
 
 **GCP Cloud KMS** has no emulator. `GcpKmsKeyProviderTest` (a unit test in `connector-kms`) runs the provider against an in-process fake of the Cloud KMS gRPC service: real AES-GCM with the AAD enforced, real ECDSA, and the CRC32C integrity fields. It checks our side of the protocol, not Google's service.
 
-**Not covered yet:** an Iceberg REST catalog (Polaris) container; throughput tests; GCP KMS against the real service.
+**Not covered yet:** an Iceberg REST catalog (Polaris) container; throughput tests; GCP KMS against the real service; the image on a real Kubernetes cluster.
 
 ## 16. Risks and verification items
 
@@ -905,7 +993,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 | # | Item | Status | Result |
 |---|---|---|---|
 | 1 | Java 25 with Iceberg/Parquet and Hadoop classes | **Passed** | Parquet write and read through Iceberg work on Java 25. A fully trimmed `hadoop-common` is not enough: `Configuration` needs Woodstox/StAX2, hadoop-shaded-guava and commons-collections4, and Parquet's read path needs `hadoop-mapreduce-client-core`. That is six jars in total, all with transitive dependencies excluded (§2). We don't use `HadoopFileIO`, so Hadoop's security code (`UserGroupInformation`/`Subject`, a known Java 23+ problem area) is never reached. `S3FileIO` against SeaweedFS **passed** in `FullStackIT`, once the AWS `kms` module was added (§2) |
-| 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5) |
+| 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5). **Later finding:** the packaged app exited right after starting, because Camel 4 reads `camel.main.run-controller`, not `camel.springboot.main-run-controller`; tests start the app in-process, so only `ContainerImageIT` saw it (§14.1) |
 | 3 | Azure emulators | **Passed** | Service Bus and Event Hubs emulators run under `-Pit` on minikube. They found two adapter bugs (§10.3): Camel's Service Bus producer can't set per-message sessions or IDs, and the Azure client reorders sends in flight together |
 | 4 | Custom compaction | **Built** | Bin-pack via `RewriteFiles` + `validateFromSnapshot` through the fenced committer (§8.4). Findings: snapshot expiry must run standalone to delete files physically; and Iceberg deletes a removed file only once the snapshot that removed it has expired, so retention adds a marker commit to purge at once |
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |

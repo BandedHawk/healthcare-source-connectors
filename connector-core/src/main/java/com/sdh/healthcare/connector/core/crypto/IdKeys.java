@@ -40,6 +40,23 @@ public final class IdKeys {
         return key;
     }
 
+    /**
+     * Unwraps the stored ID key without ever creating one: for read-only tools (design §11.4), which must not
+     * write to the tables.
+     */
+    public static byte[] load(Table table, KeyProvider keys) {
+        table.refresh();
+        String stored = table.properties().get(PROPERTY);
+        if (stored == null) {
+            throw new IllegalStateException("No ID key stored yet: the connector has never started on these tables");
+        }
+        byte[] key = keys.unwrap(decode(stored));
+        if (key.length != 32) {
+            throw new IllegalStateException("Stored ID key has the wrong length");
+        }
+        return key;
+    }
+
     static String encode(WrappedKey w) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("kekRef", w.keyRef());

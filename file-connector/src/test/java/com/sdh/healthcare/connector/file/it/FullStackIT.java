@@ -60,7 +60,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * through Iceberg's S3FileIO, and Kafka. A downstream consumer then reads every section back with
  * connector-queue-reader, and no stored object may contain plaintext.
  */
-@SpringBootTest(properties = "camel.springboot.main-run-controller=false")
+@SpringBootTest(properties = "camel.main.run-controller=false")
 class FullStackIT {
     static final String MARKER = "PHI-MARKER-7f3a";
     static final String BUCKET = "sdh-warehouse";

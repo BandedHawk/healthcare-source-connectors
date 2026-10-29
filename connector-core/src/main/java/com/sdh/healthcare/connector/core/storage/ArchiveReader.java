@@ -39,13 +39,13 @@ public final class ArchiveReader {
     private ArchiveReader() {}
 
     /**
-     * Writes bytes {@code [fromOffset, fileSize)} of the archived file to {@code out}. When {@code fromOffset} is 0
-     * the digest is recomputed and must match the stored one.
+     * Writes bytes {@code [fromOffset, fileSize)} of the archived file to {@code out}. Every chunk is decrypted
+     * either way, so the digest is always recomputed and must match the stored one; on a mismatch the caller must
+     * discard what was written.
      */
     public static Restored restore(Table table, UUID fileId, KeyProvider keys, SectionIds ids, long fromOffset,
             OutputStream out) throws IOException {
-        Record summary = rows(table, Expressions.and(Expressions.equal(FILE_ID, fileId),
-                Expressions.equal(CHUNK_INDEX, SUMMARY_ROW))).stream().findFirst()
+        Record summary = summary(table, fileId)
                 .orElseThrow(() -> new IOException("No finished archive for this file"));
         long size = (Long) summary.getField(FILE_SIZE);
         int count = (Integer) summary.getField(CHUNK_COUNT);
@@ -55,7 +55,9 @@ public final class ArchiveReader {
 
         byte[] chain = new byte[32];
         Mac mac = null;
-        boolean verify = fromOffset == 0;
+        if (fromOffset < 0 || fromOffset > size) {
+            throw new IllegalArgumentException("Offset outside the file");
+        }
         Map<String, byte[]> bdks = new HashMap<>();
         for (int w = 0; w < count; w += WINDOW) {
             List<Record> rows = rows(table, Expressions.and(Expressions.equal(FILE_ID, fileId),
@@ -76,15 +78,13 @@ public final class ArchiveReader {
                 int len = (int) Math.min(chunkSize, Math.max(0, size - (long) index * chunkSize));
                 byte[] plain = SectionCrypto.decryptChunk(SectionCrypto.sectionKey(bdk, fileId, 0), fileId, 0, index,
                         count, len, bytes(r.getField(CIPHERTEXT)));
-                if (verify) {
-                    if (index % perBlock == 0) {
-                        mac = ids.newLabelledMac("sdh-file-digest");
-                        mac.update(chain);
-                    }
-                    mac.update(plain);
-                    if (index % perBlock == perBlock - 1 || index == count - 1) {
-                        chain = mac.doFinal();
-                    }
+                if (index % perBlock == 0) {
+                    mac = ids.newLabelledMac("sdh-file-digest");
+                    mac.update(chain);
+                }
+                mac.update(plain);
+                if (index % perBlock == perBlock - 1 || index == count - 1) {
+                    chain = mac.doFinal();
                 }
                 long start = (long) index * chunkSize;
                 if (start + len > fromOffset) {
@@ -93,16 +93,27 @@ public final class ArchiveReader {
                 }
             }
         }
-        if (verify && !SectionIds.encode(chain).equals(stored)) {
+        if (!SectionIds.encode(chain).equals(stored)) {
             throw new ChunkIntegrityException("Archive digest mismatch");
         }
-        Optional<String> name = Optional.ofNullable(summary.getField(ORIGINAL_NAME_ENC)).map(enc -> {
+        Optional<String> name = originalName(summary, fileId, keys);
+        return new Restored(fileId, size, stored, name, summary);
+    }
+
+    /** Decrypts the original file name kept on a summary row, if one was recorded. */
+    public static Optional<String> originalName(Record summary, UUID fileId, KeyProvider keys) {
+        return Optional.ofNullable(summary.getField(ORIGINAL_NAME_ENC)).map(enc -> {
             byte[] bdk = keys.unwrap(new WrappedKey((String) summary.getField(KEK_REF),
                     bytes(summary.getField(BDK_WRAPPED))));
             return new String(SectionCrypto.decryptSmall(SectionCrypto.sectionKey(bdk, fileId, -1), fileId, -1, 0, 1,
                     64 << 10, bytes(enc)), StandardCharsets.UTF_8);
         });
-        return new Restored(fileId, size, stored, name, summary);
+    }
+
+    /** The file's summary row (file-level values, design §8.2), present once its archive is finished. */
+    public static Optional<Record> summary(Table table, UUID fileId) throws IOException {
+        return rows(table, Expressions.and(Expressions.equal(FILE_ID, fileId),
+                Expressions.equal(CHUNK_INDEX, SUMMARY_ROW))).stream().findFirst();
     }
 
     private static List<Record> rows(Table table, Expression filter) throws IOException {

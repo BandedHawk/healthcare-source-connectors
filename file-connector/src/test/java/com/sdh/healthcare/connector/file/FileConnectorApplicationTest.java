@@ -40,7 +40,7 @@ import org.springframework.test.context.DynamicPropertySource;
  * The whole application on real components without Docker: embedded Postgres (lease + JDBC Iceberg catalog),
  * in-memory object storage, key files on disk, the Camel file route, and a SEDA queue standing in for the broker.
  */
-@SpringBootTest(properties = "camel.springboot.main-run-controller=false")
+@SpringBootTest(properties = "camel.main.run-controller=false")
 class FileConnectorApplicationTest {
     static final Path ROOT;
     static final Path INBOUND;

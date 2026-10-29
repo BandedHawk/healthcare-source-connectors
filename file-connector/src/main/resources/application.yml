@@ -13,8 +13,9 @@ camel:
     message-history: false
     log-mask: true
     log-exhausted-message-body: false
-  springboot:
-    main-run-controller: true
+    # Keeps the JVM alive: the app has no web server or other non-daemon thread. (Camel 4 reads this here; the old
+    # camel.springboot.main-run-controller is ignored, and the packaged app exited right after starting.)
+    run-controller: true
 
 # Telemetry (design §12): spans are exported through sdh.telemetry.otlp (with the PHI allow-list filter), so Boot's
 # own OTLP exporters and the Micrometer OTLP metrics registry are off. Sample every trace: one per file is cheap.

@@ -112,6 +112,30 @@ public final class JdbcLeaseStore implements LeaseStore {
         update(sql, 1L, grant);
     }
 
+    /** Reads a lease without taking or changing it. Empty if it has never been held. */
+    public java.util.Optional<LeaseStatus> inspect(String leaseName) {
+        String sql = """
+                SELECT owner, epoch, acquired_at, renewed_at, expires_at,
+                       (extract(epoch FROM expires_at - clock_timestamp()) * 1000)::bigint
+                  FROM %s WHERE name = ?""".formatted(table);
+        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setQueryTimeout(queryTimeoutSeconds);
+            ps.setString(1, leaseName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return java.util.Optional.empty();
+                }
+                return java.util.Optional.of(new LeaseStatus(leaseName, rs.getString(1), rs.getLong(2),
+                        instant(rs, 3), instant(rs, 4), instant(rs, 5), Duration.ofMillis(rs.getLong(6))));
+            }
+        } catch (SQLException e) {
+            if ("42P01".equals(e.getSQLState())) {
+                return java.util.Optional.empty();
+            }
+            throw new IllegalStateException("Lease store unavailable", e);
+        }
+    }
+
     private int update(String sql, long millis, LeaseGrant grant) {
         try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             c.setAutoCommit(true);

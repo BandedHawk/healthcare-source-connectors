@@ -62,6 +62,12 @@ public final class TestKeys {
         recoveryPem = Files.writeString(dir.resolve("recovery-public.pem"), publicPem(recovery.getPublic()));
     }
 
+    /** Writes {@code key} as an encrypted PKCS#8 PEM with owner-only permissions, as an operator would keep it. */
+    public static Path encryptedPrivatePem(Path file, PrivateKey key, String passphrase) throws Exception {
+        Files.writeString(privateFile(file), pem("ENCRYPTED PRIVATE KEY", encrypt(key, passphrase)));
+        return file;
+    }
+
     public static KeyPair ec() throws Exception {
         KeyPairGenerator g = KeyPairGenerator.getInstance("EC");
         g.initialize(new ECGenParameterSpec("secp256r1"));

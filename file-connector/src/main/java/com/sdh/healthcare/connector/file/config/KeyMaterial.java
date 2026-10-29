@@ -48,15 +48,17 @@ import javax.crypto.SecretKey;
  *
  * <p>Wrapping and signing can each use {@code local} or a KMS ({@code aws-kms}, {@code gcp-kms}, {@code azure-keyvault},
  * {@code vault-transit}). Every KEK is probed with a wrap/unwrap at startup, and a KMS signing key with a sign/verify.
- * Locally, startup is refused if the keystore or signing key is group- or world-accessible or the signing key isn't
- * encrypted. The recipient key must match its pinned fingerprint. Public key files are not checked for permissions.
+ * Locally, startup is refused if the keystore or signing key is world-accessible, group-writable or group-executable,
+ * or the signing key isn't encrypted. Group read is allowed: Kubernetes secret volumes with an {@code fsGroup} are
+ * always at least 0440. The recipient key must match its pinned fingerprint. Public key files are not checked for permissions.
  */
 public record KeyMaterial(KeyProvider wrap, JWSSigner signer, String signerKid, PublicKey recipient,
         String recipientKid, ECPublicKey recovery, List<AutoCloseable> resources) implements AutoCloseable {
     private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(KeyMaterial.class);
 
+    /** Group read is allowed: Kubernetes adds it (mode | 0440) to secret files when the pod sets an fsGroup. */
     private static final Set<PosixFilePermission> GROUP_OR_OTHER = EnumSet.of(
-            PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_WRITE, PosixFilePermission.GROUP_EXECUTE,
+            PosixFilePermission.GROUP_WRITE, PosixFilePermission.GROUP_EXECUTE,
             PosixFilePermission.OTHERS_READ, PosixFilePermission.OTHERS_WRITE, PosixFilePermission.OTHERS_EXECUTE);
 
     /** Builds a KMS provider by name. Replaceable in tests to point at emulators. */
@@ -232,6 +234,15 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer, String signerKid, 
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(key.getEncoded()));
     }
 
+    /**
+     * Reads an encrypted PKCS#8 private key under the same rules as the signing key: owner-only (or group-read)
+     * permissions and a passphrase. Used by operator tools for the recovery key (design §11.4).
+     */
+    public static PrivateKey loadPrivateKey(Path pem, char[] passphrase) throws IOException, GeneralSecurityException {
+        checkPrivate(pem);
+        return Pem.encryptedPrivateKey(pem, passphrase);
+    }
+
     static void checkPrivate(Path file) throws IOException {
         if (!Files.isRegularFile(file)) {
             throw new IOException("Key file not found: " + file.getFileName());
@@ -241,7 +252,7 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer, String signerKid, 
             perms.retainAll(GROUP_OR_OTHER);
             if (!perms.isEmpty()) {
                 throw new IOException("Key file " + file.getFileName()
-                        + " must not be accessible by group or others (chmod 600)");
+                        + " must not be accessible by others or writable by group (chmod 600 or 640)");
             }
         }
     }

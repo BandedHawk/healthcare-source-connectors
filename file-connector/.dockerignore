@@ -1,0 +1,4 @@
+# The image is built from the packaged jar and the files in docker/ only.
+*
+!target/file-connector-*.jar
+!docker/

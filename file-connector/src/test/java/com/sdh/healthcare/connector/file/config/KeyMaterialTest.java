@@ -47,16 +47,28 @@ class KeyMaterialTest {
     }
 
     @Test
-    void refusesGroupReadableKeystoreAndSigningKey() throws Exception {
+    void refusesWorldReadableOrGroupWritableKeystoreAndSigningKey() throws Exception {
         TestKeys k = new TestKeys(dir);
         String pin = KeyMaterial.fingerprint(k.recipient.getPublic());
-        Files.setPosixFilePermissions(k.keystore, PosixFilePermissions.fromString("rw-r-----"));
+        Files.setPosixFilePermissions(k.keystore, PosixFilePermissions.fromString("rw-rw----"));
         assertThatThrownBy(() -> KeyMaterial.load(crypto(k, pin, k.signingPem)))
-                .isInstanceOf(IOException.class).hasMessageContaining("group or others");
+                .isInstanceOf(IOException.class).hasMessageContaining("others or writable by group");
         Files.setPosixFilePermissions(k.keystore, PosixFilePermissions.fromString("rw-------"));
         Files.setPosixFilePermissions(k.signingPem, PosixFilePermissions.fromString("rw----r--"));
         assertThatThrownBy(() -> KeyMaterial.load(crypto(k, pin, k.signingPem)))
-                .isInstanceOf(IOException.class).hasMessageContaining("group or others");
+                .isInstanceOf(IOException.class).hasMessageContaining("others or writable by group");
+    }
+
+    /** Kubernetes secret volumes with an fsGroup: read-only for owner and group (0440). */
+    @Test
+    void acceptsGroupReadOnlyKeyFiles() throws Exception {
+        TestKeys k = new TestKeys(dir);
+        String pin = KeyMaterial.fingerprint(k.recipient.getPublic());
+        Files.setPosixFilePermissions(k.keystore, PosixFilePermissions.fromString("r--r-----"));
+        Files.setPosixFilePermissions(k.signingPem, PosixFilePermissions.fromString("r--r-----"));
+        try (KeyMaterial m = KeyMaterial.load(crypto(k, pin, k.signingPem))) {
+            assertThat(m.signerKid()).isNotBlank();
+        }
     }
 
     @Test

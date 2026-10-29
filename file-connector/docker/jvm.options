@@ -1,0 +1,21 @@
+# JVM options for the connector and the admin commands (design §7.5, §14.1), read with java @/app/jvm.options.
+# They follow JDK_JAVA_OPTIONS and JAVA_TOOL_OPTIONS on the command line, so those can add tuning but not undo these.
+
+# PHI hygiene: no heap dumps, core dumps or crash logs (hs_err files hold raw memory near the crash), and no attach
+# (jcmd could otherwise take a heap dump).
+-XX:-HeapDumpOnOutOfMemoryError
+-XX:-CreateCoredumpOnCrash
+-XX:ErrorFile=/dev/null
+-XX:+DisableAttachMechanism
+# Exit on OutOfMemoryError so the orchestrator restarts a clean process.
+-XX:+ExitOnOutOfMemoryError
+# No hsperfdata file in /tmp.
+-XX:-UsePerfData
+-XX:MaxRAMPercentage=75
+# Java 25 otherwise warns when libraries load native code.
+--enable-native-access=ALL-UNNAMED
+-Djava.io.tmpdir=/tmp
+# zstd-jni and snappy-java load from /app/native instead of unpacking themselves into /tmp, so /tmp can be noexec.
+-DZstdNativePath=/app/native/libzstd-jni.so
+-Dorg.xerial.snappy.lib.path=/app/native
+-Dorg.xerial.snappy.lib.name=libsnappyjava.so

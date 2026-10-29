@@ -31,13 +31,14 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class TelemetryConfiguration {
 
-    private static String url(ConnectorProperties.Otlp otlp, String path) {
+    /** The OTLP/HTTP URL for a signal path such as {@code /v1/logs}; also used by the admin commands. */
+    public static String url(ConnectorProperties.Otlp otlp, String path) {
         String base = otlp.endpoint().endsWith("/") ? otlp.endpoint().substring(0, otlp.endpoint().length() - 1)
                 : otlp.endpoint();
         return base + path;
     }
 
-    private static Map<String, String> headers(ConnectorProperties.Otlp otlp) {
+    public static Map<String, String> headers(ConnectorProperties.Otlp otlp) {
         return otlp.headers() == null ? Map.of() : otlp.headers();
     }
 
