@@ -980,7 +980,7 @@ spec:
 
 **Failsafe:** it tests `target/classes`, because Spring Boot's repackaged jar keeps classes under `BOOT-INF/`.
 
-**Time:** with images cached in the VM, the whole build (128 unit tests + 13 ITs, including building the image) takes about 2 min 40 s. The first run pulls several GB of images.
+**Time:** with images cached in the VM, the whole build (135 unit tests + 13 ITs, including building the image) takes about 2 min 50 s. The first run pulls several GB of images.
 
 **GCP Cloud KMS** has no emulator. `GcpKmsKeyProviderTest` (a unit test in `connector-kms`) runs the provider against an in-process fake of the Cloud KMS gRPC service: real AES-GCM with the AAD enforced, real ECDSA, and the CRC32C integrity fields. It checks our side of the protocol, not Google's service.
 
