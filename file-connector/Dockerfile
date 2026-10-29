@@ -1,7 +1,10 @@
-# file-connector image (design §7.5, §14.1). Build the jar first, then build from this directory:
+# file-connector SERVICE image: for our own hosted service only, NOT for customer distribution (design §14.1, §14.3).
+# It is a full Ubuntu/Temurin image with a shell and sdh-admin for operators. The image distributed to customers is
+# built from the distribution kit instead (container/Dockerfile in target/file-connector-*-dist-dir; scripts/
+# build-image.sh customer). Build the jar first, then build from this directory:
 #
 #   ./mvnw -pl file-connector -am package -DskipTests
-#   docker build -t sdh/file-connector:0.1.0-SNAPSHOT file-connector
+#   docker build -t sdh/file-connector-service:0.1.0-SNAPSHOT file-connector
 #
 # or use scripts/build-image.sh, which does both against the minikube VM's Docker daemon.
 #
@@ -44,7 +47,7 @@ RUN set -eu; \
     cp org/xerial/snappy/native/Linux/$snappy/libsnappyjava.so ../native/libsnappyjava.so
 
 FROM ${JRE_IMAGE}
-LABEL org.opencontainers.image.title="file-connector" \
+LABEL org.opencontainers.image.title="file-connector (service)" \
       org.opencontainers.image.description="Splits inbound healthcare files into encrypted Iceberg sections and announces them" \
       org.opencontainers.image.vendor="Smile Digital Health Inc." \
       org.opencontainers.image.licenses="LicenseRef-Proprietary" \
@@ -65,21 +68,23 @@ COPY --from=extract /build/layers/application/ ./
 COPY --from=extract /build/native/ ./native/
 COPY --from=extract /build/legal/ ./legal/
 
-COPY docker/jvm.options /app/jvm.options
+# The same JVM options as the customer image and the distribution (src/dist).
+COPY src/dist/config/jvm.options src/dist/container/container.options src/dist/container/admin.args /app/
 COPY docker/sdh-admin /usr/local/bin/sdh-admin
-RUN chmod 0644 /app/jvm.options && chmod 0755 /usr/local/bin/sdh-admin
+RUN chmod 0644 /app/jvm.options /app/container.options /app/admin.args && chmod 0755 /usr/local/bin/sdh-admin
 # Every OS package in this image, with the source package it was built from (design §14.2): the attribution and
 # source-availability record for what the base image brings. Each package's terms are in
 # /usr/share/doc/<package>/copyright; the Java runtime's are in /opt/java/openjdk/legal/.
-RUN { echo "# Operating system packages in this image: package, version, source package (source version)."; \
-      echo "# Licenses and copyrights: /usr/share/doc/<package>/copyright."; \
-      dpkg-query -W -f='${Package} ${Version} ${source:Package} (${source:Version})\n' | sort; } \
+RUN { echo "# Operating system packages in this image: package, version, source package, source version, copyright file."; \
+      dpkg-query -W -f='${Package} ${Version} ${source:Package} ${source:Version}\n' | sort \
+      | while read -r p v sp sv; do echo "$p $v $sp $sv $(readlink -f "/usr/share/doc/${p%%:*}/copyright")"; done; } \
       > /app/legal/os-packages.txt \
  && chmod 0644 /app/legal/os-packages.txt
 
 USER 10001:10001
 ENV TZ=UTC
 
-# JVM options, including the PHI hygiene flags (design §7.5), are in /app/jvm.options; sdh-admin uses the same file.
+# JVM options: the PHI hygiene flags (design §7.5) in /app/jvm.options, container settings in /app/container.options;
+# sdh-admin uses the same files.
 # Arguments after the image name go to the app, e.g. `docker run … <image> admin status`.
-ENTRYPOINT ["java", "@/app/jvm.options", "-jar", "/app/app.jar"]
+ENTRYPOINT ["java", "@/app/jvm.options", "@/app/container.options", "-jar", "/app/app.jar"]

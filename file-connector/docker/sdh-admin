@@ -1,6 +1,5 @@
 #!/bin/sh
-# Operator commands inside a running connector container (design §11.4):
-#   kubectl exec -it <pod> -- sdh-admin status
+# Operator commands inside a running service container (design §11.4):
+#   kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status
 # Same JVM options as the connector, with a small heap so it fits beside the running connector's JVM.
-# SDH_OPERATOR must be set (e.g. kubectl exec ... -- env SDH_OPERATOR=alice sdh-admin status).
-exec java @/app/jvm.options -Xmx512m -jar /app/app.jar admin "$@"
+exec java @/app/jvm.options @/app/container.options @/app/admin.args "$@"

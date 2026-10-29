@@ -27,7 +27,7 @@ Revision 2026-10-28 (i): built observability (§12): OpenTelemetry traces, metri
 
 Revision 2026-10-28 (j): built the cloud key providers (§7.4) in a new `connector-kms` module: AWS KMS, Google Cloud KMS, Azure Key Vault and Vault Transit, for wrapping and for ES256 signing. Each is tested against an emulator or, for GCP, a fake KMS (§15.1).
 
-Revision 2026-10-28 (k): built the container image (§14.1) and `ContainerImageIT`, which runs it locked down (read-only root filesystem, noexec `/tmp`, no capabilities, secrets as a Kubernetes-style volume). It found that the packaged app exited right after starting: Camel 4 ignores the old `camel.springboot.main-run-controller` setting, now `camel.main.run-controller`. Key files may now be group-readable (0440), as Kubernetes secret volumes with an `fsGroup` always are (§7.4).
+Revision 2026-10-28 (k): built the container image (§14.1) and `ContainerImageIT` (now `ServiceImageIT`), which runs it locked down (read-only root filesystem, noexec `/tmp`, no capabilities, secrets as a Kubernetes-style volume). It found that the packaged app exited right after starting: Camel 4 ignores the old `camel.springboot.main-run-controller` setting, now `camel.main.run-controller`. Key files may now be group-readable (0440), as Kubernetes secret volumes with an `fsGroup` always are (§7.4).
 
 Revision 2026-10-28 (l): built the operator commands `restore`, `decrypt-fallback` and `status` (§11.4). They are read-only, need `SDH_OPERATOR` and audit every run. Restores now always verify the digest, including partial ones. The image's JVM options moved to `/app/jvm.options`, shared with an `sdh-admin` wrapper (§14.1). Recording `replaces_file_id` on resubmission is not built yet.
 
@@ -44,6 +44,13 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - added an EDIFACT splitter (§6.2);
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
+
+Revision 2026-10-29 (u): three builds (§14.1, §14.3):
+- the **service image**, for our own hosted service only, is the existing Ubuntu/Temurin image;
+- the **customer image** is built on a distroless Java 25 base: 25 Debian packages, no shell or package tools, so far less GPL code is redistributed;
+- the **distribution tarball** has no Java runtime, so customers can receive nothing from us under the GPL and build their own image.
+
+The JVM options are split into shared files (`src/dist/`). Operator commands work without a shell (`java @/app/admin.args`). `ContainerImageIT` became `ServiceImageIT` and `CustomerImageIT`.
 
 Revision 2026-10-29 (t): license attribution for customer distribution (§14.2). Every jar carries our `LICENSE` and `NOTICE` (proprietary, Smile Digital Health Inc., with the HL7 attribution). The application jar, and so the image and any future distribution archive, also carries `THIRD-PARTY.txt` and the license texts for everything it bundles, generated with `license-maven-plugin` and a `gmavenplus` step adapted from `healthcare-data-harmonization`. The image adds `/app/legal/` and an OS package inventory. Legal review items before the first customer release are listed in §14.2.
 
@@ -102,7 +109,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── pom.xml                              parent: dependency/plugin management, Java 25, enforcer
 ├── .gitignore                           excludes build output, IDE files, *.pem, *.key, *.p12, .env
 ├── mvnw, .mvn/wrapper/                  Maven 3.9.16
-├── scripts/                             it-minikube.sh (Docker suite), build-image.sh (image), perf.sh (throughput), minikube-env.sh (shared),
+├── scripts/                             it-minikube.sh (Docker suite), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
 │                                        cda-model/ (generates the C-CDA converter's schema model, §6.4)
 ├── docs/DESIGN.md                       this document
 ├── LICENSE, NOTICE                      our proprietary notice and attributions (HL7), copied into every jar (§14.2)
@@ -128,7 +135,8 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │       ├── publish/      MessagePublisher SPI, OutboundMessage (broker adapters live in the connector app, §10.3)
 │       ├── telemetry/    Telemetry facade (spans, audit events, metrics), Attr allow-list, Fields, error codes
 │       └── pipeline/     source-agnostic ingest pipeline (read → split → encrypt → write → commit → publish)
-└── file-connector/                      Spring Boot application + container image (Dockerfile, §14.1)
+└── file-connector/                      Spring Boot application; service image (Dockerfile, §14.1); distribution kit
+    │                                    (src/dist, src/assembly) and customer image (§14.3)
     └── com.sdh.healthcare.connector.file
         ├── FileConnectorApplication
         ├── config/       ConnectorProperties (sdh.*), KeyMaterial (local key provider), PEM reading
@@ -1062,18 +1070,25 @@ Compared with the earlier sketch:
 - the signing key and recipient are single objects, not a list;
 - retention moved to `maintenance.retention`; `lease.store` isn't read yet.
 
-### 14.1 Container image (built)
+### 14.1 Container images (built)
 
-`file-connector/Dockerfile` builds the image from the packaged jar. `scripts/build-image.sh` runs Maven and then `docker build` against the minikube VM's Docker daemon, tagging `sdh/file-connector:<version>` (override with `SDH_IMAGE`; extra arguments go to `docker build`). Plain `docker build file-connector` works too.
+There are two images, built from the same jar and the same JVM options:
+
+| Image | For | Built from | Base | Shell | Size |
+|---|---|---|---|---|---|
+| **Service** (`sdh/file-connector-service`) | our own hosted service only; never given to customers | `file-connector/Dockerfile` | `eclipse-temurin:25-jre-noble` (Ubuntu) | yes, with `sdh-admin` | about 513 MB |
+| **Customer** (`sdh/file-connector`) | distribution to customers | the distribution kit's `container/Dockerfile` plus the OS inventory step (§14.3) | `gcr.io/distroless/java25-debian13`, pinned by digest | no | about 437 MB |
+
+`scripts/build-image.sh [service|customer]` runs Maven and then `docker build` against the minikube VM's Docker daemon (override the tag with `SDH_IMAGE`, the customer base with `SDH_JAVA_IMAGE`; extra arguments go to `docker build`). Both images run as uid/gid 10001 with a read-only root filesystem and the same mounts, so the Kubernetes settings below apply to both. What follows describes the service image; §14.3 describes the customer image's differences.
 
 - **Base:** `eclipse-temurin:25-jre-noble`, with `25-jdk-noble` for the build stage. Production builds should pin both by digest (`--build-arg JRE_IMAGE=eclipse-temurin@sha256:…`).
 - **Layers:** Spring Boot's `-Djarmode=tools extract --layers`, copied as four layers with dependencies first, so a code change rebuilds a few hundred KB rather than 200 MB. The image is about 513 MB.
 - **User:** uid/gid 10001 (`sdh`), with no home directory or login shell. Everything under `/app` is root-owned and read-only to it; only `/data/inbound` belongs to it.
-- **Operator commands:** `/usr/local/bin/sdh-admin` runs `admin` (§11.4) with the same JVM options and `-Xmx512m`, so it fits beside the connector's JVM: `kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status`. With a read-only root filesystem, restore into `/tmp` (then `kubectl cp`) or the inbound volume. As a one-off container, arguments after the image name go to the app: `docker run … <image> admin status`.
+- **Operator commands:** `/usr/local/bin/sdh-admin` runs `admin` (§11.4) with the same JVM options and `-Xmx512m` (`@/app/admin.args`), so it fits beside the connector's JVM: `kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status`. With a read-only root filesystem, restore into `/tmp` (then `kubectl cp`) or the inbound volume. As a one-off container, arguments after the image name go to the app: `docker run … <image> admin status`.
 - **Legal:** `/app/legal/` holds `LICENSE`, `NOTICE`, `THIRD-PARTY.txt` and `licenses/`, extracted from the jar at build time, and `os-packages.txt`, the OS package inventory generated in the final stage (§14.2). The OCI labels give the vendor (Smile Digital Health Inc.), `org.opencontainers.image.licenses=LicenseRef-Proprietary` and a pointer to these files. The JRE's notices stay in `/opt/java/openjdk/legal` and the OS packages' in `/usr/share/doc`.
 - **Health:** there is no HTTP endpoint. The process is the health signal: fatal conditions exit with status 70 (`FatalExit`) and the orchestrator restarts it.
 
-**JVM flags.** These are in `/app/jvm.options` (from `file-connector/docker/`), read by `ENTRYPOINT` as `java @/app/jvm.options -jar /app/app.jar`. `JDK_JAVA_OPTIONS` and `JAVA_TOOL_OPTIONS` are read before the command line, so they can add tuning (e.g. `-Xmx`) but can't undo these:
+**JVM flags.** These are in two argument files, shared by both images and the distribution (`file-connector/src/dist/`): `/app/jvm.options` holds the PHI hygiene flags, which also apply on a host, and `/app/container.options` the container-only settings (heap from the memory limit, `/tmp`, native library paths). `ENTRYPOINT` is `java @/app/jvm.options @/app/container.options -jar /app/app.jar`, and operator commands add `@/app/admin.args`. `JDK_JAVA_OPTIONS` and `JAVA_TOOL_OPTIONS` are read before the command line, so they can add tuning (e.g. `-Xmx`) but can't undo these:
 
 | Flag | Why |
 |---|---|
@@ -1094,7 +1109,7 @@ Compared with the earlier sketch:
 | `/run/secrets` | read-only secret volume | Local mode: `keks.p12`, `signing.pem`, `recipient.pem`, `recovery.pem` (paths are configuration, §14). Mode 0400 or 0440 |
 | configuration | ConfigMap via `SPRING_CONFIG_ADDITIONAL_LOCATION`, or `SPRING_APPLICATION_JSON` | `sdh.*` (§14). Passwords and passphrases come from environment variables or a `configtree:` mount |
 
-**Kubernetes.** A sketch of the pod settings. It's untested on a cluster (the `sdh-it` profile runs no Kubernetes), but `ContainerImageIT` applies the same constraints in Docker:
+**Kubernetes.** A sketch of the pod settings. It's untested on a cluster (the `sdh-it` profile runs no Kubernetes), but `ServiceImageIT` and `CustomerImageIT` apply the same constraints in Docker:
 
 ```yaml
 spec:
@@ -1110,7 +1125,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: file-connector
-          image: sdh/file-connector:0.1.0
+          image: sdh/file-connector:0.1.0         # or sdh/file-connector-service for our own service
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -1128,14 +1143,15 @@ spec:
 
 ### 14.2 Licensing and third-party attribution (built)
 
-The project is proprietary: `Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.` (`LICENSE`, and `<licenses>`/`<organization>` in the parent POM). The container image is distributed to customers as a product, and a distribution archive (tarball) for non-container installs may follow. Third-party licenses (Apache-2.0, MIT, BSD, EPL, GPL) attach their conditions to redistribution, so attribution goes into each artifact for exactly what that artifact bundles. The approach is taken from `healthcare-data-harmonization` (`license-maven-plugin` 2.7.1 plus a `gmavenplus-plugin` 5.1.0 Groovy step), configured in the parent POM's `pluginManagement`.
+The project is proprietary: `Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.` (`LICENSE`, and `<licenses>`/`<organization>` in the parent POM). The customer image and the distribution tarball are given to customers (§14.3); the service image runs only our own hosted service, which isn't distribution. Third-party licenses (Apache-2.0, MIT, BSD, EPL, GPL) attach their conditions to redistribution, so attribution goes into each artifact for exactly what that artifact bundles. The approach is taken from `healthcare-data-harmonization` (`license-maven-plugin` 2.7.1 plus a `gmavenplus-plugin` 5.1.0 Groovy step), configured in the parent POM's `pluginManagement`.
 
 | Artifact | Bundles | Carries |
 |---|---|---|
 | Library jars (`connector-contract`, `connector-core`, `connector-kms`, `connector-queue-reader`) | only our classes; dependencies are declared in the POM and fetched by the user's build | `META-INF/LICENSE`, `META-INF/NOTICE` (ours, with the HL7 attribution). A list of dependencies here would describe things the jar doesn't contain, and could be wrong for the versions a consumer resolves; their own bundling step attributes what they ship |
 | `file-connector` jar | every runtime dependency (368 components, 13 licenses at present) | the above, plus `META-INF/THIRD-PARTY.txt` and `META-INF/licenses/` |
-| Container image | the jar's contents, native libraries unpacked from zstd-jni and snappy-java, the Temurin JRE, Ubuntu packages | `/app/legal/`: `LICENSE`, `NOTICE`, `THIRD-PARTY.txt`, `licenses/` (from the jar) and `os-packages.txt` (every OS package with version and source package, generated in the final image stage). The JRE's notices are in `/opt/java/openjdk/legal/` and each package's terms in `/usr/share/doc/<package>/copyright`. OCI labels give the vendor and `LicenseRef-Proprietary` |
-| Distribution archive (not built yet) | the jar; possibly a JRE | at its top level: `LICENSE`, `NOTICE`, `THIRD-PARTY.txt` and `licenses/`, extracted from the jar as the Dockerfile does; if a JRE is bundled, its `legal/` directory as well |
+| Distribution tarball (§14.3) | the jar, the zstd and snappy native libraries; no JRE | `legal/`: `LICENSE`, `NOTICE`, `THIRD-PARTY.txt`, `licenses/`, copied from the jar's build |
+| Customer image (§14.3) | the tarball's contents, plus the distroless base: the Temurin JRE as a Debian package, glibc, the GCC runtime libraries and a few data and font libraries (25 packages) | `/app/legal/`: the tarball's `legal/` files, and `os-packages.txt`, generated by the inventory step: each package's version, source package and source version, and its copyright file in `/usr/share/doc/` |
+| Service image (§14.1; not distributed) | the jar's contents, native libraries, the Temurin JRE, Ubuntu packages | the same `/app/legal/` files, with `os-packages.txt` generated by `dpkg-query`; the JRE's notices are in `/opt/java/openjdk/legal/` |
 
 Our `LICENSE` and `NOTICE` are added to every jar as Maven resources from the repository root. `NOTICE` credits Health Level Seven for the C-CDA model in `connector-core`, which is derived from the HL7 CDA R2 and SDTC schemas (§6.4), and says where the image's other notices are.
 
@@ -1176,8 +1192,59 @@ None forces GPL terms on the connector, because every GPL or LGPL option has a p
 
 **For legal review before the first customer release** (not engineering decisions):
 - **HL7:** HL7's CDA-core-2.0 repository declares no license. The attribution follows HL7's IP policy; confirm it covers redistributing the derived model in a commercial product.
-- **GPL source availability:** the image redistributes GPL and LGPL binaries: the Temurin JRE (GPL-2.0 with the Classpath Exception) and Ubuntu packages such as glibc, bash and coreutils. Commercial distribution of GPL-2.0 binaries needs either the corresponding source alongside or a written offer to provide it; pointing to upstream alone isn't enough. `os-packages.txt` records each package's source package and version, which is what a source offer or a source archive needs. A smaller base image would reduce how much this covers, for example Ubuntu chiselled or a distroless JRE image, which have no shell or package tools.
+- **GPL source availability:** the distribution tarball contains nothing we use under the GPL: where a dependency offers the GPL as one choice, we use its other license. The customer image redistributes a few GPL and LGPL binaries: the Temurin JRE (GPL-2.0 with the Classpath Exception), glibc (LGPL-2.1) and the GCC runtime libraries (GPL-3.0 with the GCC Runtime Library Exception). No shell, core utilities or package tools are included; the earlier Ubuntu-based image carried bash, coreutils and many more. Commercial distribution of GPL-2.0 binaries needs either the corresponding source alongside or a written offer to provide it; pointing to upstream alone isn't enough. `os-packages.txt` records each package's source package and version, which is what a source offer or a source archive needs. Customers who must receive no GPL code from us can use the tarball and build their own image (§14.3).
 - **Dependencies under a choice** (Logback, JNA, RabbitMQ client, Jakarta APIs): we rely on the permissive or weak-copyleft option. Recording that election in the release notes may be wanted.
+
+### 14.3 Distribution tarball and customer image (built)
+
+Customers get the connector in two forms, both built from one distribution kit:
+- **The tarball**, `file-connector/target/file-connector-<version>-dist.tar.gz` (`-Pdist`, or the NetBeans action **Build distribution tarball**). It has no Java runtime: customers run it on a host with Java 25, or build their own image from it. Either way they receive nothing from us under the GPL.
+- **The customer image**, which we build from the same kit on the distroless Java 25 base.
+
+The kit is also built as a directory on every `package` (`target/file-connector-<version>-dist-dir/`), which is what the customer image and `CustomerImageIT` build from. The assembly is `src/assembly/` (one component descriptor, a directory format and a tarball format); the sources are `src/dist/`.
+
+| Kit path | Contents |
+|---|---|
+| `app.jar` | the application jar |
+| `bin/file-connector`, `bin/sdh-admin` | host start scripts: `java @config/jvm.options $JAVA_OPTS -jar app.jar`, with `SPRING_CONFIG_ADDITIONAL_LOCATION` pointing at `config/` |
+| `config/jvm.options` | the PHI hygiene flags, shared with both images |
+| `config/application.yml.example` | the §14 reference configuration, without references to this document |
+| `container/Dockerfile`, `container.options`, `admin.args`, `inbound/` | the customer image build |
+| `native/linux-amd64/`, `native/linux-arm64/` | `libzstd-jni.so` and `libsnappyjava.so`, unpacked from their jars at build time (`maven-dependency-plugin`) |
+| `legal/` | `LICENSE`, `NOTICE`, `THIRD-PARTY.txt`, `licenses/` (§14.2) |
+| `README.md` | for customers: requirements, configuration, host and container use, a Kubernetes manifest, operator commands, troubleshooting |
+
+**`container/Dockerfile`** works on any Linux Java 25 image with glibc and `java` on the `PATH`:
+- **Base:** `ARG JAVA_IMAGE` defaults to `gcr.io/distroless/java25-debian13:nonroot`; customers pin their own.
+- **No `RUN` steps**, so shell-less bases work:
+  - the native libraries come prebuilt from the kit, chosen by BuildKit's `TARGETARCH` (amd64 on the classic builder);
+  - the inbound mount point is copied in with `--chown=10001:10001`.
+- **User:** a numeric uid/gid 10001 with no account entry, so `-Duser.home=/tmp` is set in `container.options`.
+- **Labels:** the vendor and license, as on the service image.
+
+**Customer image** (`scripts/build-image.sh customer`, tag `sdh/file-connector:<version>`):
+1. `container/Dockerfile`, built from the kit directory on `gcr.io/distroless/java25-debian13`, pinned by digest in the script and in `CustomerImageIT` (keep them in step, and update both when the base gets security fixes).
+2. `file-connector/docker/customer-inventory.Dockerfile` adds `/app/legal/os-packages.txt`. The image has no shell, so a `busybox` build stage reads the base's package records (`/var/lib/dpkg/status.d/`) and resolves each package's copyright file. `busybox` isn't in the result. This step is our build tooling and isn't in the kit.
+
+The base holds 25 Debian packages: the Temurin 25 JRE (as `temurin-25-jre`), glibc, the GCC runtime libraries, zlib, fonts, certificates and timezone data. It has no shell, core utilities or package tools.
+
+**Differences from the service image:**
+
+| | Service image | Customer image |
+|---|---|---|
+| Base | Ubuntu 24.04 with Temurin (`eclipse-temurin:25-jre-noble`) | distroless Debian 13 with Temurin as a package |
+| Layers | Spring Boot layers, so a code change rebuilds a few hundred KB | the jar as one layer; the kit build has no extraction step |
+| Account | `sdh` (10001) in `/etc/passwd` | numeric 10001 |
+| Operator commands | `sdh-admin <command>` | `kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args <command>`, with `SDH_OPERATOR` in the exec's environment |
+| Troubleshooting | `kubectl exec -- sh` | `kubectl debug -it <pod> --image=busybox --target=file-connector` (an ephemeral container; Kubernetes 1.25 or later) |
+
+Both images use the same JVM options files and the same Kubernetes settings (§14.1).
+
+**Tests:** `ServiceImageIT` and `CustomerImageIT` share one test body (`ContainerImageItBase`): ingest, downstream read-back, operator commands, no PHI in the log, and the legal files. File checks read files out of the container, so they work without a shell. Shell-only checks run on the service image only: the uid as seen inside, no writes outside the volumes, nothing unpacked into `/tmp`. `CustomerImageIT` also checks that:
+- the image has no shell;
+- `os-packages.txt` lists the JRE and glibc;
+- every package's copyright file exists;
+- none of the shell, core-utility or package-tool packages is present.
 
 ## 15. Testing
 
@@ -1209,7 +1276,7 @@ None forces GPL terms on the connector, because every GPL or LGPL option has a p
 | `GcsIT` | `fsouza/fake-gcs-server:1.56.1`, `postgres:18.4` | Google Cloud Storage through `GCSFileIO` and a JDBC catalog (§8.1): ingest, downstream read-back with its own catalog client, archive restore, compaction, orphan cleanup (a planted stray object is found by listing and deleted), retention purge, and no plaintext or filename in any object. The emulator's external URL is set after start, because resumable uploads return URLs built from it. Shares its test body with `AdlsIT` (`ObjectStoreItBase`) |
 | `AdlsIT` | `mcr.microsoft.com/azure-storage/azurite:3.35.0`, `postgres:18.4` | Azure Data Lake Storage Gen2 through `ADLSFileIO`: the same checks as `GcsIT`, except orphan cleanup, which Azurite can't support (no Data Lake directory listing). The test lists objects through the Blob API instead |
 | `PolarisIT` | `apache/polaris:1.8.0`, `chrislusf/seaweedfs:4.48`, `postgres:18.4` | The connector on a real Iceberg REST catalog (§8.1). The test creates the Polaris catalog through the management API (S3 storage with `stsUnavailable`, since SeaweedFS has no STS). It runs the `FullStackIT` flow on Polaris: ingest a good and a bad file, read every section back with a separate REST client, restore the archive, compact, delete a stray object, purge by retention, and check that no object holds plaintext or a filename. It also runs admin `status` against the same catalog. Fencing (§9.3) with two separate REST clients: a properties-only checkpoint commits as a marker snapshot; a stale holder is fenced after its successor establishes; the race between building and committing is rejected by the server (`assert-ref-snapshot-id`); and the control case shows a plain Iceberg transaction is not fenced. The SEDA queue stands in for the broker, which is covered elsewhere |
-| `ContainerImageIT` | the image built from `Dockerfile` + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | The image as deployed (§14.1): read-only root filesystem, `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the inbound directory is a volume that a second container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`. It checks that the process runs as 10001 and can't write outside its volumes; that a good and a bad file end in `completed/` and `failed/`; that downstream reads every section back from the host; that the console log has no PHI marker or filename; that `sdh-admin status` and `sdh-admin restore` work inside the running container without taking the lease; that `/app/legal/` holds our notice (with the HL7 attribution), a complete `THIRD-PARTY.txt` (including zstd-jni and snappy-java, whose native libraries are unpacked) and the license texts; that `os-packages.txt` lists every OS package and each has its copyright file; and that the JRE's notices are present; and that nothing native or `hs_err` was written to `/tmp`. The container log is saved to `target/container-image-it.log` |
+| `ServiceImageIT`, `CustomerImageIT` | the service image (`Dockerfile`) or the customer image (the kit's `container/Dockerfile` on distroless, plus the inventory step) + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | Each image as deployed (§14.1, §14.3), sharing one test body (`ContainerImageItBase`): read-only root filesystem, `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the inbound directory is a volume that a second container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`. It checks that the process runs as 10001 and can't write outside its volumes; that a good and a bad file end in `completed/` and `failed/`; that downstream reads every section back from the host; that the console log has no PHI marker or filename; that `sdh-admin status` and `sdh-admin restore` work inside the running container without taking the lease; that `/app/legal/` holds our notice (with the HL7 attribution), a complete `THIRD-PARTY.txt` (including zstd-jni and snappy-java, whose native libraries are unpacked) and the license texts; that `os-packages.txt` lists every OS package and each has its copyright file; and that the JRE's notices are present; and that nothing native or `hs_err` was written to `/tmp`. The container log is saved to `target/container-image-it.log` |
 | `VaultTransitIT` | `hashicorp/vault:2.1.1` (dev mode) | `vault-transit` built purely from connector settings (address, token file): wrap with associated data, ES256 signing, message round trip; a wrong token fails startup naming the KEK and HTTP 403 |
 
 **Running it on minikube with KVM2:** use `scripts/it-minikube.sh`, which needs no local Docker daemon. The script:
@@ -1242,7 +1309,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 | # | Item | Status | Result |
 |---|---|---|---|
 | 1 | Java 25 with Iceberg/Parquet and Hadoop classes | **Passed** | Parquet write and read through Iceberg work on Java 25. A fully trimmed `hadoop-common` is not enough: `Configuration` needs Woodstox/StAX2, hadoop-shaded-guava and commons-collections4, and Parquet's read path needs `hadoop-mapreduce-client-core`. That is six jars in total, all with transitive dependencies excluded (§2). We don't use `HadoopFileIO`, so Hadoop's security code (`UserGroupInformation`/`Subject`, a known Java 23+ problem area) is never reached. `S3FileIO` against SeaweedFS **passed** in `FullStackIT`, once the AWS `kms` module was added (§2) |
-| 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client; 208 MB with the GCS and ADLS clients as well). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5). **Later finding:** the packaged app exited right after starting, because Camel 4 reads `camel.main.run-controller`, not `camel.springboot.main-run-controller`; tests start the app in-process, so only `ContainerImageIT` saw it (§14.1) |
+| 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client; 208 MB with the GCS and ADLS clients as well). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5). **Later finding:** the packaged app exited right after starting, because Camel 4 reads `camel.main.run-controller`, not `camel.springboot.main-run-controller`; tests start the app in-process, so only `ContainerImageIT` (now `ServiceImageIT`) saw it (§14.1) |
 | 3 | Azure emulators | **Passed** | Service Bus and Event Hubs emulators run under `-Pit` on minikube. They found two adapter bugs (§10.3): Camel's Service Bus producer can't set per-message sessions or IDs, and the Azure client reorders sends in flight together |
 | 4 | Custom compaction | **Built** | Bin-pack via `RewriteFiles` + `validateFromSnapshot` through the fenced committer (§8.4). Findings: snapshot expiry must run standalone to delete files physically; and Iceberg deletes a removed file only once the snapshot that removed it has expired, so retention adds a marker commit to purge at once |
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |

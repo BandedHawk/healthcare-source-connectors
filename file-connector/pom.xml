@@ -273,6 +273,67 @@
           </execution>
         </executions>
       </plugin>
+      <!-- Distribution kit (design §14.3): the jar, attribution, configuration, start scripts, the customer
+           Dockerfile and the zstd/snappy native libraries for both architectures, so a container needs no RUN step.
+           Built as a directory on every package (the customer image is built from it); -Pdist adds the tarball. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>dist-native-libraries</id>
+            <phase>prepare-package</phase>
+            <goals><goal>unpack-dependencies</goal></goals>
+            <configuration>
+              <includeArtifactIds>zstd-jni,snappy-java</includeArtifactIds>
+              <includes>linux/amd64/*.so,linux/aarch64/*.so,org/xerial/snappy/native/Linux/x86_64/*.so,org/xerial/snappy/native/Linux/aarch64/*.so</includes>
+              <outputDirectory>${project.build.directory}/dist-native</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>dist-dir</id>
+            <phase>package</phase>
+            <goals><goal>single</goal></goals>
+            <configuration>
+              <descriptors><descriptor>src/assembly/dist-dir.xml</descriptor></descriptors>
+              <attach>false</attach>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!-- The customer distribution tarball: target/file-connector-<version>-dist.tar.gz (design §14.3). -->
+    <profile>
+      <id>dist</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-assembly-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>dist-tarball</id>
+                <phase>package</phase>
+                <goals><goal>single</goal></goals>
+                <configuration>
+                  <descriptors><descriptor>src/assembly/dist.xml</descriptor></descriptors>
+                  <attach>false</attach>
+                  <tarLongFileMode>posix</tarLongFileMode>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

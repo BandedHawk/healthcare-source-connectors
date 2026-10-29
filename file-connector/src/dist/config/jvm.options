@@ -1,0 +1,16 @@
+# JVM options for the connector and the admin commands, on a host or in a container (design §7.5, §14.1, §14.3).
+# Read with java @<this file>. They follow JDK_JAVA_OPTIONS and JAVA_TOOL_OPTIONS on the command line, so those can
+# add tuning but not undo these. Container-only options are in container/container.options.
+
+# PHI hygiene: no heap dumps, core dumps or crash logs (hs_err files hold raw memory near the crash), and no attach
+# (jcmd could otherwise take a heap dump).
+-XX:-HeapDumpOnOutOfMemoryError
+-XX:-CreateCoredumpOnCrash
+-XX:ErrorFile=/dev/null
+-XX:+DisableAttachMechanism
+# Exit on OutOfMemoryError so the orchestrator or service manager restarts a clean process.
+-XX:+ExitOnOutOfMemoryError
+# No hsperfdata file in the temporary directory.
+-XX:-UsePerfData
+# Java 25 otherwise warns when libraries load native code.
+--enable-native-access=ALL-UNNAMED

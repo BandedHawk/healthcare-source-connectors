@@ -1,0 +1,9 @@
+#!/bin/sh
+# Operator commands on a host (design §11.4), with the connector's configuration: bin/sdh-admin status
+# SDH_OPERATOR must be set, e.g. SDH_OPERATOR=alice bin/sdh-admin status. A small heap, so it fits beside the
+# running connector.
+set -eu
+home=$(cd "$(dirname "$0")/.." && pwd)
+SPRING_CONFIG_ADDITIONAL_LOCATION="${SPRING_CONFIG_ADDITIONAL_LOCATION:-optional:file:$home/config/}"
+export SPRING_CONFIG_ADDITIONAL_LOCATION
+exec "${JAVA:-java}" "@$home/config/jvm.options" -Xmx512m -jar "$home/app.jar" admin "$@"

@@ -1,0 +1,77 @@
+# Example configuration for the file connector (Smile Digital Health Inc.). Copy to application.yml in this
+# directory and adjust. Values shown are defaults where they exist; remove what you don't need.
+# Secrets don't belong here: use environment variables (SDH_CRYPTO_KEYSTORE_PASSWORD,
+# SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE, SDH_LEASE_JDBC_PASSWORD, ...) or a configtree: mount.
+sdh:
+  connector-id: file-connector
+  encrypt-workers: 0              # 0 = one per CPU core
+  file:
+    inbound-dir: /data/inbound
+    read-lock: changed            # changed | marker (<name>.done)
+    min-age: 30s
+    poll-interval: 5s
+    include: "*"                  # Ant-style
+  split:
+    format: ccda                  # ccda | xml | x12 | edifact | fhir | csv | delimited | <plugin>
+    boundary: ClinicalDocument    # optional; format default
+    options:                      # format options; nested keys become dotted names
+      namespace: urn:hl7-org:v3
+      csv: { header: true }       # → csv.header
+      fhir: { ndjson-group-size: 0 }
+      delimited: { pattern: "^MSH\\|", mode: START }
+    limits: { max-file-bytes: 1TB, max-section-bytes: 512MB }   # omitted = format defaults
+    convert: true                 # JSON conversion where the format has a converter
+    convert-max-bytes: 64MB       # larger sections are stored in their original form, as failed
+  storage:
+    catalog-name: sdh             # also sent in messages
+    namespace: sdh_ingest
+    catalog:                      # Iceberg catalog properties, passed through unchanged
+      type: rest                  # rest | jdbc
+      uri: https://polaris:8181/api/catalog
+      warehouse: sdh              # the Polaris catalog name
+      rest.auth.type: oauth2
+      credential: "sdh-connector:${POLARIS_CLIENT_SECRET}"   # client id:secret, secret from the environment
+      scope: PRINCIPAL_ROLE:ALL
+      oauth2-server-uri: https://polaris:8181/api/catalog/v1/oauth/tokens
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO   # or ...gcp.gcs.GCSFileIO, ...azure.adlsv2.ADLSFileIO
+      s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
+      client: { region: us-east-1 }
+    commit: { max-sections: 10000, max-bytes: 512MB, max-interval: 30s }
+    archive: { commit-bytes: 512MB }
+  lease:
+    name: file-connector
+    jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
+    ttl: 60s
+    renew-interval: 15s
+    safety-margin: 10s
+  crypto:
+    wrap-provider: local          # local | aws-kms | gcp-kms | azure-keyvault | vault-transit
+    sign-provider: local          # same choices, independently
+    keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
+    keys:
+      sections-kek: sections-kek/1                          # keystore alias, or the KMS key ref
+      source-files-kek: source-files-kek/1
+      failed-files-kek: failed-files-kek/1
+      signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
+      # signing: { kid: connector-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
+    aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
+    gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC
+    vault: { address: "https://vault:8200", token-file: /vault/secrets/token, mount: transit }   # vault-transit
+      recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
+      recovery-public: /run/secrets/recovery-public.pem
+  queue:
+    type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
+    uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"
+    artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
+  retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
+  telemetry:                      # unset endpoint = no export
+    otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env
+    metric-interval: 60s
+  maintenance:                    # runs between files
+    enabled: true
+    interval: 1h
+    snapshot-retention: 7d
+    min-snapshots: 10
+    compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
+    orphans: { enabled: true, interval: 24h, min-age: 3d }
+    retention: { sections: 30d, source-files: 365d, failed-files: 365d }   # unset = keep forever (default)

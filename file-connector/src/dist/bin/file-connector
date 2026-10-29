@@ -1,0 +1,10 @@
+#!/bin/sh
+# Runs the file connector on a host (design §14.3). Needs Java 25 on the PATH, or JAVA set to its java binary.
+# Configuration: config/application.yml (start from config/application.yml.example), environment variables such
+# as SDH_LEASE_JDBC_PASSWORD, or --sdh.x=y arguments. Extra JVM options (for example -Xmx2g) go in JAVA_OPTS.
+set -eu
+home=$(cd "$(dirname "$0")/.." && pwd)
+SPRING_CONFIG_ADDITIONAL_LOCATION="${SPRING_CONFIG_ADDITIONAL_LOCATION:-optional:file:$home/config/}"
+export SPRING_CONFIG_ADDITIONAL_LOCATION
+# shellcheck disable=SC2086 # JAVA_OPTS is a list of options
+exec "${JAVA:-java}" "@$home/config/jvm.options" ${JAVA_OPTS:-} -jar "$home/app.jar" "$@"

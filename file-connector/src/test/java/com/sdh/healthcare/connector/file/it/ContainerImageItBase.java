@@ -35,6 +35,7 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.GenericContainer;
@@ -52,13 +53,15 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * The image as deployed (design §7.5, §14.1): built from {@code file-connector/Dockerfile} and the packaged jar, run
- * with a read-only root filesystem, a noexec /tmp, all capabilities dropped, no-new-privileges and a memory limit.
+ * An image as deployed (design §7.5, §14.1, §14.3), run with a read-only root filesystem, a noexec /tmp, all
+ * capabilities dropped, no-new-privileges and a memory limit. Subclasses build the service image and the customer
+ * image; checks that need a shell inside the container run only where there is one.
  * Secrets come from a volume shaped like a Kubernetes secret with an fsGroup (root:10001, 0440), and the inbound
  * directory is a volume. It ingests a good and a bad CSV file through Postgres, SeaweedFS and Kafka, all reached by
  * network alias, and a downstream reader reads every section back.
  */
-class ContainerImageIT {
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+abstract class ContainerImageItBase {
     static final String MARKER = "PHI-MARKER-c0e1";
     static final String BUCKET = "sdh-warehouse";
     static final String ACCESS_KEY = "sdh-it-access";
@@ -66,7 +69,6 @@ class ContainerImageIT {
     static final String S3_CONFIG = """
             {"identities":[{"name":"sdh","credentials":[{"accessKey":"%s","secretKey":"%s"}],
               "actions":["Admin","Read","Write","List","Tagging"]}]}""".formatted(ACCESS_KEY, SECRET_KEY);
-    static final String IMAGE = "sdh/file-connector:it";
     static final String APP_UID = "10001";
 
     static Network network;
@@ -82,8 +84,20 @@ class ContainerImageIT {
     static UUID goodId;
     static UUID badId;
 
+    /** The image under test, built from what Maven just packaged. */
+    abstract ImageFromDockerfile image() throws Exception;
+
+    /** Whether the image has a shell and the usual tools (the service image) or not (the customer image). */
+    abstract boolean hasShell();
+
+    /** Runs an operator command (design §11.4) inside the running container, as {@code it-operator}. */
+    abstract String admin(String... args) throws Exception;
+
+    /** Short name for the saved log. */
+    abstract String variant();
+
     @BeforeAll
-    static void start() throws Exception {
+    void start() throws Exception {
         ItSupport.requireDocker();
         keys = new TestKeys(Files.createTempDirectory("sdh-image-it"));
         network = Network.newNetwork();
@@ -131,9 +145,9 @@ class ContainerImageIT {
     }
 
     @AfterAll
-    static void stop() throws Exception {
+    void stop() throws Exception {
         // Kept for diagnosis: the console output is PHI-free by design, and this test asserts it.
-        Files.writeString(Path.of("target", "container-image-it.log"), APP_LOG.toUtf8String());
+        Files.writeString(Path.of("target", variant() + "-image-it.log"), APP_LOG.toUtf8String());
         Stream.of(app, upstream, kafka, seaweed, postgres).filter(c -> c != null).forEach(GenericContainer::stop);
         DockerClient docker = DockerClientFactory.lazyClient();
         for (String v : VOLUMES) {
@@ -148,18 +162,23 @@ class ContainerImageIT {
         }
     }
 
-    /** Built from the Dockerfile and the jar Maven just packaged; the tag keeps Docker's layer cache between runs. */
-    static ImageFromDockerfile image() throws Exception {
-        Path jar;
+    /** The jar Maven just packaged. */
+    static Path packagedJar() throws Exception {
         try (Stream<Path> s = Files.list(Path.of("target"))) {
-            jar = s.filter(p -> p.getFileName().toString().matches("file-connector-.*\\.jar")).findFirst()
+            return s.filter(p -> p.getFileName().toString().matches("file-connector-[^-]+(-SNAPSHOT)?\\.jar")).findFirst()
                     .orElseThrow(() -> new IllegalStateException("Package file-connector first (mvn -Pit verify)"));
         }
-        return new ImageFromDockerfile(IMAGE, false)
-                .withFileFromPath("Dockerfile", Path.of("Dockerfile"))
-                .withFileFromPath("docker", Path.of("docker"))
-                .withFileFromPath("app.jar", jar)
-                .withBuildArg("JAR_FILE", "app.jar");
+    }
+
+    /** Reads a file out of the container (works without a shell, and on a read-only root filesystem). */
+    static String read(String path) throws Exception {
+        return app.copyFileFromContainer(path, in -> new String(in.readAllBytes(), UTF_8));
+    }
+
+    /** Runs a command in the upstream container, which shares the inbound volume. */
+    static String upstreamExec(String... cmd) throws Exception {
+        ExecResult r = upstream.execInContainer(cmd);
+        return r.getExitCode() + ":" + r.getStdout().strip() + r.getStderr().strip();
     }
 
     /** A labelled named volume, so Ryuk cleans it up if the test dies. */
@@ -249,12 +268,22 @@ class ContainerImageIT {
         return r.getExitCode() + ":" + r.getStdout().strip() + r.getStderr().strip();
     }
 
+    /** Image-specific checks of what the base image contains, given its OS package names. */
+    abstract void checkBaseImage(List<String> packages) throws Exception;
+
     @Test
     void lockedDownImageIngestsAndDownstreamReadsEverySectionBack() throws Exception {
-        // Runs as the image's non-root user, and nothing outside the volumes and /tmp is writable.
-        assertThat(exec("id", "-u")).isEqualTo("0:" + APP_UID);
-        assertThat(exec("touch", "/app/x")).startsWith("1:");
-        assertThat(exec("touch", "/x")).startsWith("1:");
+        // Runs as the image's non-root user.
+        assertThat(DockerClientFactory.lazyClient().inspectImageCmd(app.getDockerImageName()).exec().getConfig()
+                .getUser()).isEqualTo(APP_UID + ":" + APP_UID);
+        if (hasShell()) {
+            // Nothing outside the volumes and /tmp is writable.
+            assertThat(exec("id", "-u")).isEqualTo("0:" + APP_UID);
+            assertThat(exec("touch", "/app/x")).startsWith("1:");
+            assertThat(exec("touch", "/x")).startsWith("1:");
+        } else {
+            assertThat(app.execInContainer("sh", "-c", "true").getExitCode()).as("no shell in the image").isNotZero();
+        }
 
         String header = "id,name,note\n";
         List<String> records = new ArrayList<>();
@@ -272,15 +301,15 @@ class ContainerImageIT {
         long deadline = System.currentTimeMillis() + 120_000;
         String listing = "";
         while (System.currentTimeMillis() < deadline) {
-            listing = exec("ls", "/data/inbound");
+            listing = upstreamExec("ls", "/data/inbound");
             if (!listing.contains(".csv")) {
                 break;
             }
             Thread.sleep(500);
         }
         assertThat(listing).as("both files picked up\n" + APP_LOG.toUtf8String()).doesNotContain(".csv");
-        assertThat(exec("sh", "-c", "ls /data/inbound/completed | grep -c '\\.json$'")).isEqualTo("0:1");
-        assertThat(exec("sh", "-c", "ls /data/inbound/failed | grep -c '\\.json$'")).isEqualTo("0:1");
+        assertThat(upstreamExec("sh", "-c", "ls /data/inbound/completed | grep -c '\\.json$'")).isEqualTo("0:1");
+        assertThat(upstreamExec("sh", "-c", "ls /data/inbound/failed | grep -c '\\.json$'")).isEqualTo("0:1");
 
         // Downstream, from the host: Kafka → connector-queue-reader → sections from SeaweedFS.
         ConnectorProperties.Crypto hostCrypto = new ConnectorProperties.Crypto("local", "local",
@@ -331,38 +360,47 @@ class ContainerImageIT {
         }
 
         // Operator commands inside the running container (design §11.4), as `kubectl exec` would run them: same
-        // configuration from the environment, same JVM options, no lease taken.
-        String status = exec("env", "SDH_OPERATOR=it-operator", "sdh-admin", "status");
+        // configuration from the environment, same JVM options, no lease taken. The restore goes to failed/ on the
+        // inbound volume (never picked up), where the upstream container can read it.
+        String status = admin("status");
         assertThat(status).startsWith("0:").containsPattern("lease: +file-connector held by .+, epoch 1,")
                 .contains("admin.status operator=it-operator");
-        assertThat(exec("env", "SDH_OPERATOR=it-operator", "sdh-admin", "restore", "--file-id", badId.toString(),
-                "--to", "/tmp")).startsWith("0:").contains("digest verified");
-        assertThat(exec("cat", "/tmp/" + badId)).isEqualTo("0:" + (header + "1," + MARKER + ",\"never closed").strip());
-        assertThat(exec("rm", "/tmp/" + badId)).startsWith("0:");
+        assertThat(admin("restore", "--file-id", badId.toString(), "--to", "/data/inbound/failed"))
+                .startsWith("0:").contains("digest verified");
+        assertThat(upstreamExec("cat", "/data/inbound/failed/" + badId))
+                .isEqualTo("0:" + (header + "1," + MARKER + ",\"never closed").strip());
+        assertThat(upstreamExec("rm", "/data/inbound/failed/" + badId)).startsWith("0:");
 
         // The container's console output (what a log shipper would collect) holds no PHI or filenames.
         String log = APP_LOG.toUtf8String();
         assertThat(log).contains("Started FileConnectorApplication");
         assertThat(log).doesNotContain(MARKER).doesNotContain("good.csv").doesNotContain("bad.csv");
-        // Native libraries load from /app/native, so nothing was unpacked into /tmp (mounted noexec here).
-        assertThat(exec("sh", "-c", "ls -A /tmp | grep -ci 'zstd\\|snappy\\|hs_err'")).isEqualTo("1:0");
+        // Native libraries load from /app/native, so nothing was unpacked into /tmp (mounted noexec here). Without
+        // a shell, the ingest itself shows zstd loaded: sections couldn't be compressed otherwise.
+        if (hasShell()) {
+            assertThat(exec("sh", "-c", "ls -A /tmp | grep -ci 'zstd\\|snappy\\|hs_err'")).isEqualTo("1:0");
+        }
 
-        // Third-party attribution ships in the image, readable by the app user (design §14.2): our notice, every
-        // component with its license and NOTICE, the license texts, and the native libraries' sources.
-        assertThat(exec("grep", "-c", "Smile Digital Health Inc.", "/app/legal/LICENSE", "/app/legal/NOTICE"))
-                .startsWith("0:");
-        assertThat(exec("grep", "-q", "derived from the HL7 CDA Release 2", "/app/legal/NOTICE")).isEqualTo("0:");
-        assertThat(exec("grep", "-c", "^Coordinates: com.github.luben:zstd-jni:", "/app/legal/THIRD-PARTY.txt"))
-                .isEqualTo("0:1");
-        assertThat(exec("grep", "-c", "^Coordinates: org.xerial.snappy:snappy-java:", "/app/legal/THIRD-PARTY.txt"))
-                .isEqualTo("0:1");
-        assertThat(exec("grep", "-c", "PLACEHOLDER", "/app/legal/THIRD-PARTY.txt")).startsWith("1:0");
-        assertThat(exec("sh", "-c", "test -s /app/legal/licenses/apache-2.0.txt && test -s /app/legal/licenses/mit.txt"))
-                .isEqualTo("0:");
-        // What the base image brings is attributed too: every OS package with its copyright file, and the JRE's notices.
-        assertThat(exec("grep", "-qE", "^libc6 [^ ]+ glibc ", "/app/legal/os-packages.txt")).isEqualTo("0:");
-        assertThat(exec("sh", "-c", "grep -v '^#' /app/legal/os-packages.txt | while read p rest; do "
-                + "test -s /usr/share/doc/${p%%:*}/copyright || echo \"$p\"; done | head -5")).isEqualTo("0:");
-        assertThat(exec("sh", "-c", "test -s /opt/java/openjdk/legal/java.base/LICENSE")).isEqualTo("0:");
+        // Third-party attribution ships in the image (design §14.2): our notice, every component with its license
+        // and NOTICE, the license texts, and the native libraries' sources.
+        assertThat(read("/app/legal/LICENSE")).contains("Smile Digital Health Inc.");
+        assertThat(read("/app/legal/NOTICE")).contains("Smile Digital Health Inc.")
+                .contains("derived from the HL7 CDA Release 2");
+        String thirdParty = read("/app/legal/THIRD-PARTY.txt");
+        assertThat(thirdParty).contains("Coordinates: com.github.luben:zstd-jni:")
+                .contains("Coordinates: org.xerial.snappy:snappy-java:").doesNotContain("PLACEHOLDER");
+        assertThat(read("/app/legal/licenses/apache-2.0.txt")).contains("Apache License");
+        assertThat(read("/app/legal/licenses/mit.txt")).contains("MIT License");
+
+        // What the base image brings is attributed too: every OS package, with its source package and a copyright
+        // file that exists in the image.
+        List<String[]> packages = read("/app/legal/os-packages.txt").lines().filter(l -> !l.startsWith("#"))
+                .map(l -> l.split(" ")).toList();
+        assertThat(packages).anySatisfy(p -> assertThat(p).startsWith("libc6").contains("glibc"));
+        for (String[] p : packages) {
+            assertThat(p).as(String.join(" ", p)).hasSize(5);
+            assertThat(read(p[4])).as("copyright of " + p[0]).isNotBlank();
+        }
+        checkBaseImage(packages.stream().map(p -> p[0]).toList());
     }
 }

@@ -315,6 +315,16 @@
           <artifactId>spring-boot-maven-plugin</artifactId>
           <version>${spring-boot.version}</version>
         </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-dependency-plugin</artifactId>
+          <version>3.11.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-assembly-plugin</artifactId>
+          <version>3.8.0</version>
+        </plugin>
         <!-- Third-party attribution (design §14.2), adapted from healthcare-data-harmonization. Enabled in modules
              whose artifact bundles dependencies (file-connector, from which the image and any distribution archive are
              built). At prepare-package: download-licenses fetches the license texts named in dependency POMs, add-third-party writes

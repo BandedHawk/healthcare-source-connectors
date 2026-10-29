@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- NetBeans custom actions for the root project: right-click the project > Run Maven > (action).
-     Same as scripts/perf.sh; results in connector-core/target/perf/throughput-<storage>-<recipient>.md.
+     Throughput test: same as scripts/perf.sh; results in connector-core/target/perf/throughput-<storage>-<recipient>.md.
      Change a property here, or copy the action, for other settings (perf.size, perf.formats, perf.recipient).
      perf.storage=s3 needs the minikube environment, so run that one with scripts/perf.sh. -->
 <actions>
@@ -40,6 +40,23 @@
             <perf.formats>ccda,x12,csv</perf.formats>
             <perf.storage>local</perf.storage>
             <perf.recipient>ec</perf.recipient>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-distribution-tarball</actionName>
+        <displayName>Build distribution tarball</displayName>
+        <!-- file-connector/target/file-connector-<version>-dist.tar.gz, for customers (design §14.3). -->
+        <goals>
+            <goal>-pl</goal>
+            <goal>file-connector</goal>
+            <goal>-am</goal>
+            <goal>package</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>dist</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <skipTests>true</skipTests>
         </properties>
     </action>
 </actions>

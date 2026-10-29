@@ -11,13 +11,12 @@ The library jars (connector-contract, connector-core, connector-kms, connector-q
 Digital Health code, apart from the HL7-derived model described below; their third-party dependencies are declared
 in their Maven POMs and are not included in them.
 
-The container image also contains:
-- native libraries unpacked from zstd-jni (BSD-2-Clause) and snappy-java (Apache-2.0) into /app/native, so they
-  can load from a read-only filesystem; both components are listed in THIRD-PARTY.txt;
-- the Eclipse Temurin Java runtime (GPL-2.0 with the Classpath Exception, and others), whose notices and license
-  texts are in /opt/java/openjdk/legal/;
-- Ubuntu operating system packages, listed in /app/legal/os-packages.txt, each with its copyright and license
-  terms in /usr/share/doc/<package>/copyright.
+The distribution archive contains no Java runtime. The container image also contains:
+- native libraries from zstd-jni (BSD-2-Clause) and snappy-java (Apache-2.0) in /app/native, so they can load
+  from a read-only filesystem; both components are listed in THIRD-PARTY.txt;
+- the Eclipse Temurin Java runtime (GPL-2.0 with the Classpath Exception, and others) and the operating system
+  packages of its base image, listed with their versions and source packages in /app/legal/os-packages.txt. Each
+  package's copyright and license terms are in the copyright file named there, under /usr/share/doc/.
 
 HL7 Clinical Document Architecture
 The C-CDA element model in connector-core (com/sdh/healthcare/connector/core/convert/cda-r2-sdtc.model) is

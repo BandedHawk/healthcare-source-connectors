@@ -1,0 +1,11 @@
+# Container-only JVM options (design §14.1), read after config/jvm.options:
+#   java @/app/jvm.options @/app/container.options -jar /app/app.jar
+# Heap sized from the container memory limit.
+-XX:MaxRAMPercentage=75
+-Djava.io.tmpdir=/tmp
+# The app user has no home directory; nothing is written there, but some libraries look it up.
+-Duser.home=/tmp
+# zstd-jni and snappy-java load from /app/native instead of unpacking themselves into /tmp, so /tmp can be noexec.
+-DZstdNativePath=/app/native/libzstd-jni.so
+-Dorg.xerial.snappy.lib.path=/app/native
+-Dorg.xerial.snappy.lib.name=libsnappyjava.so

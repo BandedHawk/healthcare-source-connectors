@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Distribution kit (design §14.3) as a directory, built on every package; the customer image is built from it. -->
+<assembly xmlns="http://maven.apache.org/ASSEMBLY/2.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/ASSEMBLY/2.2.0 https://maven.apache.org/xsd/assembly-2.2.0.xsd">
+  <id>dist-dir</id>
+  <formats>
+    <format>dir</format>
+  </formats>
+  <includeBaseDirectory>true</includeBaseDirectory>
+  <baseDirectory>file-connector-${project.version}</baseDirectory>
+  <componentDescriptors>
+    <componentDescriptor>src/assembly/dist-component.xml</componentDescriptor>
+  </componentDescriptors>
+</assembly>

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Contents of the distribution kit (design §14.3), shared by the directory and tarball formats. -->
+<component xmlns="http://maven.apache.org/ASSEMBLY-COMPONENT/2.2.0"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="http://maven.apache.org/ASSEMBLY-COMPONENT/2.2.0 https://maven.apache.org/xsd/assembly-component-2.2.0.xsd">
+  <files>
+    <file>
+      <source>${project.build.directory}/${project.build.finalName}.jar</source>
+      <destName>app.jar</destName>
+      <fileMode>0644</fileMode>
+    </file>
+    <!-- zstd-jni names its library by version; the container options expect a fixed name. -->
+    <file>
+      <source>${project.build.directory}/dist-native/linux/amd64/libzstd-jni-${zstd-jni.version}.so</source>
+      <outputDirectory>native/linux-amd64</outputDirectory>
+      <destName>libzstd-jni.so</destName>
+      <fileMode>0644</fileMode>
+    </file>
+    <file>
+      <source>${project.build.directory}/dist-native/linux/aarch64/libzstd-jni-${zstd-jni.version}.so</source>
+      <outputDirectory>native/linux-arm64</outputDirectory>
+      <destName>libzstd-jni.so</destName>
+      <fileMode>0644</fileMode>
+    </file>
+    <file>
+      <source>${project.build.directory}/dist-native/org/xerial/snappy/native/Linux/x86_64/libsnappyjava.so</source>
+      <outputDirectory>native/linux-amd64</outputDirectory>
+      <fileMode>0644</fileMode>
+    </file>
+    <file>
+      <source>${project.build.directory}/dist-native/org/xerial/snappy/native/Linux/aarch64/libsnappyjava.so</source>
+      <outputDirectory>native/linux-arm64</outputDirectory>
+      <fileMode>0644</fileMode>
+    </file>
+  </files>
+  <fileSets>
+    <fileSet>
+      <directory>src/dist</directory>
+      <outputDirectory>.</outputDirectory>
+      <excludes>
+        <exclude>bin/**</exclude>
+        <exclude>**/.keep</exclude>
+      </excludes>
+      <fileMode>0644</fileMode>
+      <directoryMode>0755</directoryMode>
+    </fileSet>
+    <fileSet>
+      <directory>src/dist/bin</directory>
+      <outputDirectory>bin</outputDirectory>
+      <fileMode>0755</fileMode>
+    </fileSet>
+    <!-- Our LICENSE and NOTICE, and the third-party attribution generated for this jar (design §14.2). -->
+    <fileSet>
+      <directory>${project.build.outputDirectory}/META-INF</directory>
+      <outputDirectory>legal</outputDirectory>
+      <includes>
+        <include>LICENSE</include>
+        <include>NOTICE</include>
+        <include>THIRD-PARTY.txt</include>
+        <include>licenses/**</include>
+      </includes>
+      <fileMode>0644</fileMode>
+      <directoryMode>0755</directoryMode>
+    </fileSet>
+  </fileSets>
+</component>
