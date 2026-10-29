@@ -321,11 +321,19 @@ public final class TableMaintenance {
         int listed = 0;
         for (FileInfo f : io.listPrefix(prefix)) {
             listed++;
-            if (!reachable.contains(f.location()) && f.createdAtMillis() < cutoff) {
-                orphans.add(f.location());
+            String location = qualify(prefix, f.location());
+            // A path form the table doesn't use (another scheme, a bucket alias) would make every file look
+            // orphaned, however small the table. Refuse the whole run rather than delete anything.
+            if (!location.startsWith(prefix)) {
+                LOG.error("maintenance.orphans_refused table={} reason=listed_path_outside_table (do listed paths"
+                        + " match table paths?)", table.name());
+                return 0;
+            }
+            if (!reachable.contains(location) && f.createdAtMillis() < cutoff) {
+                orphans.add(location);
             }
         }
-        // A path form mismatch (scheme, bucket alias) would make every file look orphaned. Refuse rather than wipe.
+        // A second line of defence: most of a table looking orphaned means something is wrong, not a crash leftover.
         if (orphans.size() > 20 && orphans.size() * 2 > listed) {
             LOG.error("maintenance.orphans_refused table={} orphans={} listed={} (do listed paths match table paths?)",
                     table.name(), orphans.size(), listed);
@@ -339,6 +347,22 @@ public final class TableMaintenance {
                     .with(Attr.COUNT, orphans.size()));
         }
         return orphans.size();
+    }
+
+    /**
+     * The full location of a listed file. {@code ADLSFileIO.listPrefix} (Iceberg 1.12) returns paths relative to the
+     * container ({@code wh/t/data/x.parquet}), unlike the S3 and GCS FileIOs and unlike the table's own paths
+     * ({@code abfss://fs@account.dfs.core.windows.net/wh/t/data/x.parquet}). A relative path is resolved against
+     * the scheme and authority of the prefix it was listed under; anything else is returned unchanged.
+     */
+    static String qualify(String prefix, String listed) {
+        int scheme = prefix.indexOf("://");
+        if (scheme < 0 || listed.contains("://")) {
+            return listed;
+        }
+        int pathStart = prefix.indexOf('/', scheme + 3);
+        String root = pathStart < 0 ? prefix + "/" : prefix.substring(0, pathStart + 1);
+        return root + (listed.startsWith("/") ? listed.substring(1) : listed);
     }
 
     static Set<String> reachable(Table table) {

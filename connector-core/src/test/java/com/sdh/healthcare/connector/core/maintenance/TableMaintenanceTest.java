@@ -44,6 +44,7 @@ import org.apache.iceberg.data.Record;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.jdbc.JdbcCatalog;
 import org.junit.jupiter.api.BeforeEach;
+import org.apache.iceberg.io.FileInfo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -264,6 +265,57 @@ class TableMaintenanceTest {
         assertThat(referenced).allMatch(p -> Files.exists(Path.of(p)));
         assertThat(rows(catalog.loadTable(org.apache.iceberg.catalog.TableIdentifier.of(namespace, DEFAULT_NAME))))
                 .isEqualTo(before);
+    }
+
+    @Test
+    void listedPathsAreQualifiedLikeTablePaths() {
+        String adls = "abfss://fs@acct.dfs.core.windows.net/wh/t/";
+        // ADLSFileIO lists paths relative to the container.
+        assertThat(TableMaintenance.qualify(adls, "wh/t/data/x.parquet"))
+                .isEqualTo("abfss://fs@acct.dfs.core.windows.net/wh/t/data/x.parquet");
+        assertThat(TableMaintenance.qualify(adls, "/wh/t/data/x.parquet"))
+                .isEqualTo("abfss://fs@acct.dfs.core.windows.net/wh/t/data/x.parquet");
+        // S3 and GCS list full locations; local paths have no scheme at all.
+        assertThat(TableMaintenance.qualify("s3://b/wh/t/", "s3://b/wh/t/data/x.parquet"))
+                .isEqualTo("s3://b/wh/t/data/x.parquet");
+        assertThat(TableMaintenance.qualify("/tmp/wh/t/", "/tmp/wh/t/data/x.parquet"))
+                .isEqualTo("/tmp/wh/t/data/x.parquet");
+    }
+
+    /** Lists every file under another path than the table uses, as a bucket alias or a FileIO quirk would. */
+    public static final class AliasListingFileIO extends LocalFileIO {
+        @Override
+        public Iterable<FileInfo> listPrefix(String prefix) {
+            List<FileInfo> out = new ArrayList<>();
+            for (FileInfo f : super.listPrefix(prefix)) {
+                out.add(new FileInfo("/alias" + f.location(), f.size(), f.createdAtMillis()));
+            }
+            return out;
+        }
+    }
+
+    @Test
+    void aSmallTableIsNotWipedWhenListedPathsDontMatch() throws Exception {
+        JdbcCatalog aliased = new JdbcCatalog();
+        aliased.initialize("jdbc_" + UUID.randomUUID().toString().replace("-", ""), Map.of(
+                CatalogProperties.URI, TestPostgres.jdbcUrl(),
+                CatalogProperties.WAREHOUSE_LOCATION, warehouse.resolve("aliased").toString(),
+                CatalogProperties.FILE_IO_IMPL, AliasListingFileIO.class.getName(),
+                "jdbc.schema-version", "V1"));
+        Table t = IngestTables.sections(aliased, namespace);
+        committer.establish(t);
+        batch(t, RECENT_DAY, 2);
+        Set<String> referenced = TableMaintenance.reachable(t);
+        assertThat(referenced).hasSizeLessThan(20); // below the old size-based guard
+        for (String p : referenced) {
+            Files.setLastModifiedTime(Path.of(p), FileTime.from(NOW.minus(Duration.ofDays(30))));
+        }
+
+        TableMaintenance.Report r = maintenance(new MaintenanceSettings(Duration.ofDays(7), 10, false, 0.75, 5,
+                8L << 30, Duration.ofDays(3))).run(t, INGESTED_AT, Optional.empty(), true);
+
+        assertThat(r.orphansDeleted()).isZero();
+        assertThat(referenced).allMatch(p -> Files.exists(Path.of(p)));
     }
 
     @Test
