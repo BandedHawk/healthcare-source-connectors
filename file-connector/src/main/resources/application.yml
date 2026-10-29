@@ -16,6 +16,24 @@ camel:
   springboot:
     main-run-controller: true
 
+# Telemetry (design §12): spans are exported through sdh.telemetry.otlp (with the PHI allow-list filter), so Boot's
+# own OTLP exporters and the Micrometer OTLP metrics registry are off. Sample every trace: one per file is cheap.
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+    export:
+      otlp:
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
+  otlp:
+    metrics:
+      export:
+        enabled: false
+
 sdh:
   file:
     inbound-dir: /data/inbound

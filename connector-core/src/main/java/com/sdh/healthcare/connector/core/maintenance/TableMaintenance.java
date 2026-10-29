@@ -1,6 +1,9 @@
 package com.sdh.healthcare.connector.core.maintenance;
 
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Clock;
@@ -17,6 +20,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
@@ -75,6 +80,18 @@ public final class TableMaintenance {
      * @param orphans    also clean up unreferenced files this run
      */
     public Report run(Table table, String timeColumn, Optional<Duration> retention, boolean orphans) {
+        Span span = Telemetry.get().span("maintenance", Fields.of(Attr.TABLE, table.name()));
+        try (Scope ignored = span.makeCurrent()) {
+            return runTraced(table, timeColumn, retention, orphans);
+        } catch (RuntimeException | Error e) {
+            Telemetry.fail(span, e);
+            throw e;
+        } finally {
+            span.end();
+        }
+    }
+
+    private Report runTraced(Table table, String timeColumn, Optional<Duration> retention, boolean orphans) {
         committer.verifyCurrent(table);
         Instant now = clock.instant();
 
@@ -122,8 +139,9 @@ public final class TableMaintenance {
             return 0; // no empty snapshot
         }
         committer.commit(table, tx -> tx.newDelete().deleteFromRowFilter(older).commit());
-        LOG.info("maintenance.retention table={} cutoffDay={} files={}", table.name(),
-                cutoff.atOffset(ZoneOffset.UTC).toLocalDate(), matching);
+        // PHI deletion is audited: which table, how many files, and the first day kept.
+        Telemetry.get().audit("maintenance.retention", Fields.of(Attr.TABLE, table.name())
+                .with(Attr.COUNT, matching).with(Attr.REASON, "before " + cutoff.atOffset(ZoneOffset.UTC).toLocalDate()));
         return matching;
     }
 
@@ -315,6 +333,10 @@ public final class TableMaintenance {
         }
         for (String o : orphans) {
             io.deleteFile(o);
+        }
+        if (!orphans.isEmpty()) {
+            Telemetry.get().audit("maintenance.orphans_deleted", Fields.of(Attr.TABLE, table.name())
+                    .with(Attr.COUNT, orphans.size()));
         }
         return orphans.size();
     }

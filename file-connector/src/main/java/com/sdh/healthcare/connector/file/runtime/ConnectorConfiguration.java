@@ -5,6 +5,9 @@ import com.sdh.healthcare.connector.file.ingest.InboundService;
 import com.sdh.healthcare.connector.file.route.InboundRoute;
 import java.time.Clock;
 import java.util.concurrent.locks.ReentrantLock;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import org.apache.camel.CamelContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,15 +27,16 @@ public class ConnectorConfiguration {
     @ConditionalOnMissingBean
     FatalExit fatalExit() {
         return reason -> {
-            LOG.error("connector.fatal reason={} status={}", reason, FatalExit.STATUS);
+            Telemetry.get().auditError("connector.fatal", Fields.of(Attr.REASON, reason));
             // Exit from another thread so Spring's shutdown hooks can run (and stop this route) without deadlock.
             Thread.ofPlatform().name("sdh-fatal-exit").start(() -> System.exit(FatalExit.STATUS));
         };
     }
 
+    /** Takes {@link Telemetry} so the SDK is installed before the lease and pipeline emit anything. */
     @Bean(destroyMethod = "close")
-    ConnectorRuntime connectorRuntime(ConnectorProperties props, CamelContext camel, FatalExit fatal)
-            throws Exception {
+    ConnectorRuntime connectorRuntime(ConnectorProperties props, CamelContext camel, FatalExit fatal,
+            Telemetry telemetry) throws Exception {
         return ConnectorRuntime.start(props, camel, fatal);
     }
 

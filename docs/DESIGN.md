@@ -23,6 +23,8 @@ See §10.3, §8.1, §11.2 and §16. MinIO images are no longer published, so S3 
 
 Revision 2026-10-28 (h): built table maintenance (§8.4): retention, compaction, snapshot expiry and orphan-file cleanup, scheduled between files under a writer lock. Retention now purges PHI files in the same run (a marker commit makes the delete expirable). Retention settings moved to `sdh.maintenance.retention` (§14).
 
+Revision 2026-10-28 (i): built observability (§12): OpenTelemetry traces, metrics and audit events, exported over OTLP through PHI filters, and checked end to end against a real collector.
+
 ---
 
 ## 1. Purpose
@@ -55,7 +57,7 @@ All versions were checked against Maven Central on 2026-10-28.
 | PostgreSQL | any supported | Lease store (§9.3). Can be the JDBC catalog's database. Driver 42.7.14, HikariCP (Boot-managed, pool of 2) |
 | AWS SDK v2 | 2.50.2 | `s3`, `apache-client` and `kms` for Iceberg's `S3FileIO` (`iceberg-aws`). `kms` is needed even without SSE-KMS: `AwsProperties` loads KMS model classes on startup. Same line as Camel's SQS client, imported as a BOM in `file-connector` |
 | Testcontainers | 2.0.5 | `-Pit` only, run by Failsafe 3.6.1 (§15) |
-| OpenTelemetry | via Spring Boot 4 OpenTelemetry starter | OTLP export of traces, metrics, logs |
+| OpenTelemetry | 1.62.0 (Boot-managed) | `connector-core` uses the API only; `file-connector` gets the SDK from `spring-boot-starter-opentelemetry` and exports over OTLP/HTTP with its own filtered exporters (§12) |
 | Maven | 3.9.16 via Maven Wrapper | The local install is 3.8.7 |
 | Spark | **Not used** | |
 
@@ -84,7 +86,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │       ├── storage/      Iceberg catalog/FileIO setup, writers, compaction, retention
 │       ├── checkpoint/   checkpoint model, lease store, lease keeper, fenced committer
 │       ├── publish/      MessagePublisher SPI, OutboundMessage (broker adapters live in the connector app, §10.3)
-│       ├── telemetry/    audit events, metrics, PHI-safe error codes
+│       ├── telemetry/    Telemetry facade (spans, audit events, metrics), Attr allow-list, Fields, error codes
 │       └── pipeline/     source-agnostic ingest pipeline (read → split → encrypt → write → commit → publish)
 └── file-connector/                      Spring Boot application + Docker image
     └── com.sdh.healthcare.connector.file
@@ -95,6 +97,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
         ├── route/        InboundRoute (directory discovery)
         ├── ingest/       InboundService (per-file handling, in-progress recovery, backoff)
         ├── publish/      QueueType (broker adapters), CamelMessagePublisher
+        ├── telemetry/    OTLP exporters, AllowListSpanExporter, AuditOnlyLogRecordExporter, inbound age gauge
         ├── source/       LocalSourceFile, DirectoryOutcomeRecorder (completed/ and failed/ records, local fallback)
         └── admin/        operator commands (restore, decrypt-fallback) — not built yet
 ```
@@ -632,7 +635,7 @@ After the split phase: archive the original to `source_files`, publish `file.com
 2. Already-committed and published sections stay where they are, each tied to its `file_id`.
 3. The whole original is archived into `failed_files`. It goes to the local fallback `failed/<fileId>.enc` instead (§11.3) when the file is over `max-file-bytes`, when `FAILING` couldn't be recorded, or when the archive fails (storage or KMS unreachable). If even the fallback can't be written, the original is kept and the error propagates.
 4. Announce every committed section: publish `section.stored` for any committed section not yet acknowledged. Once a file is `FAILED` no restart will republish it, so it must happen here. This is skipped when the broker itself is the failure, and a `publish.unannounced` range is logged instead. Also, when splitting stops, the in-flight publish of the last committed batch is now awaited rather than cancelled. A test that forces this race shows that, without the fix, the last batch was stored but never announced.
-5. Write `failed/<fileId>.json`, delete the original, log `file.failed` (fileId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the OpenTelemetry event comes with §12. Attempt count isn't recorded yet.
+5. Write `failed/<fileId>.json`, delete the original, log `file.failed` (fileId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the `sdh.audit.file.failed` event and `sdh.files.failed` metric report it (§12). Attempt count isn't recorded yet.
 
 ### 11.3 Local fallback format
 
@@ -652,34 +655,75 @@ After the split phase: archive the original to `source_files`, publish `file.com
 - `decrypt-fallback --file failed/<id>.enc --key recovery.pem` handles a file that was encrypted locally.
 - `status` shows the checkpoint, lease and in-progress file.
 
-## 12. Observability and audit (OpenTelemetry)
+## 12. Observability and audit (OpenTelemetry, built)
+
+**Structure:**
+- **`connector-core`** emits through `Telemetry` (`telemetry/`), on the OpenTelemetry **API** only. Until an SDK is installed everything is a no-op, so libraries and tests need nothing.
+- **`file-connector`** installs the SDK that `spring-boot-starter-opentelemetry` builds and exports over OTLP/HTTP (§12.1).
 
 **Traces:** `ingest.file` (root, one per file) contains:
-- `split.batch`
-- `storage.commit`
-- `publish.batch`
-- `archive`
+- **`split.batch`** (file ID, format, last seq, count), which contains:
+  - `storage.commit` (table, count);
+  - `publish.batch` (count). This runs on the publishing thread, and its trace context is carried across, so it stays a child of its batch.
+- **`archive`** (file ID, table).
+- **`publish.batch`** for `file.started` and `file.completed`.
 
-**Audit log events** (OTel logs, `event.name = sdh.audit.*`):
-- **File events:** `file.discovered`, `file.started`, `file.resumed`, `batch.committed` (running seq and offset), `file.archived`, `file.completed` (final tally), `file.failed` (stage, offset, seq, error code), `file.abandoned`.
-- **Operator and lease events:** `admin.restore`, `admin.decrypt_fallback`, `lease.acquired`, `lease.fenced_table` (epoch established on a table), `lease.lost` (with reason `EXPIRED`, `TAKEN_OVER` or `FENCED`), `lease.released`.
+Other spans:
+- `ingest.recover` is the root when finishing a file without its source.
+- `maintenance` (table) runs per table and pass (§8.4).
+
+Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has status ERROR with `sdh.error_code` and `sdh.stage`. **Exceptions are never recorded on spans:** their messages could hold PHI, so only the exception class name (`sdh.reason`) is kept. Sampling is 100%: one trace per file is cheap.
+
+**Audit events:** OTel log records with `event.name = sdh.audit.<event>`, also written to the console log (`sdh.audit` logger).
+- **File events:**
+  - `file.discovered` (bytes);
+  - `file.started` (file ID, format, bytes);
+  - `file.resumed` (next seq, offset);
+  - `batch.committed` (last seq, offset, count);
+  - `publish.republish`;
+  - `file.split`;
+  - `file.archived` (table, bytes);
+  - `file.completed` (sections, bytes);
+  - `file.failing` and `file.failed` (stage, error code, offset, last seq, where archived);
+  - `archive.unavailable`, `publish.unannounced`, `file.failed_unarchived`, `file.abandoned`.
+- **Lease and process events:**
+  - `lease.acquired`, `lease.fenced_table` (epoch, table), `lease.lost` (reason `EXPIRED`, `TAKEN_OVER` or `FENCED`), `lease.released`;
+  - `connector.started`, `connector.fatal` (reason).
+- **PHI deletion:** `maintenance.retention` (table, files, first day kept) and `maintenance.orphans_deleted`.
+- **Operator events** (`admin.*`) come with the admin commands.
 
 **Metrics:**
 
-| Metric | Type |
-|---|---|
-| `sdh.files.in_progress` | gauge |
-| `sdh.bytes.read` | counter |
-| `sdh.sections.stored` | counter |
-| `sdh.sections.published` | counter |
-| `sdh.files.completed` | counter |
-| `sdh.files.failed{error_code}` | counter |
-| `sdh.commit.duration` | histogram |
-| `sdh.publish.duration` | histogram |
-| `sdh.inbound.oldest_file_age` | gauge |
-| `sdh.file.progress_ratio` | gauge |
+| Metric | Type | Attributes |
+|---|---|---|
+| `sdh.files.in_progress` | gauge | |
+| `sdh.file.progress_ratio` | gauge | bytes split / file size of the current file |
+| `sdh.inbound.oldest_file_age` | gauge (s) | waiting files only (not hidden files or `.done` markers) |
+| `sdh.bytes.read` | counter (By) | stage: `split`, `archive` |
+| `sdh.sections.stored` | counter | format |
+| `sdh.sections.published` | counter | |
+| `sdh.files.completed` | counter | |
+| `sdh.files.failed` | counter | error code, stage |
+| `sdh.commit.duration` | histogram (s) | table |
+| `sdh.publish.duration` | histogram (s) | |
 
-Attributes are restricted to an allow-list (fileId, format, error code, stage, counts, offsets). A telemetry processor drops any other attribute, so PHI cannot leak in through a careless log call.
+**PHI defence, two layers:**
+1. **At the source:** every attribute goes through `Fields`, which only accepts keys from the `Attr` enum (`sdh.file_id`, `sdh.format`, `sdh.state`, `sdh.stage`, `sdh.error_code`, `sdh.result`, `sdh.reason`, `sdh.seq`, `sdh.offset`, `sdh.count`, `sdh.bytes`, `sdh.epoch`, `sdh.table`, `sdh.archive`), with strings or numbers. There is no way to attach a filename or content.
+2. **At export:**
+   - `AllowListSpanExporter` keeps only those keys, whatever produced the span, and drops span events (exception events) and link attributes.
+   - `AuditOnlyLogRecordExporter` exports only `sdh.audit.*` records, with allow-listed attributes, and replaces the body with the event name. Free-text log lines from any library never leave the host.
+   - Metrics are created only through `Telemetry`, so their attributes are allow-listed by construction.
+
+### 12.1 Export configuration
+
+- **Endpoint:** `sdh.telemetry.otlp.endpoint` is the collector's OTLP/HTTP base URL; `/v1/traces`, `/v1/metrics` and `/v1/logs` are appended. `sdh.telemetry.otlp.headers` adds request headers (e.g. auth); `timeout` is 10 s; `metric-interval` is 60 s. Unset means no exporters: telemetry stays in-process and audit events still reach the console.
+- **What's switched off:** Boot's own OTLP trace and log exporters (`management.tracing.export.otlp.enabled`, `management.logging.export.otlp.enabled`) and the Micrometer OTLP metrics registry (`management.otlp.metrics.export.enabled`). Every export goes through the filters above. JVM metrics via Micrometer aren't exported.
+- **Meter provider:** Boot builds no OpenTelemetry meter provider (its metrics go through Micrometer), so `file-connector` defines an `SdkMeterProvider` with a periodic OTLP reader. Without it, metrics recorded through the OTel API would go nowhere.
+
+**Tests:**
+- **`FileProcessorTest`:** installs an SDK with in-memory exporters. It checks the span tree (including `publish.batch` parented across threads), the error code on a failed file, the audit events and the metric counts, and that no key outside the allow-list and no filename or record content appears anywhere.
+- **`ExportFilterTest`:** covers both export filters.
+- **`FullStackIT`:** exports to a real `otel/opentelemetry-collector-contrib:0.162.0`. It checks that traces, metrics and audit events arrive, and that none contains the PHI marker or a filename.
 
 ## 13. Performance
 
@@ -751,6 +795,9 @@ sdh:
     uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"
     artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
   retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
+  telemetry:                      # §12.1; unset endpoint = no export
+    otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env
+    metric-interval: 60s
   maintenance:                    # §8.4; runs between files
     enabled: true
     interval: 1h
@@ -783,7 +830,7 @@ Compared with the earlier sketch:
 
 | Test | Containers | Verifies |
 |---|---|---|
-| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket |
+| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
 | `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = fileId, metadata headers, per-file order, `acks=all` + idempotence |
 | `RabbitMqIT` | `rabbitmq:4.2.9-management-alpine` | `message_id`, content type, headers, publisher confirms (`CORRELATED`) |
 | `ArtemisIT` | `apache/activemq-artemis:2.44.0-alpine` | `JMSXGroupID`, and duplicates dropped by `_AMQ_DUPL_ID` |

@@ -1,5 +1,8 @@
 package com.sdh.healthcare.connector.core.checkpoint;
 
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -77,7 +80,8 @@ public final class FencedCommitter {
             addMarker(tx, lease.epoch());
             try {
                 compareAndSwap(tx, current);
-                LOG.info("lease.fenced_table epoch={} previous={}", lease.epoch(), current);
+                Telemetry.get().audit("lease.fenced_table", Fields.of(Attr.EPOCH, lease.epoch())
+                        .with(Attr.TABLE, table.name()));
                 return;
             } catch (CommitFailedException e) {
                 if (attempt >= maxAttempts) {

@@ -22,6 +22,7 @@ public record ConnectorProperties(
         @DefaultValue Queue queue,
         @DefaultValue Retry retry,
         @DefaultValue Maintenance maintenance,
+        @DefaultValue Telemetry telemetry,
         /** Hash/encrypt/seal threads; 0 = one per CPU core. */
         @DefaultValue("0") int encryptWorkers) {
 
@@ -101,6 +102,20 @@ public record ConnectorProperties(
 
     /** How long to keep each table's rows, in whole days; unset = forever (the default). */
     public record Retention(Duration sections, Duration sourceFiles, Duration failedFiles) {}
+
+    /**
+     * OpenTelemetry export (design §12). With no endpoint, nothing is exported (audit events still go to the log).
+     *
+     * @param metricInterval how often metrics are exported
+     */
+    public record Telemetry(@DefaultValue Otlp otlp, @DefaultValue("60s") Duration metricInterval) {}
+
+    /**
+     * @param endpoint base URL of an OTLP/HTTP collector, e.g. {@code https://otel-collector:4318}; {@code /v1/traces},
+     *                 {@code /v1/metrics} and {@code /v1/logs} are appended
+     * @param headers  extra request headers, e.g. an authorization token (supply secrets from the environment)
+     */
+    public record Otlp(String endpoint, Map<String, String> headers, @DefaultValue("10s") Duration timeout) {}
 
     public record Retry(@DefaultValue("8") int maxAttempts, @DefaultValue("200ms") Duration initialBackoff,
             @DefaultValue("30s") Duration maxBackoff) {}

@@ -23,6 +23,12 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import com.sdh.healthcare.connector.core.storage.ArchiveTables;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,26 +84,63 @@ public final class FileProcessor {
         return pipeline.fingerprint(src);
     }
 
-    /** Processes one file: a new one, or the in-progress one (matched by fingerprint). */
+    /** Processes one file: a new one, or the in-progress one (matched by fingerprint). Traced as {@code ingest.file}. */
     public Outcome process(SourceFile file) throws Exception {
-        try (SeekableByteSource src = file.open()) {
-            String fingerprint = pipeline.fingerprint(src);
-            Optional<Checkpoint> cp = pipeline.checkpoint().filter(c -> c.fingerprint().equals(fingerprint));
-            if (cp.isPresent() && cp.get().state() == Checkpoint.State.FAILING) {
-                return fail(cp.get(), file, src);
+        return traced("ingest.file", () -> {
+            try (SeekableByteSource src = file.open()) {
+                Telemetry.get().audit("file.discovered", Fields.of(Attr.BYTES, src.size()));
+                return processOpen(file, src);
             }
-            if (cp.isPresent() && cp.get().state() == Checkpoint.State.ARCHIVING) {
-                return completeOrFail(cp.get(), file, src, fingerprint);
+        });
+    }
+
+    @FunctionalInterface
+    private interface Work {
+        Outcome run() throws Exception;
+    }
+
+    /** Root span for one file's work; records the outcome, and the in-progress gauge. */
+    private Outcome traced(String name, Work work) throws Exception {
+        Telemetry t = Telemetry.get();
+        Span span = t.span(name, Fields.of(Attr.FORMAT, pipeline.settings().format()));
+        t.fileStartedProcessing();
+        try (Scope ignored = span.makeCurrent()) {
+            Outcome o = work.run();
+            if (o != null) {
+                span.setAttribute(Attr.FILE_ID.key(), o.fileId().toString());
+                span.setAttribute(Attr.RESULT.key(), o.result().name());
+                if (o.failure() != null) {
+                    span.setAttribute(Attr.STAGE.key(), o.failure().stage());
+                    Telemetry.fail(span, o.failure().code());
+                }
             }
-            IngestPipeline.SplitResult split;
-            try {
-                split = pipeline.split(src);
-            } catch (Exception e) {
-                rethrowIfFatal(e);
-                return fail(failingCheckpoint(e, "split", src, fingerprint), file, src);
-            }
-            return completeOrFail(split.checkpoint(), file, src, fingerprint);
+            return o;
+        } catch (Exception | Error e) {
+            Telemetry.fail(span, e);
+            throw e;
+        } finally {
+            span.end();
+            t.fileFinishedProcessing();
         }
+    }
+
+    private Outcome processOpen(SourceFile file, SeekableByteSource src) throws Exception {
+        String fingerprint = pipeline.fingerprint(src);
+        Optional<Checkpoint> cp = pipeline.checkpoint().filter(c -> c.fingerprint().equals(fingerprint));
+        if (cp.isPresent() && cp.get().state() == Checkpoint.State.FAILING) {
+            return fail(cp.get(), file, src);
+        }
+        if (cp.isPresent() && cp.get().state() == Checkpoint.State.ARCHIVING) {
+            return completeOrFail(cp.get(), file, src, fingerprint);
+        }
+        IngestPipeline.SplitResult split;
+        try {
+            split = pipeline.split(src);
+        } catch (Exception e) {
+            rethrowIfFatal(e);
+            return fail(failingCheckpoint(e, "split", src, fingerprint), file, src);
+        }
+        return completeOrFail(split.checkpoint(), file, src, fingerprint);
     }
 
     /**
@@ -109,28 +152,33 @@ public final class FileProcessor {
         if (found.isEmpty()) {
             return Optional.empty();
         }
-        Checkpoint cp = found.get();
+        return Optional.of(traced("ingest.recover", () -> recover(found.get())));
+    }
+
+    private Outcome recover(Checkpoint cp) throws Exception {
         switch (cp.state()) {
             case ARCHIVING -> {
                 Optional<Archiver.Result> done = sourceArchiver.finished(cp.fileId());
                 if (done.isPresent()) {
-                    return Optional.of(finishCompletion(cp, done.get(), null));
+                    return finishCompletion(cp, done.get(), null);
                 }
             }
             case FAILING -> {
                 announceCommitted(cp, true);
                 Optional<Archiver.Result> done = failedArchiver.finished(cp.fileId());
                 if (done.isEmpty()) {
-                    LOG.warn("file.failed_unarchived fileId={} (check failed/ for a local fallback)", cp.fileId());
+                    // Check failed/ for a local fallback.
+                    Telemetry.get().auditWarn("file.failed_unarchived", Fields.of(Attr.FILE_ID, cp.fileId()));
                 }
-                return Optional.of(finishFailure(cp, true, done.map(Archiver.Result::digest).orElse(null),
-                        done.isPresent() ? ArchiveLocation.FAILED_FILES : ArchiveLocation.UNKNOWN, null));
+                return finishFailure(cp, true, done.map(Archiver.Result::digest).orElse(null),
+                        done.isPresent() ? ArchiveLocation.FAILED_FILES : ArchiveLocation.UNKNOWN, null);
             }
             default -> { }
         }
         pipeline.commitCheckpoint(cp.withState(Checkpoint.State.ABANDONED));
-        LOG.warn("file.abandoned fileId={} state={} committedSeq={}", cp.fileId(), cp.state(), cp.committedSeq());
-        return Optional.of(new Outcome(cp.fileId(), Result.ABANDONED, cp.sectionCount(), null, null));
+        Telemetry.get().auditWarn("file.abandoned", Fields.of(Attr.FILE_ID, cp.fileId()).with(Attr.STATE, cp.state())
+                .with(Attr.SEQ, cp.committedSeq()));
+        return new Outcome(cp.fileId(), Result.ABANDONED, cp.sectionCount(), null, null);
     }
 
     // ---- completion ----
@@ -148,6 +196,8 @@ public final class FileProcessor {
             rethrowIfFatal(e);
             return fail(failingCheckpoint(e, "archive", src, fingerprint), file, src);
         }
+        Telemetry.get().audit("file.archived", Fields.of(Attr.FILE_ID, cp.fileId())
+                .with(Attr.TABLE, ArchiveTables.SOURCE_FILES).with(Attr.BYTES, cp.fileSize()));
         return finishCompletion(cp, archived, file);
     }
 
@@ -160,7 +210,9 @@ public final class FileProcessor {
             file.deleteOriginal();
         }
         pipeline.commitCheckpoint(cp.withState(Checkpoint.State.COMPLETED));
-        LOG.info("file.completed fileId={} sections={} size={}", cp.fileId(), cp.sectionCount(), cp.fileSize());
+        Telemetry.get().audit("file.completed", Fields.of(Attr.FILE_ID, cp.fileId())
+                .with(Attr.COUNT, cp.sectionCount()).with(Attr.BYTES, cp.fileSize()));
+        Telemetry.get().fileCompleted();
         return new Outcome(cp.fileId(), Result.COMPLETED, cp.sectionCount(), null, null);
     }
 
@@ -202,8 +254,8 @@ public final class FileProcessor {
             case IOException io -> code = ErrorCode.SOURCE_READ_FAILED;
             default -> code = ErrorCode.STORAGE_FAILED;
         }
-        LOG.warn("file.failing fileId={} stage={} code={} offset={} cause={}", base.fileId(), stage, code, offset,
-                e.getClass().getSimpleName());
+        Telemetry.get().auditWarn("file.failing", Fields.of(Attr.FILE_ID, base.fileId()).with(Attr.STAGE, stage)
+                .with(Attr.ERROR_CODE, code).with(Attr.OFFSET, offset).with(Attr.REASON, e.getClass().getSimpleName()));
         return base.failing(new Failure(stage, code, offset, now));
     }
 
@@ -228,8 +280,9 @@ public final class FileProcessor {
                 location = ArchiveLocation.FAILED_FILES;
             } catch (Exception e) {
                 rethrowIfFatal(e);
-                LOG.warn("archive.unavailable fileId={} error={}; using local fallback", fileId,
-                        e.getClass().getSimpleName());
+                // Using the local fallback.
+                Telemetry.get().auditWarn("archive.unavailable", Fields.of(Attr.FILE_ID, fileId)
+                        .with(Attr.REASON, e.getClass().getSimpleName()));
             }
         }
         if (location == ArchiveLocation.LOCAL_FALLBACK) {
@@ -250,8 +303,10 @@ public final class FileProcessor {
         if (file != null) {
             file.deleteOriginal();
         }
-        LOG.error("file.failed fileId={} stage={} code={} offset={} lastSeq={} archive={}", failing.fileId(),
-                f.stage(), f.code(), f.offset(), failing.committedSeq(), location);
+        Telemetry.get().auditError("file.failed", Fields.of(Attr.FILE_ID, failing.fileId()).with(Attr.STAGE, f.stage())
+                .with(Attr.ERROR_CODE, f.code()).with(Attr.OFFSET, f.offset()).with(Attr.SEQ, failing.committedSeq())
+                .with(Attr.ARCHIVE, location));
+        Telemetry.get().fileFailed(f.code(), f.stage());
         if (recorded) {
             tryCommit(failing.failed());
         }
@@ -275,8 +330,9 @@ public final class FileProcessor {
                 rethrowIfFatal(e);
             }
         }
-        LOG.warn("publish.unannounced fileId={} fromSeq={} toSeq={}", failing.fileId(), failing.publishedSeq() + 1,
-                failing.committedSeq());
+        Telemetry.get().auditWarn("publish.unannounced", Fields.of(Attr.FILE_ID, failing.fileId())
+                .with(Attr.SEQ, failing.publishedSeq() + 1)
+                .with(Attr.COUNT, failing.committedSeq() - failing.publishedSeq()));
     }
 
     /** Commits a checkpoint, reporting rather than throwing if storage is unavailable. */

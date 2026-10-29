@@ -33,6 +33,17 @@ import com.sdh.healthcare.connector.core.storage.Archiver;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.logs.SdkLoggerProvider;
+import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
+import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -106,6 +117,7 @@ class FileProcessorTest {
     @AfterEach
     void tearDown() {
         open.forEach(IngestPipeline::close);
+        Telemetry.install(io.opentelemetry.api.OpenTelemetry.noop());
     }
 
     Table table(String name) {
@@ -243,6 +255,81 @@ class FileProcessorTest {
         Outcome o = process().recoverWithoutSource().orElseThrow();
         assertThat(o.result()).isEqualTo(Result.ABANDONED);
         assertThat(process().inProgress()).isEmpty();
+    }
+
+    // ---- telemetry (design §12) ----
+
+    @Test
+    void emitsTracesAuditEventsAndMetricsWithoutPhi() throws Exception {
+        InMemorySpanExporter spans = InMemorySpanExporter.create();
+        InMemoryLogRecordExporter logs = InMemoryLogRecordExporter.create();
+        InMemoryMetricReader metrics = InMemoryMetricReader.create();
+        Telemetry.install(OpenTelemetrySdk.builder()
+                .setTracerProvider(SdkTracerProvider.builder().addSpanProcessor(SimpleSpanProcessor.create(spans))
+                        .build())
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(SimpleLogRecordProcessor.create(logs)).build())
+                .setMeterProvider(SdkMeterProvider.builder().registerMetricReader(metrics).build())
+                .build());
+
+        FileProcessor p = process();
+        Outcome good = p.process(new MemSource("smith-john.csv", csv(10)));
+        Outcome bad = p.process(new MemSource("jones-mary.csv", csv(7) + "8,\"never closed\n"));
+
+        // Traces: one root per file, with the stages underneath.
+        var all = spans.getFinishedSpanItems();
+        var roots = all.stream().filter(sp -> sp.getName().equals("ingest.file")).toList();
+        assertThat(roots).hasSize(2);
+        assertThat(roots).allMatch(r -> !r.getParentSpanContext().isValid());
+        assertThat(all).extracting(io.opentelemetry.sdk.trace.data.SpanData::getName)
+                .contains("split.batch", "storage.commit", "publish.batch", "archive");
+        var failedRoot = roots.stream().filter(r -> bad.fileId().toString()
+                .equals(r.getAttributes().get(AttributeKey.stringKey("sdh.file_id")))).findFirst().orElseThrow();
+        assertThat(failedRoot.getStatus().getStatusCode()).isEqualTo(io.opentelemetry.api.trace.StatusCode.ERROR);
+        assertThat(failedRoot.getAttributes().get(AttributeKey.stringKey("sdh.error_code")))
+                .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+        // publish.batch runs on another thread but stays inside its batch's trace.
+        var batchIds = all.stream().filter(sp -> sp.getName().equals("split.batch"))
+                .map(io.opentelemetry.sdk.trace.data.SpanData::getSpanId).toList();
+        assertThat(all.stream().filter(sp -> sp.getName().equals("publish.batch"))
+                .filter(sp -> batchIds.contains(sp.getParentSpanId()))).isNotEmpty();
+
+        // Audit events.
+        var events = logs.getFinishedLogRecordItems().stream().map(l -> l.getEventName()).toList();
+        assertThat(events).contains("sdh.audit.file.discovered", "sdh.audit.file.started", "sdh.audit.batch.committed",
+                "sdh.audit.file.archived", "sdh.audit.file.completed", "sdh.audit.file.failing",
+                "sdh.audit.file.failed", "sdh.audit.lease.fenced_table");
+
+        // Metrics.
+        var data = metrics.collectAllMetrics();
+        assertThat(sum(data, "sdh.sections.stored")).isEqualTo(10 + 6);
+        assertThat(sum(data, "sdh.files.completed")).isEqualTo(1);
+        assertThat(sum(data, "sdh.files.failed")).isEqualTo(1);
+        assertThat(data).extracting(io.opentelemetry.sdk.metrics.data.MetricData::getName)
+                .contains("sdh.bytes.read", "sdh.sections.published", "sdh.commit.duration", "sdh.publish.duration",
+                        "sdh.files.in_progress", "sdh.file.progress_ratio");
+
+        // No PHI anywhere: only allow-listed keys, and no filename or record content in any value or body.
+        List<io.opentelemetry.api.common.Attributes> attrs = new ArrayList<>();
+        all.forEach(sp -> attrs.add(sp.getAttributes()));
+        logs.getFinishedLogRecordItems().forEach(l -> attrs.add(l.getAttributes()));
+        data.forEach(m -> m.getData().getPoints().forEach(pt -> attrs.add(pt.getAttributes())));
+        for (var a : attrs) {
+            a.forEach((k, v) -> {
+                assertThat(k.getKey()).isIn(com.sdh.healthcare.connector.core.telemetry.Attr.ALLOWED_KEYS);
+                assertThat(String.valueOf(v)).doesNotContain("smith").doesNotContain("jones")
+                        .doesNotContain("patient");
+            });
+        }
+        assertThat(logs.getFinishedLogRecordItems()).allSatisfy(l -> assertThat(String.valueOf(l.getBodyValue()))
+                .doesNotContain("smith").doesNotContain("patient"));
+        assertThat(good.result()).isEqualTo(Result.COMPLETED);
+    }
+
+    static long sum(java.util.Collection<io.opentelemetry.sdk.metrics.data.MetricData> data, String name) {
+        return data.stream().filter(m -> m.getName().equals(name))
+                .flatMap(m -> m.getLongSumData().getPoints().stream())
+                .mapToLong(io.opentelemetry.sdk.metrics.data.LongPointData::getValue).sum();
     }
 
     // ---- failure ----

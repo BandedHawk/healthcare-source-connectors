@@ -1,5 +1,8 @@
 package com.sdh.healthcare.connector.core.checkpoint;
 
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.time.Duration;
@@ -91,7 +94,7 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable {
             throws LeaseHeldException {
         long sentAt = nanoClock.getAsLong();
         LeaseGrant grant = store.acquire(leaseName, owner, settings.ttl());
-        LOG.info("lease.acquired epoch={}", grant.epoch());
+        Telemetry.get().audit("lease.acquired", Fields.of(Attr.EPOCH, grant.epoch()));
         return new LeaseKeeper(store, grant, sentAt + settings.localValidity().toNanos(), settings, nanoClock,
                 onLost, scheduleRenewals);
     }
@@ -160,7 +163,7 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable {
     private synchronized LeaseLostException markLost(LeaseLostException.Reason reason) {
         if (lost == null) {
             lost = new LeaseLostException(reason);
-            LOG.error("lease.lost epoch={} reason={}", grant.epoch(), reason);
+            Telemetry.get().auditError("lease.lost", Fields.of(Attr.EPOCH, grant.epoch()).with(Attr.REASON, reason));
             if (renewal != null) {
                 renewal.cancel(false);
             }
@@ -179,7 +182,7 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable {
         if (lost == null) {
             try {
                 store.release(grant);
-                LOG.info("lease.released epoch={}", grant.epoch());
+                Telemetry.get().audit("lease.released", Fields.of(Attr.EPOCH, grant.epoch()));
             } catch (RuntimeException e) {
                 LOG.warn("lease.release_failed epoch={} error={}", grant.epoch(), e.getClass().getSimpleName());
             }

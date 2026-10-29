@@ -105,6 +105,17 @@
       <artifactId>camel-spring-rabbitmq-starter</artifactId>
     </dependency>
 
+    <!-- Telemetry (design §12): OpenTelemetry SDK with OTLP export of traces, metrics and audit logs. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-opentelemetry</artifactId>
+    </dependency>
+    <!-- Our own OTLP exporters, wrapped in the PHI allow-list filter (Boot's are switched off). -->
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-exporter-otlp</artifactId>
+    </dependency>
+
     <!-- Lease store (design §9.3). -->
     <dependency>
       <groupId>com.zaxxer</groupId>
@@ -144,6 +155,11 @@
     <dependency>
       <groupId>io.zonky.test</groupId>
       <artifactId>embedded-postgres</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk-testing</artifactId>
       <scope>test</scope>
     </dependency>
 

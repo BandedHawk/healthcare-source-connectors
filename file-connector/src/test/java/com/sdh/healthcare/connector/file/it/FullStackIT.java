@@ -75,6 +75,23 @@ class FullStackIT {
     static final PostgreSQLContainer POSTGRES;
     static final GenericContainer<?> SEAWEED;
     static final KafkaContainer KAFKA;
+    /** OpenTelemetry Collector: receives the app's OTLP export and writes it to a file the test reads back. */
+    static final GenericContainer<?> COLLECTOR;
+    static final String COLLECTOR_CONFIG = """
+            receivers:
+              otlp:
+                protocols:
+                  http:
+                    endpoint: 0.0.0.0:4318
+            exporters:
+              file:
+                path: /tmp/otel-out.json
+            service:
+              pipelines:
+                traces: {receivers: [otlp], exporters: [file]}
+                metrics: {receivers: [otlp], exporters: [file]}
+                logs: {receivers: [otlp], exporters: [file]}
+            """;
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
     static {
@@ -94,6 +111,14 @@ class FullStackIT {
                 .withExposedPorts(8333)
                 .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(2)));
         KAFKA = new KafkaContainer("apache/kafka:4.2.2");
+        COLLECTOR = new GenericContainer<>("otel/opentelemetry-collector-contrib:0.162.0")
+                .withCopyToContainer(org.testcontainers.images.builder.Transferable.of(COLLECTOR_CONFIG),
+                        "/etc/otelcol-contrib/config.yaml")
+                // The image is distroless (no /tmp): provide the output file, writable by the collector's user.
+                .withCopyToContainer(org.testcontainers.images.builder.Transferable.of("", 0666), "/tmp/otel-out.json")
+                .withExposedPorts(4318)
+                .waitingFor(Wait.forLogMessage(".*Everything is ready.*", 1));
+        COLLECTOR.start();
         POSTGRES.start();
         SEAWEED.start();
         KAFKA.start();
@@ -165,6 +190,9 @@ class FullStackIT {
         String pin = KeyMaterial.fingerprint(KEYS.recipient.getPublic());
         r.add("sdh.crypto.keys.recipient.sha256", () -> pin);
         r.add("sdh.crypto.keys.recovery-public", KEYS.recoveryPem::toString);
+        r.add("sdh.telemetry.otlp.endpoint",
+                () -> "http://" + COLLECTOR.getHost() + ":" + COLLECTOR.getMappedPort(4318));
+        r.add("sdh.telemetry.metric-interval", () -> "1s");
         r.add("sdh.queue.type", () -> "kafka");
         r.add("sdh.queue.uri", () -> "kafka:sdh-sections?brokers=" + KAFKA.getBootstrapServers());
     }
@@ -291,5 +319,30 @@ class FullStackIT {
                         .doesNotContain("bad.csv");
             }
         }
+
+        // Telemetry reached the collector over OTLP: traces, metrics and audit events, and none of it holds PHI.
+        String exported = "";
+        long until = System.currentTimeMillis() + 60_000;
+        while (System.currentTimeMillis() < until) {
+            try {
+                exported = COLLECTOR.copyFileFromContainer("/tmp/otel-out.json",
+                        in -> new String(in.readAllBytes(), UTF_8));
+            } catch (Exception notYet) {
+                exported = "";
+            }
+            // Spans are exported in 5 s batches, logs every second, metrics every second here: wait for the last of each.
+            if (exported.contains("\"maintenance\"") && exported.contains("sdh.audit.maintenance.retention")
+                    && exported.contains("sdh.files.failed")) {
+                break;
+            }
+            Thread.sleep(1000);
+        }
+        assertThat(exported).contains("\"ingest.file\"", "\"split.batch\"", "\"storage.commit\"",
+                "\"publish.batch\"", "\"archive\"", "\"maintenance\"",
+                "sdh.audit.file.started", "sdh.audit.batch.committed", "sdh.audit.file.completed",
+                "sdh.audit.file.failed", "sdh.audit.lease.acquired", "sdh.audit.maintenance.retention",
+                "sdh.sections.stored", "sdh.files.completed", "sdh.files.failed", "sdh.commit.duration");
+        assertThat(exported).as("no PHI or filenames in exported telemetry")
+                .doesNotContain(MARKER).doesNotContain("good.csv").doesNotContain("bad.csv");
     }
 }

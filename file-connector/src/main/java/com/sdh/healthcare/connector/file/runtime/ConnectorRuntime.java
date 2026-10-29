@@ -139,8 +139,10 @@ public final class ConnectorRuntime implements AutoCloseable {
                     p.crypto().keys().failedFilesKek(), archiveCommit, retry), clock);
             FileProcessor processor = new FileProcessor(pipeline, sourceArchiver, failedArchiver,
                     new DirectoryOutcomeRecorder(inbound), keys.recovery());
-            LOG.info("connector.started connectorId={} format={} queue={} epoch={}", p.connectorId(), format,
-                    queueType.name().toLowerCase(java.util.Locale.ROOT), lease.epoch());
+            com.sdh.healthcare.connector.core.telemetry.Telemetry.get().audit("connector.started",
+                    com.sdh.healthcare.connector.core.telemetry.Fields.of(
+                                    com.sdh.healthcare.connector.core.telemetry.Attr.FORMAT, format)
+                            .with(com.sdh.healthcare.connector.core.telemetry.Attr.EPOCH, lease.epoch()));
             return new ConnectorRuntime(camel, ds, catalog, lease, publisher, pipeline, processor, sections,
                     sourceFiles, failedFiles, keys, ids, committer);
         } catch (Exception | Error e) {

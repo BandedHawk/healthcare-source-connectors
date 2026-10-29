@@ -11,6 +11,9 @@ import com.sdh.healthcare.connector.core.crypto.MacedJson;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
@@ -28,6 +31,8 @@ import java.util.function.BiConsumer;
 import java.util.function.LongConsumer;
 import javax.crypto.Mac;
 import javax.crypto.SecretKey;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Scope;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionKey;
@@ -142,6 +147,19 @@ public final class Archiver {
      */
     public Result archive(UUID fileId, SeekableByteSource src, Optional<String> originalName,
             BiConsumer<GenericRecord, Instant> summary) throws Exception {
+        Span span = Telemetry.get().span("archive", Fields.of(Attr.FILE_ID, fileId).with(Attr.TABLE, table.name()));
+        try (Scope ignored = span.makeCurrent()) {
+            return archiveTraced(fileId, src, originalName, summary);
+        } catch (Exception | Error e) {
+            Telemetry.fail(span, e);
+            throw e;
+        } finally {
+            span.end();
+        }
+    }
+
+    private Result archiveTraced(UUID fileId, SeekableByteSource src, Optional<String> originalName,
+            BiConsumer<GenericRecord, Instant> summary) throws Exception {
         Optional<ArchiveCheckpoint> stored = checkpoint().filter(c -> c.fileId().equals(fileId));
         if (stored.isPresent() && stored.get().done()) {
             return new Result(stored.get().digest(), stored.get().finishedAt(), -1);
@@ -171,6 +189,7 @@ public final class Archiver {
                 for (long c = block * perBlock; c < Math.min(chunks, (block + 1) * perBlock); c++) {
                     int len = (int) Math.min(chunkSize, Math.max(0, size - c * chunkSize));
                     byte[] plain = src.readFully(c * chunkSize, len);
+                    Telemetry.get().bytesRead(len, "archive");
                     mac.update(plain);
                     batch.chunk(fileId, (int) c, (int) chunks, size, plain);
                     Arrays.fill(plain, (byte) 0);
@@ -204,6 +223,7 @@ public final class Archiver {
 
     private void commit(DataFile file, ArchiveCheckpoint next) throws Exception {
         String encoded = codec.encode(next);
+        long started = System.nanoTime();
         settings.retry().call("archive.commit", RetryPolicy.TRANSIENT_STORAGE, attempt -> {
             if (attempt > 1) {
                 Optional<ArchiveCheckpoint> cur = checkpoint();
@@ -217,6 +237,7 @@ public final class Archiver {
                 tx.updateProperties().set(checkpointKey, encoded).commit();
             });
         });
+        Telemetry.get().commitDuration(System.nanoTime() - started, table.name());
     }
 
     /** One Parquet data file for one commit, with its own batch data key. */

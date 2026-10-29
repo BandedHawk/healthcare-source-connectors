@@ -38,6 +38,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.Scope;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
@@ -132,7 +139,8 @@ public final class IngestPipeline implements AutoCloseable {
         Optional<Checkpoint> cp = checkpoint();
         if (cp.isPresent() && cp.get().state() == Checkpoint.State.SPLITTING) {
             commitCheckpoint(cp.get().withState(Checkpoint.State.ABANDONED));
-            LOG.warn("file.abandoned fileId={} committedSeq={}", cp.get().fileId(), cp.get().committedSeq());
+            Telemetry.get().auditWarn("file.abandoned", Fields.of(Attr.FILE_ID, cp.get().fileId())
+                    .with(Attr.SEQ, cp.get().committedSeq()));
         }
     }
 
@@ -158,8 +166,8 @@ public final class IngestPipeline implements AutoCloseable {
             if (!cp.format().equals(settings.format())) {
                 throw new IllegalStateException("Split format changed while file " + cp.fileId() + " is in progress");
             }
-            LOG.info("file.resumed fileId={} nextSeq={} offset={} publishedSeq={}", cp.fileId(), cp.nextSeq(),
-                    cp.resumeAt().offset(), cp.publishedSeq());
+            Telemetry.get().audit("file.resumed", Fields.of(Attr.FILE_ID, cp.fileId()).with(Attr.SEQ, cp.nextSeq())
+                    .with(Attr.OFFSET, cp.resumeAt().offset()));
         } else {
             if (src.size() > settings.split().limits().maxFileBytes()) {
                 // Rejected before ingestion (design §6.3): no checkpoint, no file.started.
@@ -168,7 +176,8 @@ public final class IngestPipeline implements AutoCloseable {
             cp = Checkpoint.start(UuidV7.next(clock.millis()), fingerprint, settings.format(), src.size(),
                     clock.instant());
             commitCheckpoint(cp);
-            LOG.info("file.started fileId={} format={} size={}", cp.fileId(), cp.format(), cp.fileSize());
+            Telemetry.get().audit("file.started", Fields.of(Attr.FILE_ID, cp.fileId()).with(Attr.FORMAT, cp.format())
+                    .with(Attr.BYTES, cp.fileSize()));
         }
         return run(cp, src);
     }
@@ -207,7 +216,7 @@ public final class IngestPipeline implements AutoCloseable {
             hooks.beforeEndOfFile();
             cp = cp.withState(Checkpoint.State.ARCHIVING);
             commitCheckpoint(cp);
-            LOG.info("file.split fileId={} sections={}", cp.fileId(), cp.sectionCount());
+            Telemetry.get().audit("file.split", Fields.of(Attr.FILE_ID, cp.fileId()).with(Attr.COUNT, cp.sectionCount()));
             return new SplitResult(cp.fileId(), cp.sectionCount(), cp);
         } finally {
             if (batch != null) {
@@ -240,6 +249,7 @@ public final class IngestPipeline implements AutoCloseable {
         private final int maxPending = settings.encryptWorkers() * 4;
         private final UUID fileId;
         private final String format;
+        private final Span span;
         private long lastSeq = -1;
         private long bytes;
         private int count;
@@ -248,6 +258,7 @@ public final class IngestPipeline implements AutoCloseable {
         Batch(UUID fileId, String format) {
             this.fileId = fileId;
             this.format = format;
+            this.span = Telemetry.get().span("split.batch", Fields.of(Attr.FILE_ID, fileId).with(Attr.FORMAT, format));
         }
 
         void add(long seq, Section section, SeekableByteSource src) throws Exception {
@@ -265,6 +276,7 @@ public final class IngestPipeline implements AutoCloseable {
             last = section;
             bytes += len;
             count++;
+            Telemetry.get().bytesRead(section.sourceLength(), "split");
         }
 
         boolean full() {
@@ -286,42 +298,69 @@ public final class IngestPipeline implements AutoCloseable {
         void abandon() {
             pending.forEach(f -> f.cancel(true));
             writer.close();
+            span.setAttribute(Attr.RESULT.key(), "abandoned");
+            span.setStatus(StatusCode.ERROR);
+            span.end();
         }
     }
 
     private BatchOutcome commitBatch(Batch batch, Checkpoint cp, Future<Long> previousPublish) throws Exception {
-        DataFile dataFile = batch.finish();
-        hooks.batchWritten(batch.lastSeq);
-        long published = await(previousPublish, cp.publishedSeq());
-        Checkpoint next = cp.committed(batch.last.resume(), batch.lastSeq, published);
-        String encoded = codec.encode(next);
-        Snapshot snapshot = settings.retry().call("storage.commit", RetryPolicy.TRANSIENT_STORAGE, attempt -> {
-            if (attempt > 1 && alreadyCommitted(next)) {
-                return table.currentSnapshot();
+        Telemetry t = Telemetry.get();
+        try (Scope ignored = batch.span.makeCurrent()) {
+            DataFile dataFile = batch.finish();
+            hooks.batchWritten(batch.lastSeq);
+            long published = await(previousPublish, cp.publishedSeq());
+            Checkpoint next = cp.committed(batch.last.resume(), batch.lastSeq, published);
+            String encoded = codec.encode(next);
+            Span commit = t.span("storage.commit", Fields.of(Attr.TABLE, table.name()).with(Attr.COUNT, batch.count));
+            long started = System.nanoTime();
+            Snapshot snapshot;
+            try (Scope c = commit.makeCurrent()) {
+                snapshot = settings.retry().call("storage.commit", RetryPolicy.TRANSIENT_STORAGE, attempt -> {
+                    if (attempt > 1 && alreadyCommitted(next)) {
+                        return table.currentSnapshot();
+                    }
+                    return committer.commit(table, tx -> {
+                        tx.newFastAppend().appendFile(dataFile).commit();
+                        tx.updateProperties().set(checkpointKey, encoded).commit();
+                    });
+                });
+            } catch (Exception | Error e) {
+                Telemetry.fail(commit, e);
+                throw e;
+            } finally {
+                commit.end();
             }
-            return committer.commit(table, tx -> {
-                tx.newFastAppend().appendFile(dataFile).commit();
-                tx.updateProperties().set(checkpointKey, encoded).commit();
-            });
-        });
-        LOG.info("batch.committed fileId={} lastSeq={} offset={} sections={} snapshotId={}", next.fileId(),
-                next.committedSeq(), next.resumeAt().offset(), batch.count, snapshot.snapshotId());
-        hooks.batchCommitted(batch.lastSeq);
+            t.commitDuration(System.nanoTime() - started, table.name());
+            t.sectionsStored(batch.count, batch.format);
+            t.progress(next.resumeAt().offset(), next.fileSize());
+            t.audit("batch.committed", Fields.of(Attr.FILE_ID, next.fileId()).with(Attr.SEQ, next.committedSeq())
+                    .with(Attr.OFFSET, next.resumeAt().offset()).with(Attr.COUNT, batch.count));
+            batch.span.setAttribute(Attr.SEQ.key(), next.committedSeq());
+            batch.span.setAttribute(Attr.COUNT.key(), batch.count);
+            hooks.batchCommitted(batch.lastSeq);
 
-        LocalDate day = batch.writer.ingestedDate();
-        StorageRef ref = new StorageRef(settings.catalogName(), namespace, tableName, day, snapshot.snapshotId(),
-                batch.writer.kekRef());
-        List<ConnectorMessage> messages = new ArrayList<>(batch.count);
-        for (WrittenSection w : batch.writer.written()) {
-            messages.add(new SectionStored(w.sectionId(), w.fileId(), w.seq(), w.sourceOffset(), w.sourceLength(),
-                    w.format(), w.plaintextLength(), w.chunkCount(), ref));
+            LocalDate day = batch.writer.ingestedDate();
+            StorageRef ref = new StorageRef(settings.catalogName(), namespace, tableName, day, snapshot.snapshotId(),
+                    batch.writer.kekRef());
+            List<ConnectorMessage> messages = new ArrayList<>(batch.count);
+            for (WrittenSection w : batch.writer.written()) {
+                messages.add(new SectionStored(w.sectionId(), w.fileId(), w.seq(), w.sourceOffset(), w.sourceLength(),
+                        w.format(), w.plaintextLength(), w.chunkCount(), ref));
+            }
+            long last = batch.lastSeq;
+            // Carry the trace across to the publishing thread, so publish.batch is a child of this batch.
+            Future<Long> publish = publishing.submit(Context.current().wrap(() -> {
+                publish(messages);
+                return last;
+            }));
+            return new BatchOutcome(next, publish);
+        } catch (Exception | Error e) {
+            Telemetry.fail(batch.span, e);
+            throw e;
+        } finally {
+            batch.span.end();
         }
-        long last = batch.lastSeq;
-        Future<Long> publish = publishing.submit(() -> {
-            publish(messages);
-            return last;
-        });
-        return new BatchOutcome(next, publish);
     }
 
     /** After an ambiguous failure: did a previous attempt of this commit land after all? */
@@ -388,8 +427,8 @@ public final class IngestPipeline implements AutoCloseable {
             messages.add(new SectionStored(r.sectionId(), cp.fileId(), r.seq(), r.sourceOffset(), r.sourceLength(),
                     r.format(), r.plaintextLength(), r.chunkCount(), ref));
         }
-        LOG.info("publish.republish fileId={} fromSeq={} toSeq={}", cp.fileId(), cp.publishedSeq() + 1,
-                cp.committedSeq());
+        Telemetry.get().audit("publish.republish", Fields.of(Attr.FILE_ID, cp.fileId())
+                .with(Attr.SEQ, cp.publishedSeq() + 1).with(Attr.COUNT, messages.size()));
         publish(messages);
     }
 
@@ -398,6 +437,22 @@ public final class IngestPipeline implements AutoCloseable {
      * whose send fails are retried one by one with backoff.
      */
     private void publish(List<ConnectorMessage> messages) throws Exception {
+        Telemetry t = Telemetry.get();
+        Span span = t.span("publish.batch", Fields.of(Attr.COUNT, messages.size()));
+        long started = System.nanoTime();
+        try (Scope ignored = span.makeCurrent()) {
+            sendAll(messages);
+        } catch (Exception | Error e) {
+            Telemetry.fail(span, e instanceof PublishFailedException ? ErrorCode.PUBLISH_FAILED : null);
+            throw e;
+        } finally {
+            span.end();
+        }
+        t.publishDuration(System.nanoTime() - started);
+        t.sectionsPublished(messages.stream().filter(SectionStored.class::isInstance).count());
+    }
+
+    private void sendAll(List<ConnectorMessage> messages) throws Exception {
         List<CompletableFuture<byte[]>> sealed = new ArrayList<>(messages.size());
         for (ConnectorMessage m : messages) {
             sealed.add(CompletableFuture.supplyAsync(() -> sealer.seal(m), workers));
