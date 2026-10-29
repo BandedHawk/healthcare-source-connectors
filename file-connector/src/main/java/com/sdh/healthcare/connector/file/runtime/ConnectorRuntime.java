@@ -234,6 +234,7 @@ public final class ConnectorRuntime implements AutoCloseable {
         }
         pipeline.close();
         publisher.close();
+        keys.close();
         closeQuietly(lease);
         closeQuietly(catalog);
         closeQuietly(dataSource);

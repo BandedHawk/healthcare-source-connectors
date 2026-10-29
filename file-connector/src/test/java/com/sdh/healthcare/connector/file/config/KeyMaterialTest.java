@@ -19,12 +19,20 @@ class KeyMaterialTest {
     Path dir;
 
     static ConnectorProperties.Crypto crypto(TestKeys k, String recipientPin, Path signingPem) throws Exception {
-        return new ConnectorProperties.Crypto("local", "local",
+        return crypto(k, recipientPin, signingPem, "local", "local", null);
+    }
+
+    static ConnectorProperties.Crypto crypto(TestKeys k, String recipientPin, Path signingPem, String wrap,
+            String sign, String signingKeyRef) {
+        return new ConnectorProperties.Crypto(wrap, sign,
                 new ConnectorProperties.Keystore(k.keystore, TestKeys.KS_PASSWORD),
                 new ConnectorProperties.Keys(TestKeys.SECTIONS, TestKeys.SOURCE, TestKeys.FAILED,
-                        new ConnectorProperties.Signing("connector-2026", signingPem, TestKeys.SIGNING_PASSPHRASE),
+                        new ConnectorProperties.Signing("connector-2026", signingPem, TestKeys.SIGNING_PASSPHRASE,
+                                signingKeyRef),
                         new ConnectorProperties.Recipient("downstream-2026", k.recipientPem, recipientPin),
-                        k.recoveryPem));
+                        k.recoveryPem),
+                new ConnectorProperties.Aws(null, null), new ConnectorProperties.Gcp(null),
+                new ConnectorProperties.Vault(null, null, null, "transit", null));
     }
 
     @Test
@@ -65,8 +73,9 @@ class KeyMaterialTest {
                 .isInstanceOf(GeneralSecurityException.class).hasMessageContaining("encrypted");
 
         ConnectorProperties.Crypto c = crypto(k, pin, k.signingPem);
-        assertThatThrownBy(() -> KeyMaterial.load(new ConnectorProperties.Crypto("aws-kms", "local", c.keystore(),
-                c.keys()))).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("local");
+        assertThatThrownBy(() -> KeyMaterial.load(new ConnectorProperties.Crypto("hsm-x", "local", c.keystore(),
+                c.keys(), c.aws(), c.gcp(), c.vault()))).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Unknown key provider");
     }
 
     @Test

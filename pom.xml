@@ -14,6 +14,7 @@
     <module>connector-contract</module>
     <module>connector-core</module>
     <module>connector-queue-reader</module>
+    <module>connector-kms</module>
     <module>file-connector</module>
   </modules>
 
@@ -41,6 +42,12 @@
     <testcontainers.version>2.0.5</testcontainers.version>
     <!-- Same as Spring Boot 4.1.2 manages, so connector-core's API matches the app's SDK. -->
     <opentelemetry.version>1.62.0</opentelemetry.version>
+    <!-- KMS clients (connector-kms), chosen to match what Camel already brings: AWS SDK line, gax 2.83, azure-core 1.57. -->
+    <awssdk.version>2.50.2</awssdk.version>
+    <google-cloud-kms.version>2.98.0</google-cloud-kms.version>
+    <azure-keyvault-keys.version>4.10.6</azure-keyvault-keys.version>
+    <azure-identity.version>1.18.1</azure-identity.version>
+    <lowkey-vault.version>7.3.112</lowkey-vault.version>
   </properties>
 
   <dependencyManagement>
@@ -65,6 +72,40 @@
         <version>${opentelemetry.version}</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${awssdk.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>com.google.cloud</groupId>
+        <artifactId>google-cloud-kms-bom</artifactId>
+        <version>${google-cloud-kms.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-security-keyvault-keys</artifactId>
+        <version>${azure-keyvault-keys.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-identity</artifactId>
+        <version>${azure-identity.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.github.nagyesta.lowkey-vault</groupId>
+        <artifactId>lowkey-vault-testcontainers</artifactId>
+        <version>${lowkey-vault.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sdh.healthcare</groupId>
+        <artifactId>connector-kms</artifactId>
+        <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>org.testcontainers</groupId>

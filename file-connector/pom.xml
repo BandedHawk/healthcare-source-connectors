@@ -16,8 +16,6 @@
     <!-- Iceberg 1.12.0 is built against Jackson 2.22.2; Boot 4.1.2 would downgrade it to 2.21.x.
          Spring itself uses Jackson 3, so pinning Jackson 2 here only affects Iceberg. -->
     <jackson2.version>2.22.2</jackson2.version>
-    <!-- Same AWS SDK line Camel's SQS component is built with, so all SDK modules match. -->
-    <awssdk.version>2.50.2</awssdk.version>
   </properties>
 
   <dependencyManagement>
@@ -37,13 +35,6 @@
         <scope>import</scope>
       </dependency>
       <dependency>
-        <groupId>software.amazon.awssdk</groupId>
-        <artifactId>bom</artifactId>
-        <version>${awssdk.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
-      <dependency>
         <groupId>org.apache.camel.springboot</groupId>
         <artifactId>camel-spring-boot-bom</artifactId>
         <version>${camel.version}</version>
@@ -57,6 +48,10 @@
     <dependency>
       <groupId>com.sdh.healthcare</groupId>
       <artifactId>connector-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.sdh.healthcare</groupId>
+      <artifactId>connector-kms</artifactId>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -207,6 +202,23 @@
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>testcontainers-mssqlserver</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-vault</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.github.nagyesta.lowkey-vault</groupId>
+      <artifactId>lowkey-vault-testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Lowkey's client factory (emulator certificate, auth) lives here; optional in the Testcontainers module. -->
+    <dependency>
+      <groupId>com.github.nagyesta.lowkey-vault</groupId>
+      <artifactId>lowkey-vault-client</artifactId>
+      <version>${lowkey-vault.version}</version>
       <scope>test</scope>
     </dependency>
     <!-- Testcontainers checks SQL Server (the Service Bus emulator's store) is ready over JDBC. -->

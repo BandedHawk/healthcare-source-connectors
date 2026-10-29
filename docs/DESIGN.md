@@ -25,6 +25,8 @@ Revision 2026-10-28 (h): built table maintenance (§8.4): retention, compaction,
 
 Revision 2026-10-28 (i): built observability (§12): OpenTelemetry traces, metrics and audit events, exported over OTLP through PHI filters, and checked end to end against a real collector.
 
+Revision 2026-10-28 (j): built the cloud key providers (§7.4) in a new `connector-kms` module: AWS KMS, Google Cloud KMS, Azure Key Vault and Vault Transit, for wrapping and for ES256 signing. Each is tested against an emulator or, for GCP, a fake KMS (§15.1).
+
 ---
 
 ## 1. Purpose
@@ -55,7 +57,8 @@ All versions were checked against Maven Central on 2026-10-28.
 | Jackson 2 | 2.22.2 | Used by Iceberg only (Spring uses Jackson 3). Pinned in `file-connector`, because Boot 4.1.2 would downgrade it to 2.21.x |
 | Nimbus JOSE+JWT | 10.10 | JWS/JWE message encryption and signing |
 | PostgreSQL | any supported | Lease store (§9.3). Can be the JDBC catalog's database. Driver 42.7.14, HikariCP (Boot-managed, pool of 2) |
-| AWS SDK v2 | 2.50.2 | `s3`, `apache-client` and `kms` for Iceberg's `S3FileIO` (`iceberg-aws`). `kms` is needed even without SSE-KMS: `AwsProperties` loads KMS model classes on startup. Same line as Camel's SQS client, imported as a BOM in `file-connector` |
+| AWS SDK v2 | 2.50.2 | `s3`, `apache-client` and `kms` for Iceberg's `S3FileIO` (`iceberg-aws`). `kms` is needed even without SSE-KMS: `AwsProperties` loads KMS model classes on startup. Same line as Camel's SQS client, imported as a BOM in the parent POM |
+| KMS clients | `google-cloud-kms` 2.98.0, `azure-security-keyvault-keys` 4.10.6, `azure-identity` 1.18.1 | `connector-kms` (§7.4). Chosen to match the versions Camel already brings (gax 2.83, gRPC 1.8x, azure-core 1.57), so nothing shared is upgraded underneath Camel. Vault Transit uses the JDK HTTP client |
 | Testcontainers | 2.0.5 | `-Pit` only, run by Failsafe 3.6.1 (§15) |
 | OpenTelemetry | 1.62.0 (Boot-managed) | `connector-core` uses the API only; `file-connector` gets the SDK from `spring-boot-starter-opentelemetry` and exports over OTLP/HTTP with its own filtered exporters (§12) |
 | Maven | 3.9.16 via Maven Wrapper | The local install is 3.8.7 |
@@ -78,6 +81,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │       ├── crypto/       KeyProvider SPI, section key derivation, chunk encryption
 │       └── table/        sections table schema, partition spec, sort order
 ├── connector-queue-reader/              library jar for consumers (§10.2); depends on contract only
+├── connector-kms/                       library jar: KMS KeyProviders (§7.4); used by file-connector, optional for readers
 │   └── com.sdh.healthcare.connector.reader
 ├── connector-core/                      library jar (no main class)
 │   └── com.sdh.healthcare.connector.core
@@ -271,26 +275,52 @@ Using a separate KEK per table lets the retrieving system be given decrypt right
 - Identical content in different files gets the same ID and is treated by downstream as a duplicate. This is accepted, and documented for CSV providers.
 - The `idKey` is never rotated: rotating it would break dedup. Losing it breaks dedup only, not decryption.
 
-### 7.4 KeyProvider SPI
+### 7.4 KeyProvider SPI (built)
 
 ```java
 public interface KeyProvider {
     WrappedKey wrap(String keyRef, byte[] dataKey);
     byte[] unwrap(WrappedKey wrapped);
-    byte[] sign(String keyRef, byte[] digest);        // ES256
+    byte[] sign(String keyRef, byte[] digest);        // ES256, raw r‖s
     PublicKey publicKey(String keyRef);
 }
 ```
 
-Implementations: `aws-kms`, `gcp-kms`, `azure-keyvault`, `vault-transit`, and `local`. **Only `local` is built so far**; any other value fails startup with a clear message.
+Wrapping (the three KEKs) and signing are configured independently (`sdh.crypto.wrap-provider`, `sign-provider`), each one of the following. The KMS providers live in `connector-kms`, so downstream readers can use the same class to unwrap (§10.2).
 
-- **`local`** (`KeyMaterial` in `file-connector`): a PKCS#12 keystore whose entries are AES-256 secret keys, with entry aliases as the KEK refs. Plus PEM files for the signing key, the recipient key and the recovery key. The sections KEK must differ from the two archive KEKs. The signing key must be EC P-256. Encrypted PKCS#8 is read with the JDK alone, using PBES2 as written by `openssl pkcs8 -topk8 -v2 aes-256-cbc`; a test checks this against a real OpenSSL-generated key.
-- **One recipient at a time:** messages are sealed to a single configured recipient. Rotation means switching `kid`; readers accept several keys meanwhile (§10.2).
-- **Mixing providers:** wrapping and signing providers are configured independently, so a KMS can be used for one and PEM for the other.
-- **Protections in `local` mode:**
+| Provider | Wrap / unwrap | Sign (ES256) | Key ref | Recorded `kek_ref` |
+|---|---|---|---|---|
+| `local` | AES key wrap with AES-256 keys from a PKCS#12 keystore | encrypted PKCS#8 PEM (EC P-256) | keystore alias | alias |
+| `aws-kms` | `Encrypt`/`Decrypt`, symmetric key, encryption context `sdh:purpose=sdh-batch-data-key` | `Sign`, `ECC_NIST_P256`, digest; DER → raw | key ID, ARN or alias | the key ARN KMS used (resolves aliases) |
+| `gcp-kms` | `Encrypt`/`Decrypt`, symmetric key, AAD `sdh-batch-data-key`; CRC32C checked both ways | `AsymmetricSign`, `EC_SIGN_P256_SHA256` key version; DER → raw | `projects/…/cryptoKeys/<k>` (sign: `…/cryptoKeyVersions/<n>`) | the key version that encrypted |
+| `azure-keyvault` | `wrapKey`/`unwrapKey`, `RSA-OAEP-256` on an RSA key (Key Vault wraps only with RSA; AES on Managed HSM) | `sign` ES256 on an EC P-256 key (already raw) | key identifier URL, versioned or not | versioned key ID |
+| `vault-transit` | `encrypt`/`decrypt` on `aes256-gcm96`, associated data `sdh-batch-data-key` | `sign/<k>/sha2-256`, `prehashed`, `marshaling_algorithm=jws` on `ecdsa-p256` | transit key name | key name (`vault:v<n>:` in the value keeps the version) |
+
+**Credentials:**
+- **AWS:** the default provider chain; optional `sdh.crypto.aws.region` and `endpoint` (e.g. a VPC endpoint).
+- **GCP:** Application Default Credentials; optional `sdh.crypto.gcp.endpoint` (a regional endpoint).
+- **Azure:** `DefaultAzureCredential` (managed or workload identity, environment).
+- **Vault:** `sdh.crypto.vault.address`, `mount` (default `transit`), optional `namespace`, plus a token, either `token` (from the environment) or `token-file`. The file is re-read on every request, so a Vault Agent sidecar can rotate it. Other Vault auth methods (Kubernetes, AppRole) are expected to run through Vault Agent.
+
+**Startup checks** (`KeyMaterial`):
+- **KEKs:** every KEK is probed with a wrap and unwrap of a throwaway key, so a missing key or permission stops startup with a message naming the KEK.
+- **Signing key:** a KMS signing key must be EC P-256. A probe JWS is signed through the KMS and verified with the key's public half. Its SHA-256 fingerprint is logged (`crypto.signing_key`) for configuring readers.
+- **Separate KEKs:** the sections KEK must differ from the archive KEKs.
+- **Client lifecycle:** KMS clients are closed on shutdown.
+
+**Signing through a KMS:** `KmsJwsSigner` (a Nimbus `JWSSigner`) sends the SHA-256 digest of the JWS signing input to `KeyProvider.sign`, so the private key never leaves the KMS. `MessageSealer` uses it like any other signer.
+
+**Failures:** KMS errors carry the KMS's own message, which names keys and requests, never data. During ingest they count as storage failures (§11). If the failed-files KEK is unreachable, the file goes to the local fallback.
+
+**Local mode:**
+- **Keystore:** a PKCS#12 keystore whose entries are AES-256 secret keys, with entry aliases as the KEK refs. Plus PEM files for the signing key, the recipient key and the recovery key.
+- **Encrypted PEMs:** encrypted PKCS#8 is read with the JDK alone, using PBES2 as written by `openssl pkcs8 -topk8 -v2 aes-256-cbc`; a test checks this against a real OpenSSL-generated key.
+- **Protections:**
   - The service refuses to start if the keystore or signing key file is accessible by group or others. Public key files are not checked.
   - Private PEMs must be encrypted PKCS#8, with the passphrase supplied from an environment variable or mounted secret.
   - Recipient PEM fingerprints must match the pinned values.
+
+**Recipients:** messages are sealed to a single configured recipient. Rotation means switching `kid`; readers accept several keys meanwhile (§10.2). The recipient and recovery keys are always public PEMs: the connector only encrypts to them.
 
 ### 7.5 PHI hygiene
 
@@ -780,14 +810,18 @@ sdh:
     renew-interval: 15s
     safety-margin: 10s
   crypto:
-    wrap-provider: local          # only local is built so far
-    sign-provider: local
-    keystore: { path: /run/secrets/keks.p12 }               # password: SDH_CRYPTO_KEYSTORE_PASSWORD
+    wrap-provider: local          # local | aws-kms | gcp-kms | azure-keyvault | vault-transit (§7.4)
+    sign-provider: local          # same choices, independently
+    keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
     keys:
-      sections-kek: sections-kek/1                          # keystore alias
+      sections-kek: sections-kek/1                          # keystore alias, or the KMS key ref
       source-files-kek: source-files-kek/1
       failed-files-kek: failed-files-kek/1
-      signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # passphrase: env
+      signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
+      # signing: { kid: connector-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
+    aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
+    gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC
+    vault: { address: "https://vault:8200", token-file: /vault/secrets/token, mount: transit }   # vault-transit
       recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
       recovery-public: /run/secrets/recovery-public.pem
   queue:
@@ -838,6 +872,9 @@ Compared with the earlier sketch:
 | `PubSubIT` | `gcr.io/google.com/cloudsdktool/google-cloud-cli:590.0.0-emulators` | Ordering key with message ordering enabled, attributes |
 | `ServiceBusIT` | `mcr.microsoft.com/azure-messaging/servicebus-emulator:2.0.0` + `mssql/server:2022-CU26-ubuntu-22.04` | Sessions per file in order, and duplicates dropped by MessageId. The emulator caps the dedup window at 5 min |
 | `EventHubsIT` | `mcr.microsoft.com/azure-messaging/eventhubs-emulator:2.2.0` + `azurite:3.35.0` | Each file in one partition, in order |
+| `AwsKmsIT` | `nsmithuk/local-kms:3.11.7` | `aws-kms` through `KeyMaterial.load`: KEK probes; an alias-referenced KEK records the real key ARN; tag tampering refused; a message signed through KMS opens with the KMS public key. local-kms replaces LocalStack (no account token) |
+| `AzureKeyVaultIT` | `nagyesta/lowkey-vault:7.3.112` | `azure-keyvault`: RSA-OAEP-256 wrapping records the versioned key ID; ES256 through Key Vault. Emulator workarounds, test-only: (1) versioned key IDs, because Lowkey rejects `wrapKey` on an unversioned ID, which real Key Vault accepts; (2) the KEK also gets `encrypt`/`decrypt`; (3) under minikube the client goes to the VM's IP, which isn't in Lowkey's certificate, so the test client trusts only self-signed certificates and skips hostname verification |
+| `VaultTransitIT` | `hashicorp/vault:2.1.1` (dev mode) | `vault-transit` built purely from connector settings (address, token file): wrap with associated data, ES256 signing, message round trip; a wrong token fails startup naming the KEK and HTTP 403 |
 
 **Running it on minikube with KVM2:** use `scripts/it-minikube.sh`, which needs no local Docker daemon. The script:
 - creates or starts a dedicated single-node profile `sdh-it` (`--driver=kvm2 --container-runtime=docker --no-kubernetes`, 6 CPUs, 12 GB, 60 GB disk; override with `SDH_IT_*`);
@@ -857,7 +894,9 @@ Compared with the earlier sketch:
 
 **Time:** with images cached in the VM, the whole build (114 unit tests + 8 ITs) takes about 1 min 45 s. The first run pulls several GB of images.
 
-**Not covered yet:** KMS and Vault, until those key providers exist; an Iceberg REST catalog (Polaris) container; throughput tests.
+**GCP Cloud KMS** has no emulator. `GcpKmsKeyProviderTest` (a unit test in `connector-kms`) runs the provider against an in-process fake of the Cloud KMS gRPC service: real AES-GCM with the AAD enforced, real ECDSA, and the CRC32C integrity fields. It checks our side of the protocol, not Google's service.
+
+**Not covered yet:** an Iceberg REST catalog (Polaris) container; throughput tests; GCP KMS against the real service.
 
 ## 16. Risks and verification items
 
@@ -871,9 +910,9 @@ These are checked first, in a build spike before the full implementation. Spike 
 | 4 | Custom compaction | **Built** | Bin-pack via `RewriteFiles` + `validateFromSnapshot` through the fenced committer (§8.4). Findings: snapshot expiry must run standalone to delete files physically; and Iceberg deletes a removed file only once the snapshot that removed it has expired, so retention adds a marker commit to purge at once |
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |
 | 6 | New: fencing on REST and JDBC catalogs | **Passed** | Plain Iceberg transactions are not fenced, which the control test demonstrates. The compare-and-swap committer with snapshot markers is (§9.3) |
-| 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. Not covered: MinIO (images no longer published), KMS and Vault (providers not built), a REST catalog container |
+| 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. KMS providers: AWS (local-kms), Azure (Lowkey Vault) and Vault pass; GCP runs against a fake. Not covered: MinIO (images no longer published), a REST catalog container |
 
-**Spike follow-ups:** add KMS/Vault and REST-catalog ITs when those pieces exist. Check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
+**Spike follow-ups:** add a REST-catalog IT. Check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
 
 ## 17. Out of scope (for now)
 

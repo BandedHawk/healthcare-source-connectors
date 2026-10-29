@@ -60,8 +60,29 @@ public record ConnectorProperties(
 
     public record Jdbc(String url, String username, String password, @DefaultValue("sdh_lease") String table) {}
 
+    /**
+     * @param wrapProvider who wraps batch data keys with the KEKs: {@code local}, {@code aws-kms}, {@code gcp-kms},
+     *                     {@code azure-keyvault} or {@code vault-transit}
+     * @param signProvider who holds the message signing key, same choices
+     */
     public record Crypto(@DefaultValue("local") String wrapProvider, @DefaultValue("local") String signProvider,
-            @DefaultValue Keystore keystore, @DefaultValue Keys keys) {}
+            @DefaultValue Keystore keystore, @DefaultValue Keys keys, @DefaultValue Aws aws, @DefaultValue Gcp gcp,
+            @DefaultValue Vault vault) {}
+
+    /** AWS KMS. Credentials from the default AWS chain. @param endpoint override, e.g. a VPC endpoint */
+    public record Aws(String region, java.net.URI endpoint) {}
+
+    /** Google Cloud KMS. Credentials from Application Default Credentials. @param endpoint e.g. a regional endpoint */
+    public record Gcp(String endpoint) {}
+
+    /**
+     * Vault (or OpenBao) Transit.
+     *
+     * @param token     a token (from the environment), or
+     * @param tokenFile a file holding one, re-read on every request (e.g. written by Vault Agent)
+     */
+    public record Vault(java.net.URI address, String token, Path tokenFile, @DefaultValue("transit") String mount,
+            String namespace) {}
 
     /** PKCS#12 keystore holding the AES-256 KEKs; entry aliases are the KEK refs. */
     public record Keystore(Path path, String password) {}
@@ -69,8 +90,11 @@ public record ConnectorProperties(
     public record Keys(String sectionsKek, String sourceFilesKek, String failedFilesKek, @DefaultValue Signing signing,
             @DefaultValue Recipient recipient, Path recoveryPublic) {}
 
-    /** EC P-256 private key as an encrypted PKCS#8 PEM. */
-    public record Signing(@DefaultValue("connector") String kid, Path pem, String passphrase) {}
+    /**
+     * The ES256 signing key: for {@code local}, an encrypted PKCS#8 PEM ({@code pem}, {@code passphrase}); for a KMS,
+     * the key's reference ({@code keyRef}: AWS key ID/ARN/alias, GCP key version name, Azure key ID, Vault key name).
+     */
+    public record Signing(@DefaultValue("connector") String kid, Path pem, String passphrase, String keyRef) {}
 
     /** Recipient public key PEM, pinned by the SHA-256 of its SubjectPublicKeyInfo (hex). */
     public record Recipient(String kid, Path pem, String sha256) {}
