@@ -35,7 +35,13 @@ public record ConnectorProperties(
             @DefaultValue("5s") Duration pollInterval, @DefaultValue("*") String include) {}
 
     /** @param options format options as in design §6.2, e.g. {@code csv.header}, {@code namespace} */
-    public record Split(String format, String boundary, Map<String, String> options, @DefaultValue Limits limits) {}
+    /**
+     * @param convert          convert sections to JSON where the format has a converter (design §6.4): csv, ccda, x12,
+     *                         edifact. FHIR, generic XML and delimited sections are always stored as split.
+     * @param convertMaxBytes  larger sections aren't converted and are stored in their original form as failed
+     */
+    public record Split(String format, String boundary, Map<String, String> options, @DefaultValue Limits limits,
+            @DefaultValue("true") boolean convert, @DefaultValue("64MB") DataSize convertMaxBytes) {}
 
     /** Null values keep the format's defaults (design §6.3). */
     public record Limits(DataSize maxFileBytes, DataSize maxSectionBytes, Long maxSectionsPerFile) {}

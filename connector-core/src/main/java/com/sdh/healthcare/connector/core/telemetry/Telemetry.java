@@ -37,6 +37,7 @@ public final class Telemetry {
     private final LongCounter sectionsPublished;
     private final LongCounter filesCompleted;
     private final LongCounter filesFailed;
+    private final LongCounter sectionsFailed;
     private final DoubleHistogram commitDuration;
     private final DoubleHistogram publishDuration;
     private final AtomicLong filesInProgress = new AtomicLong();
@@ -55,6 +56,9 @@ public final class Telemetry {
                 .setDescription("section.stored messages acknowledged by the broker").build();
         filesCompleted = meter.counterBuilder("sdh.files.completed").build();
         filesFailed = meter.counterBuilder("sdh.files.failed").setDescription("By error code and stage").build();
+        sectionsFailed = meter.counterBuilder("sdh.sections.failed")
+                .setDescription("Sections stored in their original form after failing conversion, by error code")
+                .build();
         commitDuration = meter.histogramBuilder("sdh.commit.duration").setUnit("s").build();
         publishDuration = meter.histogramBuilder("sdh.publish.duration").setUnit("s").build();
         meter.gaugeBuilder("sdh.files.in_progress").ofLongs()
@@ -138,6 +142,10 @@ public final class Telemetry {
 
     public void sectionsPublished(long n) {
         sectionsPublished.add(n);
+    }
+
+    public void sectionFailed(ErrorCode code, String format) {
+        sectionsFailed.add(1, Fields.of(Attr.ERROR_CODE, code).with(Attr.FORMAT, format).toAttributes());
     }
 
     public void fileCompleted() {

@@ -1,5 +1,7 @@
 package com.sdh.healthcare.connector.core.storage;
 
+import com.sdh.healthcare.connector.core.convert.Representation;
+import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import static com.sdh.healthcare.connector.contract.table.SectionsTable.*;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
@@ -48,8 +50,14 @@ public final class SectionBatchWriter implements AutoCloseable {
 
     public record SectionInput(UUID fileId, long seq, long sourceOffset, String format, byte[] plaintext) {}
 
+    /**
+     * @param representation what the stored bytes are (design §6.4)
+     * @param error          set when conversion failed and the section is stored in its original form
+     * @param errorPosition  where in the section conversion failed; -1 without an error. Not stored: for audit only.
+     */
     public record WrittenSection(String sectionId, UUID fileId, long seq, long sourceOffset, long sourceLength,
-            String format, long plaintextLength, int chunkCount) {}
+            String format, Representation representation, ErrorCode error, long errorPosition, long plaintextLength,
+            int chunkCount) {}
 
     private final Table table;
     private final SectionIds ids;
@@ -100,7 +108,7 @@ public final class SectionBatchWriter implements AutoCloseable {
         return wrapped.keyRef();
     }
 
-    /** Spike/test convenience: a section given as bytes in memory. */
+    /** Spike/test convenience: a section given as bytes in memory, stored as split. */
     public WrittenSection add(SectionInput in) {
         long len = in.plaintext().length;
         Section section = new Section(in.sourceOffset(), len, List.of(new Section.SourceRange(0, len)),
@@ -116,7 +124,7 @@ public final class SectionBatchWriter implements AutoCloseable {
     public record EncryptedSection(WrittenSection section, List<byte[]> chunks) {}
 
     /**
-     * Reads, hashes and encrypts a section of at most one chunk. Thread-safe, so the pipeline runs it on a
+     * Reads, hashes and encrypts a section of at most one chunk, as split. Thread-safe, so the pipeline runs it on a
      * worker pool; the result is then passed to {@link #write} on the writer thread.
      */
     public EncryptedSection encryptSmall(UUID fileId, long seq, String format, Section section,
@@ -129,12 +137,40 @@ public final class SectionBatchWriter implements AutoCloseable {
         if (plain.length != len) {
             throw new IOException("Source ended inside a section");
         }
+        return encrypt(fileId, seq, format, section, plain, Representation.raw(format), null, -1);
+    }
+
+    /**
+     * Hashes and encrypts section bytes already in memory (converted JSON, or the original after a failed conversion)
+     * of at most one chunk. {@code lineage} gives the section's place in the original file. Thread-safe; wipes
+     * {@code plain}.
+     */
+    public EncryptedSection encrypt(UUID fileId, long seq, String format, Section lineage, byte[] plain,
+            Representation rep, ErrorCode error, long errorPosition) {
+        if (SectionCrypto.chunkCount(plain.length) != 1) {
+            throw new IllegalArgumentException("Section spans more than one chunk");
+        }
         try {
             String sectionId = SectionIds.encode(ids.newMac().doFinal(plain));
             SecretKey key = SectionCrypto.sectionKey(bdk, fileId, seq);
             byte[] ct = SectionCrypto.encryptChunk(key, fileId, seq, 0, 1, plain);
-            return new EncryptedSection(new WrittenSection(sectionId, fileId, seq, section.sourceOffset(),
-                    section.sourceLength(), format, len, 1), List.of(ct));
+            return new EncryptedSection(new WrittenSection(sectionId, fileId, seq, lineage.sourceOffset(),
+                    lineage.sourceLength(), format, rep, error, errorPosition, plain.length, 1), List.of(ct));
+        } finally {
+            Arrays.fill(plain, (byte) 0);
+        }
+    }
+
+    /** Stores section bytes held in memory, of any size. Writer thread only; wipes {@code plain}. */
+    public WrittenSection addBytes(UUID fileId, long seq, String format, Section lineage, byte[] plain,
+            Representation rep, ErrorCode error, long errorPosition) throws IOException {
+        if (SectionCrypto.chunkCount(plain.length) == 1) {
+            return write(encrypt(fileId, seq, format, lineage, plain, rep, error, errorPosition));
+        }
+        try {
+            Section inMemory = new Section(lineage.sourceOffset(), lineage.sourceLength(),
+                    List.of(new Section.SourceRange(0, plain.length)), lineage.resume());
+            return add(fileId, seq, format, inMemory, SeekableByteSource.of(plain), rep, error, errorPosition);
         } finally {
             Arrays.fill(plain, (byte) 0);
         }
@@ -160,10 +196,20 @@ public final class SectionBatchWriter implements AutoCloseable {
      */
     public WrittenSection add(UUID fileId, long seq, String format, Section section, SeekableByteSource src)
             throws IOException {
+        return add(fileId, seq, format, section, src, Representation.raw(format), null, -1);
+    }
+
+    /** As {@link #add(UUID, long, String, Section, SeekableByteSource)}, stating what the bytes are. */
+    public WrittenSection add(UUID fileId, long seq, String format, Section section, SeekableByteSource src,
+            Representation rep, ErrorCode error, long errorPosition) throws IOException {
         long len = section.plaintextLength();
         int chunkCount = SectionCrypto.chunkCount(len);
         if (chunkCount == 1) {
-            return write(encryptSmall(fileId, seq, format, section, src));
+            byte[] plain = section.readAll(src);
+            if (plain.length != len) {
+                throw new IOException("Source ended inside a section");
+            }
+            return write(encrypt(fileId, seq, format, section, plain, rep, error, errorPosition));
         }
         byte[] buf = new byte[SectionCrypto.CHUNK_SIZE];
         try {
@@ -175,7 +221,7 @@ public final class SectionBatchWriter implements AutoCloseable {
             }
             byte[] digest = first.doFinal();
             WrittenSection ws = new WrittenSection(SectionIds.encode(digest), fileId, seq, section.sourceOffset(),
-                    section.sourceLength(), format, len, chunkCount);
+                    section.sourceLength(), format, rep, error, errorPosition, len, chunkCount);
             SecretKey key = SectionCrypto.sectionKey(bdk, fileId, seq);
             Mac second = ids.newMac();
             try (InputStream in = section.open(src)) {
@@ -221,6 +267,9 @@ public final class SectionBatchWriter implements AutoCloseable {
         r.setField(KEK_REF, wrapped.keyRef());
         r.setField(BATCH_ID, batchId);
         r.setField(INGESTED_AT, ingestedAt);
+        r.setField(CONTENT_TYPE, ws.representation().contentType());
+        r.setField(MAPPING, ws.representation().mapping());
+        r.setField(ERROR_CODE, ws.error() == null ? null : ws.error().name());
         writer.write(r);
     }
 

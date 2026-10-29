@@ -317,7 +317,7 @@ class PolarisIT {
             assertThat(sections).hasSize(30);
             for (SectionStored s : sections) {
                 assertThat(new String(reader.readSection(s, 1 << 20), UTF_8))
-                        .isEqualTo(header + records.get((int) s.seq()));
+                        .isEqualTo(ItSupport.csvRowJson(records.get((int) s.seq())));
             }
             FileCompleted done = msgs.stream().filter(FileCompleted.class::isInstance)
                     .map(FileCompleted.class::cast).findFirst().orElseThrow();
@@ -355,7 +355,7 @@ class PolarisIT {
                 assertThat(keys(dataPrefix)).doesNotContain(stray);
                 for (SectionStored s : sections) {
                     assertThat(new String(reader.readSection(s, 1 << 20), UTF_8))
-                            .isEqualTo(header + records.get((int) s.seq()));
+                            .isEqualTo(ItSupport.csvRowJson(records.get((int) s.seq())));
                 }
                 var purge = new TableMaintenance(runtime.committer(), MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))

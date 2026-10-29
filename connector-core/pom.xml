@@ -112,5 +112,57 @@
       <artifactId>opentelemetry-sdk-testing</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- Throughput runs on S3 (-Pperf -Dperf.storage=s3): S3FileIO against SeaweedFS in Docker. -->
+    <dependency>
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-aws</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <scope>test</scope>
+      <exclusions>
+        <!-- The async (Netty) client: S3FileIO uses the Apache client. Excluded from kms below too. -->
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>netty-nio-client</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>apache-client</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <!-- Iceberg's AwsProperties needs the KMS model classes even without SSE-KMS (design §2). -->
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>kms</artifactId>
+      <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>netty-nio-client</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <!-- Iceberg's AwsProperties also references STS model classes when S3FileIO starts. -->
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>sts</artifactId>
+      <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>netty-nio-client</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 </project>

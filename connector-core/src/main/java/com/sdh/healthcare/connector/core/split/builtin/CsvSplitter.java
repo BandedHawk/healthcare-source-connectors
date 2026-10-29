@@ -34,7 +34,8 @@ public final class CsvSplitter implements SectionSplitter {
         delimiter(cfg);
     }
 
-    private static byte delimiter(SplitConfig cfg) {
+    /** The configured delimiter; also used by the CSV converter. */
+    public static char delimiter(SplitConfig cfg) {
         String d = cfg.option("csv.delimiter", ",");
         if (d.equals("\\t")) {
             d = "\t";
@@ -42,13 +43,13 @@ public final class CsvSplitter implements SectionSplitter {
         if (d.length() != 1 || d.charAt(0) > 0x7f || d.charAt(0) == '"' || d.charAt(0) == '\n') {
             throw new IllegalArgumentException("csv.delimiter must be one ASCII character other than quote or newline");
         }
-        return (byte) d.charAt(0);
+        return d.charAt(0);
     }
 
     @Override
     public SplitSession open(SeekableByteSource src, ResumePoint from, SplitConfig cfg)
             throws IOException, SplitException {
-        byte delim = delimiter(cfg);
+        byte delim = (byte) delimiter(cfg);
         long max = cfg.limits().maxSectionBytes();
         byte[] header = null;
         long start = from.offset();

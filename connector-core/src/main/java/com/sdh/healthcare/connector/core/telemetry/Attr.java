@@ -25,7 +25,9 @@ public enum Attr {
     TABLE("sdh.table"),
     ARCHIVE("sdh.archive"),
     /** Who ran an operator command (design §11.4): an account name, never a person's details. */
-    OPERATOR("sdh.operator");
+    OPERATOR("sdh.operator"),
+    /** Byte position within a section, e.g. where conversion failed (design §6.4). */
+    POSITION("sdh.position");
 
     private final String key;
 

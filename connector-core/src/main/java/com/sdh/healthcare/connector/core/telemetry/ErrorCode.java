@@ -29,5 +29,24 @@ public enum ErrorCode {
     PARSE_X12_CONTROL_MISMATCH,
     PARSE_X12_UNEXPECTED_SEGMENT,
     PARSE_JSON_MALFORMED,
-    PARSE_FHIR_UNEXPECTED_RESOURCE
+    PARSE_FHIR_UNEXPECTED_RESOURCE,
+    PARSE_EDIFACT_INVALID_ENVELOPE,
+    PARSE_EDIFACT_UNBALANCED,
+    PARSE_EDIFACT_CONTROL_MISMATCH,
+    PARSE_EDIFACT_UNEXPECTED_SEGMENT,
+
+    // Converting a section to JSON (design §6.4). These fail the section only: it is stored in its original form.
+    /** Bytes that aren't valid in the section's character encoding. */
+    CONVERT_INVALID_ENCODING,
+    /** A CSV record with a different number of fields from the header. */
+    CONVERT_CSV_FIELD_COUNT,
+    /** A CSV record that breaks RFC 4180 quoting (text after a closing quote). */
+    CONVERT_CSV_MALFORMED,
+    CONVERT_X12_MALFORMED,
+    CONVERT_EDIFACT_MALFORMED,
+    /** An EDIFACT syntax identifier (UNB S001) whose character set isn't supported. */
+    CONVERT_EDIFACT_CHARSET,
+    CONVERT_XML_MALFORMED,
+    /** A section over {@code split.convert-max-bytes}: converting it would need too much memory. */
+    CONVERT_TOO_LARGE
 }

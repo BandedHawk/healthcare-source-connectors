@@ -23,8 +23,10 @@ import org.apache.iceberg.io.CloseableIterable;
  */
 public final class CommittedSections {
 
+    /** @param mapping null when stored as split; @param errorCode set when conversion failed (design §6.4) */
     public record Row(String sectionId, long seq, long sourceOffset, long sourceLength, String format,
-            long plaintextLength, int chunkCount, LocalDate ingestedDate, String kekRef) {}
+            String contentType, String mapping, String errorCode, long plaintextLength, int chunkCount,
+            LocalDate ingestedDate, String kekRef) {}
 
     private CommittedSections() {}
 
@@ -40,8 +42,8 @@ public final class CommittedSections {
                         Expressions.greaterThan(SEQ, afterSeq),
                         Expressions.lessThanOrEqual(SEQ, uptoSeq),
                         Expressions.equal(CHUNK_INDEX, 0)))
-                .select(SECTION_ID, SEQ, SOURCE_OFFSET, SOURCE_LENGTH, FORMAT, PLAINTEXT_LENGTH, CHUNK_COUNT,
-                        INGESTED_AT, KEK_REF)
+                .select(SECTION_ID, SEQ, SOURCE_OFFSET, SOURCE_LENGTH, FORMAT, CONTENT_TYPE, MAPPING, ERROR_CODE,
+                        PLAINTEXT_LENGTH, CHUNK_COUNT, INGESTED_AT, KEK_REF)
                 .build()) {
             for (Record r : rows) {
                 out.add(new Row(
@@ -50,6 +52,9 @@ public final class CommittedSections {
                         (Long) r.getField(SOURCE_OFFSET),
                         (Long) r.getField(SOURCE_LENGTH),
                         (String) r.getField(FORMAT),
+                        (String) r.getField(CONTENT_TYPE),
+                        (String) r.getField(MAPPING),
+                        (String) r.getField(ERROR_CODE),
                         (Long) r.getField(PLAINTEXT_LENGTH),
                         (Integer) r.getField(CHUNK_COUNT),
                         ((OffsetDateTime) r.getField(INGESTED_AT)).withOffsetSameInstant(ZoneOffset.UTC).toLocalDate(),
@@ -64,5 +69,24 @@ public final class CommittedSections {
                     + "]: found " + out.size());
         }
         return out;
+    }
+
+    /** How many of a file's committed sections failed conversion and are stored in their original form. */
+    public static long countFailed(Table table, UUID fileId) {
+        long n = 0;
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(FILE_ID, fileId),
+                        Expressions.equal(CHUNK_INDEX, 0),
+                        Expressions.notNull(ERROR_CODE)))
+                .select(SEQ)
+                .build()) {
+            for (Record ignored : rows) {
+                n++;
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return n;
     }
 }

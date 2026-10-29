@@ -23,14 +23,14 @@ class DirectoryOutcomeRecorderTest {
         DirectoryOutcomeRecorder rec = new DirectoryOutcomeRecorder(inbound);
         UUID id = UUID.randomUUID();
         Instant t = Instant.parse("2026-10-28T12:00:00Z");
-        rec.completed(new OutcomeRecorder.CompletionRecord(id, t, t.plusSeconds(5), 42, 1000, "abc"));
-        rec.completed(new OutcomeRecorder.CompletionRecord(id, t, t.plusSeconds(5), 42, 1000, "abc")); // idempotent
+        rec.completed(new OutcomeRecorder.CompletionRecord(id, t, t.plusSeconds(5), 42, 2, 1000, "abc"));
+        rec.completed(new OutcomeRecorder.CompletionRecord(id, t, t.plusSeconds(5), 42, 2, 1000, "abc")); // idempotent
         UUID id2 = UUID.randomUUID();
         rec.failed(new OutcomeRecorder.FailureRecord(id2, t, t.plusSeconds(1), "split",
                 ErrorCode.PARSE_UNBALANCED_ELEMENT, 512, 3, 1000, ArchiveLocation.FAILED_FILES, "def"));
 
         Path c = inbound.resolve("completed").resolve(id + ".json");
-        assertThat(Files.readString(c)).contains("\"sectionCount\":42", "\"fileDigest\":\"abc\"");
+        assertThat(Files.readString(c)).contains("\"sectionCount\":42", "\"failedSectionCount\":2", "\"fileDigest\":\"abc\"");
         assertThat(Files.readString(inbound.resolve("failed").resolve(id2 + ".json")))
                 .contains("\"errorCode\":\"PARSE_UNBALANCED_ELEMENT\"", "\"archivedTo\":\"FAILED_FILES\"");
         assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(c))).isEqualTo("rw-------");

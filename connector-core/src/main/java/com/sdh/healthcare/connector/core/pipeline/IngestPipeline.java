@@ -5,11 +5,16 @@ import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.core.convert.ConversionException;
+import com.sdh.healthcare.connector.core.convert.Representation;
+import com.sdh.healthcare.connector.core.convert.SectionConverter;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
@@ -94,7 +99,15 @@ public final class IngestPipeline implements AutoCloseable {
     private final String namespace;
     private final String tableName;
     private final ExecutorService workers;
+    /**
+     * Message sealing has its own pool. Sharing the encrypt pool let each batch's 10,000 sealing jobs queue ahead of
+     * the next batch's section encryption, so splitting stalled while the previous batch was sealed (found by the
+     * throughput tests, design §13).
+     */
+    private final ExecutorService sealers;
     private final ExecutorService publishing;
+    /** This format's JSON converter (design §6.4); null when sections are stored as split. */
+    private final SectionConverter converter;
     private PipelineHooks hooks = PipelineHooks.NONE;
 
     public IngestPipeline(PipelineSettings settings, Table sectionsTable, FencedCommitter committer, KeyProvider keys,
@@ -114,8 +127,14 @@ public final class IngestPipeline implements AutoCloseable {
         this.namespace = nt[0];
         this.tableName = nt[1];
         splitters.get(settings.format()).validate(settings.split());
+        this.converter = settings.converters().get(settings.format()).orElse(null);
+        if (converter != null) {
+            converter.validate(settings.split());
+        }
         this.workers = Executors.newFixedThreadPool(settings.encryptWorkers(),
                 Thread.ofPlatform().name("sdh-encrypt-", 0).daemon(true).factory());
+        this.sealers = Executors.newFixedThreadPool(settings.encryptWorkers(),
+                Thread.ofPlatform().name("sdh-seal-", 0).daemon(true).factory());
         this.publishing = Executors.newSingleThreadExecutor(
                 Thread.ofPlatform().name("sdh-publish").daemon(true).factory());
     }
@@ -240,11 +259,19 @@ public final class IngestPipeline implements AutoCloseable {
 
     private record BatchOutcome(Checkpoint checkpoint, Future<Long> publish) {}
 
+    /** A section ready to be written: encrypted already, or (over one chunk) still in memory. */
+    private sealed interface Prepared permits Ready, InMemory {}
+
+    private record Ready(EncryptedSection encrypted) implements Prepared {}
+
+    private record InMemory(long seq, Section lineage, byte[] bytes, Representation rep, ErrorCode error,
+            long position) implements Prepared {}
+
     /** One commit batch: sections are added in seq order; single-chunk ones are encrypted on the worker pool. */
     private final class Batch {
         private final SectionBatchWriter writer =
                 new SectionBatchWriter(table, keys, settings.kekRef(), ids, clock.instant());
-        private final Deque<Future<EncryptedSection>> pending = new ArrayDeque<>();
+        private final Deque<Future<Prepared>> pending = new ArrayDeque<>();
         private final long openedAt = clock.millis();
         private final int maxPending = settings.encryptWorkers() * 4;
         private final UUID fileId;
@@ -264,13 +291,31 @@ public final class IngestPipeline implements AutoCloseable {
         void add(long seq, Section section, SeekableByteSource src) throws Exception {
             long len = section.plaintextLength();
             if (SectionCrypto.chunkCount(len) == 1) {
-                pending.add(workers.submit(() -> writer.encryptSmall(fileId, seq, format, section, src)));
+                // Read, convert (if any) and encrypt on the worker pool.
+                pending.add(workers.submit(() -> {
+                    if (converter == null) {
+                        return new Ready(writer.encryptSmall(fileId, seq, format, section, src));
+                    }
+                    if (len > settings.convertMaxBytes()) {
+                        return new Ready(writer.encrypt(fileId, seq, format, section, section.readAll(src),
+                                Representation.raw(format), ErrorCode.CONVERT_TOO_LARGE, 0));
+                    }
+                    return prepare(seq, section, section.readAll(src));
+                }));
                 while (pending.size() > maxPending) {
-                    writer.write(get(pending.poll()));
+                    store(get(pending.poll()));
                 }
             } else {
+                // Larger sections run on this thread, one at a time, so memory stays bounded.
                 drain();
-                writer.add(fileId, seq, format, section, src);
+                if (converter == null) {
+                    writer.add(fileId, seq, format, section, src);
+                } else if (len > settings.convertMaxBytes()) {
+                    writer.add(fileId, seq, format, section, src, Representation.raw(format),
+                            ErrorCode.CONVERT_TOO_LARGE, 0);
+                } else {
+                    store(prepare(seq, section, section.readAll(src)));
+                }
             }
             lastSeq = seq;
             last = section;
@@ -291,7 +336,41 @@ public final class IngestPipeline implements AutoCloseable {
 
         void drain() throws Exception {
             while (!pending.isEmpty()) {
-                writer.write(get(pending.poll()));
+                store(get(pending.poll()));
+            }
+        }
+
+        /**
+         * Converts a section to JSON; if that fails, keeps it as split, marked with the error (design §6.4). Small
+         * results are encrypted here (on a worker), larger ones are left for the writer thread.
+         */
+        private Prepared prepare(long seq, Section section, byte[] raw) {
+            byte[] stored;
+            Representation rep;
+            ErrorCode error = null;
+            long position = -1;
+            try {
+                stored = converter.convert(raw, settings.split());
+                rep = Representation.json(converter.mapping());
+                java.util.Arrays.fill(raw, (byte) 0);
+            } catch (ConversionException e) {
+                stored = raw;
+                rep = Representation.raw(format);
+                error = e.code();
+                position = e.position();
+            }
+            if (SectionCrypto.chunkCount(stored.length) == 1) {
+                return new Ready(writer.encrypt(fileId, seq, format, section, stored, rep, error, position));
+            }
+            return new InMemory(seq, section, stored, rep, error, position);
+        }
+
+        /** Writer thread: writes prepared sections in seq order. */
+        private void store(Prepared p) throws IOException {
+            switch (p) {
+                case Ready r -> writer.write(r.encrypted());
+                case InMemory m -> writer.addBytes(fileId, m.seq(), format, m.lineage(), m.bytes(), m.rep(), m.error(),
+                        m.position());
             }
         }
 
@@ -345,8 +424,14 @@ public final class IngestPipeline implements AutoCloseable {
                     batch.writer.kekRef());
             List<ConnectorMessage> messages = new ArrayList<>(batch.count);
             for (WrittenSection w : batch.writer.written()) {
-                messages.add(new SectionStored(w.sectionId(), w.fileId(), w.seq(), w.sourceOffset(), w.sourceLength(),
-                        w.format(), w.plaintextLength(), w.chunkCount(), ref));
+                messages.add(message(w, ref));
+                if (w.error() != null) {
+                    // Audited once committed, so a restart doesn't report it twice.
+                    t.auditWarn("section.failed", Fields.of(Attr.FILE_ID, w.fileId()).with(Attr.SEQ, w.seq())
+                            .with(Attr.FORMAT, w.format()).with(Attr.ERROR_CODE, w.error())
+                            .with(Attr.OFFSET, w.sourceOffset()).with(Attr.POSITION, w.errorPosition()));
+                    t.sectionFailed(w.error(), w.format());
+                }
             }
             long last = batch.lastSeq;
             // Carry the trace across to the publishing thread, so publish.batch is a child of this batch.
@@ -413,6 +498,22 @@ public final class IngestPipeline implements AutoCloseable {
 
     // ---- publishing ----
 
+    private static SectionInStorage message(WrittenSection w, StorageRef ref) {
+        Representation rep = w.representation();
+        if (w.error() != null) {
+            return new SectionFailed(w.sectionId(), w.fileId(), w.seq(), w.sourceOffset(), w.sourceLength(), w.format(),
+                    rep.contentType(), w.error().name(), w.plaintextLength(), w.chunkCount(), ref);
+        }
+        return new SectionStored(w.sectionId(), w.fileId(), w.seq(), w.sourceOffset(), w.sourceLength(), w.format(),
+                rep.contentType(), rep.mapping(), w.plaintextLength(), w.chunkCount(), ref);
+    }
+
+    /** How many of a file's committed sections failed conversion and are stored in their original form. */
+    public long failedSectionCount(UUID fileId) {
+        table.refresh();
+        return CommittedSections.countFailed(table, fileId);
+    }
+
     /** Rebuilds and republishes messages for sections committed but not acknowledged before a restart. */
     private void republish(Checkpoint cp) throws Exception {
         if (cp.committedSeq() <= cp.publishedSeq()) {
@@ -424,8 +525,11 @@ public final class IngestPipeline implements AutoCloseable {
                 cp.committedSeq())) {
             StorageRef ref = new StorageRef(settings.catalogName(), namespace, tableName, r.ingestedDate(), snapshotId,
                     r.kekRef());
-            messages.add(new SectionStored(r.sectionId(), cp.fileId(), r.seq(), r.sourceOffset(), r.sourceLength(),
-                    r.format(), r.plaintextLength(), r.chunkCount(), ref));
+            messages.add(r.errorCode() != null
+                    ? new SectionFailed(r.sectionId(), cp.fileId(), r.seq(), r.sourceOffset(), r.sourceLength(),
+                            r.format(), r.contentType(), r.errorCode(), r.plaintextLength(), r.chunkCount(), ref)
+                    : new SectionStored(r.sectionId(), cp.fileId(), r.seq(), r.sourceOffset(), r.sourceLength(),
+                            r.format(), r.contentType(), r.mapping(), r.plaintextLength(), r.chunkCount(), ref));
         }
         Telemetry.get().audit("publish.republish", Fields.of(Attr.FILE_ID, cp.fileId())
                 .with(Attr.SEQ, cp.publishedSeq() + 1).with(Attr.COUNT, messages.size()));
@@ -449,13 +553,13 @@ public final class IngestPipeline implements AutoCloseable {
             span.end();
         }
         t.publishDuration(System.nanoTime() - started);
-        t.sectionsPublished(messages.stream().filter(SectionStored.class::isInstance).count());
+        t.sectionsPublished(messages.stream().filter(SectionInStorage.class::isInstance).count());
     }
 
     private void sendAll(List<ConnectorMessage> messages) throws Exception {
         List<CompletableFuture<byte[]>> sealed = new ArrayList<>(messages.size());
         for (ConnectorMessage m : messages) {
-            sealed.add(CompletableFuture.supplyAsync(() -> sealer.seal(m), workers));
+            sealed.add(CompletableFuture.supplyAsync(() -> sealer.seal(m), sealers));
         }
         List<OutboundMessage> outbound = new ArrayList<>(messages.size());
         List<CompletableFuture<Void>> acks = new ArrayList<>(messages.size());
@@ -521,9 +625,11 @@ public final class IngestPipeline implements AutoCloseable {
     @Override
     public void close() {
         publishing.shutdownNow();
+        sealers.shutdownNow();
         workers.shutdownNow();
         try {
             publishing.awaitTermination(30, TimeUnit.SECONDS);
+            sealers.awaitTermination(30, TimeUnit.SECONDS);
             workers.awaitTermination(30, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

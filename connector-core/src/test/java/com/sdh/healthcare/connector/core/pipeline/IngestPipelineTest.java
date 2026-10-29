@@ -23,6 +23,7 @@ import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
@@ -98,11 +99,126 @@ class IngestPipelineTest {
         open.forEach(IngestPipeline::close);
     }
 
+    /** Pipeline mechanics are tested on sections stored as split; conversion has its own tests below. */
     PipelineSettings settings() {
         return PipelineSettings.defaults("file-connector", "csv", "prod", KEK)
                 .withCommit(BATCH, 1L << 30, Duration.ofHours(1))
                 .withWorkers(4)
-                .withRetry(new RetryPolicy(3, Duration.ofMillis(1), Duration.ofMillis(5)));
+                .withRetry(new RetryPolicy(3, Duration.ofMillis(1), Duration.ofMillis(5)))
+                .withConversion(ConverterRegistry.none(), 64L << 20);
+    }
+
+    /** CSV with a header, converted to JSON (design §6.4). */
+    PipelineSettings converting() {
+        return settings().withSplit(SplitConfig.defaults("csv").withOption("csv.header", "true"))
+                .withConversion(ConverterRegistry.load(), 64L << 20);
+    }
+
+    // ---- conversion (design §6.4) ----
+
+    static final String HEADER = "id,name,note\n";
+
+    @Test
+    void convertsToJsonAndStoresFailedSectionsInTheirOriginalFormWithLineage() throws Exception {
+        String good = "1,Ann,\"two\nlines\"\n";
+        String shortRow = "2,Bob\n";
+        byte[] latin1 = "3,Jos\u00e9,x\n".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        String last = "4,Cy,\n";
+        java.io.ByteArrayOutputStream file = new java.io.ByteArrayOutputStream();
+        file.writeBytes(HEADER.getBytes(UTF_8));
+        file.writeBytes(good.getBytes(UTF_8));
+        file.writeBytes(shortRow.getBytes(UTF_8));
+        file.writeBytes(latin1);
+        file.writeBytes(last.getBytes(UTF_8));
+        byte[] bytes = file.toByteArray();
+
+        RecordingPublisher pub = new RecordingPublisher();
+        IngestPipeline p = process(converting(), pub, PipelineHooks.NONE);
+        IngestPipeline.SplitResult result = p.split(SeekableByteSource.of(bytes));
+        assertThat(result.sectionCount()).isEqualTo(4);
+
+        List<ConnectorMessage> msgs = decode(pub.sent);
+        List<ConnectorMessage.SectionInStorage> s = msgs.stream()
+                .filter(ConnectorMessage.SectionInStorage.class::isInstance)
+                .map(ConnectorMessage.SectionInStorage.class::cast).toList();
+        assertThat(s).extracting(m -> m.getClass().getSimpleName())
+                .containsExactly("SectionStored", "SectionFailed", "SectionFailed", "SectionStored");
+        SectionStored first = (SectionStored) s.get(0);
+        assertThat(first.contentType()).isEqualTo("application/json");
+        assertThat(first.mapping()).isEqualTo("csv-row/1");
+        ConnectorMessage.SectionFailed mismatch = (ConnectorMessage.SectionFailed) s.get(1);
+        assertThat(mismatch.errorCode()).isEqualTo("CONVERT_CSV_FIELD_COUNT");
+        assertThat(mismatch.contentType()).isEqualTo("text/csv");
+        assertThat(((ConnectorMessage.SectionFailed) s.get(2)).errorCode()).isEqualTo("CONVERT_INVALID_ENCODING");
+
+        // Lineage: offsets point into the original file, whether converted or not.
+        int goodAt = HEADER.length();
+        int shortAt = goodAt + good.length();
+        int latinAt = shortAt + shortRow.length();
+        assertThat(s).extracting(ConnectorMessage.SectionInStorage::sourceOffset)
+                .containsExactly((long) goodAt, (long) shortAt, (long) latinAt, (long) latinAt + latin1.length);
+        assertThat(s).extracting(ConnectorMessage.SectionInStorage::sourceLength)
+                .containsExactly((long) good.length(), (long) shortRow.length(), (long) latin1.length,
+                        (long) last.length());
+
+        // Stored bytes: JSON for converted sections, the section as split (header included) for failed ones; the
+        // section ID is the keyed hash of what is stored.
+        Table table = catalog.loadTable(tableId);
+        SectionIds ids = new SectionIds(IdKeys.loadOrCreate(table, null, keys, KEK));
+        byte[] json = "[\"1\",\"Ann\",\"two\\nlines\"]".getBytes(UTF_8);
+        assertThat(decrypt(table, result.fileId(), 0)).isEqualTo(json);
+        assertThat(first.sectionId()).isEqualTo(ids.of(json));
+        byte[] raw = (HEADER + shortRow).getBytes(UTF_8);
+        assertThat(decrypt(table, result.fileId(), 1)).isEqualTo(raw);
+        assertThat(mismatch.sectionId()).isEqualTo(ids.of(raw));
+        assertThat(decrypt(table, result.fileId(), 3)).isEqualTo("[\"4\",\"Cy\",\"\"]".getBytes(UTF_8));
+        assertThat(dataRows(table, result.fileId())).extracting(r -> r.getField(ERROR_CODE)).containsExactly(
+                null, "CONVERT_CSV_FIELD_COUNT", "CONVERT_INVALID_ENCODING", null);
+        assertThat(p.failedSectionCount(result.fileId())).isEqualTo(2);
+    }
+
+    @Test
+    void failedSectionMessagesAreRebuiltAfterARestart() throws Exception {
+        RecordingPublisher pub = new RecordingPublisher();
+        IngestPipeline first = process(converting(), pub, new PipelineHooks() {
+            @Override
+            public void batchCommitted(long lastSeq) {
+                throw new SimulatedCrash();
+            }
+        });
+        byte[] file = (HEADER + "1,a,b\n2,b\n").getBytes(UTF_8);
+        assertThatThrownBy(() -> first.split(SeekableByteSource.of(file))).isInstanceOf(SimulatedCrash.class);
+        assertThat(sections(decode(pub.sent))).isEmpty();
+
+        RecordingPublisher again = new RecordingPublisher();
+        process(converting(), again, PipelineHooks.NONE).split(SeekableByteSource.of(file));
+        List<ConnectorMessage> msgs = decode(again.sent);
+        assertThat(msgs.stream().filter(m -> m instanceof ConnectorMessage.SectionFailed f
+                && f.errorCode().equals("CONVERT_CSV_FIELD_COUNT") && f.seq() == 1)).hasSize(1);
+        assertThat(sections(msgs)).singleElement().satisfies(m -> assertThat(m.mapping()).isEqualTo("csv-row/1"));
+    }
+
+    @Test
+    void largeJsonIsStoredInChunks() throws Exception {
+        RecordingPublisher pub = new RecordingPublisher();
+        String big = "1,\"" + "x".repeat(SectionCrypto.CHUNK_SIZE + 500) + "\",z\n";
+        IngestPipeline p = process(converting(), pub, PipelineHooks.NONE);
+        UUID fileId = p.split(SeekableByteSource.of((HEADER + "2,short,ok\n" + big).getBytes(UTF_8))).fileId();
+        List<SectionStored> stored = sections(decode(pub.sent));
+        assertThat(stored).extracting(SectionStored::chunkCount).containsExactly(1, 2);
+        assertThat(decrypt(catalog.loadTable(tableId), fileId, 1)).isEqualTo(
+                ("[\"1\",\"" + "x".repeat(SectionCrypto.CHUNK_SIZE + 500) + "\",\"z\"]").getBytes(UTF_8));
+    }
+
+    @Test
+    void sectionsOverTheConversionLimitAreStoredRaw() throws Exception {
+        RecordingPublisher limited = new RecordingPublisher();
+        IngestPipeline q = process(converting().withConversion(ConverterRegistry.load(), 30), limited,
+                PipelineHooks.NONE);
+        q.split(SeekableByteSource.of((HEADER + "3,a,b\n4,a much longer record,c\n").getBytes(UTF_8)));
+        List<ConnectorMessage> msgs = decode(limited.sent);
+        assertThat(msgs.stream().filter(ConnectorMessage.SectionFailed.class::isInstance)
+                .map(m -> ((ConnectorMessage.SectionFailed) m).errorCode())).containsExactly("CONVERT_TOO_LARGE");
     }
 
     /** A fresh "process": its own table handle, a higher lease epoch, and the ID key loaded from the table. */

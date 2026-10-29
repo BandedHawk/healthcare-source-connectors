@@ -5,6 +5,7 @@ import java.util.Arrays;
 public enum MessageType {
     FILE_STARTED("file.started"),
     SECTION_STORED("section.stored"),
+    SECTION_FAILED("section.failed"),
     FILE_COMPLETED("file.completed");
 
     private final String wireName;

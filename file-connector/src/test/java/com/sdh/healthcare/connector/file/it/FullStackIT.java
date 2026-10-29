@@ -226,6 +226,10 @@ class FullStackIT {
             records.add(rec);
             file.append(rec);
         }
+        // One record with a missing field: that section fails conversion and is stored in its original form, while
+        // the file still completes (design §6.4).
+        String shortRow = "30," + MARKER + "-short\n";
+        file.append(shortRow);
         Path good = INBOUND.resolve("good.csv");
         Files.writeString(good, file);
         Files.setLastModifiedTime(good, FileTime.from(Instant.now().minusSeconds(30)));
@@ -254,9 +258,9 @@ class FullStackIT {
                         "bootstrap.servers", KAFKA.getBootstrapServers(), "group.id", "downstream",
                         "auto.offset.reset", "earliest"), new StringDeserializer(), new StringDeserializer())) {
             consumer.subscribe(List.of("sdh-sections"));
-            // 2 × file.started, 30 × section.stored, 1 × file.completed (the bad file stores nothing).
+            // 2 × file.started, 30 × section.stored, 1 × section.failed, 1 × file.completed (the bad file stores nothing).
             long until = System.currentTimeMillis() + 60_000;
-            while (msgs.size() < 33 && System.currentTimeMillis() < until) {
+            while (msgs.size() < 34 && System.currentTimeMillis() < until) {
                 for (var rec : consumer.poll(Duration.ofMillis(500))) {
                     msgs.add(reader.decode(rec.value().getBytes(UTF_8)));
                 }
@@ -267,10 +271,19 @@ class FullStackIT {
             assertThat(sections).hasSize(30);
             for (SectionStored s : sections) {
                 assertThat(new String(reader.readSection(s, 1 << 20), UTF_8))
-                        .isEqualTo(header + records.get((int) s.seq()));
+                        .isEqualTo(ItSupport.csvRowJson(records.get((int) s.seq())));
             }
+            assertThat(sections).allSatisfy(s -> assertThat(s.mapping()).isEqualTo("csv-row/1"));
+            ConnectorMessage.SectionFailed failed = msgs.stream().filter(ConnectorMessage.SectionFailed.class::isInstance)
+                    .map(ConnectorMessage.SectionFailed.class::cast).findFirst().orElseThrow();
+            assertThat(failed.errorCode()).isEqualTo("CONVERT_CSV_FIELD_COUNT");
+            assertThat(failed.seq()).isEqualTo(30);
+            assertThat(failed.sourceLength()).isEqualTo(shortRow.length());
+            assertThat(new String(reader.readSection(failed, 1 << 20), UTF_8)).isEqualTo(header + shortRow);
             FileCompleted done = msgs.stream().filter(FileCompleted.class::isInstance)
                     .map(FileCompleted.class::cast).findFirst().orElseThrow();
+            assertThat(done.sectionCount()).isEqualTo(31);
+            assertThat(done.failedSectionCount()).isEqualTo(1);
             ByteArrayOutputStream restored = new ByteArrayOutputStream();
             ArchiveReader.restore(runtime.sourceFiles(), done.fileId(), runtime.keys().wrap(), runtime.ids(), 0,
                     restored);
@@ -290,13 +303,13 @@ class FullStackIT {
                 var report = new TableMaintenance(runtime.committer(), new MaintenanceSettings(Duration.ofDays(7), 10,
                         true, 0.75, 2, 8L << 30, Duration.ZERO), Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
                         .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.empty(), true);
-                assertThat(report.compactedFiles()).as("30 sections in batches of 7").isEqualTo(5);
+                assertThat(report.compactedFiles()).as("31 sections in batches of 7").isEqualTo(5);
                 assertThat(report.orphansDeleted()).isEqualTo(1);
                 assertThat(keys(dataPrefix)).doesNotContain(stray);
                 // Downstream still reads every section after compaction.
                 for (SectionStored s : sections) {
                     assertThat(new String(reader.readSection(s, 1 << 20), UTF_8))
-                            .isEqualTo(header + records.get((int) s.seq()));
+                            .isEqualTo(ItSupport.csvRowJson(records.get((int) s.seq())));
                 }
 
                 // Retention: three days on, a one-day policy drops today's partition and purges its objects at once.

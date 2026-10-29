@@ -103,7 +103,7 @@ class QueueReaderTest {
 
     static SectionStored message(WrittenSection s, SectionBatchWriter w, Snapshot snap) {
         return new SectionStored(s.sectionId(), s.fileId(), s.seq(), s.sourceOffset(), s.sourceLength(), s.format(),
-                s.plaintextLength(), s.chunkCount(),
+                s.representation().contentType(), s.representation().mapping(), s.plaintextLength(), s.chunkCount(),
                 new StorageRef("prod", NS, SectionsTable.DEFAULT_NAME, w.ingestedDate(), snap.snapshotId(), w.kekRef()));
     }
 
@@ -137,11 +137,12 @@ class QueueReaderTest {
         try (QueueReader reader = reader()) {
             SectionStored real = (SectionStored) reader.decode(bodies.get(0));
             SectionStored wrongId = new SectionStored("not-the-id", real.fileId(), real.seq(), real.sourceOffset(),
-                    real.sourceLength(), real.format(), real.plaintextLength(), real.chunkCount(), real.storage());
+                    real.sourceLength(), real.format(), real.contentType(), real.mapping(), real.plaintextLength(),
+                    real.chunkCount(), real.storage());
             assertThatThrownBy(() -> reader.readSection(wrongId, 100))
                     .isInstanceOf(com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException.class);
-            SectionStored missing = new SectionStored(real.sectionId(), real.fileId(), 99, 0, 3, "ccda", 3, 1,
-                    real.storage());
+            SectionStored missing = new SectionStored(real.sectionId(), real.fileId(), 99, 0, 3, "ccda",
+                    "application/xml", null, 3, 1, real.storage());
             assertThatThrownBy(() -> reader.readSection(missing, 100)).isInstanceOf(SectionNotFoundException.class);
         }
     }
@@ -150,7 +151,7 @@ class QueueReaderTest {
     void newerContractMajorVersionIsRejectedWithClearReason() throws Exception {
         JWSObject jws = new JWSObject(new JWSHeader.Builder(JWSAlgorithm.ES256).keyID("connector-2026")
                 .type(MessageSealer.JWS_TYPE).build(),
-                new Payload(Map.of("v", "2.0", "type", "file.started", "messageId", "x", "fileId",
+                new Payload(Map.of("v", "3.0", "type", "file.started", "messageId", "x", "fileId",
                         UUID.randomUUID().toString())));
         jws.sign(new ECDSASigner((ECPrivateKey) signer.getPrivate()));
         JWEObject jwe = new JWEObject(new JWEHeader.Builder(JWEAlgorithm.ECDH_ES_A256KW, EncryptionMethod.A256GCM)
@@ -168,7 +169,7 @@ class QueueReaderTest {
     @Test
     void otherMessageTypesDecode() throws Exception {
         UUID fileId = UUID.randomUUID();
-        byte[] body = sealer.seal(new ConnectorMessage.FileCompleted(fileId, 3, 999, "digest", Instant.EPOCH,
+        byte[] body = sealer.seal(new ConnectorMessage.FileCompleted(fileId, 3, 0, 999, "digest", Instant.EPOCH,
                 Instant.EPOCH.plusSeconds(5)));
         try (QueueReader reader = reader()) {
             assertThat(reader.decode(body)).isInstanceOf(ConnectorMessage.FileCompleted.class)

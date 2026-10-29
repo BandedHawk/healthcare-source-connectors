@@ -47,8 +47,8 @@ class PipelineToReaderTest {
         for (int i = 0; i < 25; i++) {
             String d = doc.formatted(i, i);
             file.append("  ").append(d).append('\n');
-            expected.add("<?xml version=\"1.0\"?>\n" + d.replace("<ClinicalDocument>",
-                    "<ClinicalDocument xmlns=\"urn:hl7-org:v3\">"));
+            // Each document arrives as JSON in the C-CDA mapping (design §6.4); ClinicalDocument has one id and title.
+            expected.add("{\"ClinicalDocument\":{\"id\":{\"root\":\"%d\"},\"title\":\"Patient %d\"}}".formatted(i, i));
         }
         file.append("</batch>\n");
 
@@ -93,6 +93,8 @@ class PipelineToReaderTest {
             assertThat(first).isInstanceOf(FileStarted.class);
             for (OutboundMessage m : sent.subList(1, sent.size())) {
                 SectionStored s = (SectionStored) reader.decode(m.body());
+                assertThat(s.contentType()).isEqualTo("application/json");
+                assertThat(s.mapping()).isEqualTo("ccda/1");
                 read.add(new String(reader.readSection(s, 1 << 20), UTF_8));
             }
             assertThat(read).containsExactlyElementsOf(expected);

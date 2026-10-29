@@ -33,6 +33,18 @@ Revision 2026-10-28 (l): built the operator commands `restore`, `decrypt-fallbac
 
 Revision 2026-10-28 (m): the connector now runs against a real Iceberg REST catalog, Apache Polaris 1.8.0, in `PolarisIT` (§8.1, §15.1). Fencing, ingest, downstream read-back, archive restore, maintenance and the admin `status` command all pass unchanged. The REST catalog settings in §14 now include OAuth and an explicit `rest.auth.type`.
 
+Revision 2026-10-29 (n): built the throughput tests (§13.1, `scripts/perf.sh`). Small sections are bound by per-message public-key crypto, about 0.55 ms of CPU each with a P-256 recipient. Revision 2026-10-29 (n): built the throughput tests (§13.1, `scripts/perf.sh`). Small sections are bound by per-message public-key crypto, about 0.55 ms of CPU each with a P-256 recipient. Fixed a queueing problem that stalled splitting while the previous batch was sealed: sealing now has its own pool (§13), which made small sections 25–40% faster.
+
+Revision 2026-10-29 (o): sections are now converted to JSON before they are stored (§6.4). The JSON shapes are:
+- CSV: an array of fields by position, with the header dropped;
+- C-CDA: Google Data Harmonization's XmlToJson style, driven by the CDA schema and checked against Google's own published outputs;
+- X12 and EDIFACT: segment and element arrays, with every position kept.
+
+FHIR, generic XML and delimited sections are stored as split. A section that fails conversion is stored in its original form, marked with an error code, and announced with a new `section.failed` message; the file still completes. Also:
+- added an EDIFACT splitter (§6.2);
+- contract version 2.0 (§10.1);
+- three new `sections` columns (§8.2).
+
 ---
 
 ## 1. Purpose
@@ -79,7 +91,8 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── pom.xml                              parent: dependency/plugin management, Java 25, enforcer
 ├── .gitignore                           excludes build output, IDE files, *.pem, *.key, *.p12, .env
 ├── mvnw, .mvn/wrapper/                  Maven 3.9.16
-├── scripts/                             it-minikube.sh (Docker suite), build-image.sh (image), minikube-env.sh (shared)
+├── scripts/                             it-minikube.sh (Docker suite), build-image.sh (image), perf.sh (throughput), minikube-env.sh (shared),
+│                                        cda-model/ (generates the C-CDA converter's schema model, §6.4)
 ├── docs/DESIGN.md                       this document
 ├── connector-contract/                  library jar: the wire contract shared by writers and readers
 │   └── com.sdh.healthcare.connector.contract
@@ -93,6 +106,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── connector-core/                      library jar (no main class)
 │   └── com.sdh.healthcare.connector.core
 │       ├── split/        SectionSplitter SPI + built-in splitters
+│       ├── convert/      SectionConverter SPI + JSON converters (csv, ccda, x12, edifact), CDA schema model
 │       ├── crypto/       KMS/local KeyProvider implementations, ID HMAC
 │       ├── storage/      Iceberg catalog/FileIO setup, writers, compaction, retention
 │       ├── checkpoint/   checkpoint model, lease store, lease keeper, fenced committer
@@ -233,6 +247,7 @@ The format and boundary are both set at run time.
 | `ccda` / `xml` | `ccda`: element `ClinicalDocument`, ns `urn:hl7-org:v3`. `xml`: boundary required, `namespace` defaults to `*` (any) | Byte-level streaming XML tokenizer that ignores comments, CDATA, processing instructions and DOCTYPE. A section runs from the boundary start tag to its matching end tag; a nested boundary element stays inside the outer section. Namespace declarations in scope from ancestor elements are copied onto the section's root element, and the file's XML declaration is prepended, so every section is a valid standalone document. End tags are checked against start tags. Input must be ASCII-compatible (UTF-8, ISO-8859-x); UTF-16 fails with `PARSE_XML_UNSUPPORTED_ENCODING`. Entities from a DOCTYPE internal subset are not carried into sections. |
 | `x12` | segment `ST` (also `GS` or `ISA`) | Delimiters are read from each ISA segment. `ST`: each section is `ISA + GS + ST…SE + GE + IEA`, with GE01 and IEA01 rewritten to 1. `GS`: `ISA + GS…GE + IEA`, IEA01 = 1. `ISA`: the interchange unchanged. A TA1 between ISA and GS becomes `ISA + TA1 + IEA` (IEA01 = 0), so nothing is dropped. Control numbers ST02/SE02, GS06/GE02 and ISA13/IEA02 are checked. BIN segments are not supported. |
 | `fhir` | `Bundle` (`*` = any `resourceType`) | Byte-level structural JSON scanner (strings, escapes, bracket nesting) that checks each top-level object's `resourceType`. Jackson was dropped because it can't restart mid-array at a byte offset; full JSON validation is left downstream. Accepts a single resource, a JSON array, or NDJSON / whitespace-separated objects. Optional `fhir.ndjson-group-size` = N groups N resources per section (boundary then defaults to `*`); grouped array sections are wrapped in `[ ]`. |
+| `edifact` | message `UNH` (also `UNG` or `UNB`) | Delimiters come from each interchange's `UNA` service string advice, or the ISO 9735 defaults; the release character is honoured. `UNH`: each section is `[UNA] UNB [UNG] UNH…UNT [UNE] UNZ`, with the UNE and UNZ counts rewritten to 1. `UNG`: one functional group per section; messages outside a group are one section each. `UNB`: the interchange unchanged. Control references UNH/UNT, UNG/UNE and UNB/UNZ are checked; segment counts aren't. |
 | `csv` | record | RFC 4180 record boundary (newlines inside quotes are respected). `csv.header=true` prepends the first record to every section; `csv.delimiter` (default `,`). Empty lines are skipped. Content is otherwise not interpreted. |
 | `delimited` | regex (`delimited.pattern`, or `delimited.literal=true`) | Generic fallback for proprietary formats. `mode = START \| END \| SEPARATOR` controls whether a matching line begins a section, ends one, or is dropped. Each line is decoded (`delimited.charset`, default UTF-8) and tested with `find()` on its first `delimited.match-window` bytes (default 4096). Blank lines never start a section. In START mode, lines before the first match form their own section. |
 
@@ -247,6 +262,59 @@ These are configurable per format. A violation fails the file with error code `L
 | `max-sections-per-file` | unlimited |
 
 A file over `max-file-bytes` is rejected **before ingestion**. It is moved to the encrypted local `failed/` fallback and is not stored in Iceberg.
+
+### 6.4 Conversion to JSON (built)
+
+After splitting, each section is converted to JSON and the JSON is what is stored, encrypted and announced. Converters are found by format (`SectionConverter`, loaded with `ServiceLoader` like the splitters) and run on the encrypt worker pool. `sdh.split.convert: false` turns conversion off.
+
+| Format | Mapping | JSON |
+|---|---|---|
+| `csv` | `csv-row/1` | The record's fields by position: `["1","Doe, Jane","","two\nlines"]`. RFC 4180 quoting; values kept exactly (no trimming, no type inference, empty is `""`). With `csv.header=true` the header is dropped |
+| `ccda` | `ccda/1` | Google Healthcare Data Harmonization XmlToJson style (below) |
+| `x12` | `x12/1` | `{"format":"X12","segments":[{"segment_id":"NM1","elements":["41","2","SAMPLE CLINIC","","",…]}]}`. Every segment, envelopes too; empty elements and spaces kept so positions are stable; composites stay one string (`"HC:99213:25"`) |
+| `edifact` | `edifact/1` | `{"format":"EDIFACT","segments":[{"segment_id":"DTM","elements":[["137","20261028","102"]]}]}`. Each element is its list of components; release characters applied; empty elements and components kept. The character set comes from UNB S001 (UNOA/UNOB ASCII, UNOC–UNOK ISO 8859, UNOW/UNOY UTF-8) |
+| `fhir`, `xml`, `delimited` | — | Stored as split: FHIR is already JSON; the others have no agreed mapping |
+
+The X12 and EDIFACT shape follows common EDI-to-JSON converters (hub.actionedi.com). Those converters drop empty elements, delete spaces inside values and mishandle the EDIFACT release character, which would break mapping by position, so we don't follow them there.
+
+**C-CDA, following Google's XmlToJson.** Google's tool binds the document to the CDA schema and writes it as nested JSON. Ours follows the same rules with a model generated from HL7's CDA R2 + SDTC schemas (`scripts/cda-model/generate_cda_model.py`, pinned to HL7/CDA-core-2.0 at `e922fc3`; output `cda-r2-sdtc.model`, with 234 types and 1,098 child elements):
+- **Keys:** `{"ClinicalDocument": {…}}`; each element becomes a key with its local name, and each attribute a key with its name.
+- **Arrays come from the schema:** an element the schema lets repeat (`id`, `name`, `given`, `entry`, `tr`, `td`…) is always an array, even with one occurrence; others are single values.
+- **`xsi:type`** becomes `"type"` and selects the type used for the children.
+- **Text:** an element with only text becomes a string, kept exactly. With attributes or child elements, the text goes under `"value"`: an array of text parts for mixed types (narrative, ED, names), otherwise a string. Whitespace-only text between child elements is dropped.
+- **Typed attributes:** schema boolean attributes (`negationInd`, `inversionInd`, BL `value`) are JSON booleans, and integer ones (INT `value`, `qty`) JSON numbers. Everything else is a string; a value that isn't valid for its type stays a string.
+
+**Where we deliberately differ from Google's tool**, so nothing is lost:
+- **`nullFlavor` is kept.** Google deletes it.
+- **Empty elements are kept.** An empty `<td/>` is `""`, so table cell positions stay stable; Google drops it.
+- **Unknown elements and attributes are kept**, unknown elements as arrays. Google's schema binding drops them.
+- **SDTC extensions keep their prefix** (`"sdtc:raceCode"`), as they sit beside CDA elements of the same name.
+- **Keys come in document order**, so the output is deterministic.
+- **Not data, so left out:** `xmlns` declarations and `xsi:schemaLocation`.
+
+As in Google's output, mixed content loses the interleaving of text and child elements: text parts are listed under `"value"`, child elements under their own keys.
+
+**Checks:**
+- `CcdaConverterTest` converts Google's published Synthea inputs and compares the result with Google's expected JSON, after applying Google's two deletions. One pair always runs; all 13 run with `-Dccda.google.dir`, and all match.
+- `CcdaSamplesTest` converts four real-world documents (USCDI v3 samples, a master CCD, and a de-identified Epic inpatient CCD) and checks that every attribute value and every piece of text in the XML appears in the JSON.
+- DTDs and external entities are refused.
+
+**Failures stay with the section, not the file.** A section that can't be converted is stored in its original form (as split), in the same `sections` table and commit, with `error_code` set. It is announced with `section.failed` (§10.1), and the file carries on and completes. Codes:
+- `CONVERT_CSV_FIELD_COUNT`: the record's field count differs from the header's;
+- `CONVERT_CSV_MALFORMED`: text after a closing quote;
+- `CONVERT_INVALID_ENCODING`: bytes that aren't valid UTF-8, or not valid in the declared EDIFACT character set;
+- `CONVERT_EDIFACT_CHARSET`: an unsupported syntax identifier;
+- `CONVERT_X12_MALFORMED`, `CONVERT_EDIFACT_MALFORMED`, `CONVERT_XML_MALFORMED`;
+- `CONVERT_TOO_LARGE`: over `split.convert-max-bytes`, 64 MiB by default; converting needs the whole section in memory.
+
+Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offset, byte position within the section, code), emitted once its batch commits, and the `sdh.sections.failed` metric. Errors in splitting itself, such as an unterminated quote or broken XML, still fail the whole file (§11), because the file can't be divided into sections.
+
+**Lineage:** `source_offset`/`source_length` (and the message's `sourceOffset`/`sourceLength`) always locate the section in the original, unsplit file, converted or not. Remediation (review, correction, resubmission) is a later piece of work with its own console; failed sections can already be found with `error_code IS NOT NULL` and read with `connector-queue-reader`.
+
+**Memory and speed:**
+- Single-chunk sections (up to 8 MiB) are converted on the worker pool.
+- Larger ones are converted on the writer thread, one at a time, and JSON over one chunk is chunked as usual.
+- Conversion adds little next to message sealing (§13.1).
 
 ## 7. Encryption and identifiers
 
@@ -275,7 +343,7 @@ Using a separate KEK per table lets the retrieving system be given decrypt right
 
 ### 7.3 Section ID
 
-`sectionId = base32(HMAC-SHA-256(idKey, sectionPlaintextBytes))` (including prefix/suffix bytes).
+`sectionId = base32(HMAC-SHA-256(idKey, storedBytes))`: the JSON for a converted section, or the section as split (including prefix/suffix bytes) for one stored in its original form (§6.4). Converters are deterministic, so the same section always gets the same ID. For CSV the header is no longer part of what is hashed, so identical records in files with different headers get the same ID.
 
 - The ID is deterministic from content, so a repaired file resubmitted later produces the same IDs for unchanged sections. This is what downstream dedup relies on.
 - It is keyed, so it cannot be used to guess low-entropy PHI such as a CSV row.
@@ -382,6 +450,9 @@ The namespace is `sdh_ingest` (configurable). There are three tables, each with 
 | kek_ref | string | key ID/version used to wrap |
 | batch_id | uuid | |
 | ingested_at | timestamptz | |
+| content_type | string | what the stored bytes are: `application/json` when converted, else the original media type (`text/csv`, `application/xml`, `application/edi-x12`, `application/edifact`, `application/fhir+json`) |
+| mapping | string, optional | the JSON mapping and version (`csv-row/1`, `ccda/1`, `x12/1`, `edifact/1`); null when stored as split |
+| error_code | string, optional | set when conversion failed and the section is stored in its original form (§6.4) |
 
 - **Partitioning:** `day(ingested_at)`. Sort order `file_id, seq, chunk_index`, so readers prune files using min/max statistics.
 - **Parquet settings:** zstd level 1 for the whole table. Row group 128 MiB, target file size 512 MiB. The earlier plan to leave `ciphertext` uncompressed isn't possible: Iceberg sets the Parquet codec per table, not per column (spike finding). zstd passes incompressible ciphertext through at a small CPU cost and almost no size overhead.
@@ -561,14 +632,16 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 | Type | When | Payload (inside encryption) |
 |---|---|---|
 | `file.started` | file picked up (or resumed with a new run) | fileId, format, fileSize, startedAt, connectorId |
-| `section.stored` | after batch commit | messageId, fileId, sectionId, seq, sourceOffset, sourceLength, format, plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef) |
-| `file.completed` | after archive commit | fileId, sectionCount, fileSize, fileDigest, startedAt, completedAt |
+| `section.stored` | after batch commit | messageId, fileId, sectionId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef) |
+| `section.failed` | after batch commit, in seq order with the others | as `section.stored`, with errorCode instead of mapping; the section is stored in its original form (§6.4) |
+| `file.completed` | after archive commit | fileId, sectionCount (failed included), failedSectionCount, fileSize, fileDigest, startedAt, completedAt |
 
 - **No `file.failed` message:** failure is reported through OpenTelemetry only, as agreed. Downstream can detect an unfinished file as a `file.started` with no matching `file.completed`.
 - **Change from earlier discussion:** the "duplicates skipped" count is **not** included in `file.completed`. Counting it would require checking every section against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
 - **Unencrypted broker metadata** is limited to: `messageId`, `type`, `fileId` (used for ordering), and the content type `application/jose`.
 - **Message IDs:**
-  - `section.stored`: `messageId = sectionId`.
+  - `section.stored` and `section.failed`: `messageId = sectionId`.
+- **Contract 2.0** (from 1.0): added `contentType`, `mapping`, `section.failed` and `failedSectionCount`. It's a major version because a 1.x reader can't handle the new message type.
   - `file.started`: `fs-<fileId>`.
   - `file.completed`: `fc-<fileId>`.
 
@@ -795,11 +868,56 @@ Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has s
 | Reader | 1 thread, sequential; `FileChannel` with 4 MiB direct buffers |
 | Splitter | 1 thread |
 | Hash, compress, encrypt | worker pool sized to CPU cores, at most 4 × workers sections in flight; sections over one chunk run inline on the writer thread |
-| Iceberg writer | 1 thread, writes in seq order |
-| Publishing | one background thread per pipeline sends in seq order; sealing runs on the worker pool; the adapter's futures carry concurrency |
+| Iceberg writer | 1 thread (the splitter's), writes in seq order |
+| Sealing messages | its own pool, also sized to CPU cores. It used to share the encrypt pool, so a batch's 10,000 sealing jobs queued ahead of the next batch's encryption and splitting stalled (§13.1) |
+| Publishing | one background thread per pipeline sends in seq order; the adapter's futures carry concurrency |
 
 - **Reads per file:** each file is read **twice**, once to split and once to archive. This trade keeps both phases simply resumable, and the second read is sequential I/O.
-- **Throughput:** expected to be bound by disk read speed or object-store upload speed for large C-CDA and X12 files, and by HMAC/encryption for very many small CSV records.
+- **Throughput:** measured in §13.1. The original expectation (disk or object-store bound for large files, HMAC and encryption bound for small records) was wrong on both counts: large sections are bound by the single split-and-write thread, and small ones by per-message public-key crypto.
+
+### 13.1 Measured throughput (built)
+
+`scripts/perf.sh` generates synthetic files and runs each through the whole ingest path, assembled as the connector assembles it, with production defaults: commits every 10,000 sections or 512 MiB, one encrypt worker per core, 512 MiB archive commits and a 1.5 GiB heap (the Kubernetes sketch in §14.1).
+- **Generated files** (seeded random words from a 4,096-word vocabulary, so they compress roughly like real text):
+  - C-CDA: one `ClinicalDocument` per section, 50–350 KB each;
+  - X12 837P: one claim per section, 1–6 KB, 1,000 per group;
+  - CSV: one 150–400-byte record per section, with a header; 1 in 10 has a quoted note with a newline.
+- **What it measures:** wall time for the split and archive phases (from the pipeline's own spans), average cores used, the busiest single thread's share of wall time, sampled peak heap, and stored bytes against source bytes.
+- **What it checks:** each file completes with exactly the expected number of sections and messages.
+- **The broker** is replaced by a counter that acknowledges at once, so broker latency isn't included; every message is still sealed and signed.
+- **Options:** `-Dperf.size=4GiB`, `-Dperf.formats=csv`, `-Dperf.storage=s3` (SeaweedFS in the minikube VM), `-Dperf.recipient=rsa`.
+- **Output:** `connector-core/target/perf/throughput-<storage>-<recipient>.md`.
+
+**Results, 2026-10-29:** 1 GiB per format; AMD Ryzen 9 8945HX (16 cores, 32 threads), Java 25.0.4. Iceberg on local disk, JDBC catalog. After the sealing-pool fix.
+
+| Recipient key | Format | Sections | MiB/s | Sections/s | Split phase MiB/s | Archive MiB/s | Avg cores | Busiest thread | Stored ÷ source |
+|---|---|---:|---:|---:|---:|---:|---:|---|---:|
+| P-256 | C-CDA | 5,259 | 118 | 604 | 273 | 206 | 3.6 | main 93% | 0.50 |
+| P-256 | X12 | 475,907 | 40 | 18,795 | 52 | 177 | 18.5 | main 59% | 0.93 |
+| P-256 | CSV | 3,767,820 | 7 | 24,434 | 7 | 145 | 23.1 | sdh-seal 69% | 1.79 |
+| RSA-3072 | C-CDA | 5,259 | 119 | 612 | 280 | 207 | 3.1 | main 94% | 0.50 |
+| RSA-3072 | X12 | 475,907 | 61 | 28,357 | 91 | 185 | 9.8 | main 81% | 0.93 |
+| RSA-3072 | CSV | 3,767,820 | 13 | 48,607 | 15 | 139 | 14.9 | main 58% | 1.79 |
+
+On S3 (SeaweedFS inside the minikube VM, P-256) the results were close to local disk: C-CDA 103 MiB/s, X12 15,298 and CSV 19,490 sections/s. Uploads are not the limit, and SeaweedFS's own CPU use in the VM takes from the same host. Before the sealing-pool fix, P-256 gave X12 15,048 and CSV 19,859 sections/s.
+
+**What bounds each case:**
+- **Large sections (C-CDA): the single split-and-write thread**, busy 93% at about 270 MiB/s. Splitting, Parquet writing and multi-chunk section encryption all run on it; the workers are mostly idle. The archive pass runs at about 200 MiB/s. Neither is near disk speed. Input files were in the page cache, so disk reads weren't measured.
+- **Small sections (X12, CSV): public-key crypto for every message.** A CPU profile of the CSV run put about 90% of CPU in P-256 arithmetic. Timed separately on one core:
+  - ECDH key agreement: 390 µs;
+  - ES256 signature: 95 µs;
+  - ephemeral key generation: 70 µs.
+
+  That's about 0.55 ms per message: the ECDH-ES encryption about 85%, the signature about 15%. Splitting, hashing, section encryption, zstd and Parquet are a few percent together.
+- **RSA-3072 recipients** (already supported by the contract, §10) cost the connector about 55 µs per message to encrypt instead of about 460 µs: CSV is 2× faster, X12 1.5×. Readers pay the difference: RSA-3072 decryption is about 2.1 ms per message against about 0.4 ms for ECDH. With RSA, CSV is no longer CPU-bound (15 of 32 cores, no thread saturated), so the next limit is coordination between stages.
+- **Stored ÷ source:** CSV stores 1.8× its size, because the header is prepended to every section and each row carries an ID, keys and GCM overhead. X12 is 0.93, with an envelope added to every transaction. C-CDA compresses to 0.5.
+- **Peak heap:** G1 grew to the 1.5 GiB limit in every run, so this doesn't show how much the pipeline needs; in-flight data is bounded (§13). A smaller heap hasn't been tried.
+
+**Ways to go faster on small sections** (not decided; §16 item 8):
+1. RSA-3072 recipient keys: configuration only, about 2× for CSV, but readers pay about 5× more per message to decrypt.
+2. A native crypto provider for P-256 (for example Amazon Corretto Crypto Provider, built on AWS-LC). Likely several times faster for ECDH and signing; not tried.
+3. One message per committed batch instead of per section. This cuts sealing by up to 10,000× but changes the contract and how downstream consumers work.
+4. Reusing the ephemeral ECDH key across messages would remove most of the cost. It breaks RFC 7518's rule that each key agreement uses a new ephemeral key, so it's not recommended.
 
 ## 14. Configuration
 
@@ -816,7 +934,7 @@ sdh:
     poll-interval: 5s
     include: "*"                  # Ant-style
   split:
-    format: ccda                  # ccda | xml | x12 | fhir | csv | delimited | <plugin>
+    format: ccda                  # ccda | xml | x12 | edifact | fhir | csv | delimited | <plugin>
     boundary: ClinicalDocument    # optional; format default
     options:                      # format options from §6.2, nested keys become dotted names
       namespace: urn:hl7-org:v3
@@ -824,6 +942,8 @@ sdh:
       fhir: { ndjson-group-size: 0 }
       delimited: { pattern: "^MSH\\|", mode: START }
     limits: { max-file-bytes: 1TB, max-section-bytes: 512MB }   # omitted = format defaults
+    convert: true                 # JSON conversion where the format has a converter (§6.4)
+    convert-max-bytes: 64MB       # larger sections are stored in their original form, as failed
   storage:
     catalog-name: sdh             # also sent in messages
     namespace: sdh_ingest
@@ -952,11 +1072,12 @@ spec:
 
 | Level | Coverage |
 |---|---|
+| Conversion | `FlatConvertersTest` (CSV, X12, EDIFACT edge cases and failure codes), `CcdaConverterTest` (parity with Google's XmlToJson outputs, DTDs refused), `CcdaSamplesTest` (four real-world C-CDA documents, nothing lost), `IngestPipelineTest` (JSON stored, failed sections kept raw with lineage, rebuilt after a restart, size limit, chunked JSON) |
 | Unit | Each splitter, including boundaries spanning buffer edges, resume from every reported offset, malformed input and limits; crypto round-trips and AAD tamper detection; checkpoint MAC; message JOSE round-trip; lease keeper timing with a fake clock |
 | Integration without Docker (default build) | Embedded PostgreSQL binaries (`io.zonky.test:embedded-postgres`) for the lease store and JDBC catalog. Iceberg's `RESTCatalogAdapter` for REST catalog commit rules, in-process. `InMemoryFileIO`. Fencing tests run against both catalog types. End-to-end write → message → `connector-queue-reader`. The whole Spring Boot app with a SEDA queue (`FileConnectorApplicationTest`). The admin commands against data the running app wrote, while it holds the lease (`AdminCommandsTest`) |
 | Integration with Docker (`-Pit`) | See §15.1 |
 | Crash and resume | Fault-injection points at every stage (after write, after commit, mid-publish, before end of file, mid-archive, after delete, while failing), then a restart. The test checks that there are no gaps, no lost or duplicated rows, and duplicate messages only within one batch |
-| Throughput | Not built yet: synthetic multi-GB C-CDA, X12 and CSV files, with records of MB/s and sections/s |
+| Throughput | `-Pperf` / `scripts/perf.sh` (§13.1): synthetic multi-GB C-CDA, X12 and CSV through the whole ingest path, on local disk or SeaweedFS; MiB/s, sections/s, phase times, cores used, busiest thread, stored ÷ source |
 
 ### 15.1 Docker integration suite (`-Pit`)
 
@@ -964,7 +1085,7 @@ spec:
 
 | Test | Containers | Verifies |
 |---|---|---|
-| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
+| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. The good file has one record with a missing field: that section arrives as `section.failed` and reads back in its original form, and the file still completes with `failedSectionCount` 1; the others read back as JSON rows. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
 | `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = fileId, metadata headers, per-file order, `acks=all` + idempotence |
 | `RabbitMqIT` | `rabbitmq:4.2.9-management-alpine` | `message_id`, content type, headers, publisher confirms (`CORRELATED`) |
 | `ArtemisIT` | `apache/activemq-artemis:2.44.0-alpine` | `JMSXGroupID`, and duplicates dropped by `_AMQ_DUPL_ID` |
@@ -999,7 +1120,7 @@ spec:
 
 **GCP Cloud KMS** has no emulator. `GcpKmsKeyProviderTest` (a unit test in `connector-kms`) runs the provider against an in-process fake of the Cloud KMS gRPC service: real AES-GCM with the AAD enforced, real ECDSA, and the CRC32C integrity fields. It checks our side of the protocol, not Google's service.
 
-**Not covered yet:** throughput tests; other REST catalogs (Nessie, Unity, AWS S3 Tables); GCP KMS against the real service; the image on a real Kubernetes cluster.
+**Not covered yet:** other REST catalogs (Nessie, Unity, AWS S3 Tables); GCP KMS against the real service; the image on a real Kubernetes cluster.
 
 ## 16. Risks and verification items
 
@@ -1014,6 +1135,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |
 | 6 | New: fencing on REST and JDBC catalogs | **Passed** | Plain Iceberg transactions are not fenced, which the control test demonstrates. The compare-and-swap committer with snapshot markers is (§9.3). Confirmed on a real REST server, Apache Polaris 1.8.0, in `PolarisIT` |
 | 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. KMS providers: AWS (local-kms), Azure (Lowkey Vault) and Vault pass; GCP runs against a fake. Apache Polaris (REST catalog) passes, including fencing. Not covered: MinIO (images no longer published) |
+| 8 | New: throughput on small sections | **Open** | §13.1: about 24,000 sections/s (CSV ≈ 7 MiB/s) with a P-256 recipient on 16 cores, bound by public-key crypto for every message. A 1 GiB CSV takes about 2.5 minutes. Whether that's enough depends on expected volumes; the options are in §13.1 |
 
 **Spike follow-ups:** check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
 

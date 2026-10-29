@@ -28,6 +28,21 @@ final class ItSupport {
         }
     }
 
+    /**
+     * The stored form of a test CSV record {@code id,name,"multi\nline"} (no other quoting): a JSON array of its
+     * fields by position, the header dropped (design §6.4, csv-row/1).
+     */
+    static String csvRowJson(String record) {
+        String r = record.endsWith("\n") ? record.substring(0, record.length() - 1) : record;
+        int a = r.indexOf(',');
+        int b = r.indexOf(',', a + 1);
+        String note = r.substring(b + 1);
+        if (note.startsWith("\"") && note.endsWith("\"")) {
+            note = note.substring(1, note.length() - 1);
+        }
+        return "[\"" + r.substring(0, a) + "\",\"" + r.substring(a + 1, b) + "\",\"" + note.replace("\n", "\\n") + "\"]";
+    }
+
     /** Two files' messages interleaved, as two files would never be, to make per-file ordering visible. */
     static List<OutboundMessage> interleaved(UUID a, UUID b, int perFile) {
         List<OutboundMessage> out = new ArrayList<>();

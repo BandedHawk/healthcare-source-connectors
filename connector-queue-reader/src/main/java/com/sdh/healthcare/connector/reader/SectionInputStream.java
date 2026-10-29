@@ -5,7 +5,7 @@ import static com.sdh.healthcare.connector.contract.table.SectionsTable.*;
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -26,7 +26,7 @@ import org.apache.iceberg.io.CloseableIterable;
 
 /** Streams one section: scans its chunk rows, puts them in order and decrypts them one at a time. */
 final class SectionInputStream extends InputStream {
-    private final SectionStored msg;
+    private final SectionInStorage msg;
     private final BatchKeyCache keys;
     private final CloseableIterable<Record> rows;
     private final Iterator<Record> it;
@@ -40,7 +40,7 @@ final class SectionInputStream extends InputStream {
     private int pos;
     private boolean sawRows;
 
-    private SectionInputStream(Table table, SectionStored msg, BatchKeyCache keys) {
+    private SectionInputStream(Table table, SectionInStorage msg, BatchKeyCache keys) {
         this.msg = msg;
         this.keys = keys;
         long dayStart = TimeUnit.SECONDS.toMicros(
@@ -58,7 +58,7 @@ final class SectionInputStream extends InputStream {
         this.it = rows.iterator();
     }
 
-    static SectionInputStream open(Table table, SectionStored msg, BatchKeyCache keys) {
+    static SectionInputStream open(Table table, SectionInStorage msg, BatchKeyCache keys) {
         return new SectionInputStream(table, msg, keys);
     }
 

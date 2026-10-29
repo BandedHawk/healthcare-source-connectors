@@ -202,10 +202,11 @@ public final class FileProcessor {
     }
 
     private Outcome finishCompletion(Checkpoint cp, Archiver.Result archived, SourceFile file) throws Exception {
-        pipeline.publishNow(List.of(new FileCompleted(cp.fileId(), cp.sectionCount(), cp.fileSize(),
+        long failedSections = pipeline.failedSectionCount(cp.fileId());
+        pipeline.publishNow(List.of(new FileCompleted(cp.fileId(), cp.sectionCount(), failedSections, cp.fileSize(),
                 archived.digest(), cp.startedAt(), archived.finishedAt())));
         recorder.completed(new CompletionRecord(cp.fileId(), cp.startedAt(), archived.finishedAt(), cp.sectionCount(),
-                cp.fileSize(), archived.digest()));
+                failedSections, cp.fileSize(), archived.digest()));
         if (file != null) {
             file.deleteOriginal();
         }

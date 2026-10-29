@@ -7,7 +7,8 @@ package com.sdh.healthcare.connector.contract;
  * fields, which older readers ignore. A major change needs a reader upgrade first.
  */
 public final class ContractVersion {
-    public static final int MAJOR = 1;
+    /** 2: sections carry their content type and mapping; section.failed; file.completed counts failed sections. */
+    public static final int MAJOR = 2;
     public static final int MINOR = 0;
     public static final String CURRENT = MAJOR + "." + MINOR;
 

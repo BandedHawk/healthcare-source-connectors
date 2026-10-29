@@ -49,6 +49,7 @@ public final class DirectoryOutcomeRecorder implements OutcomeRecorder {
         m.put("startedAt", r.startedAt().toString());
         m.put("completedAt", r.completedAt().toString());
         m.put("sectionCount", r.sectionCount());
+        m.put("failedSectionCount", r.failedSectionCount());
         m.put("byteCount", r.fileSize());
         m.put("fileDigest", r.fileDigest());
         writeAtomically(completed, r.fileId() + ".json", JSONObjectUtils.toJSONString(m).getBytes(StandardCharsets.UTF_8));

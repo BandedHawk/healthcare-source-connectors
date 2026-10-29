@@ -326,7 +326,7 @@ class ContainerImageIT {
             assertThat(sections).hasSize(20);
             for (SectionStored s : sections) {
                 assertThat(new String(reader.readSection(s, 1 << 20), UTF_8))
-                        .isEqualTo(header + records.get((int) s.seq()));
+                        .isEqualTo(ItSupport.csvRowJson(records.get((int) s.seq())));
             }
         }
 

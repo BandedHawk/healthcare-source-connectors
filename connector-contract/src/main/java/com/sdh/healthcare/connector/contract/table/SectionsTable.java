@@ -1,5 +1,6 @@
 package com.sdh.healthcare.connector.contract.table;
 
+import static org.apache.iceberg.types.Types.NestedField.optional;
 import static org.apache.iceberg.types.Types.NestedField.required;
 
 import org.apache.iceberg.PartitionSpec;
@@ -25,6 +26,12 @@ public final class SectionsTable {
     public static final String KEK_REF = "kek_ref";
     public static final String BATCH_ID = "batch_id";
     public static final String INGESTED_AT = "ingested_at";
+    /** What the stored bytes are: {@code application/json} once converted, else the original media type. */
+    public static final String CONTENT_TYPE = "content_type";
+    /** The JSON mapping and version, e.g. {@code csv-row/1}; null when stored as split. */
+    public static final String MAPPING = "mapping";
+    /** Set when conversion failed and the section is stored in its original form (design §6.4); null otherwise. */
+    public static final String ERROR_CODE = "error_code";
 
     public static final Schema SCHEMA = new Schema(
             required(1, SECTION_ID, Types.StringType.get()),
@@ -40,7 +47,10 @@ public final class SectionsTable {
             required(11, BDK_WRAPPED, Types.BinaryType.get()),
             required(12, KEK_REF, Types.StringType.get()),
             required(13, BATCH_ID, Types.UUIDType.get()),
-            required(14, INGESTED_AT, Types.TimestampType.withZone()));
+            required(14, INGESTED_AT, Types.TimestampType.withZone()),
+            required(15, CONTENT_TYPE, Types.StringType.get()),
+            optional(16, MAPPING, Types.StringType.get()),
+            optional(17, ERROR_CODE, Types.StringType.get(), "conversion failed; stored in its original form"));
 
     public static final PartitionSpec SPEC =
             PartitionSpec.builderFor(SCHEMA).day(INGESTED_AT).build();

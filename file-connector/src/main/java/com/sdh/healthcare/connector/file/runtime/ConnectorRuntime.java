@@ -5,6 +5,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
+import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.pipeline.FileProcessor;
@@ -125,7 +126,9 @@ public final class ConnectorRuntime implements AutoCloseable {
                     .withCommit(p.storage().commit().maxSections(), p.storage().commit().maxBytes().toBytes(),
                             p.storage().commit().maxInterval())
                     .withWorkers(workers)
-                    .withRetry(retry);
+                    .withRetry(retry)
+                    .withConversion(p.split().convert() ? ConverterRegistry.load() : ConverterRegistry.none(),
+                            p.split().convertMaxBytes().toBytes());
             configureBroker(camel, queueType, p.queue());
             ClosablePublisher publisher = Publishers.create(camel, queueType, queueUri);
             Clock clock = Clock.systemUTC();

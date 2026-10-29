@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.PayloadCodec;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import java.nio.charset.StandardCharsets;
@@ -37,7 +38,8 @@ class ContractRoundTripTest {
         KeyPair signer = ec();
         KeyPair recipient = ec();
         KeyPair stranger = ec();
-        SectionStored msg = new SectionStored("ABC", UUID.randomUUID(), 7, 100, 50, "ccda", 50, 1,
+        SectionStored msg = new SectionStored("ABC", UUID.randomUUID(), 7, 100, 50, "ccda", "application/json",
+                "ccda/1", 50, 1,
                 new StorageRef("cat", "sdh_ingest", "sections", LocalDate.of(2026, 10, 28), 42L, "kek-1"));
 
         byte[] body = new MessageSealer(new ECDSASigner((ECPrivateKey) signer.getPrivate()), "sig-1",
@@ -54,6 +56,25 @@ class ContractRoundTripTest {
                 .isInstanceOf(MessageRejectedException.class)
                 .extracting(e -> ((MessageRejectedException) e).reason())
                 .isEqualTo(MessageRejectedException.Reason.BAD_SIGNATURE);
+    }
+
+    /** Every message type survives the payload codec, including optional fields left out. */
+    @Test
+    void everyMessageTypeRoundTrips() {
+        UUID fileId = UUID.randomUUID();
+        StorageRef ref = new StorageRef("cat", "sdh_ingest", "sections", LocalDate.of(2026, 10, 28), 42L, "kek-1");
+        for (ConnectorMessage m : java.util.List.of(
+                new ConnectorMessage.FileStarted(fileId, "csv", 999, java.time.Instant.EPOCH, "file-connector"),
+                new SectionStored("ID1", fileId, 0, 10, 20, "csv", "application/json", "csv-row/1", 30, 1, ref),
+                new SectionStored("ID2", fileId, 1, 30, 20, "fhir", "application/fhir+json", null, 20, 1, ref),
+                new ConnectorMessage.SectionFailed("ID3", fileId, 2, 50, 20, "csv", "text/csv",
+                        "CONVERT_CSV_FIELD_COUNT", 40, 1, ref),
+                new ConnectorMessage.FileCompleted(fileId, 3, 1, 999, "digest", java.time.Instant.EPOCH,
+                        java.time.Instant.EPOCH))) {
+            assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(m))).isEqualTo(m);
+        }
+        assertThat(PayloadCodec.toJson(new SectionStored("ID2", fileId, 1, 30, 20, "fhir", "application/fhir+json",
+                null, 20, 1, ref))).doesNotContainKey("mapping");
     }
 
     @Test

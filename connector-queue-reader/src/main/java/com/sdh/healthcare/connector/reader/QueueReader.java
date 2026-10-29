@@ -4,6 +4,7 @@ import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import java.io.IOException;
@@ -31,8 +32,12 @@ import org.apache.iceberg.catalog.TableIdentifier;
  *     .build();
  *
  * ConnectorMessage m = reader.decode(brokerMessageBody);
- * if (m instanceof SectionStored s) {
- *     try (InputStream in = reader.openSection(s)) { ... }
+ * switch (m) {
+ *     case SectionStored s -> {           // JSON when s.mapping() != null (csv-row/1, ccda/1, x12/1, edifact/1)
+ *         try (InputStream in = reader.openSection(s)) { ... }
+ *     }
+ *     case SectionFailed f -> { ... }     // kept in its original format (f.contentType()) for remediation
+ *     default -> { }
  * }
  * }</pre>
  *
@@ -74,13 +79,13 @@ public final class QueueReader implements AutoCloseable {
      *
      * @throws SectionNotFoundException if the section is not (or no longer) in the table
      */
-    public InputStream openSection(SectionStored message) {
+    public InputStream openSection(SectionInStorage message) {
         Table table = table(message.storage());
         return SectionInputStream.open(table, message, keys);
     }
 
     /** Reads a whole section into memory. Refuses sections larger than {@code maxBytes}. */
-    public byte[] readSection(SectionStored message, int maxBytes) {
+    public byte[] readSection(SectionInStorage message, int maxBytes) {
         if (message.plaintextLength() > maxBytes) {
             throw new IllegalArgumentException("Section is larger than maxBytes");
         }

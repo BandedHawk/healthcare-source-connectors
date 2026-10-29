@@ -3,6 +3,8 @@ package com.sdh.healthcare.connector.contract.message;
 import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import java.time.Instant;
@@ -29,12 +31,20 @@ public final class PayloadCodec {
                 o.put("startedAt", f.startedAt().toString());
                 o.put("connectorId", f.connectorId());
             }
-            case SectionStored s -> {
+            case SectionInStorage s -> {
                 o.put("sectionId", s.sectionId());
                 o.put("seq", s.seq());
                 o.put("sourceOffset", s.sourceOffset());
                 o.put("sourceLength", s.sourceLength());
                 o.put("format", s.format());
+                o.put("contentType", s.contentType());
+                switch (s) {
+                    case SectionStored st when st.mapping() != null -> o.put("mapping", st.mapping());
+                    case SectionFailed f -> o.put("errorCode", f.errorCode());
+                    default -> {
+                        // stored as split: no mapping
+                    }
+                }
                 o.put("plaintextLength", s.plaintextLength());
                 o.put("chunkCount", s.chunkCount());
                 StorageRef r = s.storage();
@@ -49,6 +59,7 @@ public final class PayloadCodec {
             }
             case FileCompleted c -> {
                 o.put("sectionCount", c.sectionCount());
+                o.put("failedSectionCount", c.failedSectionCount());
                 o.put("fileSize", c.fileSize());
                 o.put("fileDigest", c.fileDigest());
                 o.put("startedAt", c.startedAt().toString());
@@ -75,28 +86,34 @@ public final class PayloadCodec {
                             num(o, "fileSize"),
                             Instant.parse(str(o, "startedAt")),
                             str(o, "connectorId"));
-                    case SECTION_STORED -> {
-                        Map<String, Object> st = (Map<String, Object>) req(o, "storage");
-                        yield new SectionStored(
-                                str(o, "sectionId"),
-                                fileId,
-                                num(o, "seq"),
-                                num(o, "sourceOffset"),
-                                num(o, "sourceLength"),
-                                str(o, "format"),
-                                num(o, "plaintextLength"),
-                                Math.toIntExact(num(o, "chunkCount")),
-                                new StorageRef(
-                                        str(st, "catalog"),
-                                        str(st, "namespace"),
-                                        str(st, "table"),
-                                        LocalDate.parse(str(st, "ingestedDate")),
-                                        num(st, "snapshotId"),
-                                        str(st, "kekRef")));
-                    }
+                    case SECTION_STORED -> new SectionStored(
+                            str(o, "sectionId"),
+                            fileId,
+                            num(o, "seq"),
+                            num(o, "sourceOffset"),
+                            num(o, "sourceLength"),
+                            str(o, "format"),
+                            str(o, "contentType"),
+                            (String) o.get("mapping"),
+                            num(o, "plaintextLength"),
+                            Math.toIntExact(num(o, "chunkCount")),
+                            storage(o));
+                    case SECTION_FAILED -> new SectionFailed(
+                            str(o, "sectionId"),
+                            fileId,
+                            num(o, "seq"),
+                            num(o, "sourceOffset"),
+                            num(o, "sourceLength"),
+                            str(o, "format"),
+                            str(o, "contentType"),
+                            str(o, "errorCode"),
+                            num(o, "plaintextLength"),
+                            Math.toIntExact(num(o, "chunkCount")),
+                            storage(o));
                     case FILE_COMPLETED -> new FileCompleted(
                             fileId,
                             num(o, "sectionCount"),
+                            num(o, "failedSectionCount"),
                             num(o, "fileSize"),
                             str(o, "fileDigest"),
                             Instant.parse(str(o, "startedAt")),
@@ -106,6 +123,13 @@ public final class PayloadCodec {
             throw new IllegalArgumentException("messageId does not match payload");
         }
         return m;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static StorageRef storage(Map<String, Object> o) {
+        Map<String, Object> st = (Map<String, Object>) req(o, "storage");
+        return new StorageRef(str(st, "catalog"), str(st, "namespace"), str(st, "table"),
+                LocalDate.parse(str(st, "ingestedDate")), num(st, "snapshotId"), str(st, "kekRef"));
     }
 
     private static Object req(Map<String, Object> o, String k) {

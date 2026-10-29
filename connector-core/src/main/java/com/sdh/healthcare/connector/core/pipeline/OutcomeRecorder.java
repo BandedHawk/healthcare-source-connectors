@@ -30,8 +30,9 @@ public interface OutcomeRecorder {
         void close() throws IOException;
     }
 
-    record CompletionRecord(UUID fileId, Instant startedAt, Instant completedAt, long sectionCount, long fileSize,
-            String fileDigest) {}
+    /** @param failedSectionCount sections stored in their original form after failing conversion (design §6.4) */
+    record CompletionRecord(UUID fileId, Instant startedAt, Instant completedAt, long sectionCount,
+            long failedSectionCount, long fileSize, String fileDigest) {}
 
     enum ArchiveLocation { FAILED_FILES, LOCAL_FALLBACK, UNKNOWN }
 
