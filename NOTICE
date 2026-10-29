@@ -1,15 +1,23 @@
 Healthcare Source Connectors
 Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
 
-This product includes third-party software. Each component, its license(s) and its own NOTICE text are listed
-in META-INF/THIRD-PARTY.txt, and the license texts are in META-INF/licenses/. In the container image these files
-are in /app/legal/. Where a component is offered under a choice of licenses, all of them are listed.
+Third-party software
+The file connector application (its jar, container image and any distribution archive) includes third-party
+software. Each bundled component, its license(s), its copyright line and its own NOTICE text are listed in
+THIRD-PARTY.txt, and the license texts are in licenses/: under META-INF/ in the application jar, and in /app/legal/
+in the container image. Where a component is offered under a choice of licenses, all of them are listed.
+
+The library jars (connector-contract, connector-core, connector-kms, connector-queue-reader) contain only Smile
+Digital Health code, apart from the HL7-derived model described below; their third-party dependencies are declared
+in their Maven POMs and are not included in them.
 
 The container image also contains:
 - native libraries unpacked from zstd-jni (BSD-2-Clause) and snappy-java (Apache-2.0) into /app/native, so they
   can load from a read-only filesystem; both components are listed in THIRD-PARTY.txt;
-- the Eclipse Temurin Java runtime and the Ubuntu base image, whose notices are in /opt/java/openjdk/legal and
-  /usr/share/doc respectively.
+- the Eclipse Temurin Java runtime (GPL-2.0 with the Classpath Exception, and others), whose notices and license
+  texts are in /opt/java/openjdk/legal/;
+- Ubuntu operating system packages, listed in /app/legal/os-packages.txt, each with its copyright and license
+  terms in /usr/share/doc/<package>/copyright.
 
 HL7 Clinical Document Architecture
 The C-CDA element model in connector-core (com/sdh/healthcare/connector/core/convert/cda-r2-sdtc.model) is

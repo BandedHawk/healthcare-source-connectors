@@ -267,6 +267,20 @@
   </dependencyManagement>
 
   <build>
+    <!-- Our LICENSE and NOTICE go into every jar's META-INF (design §14.2). -->
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <resource>
+        <directory>${maven.multiModuleProjectDirectory}</directory>
+        <targetPath>META-INF</targetPath>
+        <includes>
+          <include>LICENSE</include>
+          <include>NOTICE</include>
+        </includes>
+      </resource>
+    </resources>
     <pluginManagement>
       <plugins>
         <plugin>
@@ -301,8 +315,9 @@
           <artifactId>spring-boot-maven-plugin</artifactId>
           <version>${spring-boot.version}</version>
         </plugin>
-        <!-- Third-party attribution (design §14.2), adapted from healthcare-data-harmonization. In every jar module, at
-             prepare-package: download-licenses fetches the license texts named in dependency POMs, add-third-party writes
+        <!-- Third-party attribution (design §14.2), adapted from healthcare-data-harmonization. Enabled in modules
+             whose artifact bundles dependencies (file-connector, from which the image and any distribution archive are
+             built). At prepare-package: download-licenses fetches the license texts named in dependency POMs, add-third-party writes
              META-INF/THIRD-PARTY.txt from src/license/third-party.ftl, and the gmavenplus step below replaces each license
              with its canonical text and fills in each component's own NOTICE. Runtime dependencies only; our own modules
              are excluded. Needs network access when packaging; offline, a placeholder is written and a warning logged. -->
@@ -426,9 +441,6 @@
                     def metaInf = new File(project.build.outputDirectory, "META-INF")
                     def licensesDir = new File(metaInf, "licenses")
                     licensesDir.mkdirs()
-
-                    // Our own LICENSE and NOTICE (copyright, HL7 attribution) go into every jar.
-                    ["LICENSE", "NOTICE"].each { new File(metaInf, it).text = new File(rootDir, it).text }
 
                     def thirdPartyFile = new File(metaInf, "THIRD-PARTY.txt")
                     if (!thirdPartyFile.exists()) {

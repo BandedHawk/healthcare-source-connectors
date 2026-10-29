@@ -359,5 +359,10 @@ class ContainerImageIT {
         assertThat(exec("grep", "-c", "PLACEHOLDER", "/app/legal/THIRD-PARTY.txt")).startsWith("1:0");
         assertThat(exec("sh", "-c", "test -s /app/legal/licenses/apache-2.0.txt && test -s /app/legal/licenses/mit.txt"))
                 .isEqualTo("0:");
+        // What the base image brings is attributed too: every OS package with its copyright file, and the JRE's notices.
+        assertThat(exec("grep", "-qE", "^libc6 [^ ]+ glibc ", "/app/legal/os-packages.txt")).isEqualTo("0:");
+        assertThat(exec("sh", "-c", "grep -v '^#' /app/legal/os-packages.txt | while read p rest; do "
+                + "test -s /usr/share/doc/${p%%:*}/copyright || echo \"$p\"; done | head -5")).isEqualTo("0:");
+        assertThat(exec("sh", "-c", "test -s /opt/java/openjdk/legal/java.base/LICENSE")).isEqualTo("0:");
     }
 }

@@ -253,7 +253,9 @@
 
   <build>
     <plugins>
-      <!-- Third-party attribution in the jar: META-INF/THIRD-PARTY.txt, licenses/, LICENSE, NOTICE (design §14.2). -->
+      <!-- Third-party attribution for everything this jar bundles: META-INF/THIRD-PARTY.txt and licenses/ (design
+           §14.2). Only this module needs it: the image and any distribution archive are built from this jar, while
+           the library jars bundle nothing and carry just our LICENSE and NOTICE. -->
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>license-maven-plugin</artifactId>

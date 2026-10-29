@@ -68,6 +68,14 @@ COPY --from=extract /build/legal/ ./legal/
 COPY docker/jvm.options /app/jvm.options
 COPY docker/sdh-admin /usr/local/bin/sdh-admin
 RUN chmod 0644 /app/jvm.options && chmod 0755 /usr/local/bin/sdh-admin
+# Every OS package in this image, with the source package it was built from (design §14.2): the attribution and
+# source-availability record for what the base image brings. Each package's terms are in
+# /usr/share/doc/<package>/copyright; the Java runtime's are in /opt/java/openjdk/legal/.
+RUN { echo "# Operating system packages in this image: package, version, source package (source version)."; \
+      echo "# Licenses and copyrights: /usr/share/doc/<package>/copyright."; \
+      dpkg-query -W -f='${Package} ${Version} ${source:Package} (${source:Version})\n' | sort; } \
+      > /app/legal/os-packages.txt \
+ && chmod 0644 /app/legal/os-packages.txt
 
 USER 10001:10001
 ENV TZ=UTC
