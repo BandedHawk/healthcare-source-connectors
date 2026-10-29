@@ -27,9 +27,12 @@ on a Java 25 base image of your choice.
 - Java 25.
 - PostgreSQL, for the single-instance lease; it can be the JDBC catalog's database.
 - An Iceberg catalog: REST (for example Apache Polaris) or JDBC.
-- Object storage: Amazon S3 or an S3-compatible store, Google Cloud Storage, or Azure Data Lake Storage Gen2.
+- Object storage: Amazon S3, Google Cloud Storage or Azure Data Lake Storage Gen2. Of the S3-compatible stores,
+  SeaweedFS is tested; MinIO is not supported.
 - A message broker: Kafka, Amazon SQS, Google Pub/Sub, Azure Service Bus or Event Hubs, ActiveMQ Artemis or RabbitMQ.
-- Keys: a local keystore and PEM files, or a KMS (AWS KMS, Google Cloud KMS, Azure Key Vault, HashiCorp Vault Transit).
+- Keys: a local keystore and PEM files, or a KMS (AWS KMS, Azure Key Vault or HashiCorp Vault Transit). Google
+  Cloud KMS is available but untested against the live service; contact Smile Digital Health before relying on
+  it in production.
 
 Run exactly one connector per inbound directory. A second instance is refused at startup.
 

@@ -122,7 +122,7 @@
       <scope>runtime</scope>
     </dependency>
 
-    <!-- Object storage: S3FileIO for AWS S3, SeaweedFS and MinIO (design §8.1). -->
+    <!-- Object storage: S3FileIO for AWS S3 and S3-compatible stores such as SeaweedFS (design §8.1; MinIO is not supported). -->
     <dependency>
       <groupId>org.apache.iceberg</groupId>
       <artifactId>iceberg-aws</artifactId>
