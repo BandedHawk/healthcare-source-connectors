@@ -5,7 +5,9 @@ Third-party software
 The file connector application (its jar, container image and any distribution archive) includes third-party
 software. Each bundled component, its license(s), its copyright line and its own NOTICE text are listed in
 THIRD-PARTY.txt, and the license texts are in licenses/: under META-INF/ in the application jar, and in /app/legal/
-in the container image. Where a component is offered under a choice of licenses, all of them are listed.
+in the container image. Where a component is offered under a choice of licenses, all of them are listed, and the
+"Elected license" line names the one Smile Digital Health Inc. distributes it under: a permissive license (MIT,
+Apache, BSD, ISC or Creative Commons) over any GNU General Public License or similar license.
 
 The library jars (connector-contract, connector-core, connector-kms, connector-queue-reader) contain only Smile
 Digital Health code, apart from the HL7-derived model described below; their third-party dependencies are declared

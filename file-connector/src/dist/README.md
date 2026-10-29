@@ -173,4 +173,5 @@ the connector's user and shares its processes, so the connector's files are unde
 
 `legal/THIRD-PARTY.txt` lists every third-party component in `app.jar` with its licenses, copyright and notices.
 `legal/licenses/` holds the license texts. Where a component is offered under a choice of licenses, all of them are
-listed.
+listed, and its "Elected license" line names the one Smile Digital Health distributes it under. Permissive licenses
+(MIT, Apache, BSD, ISC, Creative Commons) are elected over any GNU General Public License or similar license.

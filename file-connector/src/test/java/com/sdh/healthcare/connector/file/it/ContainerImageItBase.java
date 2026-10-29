@@ -389,6 +389,17 @@ abstract class ContainerImageItBase {
         String thirdParty = read("/app/legal/THIRD-PARTY.txt");
         assertThat(thirdParty).contains("Coordinates: com.github.luben:zstd-jni:")
                 .contains("Coordinates: org.xerial.snappy:snappy-java:").doesNotContain("PLACEHOLDER");
+        // Every component offered under a choice of licenses names the one we distribute it under, and none is a GNU
+        // license where something else was offered (design §14.2).
+        List<String> lines = thirdParty.lines().toList();
+        for (int i = 0; i < lines.size(); i++) {
+            if (lines.get(i).startsWith("Licenses: ") && lines.get(i).contains(",")) {
+                String elected = lines.get(i + 1);
+                assertThat(elected).as("election for " + lines.get(i)).startsWith("Elected license: ")
+                        .doesNotContain("NONE").doesNotContain("GPL");
+            }
+        }
+        assertThat(thirdParty).contains("Elected license: Apache-2.0").contains("Elected license: EPL-2.0");
         assertThat(read("/app/legal/licenses/apache-2.0.txt")).contains("Apache License");
         assertThat(read("/app/legal/licenses/mit.txt")).contains("MIT License");
 

@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-29 (y): license election for dual-licensed components (§14.2): permissive licenses (MIT, Apache-2.0, BSD, ISC, Creative Commons) are elected over any GPL or similar license. `THIRD-PARTY.txt` names the elected license for each of the ten components offered under a choice, and the image tests fail if one is missing or a GNU license is elected. Five components have no permissive option and are distributed under EPL-2.0 or CDDL-1.1.
+
 Revision 2026-10-29 (x): ran ADLS Gen2 orphan cleanup on a real Azure storage account (`AdlsAzureIT`, opt-in, §15.1). `ADLSFileIO.listPrefix` returns paths relative to the container, so every file of the `sections` table looked orphaned; the size-based safety stop refused the run, but a table of 20 files or fewer wasn't protected by it. Listed paths are now resolved against the table location, and any listed path outside the table location refuses the whole run (§8.4). Everything, orphan cleanup included, now passes on real ADLS.
 
 Revision 2026-10-29 (w): ran the customer image on Kubernetes (§15.2, `scripts/k8s-minikube.sh`), deployed from the README's manifest in a namespace that enforces the restricted Pod Security Standard. Everything passes. The run found and fixed:
@@ -1183,6 +1185,7 @@ Our `LICENSE` and `NOTICE` are added to every jar as Maven resources from the re
 **`THIRD-PARTY.txt`** has one entry per runtime dependency (test and provided scopes and our own modules excluded), generated from `src/license/third-party.ftl`:
 - name, coordinates and project URL;
 - its licenses, by canonical SPDX-style name; several names mean a choice;
+- for a choice, an `Elected license:` line naming the one we distribute it under (below);
 - its own `NOTICE`, copied from its jar;
 - for components not offered under Apache-2.0, its copyright line: the license file it ships in its jar, or else a line from `src/license/copyrights.properties`, taken from the project's published LICENSE. MIT and BSD require the copyright line, and the canonical texts only have placeholders.
 
@@ -1207,10 +1210,22 @@ Our `LICENSE` and `NOTICE` are added to every jar as Maven resources from the re
 
 **Failing the build:** a dependency with no license in its POM fails `add-third-party` (`failOnMissing`); add it to the override file. A component that isn't offered under Apache-2.0 and has neither a license file in its jar nor a line in `copyrights.properties` fails the Groovy step. So a new MIT, BSD or EPL dependency gets a human look.
 
+**License election** (Smile Digital Health policy, 2026-10-29): for a component offered under a choice of licenses, permissive licenses come first, in this order: MIT (and MIT-0), Apache-2.0, BSD, ISC, Creative Commons. They are elected over any GNU General Public License or similar license. Where no permissive option is offered, a weak-copyleft license that isn't GPL (EPL, MPL, CDDL) comes next; the GPL family (LGPL, GPL, GPL with the Classpath Exception, AGPL) comes last. The order is a list in `src/license/third-party.ftl`, which writes the `Elected license:` line; a license outside the list is written as `NONE (… review needed)`. `ServiceImageIT` and `CustomerImageIT` fail if a component under a choice has no election, a `NONE`, or a GNU license elected. Current elections:
+
+| Component | Offered | Elected |
+|---|---|---|
+| RabbitMQ Java Client | Apache-2.0, GPL-2.0, MPL-2.0 | Apache-2.0 |
+| JNA, JNA Platform | Apache-2.0, LGPL-2.1 | Apache-2.0 |
+| HdrHistogram | BSD-2-Clause, CC0-1.0 | BSD-2-Clause |
+| JTS (`jts-core`) | BSD-3-Clause, EPL-2.0 | BSD-3-Clause |
+| Logback Classic, Logback Core | EPL-2.0, LGPL-2.1 | EPL-2.0 (no permissive option) |
+| Jakarta Annotations API, Jakarta Messaging API | EPL-2.0, GPL-2.0 with the Classpath Exception | EPL-2.0 (no permissive option) |
+| `javax.annotation-api` | CDDL-1.1, GPL-2.0 with the Classpath Exception | CDDL-1.1 (no permissive option) |
+
 **Network:** packaging `file-connector` fetches license texts, as in the reference project; the library modules don't. Offline, a placeholder is written and a warning logged, so check the warnings in a release build. `mvn test` doesn't run these steps (they're bound to `prepare-package`).
 
 **Licenses in use:** almost all Apache-2.0, MIT or BSD. The rest:
-- **offered under a choice:** Logback (EPL-2.0 or LGPL-2.1), JNA (Apache-2.0 or LGPL-2.1), the RabbitMQ client (Apache-2.0, GPL-2.0 or MPL-2.0), the Jakarta APIs (EPL-2.0 or GPL-2.0 with the Classpath Exception; EDL), `javax.annotation-api` (CDDL-1.1 or GPL-2.0 with the Classpath Exception), HdrHistogram (BSD-2-Clause or CC0);
+- **offered under a choice:** the ten components in the election table above;
 - **single license:** `pem-keystore` (EPL-1.0), `reactive-streams` (MIT-0).
 
 None forces GPL terms on the connector, because every GPL or LGPL option has a permissive or weak-copyleft alternative. For EPL-1.0 and EPL-2.0 components distributed in binary form, the project URL in `THIRD-PARTY.txt` points to the source.
@@ -1218,7 +1233,7 @@ None forces GPL terms on the connector, because every GPL or LGPL option has a p
 **For legal review before the first customer release** (not engineering decisions):
 - **HL7:** HL7's CDA-core-2.0 repository declares no license. The attribution follows HL7's IP policy; confirm it covers redistributing the derived model in a commercial product.
 - **GPL source availability:** the distribution tarball contains nothing we use under the GPL: where a dependency offers the GPL as one choice, we use its other license. The customer image redistributes a few GPL and LGPL binaries: the Temurin JRE (GPL-2.0 with the Classpath Exception), glibc (LGPL-2.1) and the GCC runtime libraries (GPL-3.0 with the GCC Runtime Library Exception). No shell, core utilities or package tools are included; the earlier Ubuntu-based image carried bash, coreutils and many more. Commercial distribution of GPL-2.0 binaries needs either the corresponding source alongside or a written offer to provide it; pointing to upstream alone isn't enough. `os-packages.txt` records each package's source package and version, which is what a source offer or a source archive needs. Customers who must receive no GPL code from us can use the tarball and build their own image (§14.3).
-- **Dependencies under a choice** (Logback, JNA, RabbitMQ client, Jakarta APIs): we rely on the permissive or weak-copyleft option. Recording that election in the release notes may be wanted.
+- **Dependencies under a choice:** decided. Permissive licenses are elected over GPL and similar licenses, and each election is recorded in `THIRD-PARTY.txt` (see "License election" above). Five components offer no permissive option and are distributed under EPL-2.0 or CDDL-1.1, which are weak copyleft (file-level); confirm these need nothing beyond the source pointers already given.
 
 ### 14.3 Distribution tarball and customer image (built)
 
