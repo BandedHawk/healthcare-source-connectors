@@ -45,6 +45,14 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-29 (w): ran the customer image on Kubernetes (§15.2, `scripts/k8s-minikube.sh`), deployed from the README's manifest in a namespace that enforces the restricted Pod Security Standard. Everything passes. The run found and fixed:
+- the README's Deployment, which passed only the lease password; all secrets now come through `envFrom`;
+- operator commands, which now take `--operator` because `kubectl exec` can't set `SDH_OPERATOR` (§11.4);
+- the README's `kubectl debug` command, refused in restricted namespaces; it now uses `--profile=restricted`;
+- `kubectl cp` advice, which doesn't work without `tar` in the image;
+- `application.yml.example`, which wasn't valid YAML.
+The run also showed that after a crash the restarted connector exited with `LEASE_HELD` until the old lease lapsed, and Kubernetes' growing restart delays made takeover take 54–94 s, with the pod in `CrashLoopBackOff`. Startup now waits for a held lease, up to TTL + safety margin (70 s by default), before refusing (§9.3). Takeover after a crash is now 57 s with no restarts; a second live instance is refused after the wait instead of at once.
+
 Revision 2026-10-29 (v): recorded two support positions (§7.4, §8.1, §15.1, §16, §17). MinIO is not supported unless a customer pays for its support, development and testing. GCP Cloud KMS stays untested against the real service until customer demand requires it.
 
 Revision 2026-10-29 (u): three builds (§14.1, §14.3):
@@ -111,7 +119,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── pom.xml                              parent: dependency/plugin management, Java 25, enforcer
 ├── .gitignore                           excludes build output, IDE files, *.pem, *.key, *.p12, .env
 ├── mvnw, .mvn/wrapper/                  Maven 3.9.16
-├── scripts/                             it-minikube.sh (Docker suite), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
+├── scripts/                             it-minikube.sh (Docker suite), k8s-minikube.sh (Kubernetes run, §15.2), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
 │                                        cda-model/ (generates the C-CDA converter's schema model, §6.4)
 ├── docs/DESIGN.md                       this document
 ├── LICENSE, NOTICE                      our proprietary notice and attributions (HL7), copied into every jar (§14.2)
@@ -224,7 +232,7 @@ The digest is chained, `H_i = HMAC(idKey, "sdh-file-digest" ‖ 0 ‖ H_{i-1} �
 
 `ConnectorRuntime` starts in a fixed order:
 1. **Validate configuration:** splitter options, queue type and URI, and key material, before touching storage.
-2. **Acquire the lease:** if another instance holds it, startup fails with `LEASE_HELD` and a non-zero exit.
+2. **Acquire the lease:** if another instance holds it, startup waits for it to lapse, up to TTL + safety margin (70 s by default). If it is still held after that, the other instance is alive, and startup fails with `LEASE_HELD` and a non-zero exit (§9.3).
 3. **Claim the inbound directory** (§9.5): if another connector owns it, startup fails with `INBOUND_DIR_CLAIMED`, the lease is released, and the process exits non-zero.
 4. **Open storage:** open the catalog and create or load the three tables.
 5. **Fence:** fence every table with this instance's epoch.
@@ -633,7 +641,7 @@ The earlier draft kept the lease in `sections` table properties, renewed every 3
 **Lease store (`JdbcLeaseStore`):**
 - One row per lease name: `owner`, `epoch`, `expires_at`.
 - All expiry checks use the database clock (`clock_timestamp()`), so client clock skew can't create two holders.
-- **Acquire** is one atomic upsert. It inserts a new row with epoch 1, or takes over an *expired* row with `epoch + 1`. A live row is left alone, and the caller gets `LEASE_HELD` and exits non-zero. Concurrent acquirers are serialised by the row lock, and the spike test confirms exactly one of 16 wins.
+- **Acquire** is one atomic upsert. It inserts a new row with epoch 1, or takes over an *expired* row with `epoch + 1`. A live row is left alone, and the caller gets `LEASE_HELD`. Concurrent acquirers are serialised by the row lock, and the spike test confirms exactly one of 16 wins.
 - **Renew** succeeds only while `owner` and `epoch` still match. **Release**, on clean shutdown, sets `expires_at` to now so a restart doesn't wait for the TTL. The row is never deleted, so the epoch only ever increases.
 - **Placement:** a JDBC-catalog deployment can use the catalog's own Postgres. A REST-catalog deployment needs a small Postgres for this. The `LeaseStore` SPI leaves room for other stores with the same guarantees (for example a Kubernetes `Lease`); none is planned yet.
 
@@ -641,7 +649,8 @@ The earlier draft kept the lease in `sections` table properties, renewed every 3
 - **Timing:** TTL 60 s, renewal every 15 s, safety margin 10 s. These defaults are configurable; the code requires `2 × renew + margin < TTL`, so two renewals can fail in a row before anything happens.
 - **Local validity:** `(time the last successful renewal request was sent) + TTL − margin`, measured on the monotonic clock. Counting from when the request was sent, not when the reply arrived, means a slow reply can only shorten the window.
 - **Self-fencing:** before every commit, the pipeline calls `checkHeld()`. If the window has passed, or the store reports a new owner, the lease is lost (`lease.lost` audit event, `LEASE_LOST`). The pipeline stops, the process exits non-zero, and the orchestrator restarts it.
-- **After a crash:** a successor waits at most the TTL (60 s) before it can take over.
+- **Waiting at startup (`LeaseKeeper.acquire`):** a held lease is retried every 2 s for up to TTL + safety margin (70 s by default), with one `lease.waiting` log line naming the holder (host, PID and a random suffix; no PHI). A crashed holder stops renewing, so its lease lapses within one TTL and the successor takes over without exiting. A lease still held after the wait has a live holder, and startup fails with `LEASE_HELD`. Exiting at once, as the first version did, made Kubernetes add its growing restart delays to the takeover: 54–94 s with the pod in `CrashLoopBackOff`, against 57 s and no restarts with the wait (§15.2). The cost is that a misconfigured second instance is refused after 70 s instead of at once.
+- **After a crash:** a successor waits at most the TTL (60 s) before it can take over. After a clean shutdown the lease is released and a replacement takes over at once (4–5 s on Kubernetes, §15.2).
 
 **Fencing (`FencedCommitter`):**
 1. **Establish:** after acquiring the lease, the instance commits its epoch to each ingest table. This commit fails if the table already shows a higher epoch. From that point, every older holder is fenced out.
@@ -666,7 +675,7 @@ Two connector instances must never watch the same inbound directory. Nothing in 
 
 The result would be duplicate sections and duplicate `section.stored` messages for the same file, under two different file IDs, and files abandoned part-way.
 
-**How it is prevented:** the lease (§9.3). A second instance with the same `sdh.lease.name` fails at startup with `LEASE_HELD`. An old instance that paused and lost its lease is rejected by fencing on its next commit. The lease is held for the life of the process, not taken per file, so it costs one Postgres renewal every 15 s and nothing per file or section; it doesn't slow ingest. A per-file mutex shared between instances would be needed only for several instances working one directory, which is out of scope (§17).
+**How it is prevented:** the lease (§9.3). A second instance with the same `sdh.lease.name` fails at startup with `LEASE_HELD`, once it has waited TTL + safety margin in case the holder had crashed (§9.3). An old instance that paused and lost its lease is rejected by fencing on its next commit. The lease is held for the life of the process, not taken per file, so it costs one Postgres renewal every 15 s and nothing per file or section; it doesn't slow ingest. A per-file mutex shared between instances would be needed only for several instances working one directory, which is out of scope (§17).
 
 **Why the lease alone isn't enough:** it is keyed on `sdh.lease.name`, not on the directory. Two connectors with different lease names but the same `inbound-dir` would both get a lease:
 - with the same tables, fencing makes whichever has the higher epoch win, and the other exits with status 70 on its next commit and keeps restarting, but by then both may have picked up the same file;
@@ -841,7 +850,7 @@ After the split phase: archive the original to `source_files`, publish `file.com
 - Every restore checks the digest, including partial ones: all chunks are decrypted either way.
 
 **Audit:**
-- `$SDH_OPERATOR` is required (letters, digits, `. _ @ + -`).
+- The operator's name is required (letters, digits, `. _ @ + -`): `--operator <name>` or `$SDH_OPERATOR`; the option wins. The option exists for `kubectl exec`, which can't set an environment variable, into the customer image, which has no `env` (§14.3).
 - Every run emits `sdh.audit.admin.<command>` with `sdh.operator`, plus the file ID, table, offset and bytes as they become known, and `result=ok|failed` with the exception class.
 - Events go to the console and, when `sdh.telemetry.otlp.endpoint` is set, to the collector. Each event is exported straight away and flushed before exit.
 - `sdh.operator` was added to the attribute allow-list (§12).
@@ -1113,7 +1122,7 @@ There are two images, built from the same jar and the same JVM options:
 | `/run/secrets` | read-only secret volume | Local mode: `keks.p12`, `signing.pem`, `recipient.pem`, `recovery.pem` (paths are configuration, §14). Mode 0400 or 0440 |
 | configuration | ConfigMap via `SPRING_CONFIG_ADDITIONAL_LOCATION`, or `SPRING_APPLICATION_JSON` | `sdh.*` (§14). Passwords and passphrases come from environment variables or a `configtree:` mount |
 
-**Kubernetes.** A sketch of the pod settings. It's untested on a cluster (the `sdh-it` profile runs no Kubernetes), but `ServiceImageIT` and `CustomerImageIT` apply the same constraints in Docker:
+**Kubernetes.** The pod settings, as in the customer README's Deployment (§14.3). That Deployment is tested on a Kubernetes 1.37 cluster, in a namespace that enforces the restricted Pod Security Standard (§15.2); `ServiceImageIT` and `CustomerImageIT` apply the same constraints in Docker:
 
 ```yaml
 spec:
@@ -1134,16 +1143,24 @@ spec:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
+          env:
+            - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/" }
+          envFrom:
+            - secretRef: { name: file-connector-env }   # keys are variable names: SDH_CRYPTO_KEYSTORE_PASSWORD, ...
           resources: { limits: { memory: 2Gi } }
           volumeMounts:
             - { name: inbound, mountPath: /data/inbound }
             - { name: tmp, mountPath: /tmp }
             - { name: keys, mountPath: /run/secrets, readOnly: true }
+            - { name: config, mountPath: /config, readOnly: true }
       volumes:
-        - { name: inbound, persistentVolumeClaim: { claimName: sdh-inbound } }
+        - { name: inbound, persistentVolumeClaim: { claimName: file-connector-inbound } }
         - { name: tmp, emptyDir: { sizeLimit: 1Gi } }
-        - { name: keys, secret: { secretName: sdh-connector-keys, defaultMode: 0440 } }
+        - { name: keys, secret: { secretName: file-connector-keys, defaultMode: 0440 } }
+        - { name: config, configMap: { name: file-connector-config } }
 ```
+
+Every secret the connector reads from the environment comes from one Secret through `envFrom`, so none can be left out of the pod spec by mistake. The README's first version passed only the lease password; on a cluster the connector exited with `sdh.crypto.keystore.password is required`.
 
 ### 14.2 Licensing and third-party attribution (built)
 
@@ -1239,8 +1256,8 @@ The base holds 25 Debian packages: the Temurin 25 JRE (as `temurin-25-jre`), gli
 | Base | Ubuntu 24.04 with Temurin (`eclipse-temurin:25-jre-noble`) | distroless Debian 13 with Temurin as a package |
 | Layers | Spring Boot layers, so a code change rebuilds a few hundred KB | the jar as one layer; the kit build has no extraction step |
 | Account | `sdh` (10001) in `/etc/passwd` | numeric 10001 |
-| Operator commands | `sdh-admin <command>` | `kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args <command>`, with `SDH_OPERATOR` in the exec's environment |
-| Troubleshooting | `kubectl exec -- sh` | `kubectl debug -it <pod> --image=busybox --target=file-connector` (an ephemeral container; Kubernetes 1.25 or later) |
+| Operator commands | `sdh-admin <command>` | `kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args <command> --operator <name>` |
+| Troubleshooting | `kubectl exec -- sh` | `kubectl debug -it <pod> --image=busybox --target=file-connector --profile=restricted` (an ephemeral container; kubectl 1.27 or later). The profile is needed where the namespace enforces the restricted Pod Security Standard. The connector's files are under `/proc/1/root/` |
 
 Both images use the same JVM options files and the same Kubernetes settings (§14.1).
 
@@ -1304,9 +1321,45 @@ Both images use the same JVM options files and the same Kubernetes settings (§1
 
 **GCP Cloud KMS** has no emulator. `GcpKmsKeyProviderTest` (a unit test in `connector-kms`) runs the provider against an in-process fake of the Cloud KMS gRPC service: real AES-GCM with the AAD enforced, real ECDSA, and the CRC32C integrity fields. It checks our side of the protocol, not Google's service. Testing against the real service waits for customer demand (§7.4).
 
-**Not covered yet:** other REST catalogs (Nessie, Unity, AWS S3 Tables); the image on a real Kubernetes cluster.
+**Not covered yet:** other REST catalogs (Nessie, Unity, AWS S3 Tables).
 
 **Not tested, by decision:** MinIO (not supported unless a customer pays for it, §8.1) and GCP Cloud KMS against the real service (untested until customer demand requires it, §7.4).
+
+### 15.2 Kubernetes run (`scripts/k8s-minikube.sh`)
+
+The customer image on a real Kubernetes cluster, deployed from the Deployment in the customer README (§14.3). The script takes that YAML block out of `file-connector/src/dist/README.md` and applies it unchanged apart from the image name, so the manifest customers copy is the one tested. `scripts/k8s-minikube.sh service` runs the service image instead.
+
+**Cluster:** a minikube profile of its own, `sdh-k8s`: single node, Kubernetes 1.37, KVM2 with the Docker runtime, 4 CPUs, 8 GB (override with `SDH_K8S_*`). The `sdh-it` profile runs no Kubernetes, and the tests shouldn't share a cluster used for other work. The kubeconfig is `~/.kube/sdh-k8s`, so the user's current kubectl context doesn't change; kubectl comes from `minikube kubectl`. The image is built straight into the node's Docker daemon (`build-image.sh` with `SDH_IT_PROFILE=sdh-k8s`), so no registry is needed. `SDH_IT_STOP=1` stops the VM afterwards; `minikube delete -p sdh-k8s` removes it.
+
+**Setup:**
+- **Connector namespace** (`sdh-k8s-test`) enforces the **restricted** Pod Security Standard, so anything the manifest leaves out is refused by the API server. It holds the connector, the inbound PVC (the minikube hostpath provisioner) and a busybox pod that shares the PVC and delivers files.
+- **Services namespace** (`sdh-k8s-test-services`): Postgres (lease and JDBC catalog), SeaweedFS and Kafka (`file-connector/src/test/k8s/services.yaml`). These images don't meet the restricted standard.
+- **Keys and configuration** as an operator would make them: `keytool` and `openssl` generate the keystore and PEM files, which go in a Secret; the passwords go in a Secret passed with `envFrom`; `application.yml` (`file-connector/src/test/k8s/application.yml`) goes in a ConfigMap.
+
+**What it checks:**
+- the Deployment is admitted under the restricted standard, and the pod runs as 10001 with a read-only root filesystem;
+- a good and a bad CSV file end in `completed/` and `failed/`;
+- all 23 messages reach Kafka, and none holds the PHI marker;
+- the pod log holds no PHI marker or filename;
+- `status` and `restore` run through `kubectl exec` with `--operator`, and the restored file matches;
+- the README's `kubectl debug` command starts and sees the connector's files;
+- after a pod delete, the replacement takes the lease over (epoch 2) and ingests;
+- after the JVM is killed with SIGKILL from the node (as the OOM killer would), the restarted connector waits for the dead holder's lease to lapse and takes over (epoch 3), with no `LEASE_HELD` exits. A forced pod delete wouldn't test this: the kubelet still sends SIGTERM first, so the JVM shuts down cleanly and releases the lease. Nor can a debug container send the signal, because the kernel ignores signals sent to a namespace's PID 1 from inside it;
+- a copy of the Deployment is refused with `LEASE_HELD`, and another connector on the same directory with `INBOUND_DIR_CLAIMED`, while the running one keeps the lease.
+
+The connector's log is saved to `file-connector/target/k8s-minikube.log`. A run takes about 10 minutes.
+
+**What it found, all fixed:**
+- **Secrets:** the README's Deployment passed only the lease password, so the connector exited with `sdh.crypto.keystore.password is required`. Secrets now come from one Secret through `envFrom` (§14.1).
+- **Operator name:** `kubectl exec` can't set an environment variable, and the customer image has no `env`, so `$SDH_OPERATOR` couldn't be given per command. The README suggested putting one name in the pod spec, which would credit every command to the same person. Admin commands now take `--operator <name>` (§11.4).
+- **`kubectl debug`:** refused in a restricted namespace, because the debug container didn't set `allowPrivilegeEscalation: false` or drop all capabilities. The README now adds `--profile=restricted`. The debug container then runs as 10001 and reaches the connector's files under `/proc/1/root/`.
+- **`kubectl cp`:** needs `tar` in the container, which the customer image doesn't have. The README now restores to the inbound volume instead.
+- **`application.yml.example`:** `recipient` and `recovery-public` were indented under `vault:`, so the file wasn't valid YAML.
+
+- **Takeover after a crash:** the restarted connector exited with `LEASE_HELD` until the old lease lapsed, so Kubernetes' restart delays added to the TTL: 54–94 s, with the pod in `CrashLoopBackOff`. Startup now waits for the lease (§9.3): 57 s, no restarts.
+- **Test isolation:** minikube's hostpath provisioner reuses a claim's directory, contents and all, for the same namespace and claim name. The script empties the inbound volume before each run.
+
+**Not covered:** managed clusters (EKS, AKS, GKE) and their storage classes; NetworkPolicies; a ReadWriteMany volume shared with a delivery service on another node; KMS and object-storage credentials from workload identity.
 
 ## 16. Risks and verification items
 
@@ -1322,6 +1375,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 | 6 | New: fencing on REST and JDBC catalogs | **Passed** | Plain Iceberg transactions are not fenced, which the control test demonstrates. The compare-and-swap committer with snapshot markers is (§9.3). Confirmed on a real REST server, Apache Polaris 1.8.0, in `PolarisIT` |
 | 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. KMS providers: AWS (local-kms), Azure (Lowkey Vault) and Vault pass; GCP runs against a fake only, and stays untested against the real service until customer demand requires it (§7.4). Apache Polaris (REST catalog) passes, including fencing. Google Cloud Storage (fake-gcs-server) and ADLS Gen2 (Azurite) pass; orphan cleanup on ADLS isn't covered, because Azurite can't list Data Lake paths. MinIO is not supported unless a customer pays for it (§8.1) |
 | 8 | New: throughput on small sections | **Open** | §13.1: about 24,000 sections/s (CSV ≈ 7 MiB/s) with a P-256 recipient on 16 cores, bound by public-key crypto for every message. A 1 GiB CSV takes about 2.5 minutes. Whether that's enough depends on expected volumes; the options are in §13.1 |
+| 9 | New: Kubernetes deployment | **Passed** | §15.2: the customer image, deployed from the README's manifest on Kubernetes 1.37 under the restricted Pod Security Standard, ingests, runs operator commands, fails over and refuses a second instance. The run found five README and configuration problems, and slow takeover after a crash (the restart delays of `CrashLoopBackOff` on top of the lease TTL); all fixed. Managed clusters (EKS, AKS, GKE) aren't covered |
 
 **Spike follow-ups:** check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
 

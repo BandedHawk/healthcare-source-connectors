@@ -9,7 +9,8 @@
 # Pin it by digest for production. The build runs no commands inside the image, so shell-less bases work.
 #
 # Run it read-only, with /tmp (noexec is fine), /data/inbound and the secrets mounted as volumes: see README.md.
-# Operator commands: kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args status
+# Operator commands: kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args status \
+#   --operator alice
 
 ARG JAVA_IMAGE=gcr.io/distroless/java25-debian13:nonroot
 FROM ${JAVA_IMAGE}

@@ -1,0 +1,30 @@
+# The connector's namespace, besides the connector itself (deployed from the README): the inbound volume, and a pod
+# that delivers files into it. For scripts/k8s-minikube.sh (design §15.2).
+# The inbound volume the README's Deployment mounts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: file-connector-inbound }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 1Gi } }
+---
+# Stands in for whatever delivers files (an SFTP server, a sync job): shares the inbound volume with the connector.
+# Same node, so ReadWriteOnce is enough. Restricted, like the connector.
+apiVersion: v1
+kind: Pod
+metadata: { name: upstream }
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: upstream
+      image: busybox:1.37.0
+      command: [sleep, "86400"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: inbound, mountPath: /data/inbound }]
+  volumes:
+    - { name: inbound, persistentVolumeClaim: { claimName: file-connector-inbound } }

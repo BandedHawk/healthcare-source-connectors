@@ -54,11 +54,11 @@ sdh:
       failed-files-kek: failed-files-kek/1
       signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
       # signing: { kid: connector-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
+      recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
+      recovery-public: /run/secrets/recovery-public.pem
     aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
     gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC
     vault: { address: "https://vault:8200", token-file: /vault/secrets/token, mount: transit }   # vault-transit
-      recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
-      recovery-public: /run/secrets/recovery-public.pem
   queue:
     type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
     uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"

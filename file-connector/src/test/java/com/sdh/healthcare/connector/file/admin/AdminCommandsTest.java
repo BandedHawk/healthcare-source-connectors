@@ -326,10 +326,15 @@ class AdminCommandsTest {
     }
 
     @Test
-    void refusesToRunWithoutAnOperatorOrWithUnknownOptions() throws Exception {
+    void refusesToRunWithoutAnOperatorOrWithUnknownOptions(CapturedOutput log) throws Exception {
         Result noOperator = admin(Map.of(), "status");
         assertThat(noOperator.status()).isEqualTo(2);
         assertThat(noOperator.err()).contains("SDH_OPERATOR");
+        // As an option instead, for kubectl exec into an image without env; it wins over the environment.
+        Result byOption = admin(Map.of(AdminCli.OPERATOR_ENV, "alice"), "status", "--operator", "carol");
+        assertThat(byOption.status()).as(byOption.err()).isZero();
+        assertThat(log.getAll()).contains("admin.status operator=carol").doesNotContain("admin.status operator=alice");
+        assertThat(admin(Map.of(), "status", "--operator", "not ok").status()).isEqualTo(2);
 
         Result typo = admin("restore", "--file-id", badId.toString(), "--to", newDir().toString(), "--form-offset",
                 "3");

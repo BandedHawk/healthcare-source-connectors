@@ -104,7 +104,8 @@ public final class ConnectorRuntime implements AutoCloseable {
             ds = dataSource(p.lease().jdbc());
             JdbcLeaseStore store = new JdbcLeaseStore(ds, p.lease().jdbc().table(), Duration.ofSeconds(10));
             store.createTableIfMissing();
-            // Fails with LEASE_HELD (non-zero exit) if another instance is running.
+            // Waits for a lease left by a crashed instance; fails with LEASE_HELD (non-zero exit) if another
+            // instance is still running after the wait (ttl + safety margin, design §9.3).
             lease = LeaseKeeper.acquire(store, p.lease().name(), LeaseKeeper.defaultOwner(),
                     new LeaseKeeper.Settings(p.lease().ttl(), p.lease().renewInterval(), p.lease().safetyMargin()),
                     lost -> fatal.exit("LEASE_LOST:" + lost.reason()));

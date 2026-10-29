@@ -27,6 +27,11 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Self-fencing alone is not enough, because a process can pause (GC, VM suspend) between checking
  * and committing. That is why every table commit also checks the epoch ({@link FencedCommitter}).
+ *
+ * <p>At startup a held lease is waited for, up to {@link Settings#startupWait()}. A holder that crashed stops
+ * renewing, so its lease lapses within one TTL and this instance takes over without exiting. Under an orchestrator
+ * that restarts failed processes with growing delays (Kubernetes), exiting at once would add those delays to the
+ * takeover. A lease still held after the wait has a live holder: {@link LeaseHeldException}.
  */
 public final class LeaseKeeper implements LeaseToken, AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(LeaseKeeper.class);
@@ -51,6 +56,22 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable {
         Duration localValidity() {
             return ttl.minus(safetyMargin);
         }
+
+        /**
+         * How long startup waits for a held lease: a crashed holder's lease lapses within the TTL, and the margin
+         * allows for clock-rate drift between the holder and the store.
+         */
+        public Duration startupWait() {
+            return ttl.plus(safetyMargin);
+        }
+    }
+
+    /** How long to sleep between attempts while waiting for a held lease at startup. */
+    static final Duration STARTUP_POLL = Duration.ofSeconds(2);
+
+    /** Sleeps between startup attempts; replaced in tests. */
+    interface Sleeper {
+        void sleep(Duration d) throws InterruptedException;
     }
 
     private final LeaseStore store;
@@ -83,20 +104,47 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable {
         }
     }
 
-    /** Acquires the lease and starts background renewal. */
+    /**
+     * Acquires the lease, waiting up to {@link Settings#startupWait()} if another instance holds it, and starts
+     * background renewal.
+     *
+     * @throws LeaseHeldException if the lease is still held after the wait: another instance is alive
+     */
     public static LeaseKeeper acquire(LeaseStore store, String leaseName, String owner, Settings settings,
             Consumer<LeaseLostException> onLost) throws LeaseHeldException {
-        return acquire(store, leaseName, owner, settings, System::nanoTime, onLost, true);
+        return acquire(store, leaseName, owner, settings, System::nanoTime, d -> Thread.sleep(d), onLost, true);
     }
 
     static LeaseKeeper acquire(LeaseStore store, String leaseName, String owner, Settings settings,
-            LongSupplier nanoClock, Consumer<LeaseLostException> onLost, boolean scheduleRenewals)
+            LongSupplier nanoClock, Sleeper sleeper, Consumer<LeaseLostException> onLost, boolean scheduleRenewals)
             throws LeaseHeldException {
-        long sentAt = nanoClock.getAsLong();
-        LeaseGrant grant = store.acquire(leaseName, owner, settings.ttl());
-        Telemetry.get().audit("lease.acquired", Fields.of(Attr.EPOCH, grant.epoch()));
-        return new LeaseKeeper(store, grant, sentAt + settings.localValidity().toNanos(), settings, nanoClock,
-                onLost, scheduleRenewals);
+        long waitUntil = nanoClock.getAsLong() + settings.startupWait().toNanos();
+        boolean waiting = false;
+        while (true) {
+            long sentAt = nanoClock.getAsLong();
+            try {
+                LeaseGrant grant = store.acquire(leaseName, owner, settings.ttl());
+                Telemetry.get().audit("lease.acquired", Fields.of(Attr.EPOCH, grant.epoch()));
+                return new LeaseKeeper(store, grant, sentAt + settings.localValidity().toNanos(), settings,
+                        nanoClock, onLost, scheduleRenewals);
+            } catch (LeaseHeldException e) {
+                long left = waitUntil - nanoClock.getAsLong();
+                if (left <= 0) {
+                    throw e;
+                }
+                if (!waiting) {
+                    // The holder ID is host, PID and a random suffix: no PHI.
+                    LOG.info("lease.waiting holder={} up_to_s={}", e.holder(), settings.startupWait().toSeconds());
+                    waiting = true;
+                }
+                try {
+                    sleeper.sleep(Duration.ofNanos(Math.min(left, STARTUP_POLL.toNanos())));
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
     }
 
     /** A unique, PHI-free owner ID for this process: host, PID and a random suffix. */

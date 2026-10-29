@@ -1,0 +1,35 @@
+# Connector configuration for scripts/k8s-minikube.sh, mounted from the ConfigMap file-connector-config as the
+# README describes. Secrets come from the file-connector-env secret as environment variables. The recipient
+# fingerprint and the services' namespace (SERVICES_NS) are filled in by the script.
+sdh:
+  file: { min-age: 500ms, poll-interval: 200ms }
+  split:
+    format: csv
+    options: { csv: { header: true } }
+  storage:
+    catalog-name: sdh
+    catalog:
+      type: jdbc
+      uri: jdbc:postgresql://postgres.SERVICES_NS:5432/sdh
+      jdbc.user: sdh
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://sdh-warehouse/wh
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      s3: { endpoint: "http://seaweedfs.SERVICES_NS:8333", path-style-access: true, access-key-id: sdh-k8s-access,
+            secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+      client: { region: us-east-1 }
+  lease:
+    jdbc: { url: "jdbc:postgresql://postgres.SERVICES_NS:5432/sdh", username: sdh }
+  crypto:
+    keystore: { path: /run/secrets/keks.p12 }
+    keys:
+      sections-kek: sections-kek/1
+      source-files-kek: source-files-kek/1
+      failed-files-kek: failed-files-kek/1
+      signing: { kid: connector-2026, pem: /run/secrets/signing.pem }
+      recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "RECIPIENT_SHA256" }
+      recovery-public: /run/secrets/recovery-public.pem
+  queue:
+    type: kafka
+    uri: "kafka:sdh-sections?brokers=kafka.SERVICES_NS:9092"

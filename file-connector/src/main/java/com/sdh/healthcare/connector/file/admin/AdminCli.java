@@ -5,9 +5,11 @@ import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import java.io.PrintStream;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
@@ -20,12 +22,16 @@ import org.springframework.context.ConfigurableApplicationContext;
  *
  * <p>Uses the connector's own configuration (application.yml, environment, {@code SPRING_APPLICATION_JSON},
  * {@code --a.b=c} overrides) but starts none of the connector: no Camel, no lease, no writes. Every command emits an
- * {@code sdh.audit.admin.<command>} event naming the operator from {@code $SDH_OPERATOR}, which is required.
+ * {@code sdh.audit.admin.<command>} event naming the operator, which is required: {@code --operator <name>} or
+ * {@code $SDH_OPERATOR}. The option is for {@code kubectl exec}, which can't set an environment variable, into an
+ * image with no shell or {@code env} (design §14.3).
  *
  * <p>Exit status: 0 done, 1 failed, 2 usage error.
  */
 public final class AdminCli {
     public static final String OPERATOR_ENV = "SDH_OPERATOR";
+    /** The same, as an option of every command; it wins over the environment variable. */
+    public static final String OPERATOR_OPTION = "operator";
     /** An account or ticket-style name: enough to identify who ran it, nothing free-form. */
     private static final Pattern OPERATOR = Pattern.compile("[A-Za-z0-9._@+-]{1,128}");
 
@@ -53,10 +59,12 @@ public final class AdminCli {
                 throw new AdminArgs.UsageException("Unknown command: " + args.getFirst());
             }
             parsed = AdminArgs.parse(args, command.flags());
-            parsed.allowOnly(command.options());
-            operator = env.get(OPERATOR_ENV);
+            Set<String> allowed = new HashSet<>(command.options());
+            allowed.add(OPERATOR_OPTION);
+            parsed.allowOnly(allowed);
+            operator = parsed.option(OPERATOR_OPTION).orElse(env.get(OPERATOR_ENV));
             if (operator == null || !OPERATOR.matcher(operator).matches()) {
-                throw new AdminArgs.UsageException("$" + OPERATOR_ENV
+                throw new AdminArgs.UsageException("--" + OPERATOR_OPTION + " or $" + OPERATOR_ENV
                         + " must name who is running this (letters, digits, . _ @ + -), for the audit trail");
             }
         } catch (AdminArgs.UsageException e) {
@@ -114,7 +122,8 @@ public final class AdminCli {
     static String usage() {
         return String.join("\n\n",
                 "usage: java -jar file-connector.jar admin <command> [options] [--sdh.some.setting=value ...]\n"
-                        + "Requires $" + OPERATOR_ENV + " (who is running it; recorded in the audit event).\n"
+                        + "Requires --" + OPERATOR_OPTION + " <name> or $" + OPERATOR_ENV
+                        + " (who is running it; recorded in the audit event).\n"
                         + "Uses the connector's configuration; --a.b=c arguments override it.",
                 RestoreCommand.USAGE, DecryptFallbackCommand.USAGE, StatusCommand.USAGE);
     }

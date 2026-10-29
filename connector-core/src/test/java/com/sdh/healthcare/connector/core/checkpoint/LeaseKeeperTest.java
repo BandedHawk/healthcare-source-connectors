@@ -15,12 +15,12 @@ class LeaseKeeperTest {
             new LeaseKeeper.Settings(Duration.ofSeconds(60), Duration.ofSeconds(15), Duration.ofSeconds(10));
 
     /** Store whose renew behaviour the test controls. */
-    static final class FakeStore implements LeaseStore {
+    static class FakeStore implements LeaseStore {
         volatile String renewMode = "ok"; // ok | fail | gone
         volatile boolean released;
 
         @Override
-        public LeaseGrant acquire(String n, String o, Duration ttl) {
+        public LeaseGrant acquire(String n, String o, Duration ttl) throws LeaseHeldException {
             return new LeaseGrant(n, o, 7, Instant.now().plus(ttl));
         }
 
@@ -43,11 +43,73 @@ class LeaseKeeperTest {
     final List<LeaseLostException> lost = new ArrayList<>();
 
     LeaseKeeper keeper(FakeStore store) throws Exception {
-        return LeaseKeeper.acquire(store, "l", "me", SETTINGS, now::get, lost::add, false);
+        return LeaseKeeper.acquire(store, "l", "me", SETTINGS, now::get, this::sleep, lost::add, false);
     }
 
     void advance(Duration d) {
         now.addAndGet(d.toNanos());
+    }
+
+    final List<Duration> sleeps = new ArrayList<>();
+
+    void sleep(Duration d) {
+        sleeps.add(d);
+        advance(d);
+    }
+
+    /** Held by another instance until the test's clock reaches {@code freeAt} (nanos). */
+    final class HeldStore extends FakeStore {
+        volatile long freeAt;
+        int attempts;
+
+        @Override
+        public LeaseGrant acquire(String n, String o, Duration ttl) throws LeaseHeldException {
+            attempts++;
+            if (now.get() < freeAt) {
+                throw new LeaseHeldException("other/1/x", Instant.now());
+            }
+            return super.acquire(n, o, ttl);
+        }
+    }
+
+    @Test
+    void waitsForALeaseThatLapses() throws Exception {
+        // A crashed holder: its lease lapses 40 s from now, well within the 70 s startup wait (ttl + margin).
+        HeldStore store = new HeldStore();
+        store.freeAt = now.get() + Duration.ofSeconds(40).toNanos();
+        long start = now.get();
+        LeaseKeeper k = LeaseKeeper.acquire(store, "l", "me", SETTINGS, now::get, this::sleep, lost::add, false);
+        assertThat(k.epoch()).isEqualTo(7);
+        assertThat(Duration.ofNanos(now.get() - start)).isEqualTo(Duration.ofSeconds(40));
+        assertThat(sleeps).allSatisfy(d -> assertThat(d).isEqualTo(LeaseKeeper.STARTUP_POLL));
+        assertThat(store.attempts).isEqualTo(21);
+        // Validity counts from the attempt that succeeded, not from the start of the wait.
+        advance(Duration.ofSeconds(49));
+        k.checkHeld();
+    }
+
+    @Test
+    void refusesWhenTheHolderIsAliveAfterTheWait() {
+        // A live holder keeps renewing, so the lease never lapses: refused after ttl + margin.
+        HeldStore store = new HeldStore();
+        store.freeAt = Long.MAX_VALUE;
+        long start = now.get();
+        assertThatThrownBy(() -> LeaseKeeper.acquire(store, "l", "me", SETTINGS, now::get, this::sleep, lost::add,
+                false)).isInstanceOf(LeaseHeldException.class);
+        assertThat(Duration.ofNanos(now.get() - start)).isEqualTo(SETTINGS.startupWait())
+                .isEqualTo(Duration.ofSeconds(70));
+        assertThat(sleeps.getLast()).isLessThanOrEqualTo(LeaseKeeper.STARTUP_POLL);
+    }
+
+    @Test
+    void anInterruptedWaitGivesUp() {
+        HeldStore store = new HeldStore();
+        store.freeAt = Long.MAX_VALUE;
+        assertThatThrownBy(() -> LeaseKeeper.acquire(store, "l", "me", SETTINGS, now::get, d -> {
+            throw new InterruptedException();
+        }, lost::add, false)).isInstanceOf(LeaseHeldException.class);
+        assertThat(Thread.interrupted()).as("interrupt flag restored").isTrue();
+        assertThat(store.attempts).isEqualTo(1);
     }
 
     @Test

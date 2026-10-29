@@ -34,7 +34,9 @@ on a Java 25 base image of your choice.
   Cloud KMS is available but untested against the live service; contact Smile Digital Health before relying on
   it in production.
 
-Run exactly one connector per inbound directory. A second instance is refused at startup.
+Run exactly one connector per inbound directory. A second instance is refused at startup, after waiting up to
+70 seconds (the lease's TTL plus its safety margin) in case the first one has crashed. A connector restarted after a
+crash waits the same way and takes over once the old lease lapses.
 
 ## Configure
 
@@ -84,7 +86,19 @@ The connector needs:
 - **`/data/inbound`:** a writable volume, shared with whatever delivers files.
 - **`/tmp`:** a writable `emptyDir` of about 1 GiB; `noexec` is fine. Uploads to object storage are staged here, with section data already encrypted.
 - **`/run/secrets`:** the keys, as a read-only secret volume (local key mode only).
-- **Configuration:** a ConfigMap mounted as `application.yml`, with `SPRING_CONFIG_ADDITIONAL_LOCATION` pointing at it. Secrets come from environment variables.
+- **Configuration:** a ConfigMap mounted as `application.yml`, with `SPRING_CONFIG_ADDITIONAL_LOCATION` pointing at it.
+- **Secrets:** a Secret whose keys are environment variable names, passed whole with `envFrom`. It holds
+  `SDH_CRYPTO_KEYSTORE_PASSWORD`, `SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE` (both local key mode only),
+  `SDH_LEASE_JDBC_PASSWORD`, and whatever `application.yml` refers to as `${...}`, such as catalog and storage
+  credentials.
+
+```sh
+kubectl create secret generic file-connector-keys --from-file=keks.p12 --from-file=signing.pem \
+  --from-file=recipient.pem --from-file=recovery-public.pem
+kubectl create secret generic file-connector-env --from-literal=SDH_CRYPTO_KEYSTORE_PASSWORD=… \
+  --from-literal=SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE=… --from-literal=SDH_LEASE_JDBC_PASSWORD=…
+kubectl create configmap file-connector-config --from-file=application.yml
+```
 
 ```yaml
 apiVersion: apps/v1
@@ -108,8 +122,8 @@ spec:
           image: <registry>/file-connector:<version>
           env:
             - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/" }
-            - name: SDH_LEASE_JDBC_PASSWORD
-              valueFrom: { secretKeyRef: { name: file-connector-env, key: lease-password } }
+          envFrom:
+            - secretRef: { name: file-connector-env }
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -135,20 +149,25 @@ from, and Kubernetes restarts it.
 The image has no shell, so run the JVM directly:
 
 ```sh
-kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args status
+kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args status --operator alice
 ```
 
-Set `SDH_OPERATOR` (who is running the command, for the audit log) in the pod's environment, or use an image with
-`env` and prefix the command with `env SDH_OPERATOR=alice`. `restore` can write to `/tmp` (copy the result out with
-`kubectl cp`) or to the inbound volume.
+`--operator` names who is running the command, for the audit log; on a host, `$SDH_OPERATOR` does the same.
+`restore` writes to the inbound volume with `--to /data/inbound/failed` (never picked up); take the file from there
+through whatever delivers files. `kubectl cp` can't copy out of this image, because it needs `tar`.
 
 ### Troubleshooting
 
-A shell-less container can't be entered with `kubectl exec -- sh`. Attach a temporary debug container instead:
+A shell-less container can't be entered with `kubectl exec -- sh`. Attach a debug container instead (kubectl 1.27 or
+later):
 
 ```sh
-kubectl debug -it <pod> --image=busybox --target=file-connector
+kubectl debug -it <pod> --image=busybox --target=file-connector --profile=restricted
 ```
+
+`--profile=restricted` lets it start in a namespace that enforces the restricted Pod Security Standard. It runs as
+the connector's user and shares its processes, so the connector's files are under `/proc/1/root/`, for example
+`/proc/1/root/tmp`. The debug container stays in the pod's spec, stopped, until the pod is replaced.
 
 ## Licenses
 

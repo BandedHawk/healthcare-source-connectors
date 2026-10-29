@@ -1,6 +1,6 @@
 # Operator commands inside a running container (design §11.4). No shell is needed:
-#   kubectl exec <pod> -- env SDH_OPERATOR=alice java @/app/jvm.options @/app/container.options @/app/admin.args status
-# (In an image without env, set SDH_OPERATOR in the pod spec instead.) A small heap, so it fits beside the connector.
+#   kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args status --operator alice
+# (--operator, because kubectl exec can't set an environment variable.) A small heap, so it fits beside the connector.
 -Xmx512m
 -jar
 /app/app.jar
