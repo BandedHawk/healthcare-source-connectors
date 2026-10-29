@@ -53,6 +53,11 @@
     <azure-keyvault-keys.version>4.10.6</azure-keyvault-keys.version>
     <azure-identity.version>1.18.1</azure-identity.version>
     <lowkey-vault.version>7.3.112</lowkey-vault.version>
+    <!-- Object storage clients for GCSFileIO and ADLSFileIO (iceberg-gcp, iceberg-azure leave them to us). Chosen on
+         the same cores as above: google-cloud-storage 2.71.0 shares google-cloud-jar-parent 1.89.0 with KMS 2.98.0;
+         datalake 12.25.0 is built on azure-storage-blob 12.32.0 and azure-core 1.57, which Camel already brings. -->
+    <google-cloud-storage.version>2.71.0</google-cloud-storage.version>
+    <azure-storage-datalake.version>12.25.0</azure-storage-datalake.version>
   </properties>
 
   <dependencyManagement>
@@ -101,6 +106,22 @@
         <groupId>com.azure</groupId>
         <artifactId>azure-identity</artifactId>
         <version>${azure-identity.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.google.cloud</groupId>
+        <artifactId>google-cloud-storage</artifactId>
+        <version>${google-cloud-storage.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-storage-file-datalake</artifactId>
+        <version>${azure-storage-datalake.version}</version>
+      </dependency>
+      <!-- Datalake 12.25.0 asks for 1.57.0; keep the 1.57.1 that Camel's Azure components already use. -->
+      <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-core</artifactId>
+        <version>1.57.1</version>
       </dependency>
       <dependency>
         <groupId>com.github.nagyesta.lowkey-vault</groupId>
@@ -312,11 +333,19 @@
         </plugins>
       </build>
     </profile>
-    <!-- Throughput tests (design §13): *Perf classes only, run by scripts/perf.sh. Never part of the normal build. -->
+    <!-- Throughput tests (design §13.1): *Perf classes only; unit tests are skipped. Never part of the normal build.
+         Run: ./mvnw -Pperf -pl connector-core -am verify (or scripts/perf.sh, or the NetBeans "Throughput test" action). -->
     <profile>
       <id>perf</id>
       <build>
         <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <skip>true</skip>
+            </configuration>
+          </plugin>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-failsafe-plugin</artifactId>

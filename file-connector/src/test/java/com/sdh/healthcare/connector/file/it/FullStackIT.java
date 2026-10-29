@@ -2,6 +2,7 @@ package com.sdh.healthcare.connector.file.it;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
@@ -12,7 +13,9 @@ import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.core.storage.ArchiveReader;
 import com.sdh.healthcare.connector.file.TestKeys;
+import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.file.ingest.InboundDirectoryClaim;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.file.runtime.FatalExit;
 import com.sdh.healthcare.connector.reader.QueueReader;
@@ -33,6 +36,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReentrantLock;
+import org.apache.camel.CamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -203,6 +207,12 @@ class FullStackIT {
     @Autowired
     ReentrantLock writerLock;
 
+    @Autowired
+    ConnectorProperties props;
+
+    @Autowired
+    CamelContext camel;
+
     /** "s3://bucket/a/b" → "a/b". */
     static String keyOf(String location) {
         String noScheme = location.substring(location.indexOf("://") + 3);
@@ -323,6 +333,22 @@ class FullStackIT {
             }
         }
 
+        // A second connector on the same directory with a different lease name (so the lease can't stop it) is
+        // refused by the directory claim before it opens storage, and releases its lease (design §9.5).
+        ConnectorProperties.Lease l = props.lease();
+        ConnectorProperties second = new ConnectorProperties(props.connectorId(), props.file(), props.split(),
+                props.storage(), new ConnectorProperties.Lease(l.jdbc(), "second-connector", l.ttl(),
+                        l.renewInterval(), l.safetyMargin()),
+                props.crypto(), props.queue(), props.retry(), props.maintenance(), props.telemetry(),
+                props.encryptWorkers());
+        assertThatThrownBy(() -> ConnectorRuntime.start(second, camel, FATAL::add))
+                .isInstanceOf(InboundDirectoryClaim.ClaimedException.class)
+                .hasMessageContaining("lease-name=file-connector");
+        assertThat(Files.readString(INBOUND.resolve(InboundDirectoryClaim.FILE))).contains("lease-name=file-connector");
+        // The running connector still owns it and carries on.
+        runtime.claim().verify();
+        assertThat(FATAL).isEmpty();
+
         // Nothing in object storage is readable: data files, manifests and metadata alike.
         try (S3Client s3 = s3()) {
             List<S3Object> objects = s3.listObjectsV2Paginator(b -> b.bucket(BUCKET)).contents().stream().toList();
@@ -355,7 +381,7 @@ class FullStackIT {
         assertThat(exported).contains("\"ingest.file\"", "\"split.batch\"", "\"storage.commit\"",
                 "\"publish.batch\"", "\"archive\"", "\"maintenance\"",
                 "sdh.audit.file.started", "sdh.audit.batch.committed", "sdh.audit.file.completed",
-                "sdh.audit.file.failed", "sdh.audit.lease.acquired", "sdh.audit.maintenance.retention",
+                "sdh.audit.file.failed", "sdh.audit.lease.acquired", "sdh.audit.connector.directory_claimed", "sdh.audit.maintenance.retention",
                 "sdh.sections.stored", "sdh.files.completed", "sdh.files.failed", "sdh.commit.duration");
         assertThat(exported).as("no PHI or filenames in exported telemetry")
                 .doesNotContain(MARKER).doesNotContain("good.csv").doesNotContain("bad.csv");

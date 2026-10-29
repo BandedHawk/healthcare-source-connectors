@@ -201,6 +201,8 @@ class ThroughputPerf {
 
             assertThat(o.result()).as("outcome").isEqualTo(FileProcessor.Result.COMPLETED);
             assertThat(o.sectionCount()).isEqualTo(g.sections());
+            // Every generated section converts to JSON; a raw fallback would measure the wrong path.
+            assertThat(pipeline.failedSectionCount(o.fileId())).as("sections stored raw").isZero();
             assertThat(pub.count.get()).as("file.started + sections + file.completed").isEqualTo(g.sections() + 2);
 
             long archiveNanos = spans.getFinishedSpanItems().stream().filter(s -> s.getName().equals("archive"))

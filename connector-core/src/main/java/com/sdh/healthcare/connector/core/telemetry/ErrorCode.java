@@ -5,6 +5,8 @@ public enum ErrorCode {
     LEASE_HELD,
     LEASE_LOST,
     LEASE_FENCED,
+    /** The inbound directory belongs to another connector (design §9.5). */
+    INBOUND_DIR_CLAIMED,
     COMMIT_CONFLICT,
     CHECKPOINT_TAMPERED,
     LIMIT_FILE_SIZE,

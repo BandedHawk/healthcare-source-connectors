@@ -19,6 +19,7 @@ import com.sdh.healthcare.connector.core.storage.Archiver;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.file.ingest.InboundDirectoryClaim;
 import com.sdh.healthcare.connector.file.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.file.publish.Publishers;
 import com.sdh.healthcare.connector.file.publish.QueueType;
@@ -41,7 +42,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Everything the connector runs on, started in a fixed order (design §9.3):
- * catalog and tables → lease → fence every table with our epoch → keys → ID key → pipeline, archivers, processor.
+ * lease → claim the inbound directory (§9.5) → catalog and tables → fence every table with our epoch → keys → ID key
+ * → pipeline, archivers, processor.
  * Closed in reverse; the inbound route is stopped first so no file is in flight when the lease is released.
  */
 public final class ConnectorRuntime implements AutoCloseable {
@@ -60,10 +62,12 @@ public final class ConnectorRuntime implements AutoCloseable {
     private final KeyMaterial keys;
     private final SectionIds ids;
     private final FencedCommitter committer;
+    private final InboundDirectoryClaim claim;
 
     private ConnectorRuntime(CamelContext camel, HikariDataSource dataSource, Catalog catalog, LeaseKeeper lease,
             ClosablePublisher publisher, IngestPipeline pipeline, FileProcessor processor, Table sections,
-            Table sourceFiles, Table failedFiles, KeyMaterial keys, SectionIds ids, FencedCommitter committer) {
+            Table sourceFiles, Table failedFiles, KeyMaterial keys, SectionIds ids, FencedCommitter committer,
+            InboundDirectoryClaim claim) {
         this.camel = camel;
         this.dataSource = dataSource;
         this.catalog = catalog;
@@ -77,6 +81,7 @@ public final class ConnectorRuntime implements AutoCloseable {
         this.keys = keys;
         this.ids = ids;
         this.committer = committer;
+        this.claim = claim;
     }
 
     public static ConnectorRuntime start(ConnectorProperties p, CamelContext camel, FatalExit fatal) throws Exception {
@@ -103,6 +108,8 @@ public final class ConnectorRuntime implements AutoCloseable {
             lease = LeaseKeeper.acquire(store, p.lease().name(), LeaseKeeper.defaultOwner(),
                     new LeaseKeeper.Settings(p.lease().ttl(), p.lease().renewInterval(), p.lease().safetyMargin()),
                     lost -> fatal.exit("LEASE_LOST:" + lost.reason()));
+            // Fails if another connector (a different lease name, catalog or namespace) owns the directory.
+            InboundDirectoryClaim claim = claimDirectory(inbound, p);
 
             Map<String, String> catalogProps = Required.require(p.storage().catalog(), "sdh.storage.catalog");
             catalog = CatalogUtil.buildIcebergCatalog(p.storage().catalogName(), catalogProps, null);
@@ -147,13 +154,34 @@ public final class ConnectorRuntime implements AutoCloseable {
                                     com.sdh.healthcare.connector.core.telemetry.Attr.FORMAT, format)
                             .with(com.sdh.healthcare.connector.core.telemetry.Attr.EPOCH, lease.epoch()));
             return new ConnectorRuntime(camel, ds, catalog, lease, publisher, pipeline, processor, sections,
-                    sourceFiles, failedFiles, keys, ids, committer);
+                    sourceFiles, failedFiles, keys, ids, committer, claim);
         } catch (Exception | Error e) {
             closeQuietly(lease);
             closeQuietly(catalog);
             closeQuietly(ds);
             throw e;
         }
+    }
+
+    private static InboundDirectoryClaim claimDirectory(Path inbound, ConnectorProperties p) throws IOException {
+        var owner = new InboundDirectoryClaim.Owner(p.connectorId(), p.lease().name(), p.storage().catalogName(),
+                p.storage().namespace());
+        try {
+            return InboundDirectoryClaim.claim(inbound, owner);
+        } catch (InboundDirectoryClaim.ClaimedException e) {
+            auditClaimed(e);
+            throw e;
+        }
+    }
+
+    /** Audit event for a directory owned by another connector; names the holder (configuration, no PHI). */
+    public static void auditClaimed(InboundDirectoryClaim.ClaimedException e) {
+        var fields = com.sdh.healthcare.connector.core.telemetry.Fields.of(
+                com.sdh.healthcare.connector.core.telemetry.Attr.ERROR_CODE, e.code().name());
+        if (e.holder() != null) {
+            fields = fields.with(com.sdh.healthcare.connector.core.telemetry.Attr.REASON, e.holder().describe());
+        }
+        com.sdh.healthcare.connector.core.telemetry.Telemetry.get().auditError("connector.directory_claimed", fields);
     }
 
     private static Archiver.Settings archiver(ConnectorProperties p, String kek, long commitBytes, RetryPolicy retry) {
@@ -194,6 +222,10 @@ public final class ConnectorRuntime implements AutoCloseable {
                     q.artemis().username(), q.artemis().password());
             camel.getComponent("jms", org.apache.camel.component.jms.JmsComponent.class).setConnectionFactory(cf);
         }
+    }
+
+    public InboundDirectoryClaim claim() {
+        return claim;
     }
 
     public FileProcessor processor() {

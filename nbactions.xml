@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- NetBeans custom actions for the root project: right-click the project > Run Maven > (action).
+     Same as scripts/perf.sh; results in connector-core/target/perf/throughput-<storage>-<recipient>.md.
+     Change a property here, or copy the action, for other settings (perf.size, perf.formats, perf.recipient).
+     perf.storage=s3 needs the minikube environment, so run that one with scripts/perf.sh. -->
+<actions>
+    <action>
+        <actionName>CUSTOM-throughput-test</actionName>
+        <displayName>Throughput test</displayName>
+        <goals>
+            <goal>-pl</goal>
+            <goal>connector-core</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>perf</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <perf.size>1GiB</perf.size>
+            <perf.formats>ccda,x12,csv</perf.formats>
+            <perf.storage>local</perf.storage>
+            <perf.recipient>ec</perf.recipient>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-throughput-test-quick</actionName>
+        <displayName>Throughput test (quick, 64 MiB)</displayName>
+        <goals>
+            <goal>-pl</goal>
+            <goal>connector-core</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>perf</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <perf.size>64MiB</perf.size>
+            <perf.formats>ccda,x12,csv</perf.formats>
+            <perf.storage>local</perf.storage>
+            <perf.recipient>ec</perf.recipient>
+        </properties>
+    </action>
+</actions>

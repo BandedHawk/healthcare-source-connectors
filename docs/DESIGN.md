@@ -33,7 +33,7 @@ Revision 2026-10-28 (l): built the operator commands `restore`, `decrypt-fallbac
 
 Revision 2026-10-28 (m): the connector now runs against a real Iceberg REST catalog, Apache Polaris 1.8.0, in `PolarisIT` (§8.1, §15.1). Fencing, ingest, downstream read-back, archive restore, maintenance and the admin `status` command all pass unchanged. The REST catalog settings in §14 now include OAuth and an explicit `rest.auth.type`.
 
-Revision 2026-10-29 (n): built the throughput tests (§13.1, `scripts/perf.sh`). Small sections are bound by per-message public-key crypto, about 0.55 ms of CPU each with a P-256 recipient. Revision 2026-10-29 (n): built the throughput tests (§13.1, `scripts/perf.sh`). Small sections are bound by per-message public-key crypto, about 0.55 ms of CPU each with a P-256 recipient. Fixed a queueing problem that stalled splitting while the previous batch was sealed: sealing now has its own pool (§13), which made small sections 25–40% faster.
+Revision 2026-10-29 (n): built the throughput tests (§13.1, `scripts/perf.sh`). Small sections are bound by per-message public-key crypto, about 0.55 ms of CPU each with a P-256 recipient. Fixed a queueing problem that stalled splitting while the previous batch was sealed: sealing now has its own pool (§13), which made small sections 25–40% faster.
 
 Revision 2026-10-29 (o): sections are now converted to JSON before they are stored (§6.4). The JSON shapes are:
 - CSV: an array of fields by position, with the header dropped;
@@ -44,6 +44,14 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - added an EDIFACT splitter (§6.2);
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
+
+Revision 2026-10-29 (s): Google Cloud Storage and Azure Data Lake Storage Gen2 now work: §8.1 listed them, but their Iceberg modules weren't in the build. Added `iceberg-gcp` and `iceberg-azure` with client versions that match the KMS and Camel libraries (§2), and `GcsIT` and `AdlsIT` (§15.1). Orphan cleanup on ADLS remains unverified, because Azurite can't list Data Lake paths (§8.1). Also fixed §8.1, which named a `sdh.storage.io` setting that doesn't exist; storage is chosen with the catalog's `io-impl`.
+
+Revision 2026-10-29 (r): built the directory claim (§9.5): a hidden `.sdh-owner` file ties the inbound directory to one connector, checked at startup and before every file, which closes the gap left by the lease when two connectors use different lease names.
+
+Revision 2026-10-29 (q): documented why only one instance may watch an inbound directory, how the lease prevents it, and the gap when two connectors use different lease names on the same directory (§9.5).
+
+Revision 2026-10-29 (p): measured throughput with JSON conversion (§13.1): 4–15% slower, most for C-CDA. The throughput test runs as a plain Maven profile (`-Pperf`) and as NetBeans custom actions (`nbactions.xml`).
 
 ---
 
@@ -77,6 +85,7 @@ All versions were checked against Maven Central on 2026-10-28.
 | PostgreSQL | any supported | Lease store (§9.3). Can be the JDBC catalog's database. Driver 42.7.14, HikariCP (Boot-managed, pool of 2) |
 | AWS SDK v2 | 2.50.2 | `s3`, `apache-client` and `kms` for Iceberg's `S3FileIO` (`iceberg-aws`). `kms` is needed even without SSE-KMS: `AwsProperties` loads KMS model classes on startup. Same line as Camel's SQS client, imported as a BOM in the parent POM |
 | KMS clients | `google-cloud-kms` 2.98.0, `azure-security-keyvault-keys` 4.10.6, `azure-identity` 1.18.1 | `connector-kms` (§7.4). Chosen to match the versions Camel already brings (gax 2.83, gRPC 1.8x, azure-core 1.57), so nothing shared is upgraded underneath Camel. Vault Transit uses the JDK HTTP client |
+| Object storage clients | `iceberg-gcp` + `google-cloud-storage` 2.71.0; `iceberg-azure` + `azure-storage-file-datalake` 12.25.0 + `azure-identity` | For `GCSFileIO` and `ADLSFileIO` (§8.1); Iceberg leaves these clients to the application. Chosen on the same cores as the KMS clients: `google-cloud-storage` 2.71.0 shares `google-cloud-jar-parent` 1.89.0 with KMS 2.98.0 (gax 2.83), and datalake 12.25.0 is built on the `azure-storage-blob` 12.32.0 that Camel's Event Hubs component already brings. `azure-core` is pinned at 1.57.1, because datalake alone would pull it back to 1.57.0 |
 | Testcontainers | 2.0.5 | `-Pit` only, run by Failsafe 3.6.1 (§15) |
 | OpenTelemetry | 1.62.0 (Boot-managed) | `connector-core` uses the API only; `file-connector` gets the SDK from `spring-boot-starter-opentelemetry` and exports over OTLP/HTTP with its own filtered exporters (§12) |
 | Maven | 3.9.16 via Maven Wrapper | The local install is 3.8.7 |
@@ -180,6 +189,7 @@ Files are processed **one at a time, oldest first**. This keeps ordering predict
 - **Re-offering:** `noop=true` and `idempotent=false`, so a file that couldn't be handled (for example, storage was down) is offered again on the next poll. Successful files are deleted by the processor, so they aren't seen twice.
 - **Partially written files:** a configurable read lock (`changed` by default) waits until the file size and modification time stay unchanged for `min-age`. With `read-lock: marker` the route waits for `<name>.done`, and the marker is deleted together with the original. `include` is an Ant-style pattern; hidden files are never picked up.
 - **Subdirectories:** `completed/` and `failed/` sit inside the inbound directory and are excluded from pickup.
+- **One connector per directory:** pickup takes no lock that another process would see, so the directory is claimed by one connector through a hidden `.sdh-owner` file, checked at startup and before every file (§9.5).
 - **Startup:** if a checkpoint records an in-progress file, that file is processed before anything else. It is matched by fingerprint, not name (size first, so only same-size files are hashed). If the file has disappeared, `FileProcessor.recoverWithoutSource()` finishes it if its archive is complete, or else raises `file.abandoned` and closes the checkpoint. The route is defined with `autoStartup(false)` and is started only after this recovery. The same check runs before every file, so a file left in progress by an earlier error is always finished first.
 - **Completion:** Camel's own move/delete options are switched off. The pipeline moves and deletes files itself, because a file is only finished once archiving has been committed.
 - **Finished-file records:** `completed/<fileId>.json` and `failed/<fileId>.json` contain no PHI: file ID, timestamps, section count, byte count, keyed file digest, and for failures the stage, offset and error code. The original filename never appears in either directory.
@@ -199,16 +209,17 @@ The digest is chained, `H_i = HMAC(idKey, "sdh-file-digest" ‖ 0 ‖ H_{i-1} �
 `ConnectorRuntime` starts in a fixed order:
 1. **Validate configuration:** splitter options, queue type and URI, and key material, before touching storage.
 2. **Acquire the lease:** if another instance holds it, startup fails with `LEASE_HELD` and a non-zero exit.
-3. **Open storage:** open the catalog and create or load the three tables.
-4. **Fence:** fence every table with this instance's epoch.
-5. **Load keys:** unwrap or create the ID key.
-6. **Build the pipeline:** pipeline, archivers and `FileProcessor`.
-7. **Start pickup:** run in-progress recovery (§5), then start the route.
+3. **Claim the inbound directory** (§9.5): if another connector owns it, startup fails with `INBOUND_DIR_CLAIMED`, the lease is released, and the process exits non-zero.
+4. **Open storage:** open the catalog and create or load the three tables.
+5. **Fence:** fence every table with this instance's epoch.
+6. **Load keys:** unwrap or create the ID key.
+7. **Build the pipeline:** pipeline, archivers and `FileProcessor`.
+8. **Start pickup:** run in-progress recovery (§5), then start the route.
 
 Shutdown runs in reverse. The route is stopped first, so no file is in flight when the lease is released.
 
 **Errors per file** (`InboundService`):
-- **Fatal errors** (lease loss, unknown commit outcome, tampered checkpoint, broken invariant, any `Error`): `FatalExit` logs a PHI-free reason and the process exits with status 70.
+- **Fatal errors** (lease loss, unknown commit outcome, tampered checkpoint, broken invariant, the directory claimed by another connector, any `Error`): `FatalExit` logs a PHI-free reason and the process exits with status 70.
 - **Anything else:** the file is left in place and the route thread sleeps with exponential backoff (from `retry.initial-backoff`, capped at 5 min), which pauses the pipeline. The next poll tries again.
 
 Nothing in this path logs a path or filename.
@@ -314,7 +325,7 @@ Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offse
 **Memory and speed:**
 - Single-chunk sections (up to 8 MiB) are converted on the worker pool.
 - Larger ones are converted on the writer thread, one at a time, and JSON over one chunk is chunked as usual.
-- Conversion adds little next to message sealing (§13.1).
+- Conversion costs 4–15% of throughput: least for CSV, where message sealing dominates, most for C-CDA (§13.1).
 
 ## 7. Encryption and identifiers
 
@@ -413,7 +424,7 @@ These are selected at run time.
 | Setting | Options |
 |---|---|
 | `sdh.storage.catalog.type` | `rest` (Apache Polaris, Nessie, Unity, AWS S3 Tables, …), `jdbc` (Postgres; simplest for self-hosting) |
-| `sdh.storage.io` | `s3` (AWS S3, **SeaweedFS**, MinIO via endpoint override + path-style access), `gcs`, `adls` |
+| `sdh.storage.catalog.io-impl` | `org.apache.iceberg.aws.s3.S3FileIO` (AWS S3, **SeaweedFS**, MinIO via endpoint override + path-style access), `org.apache.iceberg.gcp.gcs.GCSFileIO` (Google Cloud Storage, `gs://`), `org.apache.iceberg.azure.adlsv2.ADLSFileIO` (Azure Data Lake Storage Gen2, `abfs://` / `abfss://`). All three ship in the image |
 
 **Storage-side encryption:** server-side encryption (SSE-KMS / CMEK) is enabled where the store supports it, as a second layer beneath application encryption. For SeaweedFS, application encryption is the primary protection.
 
@@ -425,6 +436,10 @@ These are selected at run time.
 - **Auth:** OAuth2 client credentials: `rest.auth.type: oauth2`, `credential: <client-id>:<secret>`, `scope: PRINCIPAL_ROLE:ALL`, and `oauth2-server-uri` set explicitly. Polaris's built-in endpoint is `<uri>/v1/oauth/tokens`; with an external identity provider it's that provider's token URL.
 - **Grants:** the principal needs `CATALOG_MANAGE_CONTENT` on the catalog: tables, properties and snapshots are all written through it.
 - **Clean-up:** Polaris applies its own policy for old metadata files (§16 item 5). Data files are still deleted by the connector's maintenance through `S3FileIO`, so retention purges work the same as on JDBC.
+
+**Google Cloud Storage (tested on fake-gcs-server):** `warehouse: gs://<bucket>/<path>`. In production `GCSFileIO` uses the default Google credentials (workload identity or a service account); set `gcs.project-id`. For an emulator, `gcs.service.host` and `gcs.no-auth: true`. `GcsIT` covers ingest, downstream read-back, archive restore, compaction, orphan cleanup and retention purge.
+
+**Azure Data Lake Storage Gen2 (tested on Azurite):** `warehouse: abfss://<filesystem>@<account>.dfs.core.windows.net/<path>`, on a storage account with hierarchical namespace enabled. In production `ADLSFileIO` uses the default Azure credential chain (managed identity) unless a SAS token (`adls.sas-token.<account host>`) or shared key (`adls.auth.shared-key.account.name` / `.key`) is set. `adls.connection-string.<account host>` overrides the endpoint, which is how an emulator is reached. Azurite has no Data Lake directory operations, so `ADLSFileIO.listPrefix`, which orphan-file cleanup (§8.4) uses, is **not verified against an emulator**; Iceberg's own tests skip it on Azurite for the same reason. Everything else is covered by `AdlsIT`. Check orphan cleanup on a real storage account before relying on it.
 
 **MinIO:** its community images are no longer published on Docker Hub or Quay, so it is no longer tested. It should still work as an S3 endpoint, but that's unverified.
 
@@ -500,7 +515,8 @@ Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintain
    - It runs right after `verifyCurrent`. The worst a stale instance could do is expire snapshots that are already past retention.
    - Files replaced by compaction are deleted when the compaction snapshot itself ages out, normally 7 days later.
 4. **Orphan-file cleanup** (every `orphans.interval`, 24 h):
-   - **Listing:** files under the table location are listed through the FileIO's prefix listing (`S3FileIO` supports it; the in-memory FileIO doesn't, so cleanup is skipped there).
+   - **Listing:** files under the table location are listed through the FileIO's prefix listing (`S3FileIO`, `GCSFileIO` and `ADLSFileIO` support it; the in-memory FileIO doesn't, so cleanup is skipped there).
+   - **Not verified on ADLS:** `ADLSFileIO` lists through Data Lake directory operations, which the Azurite emulator doesn't have, so orphan cleanup on ADLS has never run in a test (§8.1). Check it once on a real storage account with hierarchical namespace before relying on it. Until then, deployments on ADLS can set `orphans.enabled: false`. The only cost is that strays left by a crash mid-batch stay in storage. They are encrypted, and a retention delete doesn't remove them.
    - **Reachability:** listed files are compared with everything reachable: metadata files and their log, manifest lists, manifests, data and delete files of every snapshot, and statistics files.
    - **Deletion:** unreferenced files older than `orphans.min-age` (3 days, at least 1 hour) are deleted.
    - **Safety stop:** if more than half of what's listed (and more than 20 files) looks orphaned, it refuses and logs `maintenance.orphans_refused`. A path-form mismatch (scheme, bucket alias) would otherwise look like every file is orphaned.
@@ -516,7 +532,7 @@ Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintain
 - orphan cleanup deletes old strays but not recent ones or anything referenced;
 - a fenced-out instance changes nothing.
 
-`FullStackIT` repeats compaction, orphan cleanup and retention purging against SeaweedFS (§15.1).
+`FullStackIT` repeats compaction, orphan cleanup and retention purging against SeaweedFS, and `GcsIT` against a GCS emulator. `AdlsIT` repeats compaction and retention purging, but not orphan cleanup (§15.1).
 
 ## 9. Checkpointing, resume and single instance
 
@@ -622,6 +638,31 @@ The earlier draft kept the lease in `sections` table properties, renewed every 3
    - JDBC and Hive catalogs compare the whole metadata location, so they are safe either way. The marker keeps behaviour identical across catalogs.
 5. **Tested:** a stale holder is rejected when it commits after its successor established, and in the race where the successor establishes between the stale holder's check and its commit. Both are tested on JDBC (embedded Postgres) and on REST (Iceberg's reference REST request handling, run in-process).
 6. **Internals:** this relies on Iceberg's public `BaseTransaction.startMetadata()`, `currentMetadata()` and `underlyingOps()`. They are not formally part of the API, so the fencing tests run on every Iceberg upgrade.
+
+### 9.5 One instance per inbound directory
+
+Two connector instances must never watch the same inbound directory. Nothing in the directory itself stops them:
+- **Pickup isn't exclusive.** The route uses `noop=true` and `idempotent=false` (§5), and the `changed` read lock only waits for the file to stop growing; it takes no lock another process would see. Two instances would both pick up the same file.
+- **The pipeline moves and deletes files itself** (§5), so one instance could delete an original while the other is still splitting or archiving it.
+- **One checkpoint per connector** (§9.1) records a single in-progress file, so two instances sharing tables would overwrite each other's progress.
+
+The result would be duplicate sections and duplicate `section.stored` messages for the same file, under two different file IDs, and files abandoned part-way.
+
+**How it is prevented:** the lease (§9.3). A second instance with the same `sdh.lease.name` fails at startup with `LEASE_HELD`. An old instance that paused and lost its lease is rejected by fencing on its next commit. The lease is held for the life of the process, not taken per file, so it costs one Postgres renewal every 15 s and nothing per file or section; it doesn't slow ingest. A per-file mutex shared between instances would be needed only for several instances working one directory, which is out of scope (§17).
+
+**Why the lease alone isn't enough:** it is keyed on `sdh.lease.name`, not on the directory. Two connectors with different lease names but the same `inbound-dir` would both get a lease:
+- with the same tables, fencing makes whichever has the higher epoch win, and the other exits with status 70 on its next commit and keeps restarting, but by then both may have picked up the same file;
+- with different tables or namespaces, nothing in storage stops them.
+
+**Directory claim (built, `InboundDirectoryClaim`):** the inbound directory records which connector owns it, in a hidden file `.sdh-owner` (hidden files are never picked up, §5).
+- **Owner:** `connector-id`, `lease.name`, `storage.catalog-name` and `storage.namespace`. A difference in any of them is another connector. The file holds only these, a format version and the claim time; no path, filename or PHI.
+- **At startup**, right after the lease is taken and before storage is opened (§5.2): if there is no claim, the connector creates one with `CREATE_NEW`, which is atomic, so of several connectors starting together exactly one wins (tested with 16). If the claim names another connector, startup fails with `INBOUND_DIR_CLAIMED`, the lease is released and the process exits non-zero. The error and the `connector.directory_claimed` audit event name the owner, so operators can see which deployment collides.
+- **Before every file** the claim is read again. If another connector has replaced it, the running connector stops (status 70, reason `INBOUND_DIR_CLAIMED`). A deleted claim is recreated. The cost is reading one small file per input file.
+- **Partly written claims:** an empty or incomplete file is re-read for up to 0.5 s, in case another connector is still writing it, then refused as unreadable.
+- **The claim outlives the process.** A stopped connector still owns its directory, because it may have a file in progress there (§9.1). To hand a directory to another connector, or after renaming the lease, namespace or connector ID, stop the old connector and delete `.sdh-owner`.
+- **Remaining limits:** two deployments with identical owner settings but separate lease databases look like one connector to the claim, and like two to the lease; keep lease names unique across environments that share storage. An OS file lock (`FileChannel.tryLock`) was considered and not used: it adds nothing the claim doesn't already catch on a local disk, and it is unreliable on NFS and some network shares.
+
+**Deployment rule:** each inbound directory has exactly one connector, with its own `connector-id`, `lease.name` and tables. Kubernetes runs it with `replicas: 1` and `strategy: Recreate` (§14.1). To process more, run more connectors on separate directories, not more instances on one.
 
 ## 10. Messaging
 
@@ -877,18 +918,18 @@ Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has s
 
 ### 13.1 Measured throughput (built)
 
-`scripts/perf.sh` generates synthetic files and runs each through the whole ingest path, assembled as the connector assembles it, with production defaults: commits every 10,000 sections or 512 MiB, one encrypt worker per core, 512 MiB archive commits and a 1.5 GiB heap (the Kubernetes sketch in §14.1).
+The throughput test is a Maven profile: `./mvnw -Pperf -pl connector-core -am verify` (unit tests are skipped). `scripts/perf.sh` wraps it, and NetBeans has it as the custom actions **Throughput test** and **Throughput test (quick, 64 MiB)** (`nbactions.xml`, root project > Run Maven). It generates synthetic files and runs each through the whole ingest path, assembled as the connector assembles it, with production defaults: commits every 10,000 sections or 512 MiB, one encrypt worker per core, 512 MiB archive commits and a 1.5 GiB heap (the Kubernetes sketch in §14.1).
 - **Generated files** (seeded random words from a 4,096-word vocabulary, so they compress roughly like real text):
   - C-CDA: one `ClinicalDocument` per section, 50–350 KB each;
   - X12 837P: one claim per section, 1–6 KB, 1,000 per group;
   - CSV: one 150–400-byte record per section, with a header; 1 in 10 has a quoted note with a newline.
 - **What it measures:** wall time for the split and archive phases (from the pipeline's own spans), average cores used, the busiest single thread's share of wall time, sampled peak heap, and stored bytes against source bytes.
-- **What it checks:** each file completes with exactly the expected number of sections and messages.
+- **What it checks:** each file completes with exactly the expected number of sections and messages, and every section converts to JSON (none falls back to raw).
 - **The broker** is replaced by a counter that acknowledges at once, so broker latency isn't included; every message is still sealed and signed.
 - **Options:** `-Dperf.size=4GiB`, `-Dperf.formats=csv`, `-Dperf.storage=s3` (SeaweedFS in the minikube VM), `-Dperf.recipient=rsa`.
 - **Output:** `connector-core/target/perf/throughput-<storage>-<recipient>.md`.
 
-**Results, 2026-10-29:** 1 GiB per format; AMD Ryzen 9 8945HX (16 cores, 32 threads), Java 25.0.4. Iceberg on local disk, JDBC catalog. After the sealing-pool fix.
+**Results, 2026-10-29:** 1 GiB per format; AMD Ryzen 9 8945HX (16 cores, 32 threads), Java 25.0.4. Iceberg on local disk, JDBC catalog. After the sealing-pool fix, before JSON conversion (§6.4); the conversion run follows the table.
 
 | Recipient key | Format | Sections | MiB/s | Sections/s | Split phase MiB/s | Archive MiB/s | Avg cores | Busiest thread | Stored ÷ source |
 |---|---|---:|---:|---:|---:|---:|---:|---|---:|
@@ -898,6 +939,16 @@ Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has s
 | RSA-3072 | C-CDA | 5,259 | 119 | 612 | 280 | 207 | 3.1 | main 94% | 0.50 |
 | RSA-3072 | X12 | 475,907 | 61 | 28,357 | 91 | 185 | 9.8 | main 81% | 0.93 |
 | RSA-3072 | CSV | 3,767,820 | 13 | 48,607 | 15 | 139 | 14.9 | main 58% | 1.79 |
+
+**With JSON conversion (§6.4), P-256, same machine, single run:**
+
+| Format | MiB/s | Sections/s | Split phase MiB/s | Avg cores | Busiest thread | Stored ÷ source | Change in sections/s |
+|---|---:|---:|---:|---:|---|---:|---:|
+| C-CDA | 100 | 514 | 204 | 5.8 | main 88% | 0.49 | −15% |
+| X12 | 36 | 16,808 | 45 | 18.0 | main 55% | 1.01 | −11% |
+| CSV | 6 | 23,490 | 7 | 22.8 | sdh-seal 68% | 1.58 | −4% |
+
+C-CDA pays most: the schema-driven XML conversion cuts the split phase from about 275 to about 205 MiB/s and spreads work onto the encrypt workers (5.8 cores against 3.6). For X12 and CSV, message sealing still dominates, so conversion is a small share. CSV now stores 1.6× its size instead of 1.8×, because the header is no longer prepended to each section; X12 grows from 0.93 to 1.01 because JSON is wordier than segment text. Archive speed is unchanged. RSA and S3 runs have not been repeated with conversion.
 
 On S3 (SeaweedFS inside the minikube VM, P-256) the results were close to local disk: C-CDA 103 MiB/s, X12 15,298 and CSV 19,490 sections/s. Uploads are not the limit, and SeaweedFS's own CPU use in the VM takes from the same host. Before the sealing-pool fix, P-256 gave X12 15,048 and CSV 19,859 sections/s.
 
@@ -955,7 +1006,7 @@ sdh:
       credential: "sdh-connector:${POLARIS_CLIENT_SECRET}"   # client id:secret, secret from the environment
       scope: PRINCIPAL_ROLE:ALL
       oauth2-server-uri: https://polaris:8181/api/catalog/v1/oauth/tokens
-      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO   # or ...gcp.gcs.GCSFileIO, ...azure.adlsv2.ADLSFileIO (§8.1)
       s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
       client: { region: us-east-1 }
     commit: { max-sections: 10000, max-bytes: 512MB, max-interval: 30s }
@@ -1085,7 +1136,7 @@ spec:
 
 | Test | Containers | Verifies |
 |---|---|---|
-| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. The good file has one record with a missing field: that section arrives as `section.failed` and reads back in its original form, and the file still completes with `failedSectionCount` 1; the others read back as JSON rows. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
+| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. The good file has one record with a missing field: that section arrives as `section.failed` and reads back in its original form, and the file still completes with `failedSectionCount` 1; the others read back as JSON rows. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. A second connector with a different lease name on the same directory is refused by the directory claim (§9.5) and the running one carries on. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
 | `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = fileId, metadata headers, per-file order, `acks=all` + idempotence |
 | `RabbitMqIT` | `rabbitmq:4.2.9-management-alpine` | `message_id`, content type, headers, publisher confirms (`CORRELATED`) |
 | `ArtemisIT` | `apache/activemq-artemis:2.44.0-alpine` | `JMSXGroupID`, and duplicates dropped by `_AMQ_DUPL_ID` |
@@ -1095,6 +1146,8 @@ spec:
 | `EventHubsIT` | `mcr.microsoft.com/azure-messaging/eventhubs-emulator:2.2.0` + `azurite:3.35.0` | Each file in one partition, in order |
 | `AwsKmsIT` | `nsmithuk/local-kms:3.11.7` | `aws-kms` through `KeyMaterial.load`: KEK probes; an alias-referenced KEK records the real key ARN; tag tampering refused; a message signed through KMS opens with the KMS public key. local-kms replaces LocalStack (no account token) |
 | `AzureKeyVaultIT` | `nagyesta/lowkey-vault:7.3.112` | `azure-keyvault`: RSA-OAEP-256 wrapping records the versioned key ID; ES256 through Key Vault. Emulator workarounds, test-only: (1) versioned key IDs, because Lowkey rejects `wrapKey` on an unversioned ID, which real Key Vault accepts; (2) the KEK also gets `encrypt`/`decrypt`; (3) under minikube the client goes to the VM's IP, which isn't in Lowkey's certificate, so the test client trusts only self-signed certificates and skips hostname verification |
+| `GcsIT` | `fsouza/fake-gcs-server:1.56.1`, `postgres:18.4` | Google Cloud Storage through `GCSFileIO` and a JDBC catalog (§8.1): ingest, downstream read-back with its own catalog client, archive restore, compaction, orphan cleanup (a planted stray object is found by listing and deleted), retention purge, and no plaintext or filename in any object. The emulator's external URL is set after start, because resumable uploads return URLs built from it. Shares its test body with `AdlsIT` (`ObjectStoreItBase`) |
+| `AdlsIT` | `mcr.microsoft.com/azure-storage/azurite:3.35.0`, `postgres:18.4` | Azure Data Lake Storage Gen2 through `ADLSFileIO`: the same checks as `GcsIT`, except orphan cleanup, which Azurite can't support (no Data Lake directory listing). The test lists objects through the Blob API instead |
 | `PolarisIT` | `apache/polaris:1.8.0`, `chrislusf/seaweedfs:4.48`, `postgres:18.4` | The connector on a real Iceberg REST catalog (§8.1). The test creates the Polaris catalog through the management API (S3 storage with `stsUnavailable`, since SeaweedFS has no STS). It runs the `FullStackIT` flow on Polaris: ingest a good and a bad file, read every section back with a separate REST client, restore the archive, compact, delete a stray object, purge by retention, and check that no object holds plaintext or a filename. It also runs admin `status` against the same catalog. Fencing (§9.3) with two separate REST clients: a properties-only checkpoint commits as a marker snapshot; a stale holder is fenced after its successor establishes; the race between building and committing is rejected by the server (`assert-ref-snapshot-id`); and the control case shows a plain Iceberg transaction is not fenced. The SEDA queue stands in for the broker, which is covered elsewhere |
 | `ContainerImageIT` | the image built from `Dockerfile` + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | The image as deployed (§14.1): read-only root filesystem, `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the inbound directory is a volume that a second container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`. It checks that the process runs as 10001 and can't write outside its volumes; that a good and a bad file end in `completed/` and `failed/`; that downstream reads every section back from the host; that the console log has no PHI marker or filename; that `sdh-admin status` and `sdh-admin restore` work inside the running container without taking the lease; and that nothing native or `hs_err` was written to `/tmp`. The container log is saved to `target/container-image-it.log` |
 | `VaultTransitIT` | `hashicorp/vault:2.1.1` (dev mode) | `vault-transit` built purely from connector settings (address, token file): wrap with associated data, ES256 signing, message round trip; a wrong token fails startup naming the KEK and HTTP 403 |
@@ -1129,18 +1182,18 @@ These are checked first, in a build spike before the full implementation. Spike 
 | # | Item | Status | Result |
 |---|---|---|---|
 | 1 | Java 25 with Iceberg/Parquet and Hadoop classes | **Passed** | Parquet write and read through Iceberg work on Java 25. A fully trimmed `hadoop-common` is not enough: `Configuration` needs Woodstox/StAX2, hadoop-shaded-guava and commons-collections4, and Parquet's read path needs `hadoop-mapreduce-client-core`. That is six jars in total, all with transitive dependencies excluded (§2). We don't use `HadoopFileIO`, so Hadoop's security code (`UserGroupInformation`/`Subject`, a known Java 23+ problem area) is never reached. `S3FileIO` against SeaweedFS **passed** in `FullStackIT`, once the AWS `kms` module was added (§2) |
-| 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5). **Later finding:** the packaged app exited right after starting, because Camel 4 reads `camel.main.run-controller`, not `camel.springboot.main-run-controller`; tests start the app in-process, so only `ContainerImageIT` saw it (§14.1) |
+| 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client; 208 MB with the GCS and ADLS clients as well). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5). **Later finding:** the packaged app exited right after starting, because Camel 4 reads `camel.main.run-controller`, not `camel.springboot.main-run-controller`; tests start the app in-process, so only `ContainerImageIT` saw it (§14.1) |
 | 3 | Azure emulators | **Passed** | Service Bus and Event Hubs emulators run under `-Pit` on minikube. They found two adapter bugs (§10.3): Camel's Service Bus producer can't set per-message sessions or IDs, and the Azure client reorders sends in flight together |
 | 4 | Custom compaction | **Built** | Bin-pack via `RewriteFiles` + `validateFromSnapshot` through the fenced committer (§8.4). Findings: snapshot expiry must run standalone to delete files physically; and Iceberg deletes a removed file only once the snapshot that removed it has expired, so retention adds a marker commit to purge at once |
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |
 | 6 | New: fencing on REST and JDBC catalogs | **Passed** | Plain Iceberg transactions are not fenced, which the control test demonstrates. The compare-and-swap committer with snapshot markers is (§9.3). Confirmed on a real REST server, Apache Polaris 1.8.0, in `PolarisIT` |
-| 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. KMS providers: AWS (local-kms), Azure (Lowkey Vault) and Vault pass; GCP runs against a fake. Apache Polaris (REST catalog) passes, including fencing. Not covered: MinIO (images no longer published) |
+| 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. KMS providers: AWS (local-kms), Azure (Lowkey Vault) and Vault pass; GCP runs against a fake. Apache Polaris (REST catalog) passes, including fencing. Google Cloud Storage (fake-gcs-server) and ADLS Gen2 (Azurite) pass; orphan cleanup on ADLS isn't covered, because Azurite can't list Data Lake paths. Not covered: MinIO (images no longer published) |
 | 8 | New: throughput on small sections | **Open** | §13.1: about 24,000 sections/s (CSV ≈ 7 MiB/s) with a P-256 recipient on 16 cores, bound by public-key crypto for every message. A 1 GiB CSV takes about 2.5 minutes. Whether that's enough depends on expected volumes; the options are in §13.1 |
 
 **Spike follow-ups:** check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
 
 ## 17. Out of scope (for now)
 
-- Multi-instance or high-availability operation. The lease enforces a single writer.
+- Multi-instance or high-availability operation. The lease enforces a single writer, and the directory claim keeps each inbound directory to one connector (§9.5).
 - **Host disk capacity:** space for the inbound directory, `completed/` and `failed/` records, and the encrypted local `failed/<fileId>.enc` fallback is the operators' responsibility, through normal system monitoring. The service doesn't reserve, measure or predict disk space.
 - Re-keying existing data after a KEK compromise. KEK rotation for new data is supported through `kek_ref`.

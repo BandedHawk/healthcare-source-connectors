@@ -6,6 +6,7 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.pipeline.FileProcessor;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
+import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.file.runtime.FatalExit;
 import com.sdh.healthcare.connector.file.source.LocalSourceFile;
 import java.io.IOException;
@@ -26,6 +27,9 @@ import org.slf4j.LoggerFactory;
  * <p>Before any file, a file left in progress (by a crash or an earlier error) is finished first: the inbound file
  * with its fingerprint is processed, or, if it has gone, the processor recovers or abandons it without the source.
  *
+ * <p>Before every file, the directory claim is checked (§9.5): if another connector has taken the directory, the
+ * process stops.
+ *
  * <p>Errors that mean the process can't safely continue (lease loss, unknown commit outcome, tampered checkpoint,
  * broken invariant) stop the process. Anything else (storage down, file unreadable) leaves the file where it is;
  * the route thread waits with backoff, so the pipeline pauses, and the next poll tries again. Paths and filenames
@@ -36,6 +40,7 @@ public final class InboundService {
     private static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
 
     private final FileProcessor processor;
+    private final InboundDirectoryClaim claim;
     private final Path inbound;
     private final PathMatcher include;
     private final boolean markerMode;
@@ -45,10 +50,11 @@ public final class InboundService {
     private int consecutiveErrors;
 
     /** @param writer held while handling a file, so table maintenance never runs at the same time */
-    public InboundService(FileProcessor processor, ConnectorProperties.File props, Duration initialBackoff,
+    public InboundService(FileProcessor processor, InboundDirectoryClaim claim, ConnectorProperties.File props, Duration initialBackoff,
             FatalExit fatal, ReentrantLock writer) {
         this.writer = writer;
         this.processor = processor;
+        this.claim = claim;
         this.inbound = props.inboundDir();
         this.include = FileSystems.getDefault().getPathMatcher("glob:" + props.include());
         this.markerMode = "marker".equals(props.readLock());
@@ -60,6 +66,7 @@ public final class InboundService {
     public void recoverAtStartup() {
         writer.lock();
         try {
+            claim.verify();
             settleInProgress();
         } catch (Throwable t) {
             onError(t);
@@ -75,6 +82,7 @@ public final class InboundService {
             if (!Files.isRegularFile(file)) {
                 return;
             }
+            claim.verify();
             settleInProgress();
             if (!Files.isRegularFile(file)) {
                 return; // it was the in-progress file, now finished
@@ -121,7 +129,11 @@ public final class InboundService {
             String reason = t instanceof LeaseLostException l ? "LEASE_LOST:" + l.reason()
                     : t instanceof CheckpointTamperedException ? "CHECKPOINT_TAMPERED"
                     : t instanceof CommitStateUnknownException ? "COMMIT_STATE_UNKNOWN"
+                    : t instanceof InboundDirectoryClaim.ClaimedException ? "INBOUND_DIR_CLAIMED"
                     : t.getClass().getSimpleName();
+            if (t instanceof InboundDirectoryClaim.ClaimedException c) {
+                ConnectorRuntime.auditClaimed(c);
+            }
             LOG.error("inbound.fatal reason={}", reason);
             fatal.exit(reason);
             return;
@@ -140,6 +152,7 @@ public final class InboundService {
 
     static boolean isFatal(Throwable t) {
         return t instanceof Error || t instanceof LeaseLostException || t instanceof CommitStateUnknownException
-                || t instanceof CheckpointTamperedException || t instanceof IllegalStateException;
+                || t instanceof CheckpointTamperedException || t instanceof IllegalStateException
+                || t instanceof InboundDirectoryClaim.ClaimedException;
     }
 }

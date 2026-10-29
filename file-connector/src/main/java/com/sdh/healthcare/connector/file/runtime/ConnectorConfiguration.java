@@ -49,8 +49,8 @@ public class ConnectorConfiguration {
     @Bean
     InboundService inboundService(ConnectorRuntime runtime, ConnectorProperties props, FatalExit fatal,
             ReentrantLock writerLock) {
-        return new InboundService(runtime.processor(), props.file(), props.retry().initialBackoff(), fatal,
-                writerLock);
+        return new InboundService(runtime.processor(), runtime.claim(), props.file(),
+                props.retry().initialBackoff(), fatal, writerLock);
     }
 
     @Bean(initMethod = "start", destroyMethod = "close")
