@@ -21,6 +21,7 @@ public record ConnectorProperties(
         @DefaultValue Crypto crypto,
         @DefaultValue Queue queue,
         @DefaultValue Retry retry,
+        @DefaultValue Maintenance maintenance,
         /** Hash/encrypt/seal threads; 0 = one per CPU core. */
         @DefaultValue("0") int encryptWorkers) {
 
@@ -81,6 +82,25 @@ public record ConnectorProperties(
     public record Queue(String type, String uri, @DefaultValue Artemis artemis) {}
 
     public record Artemis(String brokerUrl, String username, String password) {}
+
+    /**
+     * Table maintenance (design §8.4), run between files on the single writer.
+     *
+     * @param interval how often to try; a run is skipped while a file is being processed
+     */
+    public record Maintenance(@DefaultValue("true") boolean enabled, @DefaultValue("1h") Duration interval,
+            @DefaultValue("7d") Duration snapshotRetention, @DefaultValue("10") int minSnapshots,
+            @DefaultValue Compaction compaction, @DefaultValue Orphans orphans, @DefaultValue Retention retention) {}
+
+    public record Compaction(@DefaultValue("true") boolean enabled, @DefaultValue("0.75") double smallFileFraction,
+            @DefaultValue("5") int minInputFiles, @DefaultValue("8GB") DataSize maxBytesPerRun) {}
+
+    /** @param minAge never delete an unreferenced file younger than this (at least 1 hour) */
+    public record Orphans(@DefaultValue("true") boolean enabled, @DefaultValue("24h") Duration interval,
+            @DefaultValue("3d") Duration minAge) {}
+
+    /** How long to keep each table's rows, in whole days; unset = forever (the default). */
+    public record Retention(Duration sections, Duration sourceFiles, Duration failedFiles) {}
 
     public record Retry(@DefaultValue("8") int maxAttempts, @DefaultValue("200ms") Duration initialBackoff,
             @DefaultValue("30s") Duration maxBackoff) {}

@@ -21,6 +21,8 @@ Revision 2026-10-28 (g): added the Docker integration suite, which runs on minik
 
 See §10.3, §8.1, §11.2 and §16. MinIO images are no longer published, so S3 is tested on SeaweedFS only.
 
+Revision 2026-10-28 (h): built table maintenance (§8.4): retention, compaction, snapshot expiry and orphan-file cleanup, scheduled between files under a writer lock. Retention now purges PHI files in the same run (a marker commit makes the delete expirable). Retention settings moved to `sdh.maintenance.retention` (§14).
+
 ---
 
 ## 1. Purpose
@@ -88,7 +90,8 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
     └── com.sdh.healthcare.connector.file
         ├── FileConnectorApplication
         ├── config/       ConnectorProperties (sdh.*), KeyMaterial (local key provider), PEM reading
-        ├── runtime/      ConnectorRuntime (startup order), ConnectorConfiguration (Spring wiring), FatalExit
+        ├── runtime/      ConnectorRuntime (startup order), ConnectorConfiguration (Spring wiring), FatalExit,
+        │                 MaintenanceScheduler
         ├── route/        InboundRoute (directory discovery)
         ├── ingest/       InboundService (per-file handling, in-progress recovery, backoff)
         ├── publish/      QueueType (broker adapters), CamelMessagePublisher
@@ -357,17 +360,45 @@ Each commit is **one fenced Iceberg commit** (§9.3) containing:
 
 The fenced committer checks the lease epoch and commits with a strict compare-and-swap.
 
-### 8.4 Maintenance
+### 8.4 Maintenance (built)
 
-Spark is not used, so maintenance runs inside the service on the single writer and is scheduled during idle time. Every maintenance commit goes through the fenced committer, except snapshot expiry (below).
+Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintains one table without it, and `MaintenanceScheduler` (`file-connector`) runs it on all three tables every `maintenance.interval` (1 h).
 
-- **Snapshot expiry:** Iceberg core `expireSnapshots()`, keeping 7 days by default.
-  - It runs **standalone**, straight after a successful fenced commit and lease check, not inside the fenced compare-and-swap.
-  - Reason: Iceberg only deletes expired files from its own commit path. Run inside our compare-and-swap, it updates metadata but leaves the files on storage (spike finding).
-  - Expiry can't write data or checkpoints. The worst a stale instance could do is expire snapshots that are already past retention.
-- **Compaction:** custom bin-pack using core `RewriteFiles` with `validateFromSnapshot`, committed through the fenced committer (prototype passes in the spike). Iceberg's ready-made `RewriteDataFiles` action requires Spark or Flink.
-- **Orphan-file cleanup:** custom listing, comparing the object store to the files referenced by tables, with a safety age of 3 days.
-- **Retention:** `deleteFromRowFilter(ingested_at < cutoff)`, which drops whole day partitions, followed by snapshot expiry so the PHI is physically removed. Retention is configured per table and is off by default.
+**Scheduling:**
+- **Between files only:** the scheduler runs only if it can take the writer lock without waiting. The inbound service holds that lock for each file, so maintenance never overlaps with ingest; a busy tick is skipped.
+- **Bounded runs:** the compaction budget limits how long intake can be held up.
+- **Errors:** a lease loss, unknown commit outcome or tampered checkpoint exits the process (status 70); anything else is logged and retried next interval.
+- **Fencing:** every run starts with `FencedCommitter.verifyCurrent` (lease held, table epoch ours). Every maintenance commit goes through the fenced committer except snapshot expiry.
+
+**Each run, per table:**
+1. **Retention** (per table, off by default, at least 1 day). It deletes whole UTC days older than `now − retention`, using `deleteFromRowFilter` on the partition source column (`ingested_at`, or `archived_at` for the archive tables). That is metadata-only, because whole partitions match. Nothing to delete means no commit, so there are no empty snapshots. The PHI is then purged in the same run: Iceberg deletes a removed file only once the snapshot that removed it has expired, and the current snapshot never expires. So a fenced marker commit follows the delete, and every snapshot before the marker is expired, which deletes the files. Trade-off: no time travel to before a retention delete.
+2. **Compaction (bin-pack):**
+   - **What counts as small:** data files below `small-file-fraction` (0.75) of the table's target size (512 MiB), grouped by partition; a partition needs at least `min-input-files` (5) of them.
+   - **Packing:** first-fit decreasing into bins of at most the target size.
+   - **Rewriting:** each bin is rewritten by copying its rows unchanged (ciphertext included) into one new file, written unsorted because concatenating sorted files doesn't keep the sort order. Row counts are checked, and the swap commits through `RewriteFiles` with `validateFromSnapshot`.
+   - **Budget:** it stops after `max-bytes-per-run` (8 GB).
+3. **Snapshot expiry:** Iceberg core `expireSnapshots()`, keeping 7 days and at least `min-snapshots` (10).
+   - It runs **standalone** through Iceberg's own commit, because only that path deletes the expired files (spike finding).
+   - It runs right after `verifyCurrent`. The worst a stale instance could do is expire snapshots that are already past retention.
+   - Files replaced by compaction are deleted when the compaction snapshot itself ages out, normally 7 days later.
+4. **Orphan-file cleanup** (every `orphans.interval`, 24 h):
+   - **Listing:** files under the table location are listed through the FileIO's prefix listing (`S3FileIO` supports it; the in-memory FileIO doesn't, so cleanup is skipped there).
+   - **Reachability:** listed files are compared with everything reachable: metadata files and their log, manifest lists, manifests, data and delete files of every snapshot, and statistics files.
+   - **Deletion:** unreferenced files older than `orphans.min-age` (3 days, at least 1 hour) are deleted.
+   - **Safety stop:** if more than half of what's listed (and more than 20 files) looks orphaned, it refuses and logs `maintenance.orphans_refused`. A path-form mismatch (scheme, bucket alias) would otherwise look like every file is orphaned.
+
+**Readers:** expiry doesn't break `connector-queue-reader` for older messages. When a message's snapshot has been expired, the reader refreshes and reads the current table, where compacted rows are unchanged; after a retention delete it reports the section as not found. One cost: a reader working through a backlog older than the snapshot window refreshes on every such message.
+
+**Tests:** `TableMaintenanceTest` uses a JDBC catalog on embedded Postgres with a local-disk FileIO, so physical deletion is checked. It covers:
+- compaction preserves every row byte-for-byte;
+- only partitions with enough small files are compacted, within budget;
+- replaced files are deleted once their snapshot ages out;
+- retention drops only whole old days and removes their files at once, with no empty snapshot when there's nothing to delete;
+- retention works on archive tables;
+- orphan cleanup deletes old strays but not recent ones or anything referenced;
+- a fenced-out instance changes nothing.
+
+`FullStackIT` repeats compaction, orphan cleanup and retention purging against SeaweedFS (§15.1).
 
 ## 9. Checkpointing, resume and single instance
 
@@ -720,13 +751,21 @@ sdh:
     uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"
     artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
   retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
+  maintenance:                    # §8.4; runs between files
+    enabled: true
+    interval: 1h
+    snapshot-retention: 7d
+    min-snapshots: 10
+    compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
+    orphans: { enabled: true, interval: 24h, min-age: 3d }
+    retention: { sections: 30d, source-files: 365d, failed-files: 365d }   # unset = keep forever (default)
 ```
 
 Compared with the earlier sketch:
 - split options moved under `split.options`;
 - object storage settings are plain Iceberg catalog properties, replacing `storage.io`;
 - the signing key and recipient are single objects, not a list;
-- `storage.retention` and `lease.store` aren't read yet.
+- retention moved to `maintenance.retention`; `lease.store` isn't read yet.
 
 ## 15. Testing
 
@@ -744,7 +783,7 @@ Compared with the earlier sketch:
 
 | Test | Containers | Verifies |
 |---|---|---|
-| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename |
+| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket |
 | `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = fileId, metadata headers, per-file order, `acks=all` + idempotence |
 | `RabbitMqIT` | `rabbitmq:4.2.9-management-alpine` | `message_id`, content type, headers, publisher confirms (`CORRELATED`) |
 | `ArtemisIT` | `apache/activemq-artemis:2.44.0-alpine` | `JMSXGroupID`, and duplicates dropped by `_AMQ_DUPL_ID` |
@@ -782,7 +821,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 | 1 | Java 25 with Iceberg/Parquet and Hadoop classes | **Passed** | Parquet write and read through Iceberg work on Java 25. A fully trimmed `hadoop-common` is not enough: `Configuration` needs Woodstox/StAX2, hadoop-shaded-guava and commons-collections4, and Parquet's read path needs `hadoop-mapreduce-client-core`. That is six jars in total, all with transitive dependencies excluded (§2). We don't use `HadoopFileIO`, so Hadoop's security code (`UserGroupInformation`/`Subject`, a known Java 23+ problem area) is never reached. `S3FileIO` against SeaweedFS **passed** in `FullStackIT`, once the AWS `kms` module was added (§2) |
 | 2 | Camel 4.22 with Spring Boot 4.1.x | **Passed** | Spring Boot 4.1.2 with Camel 4.22.2: the context starts with all 7 broker components resolved, the file consumer picks up files oldest first, skips `completed/`/`failed/` and never moves or deletes files, and the Iceberg stack works on the same classpath. One fix needed: pin Jackson 2 to 2.22.2 (§2). Fat jar is about 184 MB with every broker client (190 MB once wired, with `iceberg-aws` and the S3 client). **Later finding:** the spike's oldest-first check passed only by directory order; `eagerMaxMessagesPerPoll=false` is needed (§5) |
 | 3 | Azure emulators | **Passed** | Service Bus and Event Hubs emulators run under `-Pit` on minikube. They found two adapter bugs (§10.3): Camel's Service Bus producer can't set per-message sessions or IDs, and the Azure client reorders sends in flight together |
-| 4 | Custom compaction | **Prototype passed** | Bin-pack via `RewriteFiles` + `validateFromSnapshot` through the fenced committer works. Finding: snapshot expiry must run standalone to delete files physically (§8.4) |
+| 4 | Custom compaction | **Built** | Bin-pack via `RewriteFiles` + `validateFromSnapshot` through the fenced committer (§8.4). Findings: snapshot expiry must run standalone to delete files physically; and Iceberg deletes a removed file only once the snapshot that removed it has expired, so retention adds a marker commit to purge at once |
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |
 | 6 | New: fencing on REST and JDBC catalogs | **Passed** | Plain Iceberg transactions are not fenced, which the control test demonstrates. The compare-and-swap committer with snapshot markers is (§9.3) |
 | 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. Not covered: MinIO (images no longer published), KMS and Vault (providers not built), a REST catalog container |

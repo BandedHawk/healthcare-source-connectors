@@ -3,6 +3,8 @@ package com.sdh.healthcare.connector.file.runtime;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.ingest.InboundService;
 import com.sdh.healthcare.connector.file.route.InboundRoute;
+import java.time.Clock;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.camel.CamelContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,9 +36,23 @@ public class ConnectorConfiguration {
         return ConnectorRuntime.start(props, camel, fatal);
     }
 
+    /** Held while a file is handled; maintenance runs only when it can take it without waiting. */
     @Bean
-    InboundService inboundService(ConnectorRuntime runtime, ConnectorProperties props, FatalExit fatal) {
-        return new InboundService(runtime.processor(), props.file(), props.retry().initialBackoff(), fatal);
+    ReentrantLock writerLock() {
+        return new ReentrantLock();
+    }
+
+    @Bean
+    InboundService inboundService(ConnectorRuntime runtime, ConnectorProperties props, FatalExit fatal,
+            ReentrantLock writerLock) {
+        return new InboundService(runtime.processor(), props.file(), props.retry().initialBackoff(), fatal,
+                writerLock);
+    }
+
+    @Bean(initMethod = "start", destroyMethod = "close")
+    MaintenanceScheduler maintenanceScheduler(ConnectorRuntime runtime, ConnectorProperties props,
+            ReentrantLock writerLock, FatalExit fatal) {
+        return new MaintenanceScheduler(runtime, props.maintenance(), writerLock, fatal, Clock.systemUTC());
     }
 
     @Bean

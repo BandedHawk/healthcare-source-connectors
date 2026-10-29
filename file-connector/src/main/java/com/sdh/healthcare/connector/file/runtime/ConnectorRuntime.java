@@ -58,10 +58,11 @@ public final class ConnectorRuntime implements AutoCloseable {
     private final Table failedFiles;
     private final KeyMaterial keys;
     private final SectionIds ids;
+    private final FencedCommitter committer;
 
     private ConnectorRuntime(CamelContext camel, HikariDataSource dataSource, Catalog catalog, LeaseKeeper lease,
             ClosablePublisher publisher, IngestPipeline pipeline, FileProcessor processor, Table sections,
-            Table sourceFiles, Table failedFiles, KeyMaterial keys, SectionIds ids) {
+            Table sourceFiles, Table failedFiles, KeyMaterial keys, SectionIds ids, FencedCommitter committer) {
         this.camel = camel;
         this.dataSource = dataSource;
         this.catalog = catalog;
@@ -74,6 +75,7 @@ public final class ConnectorRuntime implements AutoCloseable {
         this.failedFiles = failedFiles;
         this.keys = keys;
         this.ids = ids;
+        this.committer = committer;
     }
 
     public static ConnectorRuntime start(ConnectorProperties p, CamelContext camel, FatalExit fatal) throws Exception {
@@ -140,7 +142,7 @@ public final class ConnectorRuntime implements AutoCloseable {
             LOG.info("connector.started connectorId={} format={} queue={} epoch={}", p.connectorId(), format,
                     queueType.name().toLowerCase(java.util.Locale.ROOT), lease.epoch());
             return new ConnectorRuntime(camel, ds, catalog, lease, publisher, pipeline, processor, sections,
-                    sourceFiles, failedFiles, keys, ids);
+                    sourceFiles, failedFiles, keys, ids, committer);
         } catch (Exception | Error e) {
             closeQuietly(lease);
             closeQuietly(catalog);
@@ -195,6 +197,14 @@ public final class ConnectorRuntime implements AutoCloseable {
 
     public Catalog catalog() {
         return catalog;
+    }
+
+    public Table sections() {
+        return sections;
+    }
+
+    public FencedCommitter committer() {
+        return committer;
     }
 
     public Table sourceFiles() {

@@ -124,6 +124,18 @@ public final class FencedCommitter {
         }
     }
 
+    /**
+     * Checks that this instance still holds the lease and that the table carries our epoch, without committing.
+     * Used right before operations that commit through Iceberg's own path (snapshot expiry, design §8.4).
+     */
+    public void verifyCurrent(Table table) {
+        lease.checkHeld();
+        table.refresh();
+        if (epochOf(table.properties()) != lease.epoch()) {
+            throw new LeaseLostException(LeaseLostException.Reason.FENCED);
+        }
+    }
+
     public static long epochOf(Map<String, String> properties) {
         String v = properties.get(EPOCH_PROPERTY);
         return v == null ? 0L : Long.parseLong(v);

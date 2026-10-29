@@ -85,6 +85,7 @@ class FileConnectorApplicationTest {
         r.add("sdh.storage.catalog[jdbc.password]", () -> "postgres");
         r.add("sdh.storage.catalog[jdbc.schema-version]", () -> "V1");
         r.add("sdh.storage.commit.max-sections", () -> "5");
+        r.add("sdh.maintenance.compaction.min-input-files", () -> "2");
         r.add("sdh.lease.jdbc.url", () -> jdbc);
         r.add("sdh.lease.jdbc.username", () -> "postgres");
         r.add("sdh.lease.jdbc.password", () -> "postgres");
@@ -112,6 +113,12 @@ class FileConnectorApplicationTest {
 
     @Autowired
     ConnectorRuntime runtime;
+
+    @Autowired
+    com.sdh.healthcare.connector.file.runtime.MaintenanceScheduler maintenance;
+
+    @Autowired
+    java.util.concurrent.locks.ReentrantLock writerLock;
 
     static String csv(int n, String tag) {
         StringBuilder b = new StringBuilder();
@@ -199,6 +206,20 @@ class FileConnectorApplicationTest {
             assertThat(s.map(FileConnectorApplicationTest::read)).noneMatch(t -> t.contains("smith") || t.contains("jones"));
         }
         assertThat(runtime.processor().inProgress()).isEmpty();
+
+        // Maintenance between files: compacts the small batch files, data still restores byte-for-byte.
+        writerLock.lock();
+        try {
+            var reports = maintenance.runOnce();
+            assertThat(reports).hasSize(3);
+            assertThat(reports.getFirst().compactedFiles()).isGreaterThanOrEqualTo(2);
+        } finally {
+            writerLock.unlock();
+        }
+        ByteArrayOutputStream again = new ByteArrayOutputStream();
+        ArchiveReader.restore(runtime.sourceFiles(), olderId, runtime.keys().wrap(), runtime.ids(), 0, again);
+        assertThat(again.toString(UTF_8)).isEqualTo(older);
+        assertThat(FATAL).isEmpty();
     }
 
     static String read(Path p) {

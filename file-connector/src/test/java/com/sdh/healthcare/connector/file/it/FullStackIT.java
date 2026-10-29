@@ -7,6 +7,9 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
+import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.core.storage.ArchiveReader;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.file.config.KeyMaterial;
@@ -19,14 +22,17 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.security.interfaces.ECPublicKey;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -166,6 +172,22 @@ class FullStackIT {
     @Autowired
     ConnectorRuntime runtime;
 
+    @Autowired
+    ReentrantLock writerLock;
+
+    /** "s3://bucket/a/b" → "a/b". */
+    static String keyOf(String location) {
+        String noScheme = location.substring(location.indexOf("://") + 3);
+        return noScheme.substring(noScheme.indexOf('/') + 1);
+    }
+
+    static List<String> keys(String prefix) {
+        try (S3Client s3 = s3()) {
+            return s3.listObjectsV2Paginator(b -> b.bucket(BUCKET).prefix(prefix)).contents().stream()
+                    .map(S3Object::key).toList();
+        }
+    }
+
     @Test
     void ingestsToS3AndDownstreamReadsEverySectionBack() throws Exception {
         String header = "id,name,note\n";
@@ -225,6 +247,37 @@ class FullStackIT {
             ArchiveReader.restore(runtime.sourceFiles(), done.fileId(), runtime.keys().wrap(), runtime.ids(), 0,
                     restored);
             assertThat(restored.toString(UTF_8)).isEqualTo(file.toString());
+
+            // Maintenance on real S3, between files (route idle, writer lock held).
+            writerLock.lock();
+            try {
+                String dataPrefix = keyOf(runtime.sections().location()) + "/data/";
+                String stray = dataPrefix + "stray-crashed-batch.parquet";
+                try (S3Client s3 = s3()) {
+                    s3.putObject(b -> b.bucket(BUCKET).key(stray),
+                            software.amazon.awssdk.core.sync.RequestBody.fromString("half-written"));
+                }
+                var report = new TableMaintenance(runtime.committer(), new MaintenanceSettings(Duration.ofDays(7), 10,
+                        true, 0.75, 2, 8L << 30, Duration.ZERO), Clock.systemUTC())
+                        .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.empty(), true);
+                assertThat(report.compactedFiles()).as("30 sections in batches of 7").isEqualTo(5);
+                assertThat(report.orphansDeleted()).isEqualTo(1);
+                assertThat(keys(dataPrefix)).doesNotContain(stray);
+                // Downstream still reads every section after compaction.
+                for (SectionStored s : sections) {
+                    assertThat(new String(reader.readSection(s, 1 << 20), UTF_8))
+                            .isEqualTo(header + records.get((int) s.seq()));
+                }
+
+                // Retention: three days on, a one-day policy drops today's partition and purges its objects at once.
+                var purge = new TableMaintenance(runtime.committer(), MaintenanceSettings.DEFAULT,
+                        Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
+                        .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.of(Duration.ofDays(1)), false);
+                assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
+                assertThat(keys(dataPrefix)).as("PHI data objects physically removed").isEmpty();
+            } finally {
+                writerLock.unlock();
+            }
         }
 
         // Nothing in object storage is readable: data files, manifests and metadata alike.

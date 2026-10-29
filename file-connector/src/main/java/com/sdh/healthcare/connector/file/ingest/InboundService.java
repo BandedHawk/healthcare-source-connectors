@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,10 +41,13 @@ public final class InboundService {
     private final boolean markerMode;
     private final FatalExit fatal;
     private final Duration initialBackoff;
+    private final ReentrantLock writer;
     private int consecutiveErrors;
 
+    /** @param writer held while handling a file, so table maintenance never runs at the same time */
     public InboundService(FileProcessor processor, ConnectorProperties.File props, Duration initialBackoff,
-            FatalExit fatal) {
+            FatalExit fatal, ReentrantLock writer) {
+        this.writer = writer;
         this.processor = processor;
         this.inbound = props.inboundDir();
         this.include = FileSystems.getDefault().getPathMatcher("glob:" + props.include());
@@ -54,15 +58,19 @@ public final class InboundService {
 
     /** Called before the route starts. */
     public void recoverAtStartup() {
+        writer.lock();
         try {
             settleInProgress();
         } catch (Throwable t) {
             onError(t);
+        } finally {
+            writer.unlock();
         }
     }
 
     /** Called by the route for each settled file. */
     public void handle(Path file) {
+        writer.lock();
         try {
             if (!Files.isRegularFile(file)) {
                 return;
@@ -76,6 +84,8 @@ public final class InboundService {
             consecutiveErrors = 0;
         } catch (Throwable t) {
             onError(t);
+        } finally {
+            writer.unlock();
         }
     }
 
