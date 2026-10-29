@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-29 (t): third-party attribution (§14.2). Every jar carries `META-INF/LICENSE`, `NOTICE`, `THIRD-PARTY.txt` and the license texts, generated with `license-maven-plugin` and a `gmavenplus` step adapted from `healthcare-data-harmonization`, and the image has them in `/app/legal/`. The project is declared proprietary (Smile Digital Health Inc.), and `NOTICE` credits HL7 for the C-CDA model.
+
 Revision 2026-10-29 (s): Google Cloud Storage and Azure Data Lake Storage Gen2 now work: §8.1 listed them, but their Iceberg modules weren't in the build. Added `iceberg-gcp` and `iceberg-azure` with client versions that match the KMS and Camel libraries (§2), and `GcsIT` and `AdlsIT` (§15.1). Orphan cleanup on ADLS remains unverified, because Azurite can't list Data Lake paths (§8.1). Also fixed §8.1, which named a `sdh.storage.io` setting that doesn't exist; storage is chosen with the catalog's `io-impl`.
 
 Revision 2026-10-29 (r): built the directory claim (§9.5): a hidden `.sdh-owner` file ties the inbound directory to one connector, checked at startup and before every file, which closes the gap left by the lease when two connectors use different lease names.
@@ -103,6 +105,10 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── scripts/                             it-minikube.sh (Docker suite), build-image.sh (image), perf.sh (throughput), minikube-env.sh (shared),
 │                                        cda-model/ (generates the C-CDA converter's schema model, §6.4)
 ├── docs/DESIGN.md                       this document
+├── LICENSE, NOTICE                      our proprietary notice and attributions (HL7), copied into every jar (§14.2)
+├── src/license/                         third-party attribution: THIRD-PARTY.txt template, license corrections,
+│                                        copyright lines for components that ship none (§14.2)
+├── nbactions.xml                        NetBeans custom actions (throughput test, §13.1)
 ├── connector-contract/                  library jar: the wire contract shared by writers and readers
 │   └── com.sdh.healthcare.connector.contract
 │       ├── message/      message records, payload codec, contract version
@@ -1064,6 +1070,7 @@ Compared with the earlier sketch:
 - **Layers:** Spring Boot's `-Djarmode=tools extract --layers`, copied as four layers with dependencies first, so a code change rebuilds a few hundred KB rather than 200 MB. The image is about 513 MB.
 - **User:** uid/gid 10001 (`sdh`), with no home directory or login shell. Everything under `/app` is root-owned and read-only to it; only `/data/inbound` belongs to it.
 - **Operator commands:** `/usr/local/bin/sdh-admin` runs `admin` (§11.4) with the same JVM options and `-Xmx512m`, so it fits beside the connector's JVM: `kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status`. With a read-only root filesystem, restore into `/tmp` (then `kubectl cp`) or the inbound volume. As a one-off container, arguments after the image name go to the app: `docker run … <image> admin status`.
+- **Legal:** `/app/legal/` holds `LICENSE`, `NOTICE`, `THIRD-PARTY.txt` and `licenses/`, extracted from the jar at build time (§14.2). The OCI labels give the vendor (Smile Digital Health Inc.), `org.opencontainers.image.licenses=LicenseRef-Proprietary` and a pointer to these files. The JRE's notices stay in `/opt/java/openjdk/legal` and the OS packages' in `/usr/share/doc`.
 - **Health:** there is no HTTP endpoint. The process is the health signal: fatal conditions exit with status 70 (`FatalExit`) and the orchestrator restarts it.
 
 **JVM flags.** These are in `/app/jvm.options` (from `file-connector/docker/`), read by `ENTRYPOINT` as `java @/app/jvm.options -jar /app/app.jar`. `JDK_JAVA_OPTIONS` and `JAVA_TOOL_OPTIONS` are read before the command line, so they can add tuning (e.g. `-Xmx`) but can't undo these:
@@ -1119,6 +1126,52 @@ spec:
         - { name: keys, secret: { secretName: sdh-connector-keys, defaultMode: 0440 } }
 ```
 
+### 14.2 Licensing and third-party attribution (built)
+
+The project is proprietary: `Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.` (`LICENSE`, and `<licenses>`/`<organization>` in the parent POM). Every component we ship is attributed in every artifact we ship. The approach is taken from `healthcare-data-harmonization` (`license-maven-plugin` 2.7.1 plus a `gmavenplus-plugin` 5.1.0 Groovy step), configured once in the parent POM's `pluginManagement` and enabled in each jar module.
+
+**What each jar contains** (`META-INF/`, generated at `prepare-package`):
+- `LICENSE` and `NOTICE`: ours. `NOTICE` also credits Health Level Seven for the C-CDA model in `connector-core`, which is derived from the HL7 CDA R2 and SDTC schemas (§6.4), and describes what the image adds (native libraries, JRE, OS).
+- `THIRD-PARTY.txt`: one entry per runtime dependency (test and provided scopes and our own modules excluded), from `src/license/third-party.ftl`:
+  - name, coordinates and project URL;
+  - its licenses, by canonical SPDX-style name; several names mean a choice;
+  - its own `NOTICE`, copied from its jar;
+  - for components not offered under Apache-2.0, its copyright line: the license file it ships in its jar, or else a line from `src/license/copyrights.properties`, taken from the project's published LICENSE. MIT and BSD require the copyright line, and the canonical texts only have placeholders.
+- `licenses/<name>.txt`: one canonical text per license referenced. GPL-2.0 with the Classpath Exception is the GPL text followed by the exception.
+
+The library jars (`connector-contract`, `connector-core`, `connector-kms`, `connector-queue-reader`) carry this for their own dependencies, so a team that bundles the reader has it. `file-connector`'s jar covers the whole application: 368 components and 13 licenses at present. The image copies the files to `/app/legal/` (§14.1).
+
+**How it is built:**
+1. `download-licenses` fetches the texts named in dependency POMs. These are only a fallback, for a license outside the canonical list. `gnu.org` URLs are redirected to the same texts in SPDX's repository, because `gnu.org` was unreachable from the development network and each attempt retried, which added two minutes per module.
+2. `add-third-party` writes `THIRD-PARTY.txt`. License names are normalised by `<licenseMerges>`; for example, the Go license (re2j) and the Eclipse Distribution License are BSD-3-Clause texts. `src/license/override-THIRD-PARTY.properties` corrects POMs that are wrong: `javax.annotation-api` declares "CDDL + GPLv2 with classpath exception" as one license. The plugin runs with `force`, because the next step rewrites its output.
+3. The Groovy step:
+   - replaces each referenced license with its canonical text, fetched from SPDX or apache.org;
+   - fills in each component's NOTICE and copyright;
+   - copies our `LICENSE` and `NOTICE`.
+   Texts are matched by exact canonical name, unlike the reference project's substring matching, so MIT-0 never gets the MIT text and BSD-2 never gets BSD-3.
+
+**Changes from the reference setup:**
+- test and provided scopes are excluded;
+- our own modules are excluded;
+- canonical names match exactly;
+- the Classpath Exception text is fetched;
+- the copyright fallback was added;
+- download timeouts are shorter.
+
+**Failing the build:** a dependency with no license in its POM fails `add-third-party` (`failOnMissing`); add it to the override file. A component that isn't offered under Apache-2.0 and has neither a license file in its jar nor a line in `copyrights.properties` fails the Groovy step. So a new MIT, BSD or EPL dependency gets a human look.
+
+**Network:** packaging fetches license texts, as in the reference project. Offline, a placeholder is written and a warning logged, so check the warnings in a release build. `mvn test` doesn't run these steps (they're bound to `prepare-package`).
+
+**Licenses in use:** almost all Apache-2.0, MIT or BSD. The rest:
+- **offered under a choice:** Logback (EPL-2.0 or LGPL-2.1), JNA (Apache-2.0 or LGPL-2.1), the RabbitMQ client (Apache-2.0, GPL-2.0 or MPL-2.0), the Jakarta APIs (EPL-2.0 or GPL-2.0 with the Classpath Exception; EDL), `javax.annotation-api` (CDDL-1.1 or GPL-2.0 with the Classpath Exception), HdrHistogram (BSD-2-Clause or CC0);
+- **single license:** `pem-keystore` (EPL-1.0), `reactive-streams` (MIT-0).
+
+None forces GPL terms on the connector, because every GPL or LGPL option has a permissive or weak-copyleft alternative. For EPL-1.0 and EPL-2.0 components distributed in binary form, the project URL in `THIRD-PARTY.txt` points to the source.
+
+**HL7:** HL7's CDA-core-2.0 repository declares no license. The attribution follows HL7's IP policy. Confirm with the licensing contact before any external distribution.
+
+**Distribution bundles:** none yet. A future bundle (zip or tarball) should include `META-INF/LICENSE`, `NOTICE`, `THIRD-PARTY.txt` and `licenses/` from `file-connector`'s jar at its top level, as the image does.
+
 ## 15. Testing
 
 | Level | Coverage |
@@ -1149,7 +1202,7 @@ spec:
 | `GcsIT` | `fsouza/fake-gcs-server:1.56.1`, `postgres:18.4` | Google Cloud Storage through `GCSFileIO` and a JDBC catalog (§8.1): ingest, downstream read-back with its own catalog client, archive restore, compaction, orphan cleanup (a planted stray object is found by listing and deleted), retention purge, and no plaintext or filename in any object. The emulator's external URL is set after start, because resumable uploads return URLs built from it. Shares its test body with `AdlsIT` (`ObjectStoreItBase`) |
 | `AdlsIT` | `mcr.microsoft.com/azure-storage/azurite:3.35.0`, `postgres:18.4` | Azure Data Lake Storage Gen2 through `ADLSFileIO`: the same checks as `GcsIT`, except orphan cleanup, which Azurite can't support (no Data Lake directory listing). The test lists objects through the Blob API instead |
 | `PolarisIT` | `apache/polaris:1.8.0`, `chrislusf/seaweedfs:4.48`, `postgres:18.4` | The connector on a real Iceberg REST catalog (§8.1). The test creates the Polaris catalog through the management API (S3 storage with `stsUnavailable`, since SeaweedFS has no STS). It runs the `FullStackIT` flow on Polaris: ingest a good and a bad file, read every section back with a separate REST client, restore the archive, compact, delete a stray object, purge by retention, and check that no object holds plaintext or a filename. It also runs admin `status` against the same catalog. Fencing (§9.3) with two separate REST clients: a properties-only checkpoint commits as a marker snapshot; a stale holder is fenced after its successor establishes; the race between building and committing is rejected by the server (`assert-ref-snapshot-id`); and the control case shows a plain Iceberg transaction is not fenced. The SEDA queue stands in for the broker, which is covered elsewhere |
-| `ContainerImageIT` | the image built from `Dockerfile` + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | The image as deployed (§14.1): read-only root filesystem, `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the inbound directory is a volume that a second container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`. It checks that the process runs as 10001 and can't write outside its volumes; that a good and a bad file end in `completed/` and `failed/`; that downstream reads every section back from the host; that the console log has no PHI marker or filename; that `sdh-admin status` and `sdh-admin restore` work inside the running container without taking the lease; and that nothing native or `hs_err` was written to `/tmp`. The container log is saved to `target/container-image-it.log` |
+| `ContainerImageIT` | the image built from `Dockerfile` + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | The image as deployed (§14.1): read-only root filesystem, `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the inbound directory is a volume that a second container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`. It checks that the process runs as 10001 and can't write outside its volumes; that a good and a bad file end in `completed/` and `failed/`; that downstream reads every section back from the host; that the console log has no PHI marker or filename; that `sdh-admin status` and `sdh-admin restore` work inside the running container without taking the lease; that `/app/legal/` holds our notice (with the HL7 attribution), a complete `THIRD-PARTY.txt` (including zstd-jni and snappy-java, whose native libraries are unpacked) and the license texts; and that nothing native or `hs_err` was written to `/tmp`. The container log is saved to `target/container-image-it.log` |
 | `VaultTransitIT` | `hashicorp/vault:2.1.1` (dev mode) | `vault-transit` built purely from connector settings (address, token file): wrap with associated data, ES256 signing, message round trip; a wrong token fails startup naming the KEK and HTTP 403 |
 
 **Running it on minikube with KVM2:** use `scripts/it-minikube.sh`, which needs no local Docker daemon. The script:

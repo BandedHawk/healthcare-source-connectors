@@ -9,6 +9,16 @@
   <version>0.1.0-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>healthcare-source-connectors</name>
+  <organization>
+    <name>Smile Digital Health Inc.</name>
+  </organization>
+  <licenses>
+    <license>
+      <name>Proprietary</name>
+      <comments>Copyright (c) 2026 Smile Digital Health Inc. All rights reserved. See LICENSE.</comments>
+      <distribution>manual</distribution>
+    </license>
+  </licenses>
 
   <modules>
     <module>connector-contract</module>
@@ -53,6 +63,10 @@
     <azure-keyvault-keys.version>4.10.6</azure-keyvault-keys.version>
     <azure-identity.version>1.18.1</azure-identity.version>
     <lowkey-vault.version>7.3.112</lowkey-vault.version>
+    <!-- Third-party attribution (design §14.2), as in healthcare-data-harmonization. -->
+    <license-maven-plugin.version>2.7.1</license-maven-plugin.version>
+    <gmavenplus-plugin.version>5.1.0</gmavenplus-plugin.version>
+    <groovy.version>4.0.33</groovy.version>
     <!-- Object storage clients for GCSFileIO and ADLSFileIO (iceberg-gcp, iceberg-azure leave them to us). Chosen on
          the same cores as above: google-cloud-storage 2.71.0 shares google-cloud-jar-parent 1.89.0 with KMS 2.98.0;
          datalake 12.25.0 is built on azure-storage-blob 12.32.0 and azure-core 1.57, which Camel already brings. -->
@@ -286,6 +300,268 @@
           <groupId>org.springframework.boot</groupId>
           <artifactId>spring-boot-maven-plugin</artifactId>
           <version>${spring-boot.version}</version>
+        </plugin>
+        <!-- Third-party attribution (design §14.2), adapted from healthcare-data-harmonization. In every jar module, at
+             prepare-package: download-licenses fetches the license texts named in dependency POMs, add-third-party writes
+             META-INF/THIRD-PARTY.txt from src/license/third-party.ftl, and the gmavenplus step below replaces each license
+             with its canonical text and fills in each component's own NOTICE. Runtime dependencies only; our own modules
+             are excluded. Needs network access when packaging; offline, a placeholder is written and a warning logged. -->
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>license-maven-plugin</artifactId>
+          <version>${license-maven-plugin.version}</version>
+          <!-- Defined at plugin level so both goals use the same canonical names. The first name in each merge is the
+               canonical one, and is also the file name of its text in META-INF/licenses/. -->
+          <configuration>
+            <excludedScopes>test,provided,system</excludedScopes>
+            <excludedGroups>^com\.sdh\.</excludedGroups>
+            <licensesConfigFile>${maven.multiModuleProjectDirectory}/src/license/licenses.xml</licensesConfigFile>
+            <licenseMerges>
+              <licenseMerge>Apache-2.0|The Apache Software License, Version 2.0|Apache License, Version 2.0|The Apache License, Version 2.0|Apache License 2.0|Apache 2.0|Apache 2|apache 2|AL 2.0</licenseMerge>
+              <licenseMerge>MIT|MIT License|MIT license|The MIT License|The MIT License (MIT)|the mit license (mit)|MIT-License|mit license</licenseMerge>
+              <licenseMerge>MIT-0|MIT No Attribution</licenseMerge>
+              <licenseMerge>BSD-2-Clause|BSD 2-Clause License|The BSD 2-Clause License|BSD 2-Clause</licenseMerge>
+              <!-- The Go license (re2j) and the Eclipse Distribution License 1.0 are BSD-3-Clause texts (SPDX). -->
+              <licenseMerge>BSD-3-Clause|BSD License|New BSD License|BSD New license|BSD 3-Clause|BSD 3-clause|bsd-3-clause|Go License|EDL 1.0|Eclipse Distribution License - v 1.0</licenseMerge>
+              <licenseMerge>GPL-2.0-with-classpath-exception|GNU General Public License, version 2 with the GNU Classpath Exception|GNU General Public License, version 2 (GPL2), with the classpath exception|GPLv2 with Classpath Exception|GPL2 w/ CPE</licenseMerge>
+              <licenseMerge>GPL-2.0|GNU General Public License, version 2|GPLv2|GPL v2|GNU General Public License, Version 2.0</licenseMerge>
+              <licenseMerge>GPL-3.0|GNU General Public License|GPLv3|GNU General Public License, Version 3.0</licenseMerge>
+              <licenseMerge>LGPL-2.1|LGPL-2.1-only|LGPL-2.1-or-later|GNU Lesser General Public License, version 2.1|LGPLv2.1</licenseMerge>
+              <licenseMerge>LGPL-3.0|GNU Lesser General Public License|LGPLv3|GNU Lesser General Public License, Version 3.0</licenseMerge>
+              <licenseMerge>AGPL-3.0|GNU Affero General Public License|AGPLv3|Affero General Public License</licenseMerge>
+              <licenseMerge>EPL-2.0|Eclipse Public License 2.0|Eclipse Public License, Version 2.0|EPL 2.0|Eclipse Public License - v 2.0</licenseMerge>
+              <licenseMerge>EPL-1.0|Eclipse Public License 1.0|EPL 1.0|Eclipse Public License - v 1.0</licenseMerge>
+              <licenseMerge>MPL-2.0|MPL 2.0|Mozilla Public License, Version 2.0</licenseMerge>
+              <licenseMerge>CDDL-1.1|CDDL 1.1</licenseMerge>
+              <licenseMerge>CC0-1.0|CC0|Public Domain|Public Domain, per Creative Commons CC0|Creative Commons Zero</licenseMerge>
+              <licenseMerge>CC-BY-4.0|Creative Commons Attribution 4.0|CC BY 4.0</licenseMerge>
+              <licenseMerge>CC-BY-3.0|Creative Commons Attribution 3.0|CC BY 3.0</licenseMerge>
+              <licenseMerge>CC-BY-SA-4.0|Creative Commons Attribution-ShareAlike 4.0|CC BY-SA 4.0</licenseMerge>
+            </licenseMerges>
+          </configuration>
+          <executions>
+            <!-- 1: license texts named in dependency POMs (fallback for licenses not in the canonical list) -->
+            <execution>
+              <id>download-licenses</id>
+              <goals>
+                <goal>download-licenses</goal>
+              </goals>
+              <phase>prepare-package</phase>
+              <configuration>
+                <licensesOutputDirectory>${project.build.outputDirectory}/META-INF/licenses</licensesOutputDirectory>
+                <licensesOutputFile>${project.build.directory}/generated-resources/licenses.xml</licensesOutputFile>
+                <!-- Only a fallback for licenses outside the canonical list; don't let an unreachable host stall the
+                     build (gnu.org isn't reachable from every network). -->
+                <!-- gnu.org is unreachable from some networks, and each attempt retries; fetch the same texts from SPDX. -->
+                <licenseUrlReplacements>
+                  <licenseUrlReplacement>
+                    <regexp>https?://www\.gnu\.org/software/classpath/license.*</regexp>
+                    <replacement>https://raw.githubusercontent.com/spdx/license-list-data/main/text/Classpath-exception-2.0.txt</replacement>
+                  </licenseUrlReplacement>
+                  <licenseUrlReplacement>
+                    <regexp>https?://www\.gnu\.org/licenses/(old-licenses/)?lgpl-2\.1.*</regexp>
+                    <replacement>https://raw.githubusercontent.com/spdx/license-list-data/main/text/LGPL-2.1-only.txt</replacement>
+                  </licenseUrlReplacement>
+                  <licenseUrlReplacement>
+                    <regexp>https?://www\.gnu\.org/licenses/(old-licenses/)?gpl-2\.0.*</regexp>
+                    <replacement>https://raw.githubusercontent.com/spdx/license-list-data/main/text/GPL-2.0-only.txt</replacement>
+                  </licenseUrlReplacement>
+                  <licenseUrlReplacement>
+                    <regexp>https?://www\.gnu\.org/licenses/lgpl(-3\.0)?(\.html|\.txt)?</regexp>
+                    <replacement>https://raw.githubusercontent.com/spdx/license-list-data/main/text/LGPL-3.0-only.txt</replacement>
+                  </licenseUrlReplacement>
+                  <licenseUrlReplacement>
+                    <regexp>https?://www\.gnu\.org/licenses/gpl(-3\.0)?(\.html|\.txt)?</regexp>
+                    <replacement>https://raw.githubusercontent.com/spdx/license-list-data/main/text/GPL-3.0-only.txt</replacement>
+                  </licenseUrlReplacement>
+                </licenseUrlReplacements>
+                <connectTimeout>5000</connectTimeout>
+                <socketTimeout>5000</socketTimeout>
+                <connectionRequestTimeout>5000</connectionRequestTimeout>
+              </configuration>
+            </execution>
+            <!-- 2: THIRD-PARTY.txt from the template -->
+            <execution>
+              <id>add-third-party</id>
+              <goals>
+                <goal>add-third-party</goal>
+              </goals>
+              <phase>prepare-package</phase>
+              <configuration>
+                <outputDirectory>${project.build.outputDirectory}/META-INF</outputDirectory>
+                <thirdPartyFilename>THIRD-PARTY.txt</thirdPartyFilename>
+                <!-- Always regenerate: the gmavenplus step rewrites the file, so the plugin's up-to-date check would
+                     otherwise keep a stale, already-processed copy. -->
+                <force>true</force>
+                <overrideUrl>file://${maven.multiModuleProjectDirectory}/src/license/override-THIRD-PARTY.properties</overrideUrl>
+                <!-- A dependency without a license in its POM fails the build; add it to the override file. -->
+                <failOnMissing>true</failOnMissing>
+                <fileTemplate>${maven.multiModuleProjectDirectory}/src/license/third-party.ftl</fileTemplate>
+              </configuration>
+            </execution>
+          </executions>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.gmavenplus</groupId>
+          <artifactId>gmavenplus-plugin</artifactId>
+          <version>${gmavenplus-plugin.version}</version>
+          <executions>
+            <execution>
+              <id>append-notices-and-clean-licenses</id>
+              <phase>prepare-package</phase>
+              <goals>
+                <goal>execute</goal>
+              </goals>
+              <configuration>
+                <properties>
+                  <property>
+                    <name>rootDir</name>
+                    <value>${maven.multiModuleProjectDirectory}</value>
+                  </property>
+                </properties>
+                <scripts>
+                  <script><![CDATA[
+                    import java.util.zip.ZipFile
+
+                    def metaInf = new File(project.build.outputDirectory, "META-INF")
+                    def licensesDir = new File(metaInf, "licenses")
+                    licensesDir.mkdirs()
+
+                    // Our own LICENSE and NOTICE (copyright, HL7 attribution) go into every jar.
+                    ["LICENSE", "NOTICE"].each { new File(metaInf, it).text = new File(rootDir, it).text }
+
+                    def thirdPartyFile = new File(metaInf, "THIRD-PARTY.txt")
+                    if (!thirdPartyFile.exists()) {
+                        log.warn("THIRD-PARTY.txt not found; skipping license texts and notices.")
+                        return
+                    }
+                    String content = thirdPartyFile.text
+
+                    // Canonical texts by merged license name (lower case). A list is concatenated: GPL 2.0 plus the
+                    // Classpath Exception. Exact names, so MIT-0 never gets the MIT text or BSD-2 the BSD-3 text.
+                    def spdx = "https://raw.githubusercontent.com/spdx/license-list-data/main/text/"
+                    def canonical = [
+                        "apache-2.0"                      : ["https://www.apache.org/licenses/LICENSE-2.0.txt"],
+                        "mit"                             : [spdx + "MIT.txt"],
+                        "mit-0"                           : [spdx + "MIT-0.txt"],
+                        "bsd-2-clause"                    : [spdx + "BSD-2-Clause.txt"],
+                        "bsd-3-clause"                    : [spdx + "BSD-3-Clause.txt"],
+                        "gpl-2.0-with-classpath-exception": [spdx + "GPL-2.0-only.txt", spdx + "Classpath-exception-2.0.txt"],
+                        "gpl-2.0"                         : [spdx + "GPL-2.0-only.txt"],
+                        "gpl-3.0"                         : [spdx + "GPL-3.0-only.txt"],
+                        "lgpl-2.1"                        : [spdx + "LGPL-2.1-only.txt"],
+                        "lgpl-3.0"                        : [spdx + "LGPL-3.0-only.txt"],
+                        "agpl-3.0"                        : [spdx + "AGPL-3.0-only.txt"],
+                        "epl-2.0"                         : [spdx + "EPL-2.0.txt"],
+                        "epl-1.0"                         : [spdx + "EPL-1.0.txt"],
+                        "mpl-2.0"                         : [spdx + "MPL-2.0.txt"],
+                        "cddl-1.1"                        : [spdx + "CDDL-1.1.txt"],
+                        "cc0-1.0"                         : [spdx + "CC0-1.0.txt"],
+                        "cc-by-4.0"                       : [spdx + "CC-BY-4.0.txt"],
+                        "cc-by-3.0"                       : [spdx + "CC-BY-3.0.txt"],
+                        "cc-by-sa-4.0"                    : [spdx + "CC-BY-SA-4.0.txt"]
+                    ]
+                    def fetch = { String url -> URI.create(url).toURL().getText("UTF-8") }
+                    def stripHtml = { String t ->
+                        def lower = t.toLowerCase()
+                        (lower.contains("<html") || lower.contains("<!doctype")) ? t.replaceAll("(?is)<[^>]+>", " ").trim() : t
+                    }
+
+                    // What download-licenses fetched, under the plugin's own file names.
+                    def downloaded = (licensesDir.listFiles() ?: []).findAll { it.isFile() }
+                    def referenced = (content =~ /META-INF\/licenses\/([^\s,]+)\.txt/).collect { it[1] }.unique()
+                    def written = [] as Set
+                    referenced.each { String lic ->
+                        def target = new File(licensesDir, lic + ".txt")
+                        def urls = canonical[lic]
+                        if (urls) {
+                            try {
+                                target.text = urls.collect { fetch(it) }.join("\n\n")
+                            } catch (Exception e) {
+                                log.warn("Could not fetch the ${lic} text: ${e.message}")
+                                target.text = "(Standard ${lic} text unavailable during build; see ${urls.join(', ')})"
+                            }
+                        } else {
+                            def fallback = downloaded.find { it.name.toLowerCase().replace(' ', '_').startsWith(lic) }
+                            if (fallback) {
+                                target.text = stripHtml(fallback.text)
+                            } else {
+                                log.warn("No text for license '${lic}': add it to the canonical list or src/license/licenses.xml.")
+                                target.text = "(License text not provided by the dependency POM)"
+                            }
+                        }
+                        written << target.name
+                    }
+                    downloaded.each { if (!written.contains(it.name)) it.delete() }
+
+                    // Each component's own NOTICE and, unless it is solely Apache-2.0 (whose NOTICE is the
+                    // attribution), the license file it ships, which carries its copyright line.
+                    def readEntry = { File jar, String pattern ->
+                        if (jar == null || !jar.isFile() || !jar.name.endsWith(".jar")) {
+                            return null
+                        }
+                        try {
+                            new ZipFile(jar).withCloseable { zip ->
+                                def entry = zip.entries().toList().findAll { e -> !e.isDirectory() && e.name.toUpperCase().matches(pattern) }
+                                        .min { it.name.length() }
+                                entry == null ? null : zip.getInputStream(entry).getText("UTF-8").trim()
+                            }
+                        } catch (Exception e) {
+                            log.warn("Could not read the jar ${jar.name}: ${e.message}")
+                            null
+                        }
+                    }
+                    def copyrights = new Properties()
+                    new File(rootDir, "src/license/copyrights.properties").withReader("UTF-8") { copyrights.load(it) }
+                    def missingCopyright = []
+                    project.artifacts.each { artifact ->
+                        def gav = "${artifact.groupId}:${artifact.artifactId}:${artifact.version}"
+                        def noticePlaceholder = "[NOTICE_PLACEHOLDER_${gav}]"
+                        def licensePlaceholder = "[COMPONENT_LICENSE_PLACEHOLDER_${gav}]"
+                        if (!content.contains(noticePlaceholder)) {
+                            return
+                        }
+                        def notice = readEntry(artifact.file, "(META-INF/)?NOTICE(\\.TXT|\\.MD)?")
+                        content = content.replace(noticePlaceholder, notice ?: "(No NOTICE file provided by this component)")
+
+                        // Offered under Apache-2.0 (alone or as a choice): its NOTICE is the attribution.
+                        def licensesLine = (content =~ /Coordinates: ${java.util.regex.Pattern.quote(gav)}\R+(?:Project: .*\R+)?Licenses: (.*)/)
+                        def apache = licensesLine.find() && licensesLine.group(1).split(",")*.trim().contains("Apache-2.0")
+                        String shipped = ""
+                        if (!apache) {
+                            def text = readEntry(artifact.file, "(META-INF/)?(LICENSE|LICENCE|COPYING)(\\.TXT|\\.MD)?")
+                            if (text) {
+                                shipped = "\n--- LICENSE (as shipped by the component) ---\n" + text
+                            } else {
+                                def line = copyrights.getProperty("${artifact.groupId}:${artifact.artifactId}") ?: copyrights.getProperty(artifact.groupId)
+                                if (line == null) {
+                                    missingCopyright << gav
+                                } else {
+                                    shipped = "\n--- COPYRIGHT (from the component's published license) ---\n" + line
+                                }
+                            }
+                        }
+                        content = content.replace(licensePlaceholder + "\n", shipped ? shipped + "\n" : "")
+                    }
+                    thirdPartyFile.text = content
+                    if (missingCopyright) {
+                        throw new IllegalStateException("No license file in the jar and no copyright line in "
+                                + "src/license/copyrights.properties for: " + missingCopyright.join(", "))
+                    }
+                    log.info("THIRD-PARTY.txt: ${referenced.size()} license texts, notices merged.")
+                  ]]></script>
+                </scripts>
+              </configuration>
+            </execution>
+          </executions>
+          <dependencies>
+            <dependency>
+              <groupId>org.apache.groovy</groupId>
+              <artifactId>groovy</artifactId>
+              <version>${groovy.version}</version>
+              <scope>runtime</scope>
+            </dependency>
+          </dependencies>
         </plugin>
       </plugins>
     </pluginManagement>

@@ -346,5 +346,18 @@ class ContainerImageIT {
         assertThat(log).doesNotContain(MARKER).doesNotContain("good.csv").doesNotContain("bad.csv");
         // Native libraries load from /app/native, so nothing was unpacked into /tmp (mounted noexec here).
         assertThat(exec("sh", "-c", "ls -A /tmp | grep -ci 'zstd\\|snappy\\|hs_err'")).isEqualTo("1:0");
+
+        // Third-party attribution ships in the image, readable by the app user (design §14.2): our notice, every
+        // component with its license and NOTICE, the license texts, and the native libraries' sources.
+        assertThat(exec("grep", "-c", "Smile Digital Health Inc.", "/app/legal/LICENSE", "/app/legal/NOTICE"))
+                .startsWith("0:");
+        assertThat(exec("grep", "-q", "derived from the HL7 CDA Release 2", "/app/legal/NOTICE")).isEqualTo("0:");
+        assertThat(exec("grep", "-c", "^Coordinates: com.github.luben:zstd-jni:", "/app/legal/THIRD-PARTY.txt"))
+                .isEqualTo("0:1");
+        assertThat(exec("grep", "-c", "^Coordinates: org.xerial.snappy:snappy-java:", "/app/legal/THIRD-PARTY.txt"))
+                .isEqualTo("0:1");
+        assertThat(exec("grep", "-c", "PLACEHOLDER", "/app/legal/THIRD-PARTY.txt")).startsWith("1:0");
+        assertThat(exec("sh", "-c", "test -s /app/legal/licenses/apache-2.0.txt && test -s /app/legal/licenses/mit.txt"))
+                .isEqualTo("0:");
     }
 }

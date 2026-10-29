@@ -64,4 +64,18 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Third-party attribution in the jar: META-INF/THIRD-PARTY.txt, licenses/, LICENSE, NOTICE (design §14.2). -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>license-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.gmavenplus</groupId>
+        <artifactId>gmavenplus-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
 </project>

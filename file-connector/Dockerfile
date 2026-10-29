@@ -21,6 +21,12 @@ WORKDIR /build
 COPY ${JAR_FILE} app.jar
 # Spring Boot layers, least to most frequently changed, so rebuilds reuse the dependency layer.
 RUN java -Djarmode=tools -jar app.jar extract --layers --destination layers
+# Third-party attribution (design §14.2), generated into the jar at build time: LICENSE, NOTICE, THIRD-PARTY.txt and
+# the license texts. Put where they can be read without opening the jar.
+RUN mkdir legal && cd legal \
+ && jar xf ../app.jar META-INF/LICENSE META-INF/NOTICE META-INF/THIRD-PARTY.txt META-INF/licenses \
+ && mv META-INF/* . && rmdir META-INF \
+ && test -s THIRD-PARTY.txt && test -s NOTICE
 # zstd-jni (section and Parquet compression) and snappy-java (an optional Kafka codec, probed at startup) normally
 # unpack their native libraries into java.io.tmpdir and load them from there, which fails on a noexec /tmp. Unpack
 # them here instead; the -D options in ENTRYPOINT point both libraries at /app/native.
@@ -39,7 +45,10 @@ RUN set -eu; \
 
 FROM ${JRE_IMAGE}
 LABEL org.opencontainers.image.title="file-connector" \
-      org.opencontainers.image.description="Splits inbound healthcare files into encrypted Iceberg sections and announces them"
+      org.opencontainers.image.description="Splits inbound healthcare files into encrypted Iceberg sections and announces them" \
+      org.opencontainers.image.vendor="Smile Digital Health Inc." \
+      org.opencontainers.image.licenses="LicenseRef-Proprietary" \
+      org.opencontainers.image.documentation="Third-party notices: /app/legal/NOTICE and /app/legal/THIRD-PARTY.txt"
 
 # No home directory or login shell. The app owns nothing in the image except the inbound mount point.
 RUN groupadd --system --gid 10001 sdh \
@@ -54,6 +63,7 @@ COPY --from=extract /build/layers/spring-boot-loader/ ./
 COPY --from=extract /build/layers/snapshot-dependencies/ ./
 COPY --from=extract /build/layers/application/ ./
 COPY --from=extract /build/native/ ./native/
+COPY --from=extract /build/legal/ ./legal/
 
 COPY docker/jvm.options /app/jvm.options
 COPY docker/sdh-admin /usr/local/bin/sdh-admin

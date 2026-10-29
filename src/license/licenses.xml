@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Corrections for download-licenses where a dependency POM's license name or URL is unusable.
+     Names must match one of the aliases in <licenseMerges> (root pom.xml). -->
+<licenseSummary>
+    <dependencies>
+        <!-- One combined name in its POM; it is a choice of CDDL 1.1 and GPL 2.0 with the Classpath Exception. -->
+        <dependency>
+            <groupId>javax.annotation</groupId>
+            <artifactId>javax.annotation-api</artifactId>
+            <version>1.3.2</version>
+            <licenses>
+                <license>
+                    <name>CDDL-1.1</name>
+                    <url>https://raw.githubusercontent.com/spdx/license-list-data/main/text/CDDL-1.1.txt</url>
+                </license>
+                <license>
+                    <name>GPL-2.0-with-classpath-exception</name>
+                    <url>https://raw.githubusercontent.com/spdx/license-list-data/main/text/GPL-2.0-only.txt</url>
+                </license>
+            </licenses>
+        </dependency>
+    </dependencies>
+</licenseSummary>
