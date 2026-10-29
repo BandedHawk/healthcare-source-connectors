@@ -285,8 +285,10 @@ class FullStackIT {
                     s3.putObject(b -> b.bucket(BUCKET).key(stray),
                             software.amazon.awssdk.core.sync.RequestBody.fromString("half-written"));
                 }
+                // Object timestamps come from the storage server's clock (the minikube VM's), which can run a little
+                // ahead of this JVM's; a minute's lead keeps the just-planted stray old enough to count as an orphan.
                 var report = new TableMaintenance(runtime.committer(), new MaintenanceSettings(Duration.ofDays(7), 10,
-                        true, 0.75, 2, 8L << 30, Duration.ZERO), Clock.systemUTC())
+                        true, 0.75, 2, 8L << 30, Duration.ZERO), Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
                         .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.empty(), true);
                 assertThat(report.compactedFiles()).as("30 sections in batches of 7").isEqualTo(5);
                 assertThat(report.orphansDeleted()).isEqualTo(1);
