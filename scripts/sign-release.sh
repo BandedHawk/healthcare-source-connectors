@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Builds the release artifacts, generates their SBOMs and signs them, then verifies every signature (design §14.4).
+# Builds the release artifacts, generates their SBOMs, scans them for vulnerabilities and signs them, then verifies
+# every signature (design §14.4, §14.5). Nothing is signed if a base image is stale or the scan fails its policy.
 #
 #   scripts/sign-release.sh                         # test run: throwaway key, throwaway registry in the VM
 #   SDH_SIGNING_KEY=azurekms://<vault>.vault.azure.net/<key> SDH_REGISTRY=<registry>/sdh scripts/sign-release.sh
 #   SDH_IT_STOP=1 scripts/sign-release.sh           # stop the VM afterwards
 #   SDH_SKIP_BUILD=1 ...                            # reuse the tarball and images already built
+#   SDH_ALLOW_STALE_BASE=1 ...                      # sign although a pinned base image has a newer build (warns)
 #
 # Signs:
 #   - the distribution tarball: a detached signature (file-connector-<v>-dist.tar.gz.sig), verifiable with cosign or
@@ -12,7 +14,8 @@
 #   - the customer image and the service image: cosign signatures in the registry, next to each image, plus a signed
 #     CycloneDX SBOM of each image as an attestation.
 # Writes to file-connector/target/release/: the tarball and its signature, the public key (cosign.pub), the SBOMs
-# (jar, customer image, service image) and image-digests.txt.
+# (jar, customer image, service image), their vulnerability reports (*.vulns.json, not published) and
+# image-digests.txt.
 #
 # Environment:
 #   SDH_SIGNING_KEY   cosign key reference. Unset: a throwaway key pair is generated for this run (testing only).
@@ -32,9 +35,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COSIGN_IMAGE="gcr.io/projectsigstore/cosign:v2.4.1"
-SYFT_IMAGE="anchore/syft:v1.18.1"
+SYFT_IMAGE="anchore/syft:v1.54.1"
 REGISTRY_IMAGE="registry:2.8.3"
 OUT="$ROOT/file-connector/target/release"
+
+echo ">> Base images (file-connector/docker/base-images.env)"
+if ! "$ROOT/scripts/base-images.sh"; then
+  if [[ "${SDH_ALLOW_STALE_BASE:-0}" == "1" ]]; then
+    echo "   WARNING: signing with a stale base image (SDH_ALLOW_STALE_BASE=1)"
+  else
+    echo "   Update the pins, rebuild and re-run the image tests first (or set SDH_ALLOW_STALE_BASE=1)" >&2
+    exit 1
+  fi
+fi
 
 if [[ "${SDH_SKIP_BUILD:-0}" != "1" ]]; then
   (cd "$ROOT" && ./mvnw -q -pl file-connector -am -Pdist package -DskipTests)
@@ -114,11 +127,6 @@ TAR_NAME="$(basename "$TARBALL")"
 cp "$TARBALL" "$OUT/"
 cp "$ROOT/file-connector/target/sbom.cdx.json" "$OUT/file-connector-$VERSION-jar.cdx.json"
 put "$TARBALL" "$TAR_NAME"
-cosign sign-blob --yes --key "$KEY" --tlog-upload=false --output-signature "/work/$TAR_NAME.sig" \
-  "/work/$TAR_NAME" >/dev/null 2>&1
-get "$TAR_NAME.sig" "$OUT/$TAR_NAME.sig"
-chmod 0644 "$OUT/$TAR_NAME.sig"   # published alongside the tarball
-echo "   signed: $TAR_NAME.sig"
 
 : > "$OUT/image-digests.txt"
 for variant in customer service; do
@@ -135,12 +143,26 @@ for variant in customer service; do
   # The image's own SBOM: OS packages and the Java components in app.jar.
   syft "registry:$ref" -q -o "cyclonedx-json=/work/$name.cdx.json"
   get "$name.cdx.json" "$OUT/$name-$VERSION-image.cdx.json"
+  echo "   SBOM: $name-$VERSION-image.cdx.json"
+done
+
+# Pushed but not yet signed: an unsigned image doesn't verify, so nothing trusts it if the scan stops the release.
+SDH_VULN_SCAN_IN_VM=1 "$ROOT/scripts/vuln-scan.sh" "$OUT"/*.cdx.json
+
+echo ">> Signing"
+cosign sign-blob --yes --key "$KEY" --tlog-upload=false --output-signature "/work/$TAR_NAME.sig" \
+  "/work/$TAR_NAME" >/dev/null 2>&1
+get "$TAR_NAME.sig" "$OUT/$TAR_NAME.sig"
+chmod 0644 "$OUT/$TAR_NAME.sig"   # published alongside the tarball
+echo "   $TAR_NAME.sig"
+while read -r ref; do
+  name="${ref##*/}"; name="${name%@*}"
   # Signed by digest, never by tag, so the signature covers exactly these bytes.
   cosign sign --yes --key "$KEY" --tlog-upload=false "$ref" >/dev/null 2>&1
   cosign attest --yes --key "$KEY" --tlog-upload=false --type cyclonedx --predicate "/work/$name.cdx.json" \
     "$ref" >/dev/null 2>&1
-  echo "   signed, with its SBOM attested"
-done
+  echo "   $name, with its SBOM attested"
+done < "$OUT/image-digests.txt"
 
 echo ">> Verifying, as a customer would (public key only)"
 failures=0

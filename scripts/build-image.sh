@@ -10,8 +10,9 @@
 #   SDH_IT_STOP=1 scripts/build-image.sh     # stop the VM afterwards
 #
 # service:  file-connector/Dockerfile, from the packaged jar (full Ubuntu/Temurin image with a shell and sdh-admin).
-# customer: the distribution kit's container/Dockerfile on a shell-less Java 25 base (distroless by default, pinned
-#           here by digest), then file-connector/docker/customer-inventory.Dockerfile adds the OS package inventory.
+# customer: the distribution kit's container/Dockerfile on a shell-less Java 25 base (distroless by default), then
+#           file-connector/docker/customer-inventory.Dockerfile adds the OS package inventory.
+# Both bases are pinned by digest in file-connector/docker/base-images.env (design §14.5).
 # Extra arguments go to `docker build` (for the customer image, to the first build).
 set -euo pipefail
 
@@ -21,8 +22,8 @@ if [[ "${1:-}" == "service" || "${1:-}" == "customer" ]]; then
   VARIANT="$1"
   shift
 fi
-# Update deliberately (and re-run the image tests) when the base image gets security fixes.
-DISTROLESS="gcr.io/distroless/java25-debian13@sha256:5d3177252775d4b01603470fe21c015393019089904f68724bd37242e4bc6e6d"
+# The pinned bases; scripts/base-images.sh checks and updates them.
+source "$ROOT/file-connector/docker/base-images.env"
 
 if [[ "${SDH_SKIP_MAVEN:-0}" != "1" ]]; then
   (cd "$ROOT" && ./mvnw -q -pl file-connector -am package -DskipTests)
@@ -39,7 +40,8 @@ if [[ "$VARIANT" == "service" ]]; then
     echo "Expected exactly one file-connector/target/file-connector-*.jar, found: ${jars[*]}" >&2
     exit 1
   fi
-  docker build -t "$IMAGE" "$@" "$ROOT/file-connector" || status=$?
+  docker build --build-arg JRE_IMAGE="$TEMURIN_JRE_IMAGE" --build-arg JDK_IMAGE="$TEMURIN_JDK_IMAGE" \
+    -t "$IMAGE" "$@" "$ROOT/file-connector" || status=$?
 else
   IMAGE="${SDH_IMAGE:-sdh/file-connector:$VERSION}"
   KIT="$ROOT/file-connector/target/file-connector-$VERSION-dist-dir/file-connector-$VERSION"
@@ -47,7 +49,7 @@ else
     echo "No distribution kit at $KIT; package file-connector first" >&2
     exit 1
   fi
-  docker build -f "$KIT/container/Dockerfile" --build-arg JAVA_IMAGE="${SDH_JAVA_IMAGE:-$DISTROLESS}" \
+  docker build -f "$KIT/container/Dockerfile" --build-arg JAVA_IMAGE="${SDH_JAVA_IMAGE:-$DISTROLESS_IMAGE}" \
     -t "$IMAGE-kit" "$@" "$KIT" || status=$?
   if [[ $status -eq 0 ]]; then
     docker build -f "$ROOT/file-connector/docker/customer-inventory.Dockerfile" --build-arg KIT_IMAGE="$IMAGE-kit" \

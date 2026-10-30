@@ -12,14 +12,12 @@
   <artifactId>file-connector</artifactId>
   <name>file-connector</name>
 
-  <properties>
-    <!-- Iceberg 1.12.0 is built against Jackson 2.22.2; Boot 4.1.2 would downgrade it to 2.21.x.
-         Spring itself uses Jackson 3, so pinning Jackson 2 here only affects Iceberg. -->
-    <jackson2.version>2.22.2</jackson2.version>
-  </properties>
-
   <dependencyManagement>
     <dependencies>
+      <!-- Jackson 2 at the parent's security override (design §14.5). Imported again here, ahead of Spring Boot:
+           an imported BOM in the parent doesn't win over this module's own imports, and Boot 4.1.2 would bring
+           2.21.x. Spring itself uses Jackson 3, so this only affects Iceberg and the cloud clients. The parent's
+           other overrides are plain entries, which do win. -->
       <dependency>
         <groupId>com.fasterxml.jackson</groupId>
         <artifactId>jackson-bom</artifactId>

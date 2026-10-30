@@ -45,6 +45,10 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-29 (ab): fixed what the first vulnerability scan found (§14.5). Security overrides in the parent POM: Jackson 2.22.3, `amqp-client` 5.37.0, Guava 33.7.2, `lz4-java` 1.11.4 and `snappy-java` 1.1.10.12. The two bundled copies that can't be upgraded (Jackson inside `parquet-jackson`, Guava inside `hadoop-shaded-guava`) are accepted with reasons in `vuln-accepted.yaml`: our code reaches neither. The scan now passes, and a full release run signs and verifies. All unit tests and integration tests pass.
+
+Revision 2026-10-29 (aa): vulnerability scanning and base image updates (§14.5). The three base images are pinned by digest in one file, `file-connector/docker/base-images.env`, which the build script and both image tests read; the service image's Temurin bases were unpinned before. `scripts/base-images.sh` checks or updates the pins, Renovate opens a pull request when a pinned tag gets a new build, and `sign-release.sh` refuses to sign with a stale base. `scripts/vuln-scan.sh` scans the three SBOMs with grype, and `sign-release.sh` signs nothing unless it passes: no High or Critical vulnerability with a fix available, other than ones accepted with a reason. The first scan fails: 12 fixable High vulnerabilities in Java dependencies, two of them in copies bundled inside other jars. Fixing them is not done yet. The distroless pin was already behind; it now follows `nonroot`, and the image tests pass on the new bases.
+
 Revision 2026-10-29 (z): SBOMs and signing (§14.4, `scripts/sign-release.sh`). A CycloneDX SBOM of the application jar is built at `package` and ships in the kit as `legal/sbom.cdx.json`. Each image gets its own SBOM, made by syft and attached as a signed attestation. The tarball gets a detached signature (verifiable with openssl alone), and both images are signed by digest. The release key is in Azure Key Vault. Tested end to end with a throwaway key and with the Key Vault key, both into a throwaway registry. The run also fixed `.dockerignore`, which had broken `build-image.sh service` since revision (u).
 
 Revision 2026-10-29 (y): license election for dual-licensed components (§14.2): permissive licenses (MIT, Apache-2.0, BSD, ISC, Creative Commons) are elected over any GPL or similar license. `THIRD-PARTY.txt` names the elected license for each of the ten components offered under a choice, and the image tests fail if one is missing or a GNU license is elected. Five components have no permissive option and are distributed under EPL-2.0 or CDDL-1.1.
@@ -105,7 +109,7 @@ All versions were checked against Maven Central on 2026-10-28.
 | Apache Iceberg | 1.12.0 | No LTS concept; latest stable |
 | Apache Parquet | 1.17.1 | The version Iceberg 1.12.0 is built against; pinned to match, not upgraded separately |
 | Hadoop (classes only) | 3.4.3 | Six jars, transitive dependencies excluded: `hadoop-common`, `hadoop-mapreduce-client-core`, `hadoop-shaded-guava`, `woodstox-core`, `stax2-api`, `commons-collections4` (§16) |
-| Jackson 2 | 2.22.2 | Used by Iceberg only (Spring uses Jackson 3). Pinned in `file-connector`, because Boot 4.1.2 would downgrade it to 2.21.x |
+| Jackson 2 | 2.22.3 | Used by Iceberg and the cloud clients (Spring uses Jackson 3). A security override in the parent POM (§14.5), imported again in `file-connector` ahead of Spring Boot, because Boot 4.1.2 would downgrade it to 2.21.x |
 | Nimbus JOSE+JWT | 10.10 | JWS/JWE message encryption and signing |
 | PostgreSQL | any supported | Lease store (§9.3). Can be the JDBC catalog's database. Driver 42.7.14, HikariCP (Boot-managed, pool of 2) |
 | AWS SDK v2 | 2.50.2 | `s3`, `apache-client` and `kms` for Iceberg's `S3FileIO` (`iceberg-aws`). `kms` is needed even without SSE-KMS: `AwsProperties` loads KMS model classes on startup. Same line as Camel's SQS client, imported as a BOM in the parent POM |
@@ -125,7 +129,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── pom.xml                              parent: dependency/plugin management, Java 25, enforcer
 ├── .gitignore                           excludes build output, IDE files, *.pem, *.key, *.p12, .env
 ├── mvnw, .mvn/wrapper/                  Maven 3.9.16
-├── scripts/                             it-minikube.sh (Docker suite), k8s-minikube.sh (Kubernetes run, §15.2), sign-release.sh (SBOMs and signing, §14.4), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
+├── scripts/                             it-minikube.sh (Docker suite), k8s-minikube.sh (Kubernetes run, §15.2), sign-release.sh (SBOMs and signing, §14.4), vuln-scan.sh and base-images.sh (§14.5), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
 │                                        cda-model/ (generates the C-CDA converter's schema model, §6.4)
 ├── docs/DESIGN.md                       this document
 ├── LICENSE, NOTICE                      our proprietary notice and attributions (HL7), copied into every jar (§14.2)
@@ -1098,11 +1102,11 @@ There are two images, built from the same jar and the same JVM options:
 | Image | For | Built from | Base | Shell | Size |
 |---|---|---|---|---|---|
 | **Service** (`sdh/file-connector-service`) | our own hosted service only; never given to customers | `file-connector/Dockerfile` | `eclipse-temurin:25-jre-noble` (Ubuntu) | yes, with `sdh-admin` | about 513 MB |
-| **Customer** (`sdh/file-connector`) | distribution to customers | the distribution kit's `container/Dockerfile` plus the OS inventory step (§14.3) | `gcr.io/distroless/java25-debian13`, pinned by digest | no | about 437 MB |
+| **Customer** (`sdh/file-connector`) | distribution to customers | the distribution kit's `container/Dockerfile` plus the OS inventory step (§14.3) | `gcr.io/distroless/java25-debian13:nonroot`, pinned by digest (§14.5) | no | about 437 MB |
 
 `scripts/build-image.sh [service|customer]` runs Maven and then `docker build` against the minikube VM's Docker daemon (override the tag with `SDH_IMAGE`, the customer base with `SDH_JAVA_IMAGE`; extra arguments go to `docker build`). Both images run as uid/gid 10001 with a read-only root filesystem and the same mounts, so the Kubernetes settings below apply to both. What follows describes the service image; §14.3 describes the customer image's differences.
 
-- **Base:** `eclipse-temurin:25-jre-noble`, with `25-jdk-noble` for the build stage. Production builds should pin both by digest (`--build-arg JRE_IMAGE=eclipse-temurin@sha256:…`).
+- **Base:** `eclipse-temurin:25-jre-noble`, with `25-jdk-noble` for the build stage, both pinned by digest in `docker/base-images.env` (§14.5). The Dockerfile's own defaults are the bare tags, for a plain `docker build`.
 - **Layers:** Spring Boot's `-Djarmode=tools extract --layers`, copied as four layers with dependencies first, so a code change rebuilds a few hundred KB rather than 200 MB. The image is about 513 MB.
 - **User:** uid/gid 10001 (`sdh`), with no home directory or login shell. Everything under `/app` is root-owned and read-only to it; only `/data/inbound` belongs to it.
 - **Operator commands:** `/usr/local/bin/sdh-admin` runs `admin` (§11.4) with the same JVM options and `-Xmx512m` (`@/app/admin.args`), so it fits beside the connector's JVM: `kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status`. With a read-only root filesystem, restore into `/tmp` (then `kubectl cp`) or the inbound volume. As a one-off container, arguments after the image name go to the app: `docker run … <image> admin status`.
@@ -1265,7 +1269,7 @@ The kit is also built as a directory on every `package` (`target/file-connector-
 - **Labels:** the vendor and license, as on the service image.
 
 **Customer image** (`scripts/build-image.sh customer`, tag `sdh/file-connector:<version>`):
-1. `container/Dockerfile`, built from the kit directory on `gcr.io/distroless/java25-debian13`, pinned by digest in the script and in `CustomerImageIT` (keep them in step, and update both when the base gets security fixes).
+1. `container/Dockerfile`, built from the kit directory on `gcr.io/distroless/java25-debian13:nonroot`, pinned by digest in `docker/base-images.env` (§14.5).
 2. `file-connector/docker/customer-inventory.Dockerfile` adds `/app/legal/os-packages.txt`. The image has no shell, so a `busybox` build stage reads the base's package records (`/var/lib/dpkg/status.d/`) and resolves each package's copyright file. `busybox` isn't in the result. This step is our build tooling and isn't in the kit.
 
 The base holds 25 Debian packages: the Temurin 25 JRE (as `temurin-25-jre`), glibc, the GCC runtime libraries, zlib, fonts, certificates and timezone data. It has no shell, core utilities or package tools.
@@ -1297,7 +1301,7 @@ Customers' security teams need to know what is in what we ship, and that it came
 | SBOM | Made by | Covers | Where |
 |---|---|---|---|
 | Application jar | `cyclonedx-maven-plugin` 2.9.1 at `package` (parent `pluginManagement`, bound in `file-connector`) | the runtime dependencies bundled in `app.jar` (380 components, each with its POM's licenses) | `file-connector/target/sbom.cdx.json`; in the kit and tarball as `legal/sbom.cdx.json` |
-| Customer image | syft 1.18.1, from the pushed image | the OS packages (25 Debian packages, the Temurin JRE among them) and the Java components found in `app.jar` | a signed attestation on the image in the registry; a copy in `target/release/` |
+| Customer image | syft 1.54.1, from the pushed image | the OS packages (25 Debian packages, the Temurin JRE among them) and the Java components found in `app.jar` (399, more than the jar SBOM's 380 because syft also finds copies bundled inside other jars) | a signed attestation on the image in the registry; a copy in `target/release/` |
 | Service image | the same | the same for the Ubuntu base (108 packages) | the same |
 
 An SBOM lists licenses as each project declares them; the elections for dual-licensed components (§14.2) are in `THIRD-PARTY.txt`.
@@ -1329,8 +1333,73 @@ The first run also found that `scripts/build-image.sh service` had been failing 
 
 **Not done yet:**
 - the release registry and where the tarball, signature and public key are published;
-- vulnerability scanning of the SBOMs;
 - running this in CI rather than on a workstation.
+
+### 14.5 Vulnerability scanning and base image updates (built; the scan passes)
+
+Two checks keep known vulnerabilities out of a release: the base images must be the newest builds of their tags, and the SBOMs must pass a vulnerability scan. `sign-release.sh` runs both before it signs anything, so an artifact that fails either is never signed and doesn't verify.
+
+**Base images.** All three are pinned in one file, `file-connector/docker/base-images.env`, as `<image>:<tag>@sha256:<digest>`: the tag is what we follow, the digest is what we build. `scripts/build-image.sh`, `ServiceImageIT` and `CustomerImageIT` read it, so the tests build on exactly what a release does.
+
+| Pin | Image | Tag followed |
+|---|---|---|
+| `DISTROLESS_IMAGE` | customer image base (§14.3) | `gcr.io/distroless/java25-debian13:nonroot` |
+| `TEMURIN_JRE_IMAGE` | service image base (§14.1) | `eclipse-temurin:25-jre-noble` |
+| `TEMURIN_JDK_IMAGE` | service image build stage | `eclipse-temurin:25-jdk-noble` |
+
+When a tag moves to a new digest, its maintainers have published a new build, usually with security fixes:
+- **Renovate** (`renovate.json`, the GitHub app installed on the repository) opens one pull request, `renovate/base-images`, that updates the digests. It is limited to this file: it doesn't touch Maven dependencies, and it doesn't move to another tag (Java 26, another Debian or Ubuntu release), which is a deliberate change rather than an update. Checked with a local Renovate 44.160.1 dry run: a stale digest gives the pull request, and the Java 26 tags it finds are dropped.
+- **`scripts/base-images.sh`** checks the pins against the registries (`update` rewrites them). It needs only curl, not Docker or the VM.
+- **`sign-release.sh`** runs the check first and refuses to sign with a stale base; `SDH_ALLOW_STALE_BASE=1` overrides it with a warning.
+
+Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsafe.failIfNoSpecifiedTests=false`.
+
+**Vulnerability scan.** `scripts/vuln-scan.sh <sbom>…` scans CycloneDX SBOMs with grype 0.120.1 (a pinned container in the VM; its database is refreshed on each run and kept in a Docker volume). `sign-release.sh` scans the jar SBOM and both image SBOMs. The image SBOMs matter: they include the OS packages and the copies of libraries bundled inside other jars, which the Maven SBOM doesn't list.
+- **Policy:** the scan fails on any High or Critical vulnerability with a fix available, meaning a newer package, library or base image exists. Unfixed findings and lower severities are reported but don't fail it: there is nothing to upgrade to yet, and they are what a base image update brings fixes for.
+- **Exceptions:** `file-connector/docker/vuln-accepted.yaml`, grype ignore rules, each naming the vulnerability and the package, with a reason. They are reviewed at each release. There is no override switch; an accepted finding is a written decision.
+- **Output:** grype's full report next to each SBOM (`*.vulns.json`, kept, not published), a summary per SBOM and each failing finding.
+- The scan can be rerun on an earlier release's SBOMs to see whether newly published vulnerabilities affect it.
+
+**First scan** (2026-10-29, database built that day): it failed.
+- **OS packages:** none fail. Both bases are current. The distroless base has High findings in `libexpat1`, `zlib1g` and the GCC runtime libraries, but Debian marks them not fixed or won't fix.
+- **Java dependencies:** 12 High vulnerabilities with fixes:
+  - `amqp-client` 5.30.0 (fixed in 5.34.0);
+  - `jackson-core` and `jackson-databind` 2.22.2 (2.22.3);
+  - `guava` 33.6.0 (33.7.2);
+  - `lz4-java` 1.11.1 (1.11.4);
+  - `snappy-java` 1.1.10.7 (1.1.10.9).
+- **Bundled copies,** which only the image scans see:
+  - Jackson 2.21.3 inside `parquet-jackson` 1.17.1;
+  - Guava 33.4.8 inside `hadoop-shaded-guava` 1.5.0.
+
+  These need newer releases of those jars, or an accepted finding with a reason.
+
+**Fixes** (revision ab):
+- **Security overrides** in the parent POM's `dependencyManagement`, ahead of every BOM import, so they win in every module. Each says which library brings the older version; drop it once that library catches up.
+
+  | Artifact | Was | Now |
+  |---|---|---|
+  | Jackson 2 (`jackson-bom`) | 2.22.2 (2.18.4 in `connector-kms`, from the Azure SDK) | 2.22.3 |
+  | `amqp-client` | 5.30.0 | 5.37.0 |
+  | `guava` | 33.6.0 | 33.7.2 |
+  | `lz4-java` | 1.11.1 | 1.11.4 |
+  | `snappy-java` | 1.1.10.7 | 1.1.10.12 |
+
+  Each is the newest release at least two weeks old, within the same line. Jackson's BOM is imported again in `file-connector` ahead of Spring Boot's: a BOM imported in the parent doesn't win over a module's own imports, while plain entries do.
+- **Accepted**, in `vuln-accepted.yaml`, each advisory by name and limited to the bundled version:
+  - Jackson 2.21.3 inside `parquet-jackson` 1.17.1 (8 advisories). Parquet's newest release, 1.18.1, still bundles an affected 2.22.2, and Iceberg 1.12.0 is built against 1.17.1. Only `ParquetMetadata`'s JSON rendering and Parquet's own encryption key tools use this copy; we use neither, and no external JSON is parsed with it.
+  - Guava 33.4.8 inside `hadoop-shaded-guava` 1.5.0, the newest release (1 advisory). It needs Java deserialization of untrusted data, which the connector never does.
+- **Result:**
+  - The scan passes.
+  - The customer image's remaining High findings (17) are OS packages with no fix from Debian.
+  - Fixable Medium findings remain: 11 in Parquet's bundled Jackson, and one in `opentelemetry-api` 1.62.0, which Spring Boot 4.1.2 manages (fixed in 1.67.0).
+  - All unit and integration tests pass.
+  - A full release run with a throwaway key signs and passes all eight checks.
+
+**Not done yet:**
+- `opentelemetry-api` 1.67.0, when Spring Boot manages it (Medium, so it doesn't block);
+- running the scan in CI and on a schedule against released images;
+- the Renovate app on the GitHub repository (installed by the repository owner).
 
 ## 15. Testing
 

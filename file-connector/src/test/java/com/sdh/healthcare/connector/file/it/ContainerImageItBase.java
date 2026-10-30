@@ -163,6 +163,19 @@ abstract class ContainerImageItBase {
     }
 
     /** The jar Maven just packaged. */
+    /**
+     * A base image pinned in {@code docker/base-images.env} (design §14.5), as scripts/build-image.sh uses it, so the
+     * tests build on exactly the bases a release does.
+     */
+    static String baseImage(String name) throws Exception {
+        for (String line : Files.readAllLines(Path.of("docker", "base-images.env"), UTF_8)) {
+            if (line.startsWith(name + "=")) {
+                return line.substring(name.length() + 1).strip();
+            }
+        }
+        throw new IllegalStateException(name + " is not pinned in docker/base-images.env");
+    }
+
     static Path packagedJar() throws Exception {
         try (Stream<Path> s = Files.list(Path.of("target"))) {
             return s.filter(p -> p.getFileName().toString().matches("file-connector-[^-]+(-SNAPSHOT)?\\.jar")).findFirst()

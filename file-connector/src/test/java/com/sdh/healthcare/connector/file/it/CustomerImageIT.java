@@ -20,9 +20,6 @@ import org.testcontainers.images.builder.ImageFromDockerfile;
  * them out.
  */
 class CustomerImageIT extends ContainerImageItBase {
-    /** The base pinned in scripts/build-image.sh; keep the two in step. */
-    static final String DISTROLESS =
-            "gcr.io/distroless/java25-debian13@sha256:5d3177252775d4b01603470fe21c015393019089904f68724bd37242e4bc6e6d";
     static final String KIT_IMAGE = "sdh/file-connector:it-kit";
 
     @Override
@@ -39,7 +36,7 @@ class CustomerImageIT extends ContainerImageItBase {
         // would use them.
         ImageFromDockerfile fromKit = new ImageFromDockerfile(KIT_IMAGE, false)
                 .withFileFromPath("Dockerfile", kit.resolve("container/Dockerfile"))
-                .withBuildArg("JAVA_IMAGE", DISTROLESS);
+                .withBuildArg("JAVA_IMAGE", baseImage("DISTROLESS_IMAGE"));
         try (Stream<Path> entries = Files.list(kit)) {
             for (Path e : entries.toList()) {
                 fromKit.withFileFromPath(e.getFileName().toString(), e);

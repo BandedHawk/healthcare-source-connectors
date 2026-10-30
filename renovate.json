@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Base image updates only (design §14.5): a pull request when a pinned tag in file-connector/docker/base-images.env moves to a new digest. Re-run the image tests on the branch before merging.",
+  "enabledManagers": ["custom.regex"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Base images pinned as <image>:<tag>@sha256:<digest>",
+      "managerFilePatterns": ["/^file-connector/docker/base-images\\.env$/"],
+      "matchStrings": [
+        "_IMAGE=(?<depName>[^:@\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Follow the pinned tags (Java 25, Debian 13, Ubuntu 24.04); moving to another tag is a deliberate change, not an update.",
+      "matchManagers": ["custom.regex"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "enabled": false
+    },
+    {
+      "description": "One pull request for all base image digests.",
+      "matchManagers": ["custom.regex"],
+      "groupName": "base images",
+      "labels": ["base-images", "security"]
+    }
+  ],
+  "prBodyNotes": [
+    "Before merging: run `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsafe.failIfNoSpecifiedTests=false` on this branch, then `scripts/base-images.sh` should report every base as current."
+  ]
+}

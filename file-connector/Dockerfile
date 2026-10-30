@@ -12,7 +12,8 @@
 # secrets mounted as volumes, all capabilities dropped. The image itself runs as uid/gid 10001.
 # Operator commands: `sdh-admin <command>` inside a running container, or `<image> admin <command>` as a one-off.
 #
-# Pin the base images by digest for production builds: --build-arg JRE_IMAGE=eclipse-temurin@sha256:…
+# scripts/build-image.sh passes both base images pinned by digest from docker/base-images.env (design §14.5); the
+# defaults below are only for a plain `docker build`.
 
 ARG JDK_IMAGE=eclipse-temurin:25-jdk-noble
 ARG JRE_IMAGE=eclipse-temurin:25-jre-noble

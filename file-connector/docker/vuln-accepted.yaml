@@ -1,0 +1,58 @@
+# Vulnerabilities accepted for release (design §14.5), read by scripts/vuln-scan.sh as grype configuration.
+#
+# The scan fails a release on any High or Critical vulnerability with a fix available. Accept one here only when it
+# doesn't affect us (the vulnerable code isn't reachable, or the setting it needs isn't used), and say why. Name the
+# package, so the entry can't hide the same vulnerability in something else, and review the list at each release.
+#
+#   - vulnerability: CVE-2026-12345
+#     package:
+#       name: example-lib
+#     reason: "Only the XML parser is affected; we never parse XML with it. Reviewed 2026-10-29 by <name>."
+ignore:
+  # parquet-jackson 1.17.1 (shaded Jackson 2.21.3)
+  - vulnerability: GHSA-rmj7-2vxq-3g9f
+    package:
+      name: jackson-databind
+      version: 2.21.3
+    reason: "Jackson 2.21.3 bundled (shaded) inside parquet-jackson 1.17.1, which Iceberg 1.12.0 is built against; Parquet's newest release still bundles an affected 2.22.2. Only Parquet's JSON rendering of file metadata (ParquetMetadata) and its own encryption key tools (crypto/keytools) use this copy. We use neither: our encryption is our own, and no external JSON is parsed with it, so the parsing and polymorphic-typing paths these advisories need are not reachable. The application's own Jackson is 2.22.3. Reviewed 2026-10-29; drop when Parquet bundles a fixed Jackson."
+  - vulnerability: GHSA-j3rv-43j4-c7qm
+    package:
+      name: jackson-databind
+      version: 2.21.3
+    reason: "Jackson 2.21.3 bundled (shaded) inside parquet-jackson 1.17.1, which Iceberg 1.12.0 is built against; Parquet's newest release still bundles an affected 2.22.2. Only Parquet's JSON rendering of file metadata (ParquetMetadata) and its own encryption key tools (crypto/keytools) use this copy. We use neither: our encryption is our own, and no external JSON is parsed with it, so the parsing and polymorphic-typing paths these advisories need are not reachable. The application's own Jackson is 2.22.3. Reviewed 2026-10-29; drop when Parquet bundles a fixed Jackson."
+  - vulnerability: GHSA-q4xh-88c3-wmh7
+    package:
+      name: jackson-databind
+      version: 2.21.3
+    reason: "Jackson 2.21.3 bundled (shaded) inside parquet-jackson 1.17.1, which Iceberg 1.12.0 is built against; Parquet's newest release still bundles an affected 2.22.2. Only Parquet's JSON rendering of file metadata (ParquetMetadata) and its own encryption key tools (crypto/keytools) use this copy. We use neither: our encryption is our own, and no external JSON is parsed with it, so the parsing and polymorphic-typing paths these advisories need are not reachable. The application's own Jackson is 2.22.3. Reviewed 2026-10-29; drop when Parquet bundles a fixed Jackson."
+  - vulnerability: GHSA-cxp5-3px4-pw24
+    package:
+      name: jackson-databind
+      version: 2.21.3
+    reason: "Jackson 2.21.3 bundled (shaded) inside parquet-jackson 1.17.1, which Iceberg 1.12.0 is built against; Parquet's newest release still bundles an affected 2.22.2. Only Parquet's JSON rendering of file metadata (ParquetMetadata) and its own encryption key tools (crypto/keytools) use this copy. We use neither: our encryption is our own, and no external JSON is parsed with it, so the parsing and polymorphic-typing paths these advisories need are not reachable. The application's own Jackson is 2.22.3. Reviewed 2026-10-29; drop when Parquet bundles a fixed Jackson."
+  - vulnerability: GHSA-wv8q-qhhj-9h54
+    package:
+      name: jackson-databind
+      version: 2.21.3
+    reason: "Jackson 2.21.3 bundled (shaded) inside parquet-jackson 1.17.1, which Iceberg 1.12.0 is built against; Parquet's newest release still bundles an affected 2.22.2. Only Parquet's JSON rendering of file metadata (ParquetMetadata) and its own encryption key tools (crypto/keytools) use this copy. We use neither: our encryption is our own, and no external JSON is parsed with it, so the parsing and polymorphic-typing paths these advisories need are not reachable. The application's own Jackson is 2.22.3. Reviewed 2026-10-29; drop when Parquet bundles a fixed Jackson."
+  - vulnerability: GHSA-p6pp-m3f8-5c89
+    package:
+      name: jackson-core
+      version: 2.21.3
+    reason: "Jackson 2.21.3 bundled (shaded) inside parquet-jackson 1.17.1, which Iceberg 1.12.0 is built against; Parquet's newest release still bundles an affected 2.22.2. Only Parquet's JSON rendering of file metadata (ParquetMetadata) and its own encryption key tools (crypto/keytools) use this copy. We use neither: our encryption is our own, and no external JSON is parsed with it, so the parsing and polymorphic-typing paths these advisories need are not reachable. The application's own Jackson is 2.22.3. Reviewed 2026-10-29; drop when Parquet bundles a fixed Jackson."
+  - vulnerability: GHSA-7hhh-6rmp-j9qf
+    package:
+      name: jackson-core
+      version: 2.21.3
+    reason: "Jackson 2.21.3 bundled (shaded) inside parquet-jackson 1.17.1, which Iceberg 1.12.0 is built against; Parquet's newest release still bundles an affected 2.22.2. Only Parquet's JSON rendering of file metadata (ParquetMetadata) and its own encryption key tools (crypto/keytools) use this copy. We use neither: our encryption is our own, and no external JSON is parsed with it, so the parsing and polymorphic-typing paths these advisories need are not reachable. The application's own Jackson is 2.22.3. Reviewed 2026-10-29; drop when Parquet bundles a fixed Jackson."
+  - vulnerability: GHSA-r7wm-3cxj-wff9
+    package:
+      name: jackson-core
+      version: 2.21.3
+    reason: "Jackson 2.21.3 bundled (shaded) inside parquet-jackson 1.17.1, which Iceberg 1.12.0 is built against; Parquet's newest release still bundles an affected 2.22.2. Only Parquet's JSON rendering of file metadata (ParquetMetadata) and its own encryption key tools (crypto/keytools) use this copy. We use neither: our encryption is our own, and no external JSON is parsed with it, so the parsing and polymorphic-typing paths these advisories need are not reachable. The application's own Jackson is 2.22.3. Reviewed 2026-10-29; drop when Parquet bundles a fixed Jackson."
+  # hadoop-shaded-guava 1.5.0 (shaded Guava 33.4.8)
+  - vulnerability: GHSA-xxph-c9ww-hj94
+    package:
+      name: guava
+      version: 33.4.8-jre
+    reason: "Guava 33.4.8 bundled (shaded) inside hadoop-shaded-guava 1.5.0, the newest release, which Hadoop's Configuration classes need. The advisory needs Java deserialization (ObjectInputStream) of untrusted data; the connector never Java-deserializes anything. The application's own Guava is 33.7.2. Reviewed 2026-10-29; drop when a fixed hadoop-shaded-guava is released."

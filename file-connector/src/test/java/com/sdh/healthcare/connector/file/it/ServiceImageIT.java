@@ -21,7 +21,9 @@ class ServiceImageIT extends ContainerImageItBase {
                 .withFileFromPath("docker", Path.of("docker"))
                 .withFileFromPath("src/dist", Path.of("src/dist"))
                 .withFileFromPath("app.jar", packagedJar())
-                .withBuildArg("JAR_FILE", "app.jar");
+                .withBuildArg("JAR_FILE", "app.jar")
+                .withBuildArg("JRE_IMAGE", baseImage("TEMURIN_JRE_IMAGE"))
+                .withBuildArg("JDK_IMAGE", baseImage("TEMURIN_JDK_IMAGE"));
     }
 
     @Override
