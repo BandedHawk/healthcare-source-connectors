@@ -31,6 +31,18 @@ public final class IngestTables {
             TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED, "true",
             TableProperties.METADATA_PREVIOUS_VERSIONS_MAX, "100");
 
+    /**
+     * Writer settings applied on top of the table's properties by every Parquet writer here (design §13.1). Set at
+     * write time rather than as table properties, so tables created before them get them too.
+     *
+     * <p>Check the row group's buffered size after every row, not after Iceberg's default of 100. A row here can be
+     * an 8 MiB ciphertext chunk, so 100 rows is about 800 MiB held in memory before the 128 MiB row-group limit is
+     * even checked; the archive ran out of heap at 768 MiB. After the first check, Iceberg estimates when the next
+     * one is due from the average row size, so small rows are still checked rarely.
+     */
+    public static final Map<String, String> WRITE_OVERRIDES =
+            Map.of(TableProperties.PARQUET_ROW_GROUP_CHECK_MIN_RECORD_COUNT, "1");
+
     private IngestTables() {}
 
     public static Table sections(Catalog catalog, String namespace) {

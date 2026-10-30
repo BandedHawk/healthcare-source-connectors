@@ -7,6 +7,7 @@
 #   scripts/perf.sh -Dperf.formats=csv       # one format
 #   scripts/perf.sh -Dperf.storage=s3        # SeaweedFS through S3FileIO, in the minikube VM (KVM2)
 #   scripts/perf.sh -Dperf.recipient=rsa     # messages sealed to an RSA-3072 recipient instead of P-256
+#   scripts/perf.sh -Dperf.heap=768m         # a smaller heap than the default 1536m
 #   SDH_IT_STOP=1 scripts/perf.sh -Dperf.storage=s3   # stop the VM afterwards
 #
 # The same run as a plain Maven task: ./mvnw -Pperf -pl connector-core -am verify [-Dperf.size=...]

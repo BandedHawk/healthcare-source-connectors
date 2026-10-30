@@ -45,6 +45,13 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-29 (ad): the remaining performance runs (§13.1).
+- **Runs:** P-256 on the current dependencies (no change), RSA and S3 with JSON conversion, and a heap-sizing trial from 1536 down to 384 MiB.
+- **Two fixes found by the heap trial:**
+  - The Parquet writers buffered up to 100 rows before checking the row-group size, and archive rows are 8 MiB. That meant about 800 MiB in memory, which caused out-of-memory errors at 768 MiB and full collections even at 1.5 GiB. They now check after every row. Every heap down to 384 MiB completes, and 512 MiB costs about 8–14%.
+  - The cleanup after a failed Parquet write replaced the real error (the out-of-memory) with "Cannot return unfinished footer". It no longer throws.
+- **Perf test:** reports GC pause time and full collections, and takes `-Dperf.heap`.
+
 Revision 2026-10-29 (ac): two upgrade guards.
 - **Iceberg:** `IcebergUpgradeGuardTest` fails when Iceberg or Parquet changes version, and prints the review the fencing and other Iceberg-dependent code need (§9.3). It also checks that transactions are still `BaseTransaction`s on both catalog types.
 - **Azure HTTP client:** the Azure SDK now uses the JDK HTTP client instead of its Netty one, which was built for Netty 4.1 while the app runs 4.2 (§8.1). This removes the version-mismatch warning, reactor-netty, and the BoringSSL and QUIC native libraries. The enforcer bans the Netty client, and `AzureHttpClientTest` checks which client the SDK picks.
@@ -986,10 +993,10 @@ The throughput test is a Maven profile: `./mvnw -Pperf -pl connector-core -am ve
   - C-CDA: one `ClinicalDocument` per section, 50–350 KB each;
   - X12 837P: one claim per section, 1–6 KB, 1,000 per group;
   - CSV: one 150–400-byte record per section, with a header; 1 in 10 has a quoted note with a newline.
-- **What it measures:** wall time for the split and archive phases (from the pipeline's own spans), average cores used, the busiest single thread's share of wall time, sampled peak heap, and stored bytes against source bytes.
+- **What it measures:** wall time for the split and archive phases (from the pipeline's own spans), average cores used, the busiest single thread's share of wall time, sampled peak heap, the share of wall time in GC pauses, the number of full collections, and stored bytes against source bytes.
 - **What it checks:** each file completes with exactly the expected number of sections and messages, and every section converts to JSON (none falls back to raw).
 - **The broker** is replaced by a counter that acknowledges at once, so broker latency isn't included; every message is still sealed and signed.
-- **Options:** `-Dperf.size=4GiB`, `-Dperf.formats=csv`, `-Dperf.storage=s3` (SeaweedFS in the minikube VM), `-Dperf.recipient=rsa`.
+- **Options:** `-Dperf.size=4GiB`, `-Dperf.formats=csv`, `-Dperf.storage=s3` (SeaweedFS in the minikube VM), `-Dperf.recipient=rsa`, `-Dperf.heap=768m` (default 1536m).
 - **Output:** `connector-core/target/perf/throughput-<storage>-<recipient>.md`.
 
 **Results, 2026-10-29:** 1 GiB per format; AMD Ryzen 9 8945HX (16 cores, 32 threads), Java 25.0.4. Iceberg on local disk, JDBC catalog. After the sealing-pool fix, before JSON conversion (§6.4); the conversion run follows the table.
@@ -1011,7 +1018,35 @@ The throughput test is a Maven profile: `./mvnw -Pperf -pl connector-core -am ve
 | X12 | 36 | 16,808 | 45 | 18.0 | main 55% | 1.01 | −11% |
 | CSV | 6 | 23,490 | 7 | 22.8 | sdh-seal 68% | 1.58 | −4% |
 
-C-CDA pays most: the schema-driven XML conversion cuts the split phase from about 275 to about 205 MiB/s and spreads work onto the encrypt workers (5.8 cores against 3.6). For X12 and CSV, message sealing still dominates, so conversion is a small share. CSV now stores 1.6× its size instead of 1.8×, because the header is no longer prepended to each section; X12 grows from 0.93 to 1.01 because JSON is wordier than segment text. Archive speed is unchanged. RSA and S3 runs have not been repeated with conversion.
+C-CDA pays most: the schema-driven XML conversion cuts the split phase from about 275 to about 205 MiB/s and spreads work onto the encrypt workers (5.8 cores against 3.6). For X12 and CSV, message sealing still dominates, so conversion is a small share. CSV now stores 1.6× its size instead of 1.8×, because the header is no longer prepended to each section; X12 grows from 0.93 to 1.01 because JSON is wordier than segment text. Archive speed is unchanged.
+
+**Full matrix with conversion, 2026-10-29** (after the security overrides and the Azure HTTP client change, revisions ab and ac; same machine, single runs, so differences under about 5% are noise):
+
+| Run | C-CDA MiB/s | X12 sections/s | CSV sections/s |
+|---|---:|---:|---:|
+| P-256, local disk | 105 | 16,922 | 23,884 |
+| RSA-3072, local disk | 100 | 25,778 | 46,187 |
+| P-256, S3 (SeaweedFS in the VM) | 88 | 13,037 | 15,372 |
+
+- **Current dependencies:** P-256 on local disk matches the earlier conversion run (100 MiB/s, 16,808 and 23,490), so revisions ab and ac cost nothing measurable.
+- **RSA with conversion:** CSV 1.9× and X12 1.5× faster than P-256, as before conversion; C-CDA is unchanged, because it isn't bound by per-message crypto.
+- **S3 with conversion:** 16% slower than local disk for C-CDA, 23% for X12 and 36% for CSV. Before conversion, S3 was close to local disk. SeaweedFS runs in the minikube VM on the same host, and the CSV and X12 runs use all the host's cores, so part of this is SeaweedFS competing for CPU rather than S3 itself. A real object store, on separate hardware, hasn't been measured.
+
+**Heap sizing, 2026-10-29** (P-256, local disk, with the row-group fix below):
+
+| Heap | C-CDA MiB/s | X12 sections/s | CSV sections/s | GC pause % (C-CDA / X12 / CSV) | Full GCs |
+|---|---:|---:|---:|---|---:|
+| 1536 MiB | 109 | 17,362 | 23,863 | 4.7 / 3.7 / 3.7 | 0 |
+| 1024 MiB | 98 | 15,481 | 22,465 | 4.7 / 5.4 / 4.9 | 0 |
+| 768 MiB | 96 | 16,501 | 21,473 | 6.6 / 5.6 / 5.5 | 0 |
+| 512 MiB | 94 | 15,952 | 21,927 | 8.1 / 6.5 / 6.1 | 0 |
+| 384 MiB | 94 | 15,424 | 21,160 | 12.2 / 6.8 / 6.2 | 0 |
+
+- **Every size down to 384 MiB completes.** Going from 1536 to 512 MiB costs about 14% on C-CDA and 8% on X12 and CSV, as GC pauses grow. At 384 MiB, C-CDA spends 12% of its time in GC pauses. With 1536 MiB, G1 still uses what it is given (peak heap in use 660–1,480 MiB), so peak heap doesn't measure need.
+- **Recommendation:** 512 MiB is the smallest heap that is comfortable; 1 GiB loses under 10%. The Kubernetes sketch keeps 1.5 GiB (§14.1), which is the fastest; a smaller pod is a cost choice, not a correctness one.
+- **What the first heap trial found** (two fixes, revision ad):
+  - **The archive buffered far more than a row group.** The first trial failed at 768 and 512 MiB, and even at 1536 MiB every run had 2–6 full collections. Each archive row is an 8 MiB ciphertext chunk, and Iceberg's Parquet writer first checks the row group's size after 100 rows: about 800 MiB in memory before the 128 MiB limit is checked. The writers now check after every row (`IngestTables.WRITE_OVERRIDES`, set at write time so existing tables get it too). After that, full collections are gone at every size, and throughput at 1536 MiB is unchanged.
+  - **The out-of-memory error was hidden.** The runs reported Parquet's "Cannot return unfinished footer" instead. When a batch's Parquet file failed part-way, the cleanup closed it again, and Parquet refuses a second close of a failed writer; that error replaced the real one. Both cleanup paths (`Archiver` and `SectionBatchWriter`) now never throw, and `AbandonedBatchTest` checks that the original error is the one reported. In production this would have shown a misleading Parquet error for any write failure part-way through a file.
 
 On S3 (SeaweedFS inside the minikube VM, P-256) the results were close to local disk: C-CDA 103 MiB/s, X12 15,298 and CSV 19,490 sections/s. Uploads are not the limit, and SeaweedFS's own CPU use in the VM takes from the same host. Before the sealing-pool fix, P-256 gave X12 15,048 and CSV 19,859 sections/s.
 
@@ -1025,7 +1060,7 @@ On S3 (SeaweedFS inside the minikube VM, P-256) the results were close to local 
   That's about 0.55 ms per message: the ECDH-ES encryption about 85%, the signature about 15%. Splitting, hashing, section encryption, zstd and Parquet are a few percent together.
 - **RSA-3072 recipients** (already supported by the contract, §10) cost the connector about 55 µs per message to encrypt instead of about 460 µs: CSV is 2× faster, X12 1.5×. Readers pay the difference: RSA-3072 decryption is about 2.1 ms per message against about 0.4 ms for ECDH. With RSA, CSV is no longer CPU-bound (15 of 32 cores, no thread saturated), so the next limit is coordination between stages.
 - **Stored ÷ source:** CSV stores 1.8× its size, because the header is prepended to every section and each row carries an ID, keys and GCM overhead. X12 is 0.93, with an envelope added to every transaction. C-CDA compresses to 0.5.
-- **Peak heap:** G1 grew to the 1.5 GiB limit in every run, so this doesn't show how much the pipeline needs; in-flight data is bounded (§13). A smaller heap hasn't been tried.
+- **Peak heap:** G1 uses what it is given, so peak heap in use doesn't show need; the heap-sizing table above does. In-flight data is bounded (§13).
 
 **Ways to go faster on small sections** (not decided; §16 item 8):
 1. RSA-3072 recipient keys: configuration only, about 2× for CSV, but readers pay about 5× more per message to decrypt.

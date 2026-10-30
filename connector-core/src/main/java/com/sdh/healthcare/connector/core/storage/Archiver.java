@@ -265,6 +265,7 @@ public final class Archiver {
                         .withPartition(partition)
                         .withSortOrder(table.sortOrder())
                         .setAll(table.properties())
+                        .setAll(IngestTables.WRITE_OVERRIDES)
                         .createWriterFunc(GenericParquetWriter::create)
                         .overwrite()
                         .build();
@@ -318,11 +319,16 @@ public final class Archiver {
             return writer.toDataFile();
         }
 
+        /**
+         * Best effort, on the failure path only: never throws, so the error that stopped the archive is the one
+         * reported. After a failed {@link #finish()} Parquet refuses a second close ("Cannot return unfinished
+         * footer"), which used to replace the original error, an out-of-memory error among them.
+         */
         void abandon() {
             Arrays.fill(bdk, (byte) 0);
             try {
                 writer.close();
-            } catch (IOException ignored) {
+            } catch (IOException | RuntimeException ignored) {
                 // orphan file; removed by orphan cleanup
             }
         }

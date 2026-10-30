@@ -137,8 +137,8 @@ class ThroughputPerf {
                 .append(System.getProperty("java.version")).append(", ").append(System.getProperty("os.arch"))
                 .append(".\n\n");
         b.append("| Format | Size MiB | Sections | Total s | MiB/s | Sections/s | Split s (MiB/s) | Archive s (MiB/s)"
-                + " | Avg cores | Busiest thread | Peak heap MiB | Stored ÷ source |\n");
-        b.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|\n");
+                + " | Avg cores | Busiest thread | Peak heap MiB | GC pause % | Full GCs | Stored ÷ source |\n");
+        b.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|\n");
         rows.forEach(r -> b.append(r).append('\n'));
         String name = "throughput-" + storage + "-" + recipientType + ".md";
         Files.writeString(OUT.resolve(name), b.toString());
@@ -192,11 +192,13 @@ class ThroughputPerf {
             ThreadCpu threads = ThreadCpu.start();
             var os = (com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
             long cpu0 = os.getProcessCpuTime();
+            long[] gc0 = gcTotals();
             long t0 = System.nanoTime();
             FileProcessor.Outcome o = processor.process(new PathSource(input));
             long wall = System.nanoTime() - t0;
             long cpu = os.getProcessCpuTime() - cpu0;
             long peakHeap = heap.stop();
+            long[] gc1 = gcTotals();
             ThreadCpu.Busiest busiest = threads.busiest(wall);
 
             assertThat(o.result()).as("outcome").isEqualTo(FileProcessor.Result.COMPLETED);
@@ -213,11 +215,12 @@ class ThroughputPerf {
             long stored = totalSize(sections) + totalSize(source);
             double mib = g.bytes() / 1048576.0;
             String row = String.format(Locale.ROOT,
-                    "| %s | %.0f | %,d | %.1f | %.0f | %,.0f | %.1f (%.0f) | %.1f (%.0f) | %.1f | %s %.0f%% | %d | %.2f |",
+                    "| %s | %.0f | %,d | %.1f | %.0f | %,.0f | %.1f (%.0f) | %.1f (%.0f) | %.1f | %s %.0f%% | %d | %.1f | %d"
+                            + " | %.2f |",
                     format, mib, g.sections(), wall / 1e9, mib / (wall / 1e9), g.sections() / (wall / 1e9),
                     splitNanos / 1e9, mib / (splitNanos / 1e9), archiveNanos / 1e9, mib / (archiveNanos / 1e9),
                     (double) cpu / wall, busiest.name(), busiest.percent(), peakHeap >> 20,
-                    (double) stored / g.bytes());
+                    100.0 * (gc1[0] - gc0[0]) * 1e6 / wall, gc1[1] - gc0[1], (double) stored / g.bytes());
             rows.add(row);
             System.out.println(row);
         } finally {
@@ -284,6 +287,25 @@ class ThroughputPerf {
             }
             return new Busiest(name, 100.0 * most / wallNanos);
         }
+    }
+
+    /**
+     * Stop-the-world GC time in ms (G1's young and mixed pauses, plus any full collection) and the number of full
+     * collections. G1's concurrent cycle runs beside the application, so it isn't counted as pause time.
+     */
+    static long[] gcTotals() {
+        long pauseMs = 0;
+        long full = 0;
+        for (var gc : ManagementFactory.getGarbageCollectorMXBeans()) {
+            if (gc.getName().contains("Concurrent")) {
+                continue;
+            }
+            pauseMs += Math.max(0, gc.getCollectionTime());
+            if (gc.getName().contains("Old")) {
+                full += Math.max(0, gc.getCollectionCount());
+            }
+        }
+        return new long[] {pauseMs, full};
     }
 
     /** Heap in use, sampled every 50 ms: the sum of per-pool peaks would overstate it, as pools peak at different times. */
