@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-30 (ah): documentation only. The US Core 6.1 C-CDA mapping (the `mapping` repository) now reads `ccda/1` as stored, so no reshaping step sits between the connector and the mapping (§6.4). Its sample documents are the connector's conversions of the C-CDA test documents.
+
 Revision 2026-10-30 (ag): a demonstration of the connector (§15.3).
 - **Running it:** `-Pdemo`, or two NetBeans actions, in-process or against Postgres, SeaweedFS and Kafka in the minikube VM.
 - **What it shows:** C-CDA files delivered one at a time, with the connector's log, audit events, and OpenTelemetry traces and metrics on the console, through the production PHI filters. The files fail in three ways (unsupported encoding, a file cut off part-way, a document that can't be converted), and the converted documents are read back as a consumer would.
@@ -368,6 +370,8 @@ The X12 and EDIFACT shape follows common EDI-to-JSON converters (hub.actionedi.c
 - **Not data, so left out:** `xmlns` declarations and `xsi:schemaLocation`.
 
 As in Google's output, mixed content loses the interleaving of text and child elements: text parts are listed under `"value"`, child elements under their own keys.
+
+**Who reads it.** The US Core 6.1 C-CDA mapping (`ccda-us-core-6.1` in the `mapping` repository) reads `ccda/1` as stored; it is not reshaped for the mapping, since the stored sections are the durable record, read by other consumers and used for remediation. Google's own Whistle C-CDA mappings read the same style. The mapping's four sample documents are this converter's output for the XML in `connector-core/src/test/resources/ccda/`, so a change to the converter's output is a change to the mapping's input: it needs a new mapping version (`ccda/2`; §8.2, §10.1) and a US Core mapping that accepts it, as stored `ccda/1` sections stay as they are.
 
 **Checks:**
 - `CcdaConverterTest` converts Google's published Synthea inputs and compares the result with Google's expected JSON, after applying Google's two deletions. One pair always runs; all 13 run with `-Dccda.google.dir`, and all match.
