@@ -158,6 +158,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── pom.xml                              parent: dependency/plugin management, Java 25, enforcer
 ├── .gitignore                           excludes build output, IDE files, *.pem, *.key, *.p12, .env
 ├── mvnw, .mvn/wrapper/                  Maven 3.9.16
+├── .mvn/jvm.config                      lets Maven's JVM use sun.misc.Unsafe without Java 25's warning (the local Maven 3.8.7 calls it)
 ├── scripts/                             it-minikube.sh (Docker suite), k8s-minikube.sh (Kubernetes run, §15.2), sign-release.sh (SBOMs and signing, §14.4), vuln-scan.sh and base-images.sh (§14.5), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
 │                                        cda-model/ (generates the C-CDA converter's schema model, §6.4)
 ├── docs/DESIGN.md                       this document
