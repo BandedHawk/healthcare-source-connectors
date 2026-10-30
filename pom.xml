@@ -35,6 +35,7 @@
     <!-- Runtime stack (checked against Maven Central 2026-10-28) -->
     <spring-boot.version>4.1.2</spring-boot.version>
     <camel.version>4.22.2</camel.version>
+    <!-- Changing Iceberg or Parquet fails IcebergUpgradeGuardTest until its review list is done (design §9.3). -->
     <iceberg.version>1.12.0</iceberg.version>
     <!-- Kept in step with the Parquet version Iceberg 1.12.0 is built against. -->
     <parquet.version>1.17.1</parquet.version>
@@ -62,6 +63,9 @@
     <google-cloud-kms.version>2.98.0</google-cloud-kms.version>
     <azure-keyvault-keys.version>4.10.6</azure-keyvault-keys.version>
     <azure-identity.version>1.18.1</azure-identity.version>
+    <!-- Azure's HTTP client: the JDK one, built on azure-core 1.57.1 like everything Azure here. The default Netty
+         client is excluded, because it is built for Netty 4.1 and the app runs Netty 4.2 (Artemis, the AWS SDK). -->
+    <azure-core-http-jdk-httpclient.version>1.1.3</azure-core-http-jdk-httpclient.version>
     <lowkey-vault.version>7.3.112</lowkey-vault.version>
     <!-- Third-party attribution (design §14.2), as in healthcare-data-harmonization. -->
     <license-maven-plugin.version>2.7.1</license-maven-plugin.version>
@@ -158,11 +162,24 @@
         <groupId>com.azure</groupId>
         <artifactId>azure-security-keyvault-keys</artifactId>
         <version>${azure-keyvault-keys.version}</version>
+        <exclusions>
+          <!-- Azure uses the JDK HTTP client instead (azure-core-http-jdk-httpclient, design §8.1). -->
+          <exclusion><groupId>com.azure</groupId><artifactId>azure-core-http-netty</artifactId></exclusion>
+        </exclusions>
       </dependency>
       <dependency>
         <groupId>com.azure</groupId>
         <artifactId>azure-identity</artifactId>
         <version>${azure-identity.version}</version>
+        <exclusions>
+          <!-- Azure uses the JDK HTTP client instead (azure-core-http-jdk-httpclient, design §8.1). -->
+          <exclusion><groupId>com.azure</groupId><artifactId>azure-core-http-netty</artifactId></exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-core-http-jdk-httpclient</artifactId>
+        <version>${azure-core-http-jdk-httpclient.version}</version>
       </dependency>
       <dependency>
         <groupId>com.google.cloud</groupId>
@@ -173,6 +190,10 @@
         <groupId>com.azure</groupId>
         <artifactId>azure-storage-file-datalake</artifactId>
         <version>${azure-storage-datalake.version}</version>
+        <exclusions>
+          <!-- Azure uses the JDK HTTP client instead (azure-core-http-jdk-httpclient, design §8.1). -->
+          <exclusion><groupId>com.azure</groupId><artifactId>azure-core-http-netty</artifactId></exclusion>
+        </exclusions>
       </dependency>
       <!-- Datalake 12.25.0 asks for 1.57.0; keep the 1.57.1 that Camel's Azure components already use. -->
       <dependency>
@@ -184,6 +205,10 @@
         <groupId>com.github.nagyesta.lowkey-vault</groupId>
         <artifactId>lowkey-vault-testcontainers</artifactId>
         <version>${lowkey-vault.version}</version>
+        <exclusions>
+          <!-- Azure uses the JDK HTTP client instead (azure-core-http-jdk-httpclient, design §8.1). -->
+          <exclusion><groupId>com.azure</groupId><artifactId>azure-core-http-netty</artifactId></exclusion>
+        </exclusions>
       </dependency>
       <dependency>
         <groupId>com.sdh.healthcare</groupId>
@@ -666,6 +691,12 @@
               <rules>
                 <requireJavaVersion><version>[25,)</version></requireJavaVersion>
                 <requireMavenVersion><version>[3.9.0,)</version></requireMavenVersion>
+                <!-- Azure's Netty client is built for Netty 4.1 and the app runs 4.2; Azure uses the JDK client
+                     (design §8.1). Exclude it from any new Azure dependency. -->
+                <bannedDependencies>
+                  <excludes><exclude>com.azure:azure-core-http-netty</exclude></excludes>
+                  <message>com.azure:azure-core-http-netty is banned: exclude it (Azure uses azure-core-http-jdk-httpclient, design §8.1)</message>
+                </bannedDependencies>
               </rules>
             </configuration>
           </execution>

@@ -35,6 +35,13 @@ management:
       export:
         enabled: false
 
+# Azure uses the JDK HTTP client (design §8.1). It warns on every storage request that it ignores the SDK's
+# Content-Length header; the JDK sets that header itself from the request body, so the warning is noise (about one
+# line per request). Errors from it are still logged.
+logging:
+  level:
+    com.azure.core.http.jdk.httpclient.JdkHttpClient: error
+
 sdh:
   file:
     inbound-dir: /data/inbound

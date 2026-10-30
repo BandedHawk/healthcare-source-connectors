@@ -39,6 +39,11 @@
       <groupId>com.azure</groupId>
       <artifactId>azure-identity</artifactId>
     </dependency>
+    <!-- The HTTP client Key Vault and Entra ID calls use (the Netty one is excluded in the parent, design §8.1). -->
+    <dependency>
+      <groupId>com.azure</groupId>
+      <artifactId>azure-core-http-jdk-httpclient</artifactId>
+    </dependency>
 
     <dependency>
       <groupId>org.junit.jupiter</groupId>

@@ -45,6 +45,11 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-29 (ac): two upgrade guards.
+- **Iceberg:** `IcebergUpgradeGuardTest` fails when Iceberg or Parquet changes version, and prints the review the fencing and other Iceberg-dependent code need (§9.3). It also checks that transactions are still `BaseTransaction`s on both catalog types.
+- **Azure HTTP client:** the Azure SDK now uses the JDK HTTP client instead of its Netty one, which was built for Netty 4.1 while the app runs 4.2 (§8.1). This removes the version-mismatch warning, reactor-netty, and the BoringSSL and QUIC native libraries. The enforcer bans the Netty client, and `AzureHttpClientTest` checks which client the SDK picks.
+- **Tested:** all tests pass, including ADLS on a real account, Service Bus, Event Hubs and Key Vault, and a sign through the real Key Vault.
+
 Revision 2026-10-29 (ab): fixed what the first vulnerability scan found (§14.5). Security overrides in the parent POM: Jackson 2.22.3, `amqp-client` 5.37.0, Guava 33.7.2, `lz4-java` 1.11.4 and `snappy-java` 1.1.10.12. The two bundled copies that can't be upgraded (Jackson inside `parquet-jackson`, Guava inside `hadoop-shaded-guava`) are accepted with reasons in `vuln-accepted.yaml`: our code reaches neither. The scan now passes, and a full release run signs and verifies. All unit tests and integration tests pass.
 
 Revision 2026-10-29 (aa): vulnerability scanning and base image updates (§14.5). The three base images are pinned by digest in one file, `file-connector/docker/base-images.env`, which the build script and both image tests read; the service image's Temurin bases were unpinned before. `scripts/base-images.sh` checks or updates the pins, Renovate opens a pull request when a pinned tag gets a new build, and `sign-release.sh` refuses to sign with a stale base. `scripts/vuln-scan.sh` scans the three SBOMs with grype, and `sign-release.sh` signs nothing unless it passes: no High or Critical vulnerability with a fix available, other than ones accepted with a reason. The first scan fails: 12 fixable High vulnerabilities in Java dependencies, two of them in copies bundled inside other jars. Fixing them is not done yet. The distroless pin was already behind; it now follows `nonroot`, and the image tests pass on the new bases.
@@ -114,7 +119,7 @@ All versions were checked against Maven Central on 2026-10-28.
 | PostgreSQL | any supported | Lease store (§9.3). Can be the JDBC catalog's database. Driver 42.7.14, HikariCP (Boot-managed, pool of 2) |
 | AWS SDK v2 | 2.50.2 | `s3`, `apache-client` and `kms` for Iceberg's `S3FileIO` (`iceberg-aws`). `kms` is needed even without SSE-KMS: `AwsProperties` loads KMS model classes on startup. Same line as Camel's SQS client, imported as a BOM in the parent POM |
 | KMS clients | `google-cloud-kms` 2.98.0, `azure-security-keyvault-keys` 4.10.6, `azure-identity` 1.18.1 | `connector-kms` (§7.4). Chosen to match the versions Camel already brings (gax 2.83, gRPC 1.8x, azure-core 1.57), so nothing shared is upgraded underneath Camel. Vault Transit uses the JDK HTTP client |
-| Object storage clients | `iceberg-gcp` + `google-cloud-storage` 2.71.0; `iceberg-azure` + `azure-storage-file-datalake` 12.25.0 + `azure-identity` | For `GCSFileIO` and `ADLSFileIO` (§8.1); Iceberg leaves these clients to the application. Chosen on the same cores as the KMS clients: `google-cloud-storage` 2.71.0 shares `google-cloud-jar-parent` 1.89.0 with KMS 2.98.0 (gax 2.83), and datalake 12.25.0 is built on the `azure-storage-blob` 12.32.0 that Camel's Event Hubs component already brings. `azure-core` is pinned at 1.57.1, because datalake alone would pull it back to 1.57.0 |
+| Object storage clients | `iceberg-gcp` + `google-cloud-storage` 2.71.0; `iceberg-azure` + `azure-storage-file-datalake` 12.25.0 + `azure-identity` | For `GCSFileIO` and `ADLSFileIO` (§8.1); Iceberg leaves these clients to the application. Azure's HTTP client is the JDK one (`azure-core-http-jdk-httpclient` 1.1.3, built on `azure-core` 1.57.1; §8.1). Chosen on the same cores as the KMS clients: `google-cloud-storage` 2.71.0 shares `google-cloud-jar-parent` 1.89.0 with KMS 2.98.0 (gax 2.83), and datalake 12.25.0 is built on the `azure-storage-blob` 12.32.0 that Camel's Event Hubs component already brings. `azure-core` is pinned at 1.57.1, because datalake alone would pull it back to 1.57.0 |
 | Testcontainers | 2.0.5 | `-Pit` only, run by Failsafe 3.6.1 (§15) |
 | OpenTelemetry | 1.62.0 (Boot-managed) | `connector-core` uses the API only; `file-connector` gets the SDK from `spring-boot-starter-opentelemetry` and exports over OTLP/HTTP with its own filtered exporters (§12) |
 | Maven | 3.9.16 via Maven Wrapper | The local install is 3.8.7 |
@@ -477,6 +482,17 @@ These are selected at run time.
 
 **Azure Data Lake Storage Gen2 (tested on Azurite and on a real storage account):** `warehouse: abfss://<filesystem>@<account>.dfs.core.windows.net/<path>`, on a storage account with hierarchical namespace enabled. In production `ADLSFileIO` uses the default Azure credential chain (managed identity) unless a SAS token (`adls.sas-token.<account host>`) or shared key (`adls.auth.shared-key.account.name` / `.key`) is set. `adls.connection-string.<account host>` overrides the endpoint, which is how an emulator is reached. Azurite has no Data Lake directory operations, so `ADLSFileIO.listPrefix`, which orphan-file cleanup (§8.4) uses, can't run against it; Iceberg's own tests skip it on Azurite for the same reason. `AdlsIT` covers everything else on Azurite, and `AdlsAzureIT` repeats all of it, orphan cleanup included, on a real ADLS Gen2 account (§15.1). That run found that `ADLSFileIO.listPrefix` returns paths relative to the container, which orphan cleanup now resolves (§8.4).
 
+**Azure HTTP client:** every Azure client (ADLS, Key Vault, Entra ID, Service Bus and Event Hubs management calls) uses the JDK HTTP client, `azure-core-http-jdk-httpclient`.
+- **Why not the default Netty client:** `azure-core-http-netty` is built for Netty 4.1, but the app runs Netty 4.2 for Artemis and the AWS SDK, and the Azure SDK logged a version-mismatch warning at startup. Netty can't go back to 4.1 without breaking those clients. The JDK client avoids Netty entirely, and also drops reactor-netty and the BoringSSL and QUIC native libraries that came with it.
+- **How it's kept that way:**
+  - The parent POM excludes the Netty client from every Azure dependency, and the enforcer's `bannedDependencies` rule fails the build if any dependency brings it back.
+  - `AzureHttpClientTest` checks that the JDK client is the only one the SDK can find.
+- **Header warning:** the JDK client refuses to let a caller set `Content-Length`; it sets the header itself from the request body. The storage SDK sets the header anyway, and the client logged a warning for each such request (about 650 per ADLS test run). The bundled `application.yml` sets that logger to `error`.
+- **Tested:**
+  - `AdlsIT` (Azurite) and `AdlsAzureIT` (a real account; real ADLS rejects an append without a length, so the header is sent);
+  - `ServiceBusIT`, `EventHubsIT` and `AzureKeyVaultIT`;
+  - a sign with the release key in the real Key Vault, through `AzureKeyVaultKeyProvider` with an Entra ID service principal.
+
 **MinIO: not supported.** Its community images are no longer published on Docker Hub or Quay, so it isn't tested, and we don't offer support for it. It may work as an S3 endpoint (`s3.endpoint` plus `s3.path-style-access`), but that is unverified. Support will be added only if a customer pays for it, including any development and testing it needs.
 
 ### 8.2 Tables
@@ -676,7 +692,15 @@ The earlier draft kept the lease in `sections` table properties, renewed every 3
    - A REST catalog only checks a commit against concurrent changes through requirements such as `assert-ref-snapshot-id`, which is only sent when `main` moves. A properties-only commit carries no such requirement, so the server would accept it from a stale instance.
    - JDBC and Hive catalogs compare the whole metadata location, so they are safe either way. The marker keeps behaviour identical across catalogs.
 5. **Tested:** a stale holder is rejected when it commits after its successor established, and in the race where the successor establishes between the stale holder's check and its commit. Both are tested on JDBC (embedded Postgres) and on REST (Iceberg's reference REST request handling, run in-process).
-6. **Internals:** this relies on Iceberg's public `BaseTransaction.startMetadata()`, `currentMetadata()` and `underlyingOps()`. They are not formally part of the API, so the fencing tests run on every Iceberg upgrade.
+6. **Internals:** this relies on Iceberg's public `BaseTransaction.startMetadata()`, `currentMetadata()` and `underlyingOps()`, which are not formally part of the API. The fencing tests run on every build, but they can't catch everything: a real REST server's commit checks, or ADLS listing.
+7. **Upgrade guard:** `IcebergUpgradeGuardTest` records the Iceberg and Parquet versions last reviewed (1.12.0 and 1.17.1), and fails on any other version. Its failure message is the review list:
+   - read the changes to `BaseTransaction`, `TableOperations.commit` and the REST commit requirements;
+   - `FencedCommitterTest` must pass unchanged, including the control test;
+   - run `PolarisIT`, the S3, GCS and ADLS ITs, and `AdlsAzureIT` on a real account;
+   - move `parquet.version` to the Parquet version the new Iceberg declares, and check the Jackson that Parquet bundles (§14.5);
+   - update the reviewed versions.
+
+   The test also checks that tables on both catalog types hand out `BaseTransaction`s; otherwise every fenced commit would fail.
 
 ### 9.5 One instance per inbound directory
 
@@ -1512,7 +1536,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 | 8 | New: throughput on small sections | **Open** | §13.1: about 24,000 sections/s (CSV ≈ 7 MiB/s) with a P-256 recipient on 16 cores, bound by public-key crypto for every message. A 1 GiB CSV takes about 2.5 minutes. Whether that's enough depends on expected volumes; the options are in §13.1 |
 | 9 | New: Kubernetes deployment | **Passed** | §15.2: the customer image, deployed from the README's manifest on Kubernetes 1.37 under the restricted Pod Security Standard, ingests, runs operator commands, fails over and refuses a second instance. The run found five README and configuration problems, and slow takeover after a crash (the restart delays of `CrashLoopBackOff` on top of the lease TTL); all fixed. Managed clusters (EKS, AKS, GKE) aren't covered |
 
-**Spike follow-ups:** check the Iceberg internals used by the fenced committer (§9.3) on every Iceberg upgrade.
+**Spike follow-ups:** checking the Iceberg internals used by the fenced committer on every Iceberg upgrade is enforced by `IcebergUpgradeGuardTest` (§9.3).
 
 ## 17. Out of scope (for now)
 
