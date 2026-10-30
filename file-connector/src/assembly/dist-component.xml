@@ -9,6 +9,12 @@
       <destName>app.jar</destName>
       <fileMode>0644</fileMode>
     </file>
+    <!-- Software bill of materials for app.jar (design §14.4). -->
+    <file>
+      <source>${project.build.directory}/sbom.cdx.json</source>
+      <outputDirectory>legal</outputDirectory>
+      <fileMode>0644</fileMode>
+    </file>
     <!-- zstd-jni names its library by version; the container options expect a fixed name. -->
     <file>
       <source>${project.build.directory}/dist-native/linux/amd64/libzstd-jni-${zstd-jni.version}.so</source>

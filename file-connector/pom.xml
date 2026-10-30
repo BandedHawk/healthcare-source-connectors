@@ -292,6 +292,11 @@
           </execution>
         </executions>
       </plugin>
+      <!-- SBOM of the jar (design §14.4), declared before the assembly so the kit can include it. -->
+      <plugin>
+        <groupId>org.cyclonedx</groupId>
+        <artifactId>cyclonedx-maven-plugin</artifactId>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-assembly-plugin</artifactId>

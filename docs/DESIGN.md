@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-29 (z): SBOMs and signing (§14.4, `scripts/sign-release.sh`). A CycloneDX SBOM of the application jar is built at `package` and ships in the kit as `legal/sbom.cdx.json`. Each image gets its own SBOM, made by syft and attached as a signed attestation. The tarball gets a detached signature (verifiable with openssl alone), and both images are signed by digest. The release key is in Azure Key Vault. Tested end to end with a throwaway key and with the Key Vault key, both into a throwaway registry. The run also fixed `.dockerignore`, which had broken `build-image.sh service` since revision (u).
+
 Revision 2026-10-29 (y): license election for dual-licensed components (§14.2): permissive licenses (MIT, Apache-2.0, BSD, ISC, Creative Commons) are elected over any GPL or similar license. `THIRD-PARTY.txt` names the elected license for each of the ten components offered under a choice, and the image tests fail if one is missing or a GNU license is elected. Five components have no permissive option and are distributed under EPL-2.0 or CDDL-1.1.
 
 Revision 2026-10-29 (x): ran ADLS Gen2 orphan cleanup on a real Azure storage account (`AdlsAzureIT`, opt-in, §15.1). `ADLSFileIO.listPrefix` returns paths relative to the container, so every file of the `sections` table looked orphaned; the size-based safety stop refused the run, but a table of 20 files or fewer wasn't protected by it. Listed paths are now resolved against the table location, and any listed path outside the table location refuses the whole run (§8.4). Everything, orphan cleanup included, now passes on real ADLS.
@@ -123,7 +125,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── pom.xml                              parent: dependency/plugin management, Java 25, enforcer
 ├── .gitignore                           excludes build output, IDE files, *.pem, *.key, *.p12, .env
 ├── mvnw, .mvn/wrapper/                  Maven 3.9.16
-├── scripts/                             it-minikube.sh (Docker suite), k8s-minikube.sh (Kubernetes run, §15.2), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
+├── scripts/                             it-minikube.sh (Docker suite), k8s-minikube.sh (Kubernetes run, §15.2), sign-release.sh (SBOMs and signing, §14.4), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
 │                                        cda-model/ (generates the C-CDA converter's schema model, §6.4)
 ├── docs/DESIGN.md                       this document
 ├── LICENSE, NOTICE                      our proprietary notice and attributions (HL7), copied into every jar (§14.2)
@@ -1251,7 +1253,7 @@ The kit is also built as a directory on every `package` (`target/file-connector-
 | `config/application.yml.example` | the §14 reference configuration, without references to this document |
 | `container/Dockerfile`, `container.options`, `admin.args`, `inbound/` | the customer image build |
 | `native/linux-amd64/`, `native/linux-arm64/` | `libzstd-jni.so` and `libsnappyjava.so`, unpacked from their jars at build time (`maven-dependency-plugin`) |
-| `legal/` | `LICENSE`, `NOTICE`, `THIRD-PARTY.txt`, `licenses/` (§14.2) |
+| `legal/` | `LICENSE`, `NOTICE`, `THIRD-PARTY.txt`, `licenses/` (§14.2), `sbom.cdx.json` (§14.4) |
 | `README.md` | for customers: requirements, configuration, host and container use, a Kubernetes manifest, operator commands, troubleshooting |
 
 **`container/Dockerfile`** works on any Linux Java 25 image with glibc and `java` on the `PATH`:
@@ -1285,6 +1287,50 @@ Both images use the same JVM options files and the same Kubernetes settings (§1
 - `os-packages.txt` lists the JRE and glibc;
 - every package's copyright file exists;
 - none of the shell, core-utility or package-tool packages is present.
+
+### 14.4 SBOMs and signing (built and run with the Key Vault key)
+
+Customers' security teams need to know what is in what we ship, and that it came from us unchanged. `scripts/sign-release.sh` produces both for every release artifact and then verifies them as a customer would, with the public key only.
+
+**SBOMs** (CycloneDX 1.6 JSON):
+
+| SBOM | Made by | Covers | Where |
+|---|---|---|---|
+| Application jar | `cyclonedx-maven-plugin` 2.9.1 at `package` (parent `pluginManagement`, bound in `file-connector`) | the runtime dependencies bundled in `app.jar` (380 components, each with its POM's licenses) | `file-connector/target/sbom.cdx.json`; in the kit and tarball as `legal/sbom.cdx.json` |
+| Customer image | syft 1.18.1, from the pushed image | the OS packages (25 Debian packages, the Temurin JRE among them) and the Java components found in `app.jar` | a signed attestation on the image in the registry; a copy in `target/release/` |
+| Service image | the same | the same for the Ubuntu base (108 packages) | the same |
+
+An SBOM lists licenses as each project declares them; the elections for dual-licensed components (§14.2) are in `THIRD-PARTY.txt`.
+
+**Signing** with cosign 2.4.1:
+- **Tarball:** a detached signature, `file-connector-<v>-dist.tar.gz.sig`: base64 ECDSA P-256 over the file's SHA-256. Customers can verify it with cosign or with openssl alone: `openssl dgst -sha256 -verify cosign.pub -signature <(base64 -d <file>.sig) <file>`.
+- **Images** (customer and service): signed by digest, never by tag, with the signature stored in the registry next to the image. Each image's SBOM is attached as a signed CycloneDX attestation, which a Kubernetes admission policy (Sigstore policy-controller, Kyverno) can require.
+- **Key:** the release key is an EC P-256 key in **Azure Key Vault** (decision 2026-10-29), referenced as `SDH_SIGNING_KEY=azurekms://<vault>.vault.azure.net/<key>`. The private key never leaves Key Vault; cosign authenticates with a service principal (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) that has the Key Vault Crypto User role. Without `SDH_SIGNING_KEY` the script generates a throwaway key, for testing only. The public key, `cosign.pub`, is published with each release.
+- **No public transparency log:** signatures aren't uploaded to Sigstore's Rekor, which would publish the artifact digests and our key's fingerprint. The key is the trust anchor, so verification passes `--insecure-ignore-tlog=true`. Keyless signing (a CI identity plus Rekor) was considered and not chosen.
+
+**The script:**
+- builds the tarball (`-Pdist`) and both images, or reuses them (`SDH_SKIP_BUILD=1`);
+- pushes the images to `SDH_REGISTRY`, or to a throwaway `registry:2` inside the VM;
+- generates the image SBOMs, signs everything and attests the SBOMs;
+- verifies:
+  - the tarball signature with cosign and with openssl;
+  - that a tampered tarball is rejected;
+  - each image's signature and SBOM attestation;
+  - that another key is rejected.
+- writes `file-connector/target/release/`: the tarball and its signature, `cosign.pub`, the three SBOMs and `image-digests.txt`.
+
+cosign, syft and the registry run as pinned containers in the `sdh-it` VM, so nothing is installed on the host. Files reach them through a Docker volume, because the VM doesn't mount host directories.
+
+**Runs** (2026-10-29):
+- With a throwaway key and registry, all eight checks pass.
+- With the Key Vault key, all eight checks pass too. The key is `sdh-release` (EC P-256) in vault `sdh-ingestion-1`, used by the service principal `sdh-release-signer` with Key Vault Crypto User on the vault; the images went to the throwaway registry. The vault uses Azure role-based access; a principal without the role gets 403 `ForbiddenByRbac` on the first call (reading the public key), before anything is signed. The client secret expires, which stops signing until it is replaced; the key, `cosign.pub` and existing signatures are unaffected.
+
+The first run also found that `scripts/build-image.sh service` had been failing since revision (u): `file-connector/.dockerignore` didn't let in the JVM options files shared from `src/dist/`. `ServiceImageIT` passes its files to Docker explicitly, so it didn't notice. Fixed.
+
+**Not done yet:**
+- the release registry and where the tarball, signature and public key are published;
+- vulnerability scanning of the SBOMs;
+- running this in CI rather than on a workstation.
 
 ## 15. Testing
 

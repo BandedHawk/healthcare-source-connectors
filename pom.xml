@@ -66,6 +66,7 @@
     <!-- Third-party attribution (design §14.2), as in healthcare-data-harmonization. -->
     <license-maven-plugin.version>2.7.1</license-maven-plugin.version>
     <gmavenplus-plugin.version>5.1.0</gmavenplus-plugin.version>
+    <cyclonedx-maven-plugin.version>2.9.1</cyclonedx-maven-plugin.version>
     <groovy.version>4.0.33</groovy.version>
     <!-- Object storage clients for GCSFileIO and ADLSFileIO (iceberg-gcp, iceberg-azure leave them to us). Chosen on
          the same cores as above: google-cloud-storage 2.71.0 shares google-cloud-jar-parent 1.89.0 with KMS 2.98.0;
@@ -283,6 +284,30 @@
     </resources>
     <pluginManagement>
       <plugins>
+        <!-- Software bill of materials (design §14.4): CycloneDX JSON of what the application jar bundles, runtime
+             scope only, our own modules included as components. Bound in modules that bundle dependencies. -->
+        <plugin>
+          <groupId>org.cyclonedx</groupId>
+          <artifactId>cyclonedx-maven-plugin</artifactId>
+          <version>${cyclonedx-maven-plugin.version}</version>
+          <executions>
+            <execution>
+              <id>sbom</id>
+              <phase>package</phase>
+              <goals><goal>makeBom</goal></goals>
+            </execution>
+          </executions>
+          <configuration>
+            <projectType>application</projectType>
+            <schemaVersion>1.6</schemaVersion>
+            <outputFormat>json</outputFormat>
+            <outputName>sbom.cdx</outputName>
+            <includeTestScope>false</includeTestScope>
+            <includeProvidedScope>false</includeProvidedScope>
+            <includeSystemScope>false</includeSystemScope>
+            <includeLicenseText>false</includeLicenseText>
+          </configuration>
+        </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>

@@ -19,7 +19,32 @@ on a Java 25 base image of your choice.
 | `config/application.yml.example` | Every setting, with defaults where they exist |
 | `container/` | `Dockerfile` and container-only JVM options, for building an image |
 | `native/linux-amd64/`, `native/linux-arm64/` | zstd and snappy native libraries, for containers with a `noexec` `/tmp` |
-| `legal/` | `LICENSE`, `NOTICE`, `THIRD-PARTY.txt` (every bundled component, its licenses and notices) and the license texts |
+| `legal/` | `LICENSE`, `NOTICE`, `THIRD-PARTY.txt` (every bundled component, its licenses and notices), the license texts, and `sbom.cdx.json` (a CycloneDX software bill of materials for `app.jar`) |
+
+## Verify what you received
+
+Each release comes with a public key, `cosign.pub`, published by Smile Digital Health. Check the tarball's
+signature before unpacking it, with [cosign](https://docs.sigstore.dev/) or with openssl alone:
+
+```sh
+cosign verify-blob --key cosign.pub --insecure-ignore-tlog=true \
+  --signature file-connector-<version>-dist.tar.gz.sig file-connector-<version>-dist.tar.gz
+openssl dgst -sha256 -verify cosign.pub \
+  -signature <(base64 -d file-connector-<version>-dist.tar.gz.sig) file-connector-<version>-dist.tar.gz
+```
+
+The container image is signed in its registry, and its software bill of materials (OS packages and Java components)
+is attached as a signed attestation:
+
+```sh
+cosign verify --key cosign.pub --insecure-ignore-tlog=true <registry>/file-connector@sha256:<digest>
+cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --type cyclonedx \
+  <registry>/file-connector@sha256:<digest>
+```
+
+Signatures aren't recorded in Sigstore's public transparency log, so `--insecure-ignore-tlog=true` is expected; the
+public key is what you trust. A Kubernetes admission policy (for example Sigstore policy-controller or Kyverno) can
+require the signature before the image runs.
 
 ## Requirements
 

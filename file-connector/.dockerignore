@@ -1,4 +1,8 @@
-# The image is built from the packaged jar and the files in docker/ only.
+# The service image is built from the packaged jar, the files in docker/ and the JVM options shared with the
+# customer image and the distribution (src/dist, design §14.1) only.
 *
 !target/file-connector-*.jar
 !docker/
+!src/dist/config/jvm.options
+!src/dist/container/container.options
+!src/dist/container/admin.args
