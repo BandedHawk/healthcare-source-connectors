@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# Throughput tests (design §13): generates synthetic C-CDA, X12 and CSV files and runs each through the full
-# ingest path. Results: connector-core/target/perf/throughput-<storage>.md.
+# Performance tests (design §13.1): throughput and memory use. Generates synthetic C-CDA and X12 files (CSV on
+# request) and runs each through the full ingest path. Not part of any normal build or of the integration tests.
+# Results: connector-core/target/perf/throughput-<storage>-<recipient>.md (this run) and history.csv (every run
+# until `mvn clean`, one row per format).
 #
-#   scripts/perf.sh                          # 1 GiB per format, Iceberg on local disk
+#   scripts/perf.sh                          # 1 GiB each of C-CDA and X12, Iceberg on local disk
 #   scripts/perf.sh -Dperf.size=4GiB         # bigger files
-#   scripts/perf.sh -Dperf.formats=csv       # one format
+#   scripts/perf.sh -Dperf.formats=ccda,x12,csv   # CSV as well
 #   scripts/perf.sh -Dperf.storage=s3        # SeaweedFS through S3FileIO, in the minikube VM (KVM2)
 #   scripts/perf.sh -Dperf.recipient=rsa     # messages sealed to an RSA-3072 recipient instead of P-256
-#   scripts/perf.sh -Dperf.heap=768m         # a smaller heap than the default 1536m
+#   scripts/perf.sh -Dperf.heap=512m         # a smaller heap than the default 1024m
 #   SDH_IT_STOP=1 scripts/perf.sh -Dperf.storage=s3   # stop the VM afterwards
 #
 # The same run as a plain Maven task: ./mvnw -Pperf -pl connector-core -am verify [-Dperf.size=...]
-# (NetBeans: right-click the root project > Run Maven > Throughput test.)
+# (NetBeans: right-click the root project > Run Maven > Performance test, and the variants beside it.)
 #
 # Needs a few GB free under connector-core/target for the input file and the stored tables.
 set -euo pipefail

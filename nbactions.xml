@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- NetBeans custom actions for the root project: right-click the project > Run Maven > (action).
-     Throughput test: same as scripts/perf.sh; results in connector-core/target/perf/throughput-<storage>-<recipient>.md.
-     Change a property here, or copy the action, for other settings (perf.size, perf.formats, perf.recipient).
-     perf.storage=s3 needs the minikube environment, so run that one with scripts/perf.sh. -->
+     Performance tests (design §13.1): throughput and memory use for C-CDA and X12, the same as scripts/perf.sh. They run
+     only through these actions or -Pperf, never in a normal build or with the integration tests (-Pit).
+     Results: printed in the Output window at the end, and written to connector-core/target/perf/:
+       throughput-<storage>-<recipient>.md   this run (a throughput table and a memory table)
+       history.csv                           one row per format per run, kept until `mvn clean`
+     Change a property here, or copy an action, for other settings: perf.size, perf.formats (add csv),
+     perf.recipient (rsa), perf.heap. perf.storage=s3 needs the minikube environment, so run that one with
+     scripts/perf.sh. -->
 <actions>
     <action>
-        <actionName>CUSTOM-throughput-test</actionName>
-        <displayName>Throughput test</displayName>
+        <actionName>CUSTOM-performance-test</actionName>
+        <displayName>Performance test (C-CDA, X12)</displayName>
+        <!-- 1 GiB heap, as in a 2 GiB Kubernetes container (design §14.1). -->
         <goals>
             <goal>-pl</goal>
             <goal>connector-core</goal>
@@ -18,14 +24,16 @@
         </activatedProfiles>
         <properties>
             <perf.size>1GiB</perf.size>
-            <perf.formats>ccda,x12,csv</perf.formats>
+            <perf.formats>ccda,x12</perf.formats>
             <perf.storage>local</perf.storage>
             <perf.recipient>ec</perf.recipient>
+            <perf.heap>1024m</perf.heap>
         </properties>
     </action>
     <action>
-        <actionName>CUSTOM-throughput-test-quick</actionName>
-        <displayName>Throughput test (quick, 64 MiB)</displayName>
+        <actionName>CUSTOM-performance-test-quick</actionName>
+        <displayName>Performance test (quick, 64 MiB)</displayName>
+        <!-- A check that the test runs, in under a minute; the numbers mean little at this size. -->
         <goals>
             <goal>-pl</goal>
             <goal>connector-core</goal>
@@ -37,9 +45,31 @@
         </activatedProfiles>
         <properties>
             <perf.size>64MiB</perf.size>
-            <perf.formats>ccda,x12,csv</perf.formats>
+            <perf.formats>ccda,x12</perf.formats>
             <perf.storage>local</perf.storage>
             <perf.recipient>ec</perf.recipient>
+            <perf.heap>1024m</perf.heap>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-performance-test-small-heap</actionName>
+        <displayName>Performance test (512 MiB heap)</displayName>
+        <!-- The smallest comfortable heap (design §13.1): shows the memory and speed cost of a smaller pod. -->
+        <goals>
+            <goal>-pl</goal>
+            <goal>connector-core</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>perf</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <perf.size>1GiB</perf.size>
+            <perf.formats>ccda,x12</perf.formats>
+            <perf.storage>local</perf.storage>
+            <perf.recipient>ec</perf.recipient>
+            <perf.heap>512m</perf.heap>
         </properties>
     </action>
     <action>

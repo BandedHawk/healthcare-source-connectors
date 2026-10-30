@@ -153,7 +153,7 @@ spec:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
-          resources: { limits: { memory: 2Gi } }   # the heap is 75% of the limit
+          resources: { limits: { memory: 2Gi } }   # the heap is half the limit; the rest is the JVM's own memory and operator commands
           volumeMounts:
             - { name: inbound, mountPath: /data/inbound }
             - { name: tmp, mountPath: /tmp }

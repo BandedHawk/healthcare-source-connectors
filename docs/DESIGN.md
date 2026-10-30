@@ -45,6 +45,18 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-30 (af): the container heap is half the memory limit instead of 75% (`MaxRAMPercentage=50`, §14.1). In the README's 2 GiB container, the heap is now 1 GiB instead of 1.5 GiB.
+- **Why:** at a 1.5 GiB heap, process memory reached 2.0 GiB in the performance test alone, before Spring, Camel and an operator command's JVM, so a large file could get the pod killed (§13.1).
+- **Cost:** under 10% throughput.
+- **Perf test:** its default heap follows, at 1 GiB.
+- **Tested:** both image tests pass. The Kubernetes run (§15.2) now checks the heap the JVM picks inside the pod from the README's 2Gi limit (1024 MiB), and all its checks pass, including an operator restore beside the running connector.
+
+Revision 2026-10-30 (ae): performance tests for throughput and memory use as a Maven profile (§13.1).
+- **Running them:** `-Pperf`, never in a normal build or with `-Pit`. Three NetBeans actions: the full run, a quick check, and a 512 MiB heap. C-CDA and X12 by default.
+- **New memory measures:** heap still in use after each collection, direct buffers, process RSS and allocation.
+- **Results:** printed at the end, and in a per-run report plus a `history.csv` that collects every run.
+- **Finding:** the README's Kubernetes sizing (2 GiB container, 1.5 GiB heap) leaves too little room. This test's JVM alone reaches 2.0 GiB, before Spring, Camel and `sdh-admin`. A 1 GiB heap costs under 10%; changed in revision af.
+
 Revision 2026-10-29 (ad): the remaining performance runs (§13.1).
 - **Runs:** P-256 on the current dependencies (no change), RSA and S3 with JSON conversion, and a heap-sizing trial from 1536 down to 384 MiB.
 - **Two fixes found by the heap trial:**
@@ -988,16 +1000,32 @@ Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has s
 
 ### 13.1 Measured throughput (built)
 
-The throughput test is a Maven profile: `./mvnw -Pperf -pl connector-core -am verify` (unit tests are skipped). `scripts/perf.sh` wraps it, and NetBeans has it as the custom actions **Throughput test** and **Throughput test (quick, 64 MiB)** (`nbactions.xml`, root project > Run Maven). It generates synthetic files and runs each through the whole ingest path, assembled as the connector assembles it, with production defaults: commits every 10,000 sections or 512 MiB, one encrypt worker per core, 512 MiB archive commits and a 1.5 GiB heap (the Kubernetes sketch in §14.1).
+The performance test measures throughput and memory use. It is a Maven profile: `./mvnw -Pperf -pl connector-core -am verify` (unit tests are skipped).
+- **Not part of any normal build:** the test is `ThroughputPerf`, and only `-Pperf` includes `*Perf.java`. The default build and `-Pit` never run it, because its results depend on the machine.
+- **How to run it:** `scripts/perf.sh` wraps the profile. NetBeans has three custom actions (`nbactions.xml`, root project > Run Maven):
+  - **Performance test (C-CDA, X12):** 1 GiB each, 1 GiB heap (as in a 2 GiB Kubernetes container, §14.1);
+  - **Performance test (quick, 64 MiB):** a check that it runs, in under a minute;
+  - **Performance test (512 MiB heap):** the smallest comfortable heap.
+- **Formats:** C-CDA and X12 by default; `-Dperf.formats=ccda,x12,csv` adds CSV. It generates synthetic files and runs each through the whole ingest path, assembled as the connector assembles it, with production defaults: commits every 10,000 sections or 512 MiB, one encrypt worker per core, 512 MiB archive commits and a 1 GiB heap (the Kubernetes sketch in §14.1).
 - **Generated files** (seeded random words from a 4,096-word vocabulary, so they compress roughly like real text):
   - C-CDA: one `ClinicalDocument` per section, 50–350 KB each;
   - X12 837P: one claim per section, 1–6 KB, 1,000 per group;
   - CSV: one 150–400-byte record per section, with a header; 1 in 10 has a quoted note with a newline.
-- **What it measures:** wall time for the split and archive phases (from the pipeline's own spans), average cores used, the busiest single thread's share of wall time, sampled peak heap, the share of wall time in GC pauses, the number of full collections, and stored bytes against source bytes.
+- **Throughput:** wall time for the split and archive phases (from the pipeline's own spans), MiB/s and sections/s, average cores used, the busiest single thread's share of wall time, and stored bytes against source bytes.
+- **Memory:**
+  - heap after GC, peak: the most heap still in use right after a collection, from the collectors' notifications. This is the closest measure of need; it is an upper bound, because a young collection leaves old garbage in place;
+  - heap in use, peak, sampled every 50 ms; G1 grows towards the maximum, so this shows the heap given more than the heap needed;
+  - direct (off-heap) buffers, peak;
+  - process resident memory (RSS), peak, which is what a container limit sees;
+  - bytes allocated and the allocation rate;
+  - the share of wall time in GC pauses, and the number of full collections.
 - **What it checks:** each file completes with exactly the expected number of sections and messages, and every section converts to JSON (none falls back to raw).
 - **The broker** is replaced by a counter that acknowledges at once, so broker latency isn't included; every message is still sealed and signed.
-- **Options:** `-Dperf.size=4GiB`, `-Dperf.formats=csv`, `-Dperf.storage=s3` (SeaweedFS in the minikube VM), `-Dperf.recipient=rsa`, `-Dperf.heap=768m` (default 1536m).
-- **Output:** `connector-core/target/perf/throughput-<storage>-<recipient>.md`.
+- **Options:** `-Dperf.size=4GiB`, `-Dperf.formats=csv`, `-Dperf.storage=s3` (SeaweedFS in the minikube VM), `-Dperf.recipient=rsa`, `-Dperf.heap=512m` (default 1024m).
+- **Output:**
+  - printed at the end of the run (in NetBeans, the Output window);
+  - `connector-core/target/perf/throughput-<storage>-<recipient>.md`: this run's throughput and memory tables;
+  - `connector-core/target/perf/history.csv`: one row per format per run, with the settings, kept until `mvn clean`, for comparing runs.
 
 **Results, 2026-10-29:** 1 GiB per format; AMD Ryzen 9 8945HX (16 cores, 32 threads), Java 25.0.4. Iceberg on local disk, JDBC catalog. After the sealing-pool fix, before JSON conversion (§6.4); the conversion run follows the table.
 
@@ -1043,7 +1071,21 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 | 384 MiB | 94 | 15,424 | 21,160 | 12.2 / 6.8 / 6.2 | 0 |
 
 - **Every size down to 384 MiB completes.** Going from 1536 to 512 MiB costs about 14% on C-CDA and 8% on X12 and CSV, as GC pauses grow. At 384 MiB, C-CDA spends 12% of its time in GC pauses. With 1536 MiB, G1 still uses what it is given (peak heap in use 660–1,480 MiB), so peak heap doesn't measure need.
-- **Recommendation:** 512 MiB is the smallest heap that is comfortable; 1 GiB loses under 10%. The Kubernetes sketch keeps 1.5 GiB (§14.1), which is the fastest; a smaller pod is a cost choice, not a correctness one.
+- **Recommendation:** 512 MiB is the smallest heap that is comfortable; 1 GiB loses under 10%.
+
+**Memory use, 2026-10-30** (the NetBeans actions' settings: 1 GiB each of C-CDA and X12, P-256, local disk):
+
+| Max heap | Format | MiB/s | Sections/s | Heap after GC, peak MiB | Heap in use, peak MiB | Process RSS, peak MiB | Allocated GiB | GC pause % |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 1536 MiB | C-CDA | 100 | 516 | 686 | 1,471 | 1,798 | 35.6 | 5.2 |
+| 1536 MiB | X12 | 34 | 15,992 | 290 | 1,484 | 2,041 | 91.8 | 3.8 |
+| 512 MiB | C-CDA | 94 | 483 | 357 | 487 | 888 | 35.6 | 7.3 |
+| 512 MiB | X12 | 33 | 15,434 | 205 | 496 | 1,138 | 91.8 | 6.8 |
+
+- **What the pipeline needs:** with a tight heap, at most about 360 MiB is still in use after a collection for C-CDA and 200 MiB for X12. With more room, G1 collects later, so the same run shows 690 MiB.
+- **Process memory is well above the heap.** RSS is the heap plus about 350–650 MiB: metaspace, JIT code, a thread stack per encrypt worker (32 here) and native libraries. Direct buffers stayed at 0.
+- **The Kubernetes sizing is tight.** The README's manifest gave the container 2 GiB with the heap at 75% of it (§14.1, `MaxRAMPercentage=75`), which is 1.5 GiB. At that heap this test's JVM already reaches 2.0 GiB RSS on X12. The real app adds Spring, Camel and the broker clients, and `sdh-admin` (`-Xmx512m`) is meant to run beside it in the same container. A large file could take the pod over its limit, and Kubernetes would kill it. **Changed (revision af):** the heap is now half the limit, `MaxRAMPercentage=50`, so 1 GiB in the same 2 GiB container. That costs under 10% (above) and leaves about 1 GiB for the JVM's own memory and an operator command.
+- **Allocation:** the run allocates about 35 times the input for C-CDA and 90 times for X12, mostly short-lived buffers per section. G1 copes (under 8% in pauses even at 512 MiB), but it is the place to look if GC time grows.
 - **What the first heap trial found** (two fixes, revision ad):
   - **The archive buffered far more than a row group.** The first trial failed at 768 and 512 MiB, and even at 1536 MiB every run had 2–6 full collections. Each archive row is an 8 MiB ciphertext chunk, and Iceberg's Parquet writer first checks the row group's size after 100 rows: about 800 MiB in memory before the 128 MiB limit is checked. The writers now check after every row (`IngestTables.WRITE_OVERRIDES`, set at write time so existing tables get it too). After that, full collections are gone at every size, and throughput at 1536 MiB is unchanged.
   - **The out-of-memory error was hidden.** The runs reported Parquet's "Cannot return unfinished footer" instead. When a batch's Parquet file failed part-way, the cleanup closed it again, and Parquet refuses a second close of a failed writer; that error replaced the real one. Both cleanup paths (`Archiver` and `SectionBatchWriter`) now never throw, and `AbandonedBatchTest` checks that the original error is the one reported. In production this would have shown a misleading Parquet error for any write failure part-way through a file.
@@ -1180,7 +1222,7 @@ There are two images, built from the same jar and the same JVM options:
 | `-XX:-CreateCoredumpOnCrash`, `-XX:ErrorFile=/dev/null` | No core dump, and no `hs_err` file (it holds raw memory near the crash) |
 | `-XX:+DisableAttachMechanism` | No `jcmd`, so no heap dump on demand |
 | `-XX:-UsePerfData` | No `hsperfdata` file in `/tmp` |
-| `-XX:MaxRAMPercentage=75` | Heap sized from the container memory limit |
+| `-XX:MaxRAMPercentage=50` | Heap sized from the container memory limit: half of it. The rest is for the JVM's own memory (about 350–650 MiB: code, metaspace, thread stacks, native libraries) and for an operator command's JVM in the same container. A 2 GiB limit gives a 1 GiB heap (§13.1) |
 | `--enable-native-access=ALL-UNNAMED` | Java 25 otherwise warns when libraries load native code |
 | `-DZstdNativePath=…`, `-Dorg.xerial.snappy.lib.path/name=…` | zstd-jni (section and Parquet compression) and snappy-java (an optional Kafka codec) load from `/app/native`, unpacked at build time, instead of unpacking themselves into `/tmp`. So `/tmp` can be `noexec`. Other native code (Netty, lz4) falls back to Java when it can't load |
 
@@ -1218,7 +1260,7 @@ spec:
             - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/" }
           envFrom:
             - secretRef: { name: file-connector-env }   # keys are variable names: SDH_CRYPTO_KEYSTORE_PASSWORD, ...
-          resources: { limits: { memory: 2Gi } }
+          resources: { limits: { memory: 2Gi } }   # heap 1 GiB (MaxRAMPercentage=50, §13.1)
           volumeMounts:
             - { name: inbound, mountPath: /data/inbound }
             - { name: tmp, mountPath: /tmp }

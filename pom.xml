@@ -51,13 +51,14 @@
     <embedded-postgres.version>2.2.2</embedded-postgres.version>
     <embedded-postgres-binaries.version>18.6.0</embedded-postgres-binaries.version>
     <testcontainers.version>2.0.5</testcontainers.version>
-    <!-- Throughput test settings (-Pperf); override with -Dperf.size=4GiB etc. -->
+    <!-- Performance test settings (-Pperf, never part of a normal build; design §13.1). Override with
+         -Dperf.size=4GiB, -Dperf.formats=ccda,x12,csv etc. -->
     <perf.size>1GiB</perf.size>
-    <perf.formats>ccda,x12,csv</perf.formats>
+    <perf.formats>ccda,x12</perf.formats>
     <perf.storage>local</perf.storage>
     <perf.recipient>ec</perf.recipient>
-    <!-- The heap the connector gets in the Kubernetes sketch (§14.1); -Dperf.heap=768m to try a smaller one. -->
-    <perf.heap>1536m</perf.heap>
+    <!-- The heap the connector gets in the Kubernetes sketch (§14.1); -Dperf.heap=512m to try a smaller one. -->
+    <perf.heap>1024m</perf.heap>
     <!-- Same as Spring Boot 4.1.2 manages, so connector-core's API matches the app's SDK. -->
     <opentelemetry.version>1.62.0</opentelemetry.version>
     <!-- KMS clients (connector-kms), chosen to match what Camel already brings: AWS SDK line, gax 2.83, azure-core 1.57. -->
@@ -758,7 +759,7 @@
                   <includes>
                     <include>**/*Perf.java</include>
                   </includes>
-                  <!-- Heap as in the Kubernetes sketch (§14.1): 2 GiB limit × MaxRAMPercentage 75. -->
+                  <!-- Heap as in the Kubernetes sketch (§14.1): 2 GiB limit × MaxRAMPercentage 50. -->
                   <argLine>-Xmx${perf.heap}</argLine>
                   <systemPropertyVariables>
                     <perf.size>${perf.size}</perf.size>

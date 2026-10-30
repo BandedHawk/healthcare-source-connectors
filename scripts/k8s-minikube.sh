@@ -158,6 +158,10 @@ POD="$(k get pod -l app=file-connector -o jsonpath='{.items[0].metadata.name}')"
 check "runs as uid 10001" "10001" "$(k get pod "$POD" -o jsonpath='{.spec.securityContext.runAsUser}')"
 check "read-only root filesystem" "true" \
   "$(k get pod "$POD" -o jsonpath='{.spec.containers[0].securityContext.readOnlyRootFilesystem}')"
+# The heap the JVM picks from the README's 2Gi limit: half of it (container.options, design §14.1).
+heap="$(k exec "$POD" -- java @/app/jvm.options @/app/container.options -XX:+PrintFlagsFinal -version 2>/dev/null \
+  | awk '$2 == "MaxHeapSize" {print $4}')"
+check "heap is half the 2Gi memory limit" "1024 MiB" "$((${heap:-0} / 1048576)) MiB"
 
 echo ">> Files delivered by another pod"
 {
