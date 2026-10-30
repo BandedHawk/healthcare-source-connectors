@@ -53,7 +53,7 @@
             <high nullFlavor="NA" value="19000101099999-9999"/>
           </validTime>
         </name>
-        <administrativeGenderCode code="U" codeSystem="2.16.840.1.113883.5.1" codeSystemName="AdministrativeGenderCode" displayName="gender"/>
+        <administrativeGenderCode nullFlavor="UNK"/>
         <birthTime value="19000101"/>
         <deceasedInd value="false"/>
         <maritalStatusCode code="M" codeSystem="2.16.840.1.113883.5.2" codeSystemName="MaritalStatusCode" displayName="Married"/>
