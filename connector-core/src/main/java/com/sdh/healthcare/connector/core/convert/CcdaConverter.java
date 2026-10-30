@@ -68,6 +68,14 @@ public final class CcdaConverter implements SectionConverter {
         return MAPPING;
     }
 
+    private static ConversionException malformed(XMLStreamException e) {
+        int at = e.getLocation() == null ? 0 : Math.max(0, e.getLocation().getCharacterOffset());
+        boolean encoding = e.getNestedException() instanceof CharConversionException
+                || e.getNestedException() instanceof CharacterCodingException;
+        return new ConversionException(encoding ? ErrorCode.CONVERT_INVALID_ENCODING : ErrorCode.CONVERT_XML_MALFORMED,
+                at);
+    }
+
     private static XMLInputFactory factory() {
         XMLInputFactory f = XMLInputFactory.newFactory();
         f.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
@@ -131,11 +139,16 @@ public final class CcdaConverter implements SectionConverter {
                 }
             }
         } catch (XMLStreamException e) {
-            int at = e.getLocation() == null ? 0 : Math.max(0, e.getLocation().getCharacterOffset());
-            boolean encoding = e.getNestedException() instanceof CharConversionException
-                    || e.getNestedException() instanceof CharacterCodingException;
-            throw new ConversionException(encoding ? ErrorCode.CONVERT_INVALID_ENCODING : ErrorCode.CONVERT_XML_MALFORMED,
-                    at);
+            throw malformed(e);
+        } catch (RuntimeException e) {
+            // Woodstox (on the classpath for Hadoop's Configuration, so it's the StAX implementation found) reports
+            // some errors only when the text is read, wrapped in an unchecked WstxLazyException: an undeclared
+            // entity such as &nbsp;, for one. Without this it escaped as an unknown error and failed the whole file
+            // instead of storing this one section unconverted (found by the demo, design §15.3).
+            if (e.getCause() instanceof XMLStreamException x) {
+                throw malformed(x);
+            }
+            throw e;
         } finally {
             if (r != null) {
                 try {

@@ -7,7 +7,9 @@
        history.csv                           one row per format per run, kept until `mvn clean`
      Change a property here, or copy an action, for other settings: perf.size, perf.formats (add csv),
      perf.recipient (rsa), perf.heap. perf.storage=s3 needs the minikube environment, so run that one with
-     scripts/perf.sh. -->
+     scripts/perf.sh.
+     Demo (design §15.3): C-CDA files through the connector with its log and OpenTelemetry output in the Output window,
+     in-process or against containers in the minikube VM. Only these actions or -Pdemo run it. -->
 <actions>
     <action>
         <actionName>CUSTOM-performance-test</actionName>
@@ -70,6 +72,46 @@
             <perf.storage>local</perf.storage>
             <perf.recipient>ec</perf.recipient>
             <perf.heap>512m</perf.heap>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-demo</actionName>
+        <displayName>Demo (in-process)</displayName>
+        <!-- Demonstration (design §15.3): C-CDA files delivered one by one, with the connector's log, audit events and
+             OpenTelemetry traces and metrics in the Output window, a failure mix, then the converted documents read
+             back. One JVM, no Docker, under a minute. Output: file-connector/target/demo/. -->
+        <goals>
+            <goal>-pl</goal>
+            <goal>file-connector</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>demo</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <demo.stack>local</demo.stack>
+            <demo.pause>3s</demo.pause>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-demo-vm</actionName>
+        <displayName>Demo (full stack in the VM)</displayName>
+        <!-- The same demo as deployed: Postgres, SeaweedFS (S3) and Kafka as containers in the sdh-it minikube VM,
+             which is started if needed and stopped afterwards (demo.stop-vm=false keeps it running). A few minutes. -->
+        <goals>
+            <goal>-pl</goal>
+            <goal>file-connector</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>demo</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <demo.stack>vm</demo.stack>
+            <demo.pause>3s</demo.pause>
+            <demo.stop-vm>true</demo.stop-vm>
         </properties>
     </action>
     <action>

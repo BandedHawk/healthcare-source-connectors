@@ -59,6 +59,11 @@
     <perf.recipient>ec</perf.recipient>
     <!-- The heap the connector gets in the Kubernetes sketch (§14.1); -Dperf.heap=512m to try a smaller one. -->
     <perf.heap>1024m</perf.heap>
+    <!-- Demo settings (-Pdemo, never part of a normal build; design §15.3): local (one JVM) or vm (minikube). -->
+    <demo.stack>local</demo.stack>
+    <demo.pause>3s</demo.pause>
+    <demo.metric-interval>15s</demo.metric-interval>
+    <demo.stop-vm>true</demo.stop-vm>
     <!-- Same as Spring Boot 4.1.2 manages, so connector-core's API matches the app's SDK. -->
     <opentelemetry.version>1.62.0</opentelemetry.version>
     <!-- KMS clients (connector-kms), chosen to match what Camel already brings: AWS SDK line, gax 2.83, azure-core 1.57. -->
@@ -766,6 +771,49 @@
                     <perf.formats>${perf.formats}</perf.formats>
                     <perf.storage>${perf.storage}</perf.storage>
                     <perf.recipient>${perf.recipient}</perf.recipient>
+                  </systemPropertyVariables>
+                  <trimStackTrace>false</trimStackTrace>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
+      <!-- A demonstration of the connector (design §15.3): C-CDA files delivered one by one, with the log, audit
+           events and OpenTelemetry output on the console, then the converted documents read back. Only this profile
+           runs *Demo.java; unit tests are skipped. ./mvnw -Pdemo -pl file-connector -am verify [-Ddemo.stack=vm] -->
+      <id>demo</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <skip>true</skip>
+            </configuration>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>demo</id>
+                <goals>
+                  <goal>integration-test</goal>
+                  <goal>verify</goal>
+                </goals>
+                <configuration>
+                  <includes>
+                    <include>**/*Demo.java</include>
+                  </includes>
+                  <failIfNoTests>false</failIfNoTests>
+                  <systemPropertyVariables>
+                    <demo.stack>${demo.stack}</demo.stack>
+                    <demo.pause>${demo.pause}</demo.pause>
+                    <demo.metric-interval>${demo.metric-interval}</demo.metric-interval>
+                    <demo.stop-vm>${demo.stop-vm}</demo.stop-vm>
                   </systemPropertyVariables>
                   <trimStackTrace>false</trimStackTrace>
                 </configuration>

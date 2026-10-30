@@ -45,6 +45,11 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-30 (ag): a demonstration of the connector (§15.3).
+- **Running it:** `-Pdemo`, or two NetBeans actions, in-process or against Postgres, SeaweedFS and Kafka in the minikube VM.
+- **What it shows:** C-CDA files delivered one at a time, with the connector's log, audit events, and OpenTelemetry traces and metrics on the console, through the production PHI filters. The files fail in three ways (unsupported encoding, a file cut off part-way, a document that can't be converted), and the converted documents are read back as a consumer would.
+- **Bug found and fixed:** a C-CDA document with an undeclared entity such as `&nbsp;` failed its whole file with `STORAGE_FAILED`, instead of being stored unconverted. Woodstox reports that error as an unchecked exception, which the converter didn't catch (§6.4).
+
 Revision 2026-10-30 (af): the container heap is half the memory limit instead of 75% (`MaxRAMPercentage=50`, §14.1). In the README's 2 GiB container, the heap is now 1 GiB instead of 1.5 GiB.
 - **Why:** at a 1.5 GiB heap, process memory reached 2.0 GiB in the performance test alone, before Spring, Camel and an operator command's JVM, so a large file could get the pod killed (§13.1).
 - **Cost:** under 10% throughput.
@@ -367,6 +372,7 @@ As in Google's output, mixed content loses the interleaving of text and child el
 - `CcdaConverterTest` converts Google's published Synthea inputs and compares the result with Google's expected JSON, after applying Google's two deletions. One pair always runs; all 13 run with `-Dccda.google.dir`, and all match.
 - `CcdaSamplesTest` converts four real-world documents (USCDI v3 samples, a master CCD, and a de-identified Epic inpatient CCD) and checks that every attribute value and every piece of text in the XML appears in the JSON.
 - DTDs and external entities are refused.
+- An undeclared entity (such as `&nbsp;`) is `CONVERT_XML_MALFORMED`. The StAX parser on the classpath is Woodstox (Hadoop's `Configuration` needs it), and it reports some errors only when the text is read, as an unchecked `WstxLazyException`; the converter treats that like any other XML error. Before this fix, found by the demo (§15.3), such a document failed its whole file with `STORAGE_FAILED` instead of being stored unconverted (`CcdaConverterTest.undeclaredEntityIsAConversionFailure`).
 
 **Failures stay with the section, not the file.** A section that can't be converted is stored in its original form (as split), in the same `sections` table and commit, with `error_code` set. It is announced with `section.failed` (§10.1), and the file carries on and completes. Codes:
 - `CONVERT_CSV_FIELD_COUNT`: the record's field count differs from the header's;
@@ -1596,6 +1602,41 @@ The connector's log is saved to `file-connector/target/k8s-minikube.log`. A run 
 - **Test isolation:** minikube's hostpath provisioner reuses a claim's directory, contents and all, for the same namespace and claim name. The script empties the inbound volume before each run.
 
 **Not covered:** managed clusters (EKS, AKS, GKE) and their storage classes; NetworkPolicies; a ReadWriteMany volume shared with a delivery service on another node; KMS and object-storage credentials from workload identity.
+
+### 15.3 Demonstration (`-Pdemo`)
+
+A demonstration of the connector at work, for showing people rather than testing: C-CDA files are delivered one at a time, and the console shows the connector's log, its audit events, and its OpenTelemetry traces and metrics as each goes through. At the end, a downstream consumer reads the converted documents back and excerpts are shown.
+
+**Running it:** `./mvnw -Pdemo -pl file-connector -am verify`, or the NetBeans actions (root project > Run Maven). Only `-Pdemo` includes `*Demo.java`, so no normal build, `-Pit` or `-Pperf` run runs it.
+- **Demo (in-process):** one JVM, no Docker, under a minute. Embedded Postgres for the lease and JDBC catalog, Iceberg tables on local disk under `file-connector/target/demo/warehouse/`, and a Camel SEDA queue standing in for the broker.
+- **Demo (full stack in the VM):** `-Ddemo.stack=vm`, about a minute and a half once the images are in the VM. Postgres, SeaweedFS (through `S3FileIO`) and Kafka as containers in the `sdh-it` minikube VM, which is stopped afterwards (`-Ddemo.stop-vm=false` keeps it).
+  - **From NetBeans:** NetBeans starts Maven without the VM's `DOCKER_HOST`, and Testcontainers only reads that from the environment or `~/.testcontainers.properties`. So the demo asks `scripts/minikube-env.sh` for the address and certificates (starting the VM if needed), and passes them to its own Testcontainers strategy, `MinikubeDockerStrategy`. It is registered through `META-INF/services` in the test resources, and applies only when the demo has set its system properties, so the integration tests don't see it.
+- **Settings:** `demo.pause` between files (3 s), `demo.metric-interval` (15 s).
+
+**The files** (`DemoFiles`), built from the synthetic and de-identified samples in `connector-core/src/test/resources/ccda/`, so no PHI. A sample used in more than one file gets a tag in its title in each, because section IDs are keyed hashes of the content (§7.3): the same document in two files would be one section to a consumer.
+
+| File | Content | Outcome |
+|---|---|---|
+| `01-synthea-patient.xml`, `02-alice-newman.xml` | one document each | completed, 1 section |
+| `03-clinic-batch.xml` | 3 documents in a `<batch>` wrapper | completed, 3 sections |
+| `04-batch-with-bad-document.xml` | 3 documents; the middle one has an undeclared `&nbsp;` | completed, 3 sections, 1 stored unconverted (`CONVERT_XML_MALFORMED`) |
+| `05-truncated-batch.xml` | a complete document, then one cut off part-way | failed, `PARSE_UNBALANCED_ELEMENT`; the first document stays stored (one commit per document in the demo) |
+| `06-utf16-document.xml` | a document in UTF-16 | failed at byte 0, `PARSE_XML_UNSUPPORTED_ENCODING` |
+| `07-epic-inpatient.xml` | one document | completed: the connector carries on after failures |
+
+**What the console shows,** for each file:
+- the file's name, what should happen, and its delivery (written under a hidden name, then renamed);
+- the connector's log lines and audit events (`file.discovered`, `file.started`, `batch.committed`, `section.failed`, `file.failing`, `file.archived`, `file.completed`), each with its trace and span IDs;
+- the result: the file ID, the finished-file record from `completed/` or `failed/`, and whether it was as expected;
+- `[otel trace]`: the file's trace as a tree (`ingest.file` > `split.batch` > `storage.commit`, `publish.batch`, `archive`) with durations and attributes;
+- `[otel log]`: the audit events as OpenTelemetry log records;
+- `[otel metrics]` every 15 s: the `sdh.*` metrics as running totals.
+
+The console exporters are wrapped in the production filters (`AllowListSpanExporter`, `AuditOnlyLogRecordExporter`), so what's printed is exactly what a collector would get. They replace the OTLP exporters, which only exist when an endpoint is set.
+
+**At the end:** a summary table, then the downstream read-back. Every message is decoded with `connector-queue-reader` (decrypted, signature checked), and every section is read back out of the Iceberg tables. Converted documents are pretty-printed to `target/demo/output/<file>/section-<n>.json`, with a 16-line excerpt of each on the console; the unconverted one is kept as `section-1.original.xml`. Repeated message IDs are dropped, as a consumer would: the failing file re-announces its committed section (`publish.republish`), which is at-least-once delivery working as designed.
+
+**What it found:** a document with an undeclared entity failed its whole file instead of being stored unconverted (§6.4); fixed.
 
 ## 16. Risks and verification items
 

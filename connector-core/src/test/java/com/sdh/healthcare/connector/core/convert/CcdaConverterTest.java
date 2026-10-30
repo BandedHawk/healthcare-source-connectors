@@ -211,4 +211,17 @@ class CcdaConverterTest {
                 .isInstanceOfSatisfying(ConversionException.class,
                         e -> assertThat(e.code()).isEqualTo(ErrorCode.CONVERT_XML_MALFORMED));
     }
+
+    /**
+     * An undeclared entity is only reported when the text is read, and Woodstox does that with an unchecked
+     * exception. It must still be a conversion failure (the section is stored unconverted), not an unknown error that
+     * fails the whole file. Found by the demo (design §15.3).
+     */
+    @Test
+    void undeclaredEntityIsAConversionFailure() {
+        String nbsp = "<ClinicalDocument xmlns=\"urn:hl7-org:v3\"><title>Summary&nbsp;(amended)</title></ClinicalDocument>";
+        assertThatThrownBy(() -> CONVERTER.convert(nbsp.getBytes(UTF_8), CFG))
+                .isInstanceOfSatisfying(ConversionException.class,
+                        e -> assertThat(e.code()).isEqualTo(ErrorCode.CONVERT_XML_MALFORMED));
+    }
 }
