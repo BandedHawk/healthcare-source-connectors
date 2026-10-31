@@ -146,7 +146,8 @@ public final class ConnectorRuntime implements AutoCloseable {
                     .withWorkers(workers)
                     .withRetry(retry)
                     .withConversion(p.split().convert() ? ConverterRegistry.load() : ConverterRegistry.none(),
-                            p.split().convertMaxBytes().toBytes());
+                            p.split().convertMaxBytes().toBytes())
+                    .withConvertMemory(p.split().convertMemory() == null ? 0 : p.split().convertMemory().toBytes());
             configureBroker(camel, queueType, p.queue());
             ClosablePublisher publisher = Publishers.create(camel, queueType, queueUri);
             Clock clock = Clock.systemUTC();

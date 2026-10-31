@@ -130,6 +130,8 @@ public final class IngestPipeline implements AutoCloseable {
     private final ExecutorService publishing;
     /** This format's JSON converter (design §6.4); null when sections are stored as split. */
     private final SectionConverter converter;
+    /** Heap for conversions running at once (design §6.4). */
+    private final ConversionBudget budget;
     private PipelineHooks hooks = PipelineHooks.NONE;
 
     public IngestPipeline(PipelineSettings settings, Table sectionsTable, FencedCommitter committer, KeyProvider keys,
@@ -153,6 +155,7 @@ public final class IngestPipeline implements AutoCloseable {
         if (converter != null) {
             converter.validate(settings.split());
         }
+        this.budget = new ConversionBudget(settings.effectiveConvertMemoryBytes());
         this.workers = Executors.newFixedThreadPool(settings.encryptWorkers(),
                 Thread.ofPlatform().name("sdh-encrypt-", 0).daemon(true).factory());
         this.sealers = Executors.newFixedThreadPool(settings.encryptWorkers(),
@@ -338,7 +341,7 @@ public final class IngestPipeline implements AutoCloseable {
                         return new Ready(writer.encrypt(fileId, seq, format, section, section.readAll(src),
                                 Representation.raw(format), skip, 0));
                     }
-                    return prepare(seq, section, section.readAll(src));
+                    return converting(len, () -> prepare(seq, section, section.readAll(src)));
                 }));
                 while (pending.size() > maxPending) {
                     store(get(pending.poll()));
@@ -351,7 +354,7 @@ public final class IngestPipeline implements AutoCloseable {
                 } else if (skipReason(len) != null) {
                     writer.add(fileId, seq, format, section, src, Representation.raw(format), skipReason(len), 0);
                 } else {
-                    store(prepare(seq, section, section.readAll(src)));
+                    store(converting(len, () -> prepare(seq, section, section.readAll(src))));
                 }
             }
             lastSeq = seq;
@@ -359,6 +362,19 @@ public final class IngestPipeline implements AutoCloseable {
             bytes += len;
             count++;
             Telemetry.get().bytesRead(section.sourceLength(), "split");
+        }
+
+        /**
+         * Reads and converts a section once there is room in the conversion budget for it, so large sections
+         * converting together can't exhaust the heap; the room is given back once the section is ready to write.
+         */
+        private Prepared converting(long len, java.util.concurrent.Callable<Prepared> work) throws Exception {
+            int taken = budget.acquire((long) Math.ceil(len * converter.memoryFactor()));
+            try {
+                return work.call();
+            } finally {
+                budget.release(taken);
+            }
         }
 
         /** Why a section of this length isn't converted, or null if it is. */
@@ -401,6 +417,15 @@ public final class IngestPipeline implements AutoCloseable {
                 rep = Representation.raw(format);
                 error = e.code();
                 position = e.position();
+            } catch (RuntimeException e) {
+                // A converter bug: fail the section, not the whole file (which would also be blamed on storage).
+                // Only the class name is logged; a message could quote the section.
+                LOG.warn("convert.unexpected fileId={} seq={} format={} error={}", fileId, seq, format,
+                        e.getClass().getName());
+                stored = raw;
+                rep = Representation.raw(format);
+                error = ErrorCode.CONVERT_FAILED;
+                position = 0;
             }
             if (SectionCrypto.chunkCount(stored.length) == 1) {
                 return new Ready(writer.encrypt(fileId, seq, format, section, stored, rep, error, position));

@@ -10,6 +10,7 @@ package com.sdh.healthcare.connector.file.admin;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseStatus;
+import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.core.storage.ArchiveCheckpoint;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import java.io.IOException;
@@ -122,6 +123,11 @@ final class StatusCommand implements AdminCommand {
         }
         if (c.state().inProgress()) {
             b.append(String.format("%n%-21s in progress: the connector resumes it on start", ""));
+        }
+        if (c.state() == Checkpoint.State.SPLITTING && c.restarts() > 0) {
+            b.append(String.format("%n%-21s restarted %d time(s) in a row without progress; at %d the batch is"
+                    + " stored unconverted, at %d the file fails", "", c.restarts(),
+                    IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS, IngestPipeline.FAIL_AFTER_RESTARTS));
         }
         return b.toString();
     }

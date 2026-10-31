@@ -74,5 +74,11 @@ public enum ErrorCode {
      * converting one of the batch's sections may be what stops it (by running it out of memory, say). Every
      * section of that batch is stored in its original form with this code (design §9.2).
      */
-    CONVERT_SKIPPED
+    CONVERT_SKIPPED,
+    /**
+     * The converter failed in a way it doesn't report itself: an unexpected exception, a bug in the converter
+     * rather than a problem it recognised in the section. The section is stored in its original form like any other
+     * conversion failure, and the file carries on (design §6.4).
+     */
+    CONVERT_FAILED
 }

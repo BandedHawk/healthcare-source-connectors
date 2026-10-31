@@ -67,4 +67,33 @@ class JsonWriterTest {
         byte[] json = new JsonWriter(0).beginArray().value(List.of("a\uD83D")).value("\uDE00").endArray().toBytes();
         assertThat(new String(json, UTF_8)).isEqualTo("[\"a?\",\"?\"]");
     }
+
+    /** UTF-8 bytes written as they are give exactly what writing the decoded text gives. */
+    @Test
+    void utf8BytesAreWrittenAsTheirDecodedText() {
+        String text = "plain \" \\ \n\r\t\b\f \u0000\u001f é € \uD83D\uDE00 end";
+        byte[] bytes = text.getBytes(UTF_8);
+        assertThat(new JsonWriter(0).valueUtf8(bytes, 0, bytes.length).toBytes()).isEqualTo(one(text));
+        byte[] pieces = new JsonWriter(0).beginString().utf8(bytes, 0, 7).utf8(bytes, 7, bytes.length).endString()
+                .toBytes();
+        assertThat(pieces).isEqualTo(one(text));
+    }
+
+    /**
+     * From {@link JsonWriter#EXACT_SIZE_FROM}, the JSON is counted first and then written into an array of exactly
+     * its size; the bytes are the same as written the ordinary way.
+     */
+    @Test
+    void largeJsonIsBuiltAtExactlyItsSize() throws Exception {
+        String big = "x\u00e9\uD83D\uDE00\"\n".repeat(200_000);
+        byte[] bytes = big.getBytes(UTF_8);
+        JsonWriter.Body body = w -> {
+            w.beginArray().value(big).valueUtf8(bytes, 0, bytes.length).value(List.of("a", big)).literal("1");
+            w.endArray();
+        };
+        byte[] small = JsonWriter.build(16, body);
+        byte[] exact = JsonWriter.build(JsonWriter.EXACT_SIZE_FROM, body);
+        assertThat(exact).isEqualTo(small);
+        assertThat(exact.length).isGreaterThan(JsonWriter.EXACT_SIZE_FROM);
+    }
 }

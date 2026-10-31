@@ -27,6 +27,10 @@ import java.util.Objects;
  *                          section as split
  * @param convertMaxBytes   sections larger than this aren't converted (they'd need too much memory) and are stored
  *                          in their original form as failed, {@code CONVERT_TOO_LARGE} (default 64 MiB)
+ * @param convertMemoryBytes heap that conversions running at once may use between them, by each converter's
+ *                          {@link com.sdh.healthcare.connector.core.convert.SectionConverter#memoryFactor()}; a
+ *                          conversion that doesn't fit waits for others to finish. 0 (the default) means
+ *                          {@link #DEFAULT_CONVERT_MEMORY_SHARE} of the maximum heap
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -43,7 +47,11 @@ public record PipelineSettings(
         int encryptWorkers,
         RetryPolicy retry,
         ConverterRegistry converters,
-        long convertMaxBytes) {
+        long convertMaxBytes,
+        long convertMemoryBytes) {
+
+    /** The share of the maximum heap that conversions may use when {@code convertMemoryBytes} is 0. */
+    public static final double DEFAULT_CONVERT_MEMORY_SHARE = 0.4;
 
     public PipelineSettings {
         Objects.requireNonNull(connectorId);
@@ -54,39 +62,53 @@ public record PipelineSettings(
         Objects.requireNonNull(commitMaxInterval);
         Objects.requireNonNull(retry);
         Objects.requireNonNull(converters);
-        if (commitMaxSections < 1 || commitMaxBytes < 1 || encryptWorkers < 1 || convertMaxBytes < 1) {
-            throw new IllegalArgumentException("Commit thresholds and worker count must be positive");
+        if (commitMaxSections < 1 || commitMaxBytes < 1 || encryptWorkers < 1 || convertMaxBytes < 1
+                || convertMemoryBytes < 0) {
+            throw new IllegalArgumentException(
+                    "Commit thresholds, worker count and conversion limits must be positive");
         }
     }
 
     public static PipelineSettings defaults(String connectorId, String format, String catalogName, String kekRef) {
         return new PipelineSettings(connectorId, format, SplitConfig.defaults(format), catalogName, kekRef, 10_000,
                 512L << 20, Duration.ofSeconds(30), Runtime.getRuntime().availableProcessors(), RetryPolicy.DEFAULT,
-                ConverterRegistry.load(), 64L << 20);
+                ConverterRegistry.load(), 64L << 20, 0);
     }
 
     public PipelineSettings withSplit(SplitConfig s) {
         return new PipelineSettings(connectorId, format, s, catalogName, kekRef, commitMaxSections, commitMaxBytes,
-                commitMaxInterval, encryptWorkers, retry, converters, convertMaxBytes);
+                commitMaxInterval, encryptWorkers, retry, converters, convertMaxBytes, convertMemoryBytes);
     }
 
     public PipelineSettings withCommit(int maxSections, long maxBytes, Duration maxInterval) {
         return new PipelineSettings(connectorId, format, split, catalogName, kekRef, maxSections, maxBytes,
-                maxInterval, encryptWorkers, retry, converters, convertMaxBytes);
+                maxInterval, encryptWorkers, retry, converters, convertMaxBytes, convertMemoryBytes);
     }
 
     public PipelineSettings withWorkers(int n) {
         return new PipelineSettings(connectorId, format, split, catalogName, kekRef, commitMaxSections,
-                commitMaxBytes, commitMaxInterval, n, retry, converters, convertMaxBytes);
+                commitMaxBytes, commitMaxInterval, n, retry, converters, convertMaxBytes, convertMemoryBytes);
     }
 
     public PipelineSettings withRetry(RetryPolicy r) {
         return new PipelineSettings(connectorId, format, split, catalogName, kekRef, commitMaxSections,
-                commitMaxBytes, commitMaxInterval, encryptWorkers, r, converters, convertMaxBytes);
+                commitMaxBytes, commitMaxInterval, encryptWorkers, r, converters, convertMaxBytes, convertMemoryBytes);
     }
 
     public PipelineSettings withConversion(ConverterRegistry c, long maxBytes) {
         return new PipelineSettings(connectorId, format, split, catalogName, kekRef, commitMaxSections,
-                commitMaxBytes, commitMaxInterval, encryptWorkers, retry, c, maxBytes);
+                commitMaxBytes, commitMaxInterval, encryptWorkers, retry, c, maxBytes, convertMemoryBytes);
+    }
+
+    /** @param bytes heap for conversions running at once; 0 for the default share of the heap */
+    public PipelineSettings withConvertMemory(long bytes) {
+        return new PipelineSettings(connectorId, format, split, catalogName, kekRef, commitMaxSections,
+                commitMaxBytes, commitMaxInterval, encryptWorkers, retry, converters, convertMaxBytes, bytes);
+    }
+
+    /** {@code convertMemoryBytes}, or the default share of the maximum heap when it is 0. */
+    public long effectiveConvertMemoryBytes() {
+        return convertMemoryBytes > 0 ? convertMemoryBytes
+                : (long) (Runtime.getRuntime().maxMemory() * DEFAULT_CONVERT_MEMORY_SHARE);
     }
 }

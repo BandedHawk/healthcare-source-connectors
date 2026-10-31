@@ -11,8 +11,6 @@ import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.builtin.CsvSplitter;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * CSV record → JSON array of strings, by field position (design §6.4, mapping {@code csv-row/1}):
@@ -44,105 +42,126 @@ public final class CsvConverter implements SectionConverter {
         return MAPPING;
     }
 
+    /** Measured: the section, its JSON (about the same size) and a little more: 160 MiB of heap for a 64 MB record. */
+    @Override
+    public double memoryFactor() {
+        return 2.5;
+    }
+
     @Override
     public byte[] convert(byte[] section, SplitConfig cfg) throws ConversionException {
-        char delim = CsvSplitter.delimiter(cfg);
+        // The delimiter is ASCII (the splitter insists), as are quotes and line breaks, and in valid UTF-8 an
+        // ASCII byte is always that character, so the record is parsed on its bytes and never decoded.
+        byte delim = (byte) CsvSplitter.delimiter(cfg);
         boolean header = cfg.booleanOption("csv.header", false);
         int start = Text.bom(section, 0);
-        String text = Text.decode(section, start, section.length - start, StandardCharsets.UTF_8);
-        Parser p = new Parser(text, delim, start);
-        List<String> first = p.record();
-        List<String> record = first;
+        Text.check(section, start, section.length - start, StandardCharsets.UTF_8);
+        Parser p = new Parser(section, delim, start);
+        int first = p.record(null);
+        int data = start;
+        int record = first;
         if (header) {
-            record = p.record();
-            if (record == null) {
+            data = p.i;
+            record = p.record(null);
+            if (record < 0) {
                 throw new ConversionException(ErrorCode.CONVERT_CSV_MALFORMED, section.length);
             }
-            if (record.size() != first.size()) {
+            if (record != first) {
                 throw new ConversionException(ErrorCode.CONVERT_CSV_FIELD_COUNT, p.recordStart);
             }
         }
-        if (record == null || p.record() != null) {
+        if (record < 0 || p.record(null) >= 0) {
             // The splitter hands over exactly one record (after the header); anything else isn't a section of ours.
             throw new ConversionException(ErrorCode.CONVERT_CSV_MALFORMED, p.recordStart);
         }
-        JsonWriter w = new JsonWriter(section.length + 16);
-        w.beginArray();
-        for (String field : record) {
-            w.value(field);
-        }
-        w.endArray();
-        return w.toBytes();
+        int dataStart = data;
+        return JsonWriter.build(section.length + 16, w -> {
+            w.beginArray();
+            new Parser(section, delim, dataStart).record(w);
+            w.endArray();
+        });
     }
 
-    /** RFC 4180 records from decoded text. Positions are reported as (approximate) byte offsets in the section. */
+    /** RFC 4180 records from a section's bytes. Positions are byte offsets in the section. */
     private static final class Parser {
-        private final String s;
-        private final char delim;
-        private final int base;
-        private int i;
+        private final byte[] b;
+        private final byte delim;
+        int i;
         int recordStart;
 
-        Parser(String s, char delim, int base) {
-            this.s = s;
+        Parser(byte[] b, byte delim, int start) {
+            this.b = b;
             this.delim = delim;
-            this.base = base;
+            this.i = start;
         }
 
-        /** The next record, or null at the end. */
-        List<String> record() throws ConversionException {
-            if (i >= s.length()) {
-                return null;
+        /**
+         * Reads the next record, writing each field as a JSON string if {@code w} isn't null.
+         *
+         * @return the record's number of fields, or -1 at the end of the section
+         */
+        int record(JsonWriter w) throws ConversionException {
+            if (i >= b.length) {
+                return -1;
             }
-            recordStart = base + i;
-            List<String> fields = new ArrayList<>();
-            StringBuilder f = new StringBuilder();
+            recordStart = i;
+            int fields = 0;
             while (true) {
-                if (i < s.length() && s.charAt(i) == '"') {
+                if (i < b.length && b[i] == '"') {
                     i++;
+                    int run = i;
+                    if (w != null) {
+                        w.beginString();
+                    }
                     while (true) {
-                        if (i >= s.length()) {
-                            throw new ConversionException(ErrorCode.CONVERT_CSV_MALFORMED, base + i);
+                        if (i >= b.length) {
+                            throw new ConversionException(ErrorCode.CONVERT_CSV_MALFORMED, i);
                         }
-                        char c = s.charAt(i++);
-                        if (c == '"') {
-                            if (i < s.length() && s.charAt(i) == '"') {
-                                f.append('"');
-                                i++;
+                        if (b[i++] == '"') {
+                            if (i < b.length && b[i] == '"') {
+                                // "" is a quote: keep the first, skip the second
+                                if (w != null) {
+                                    w.utf8(b, run, i);
+                                }
+                                run = ++i;
                             } else {
+                                if (w != null) {
+                                    w.utf8(b, run, i - 1).endString();
+                                }
                                 break;
                             }
-                        } else {
-                            f.append(c);
                         }
                     }
                     // After a closing quote only a delimiter or the end of the record may follow.
-                    if (i < s.length() && s.charAt(i) != delim && !atEol()) {
-                        throw new ConversionException(ErrorCode.CONVERT_CSV_MALFORMED, base + i);
+                    if (i < b.length && b[i] != delim && !atEol()) {
+                        throw new ConversionException(ErrorCode.CONVERT_CSV_MALFORMED, i);
                     }
                 } else {
-                    while (i < s.length() && s.charAt(i) != delim && !atEol()) {
-                        f.append(s.charAt(i++));
+                    int from = i;
+                    while (i < b.length && b[i] != delim && !atEol()) {
+                        i++;
+                    }
+                    if (w != null) {
+                        w.valueUtf8(b, from, i);
                     }
                 }
-                fields.add(f.toString());
-                f.setLength(0);
-                if (i >= s.length()) {
+                fields++;
+                if (i >= b.length) {
                     return fields;
                 }
-                if (s.charAt(i) == delim) {
+                if (b[i] == delim) {
                     i++;
                     continue;
                 }
                 // End of record: CRLF or LF.
-                i += s.charAt(i) == '\r' ? 2 : 1;
+                i += b[i] == '\r' ? 2 : 1;
                 return fields;
             }
         }
 
         private boolean atEol() {
-            char c = s.charAt(i);
-            return c == '\n' || (c == '\r' && i + 1 < s.length() && s.charAt(i + 1) == '\n');
+            byte c = b[i];
+            return c == '\n' || (c == '\r' && i + 1 < b.length && b[i + 1] == '\n');
         }
     }
 }

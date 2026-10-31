@@ -80,6 +80,20 @@ public interface SectionConverter
     }
 
     /**
+     * The most heap {@link #convert} needs at once, as a multiple of the section's size, the section itself
+     * included. The pipeline converts several sections at a time, and uses this to keep them within the heap it
+     * sets aside for conversion: a large section waits until there is room for it. Overestimating only makes large
+     * sections wait sooner; underestimating risks running out of memory. The default, 4, is the most any built-in
+     * converter needs.
+     *
+     * @return the peak heap as a multiple of the section's size; at least 1
+     */
+    default double memoryFactor()
+    {
+        return 4;
+    }
+
+    /**
      * Converts one section, as the splitter produced it, into JSON. Called by
      * the pipeline's worker threads, possibly for several sections at once,
      * once for each section of a file in this converter's format.

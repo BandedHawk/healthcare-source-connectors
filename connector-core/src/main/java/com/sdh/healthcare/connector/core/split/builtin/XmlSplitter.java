@@ -61,6 +61,16 @@ public class XmlSplitter implements SectionSplitter
     private static final byte[] PI_END = "?>".getBytes(UTF_8);
     private static final byte[] XML_DECL = "<?xml".getBytes(UTF_8);
     private static final int MAX_CONTEXT_TAG = 1 << 20;
+    /**
+     * The most elements a boundary element may be nested in. Every open
+     * ancestor is held in memory (its start tag, for the namespaces it
+     * declares) and its offset goes into each section's resume point, which is
+     * saved in the checkpoint, so without a limit a file of nested wrappers
+     * could exhaust memory or make the checkpoint huge. Real documents nest
+     * their boundary one to three deep. Deeper nesting fails the file with
+     * {@code PARSE_XML_MALFORMED}, as the FHIR splitter does for JSON.
+     */
+    static final int MAX_DEPTH = 128;
 
     @Override
     public String format()
@@ -199,6 +209,10 @@ public class XmlSplitter implements SectionSplitter
             {
                 throw new SplitException(ErrorCode.RESUME_INVALID, 0);
             }
+            if (from.context().size() > MAX_DEPTH)
+            {
+                throw new SplitException(ErrorCode.RESUME_INVALID, from.offset());
+            }
             sc = new ByteScanner(src, startAt, cfg.readBufferBytes());
         }
 
@@ -244,6 +258,18 @@ public class XmlSplitter implements SectionSplitter
                 }
                 if (!tag.selfClosing())
                 {
+                    if (outer.size() >= MAX_DEPTH)
+                    {
+                        throw new SplitException(ErrorCode.PARSE_XML_MALFORMED,
+                                at);
+                    }
+                    if (tag.bytes().length > MAX_CONTEXT_TAG)
+                    {
+                        // A resume re-reads ancestors only up to this size, so
+                        // a larger one would fail every restart instead.
+                        throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
+                                at);
+                    }
                     outer.add(tag);
                 }
             }

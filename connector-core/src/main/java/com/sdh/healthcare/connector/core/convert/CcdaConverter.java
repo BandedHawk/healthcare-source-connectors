@@ -135,6 +135,19 @@ public final class CcdaConverter implements SectionConverter
     }
 
     /**
+     * Measured: the document, its text again in the tree, and its JSON (about
+     * its size): 208 MiB of heap for a 64 MB document, with either StAX
+     * parser.
+     *
+     * @return 3.5
+     */
+    @Override
+    public double memoryFactor()
+    {
+        return 3.5;
+    }
+
+    /**
      * Turns the XML parser's error into the converter's own
      * {@link ConversionException}, which is how {@link #convert} reports a
      * document it can't read. The section is then stored unconverted, with the
@@ -361,10 +374,13 @@ public final class CcdaConverter implements SectionConverter
             ConversionException
     {
         CdaModel model = CdaModel.INSTANCE;
-        // Written in a call of its own, so that by the time the JSON is copied
-        // to its exact size, nothing refers to the tree any more and its
-        // memory (as much as the document's text) can be reclaimed.
-        return write(model, read(model, section), section.length).toBytes();
+        Node root = read(model, section);
+        // About the size of the document: JSON drops the end tags, and the
+        // sixteenth covers escaping (a large base64 body adds two bytes per
+        // line for its \n). A large document is written twice, first only to
+        // count, so the JSON is held once, in an array of exactly its size.
+        return JsonWriter.build(section.length + (section.length >> 4) + 64,
+                w -> write(model, root, w));
     }
 
     /**
@@ -493,21 +509,15 @@ public final class CcdaConverter implements SectionConverter
      * Writes a tree read by {@link #read} as JSON, the second stage of
      * {@link #convert}: one object with the document element under its key.
      *
-     * @param model the CDA model, to look up each element's type
-     * @param root  the document element
-     * @param size  the size of the section in bytes, to size the output
-     * @return the writer holding the JSON
+     * @param model  the CDA model, to look up each element's type
+     * @param root   the document element
+     * @param writer where the JSON is written
      */
-    private static JsonWriter write(CdaModel model, Node root, int size)
+    private static void write(CdaModel model, Node root, JsonWriter writer)
     {
-        // About the size of the document: JSON drops the end tags, and the
-        // sixteenth covers escaping (a large base64 body adds two bytes per
-        // line for its \n).
-        JsonWriter writer = new JsonWriter(size + (size >> 4) + 64);
         writer.beginObject().key(root.key);
         emit(model, root, writer);
         writer.endObject();
-        return writer;
     }
 
     /**

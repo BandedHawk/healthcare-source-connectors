@@ -21,7 +21,9 @@ import java.nio.charset.StandardCharsets;
  * spaces are kept (including the ISA's fixed-width padding), so downstream can map by position. Composite elements
  * and repetitions stay as one string ({@code "HC:99213:25"}); the separators are in the ISA (ISA16, ISA11).
  * Delimiters are read from the ISA; line breaks after a segment terminator are not part of the data. Input must be
- * UTF-8 (X12's character sets are subsets of it).
+ * UTF-8 (X12's character sets are subsets of it), and the separators single ASCII characters
+ * ({@code CONVERT_X12_MALFORMED} otherwise). The section is worked on as bytes and never decoded into a string, so
+ * error positions are byte offsets.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -39,63 +41,102 @@ public final class X12Converter implements SectionConverter {
         return MAPPING;
     }
 
+    /** Measured: the section and its JSON, about 2.4 times its size: 224 MiB of heap for a 64 MB interchange. */
+    @Override
+    public double memoryFactor() {
+        return 3.5;
+    }
+
     @Override
     public byte[] convert(byte[] section, SplitConfig cfg) throws ConversionException {
-        String s = Text.decode(section, 0, section.length, StandardCharsets.UTF_8);
-        int i = skipBreaks(s, 0);
-        if (!s.startsWith("ISA", i) || s.length() < i + 4) {
-            throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, i);
+        Text.check(section, 0, section.length, StandardCharsets.UTF_8);
+        int first = skipBreaks(section, 0);
+        if (!startsWith(section, first, ISA) || section.length < first + 4) {
+            throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, first);
         }
         // ISA is fixed-format: element separator after "ISA", terminator right after ISA16 (one character).
-        char es = s.charAt(i + 3);
-        int p = i + 3;
+        byte es = section[first + 3];
+        int p = first + 3;
         for (int seps = 0; seps < 16; p++) {
-            if (p >= s.length()) {
-                throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, i);
+            if (p >= section.length) {
+                throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, first);
             }
-            if (s.charAt(p) == es) {
+            if (section[p] == es) {
                 seps++;
             }
         }
-        if (p + 1 >= s.length()) {
-            throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, i);
+        if (p + 1 >= section.length) {
+            throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, first);
         }
-        char term = s.charAt(p + 1);
-
-        JsonWriter w = new JsonWriter(section.length * 2);
-        w.beginObject().key("format").value("X12").key("segments").beginArray();
-        while (i < s.length()) {
-            int end = s.indexOf(term, i);
-            if (end < 0) {
-                throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, i);
+        byte term = section[p + 1];
+        if (es < 0 || term < 0) {
+            // A separator must be one character; a byte of a multi-byte UTF-8 character isn't one.
+            throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, first);
+        }
+        // About 2.4 times the section: every segment gains its keys and every element its quotes.
+        return JsonWriter.build(section.length * 2 + (section.length >> 1), w -> {
+            w.beginObject().key("format").value("X12").key("segments").beginArray();
+            int i = first;
+            while (i < section.length) {
+                int end = indexOf(section, term, i);
+                if (end < 0) {
+                    throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED, i);
+                }
+                // With a newline as terminator, a CRLF file leaves a CR at the end of each segment.
+                segment(w, section, i, term == '\n' && end > i && section[end - 1] == '\r' ? end - 1 : end, es);
+                i = skipBreaks(section, end + 1);
             }
-            // With a newline as terminator, a CRLF file leaves a CR at the end of each segment.
-            segment(w, s, i, term == '\n' && end > i && s.charAt(end - 1) == '\r' ? end - 1 : end, es);
-            i = skipBreaks(s, end + 1);
-        }
-        w.endArray().endObject();
-        return w.toBytes();
+            w.endArray().endObject();
+        });
     }
 
-    private static void segment(JsonWriter w, String s, int from, int to, char es) {
-        int sep = s.indexOf(es, from);
+    private static final byte[] ISA = {'I', 'S', 'A'};
+
+    /**
+     * Writes one segment from its bytes, {@code from} up to its terminator at {@code to}. The section is valid
+     * UTF-8 and the separators are ASCII, which never occurs inside a multi-byte character, so the bytes can be
+     * cut at separators and copied as they are.
+     */
+    private static void segment(JsonWriter w, byte[] b, int from, int to, byte es) {
+        int sep = indexOf(b, es, from);
         if (sep < 0 || sep > to) {
             sep = to;
         }
-        w.beginObject().key("segment_id").value(s.substring(from, sep)).key("elements").beginArray();
+        w.beginObject().key("segment_id").valueUtf8(b, from, sep).key("elements").beginArray();
         while (sep < to) {
-            int next = s.indexOf(es, sep + 1);
+            int next = indexOf(b, es, sep + 1);
             if (next < 0 || next > to) {
                 next = to;
             }
-            w.value(s.substring(sep + 1, next));
+            w.valueUtf8(b, sep + 1, next);
             sep = next;
         }
         w.endArray().endObject();
     }
 
-    private static int skipBreaks(String s, int i) {
-        while (i < s.length() && (s.charAt(i) == '\r' || s.charAt(i) == '\n')) {
+    private static int indexOf(byte[] b, byte c, int from) {
+        for (int i = from; i < b.length; i++) {
+            if (b[i] == c) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean startsWith(byte[] b, int at, byte[] prefix) {
+        if (b.length - at < prefix.length) {
+            return false;
+        }
+        for (int i = 0; i < prefix.length; i++) {
+            if (b[at + i] != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int skipBreaks(byte[] b, int i) {
+        while (i < b.length && (b[i] == '\r' || b[i] == '\n')) {
             i++;
         }
         return i;

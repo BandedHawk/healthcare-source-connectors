@@ -45,6 +45,17 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-31 (aj): the other converters need far less memory, conversions share a memory budget, and two gaps that a hostile or broken file could use are closed.
+- **Converter memory (§6.4):** X12, EDIFACT and CSV no longer decode a section into a string or build a tree; they write the JSON from the section's bytes. Large sections are written twice, counting first, so the JSON is held once at exactly its size. For a 64 MB section: EDIFACT about 2 GiB → 256 MiB, X12 512 → 224 MiB, CSV 384 → 160 MiB, C-CDA 224 → 208 MiB. Before, an EDIFACT section of about 30 MB ran a 1 GiB heap out of memory. The JSON is byte-for-byte unchanged (1,257 test inputs, 400 mutated ones per format among them).
+- **Conversion budget (§6.4):** conversions running at once share `split.convert-memory`, 40% of the heap by default. Each converter states its peak as a multiple of the section's size, and a section that doesn't fit waits.
+- **Converter bugs (§6.4):** an unexpected exception from a converter fails that section with `CONVERT_FAILED`. Before, it failed the whole file as `STORAGE_FAILED`.
+- **XML nesting (§6.3):** a boundary element may be nested at most 128 elements deep, and its ancestors' start tags may be at most 1 MiB (the most a resume re-reads). Before, there was no limit: 200,000 nested wrappers in a 600 KB file gave a 1.36 MB checkpoint, rewritten on every commit.
+- **Error positions:** CSV and X12 now report exact byte offsets; they were character offsets, which differ after non-ASCII text. An X12 separator that isn't ASCII is now `CONVERT_X12_MALFORMED` at the ISA.
+
+Revision 2026-10-31 (ai): a file that keeps stopping the connector no longer stops it forever, and C-CDA conversion needs less than half the memory.
+- **Restarts without progress (§9.2):** the checkpoint counts how often splitting resumed without a batch committing since (`restarts`, §9.1). At 2, the uncommitted batch is stored unconverted (`CONVERT_SKIPPED`), in case a conversion is what stops the connector; at 3, the file fails with `RESUME_NO_PROGRESS` (§11). Before, a section that ran the connector out of memory was retried on every restart, and nothing else was ever processed. `sdh-admin status` shows the count.
+- **C-CDA memory (§6.4):** the parser no longer joins text into one string (it took about five times the text's size), the JSON is written straight to UTF-8 bytes, and the tree is released before the output is trimmed. A 64 MB document needed 512 MiB of heap with Woodstox and 640 MiB with the JDK's parser; it now needs 224 MiB with either. The JSON is byte-for-byte the same.
+
 Revision 2026-10-30 (ah): documentation only. The US Core 6.1 C-CDA mapping (the `mapping` repository) now reads `ccda/1` as stored, so no reshaping step sits between the connector and the mapping (§6.4). Its sample documents are the connector's conversions of the C-CDA test documents.
 
 Revision 2026-10-30 (ag): a demonstration of the connector (§15.3).
@@ -338,6 +349,8 @@ These are configurable per format. A violation fails the file with error code `L
 | `max-section-bytes` | 512 MiB (well under Parquet's 2 GiB value limit) |
 | `max-sections-per-file` | unlimited |
 
+**Nesting (XML formats):** a boundary element may be nested at most 128 elements deep (`XmlSplitter.MAX_DEPTH`), and each ancestor's start tag may be at most 1 MiB. Every open ancestor is held in memory and its offset saved in each resume point, so a file of nested wrappers would otherwise grow both without limit. Deeper nesting is `PARSE_XML_MALFORMED`; a larger ancestor tag is `LIMIT_SECTION_SIZE`, since a resume couldn't re-read it. Real documents nest their boundary one to three deep. FHIR is limited to 4,096 levels of JSON nesting in the same way.
+
 A file over `max-file-bytes` is rejected **before ingestion**. It is moved to the encrypted local `failed/` fallback and is not stored in Iceberg.
 
 ### 6.4 Conversion to JSON (built)
@@ -385,7 +398,9 @@ As in Google's output, mixed content loses the interleaving of text and child el
 - `CONVERT_INVALID_ENCODING`: bytes that aren't valid UTF-8, or not valid in the declared EDIFACT character set;
 - `CONVERT_EDIFACT_CHARSET`: an unsupported syntax identifier;
 - `CONVERT_X12_MALFORMED`, `CONVERT_EDIFACT_MALFORMED`, `CONVERT_XML_MALFORMED`;
-- `CONVERT_TOO_LARGE`: over `split.convert-max-bytes`, 64 MiB by default; converting needs the whole section in memory.
+- `CONVERT_TOO_LARGE`: over `split.convert-max-bytes`, 64 MiB by default; converting needs the whole section in memory (see below);
+- `CONVERT_SKIPPED`: the connector stopped twice in a row while the section's batch was uncommitted, so the whole batch was stored unconverted (§9.2);
+- `CONVERT_FAILED`: the converter threw an exception it doesn't use for problems with the section, which means a bug in the converter. Only the exception's class name is logged (`convert.unexpected`), as its message could quote the section.
 
 Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offset, byte position within the section, code), emitted once its batch commits, and the `sdh.sections.failed` metric. Errors in splitting itself, such as an unterminated quote or broken XML, still fail the whole file (§11), because the file can't be divided into sections.
 
@@ -394,6 +409,17 @@ Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offse
 **Memory and speed:**
 - Single-chunk sections (up to 8 MiB) are converted on the worker pool.
 - Larger ones are converted on the writer thread, one at a time, and JSON over one chunk is chunked as usual.
+- **Peak heap per conversion,** measured on 64 MB sections, the section included:
+
+  | Converter | Heap | × section | JSON size |
+  |---|---|---|---|
+  | C-CDA | 208 MiB | 3.25 | about the same |
+  | X12 | 224 MiB | 3.5 | 2.4 × |
+  | EDIFACT | 256 MiB | 4 | 2.6 × |
+  | CSV | 160 MiB | 2.5 | about the same |
+
+  None decodes a whole section into a string. CSV, X12 and EDIFACT write the JSON from the section's bytes (UTF-8 is copied as it is, escaping only what JSON requires; EDIFACT decodes one component at a time). C-CDA keeps long text in the pieces the parser delivers. From 1 MiB, the JSON is written twice, counting first, so it is held once, in an array of exactly its size (`JsonWriter.build`).
+- **Conversion budget:** conversions running at once share `split.convert-memory` (default 40% of the maximum heap). Each converter states its peak as a multiple of the section's size (`SectionConverter.memoryFactor`: the figures above, rounded up), and a worker takes that much before reading and converting a section, and gives it back once the section is ready to write. A section that doesn't fit waits, first come, first served; one bigger than the whole budget runs alone. Small sections need next to nothing, so only large ones ever wait.
 - Conversion costs 4–15% of throughput: least for CSV, where message sealing dominates, most for C-CDA (§13.1).
 
 ## 7. Encryption and identifiers
@@ -630,11 +656,12 @@ sdh.checkpoint.file-connector = {
   "resumeAt": "123456789:1024,5120", "nextSeq": 40211,
   "committedSeq": 40210, "publishedSeq": 39000,
   "format": "ccda", "fileSize": 987654321,
-  "startedAt": "...", "mac": "HMAC(idKey, \"sdh-checkpoint\" ‖ 0 ‖ canonical JSON without mac)"
+  "startedAt": "...", "restarts": 1, "mac": "HMAC(idKey, \"sdh-checkpoint\" ‖ 0 ‖ canonical JSON without mac)"
 }
 ```
 
 - **`resumeAt`:** the encoded `ResumePoint` of the last committed section (§6.1): the next offset, then any context offsets. Offsets only, no content.
+- **`restarts`:** how many times splitting has resumed from this checkpoint without a batch committing since (§9.2). Every batch commit resets it, and it is left out while 0, so checkpoints written before it existed still verify.
 - **States:** see §4.1. A `FAILING` or `FAILED` checkpoint also carries `failureStage`, `errorCode`, `failureOffset` and `failedAt`. The pipeline refuses a new file while another is `SPLITTING`, `ARCHIVING` or `FAILING`.
 - **Labelled MACs:** checkpoint MACs and fingerprints prefix a label, so neither can ever equal a section ID made with the same key.
 - **Tamper detection:** the checkpoint is MAC'd with the ID key. If it fails verification, the service stops with `CHECKPOINT_TAMPERED` rather than guessing.
@@ -657,6 +684,13 @@ On restart:
 1. Read the checkpoint.
 2. Rebuild messages for any committed-but-unpublished seq range from table metadata columns. Decryption isn't needed for this.
 3. Republish those messages, then resume splitting at `resumeAt`.
+
+**Restarts without progress:** a section that stops the connector, by running it out of memory (the JVM runs with `-XX:+ExitOnOutOfMemoryError`, §14.1) or crashing it some other way, would stop it again on every restart, since the restart resumes at the same section, and no other file would ever be processed. So before resuming, the pipeline adds one to the checkpoint's `restarts` and commits it; a crash in that attempt can't record anything itself. The count is reset by every batch commit, so restarts only count while the connector makes no progress:
+- **1:** resumed as usual. One restart is allowed for anything else, such as a redeployment or a lost lease.
+- **2:** resumed, but the batch is stored without converting any of it. Each of its sections is stored in its original form and announced as failed, `CONVERT_SKIPPED`, in case converting one of them is what stops the connector. Which section it is isn't known, so the whole batch (up to `commitMaxSections`) goes unconverted; the batches after it are converted again. `file.conversion_skipped` is audited.
+- **3:** the file is failed, `RESUME_NO_PROGRESS`, at stage `split` and the resume offset (§11), and archived to `failed_files` like any other failed file.
+
+The limits are `IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS` and `FAIL_AFTER_RESTARTS`. A connector that keeps losing its lease within one batch (§9.3) also reaches them, which fails a file that has nothing wrong with it; an operator can restore it from `failed_files` and deliver it again.
 
 **Duplicates:** at most one batch can be republished after a crash. That is the same worst case as before, since a crash part-way through publishing a batch already meant republishing it. Broker dedup (§10.3) removes the duplicates where the broker supports it, and downstream dedup handles the rest.
 
@@ -871,6 +905,7 @@ if (m instanceof SectionStored s) {
 |---|---|---|
 | File over `max-file-bytes` (checked before any checkpoint or `file.started`) | `intake` | `LIMIT_FILE_SIZE` |
 | Splitter error | `split` | the splitter's `PARSE_*` / `LIMIT_*` code and offset |
+| The connector stopped three times in a row without committing a batch (§9.2) | `split` | `RESUME_NO_PROGRESS`, at the resume offset |
 | Broker didn't acknowledge after retries | `publish` | `PUBLISH_FAILED` |
 | Reading the source failed | `split` or `archive` | `SOURCE_READ_FAILED` |
 | Storage, catalog or KMS still failing after retries | `split` or `archive` | `STORAGE_FAILED` |
@@ -1146,6 +1181,7 @@ sdh:
     limits: { max-file-bytes: 1TB, max-section-bytes: 512MB }   # omitted = format defaults
     convert: true                 # JSON conversion where the format has a converter (§6.4)
     convert-max-bytes: 64MB       # larger sections are stored in their original form, as failed
+    convert-memory: 400MB         # heap conversions running at once may share; default 40% of the heap
   storage:
     catalog-name: sdh             # also sent in messages
     namespace: sdh_ingest

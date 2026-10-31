@@ -92,6 +92,28 @@ class XmlSplitterTest {
         assertThat(splitError(ccda, afterFirst, cfg("ccda")).code()).isEqualTo(ErrorCode.PARSE_UNBALANCED_ELEMENT);
     }
 
+    /**
+     * Boundary elements may sit {@link XmlSplitter#MAX_DEPTH} elements deep, and no deeper: every open ancestor is
+     * held in memory and saved in each resume point. A file of nested wrappers fails instead of growing them.
+     */
+    @Test
+    void nestingIsLimited() throws Exception {
+        String doc = "<ClinicalDocument xmlns=\"urn:hl7-org:v3\"/>";
+        String deepest = "<a>".repeat(XmlSplitter.MAX_DEPTH) + doc + "</a>".repeat(XmlSplitter.MAX_DEPTH);
+        assertThat(splitAndCheckResume(ccda, deepest, cfg("ccda"))).containsExactly(doc);
+        String deeper = "<a>".repeat(XmlSplitter.MAX_DEPTH + 1) + doc + "</a>".repeat(XmlSplitter.MAX_DEPTH + 1);
+        assertThat(splitError(ccda, deeper, cfg("ccda")).code()).isEqualTo(ErrorCode.PARSE_XML_MALFORMED);
+        assertThat(splitError(ccda, "<a>".repeat(1_000_000), cfg("ccda")).code())
+                .isEqualTo(ErrorCode.PARSE_XML_MALFORMED);
+    }
+
+    /** An ancestor start tag too large to be re-read on resume fails the file at once, not on every restart. */
+    @Test
+    void ancestorsMustBeSmallEnoughToResume() {
+        String big = "<a x=\"" + "y".repeat(1 << 20) + "\"><ClinicalDocument xmlns=\"urn:hl7-org:v3\"/></a>";
+        assertThat(splitError(ccda, big, cfg("ccda")).code()).isEqualTo(ErrorCode.LIMIT_SECTION_SIZE);
+    }
+
     @Test
     void utf16IsRejected() throws Exception {
         byte[] utf16 = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><a/>".getBytes(java.nio.charset.StandardCharsets.UTF_16);

@@ -30,7 +30,9 @@ import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.core.convert.ConversionException;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
+import com.sdh.healthcare.connector.core.convert.SectionConverter;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
@@ -234,6 +236,96 @@ class IngestPipelineTest {
         List<ConnectorMessage> msgs = decode(limited.sent);
         assertThat(msgs.stream().filter(ConnectorMessage.SectionFailed.class::isInstance)
                 .map(m -> ((ConnectorMessage.SectionFailed) m).errorCode())).containsExactly("CONVERT_TOO_LARGE");
+    }
+
+    /**
+     * Sections whose conversion would need more than the conversion budget run one at a time (design §6.4), so
+     * several large sections can't exhaust the heap together, and the file still completes, every section converted.
+     */
+    @Test
+    void conversionsThatDontFitTheBudgetTogetherRunOneAtATime() throws Exception {
+        SectionConverter csv = ConverterRegistry.load().get("csv").orElseThrow();
+        java.util.concurrent.atomic.AtomicInteger running = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger most = new java.util.concurrent.atomic.AtomicInteger();
+        SectionConverter greedy = new SectionConverter() {
+            @Override
+            public String format() {
+                return "csv";
+            }
+
+            @Override
+            public String mapping() {
+                return csv.mapping();
+            }
+
+            @Override
+            public double memoryFactor() {
+                return 1e6; // each section claims the whole budget
+            }
+
+            @Override
+            public byte[] convert(byte[] section, SplitConfig cfg) throws ConversionException {
+                most.accumulateAndGet(running.incrementAndGet(), Math::max);
+                try {
+                    Thread.sleep(2);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    running.decrementAndGet();
+                }
+                return csv.convert(section, cfg);
+            }
+        };
+        RecordingPublisher pub = new RecordingPublisher();
+        IngestPipeline p = process(converting().withConversion(ConverterRegistry.of(greedy), 64L << 20)
+                .withConvertMemory(64L << 20), pub, PipelineHooks.NONE);
+        IngestPipeline.SplitResult result = p.split(SeekableByteSource.of(convertibleFile()));
+        assertThat(result.sectionCount()).isEqualTo(RECORDS);
+        assertThat(p.failedSectionCount(result.fileId())).isZero();
+        assertThat(most.get()).isEqualTo(1);
+    }
+
+    /**
+     * A converter that fails unexpectedly (a bug, not a problem it recognises) fails only that section: it is stored
+     * as split, announced as failed with {@code CONVERT_FAILED}, and the rest of the file is converted.
+     */
+    @Test
+    void aConverterBugFailsTheSectionNotTheFile() throws Exception {
+        SectionConverter csv = ConverterRegistry.load().get("csv").orElseThrow();
+        SectionConverter buggy = new SectionConverter() {
+            @Override
+            public String format() {
+                return "csv";
+            }
+
+            @Override
+            public String mapping() {
+                return csv.mapping();
+            }
+
+            @Override
+            public byte[] convert(byte[] section, SplitConfig cfg) throws ConversionException {
+                if (new String(section, UTF_8).contains("boom")) {
+                    throw new IndexOutOfBoundsException("would quote the section: boom");
+                }
+                return csv.convert(section, cfg);
+            }
+        };
+        RecordingPublisher pub = new RecordingPublisher();
+        IngestPipeline p = process(converting().withConversion(ConverterRegistry.of(buggy), 64L << 20), pub,
+                PipelineHooks.NONE);
+        String bad = "2,boom,x\n";
+        IngestPipeline.SplitResult result = p.split(SeekableByteSource.of(
+                (HEADER + "1,a,b\n" + bad + "3,c,d\n").getBytes(UTF_8)));
+        assertThat(result.sectionCount()).isEqualTo(3);
+        Table table = catalog.loadTable(tableId);
+        assertThat(dataRows(table, result.fileId())).extracting(r -> r.getField(ERROR_CODE))
+                .containsExactly(null, "CONVERT_FAILED", null);
+        assertThat(decrypt(table, result.fileId(), 1)).isEqualTo((HEADER + bad).getBytes(UTF_8));
+        List<ConnectorMessage> msgs = decode(pub.sent);
+        assertThat(msgs.stream().filter(ConnectorMessage.SectionFailed.class::isInstance)
+                .map(m -> ((ConnectorMessage.SectionFailed) m).errorCode())).containsExactly("CONVERT_FAILED");
+        assertThat(sections(msgs)).hasSize(2);
     }
 
     /** A fresh "process": its own table handle, a higher lease epoch, and the ID key loaded from the table. */

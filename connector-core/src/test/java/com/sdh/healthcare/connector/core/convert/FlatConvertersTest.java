@@ -97,6 +97,9 @@ class FlatConvertersTest {
                 .isEqualTo(ErrorCode.CONVERT_X12_MALFORMED);
         assertThat(failure(new X12Converter(), (ISA + "NM1*\u00e9~").getBytes(ISO_8859_1), SplitConfig.defaults("x12")))
                 .isEqualTo(ErrorCode.CONVERT_INVALID_ENCODING);
+        // Separators are single ASCII characters; part of a multi-byte character can't be one.
+        assertThat(failure(new X12Converter(), ISA.replace("~\n", "\u00a7\n").getBytes(UTF_8),
+                SplitConfig.defaults("x12"))).isEqualTo(ErrorCode.CONVERT_X12_MALFORMED);
     }
 
     // ---- EDIFACT ----
@@ -129,6 +132,28 @@ class FlatConvertersTest {
                 .isEqualTo(ErrorCode.CONVERT_EDIFACT_CHARSET);
         assertThatThrownBy(() -> new EdifactConverter().convert("UNB+UNOC:3+S'NAD+X".getBytes(ISO_8859_1),
                 SplitConfig.defaults("edifact"))).isInstanceOf(ConversionException.class);
+    }
+
+    /**
+     * Sections from {@code JsonWriter.EXACT_SIZE_FROM} are written twice, counting first. The result must be what the
+     * ordinary path gives: the same JSON for a section just under the size as for the same content made larger.
+     */
+    @Test
+    void largeSectionsConvertTheSameWay() throws Exception {
+        String x12Body = "NM1*IL*1*M\u00dcLLER*JOS\u00c9~\n";
+        String x12 = ISA + x12Body.repeat(JsonWriter.EXACT_SIZE_FROM / x12Body.length() + 10) + "IEA*1*1~\n";
+        String json = convert(new X12Converter(), x12, SplitConfig.defaults("x12"));
+        assertThat(json).startsWith("{\"format\":\"X12\",\"segments\":[{\"segment_id\":\"ISA\"")
+                .contains("{\"segment_id\":\"NM1\",\"elements\":[\"IL\",\"1\",\"M\u00dcLLER\",\"JOS\u00c9\"]}")
+                .endsWith("{\"segment_id\":\"IEA\",\"elements\":[\"1\",\"1\"]}]}");
+        String edifactBody = "NAD+PE++M?+LLER:X'\n";
+        String edifact = "UNB+UNOY:3+S+R'" + edifactBody.repeat(JsonWriter.EXACT_SIZE_FROM / edifactBody.length() + 10)
+                + "UNZ+1+R'";
+        assertThat(convert(new EdifactConverter(), edifact, SplitConfig.defaults("edifact")))
+                .contains("{\"segment_id\":\"NAD\",\"elements\":[[\"PE\"],[\"\"],[\"M+LLER\",\"X\"]]}");
+        String field = "say \"\"hi\"\" \u00e9\n".repeat(JsonWriter.EXACT_SIZE_FROM / 10);
+        assertThat(convert(new CsvConverter(), "a,b\n1,\"" + field + "\"\n", CSV_HEADER))
+                .isEqualTo("[\"1\",\"" + "say \\\"hi\\\" \u00e9\\n".repeat(JsonWriter.EXACT_SIZE_FROM / 10) + "\"]");
     }
 
     @Test

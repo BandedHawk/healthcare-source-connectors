@@ -41,6 +41,31 @@ final class Text {
         return out.flip().toString();
     }
 
+    /**
+     * Checks that {@code len} bytes from {@code from} are valid in {@code cs}, as {@link #decode} would, without
+     * keeping the decoded text: it is decoded a few thousand characters at a time and thrown away. The error
+     * position is the one {@link #decode} would report.
+     */
+    static void check(byte[] b, int from, int len, Charset cs) throws ConversionException {
+        CharsetDecoder d = cs.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+        ByteBuffer in = ByteBuffer.wrap(b, from, len);
+        CharBuffer out = CharBuffer.allocate(8192);
+        CoderResult r;
+        while ((r = d.decode(in, out, true)).isOverflow()) {
+            out.clear();
+        }
+        if (r.isError()) {
+            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING, in.position());
+        }
+        while ((r = d.flush(out)).isOverflow()) {
+            out.clear();
+        }
+        if (r.isError()) {
+            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING, in.position());
+        }
+    }
+
     /** Length of a UTF-8 byte order mark at {@code from}, or 0. */
     static int bom(byte[] b, int from) {
         return b.length - from >= 3 && (b[from] & 0xff) == 0xEF && (b[from + 1] & 0xff) == 0xBB

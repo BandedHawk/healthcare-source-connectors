@@ -10,11 +10,9 @@ package com.sdh.healthcare.connector.core.convert;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.builtin.EdifactSplitter;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Arrays;
 import java.util.Map;
 
 /**
@@ -61,8 +59,30 @@ public final class EdifactConverter implements SectionConverter {
         return MAPPING;
     }
 
-    /** A component's raw bytes (release characters removed) and where it starts in the section. */
-    private record Raw(byte[] bytes, int position) {}
+    /** Measured: the section and its JSON, about 2.6 times its size: 256 MiB of heap for a 64 MB interchange. */
+    @Override
+    public double memoryFactor() {
+        return 4;
+    }
+
+    /** The service characters, from the UNA service string advice or the defaults. */
+    private record Delimiters(byte component, byte element, byte release, byte terminator) {}
+
+    /** What {@link #walk} reports, in document order. Component bytes still hold their release characters. */
+    private interface Sink {
+        /**
+         * @param element   the element's index in its segment, the tag being element 0
+         * @param component the component's index in its element
+         * @param from      where the component starts in the section
+         * @param to        where it ends (its separator)
+         * @param released  whether it holds a release character
+         */
+        void component(int element, int component, int from, int to, boolean released) throws ConversionException;
+
+        void endElement(int element);
+
+        void endSegment();
+    }
 
     @Override
     public byte[] convert(byte[] section, SplitConfig cfg) throws ConversionException {
@@ -78,79 +98,206 @@ public final class EdifactConverter implements SectionConverter {
             terminator = section[i + 8];
             i = skipBreaks(section, i + 9);
         }
+        Delimiters d = new Delimiters(component, element, release, terminator);
+        int first = i;
 
-        // Segments → elements → components, still as bytes: the charset is only known once UNB is read.
-        List<List<List<Raw>>> segments = new ArrayList<>();
-        while (i < section.length) {
-            List<List<Raw>> elements = new ArrayList<>();
-            List<Raw> components = new ArrayList<>();
-            ByteArrayOutputStream cur = new ByteArrayOutputStream(32);
-            int curStart = i;
+        // First the structure, without keeping it: the charset is only known once UNB is read, and a malformed
+        // segment anywhere is reported before an encoding error.
+        Header header = new Header(section, d);
+        walk(section, first, d, header);
+        if (header.segments == 0 || !"UNB".equals(header.tag) || header.elements < 2) {
+            throw new ConversionException(ErrorCode.CONVERT_EDIFACT_MALFORMED, 0);
+        }
+        Charset cs = CHARSETS.get(header.syntax);
+        if (cs == null) {
+            throw new ConversionException(ErrorCode.CONVERT_EDIFACT_CHARSET, header.syntaxPosition);
+        }
+
+        // About 2.6 times the section: every segment gains its keys, and every component its quotes and commas.
+        return JsonWriter.build(section.length * 2 + (section.length >> 1), w -> {
+            w.beginObject().key("format").value("EDIFACT").key("segments").beginArray();
+            walk(section, first, d, new Writer(section, d, cs, w));
+            w.endArray().endObject();
+        });
+    }
+
+    /**
+     * Reads the section's segments, elements and components in order, reporting each to {@code sink}. Nothing is
+     * kept, so it can be run once to check the structure and again to write it.
+     *
+     * @throws ConversionException {@code CONVERT_EDIFACT_MALFORMED} for a release character at the very end, or
+     *                             a last segment without its terminator
+     */
+    private static void walk(byte[] b, int i, Delimiters d, Sink sink) throws ConversionException {
+        while (i < b.length) {
+            int element = 0;
+            int component = 0;
+            int start = i;
+            boolean released = false;
             boolean terminated = false;
-            while (i < section.length) {
-                byte c = section[i++];
-                if (c == release) {
-                    if (i >= section.length) {
+            while (i < b.length) {
+                byte c = b[i++];
+                if (c == d.release()) {
+                    if (i >= b.length) {
                         throw new ConversionException(ErrorCode.CONVERT_EDIFACT_MALFORMED, i - 1);
                     }
-                    cur.write(section[i++]);
-                } else if (c == component || c == element || c == terminator) {
-                    components.add(new Raw(cur.toByteArray(), curStart));
-                    cur.reset();
-                    curStart = i;
-                    if (c != component) {
-                        elements.add(components);
-                        components = new ArrayList<>();
+                    i++;
+                    released = true;
+                } else if (c == d.component() || c == d.element() || c == d.terminator()) {
+                    sink.component(element, component, start, i - 1, released);
+                    released = false;
+                    start = i;
+                    if (c == d.component()) {
+                        component++;
+                    } else {
+                        sink.endElement(element);
+                        element++;
+                        component = 0;
                     }
-                    if (c == terminator) {
+                    if (c == d.terminator()) {
                         terminated = true;
                         break;
                     }
-                } else {
-                    cur.write(c);
                 }
             }
             if (!terminated) {
-                throw new ConversionException(ErrorCode.CONVERT_EDIFACT_MALFORMED, curStart);
+                throw new ConversionException(ErrorCode.CONVERT_EDIFACT_MALFORMED, start);
             }
-            segments.add(elements);
-            i = skipBreaks(section, i);
+            sink.endSegment();
+            i = skipBreaks(b, i);
         }
-        if (segments.isEmpty() || !tag(segments.getFirst()).equals("UNB") || segments.getFirst().size() < 2) {
-            throw new ConversionException(ErrorCode.CONVERT_EDIFACT_MALFORMED, 0);
+    }
+
+    /**
+     * A component's bytes with its release characters removed ({@code ?+} → {@code +}).
+     *
+     * @param scratch reused for the result when there are release characters; may be replaced by a larger one
+     * @return the bytes, in {@code scratch[0]}; their length
+     */
+    private static int unreleased(byte[] b, int from, int to, byte release, byte[][] scratch) {
+        if (scratch[0].length < to - from) {
+            scratch[0] = new byte[to - from];
         }
-        Raw syntax = segments.getFirst().get(1).getFirst();
-        Charset cs = CHARSETS.get(new String(syntax.bytes(), StandardCharsets.US_ASCII));
-        if (cs == null) {
-            throw new ConversionException(ErrorCode.CONVERT_EDIFACT_CHARSET, syntax.position());
+        byte[] out = scratch[0];
+        int n = 0;
+        for (int i = from; i < to; i++) {
+            if (b[i] == release) {
+                i++;
+            }
+            out[n++] = b[i];
+        }
+        return n;
+    }
+
+    /** Checks the structure and records what the first segment says: its tag, element count and charset. */
+    private static final class Header implements Sink {
+        private final byte[] b;
+        private final Delimiters d;
+        private final byte[][] scratch = {new byte[16]};
+        int segments;
+        int elements;
+        String tag;
+        String syntax;
+        int syntaxPosition;
+
+        Header(byte[] b, Delimiters d) {
+            this.b = b;
+            this.d = d;
         }
 
-        JsonWriter w = new JsonWriter(section.length * 3);
-        w.beginObject().key("format").value("EDIFACT").key("segments").beginArray();
-        for (List<List<Raw>> seg : segments) {
-            w.beginObject().key("segment_id").value(decode(seg.getFirst().getFirst(), cs)).key("elements").beginArray();
-            for (int e = 1; e < seg.size(); e++) {
-                w.beginArray();
-                for (Raw r : seg.get(e)) {
-                    w.value(decode(r, cs));
+        @Override
+        public void component(int element, int component, int from, int to, boolean released) {
+            if (segments > 0 || component > 0 || element > 1) {
+                return;
+            }
+            String text = new String(raw(from, to, released), element == 0 ? StandardCharsets.ISO_8859_1
+                    : StandardCharsets.US_ASCII);
+            if (element == 0) {
+                tag = text;
+            } else {
+                syntax = text;
+                syntaxPosition = from;
+            }
+        }
+
+        private byte[] raw(int from, int to, boolean released) {
+            if (!released) {
+                return Arrays.copyOfRange(b, from, to);
+            }
+            int n = unreleased(b, from, to, d.release(), scratch);
+            return Arrays.copyOf(scratch[0], n);
+        }
+
+        @Override
+        public void endElement(int element) {
+            if (segments == 0) {
+                elements = element + 1;
+            }
+        }
+
+        @Override
+        public void endSegment() {
+            segments++;
+        }
+    }
+
+    /**
+     * Writes each segment as {@code {"segment_id":…,"elements":[[…],…]}}. Only the tag's first component is
+     * written (and decoded); every component of the other elements is.
+     */
+    private static final class Writer implements Sink {
+        private final byte[] b;
+        private final Delimiters d;
+        private final Charset cs;
+        private final JsonWriter w;
+        private final byte[][] scratch = {new byte[256]};
+
+        Writer(byte[] b, Delimiters d, Charset cs, JsonWriter w) {
+            this.b = b;
+            this.d = d;
+            this.cs = cs;
+            this.w = w;
+        }
+
+        @Override
+        public void component(int element, int component, int from, int to, boolean released)
+                throws ConversionException {
+            if (element == 0) {
+                if (component == 0) {
+                    w.beginObject().key("segment_id").value(decode(from, to, released)).key("elements")
+                            .beginArray();
                 }
+                return;
+            }
+            if (component == 0) {
+                w.beginArray();
+            }
+            w.value(decode(from, to, released));
+        }
+
+        /** Decodes a component, reporting an invalid byte at its position in the section's own numbering. */
+        private String decode(int from, int to, boolean released) throws ConversionException {
+            if (!released) {
+                return Text.decode(b, from, to - from, cs); // positions are already the section's
+            }
+            int n = unreleased(b, from, to, d.release(), scratch);
+            try {
+                return Text.decode(scratch[0], 0, n, cs);
+            } catch (ConversionException e) {
+                throw new ConversionException(e.code(), from + e.position());
+            }
+        }
+
+        @Override
+        public void endElement(int element) {
+            if (element > 0) {
                 w.endArray();
             }
-            w.endArray().endObject();
         }
-        w.endArray().endObject();
-        return w.toBytes();
-    }
 
-    private static String tag(List<List<Raw>> segment) {
-        return new String(segment.getFirst().getFirst().bytes(), StandardCharsets.ISO_8859_1);
-    }
-
-    private static String decode(Raw r, Charset cs) throws ConversionException {
-        try {
-            return Text.decode(r.bytes(), 0, r.bytes().length, cs);
-        } catch (ConversionException e) {
-            throw new ConversionException(e.code(), r.position() + e.position());
+        @Override
+        public void endSegment() {
+            w.endArray().endObject();
         }
     }
 

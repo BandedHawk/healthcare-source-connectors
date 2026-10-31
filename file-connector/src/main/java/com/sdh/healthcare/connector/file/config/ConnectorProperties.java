@@ -49,9 +49,12 @@ public record ConnectorProperties(
      * @param convert          convert sections to JSON where the format has a converter (design §6.4): csv, ccda, x12,
      *                         edifact. FHIR, generic XML and delimited sections are always stored as split.
      * @param convertMaxBytes  larger sections aren't converted and are stored in their original form as failed
+     * @param convertMemory    heap that conversions running at once may use between them; a large section waits
+     *                         until there is room for it. Unset: 40% of the maximum heap
      */
     public record Split(String format, String boundary, Map<String, String> options, @DefaultValue Limits limits,
-            @DefaultValue("true") boolean convert, @DefaultValue("64MB") DataSize convertMaxBytes) {}
+            @DefaultValue("true") boolean convert, @DefaultValue("64MB") DataSize convertMaxBytes,
+            DataSize convertMemory) {}
 
     /** Null values keep the format's defaults (design §6.3). */
     public record Limits(DataSize maxFileBytes, DataSize maxSectionBytes, Long maxSectionsPerFile) {}
