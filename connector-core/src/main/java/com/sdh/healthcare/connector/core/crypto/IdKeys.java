@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.crypto;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
@@ -15,6 +22,9 @@ import org.apache.iceberg.Table;
  * The ID key (design §7.1): a 256-bit HMAC secret generated at first start and stored, wrapped by a KEK,
  * in the table property {@value #PROPERTY}. Never rotated, because section IDs and downstream dedup depend
  * on it.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class IdKeys {
     public static final String PROPERTY = "sdh.id-key";

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import java.sql.Connection;
@@ -17,6 +24,9 @@ import javax.sql.DataSource;
  *
  * <p>Renewals update one row and write nothing to Iceberg. The epoch only ever increases: release
  * expires the row instead of deleting it.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class JdbcLeaseStore implements LeaseStore {
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z_][a-z0-9_]{0,62}(\\.[a-z_][a-z0-9_]{0,62})?");

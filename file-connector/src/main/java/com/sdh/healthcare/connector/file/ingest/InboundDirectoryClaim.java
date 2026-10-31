@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.ingest;
 
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -27,6 +34,9 @@ import java.util.Properties;
  *
  * <p>{@link #claim} runs at startup, after the lease is taken; {@link #verify} runs before every file, so a running
  * connector stops if its claim is replaced. A deleted claim is recreated.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class InboundDirectoryClaim {
     public static final String FILE = ".sdh-owner";

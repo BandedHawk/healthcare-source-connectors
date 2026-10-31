@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.ItSupport.*;
@@ -26,6 +33,9 @@ import org.testcontainers.images.builder.Transferable;
 /**
  * Design §10.3 eventhubs: partitionKey = fileId keeps each file in one partition, in order. The adapter carries no
  * metadata here (messageId is inside the payload), so only key, order and body are checked.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class EventHubsIT {
     static final String CONFIG = """

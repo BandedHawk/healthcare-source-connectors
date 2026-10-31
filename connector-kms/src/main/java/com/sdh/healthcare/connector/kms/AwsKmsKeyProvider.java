@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.kms;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
@@ -25,6 +32,9 @@ import software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec;
  *   <li>sign: {@code Sign} on an {@code ECC_NIST_P256} key, {@code ECDSA_SHA_256} over the digest; DER → raw.</li>
  * </ul>
  * Credentials and region come from the default AWS provider chain unless configured.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class AwsKmsKeyProvider implements KeyProvider, AutoCloseable {
     private static final Map<String, String> CONTEXT = Map.of("sdh:purpose", KmsSupport.PURPOSE);

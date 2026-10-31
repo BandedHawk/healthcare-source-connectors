@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -63,6 +70,9 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * The deployed shape (design §8.1, §10.2): the Spring Boot app with Postgres (lease + JDBC catalog), SeaweedFS
  * through Iceberg's S3FileIO, and Kafka. A downstream consumer then reads every section back with
  * connector-queue-reader, and no stored object may contain plaintext.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 @SpringBootTest(properties = "camel.main.run-controller=false")
 class FullStackIT {

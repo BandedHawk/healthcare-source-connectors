@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -10,6 +17,12 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link LeaseKeeper}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class LeaseKeeperTest {
     static final LeaseKeeper.Settings SETTINGS =
             new LeaseKeeper.Settings(Duration.ofSeconds(60), Duration.ofSeconds(15), Duration.ofSeconds(10));

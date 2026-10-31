@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import java.nio.charset.StandardCharsets;
@@ -5,6 +12,9 @@ import java.nio.charset.StandardCharsets;
 /**
  * Minimal deterministic JSON writer for the converters: compact (no whitespace), keys in the order written,
  * strings escaped per RFC 8259 with non-ASCII left as UTF-8. The caller keeps the structure valid.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class JsonWriter {
     private final StringBuilder sb;

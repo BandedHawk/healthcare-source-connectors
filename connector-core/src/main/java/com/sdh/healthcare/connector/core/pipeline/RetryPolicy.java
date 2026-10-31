@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.pipeline;
 
 import java.io.IOException;
@@ -12,7 +19,12 @@ import org.apache.iceberg.jdbc.UncheckedSQLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Exponential backoff with full jitter for transient errors (design §11). */
+/**
+ * Exponential backoff with full jitter for transient errors (design §11).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 public record RetryPolicy(int maxAttempts, Duration initialBackoff, Duration maxBackoff) {
     private static final Logger LOG = LoggerFactory.getLogger(RetryPolicy.class);
 

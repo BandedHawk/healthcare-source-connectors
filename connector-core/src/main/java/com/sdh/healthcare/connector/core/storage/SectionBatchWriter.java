@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import com.sdh.healthcare.connector.core.convert.Representation;
@@ -44,6 +51,9 @@ import org.apache.iceberg.parquet.Parquet;
  * <p>One batch data key per batch, wrapped once. Every section is chunked, compressed and encrypted
  * with its own derived key. Sections are streamed from the source; at most one chunk is held in memory
  * per section being processed.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class SectionBatchWriter implements AutoCloseable {
     private static final SecureRandom RANDOM = new SecureRandom();

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -29,7 +36,12 @@ import org.apache.iceberg.io.DataWriter;
 import org.apache.iceberg.parquet.Parquet;
 import org.junit.jupiter.api.Test;
 
-/** Spike §16.4: compaction and snapshot expiry without Spark, under fencing. */
+/**
+ * Spike §16.4: compaction and snapshot expiry without Spark, under fencing.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class MaintenanceSpikeTest {
     final FencedCommitter committer = new FencedCommitter(new LeaseToken() {
         public long epoch() { return 1; }

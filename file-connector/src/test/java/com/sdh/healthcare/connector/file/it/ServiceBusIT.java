@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.ItSupport.*;
@@ -28,6 +35,9 @@ import org.testcontainers.mssqlserver.MSSQLServerContainer;
  * Design §10.3 servicebus: SessionId = fileId, MessageId = messageId with duplicate detection, metadata as
  * application properties. Microsoft's emulator, backed by SQL Server; config is copied in (no host mounts). The
  * emulator caps the duplicate-detection window at 5 minutes.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class ServiceBusIT {
     static final String CONFIG = """

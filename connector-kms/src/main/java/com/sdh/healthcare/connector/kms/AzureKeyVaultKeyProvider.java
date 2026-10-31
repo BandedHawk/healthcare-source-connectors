@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.kms;
 
 import com.azure.core.credential.TokenCredential;
@@ -25,6 +32,9 @@ import java.util.function.Function;
  *   <li>sign: {@code sign} with {@code ES256} on an EC P-256 key; Key Vault already returns raw r‖s.</li>
  * </ul>
  * Credentials come from {@code DefaultAzureCredential} (managed identity, workload identity, environment, …).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class AzureKeyVaultKeyProvider implements KeyProvider {
     private final Function<String, CryptographyClient> factory;

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import java.io.BufferedReader;
@@ -13,6 +20,9 @@ import java.util.Map;
  * The CDA R2 + SDTC element model: for each complex type, its child elements, their types and whether the schema
  * lets them repeat, plus whether the type carries text. Generated from HL7's schemas by
  * {@code scripts/cda-model/generate_cda_model.py} into {@code cda-r2-sdtc.model}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class CdaModel {
     record Child(String type, boolean repeats) {}

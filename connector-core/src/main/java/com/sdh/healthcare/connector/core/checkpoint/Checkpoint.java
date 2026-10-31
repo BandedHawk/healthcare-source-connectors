@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.sdh.healthcare.connector.core.split.ResumePoint;
@@ -17,6 +24,9 @@ import java.util.UUID;
  * @param committedSeq last seq whose data is committed; -1 if none
  * @param publishedSeq last seq whose message the broker acknowledged, as known at this commit; -1 if none
  * @param failure      why the file is being failed; set in {@code FAILING} and {@code FAILED}, else null
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public record Checkpoint(
         UUID fileId,

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.KmsItSupport.*;
@@ -20,7 +27,12 @@ import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.KeySpec;
 import software.amazon.awssdk.services.kms.model.KeyUsageType;
 
-/** Design §7.4 aws-kms, against local-kms (an AWS KMS-compatible server; no account or LocalStack token needed). */
+/**
+ * Design §7.4 aws-kms, against local-kms (an AWS KMS-compatible server; no account or LocalStack token needed).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class AwsKmsIT {
     static GenericContainer<?> kms;
 

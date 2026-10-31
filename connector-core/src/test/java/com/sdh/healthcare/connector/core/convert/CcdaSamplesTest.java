@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -19,6 +26,9 @@ import org.w3c.dom.Node;
  * Real-world C-CDA documents (synthetic or de-identified; see src/test/resources/ccda/README.md): each converts, and
  * nothing is lost. Every attribute value and every piece of text in the XML must appear in the JSON as often as in
  * the XML, apart from namespace declarations and xsi:schemaLocation, which aren't data.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class CcdaSamplesTest {
 

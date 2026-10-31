@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.ItSupport.*;
@@ -23,7 +30,12 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.testcontainers.containers.RabbitMQContainer;
 
-/** Design §10.3 rabbitmq: message_id = messageId, publisher confirms, metadata as AMQP headers. */
+/**
+ * Design §10.3 rabbitmq: message_id = messageId, publisher confirms, metadata as AMQP headers.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class RabbitMqIT {
     static RabbitMQContainer rabbit;
 

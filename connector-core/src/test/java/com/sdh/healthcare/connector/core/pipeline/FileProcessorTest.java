@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.pipeline;
 
 import static com.sdh.healthcare.connector.core.storage.ArchiveTables.*;
@@ -69,6 +76,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link FileProcessor}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class FileProcessorTest {
     static final String SECTIONS_KEK = "sections-kek/1";
     static final String SOURCE_KEK = "source-kek/1";

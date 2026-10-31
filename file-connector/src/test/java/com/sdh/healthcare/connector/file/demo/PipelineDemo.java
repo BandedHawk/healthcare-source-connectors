@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.demo;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -64,6 +71,9 @@ import org.springframework.test.context.DynamicPropertySource;
  *
  * <p>The samples are synthetic or de-identified; none contains PHI. The connector's own output stays PHI-free either
  * way: the console telemetry goes through the same filters as the OTLP export.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 // Registered before Spring's extension, so it runs after Spring has closed the connector: the stack it shuts down
 // (Postgres, the broker, the VM) must outlive the connector's own shutdown, which releases the lease.

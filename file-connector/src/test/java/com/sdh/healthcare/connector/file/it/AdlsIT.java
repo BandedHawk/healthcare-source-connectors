@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import com.azure.storage.blob.BlobContainerClient;
@@ -21,6 +28,9 @@ import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
  *
  * <p>Azurite has no Data Lake directory operations, so {@code ADLSFileIO.listPrefix} (used by orphan-file cleanup)
  * can't run against it; this test lists through the Blob API instead and skips orphan cleanup.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 @SpringBootTest(properties = "camel.main.run-controller=false")
 @Import(ObjectStoreItBase.Overrides.class)

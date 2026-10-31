@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
@@ -20,6 +27,9 @@ import java.util.Objects;
  *                          section as split
  * @param convertMaxBytes   sections larger than this aren't converted (they'd need too much memory) and are stored
  *                          in their original form as failed, {@code CONVERT_TOO_LARGE} (default 64 MiB)
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public record PipelineSettings(
         String connectorId,

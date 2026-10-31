@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.perf;
 
 import com.sdh.healthcare.connector.core.LocalFileIO;
@@ -29,6 +36,9 @@ import software.amazon.awssdk.services.s3.S3Client;
  * Where throughput runs store their tables: a JDBC catalog on embedded Postgres in both cases, with data either on
  * local disk ({@code local}) or in SeaweedFS through {@code S3FileIO} ({@code s3}, needs Docker; on minikube the
  * store runs in the VM, so uploads cross the VM's virtual network).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 abstract class PerfStorage implements AutoCloseable {
     private final Catalog catalog;

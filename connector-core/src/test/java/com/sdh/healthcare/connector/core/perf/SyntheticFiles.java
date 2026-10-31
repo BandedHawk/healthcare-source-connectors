@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.perf;
 
 import java.io.BufferedWriter;
@@ -12,6 +19,9 @@ import java.util.SplittableRandom;
  * Synthetic input for throughput tests (design §13, §15): C-CDA documents, X12 837 claims and CSV records, written
  * to a target size. Content is pseudo-random words from a large vocabulary, numbers and codes, so it compresses
  * roughly like real clinical text rather than collapsing to nothing. Seeded, so runs are repeatable.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class SyntheticFiles {
     record Generated(Path path, long bytes, long sections) {}

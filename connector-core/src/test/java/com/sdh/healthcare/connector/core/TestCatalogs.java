@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core;
 
 import java.util.Map;
@@ -14,6 +21,9 @@ import org.apache.iceberg.rest.RESTCatalogAdapter;
 /**
  * Catalog fixtures. Each {@link Kind} can hand out several independent clients for the same catalog,
  * which stand in for separate connector processes.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class TestCatalogs {
 

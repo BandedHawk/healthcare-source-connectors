@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
@@ -15,6 +22,9 @@ import java.util.UUID;
  *
  * @param chainHash base64 of H after the last archived block (32 zero bytes before the first)
  * @param digest    the finished file digest; set once {@code done}
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public record ArchiveCheckpoint(UUID fileId, long nextBlock, String chainHash, boolean done, String digest,
         Instant finishedAt) {

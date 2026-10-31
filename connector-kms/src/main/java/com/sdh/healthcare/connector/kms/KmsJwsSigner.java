@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.kms;
 
 import com.nimbusds.jose.JOSEException;
@@ -14,6 +21,9 @@ import java.util.Set;
 /**
  * ES256 JWS signer whose private key stays in a KMS (design §7.1): the SHA-256 digest of the signing input is sent to
  * {@link KeyProvider#sign}, which returns raw r‖s. Used by {@code MessageSealer} like any Nimbus signer.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class KmsJwsSigner implements JWSSigner {
     private final KeyProvider kms;

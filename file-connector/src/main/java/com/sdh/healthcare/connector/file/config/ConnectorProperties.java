@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.config;
 
 import java.nio.file.Path;
@@ -10,6 +17,9 @@ import org.springframework.util.unit.DataSize;
 /**
  * Every {@code sdh.*} setting (design §14). Secrets (passwords, passphrases) are normally supplied through
  * environment variables, e.g. {@code SDH_CRYPTO_KEYSTORE_PASSWORD}, or a Spring {@code configtree:} mount.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 @ConfigurationProperties("sdh")
 public record ConnectorProperties(

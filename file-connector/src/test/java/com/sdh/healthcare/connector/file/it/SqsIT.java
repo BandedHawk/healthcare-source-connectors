@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.ItSupport.*;
@@ -29,6 +36,9 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 /**
  * Design §10.3 sqs on a FIFO queue: MessageGroupId = fileId, MessageDeduplicationId = messageId. Runs against
  * ElasticMQ, an SQS-compatible server (no cloud account or LocalStack token needed).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class SqsIT {
     static GenericContainer<?> elasticmq;

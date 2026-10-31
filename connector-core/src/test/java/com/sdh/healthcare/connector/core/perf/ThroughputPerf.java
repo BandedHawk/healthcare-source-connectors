@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.perf;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,6 +78,9 @@ import org.junit.jupiter.params.provider.MethodSource;
  *
  * <p>Results are printed at the end and written to {@code target/perf/}: {@code throughput-<storage>-<recipient>.md}
  * for the latest run, and {@code history.csv}, which gains one row per format per run until {@code mvn clean}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ThroughputPerf {

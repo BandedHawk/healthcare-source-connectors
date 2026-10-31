@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.config;
 
 import com.nimbusds.jose.JWSAlgorithm;
@@ -51,6 +58,9 @@ import javax.crypto.SecretKey;
  * Locally, startup is refused if the keystore or signing key is world-accessible, group-writable or group-executable,
  * or the signing key isn't encrypted. Group read is allowed: Kubernetes secret volumes with an {@code fsGroup} are
  * always at least 0440. The recipient key must match its pinned fingerprint. Public key files are not checked for permissions.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public record KeyMaterial(KeyProvider wrap, JWSSigner signer, String signerKid, PublicKey recipient,
         String recipientKid, ECPublicKey recovery, List<AutoCloseable> resources) implements AutoCloseable {

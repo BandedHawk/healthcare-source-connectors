@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import static org.apache.iceberg.types.Types.NestedField.optional;
@@ -18,6 +25,9 @@ import org.apache.iceberg.types.Types;
  * archived (digest, encrypted original name, completion or failure details) are on one summary row with
  * {@code chunk_index = -1}, written in the final archive commit. The summary row's chunk columns hold the
  * file's chunk count and size; its {@code ciphertext} is empty.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class ArchiveTables {
     public static final String SOURCE_FILES = "source_files";

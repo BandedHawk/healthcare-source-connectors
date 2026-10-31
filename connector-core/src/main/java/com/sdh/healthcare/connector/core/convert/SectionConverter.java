@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import com.sdh.healthcare.connector.core.split.SplitConfig;
@@ -15,6 +22,9 @@ import com.sdh.healthcare.connector.core.split.SplitConfig;
  *   <li>Problems are reported as {@link ConversionException} with a code and a position only, never content. The
  *       section is then stored unconverted and announced as failed; the file carries on.</li>
  * </ul>
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public interface SectionConverter {
 

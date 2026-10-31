@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.admin;
 
 import java.io.FilterOutputStream;
@@ -16,6 +23,9 @@ import java.nio.file.attribute.PosixFilePermissions;
 /**
  * Writes decrypted output safely: owner-only permissions, never over an existing file, and only renamed into place
  * once complete. If writing or verification fails, the partial file is deleted, so no unverified plaintext remains.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class OutputFiles {
     private OutputFiles() {}

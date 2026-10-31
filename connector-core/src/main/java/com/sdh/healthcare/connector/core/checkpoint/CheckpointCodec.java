@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
@@ -11,7 +18,12 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
-/** Checkpoint ⇄ JSON with a MAC under the label {@code sdh-checkpoint} (design §9.1). */
+/**
+ * Checkpoint ⇄ JSON with a MAC under the label {@code sdh-checkpoint} (design §9.1).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 public final class CheckpointCodec {
     private final MacedJson<Checkpoint> json;
 

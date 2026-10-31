@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.publish;
 
 import java.util.concurrent.CompletableFuture;
@@ -13,6 +20,9 @@ import java.util.concurrent.CompletableFuture;
  * per-{@code fileId} order for messages sent in sequence and should use
  * {@code messageId} for broker-side dedup where the broker supports it.
  * Failures are retried by the pipeline.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public interface MessagePublisher
 {

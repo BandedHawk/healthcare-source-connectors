@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import com.sdh.healthcare.connector.contract.table.SectionsTable;
@@ -13,7 +20,12 @@ import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 
-/** Creates the ingest tables with the properties the design relies on. */
+/**
+ * Creates the ingest tables with the properties the design relies on.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 public final class IngestTables {
 
     /**

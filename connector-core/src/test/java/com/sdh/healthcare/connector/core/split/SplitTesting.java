@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -7,7 +14,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-/** Helpers shared by the splitter tests. */
+/**
+ * Helpers shared by the splitter tests.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 public final class SplitTesting {
     private SplitTesting() {}
 

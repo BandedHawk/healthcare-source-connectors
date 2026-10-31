@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -51,6 +58,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * The connector on an object store other than S3 (design §8.1), with a JDBC catalog and Postgres for the lease:
  * ingest, downstream read-back through the store's own FileIO, archive restore, maintenance, and no plaintext
  * anywhere in the bucket. Each subclass supplies the store (an emulator) and its Iceberg FileIO settings.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 abstract class ObjectStoreItBase {
     static final String MARKER = "PHI-MARKER-5c1d";

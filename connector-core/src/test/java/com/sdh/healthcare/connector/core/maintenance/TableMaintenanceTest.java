@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.maintenance;
 
 import static com.sdh.healthcare.connector.contract.table.SectionsTable.*;
@@ -48,6 +55,12 @@ import org.apache.iceberg.io.FileInfo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+/**
+ * Tests for {@link TableMaintenance}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class TableMaintenanceTest {
     static final Instant NOW = Instant.now();
     static final Instant OLD_DAY = NOW.minus(Duration.ofDays(10));

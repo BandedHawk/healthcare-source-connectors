@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.runtime;
 
 import com.sdh.healthcare.connector.contract.table.SectionsTable;
@@ -25,6 +32,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Runs table maintenance (design §8.4) on all three ingest tables every {@code interval}, between files: it only
  * proceeds if it can take the writer lock without waiting, so it never overlaps with ingest.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class MaintenanceScheduler implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(MaintenanceScheduler.class);

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -36,6 +43,9 @@ import java.util.Set;
  * {@code ISA + TA1 + IEA} with IEA01 = 0. Control numbers are checked
  * (ST02/SE02, GS06/GE02, ISA13/IEA02) to catch truncated or spliced input. BIN
  * segments carrying raw binary are not supported.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class X12Splitter implements SectionSplitter
 {

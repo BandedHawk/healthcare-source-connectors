@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -36,6 +43,9 @@ import org.junit.jupiter.api.Test;
  * When a batch's Parquet file fails to close, the error that caused it must be the one reported. Parquet refuses a
  * second close of a failed writer ("Cannot return unfinished footer"); the cleanup path used to close again and
  * throw that instead, which hid an out-of-memory error during the heap-sizing runs (design §13.1).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class AbandonedBatchTest {
     static final String FAILURE = "disk full (test)";

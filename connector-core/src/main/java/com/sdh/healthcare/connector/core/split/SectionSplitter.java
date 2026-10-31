@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split;
 
 import java.io.IOException;
@@ -14,6 +21,9 @@ import java.io.IOException;
  *   <li>A splitter holds no section bytes in memory beyond small context (headers, envelopes, start tags).</li>
  *   <li>Errors are reported as {@link SplitException} with a code and offset only.</li>
  * </ul>
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public interface SectionSplitter {
 

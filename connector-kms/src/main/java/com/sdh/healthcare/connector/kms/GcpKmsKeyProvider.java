@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.kms;
 
 import com.google.cloud.kms.v1.CryptoKeyVersionName;
@@ -28,6 +35,9 @@ import java.util.zip.CRC32C;
  * </ul>
  * Every request and response is checked with CRC32C, as Google recommends, to catch corruption in transit.
  * Credentials come from Application Default Credentials.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class GcpKmsKeyProvider implements KeyProvider, AutoCloseable {
     private final KeyManagementServiceClient kms;

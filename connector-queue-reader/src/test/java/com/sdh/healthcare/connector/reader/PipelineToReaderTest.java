@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.reader;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -36,7 +43,12 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.junit.jupiter.api.Test;
 
-/** Design §15: end to end, connector write → message → connector-queue-reader. */
+/**
+ * Design §15: end to end, connector write → message → connector-queue-reader.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class PipelineToReaderTest {
 
     @Test

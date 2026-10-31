@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import static com.sdh.healthcare.connector.core.storage.ArchiveTables.*;
@@ -60,6 +67,9 @@ import org.slf4j.LoggerFactory;
  *   <li>Progress is committed every {@code commitBytes} (whole blocks) with the archive checkpoint. The last commit
  *       adds the summary row and marks the checkpoint done.</li>
  * </ul>
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class Archiver {
     private static final Logger LOG = LoggerFactory.getLogger(Archiver.class);

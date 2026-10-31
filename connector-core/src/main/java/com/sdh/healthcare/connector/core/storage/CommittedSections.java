@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import static com.sdh.healthcare.connector.contract.table.SectionsTable.*;
@@ -20,6 +27,9 @@ import org.apache.iceberg.io.CloseableIterable;
 /**
  * Reads back what is needed to rebuild {@code section.stored} messages from committed rows, without
  * touching ciphertext or keys (design §9.2, restart step 2).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class CommittedSections {
 

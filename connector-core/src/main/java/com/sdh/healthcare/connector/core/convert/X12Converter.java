@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import com.sdh.healthcare.connector.core.split.SplitConfig;
@@ -15,6 +22,9 @@ import java.nio.charset.StandardCharsets;
  * and repetitions stay as one string ({@code "HC:99213:25"}); the separators are in the ISA (ISA16, ISA11).
  * Delimiters are read from the ISA; line breaks after a segment terminator are not part of the data. Input must be
  * UTF-8 (X12's character sets are subsets of it).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class X12Converter implements SectionConverter {
     public static final String MAPPING = "x12/1";

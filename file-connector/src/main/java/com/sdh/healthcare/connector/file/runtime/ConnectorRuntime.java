@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.runtime;
 
 import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
@@ -45,6 +52,9 @@ import org.slf4j.LoggerFactory;
  * lease → claim the inbound directory (§9.5) → catalog and tables → fence every table with our epoch → keys → ID key
  * → pipeline, archivers, processor.
  * Closed in reverse; the inbound route is stopped first so no file is in flight when the lease is released.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class ConnectorRuntime implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(ConnectorRuntime.class);

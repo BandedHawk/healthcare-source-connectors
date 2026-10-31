@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.ingest;
 
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
@@ -34,6 +41,9 @@ import org.slf4j.LoggerFactory;
  * broken invariant) stop the process. Anything else (storage down, file unreadable) leaves the file where it is;
  * the route thread waits with backoff, so the pipeline pauses, and the next poll tries again. Paths and filenames
  * are never logged.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class InboundService {
     private static final Logger LOG = LoggerFactory.getLogger(InboundService.class);

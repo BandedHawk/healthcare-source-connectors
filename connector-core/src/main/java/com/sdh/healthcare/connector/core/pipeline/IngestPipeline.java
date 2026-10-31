@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
@@ -78,6 +85,9 @@ import org.slf4j.LoggerFactory;
  * <p>Errors: a {@link SplitException} means the file can't be split (fail the file). Transient storage and
  * broker errors are retried per {@link RetryPolicy}. Lease loss and {@code CommitStateUnknownException} are
  * not caught: the process should exit and restart from the checkpoint.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class IngestPipeline implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(IngestPipeline.class);

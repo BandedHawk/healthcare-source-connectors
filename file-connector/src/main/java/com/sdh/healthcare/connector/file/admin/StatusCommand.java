@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.admin;
 
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
@@ -20,6 +27,9 @@ import org.apache.iceberg.Table;
  * {@code status}: the lease, the checkpoint (with the file in progress), archive progress and the inbound backlog
  * (design §11.4). Reads only. Each part is reported on its own, so an unreachable KMS still leaves the lease and
  * backlog visible; the exit status is 1 if any part couldn't be read.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class StatusCommand implements AdminCommand {
     static final String USAGE = """

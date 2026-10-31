@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -32,6 +39,9 @@ import java.util.Optional;
  * checks strings, escapes and bracket nesting, which is enough to find exact
  * byte boundaries and to restart mid-array. Full JSON validation is left to
  * downstream.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class FhirSplitter implements SectionSplitter
 {

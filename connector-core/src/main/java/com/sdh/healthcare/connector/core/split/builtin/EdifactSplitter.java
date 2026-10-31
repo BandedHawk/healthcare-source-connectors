@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -39,6 +46,9 @@ import java.util.Set;
  * Control references are checked (UNH/UNT 0062, UNG/UNE 0048, UNB/UNZ 0020) to
  * catch truncated or spliced input. Segment counts (UNT 0074) aren't. Line
  * breaks between segments are allowed.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class EdifactSplitter implements SectionSplitter
 {

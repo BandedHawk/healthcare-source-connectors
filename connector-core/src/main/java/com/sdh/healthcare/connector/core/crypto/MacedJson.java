@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.crypto;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
@@ -13,6 +20,9 @@ import java.util.function.Function;
  * JSON objects with {@code "mac": HMAC(idKey, label ‖ 0 ‖ canonical JSON without mac)}, for state kept in table
  * properties. The MAC is checked against a canonical form rebuilt from the parsed value, so it doesn't depend
  * on how the stored JSON is formatted.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class MacedJson<T> {
     private final SectionIds ids;

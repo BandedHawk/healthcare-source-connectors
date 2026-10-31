@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.pipeline;
 
 import static com.sdh.healthcare.connector.core.storage.ArchiveTables.*;
@@ -51,6 +58,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Lease loss, unknown commit outcomes, a tampered checkpoint and invariant violations are never treated as file
  * failures: they propagate so the process exits and restarts from the checkpoint.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class FileProcessor {
     private static final Logger LOG = LoggerFactory.getLogger(FileProcessor.class);

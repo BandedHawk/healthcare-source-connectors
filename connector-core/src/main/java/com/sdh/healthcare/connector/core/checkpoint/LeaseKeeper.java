@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.sdh.healthcare.connector.core.telemetry.Attr;
@@ -32,6 +39,9 @@ import org.slf4j.LoggerFactory;
  * renewing, so its lease lapses within one TTL and this instance takes over without exiting. Under an orchestrator
  * that restarts failed processes with growing delays (Kubernetes), exiting at once would add those delays to the
  * takeover. A lease still held after the wait has a live holder: {@link LeaseHeldException}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class LeaseKeeper implements LeaseToken, AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(LeaseKeeper.class);

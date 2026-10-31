@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split;
 
 import java.util.HashMap;
@@ -10,6 +17,9 @@ import java.util.Map;
  * @param options         format-specific options, keyed as in configuration (e.g. {@code csv.header})
  * @param limits          size and count limits
  * @param readBufferBytes read buffer size; 4 MiB by default (design §13)
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public record SplitConfig(String boundary, Map<String, String> options, SplitLimits limits, int readBufferBytes) {
     public static final int DEFAULT_READ_BUFFER = 4 << 20;

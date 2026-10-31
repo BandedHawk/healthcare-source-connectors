@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.admin;
 
 import static com.sdh.healthcare.connector.core.storage.ArchiveTables.FAILURE_SEQ;
@@ -52,6 +59,9 @@ import org.springframework.test.context.DynamicPropertySource;
  * The admin commands (design §11.4) against data written by the running connector: embedded Postgres (lease and
  * JDBC catalog), in-memory object storage, local keys. The connector holds the lease throughout, which the
  * commands must neither need nor disturb.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 @SpringBootTest(properties = "camel.main.run-controller=false",
         classes = com.sdh.healthcare.connector.file.FileConnectorApplication.class)

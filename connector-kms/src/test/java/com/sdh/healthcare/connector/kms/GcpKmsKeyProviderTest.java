@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.kms;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -51,6 +58,9 @@ import org.junit.jupiter.api.Test;
  * Cloud KMS has no emulator, so this runs the provider against an in-process fake of the KMS gRPC service: real
  * AES-GCM with the AAD enforced, real ECDSA, and the CRC32C integrity fields. It checks our side of the protocol, not
  * Google's service.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class GcpKmsKeyProviderTest {
     static final String KEY = "projects/p/locations/global/keyRings/r/cryptoKeys/kek";

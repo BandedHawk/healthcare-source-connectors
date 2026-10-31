@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -17,6 +24,9 @@ import org.junit.jupiter.params.provider.EnumSource;
  * that aren't formally part of its API, and other code depends on Iceberg behaviour that isn't promised either. The
  * fencing tests run on every build, but they can't notice everything (a REST server's commit checks, ADLS listing),
  * so a version change fails here until the review below has been done and the reviewed versions updated.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class IcebergUpgradeGuardTest {
 

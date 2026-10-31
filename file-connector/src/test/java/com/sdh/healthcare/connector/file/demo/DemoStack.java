@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.demo;
 
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -38,6 +45,9 @@ import software.amazon.awssdk.services.s3.S3Client;
  *       the {@code sdh-it} minikube VM, which is started if needed and stopped afterwards
  *       ({@code -Ddemo.stop-vm=false} keeps it running).
  * </ul>
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 interface DemoStack extends AutoCloseable {
 

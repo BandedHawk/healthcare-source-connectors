@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.contract.jose;
 
 import com.nimbusds.jose.JOSEException;
@@ -25,6 +32,9 @@ import java.util.Set;
 /**
  * Decrypts and verifies a sealed message. Only the algorithms the connector produces are accepted,
  * and keys are chosen by {@code kid} from fixed maps, so headers cannot pick a weaker algorithm or key.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class MessageOpener {
     private static final Set<JWEAlgorithm> JWE_ALGS = Set.of(JWEAlgorithm.ECDH_ES_A256KW, JWEAlgorithm.RSA_OAEP_256);

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -21,6 +28,12 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
+/**
+ * Tests for {@link CcdaConverter}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class CcdaConverterTest {
     static final ObjectMapper JSON = new ObjectMapper();
     static final CcdaConverter CONVERTER = new CcdaConverter();

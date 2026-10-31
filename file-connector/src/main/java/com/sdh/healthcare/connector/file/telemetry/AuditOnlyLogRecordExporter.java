@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.telemetry;
 
 import io.opentelemetry.api.common.Attributes;
@@ -15,6 +22,9 @@ import java.util.Collection;
 /**
  * Exports only audit events ({@code sdh.audit.*}) and only their allow-listed attributes (design §12). Free-text log
  * lines, from any library, never leave the host this way: their text could contain a path or record content.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class AuditOnlyLogRecordExporter implements LogRecordExporter {
     static final String PREFIX = "sdh.audit.";

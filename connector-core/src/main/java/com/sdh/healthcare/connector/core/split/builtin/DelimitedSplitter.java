@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
@@ -38,6 +45,9 @@ import java.util.regex.Pattern;
  * Lines that are empty or whitespace only never start a section. In START mode,
  * any lines before the first match become a section of their own, so nothing is
  * dropped.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class DelimitedSplitter implements SectionSplitter
 {

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.pipeline;
 
 import static com.sdh.healthcare.connector.contract.table.SectionsTable.*;
@@ -63,6 +70,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
+/**
+ * Tests for {@link IngestPipeline}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class IngestPipelineTest {
     static final String KEK = "sections-kek/1";
     static final int RECORDS = 250;

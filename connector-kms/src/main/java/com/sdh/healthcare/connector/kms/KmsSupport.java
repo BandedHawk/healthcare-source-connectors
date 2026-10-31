@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.kms;
 
 import com.nimbusds.jose.JOSEException;
@@ -13,7 +20,12 @@ import java.util.Base64;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Helpers shared by the KMS providers. */
+/**
+ * Helpers shared by the KMS providers.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 final class KmsSupport {
     /** Bound to every wrapped data key where the KMS supports it, so other ciphertexts can't pose as one. */
     static final String PURPOSE = "sdh-batch-data-key";

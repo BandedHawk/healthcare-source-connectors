@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split;
 
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -9,7 +16,12 @@ import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.TreeMap;
 
-/** Splitters by format name, loaded with {@link ServiceLoader}. Also the place where {@link SplitLimits} are enforced. */
+/**
+ * Splitters by format name, loaded with {@link ServiceLoader}. Also the place where {@link SplitLimits} are enforced.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 public final class SplitterRegistry {
     private final Map<String, SectionSplitter> byFormat;
 

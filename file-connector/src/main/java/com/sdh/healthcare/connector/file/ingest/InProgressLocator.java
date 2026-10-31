@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.ingest;
 
 import java.io.IOException;
@@ -9,7 +16,12 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 
-/** Finds the inbound file that matches the in-progress checkpoint's fingerprint (design §5, startup). */
+/**
+ * Finds the inbound file that matches the in-progress checkpoint's fingerprint (design §5, startup).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 final class InProgressLocator {
 
     @FunctionalInterface

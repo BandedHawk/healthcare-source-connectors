@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import java.util.HashMap;
@@ -9,6 +16,9 @@ import java.util.ServiceLoader;
  * Section converters by format (design §6.4), found with {@link ServiceLoader} like the splitters, so a plugin jar
  * can add one. Built in: {@code csv}, {@code ccda}, {@code x12}, {@code edifact}. Formats without a converter are
  * stored as split.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class ConverterRegistry {
     private final Map<String, SectionConverter> byFormat;

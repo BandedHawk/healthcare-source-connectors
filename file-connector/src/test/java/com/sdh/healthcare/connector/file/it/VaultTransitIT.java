@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.KmsItSupport.*;
@@ -20,7 +27,12 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.vault.VaultContainer;
 
-/** Design §7.4 vault-transit, against HashiCorp Vault in dev mode, configured only through connector settings. */
+/**
+ * Design §7.4 vault-transit, against HashiCorp Vault in dev mode, configured only through connector settings.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class VaultTransitIT {
     static VaultContainer<?> vault;
     static URI address;

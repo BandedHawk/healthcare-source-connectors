@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.source;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
@@ -26,6 +33,9 @@ import java.util.UUID;
  * <p>Records hold no PHI: IDs, timestamps, counts, the keyed digest, error code and stage. The original filename
  * never appears. Every file is written to a hidden temp file, synced, then atomically renamed into place, with
  * owner-only permissions.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class DirectoryOutcomeRecorder implements OutcomeRecorder {
     public static final String COMPLETED_DIR = "completed";

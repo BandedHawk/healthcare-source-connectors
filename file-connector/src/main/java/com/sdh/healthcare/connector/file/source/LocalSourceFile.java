@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.source;
 
 import com.sdh.healthcare.connector.core.pipeline.SourceFile;
@@ -7,7 +14,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
 
-/** A file in the inbound directory. Its name is PHI-sensitive and never logged (design §7.5). */
+/**
+ * A file in the inbound directory. Its name is PHI-sensitive and never logged (design §7.5).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 public final class LocalSourceFile implements SourceFile {
     private final Path path;
     private final Path marker;

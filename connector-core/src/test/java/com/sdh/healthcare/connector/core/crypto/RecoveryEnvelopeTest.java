@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.crypto;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -17,6 +24,12 @@ import java.util.Random;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link RecoveryEnvelope}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class RecoveryEnvelopeTest {
     static KeyPair ec() throws Exception {
         KeyPairGenerator g = KeyPairGenerator.getInstance("EC");

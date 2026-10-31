@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.ItSupport.*;
@@ -22,7 +29,12 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.activemq.ArtemisContainer;
 
-/** Design §10.3 artemis: JMSXGroupID = fileId, duplicate detection via _AMQ_DUPL_ID = messageId. */
+/**
+ * Design §10.3 artemis: JMSXGroupID = fileId, duplicate detection via _AMQ_DUPL_ID = messageId.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class ArtemisIT {
     static ArtemisContainer artemis;
 

@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.reader;
 
 import static com.sdh.healthcare.connector.contract.table.SectionsTable.*;
@@ -24,7 +31,12 @@ import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 
-/** Streams one section: scans its chunk rows, puts them in order and decrypts them one at a time. */
+/**
+ * Streams one section: scans its chunk rows, puts them in order and decrypts them one at a time.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 final class SectionInputStream extends InputStream {
     private final SectionInStorage msg;
     private final BatchKeyCache keys;

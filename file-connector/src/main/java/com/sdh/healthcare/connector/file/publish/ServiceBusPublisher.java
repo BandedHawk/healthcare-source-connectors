@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.publish;
 
 import com.azure.core.util.BinaryData;
@@ -21,6 +28,9 @@ import org.apache.camel.component.azure.servicebus.ServiceBusType;
  * the SDK directly. ServiceBusIT found this. Connection settings still come from the configured Camel URI
  * ({@code connectionString}, or {@code fullyQualifiedNamespace} with a token credential or the default Azure
  * credential chain), so configuration doesn't change.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class ServiceBusPublisher implements ClosablePublisher {
     private final ServiceBusSenderAsyncClient sender;

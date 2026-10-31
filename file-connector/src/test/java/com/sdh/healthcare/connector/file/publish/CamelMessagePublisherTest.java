@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.publish;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -16,6 +23,12 @@ import org.apache.camel.component.mock.MockEndpoint;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link CamelMessagePublisher}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class CamelMessagePublisherTest {
 
     @Test

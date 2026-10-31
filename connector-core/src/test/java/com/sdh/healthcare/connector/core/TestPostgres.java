@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core;
 
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
@@ -5,7 +12,12 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import javax.sql.DataSource;
 
-/** One embedded PostgreSQL (real binaries, no Docker) shared by all tests in the JVM. */
+/**
+ * One embedded PostgreSQL (real binaries, no Docker) shared by all tests in the JVM.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 public final class TestPostgres {
     private static EmbeddedPostgres pg;
 

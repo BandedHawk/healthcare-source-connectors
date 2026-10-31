@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.telemetry;
 
 import java.util.Arrays;
@@ -8,6 +15,9 @@ import java.util.stream.Collectors;
  * The only attribute keys telemetry may carry (design §12): identifiers, codes, offsets and counts, never content,
  * filenames or exception messages. {@link Fields} accepts nothing else, and the application's exporters drop any
  * other key that reaches them from elsewhere.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public enum Attr {
     FILE_ID("sdh.file_id"),

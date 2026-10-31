@@ -1,10 +1,22 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.crypto;
 
 import java.security.GeneralSecurityException;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
-/** {@code sectionId = base32(HMAC-SHA-256(idKey, sectionPlaintext))} (design §7.3). */
+/**
+ * {@code sectionId = base32(HMAC-SHA-256(idKey, sectionPlaintext))} (design §7.3).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 public final class SectionIds {
     private static final char[] ALPHABET = "abcdefghijklmnopqrstuvwxyz234567".toCharArray();
 

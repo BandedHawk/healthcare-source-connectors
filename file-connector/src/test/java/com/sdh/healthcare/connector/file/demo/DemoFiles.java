@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.demo;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -12,6 +19,9 @@ import java.util.List;
  * The demo's input: C-CDA files built from the synthetic and de-identified samples in
  * {@code connector-core/src/test/resources/ccda/} (no PHI). Some hold one document, some a batch of several, and three
  * are broken in the ways the demo shows.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class DemoFiles {
 

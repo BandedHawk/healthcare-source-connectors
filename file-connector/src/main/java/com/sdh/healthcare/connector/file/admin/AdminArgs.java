@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.admin;
 
 import java.util.ArrayList;
@@ -10,6 +17,9 @@ import java.util.Set;
 /**
  * Command-line options for one admin command: {@code --name value} and {@code --flag}. Arguments of the form
  * {@code --a.b=c} are Spring configuration overrides and are passed through to the configuration instead.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class AdminArgs {
     private final String command;

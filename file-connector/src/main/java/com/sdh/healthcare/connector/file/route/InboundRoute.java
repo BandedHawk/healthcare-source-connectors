@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.route;
 
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
@@ -18,6 +25,9 @@ import org.apache.camel.component.file.GenericFile;
  *   <li>Hidden files, {@code completed/} and {@code failed/} are never picked up.</li>
  *   <li>The route doesn't auto-start: it starts after startup recovery has finished any in-progress file.</li>
  * </ul>
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public class InboundRoute extends RouteBuilder {
     private final ConnectorProperties.File props;

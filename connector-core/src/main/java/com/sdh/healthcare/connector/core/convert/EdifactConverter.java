@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import com.sdh.healthcare.connector.core.split.SplitConfig;
@@ -22,6 +29,9 @@ import java.util.Map;
  * <p>The character set comes from the syntax identifier (UNB S001): UNOA/UNOB ASCII, UNOC–UNOK ISO 8859 parts,
  * UNOW/UNOY UTF-8. Others (e.g. UNOX, ISO 2022) fail with {@code CONVERT_EDIFACT_CHARSET}; bytes that aren't valid in
  * the declared set fail with {@code CONVERT_INVALID_ENCODING}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class EdifactConverter implements SectionConverter {
     public static final String MAPPING = "edifact/1";

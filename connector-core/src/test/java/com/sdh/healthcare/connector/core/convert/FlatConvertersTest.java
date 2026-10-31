@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.convert;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -9,7 +16,12 @@ import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import org.junit.jupiter.api.Test;
 
-/** CSV, X12 and EDIFACT conversion (design §6.4). */
+/**
+ * CSV, X12 and EDIFACT conversion (design §6.4).
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class FlatConvertersTest {
     static final SplitConfig CSV = SplitConfig.defaults("csv");
     static final SplitConfig CSV_HEADER = CSV.withOption("csv.header", "true");

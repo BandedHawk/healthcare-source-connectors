@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,6 +31,9 @@ import org.testcontainers.containers.wait.strategy.Wait;
  * Google Cloud Storage through Iceberg's {@code GCSFileIO} (design §8.1), against fake-gcs-server. The client
  * reaches the emulator with {@code gcs.service.host} and no credentials ({@code gcs.no-auth}); in production the
  * default Google credentials (workload identity or a service account) are used instead.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 @SpringBootTest(properties = "camel.main.run-controller=false")
 @Import(ObjectStoreItBase.Overrides.class)

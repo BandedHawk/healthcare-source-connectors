@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.contract;
 
 /**
@@ -5,6 +12,9 @@ package com.sdh.healthcare.connector.contract;
  *
  * <p>A reader accepts any message with the same major version. Minor versions only add optional
  * fields, which older readers ignore. A major change needs a reader upgrade first.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class ContractVersion {
     /** 2: sections carry their content type and mapping; section.failed; file.completed counts failed sections. */

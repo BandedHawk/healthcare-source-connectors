@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.admin;
 
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -18,6 +25,9 @@ import java.util.concurrent.TimeUnit;
  * Audit events from admin commands reach the same places as the connector's (design §12): always the console
  * ({@code sdh.audit} logger), and the OTLP collector when {@code sdh.telemetry.otlp.endpoint} is set. A short-lived
  * command can't wait for batches, so events are exported one by one and flushed before exit.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class AdminTelemetry implements AutoCloseable {
     private final SdkLoggerProvider logs;

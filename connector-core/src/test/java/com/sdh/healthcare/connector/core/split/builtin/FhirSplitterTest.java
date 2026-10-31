@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static com.sdh.healthcare.connector.core.split.SplitTesting.*;
@@ -6,6 +13,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link FhirSplitter}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class FhirSplitterTest {
     private final FhirSplitter splitter = new FhirSplitter();
 

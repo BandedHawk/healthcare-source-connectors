@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.storage;
 
 import static com.sdh.healthcare.connector.core.storage.ArchiveTables.*;
@@ -30,6 +37,9 @@ import org.apache.iceberg.io.CloseableIterable;
  * Restores an archived file from {@code source_files} or {@code failed_files} and checks its digest. Used by the
  * operator {@code restore} command (design §11) and tests. Reads a window of chunks at a time, so memory stays
  * small for any file size.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class ArchiveReader {
     private static final int WINDOW = 8;

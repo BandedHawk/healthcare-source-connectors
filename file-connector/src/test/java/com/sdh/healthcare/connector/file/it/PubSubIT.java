@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.ItSupport.*;
@@ -32,7 +39,12 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.gcloud.PubSubEmulatorContainer;
 
-/** Design §10.3 pubsub: orderingKey = fileId with message ordering enabled, metadata as attributes. */
+/**
+ * Design §10.3 pubsub: orderingKey = fileId with message ordering enabled, metadata as attributes.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class PubSubIT {
     static PubSubEmulatorContainer emulator;
 

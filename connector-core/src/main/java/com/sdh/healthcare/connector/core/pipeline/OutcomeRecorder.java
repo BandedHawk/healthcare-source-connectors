@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -9,6 +16,9 @@ import java.util.UUID;
 /**
  * Where a connector keeps PHI-free records of finished files and the local encrypted fallback (design §5, §11).
  * Writes must be atomic and idempotent: they may be repeated after a restart.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public interface OutcomeRecorder {
 

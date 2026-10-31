@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.it;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -18,6 +25,9 @@ import org.testcontainers.images.builder.ImageFromDockerfile;
  * {@code container/Dockerfile} on the distroless Java 25 base, then {@code docker/customer-inventory.Dockerfile}
  * adds the OS package inventory. No shell, so operator commands run the JVM directly and files are read by copying
  * them out.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class CustomerImageIT extends ContainerImageItBase {
     static final String KIT_IMAGE = "sdh/file-connector:it-kit";

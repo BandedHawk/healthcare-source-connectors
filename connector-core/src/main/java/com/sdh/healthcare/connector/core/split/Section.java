@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.core.split;
 
 import java.io.IOException;
@@ -15,6 +22,9 @@ import java.util.List;
  * @param parts        the section's plaintext, in order: literal bytes (such as a CSV header or an X12
  *                     envelope) and source ranges
  * @param resume       where a new session starts to produce the sections after this one
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public record Section(long sourceOffset, long sourceLength, List<Part> parts, ResumePoint resume) {
 

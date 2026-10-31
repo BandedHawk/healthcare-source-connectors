@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.publish;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -12,6 +19,12 @@ import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.camel.support.DefaultExchange;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link QueueType}.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
 class QueueTypeTest {
     static final UUID FILE = UUID.fromString("01a18433-40a8-79fb-8f3a-86092423a553");
     static final OutboundMessage MSG = new OutboundMessage("sec-abc", MessageType.SECTION_STORED, FILE, new byte[0]);

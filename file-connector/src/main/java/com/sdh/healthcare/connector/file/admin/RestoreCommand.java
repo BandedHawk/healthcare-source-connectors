@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.admin;
 
 import static com.sdh.healthcare.connector.core.storage.ArchiveTables.*;
@@ -21,6 +28,9 @@ import org.apache.iceberg.io.CloseableIterable;
  * {@code restore}: decrypts an archived file, whole or from an offset, into a directory (design §11.4). Looks in
  * {@code failed_files} first, then {@code source_files}. The digest is checked on every restore; on a mismatch
  * nothing is left behind.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class RestoreCommand implements AdminCommand {
     static final String USAGE = """

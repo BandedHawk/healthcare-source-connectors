@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.contract.jose;
 
 import com.nimbusds.jose.EncryptionMethod;
@@ -25,6 +32,9 @@ import java.security.interfaces.RSAPublicKey;
 /**
  * Signs a message (JWS, ES256) and encrypts the signed object to one recipient (JWE).
  * EC recipients use ECDH-ES+A256KW, RSA recipients RSA-OAEP-256; content is always A256GCM.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class MessageSealer {
     public static final JOSEObjectType JWS_TYPE = new JOSEObjectType("sdh-msg+jws");

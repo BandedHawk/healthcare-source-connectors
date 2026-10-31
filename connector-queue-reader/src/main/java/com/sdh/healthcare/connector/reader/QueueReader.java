@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.reader;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
@@ -43,6 +50,9 @@ import org.apache.iceberg.catalog.TableIdentifier;
  *
  * <p>The message envelope, encryption, chunk layout and table layout are all handled here. Consumers
  * see only the message records and the section bytes. Thread-safe.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 public final class QueueReader implements AutoCloseable {
     private final MessageOpener opener;

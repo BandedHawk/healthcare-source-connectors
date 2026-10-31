@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
 package com.sdh.healthcare.connector.file.demo;
 
 import io.opentelemetry.api.common.Attributes;
@@ -33,6 +40,9 @@ import java.util.stream.Collectors;
  * Prints the connector's OpenTelemetry output to the console for the demo (design §12). The demo wraps these in the
  * production filters ({@code AllowListSpanExporter}, {@code AuditOnlyLogRecordExporter}), so what's printed is exactly
  * what a collector would receive: allow-listed attributes only, no filenames or record content.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 final class ConsoleTelemetry {
     static final PrintStream OUT = System.out;
