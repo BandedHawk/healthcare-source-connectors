@@ -10,6 +10,7 @@ package com.sdh.healthcare.connector.core.convert;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,14 +18,19 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
+import com.sun.net.httpserver.HttpServer;
 import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
+import javax.xml.stream.XMLInputFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
@@ -288,6 +294,93 @@ class CcdaConverterTest {
      * exception. It must still be a conversion failure (the section is stored unconverted), not an unknown error that
      * fails the whole file. Found by the demo (design §15.3).
      */
+    static final String ROOT = "<ClinicalDocument xmlns=\"urn:hl7-org:v3\""
+            + " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:xi=\"http://www.w3.org/2001/XInclude\"";
+
+    static void assertMalformed(String xml) {
+        assertThatThrownBy(() -> CONVERTER.convert(xml.getBytes(UTF_8), CFG))
+                .isInstanceOfSatisfying(ConversionException.class,
+                        e -> assertThat(e.code()).isEqualTo(ErrorCode.CONVERT_XML_MALFORMED));
+    }
+
+    /** A document whose elements nest {@code depth} deep, counting {@code ClinicalDocument} as 1. */
+    static String nested(int depth) {
+        return ROOT + ">" + "<a>".repeat(depth - 1) + "x" + "</a>".repeat(depth - 1) + "</ClinicalDocument>";
+    }
+
+    /**
+     * Nothing a document points to is ever fetched or read: not an external DTD, an external entity or parameter
+     * entity, a schema location or an XInclude. A local HTTP server serves all of them and must get no request.
+     * Documents that only point at something are converted; those that use an entity it would declare are refused.
+     */
+    @Test
+    void neverFetchesDtdsEntitiesSchemasOrIncludes() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/", exchange -> {
+            requests.incrementAndGet();
+            byte[] body = "<!ENTITY ext \"FETCHED\">".getBytes(UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        try {
+            String url = "http://127.0.0.1:" + server.getAddress().getPort();
+            JsonNode pointsOnly = convert(("<!DOCTYPE ClinicalDocument SYSTEM \"" + url + "/cda.dtd\">" + ROOT
+                    + " xsi:schemaLocation=\"urn:hl7-org:v3 " + url + "/CDA.xsd\">"
+                    + "<title>t<xi:include href=\"" + url + "/include\" parse=\"text\"/></title>"
+                    + "</ClinicalDocument>").getBytes(UTF_8)).get("ClinicalDocument");
+            assertThat(pointsOnly.has("schemaLocation")).isFalse();
+            assertThat(pointsOnly.get("title").get("xi:include").get(0).get("href").asText()).isEqualTo(url + "/include");
+            JsonNode parameterEntity = convert(("<!DOCTYPE ClinicalDocument [<!ENTITY % p SYSTEM \"" + url + "/param\">"
+                    + " %p;]>" + ROOT + "><title>t</title></ClinicalDocument>").getBytes(UTF_8));
+            assertThat(parameterEntity.toString()).doesNotContain("FETCHED");
+            assertMalformed("<!DOCTYPE ClinicalDocument SYSTEM \"" + url + "/evil.dtd\">" + ROOT
+                    + "><title>&ext;</title></ClinicalDocument>");
+            assertMalformed("<!DOCTYPE ClinicalDocument [<!ENTITY e SYSTEM \"" + url + "/entity\">]>" + ROOT
+                    + "><title>&e;</title></ClinicalDocument>");
+            assertThat(requests.get()).as("requests to the server").isZero();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /** No entity is expanded, so neither a declared one nor "billion laughs" (each level ten of the one before). */
+    @Test
+    void refusesEntityExpansion() {
+        assertMalformed("<!DOCTYPE ClinicalDocument [<!ENTITY e \"expanded\">]>" + ROOT
+                + "><title>&e;</title></ClinicalDocument>");
+        StringBuilder laughs = new StringBuilder("<!ENTITY lol0 \"lol\">");
+        for (int i = 1; i <= 9; i++) {
+            laughs.append("<!ENTITY lol").append(i).append(" \"").append(("&lol" + (i - 1) + ";").repeat(10)).append("\">");
+        }
+        assertMalformed("<!DOCTYPE ClinicalDocument [" + laughs + "]>" + ROOT + "><title>&lol9;</title></ClinicalDocument>");
+    }
+
+    /**
+     * Nesting beyond {@link CcdaConverter#MAX_DEPTH} is refused, whichever parser is in use, and even absurd nesting
+     * fails as a conversion error, not by overflowing the stack. Real documents nest about 17 deep.
+     */
+    @Test
+    void refusesNestingDeeperThanTheLimit() throws Exception {
+        assertThat(convert(nested(50).getBytes(UTF_8)).toString()).contains("\"x\"");
+        assertMalformed(nested(CcdaConverter.MAX_DEPTH + 1));
+        assertMalformed(nested(100_000));
+    }
+
+    /**
+     * With Woodstox, the connector's parser, whose own limit (1000) is far higher, the limit is the converter's: the
+     * deepest nesting it allows converts, and one more level doesn't. The JDK's parser stops at 100 by default.
+     */
+    @Test
+    void theDepthLimitIsTheConvertersOwn() throws Exception {
+        assumeTrue(XMLInputFactory.newFactory().getClass().getName().startsWith("com.ctc.wstx"),
+                "needs Woodstox, whose own depth limit is above the converter's");
+        assertThat(convert(nested(CcdaConverter.MAX_DEPTH).getBytes(UTF_8)).toString()).contains("\"x\"");
+        assertMalformed(nested(CcdaConverter.MAX_DEPTH + 1));
+    }
+
     @Test
     void undeclaredEntityIsAConversionFailure() {
         String nbsp = "<ClinicalDocument xmlns=\"urn:hl7-org:v3\"><title>Summary&nbsp;(amended)</title></ClinicalDocument>";

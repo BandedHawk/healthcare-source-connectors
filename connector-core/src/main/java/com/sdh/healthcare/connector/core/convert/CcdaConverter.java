@@ -106,6 +106,21 @@ public final class CcdaConverter implements SectionConverter
      * of its own.
      */
     private static final XMLInputFactory FACTORY = factory();
+    /**
+     * The deepest element nesting the converter accepts, counting
+     * {@code ClinicalDocument} as 1. Real C-CDA documents nest about 17 deep, so
+     * this leaves ample room. A document nested deeper is refused as
+     * {@code CONVERT_XML_MALFORMED} as soon as it goes past the limit.
+     * <p>
+     * Without a limit, a small document of nothing but nested elements could
+     * build a huge tree and overflow the stack when {@link #emit} writes it out,
+     * since that walks the tree recursively. The parsers have depth limits of
+     * their own (Woodstox 1000, the JDK 100 through its
+     * {@code jdk.xml.maxElementDepth} setting), but they are defaults that
+     * this code doesn't set and that can change; this limit holds whichever
+     * parser is in use.
+     */
+    static final int MAX_DEPTH = 200;
 
     @Override
     public String format()
@@ -188,11 +203,12 @@ public final class CcdaConverter implements SectionConverter
      * <li><b>No DTDs, no external entities.</b> For safety: a document can't
      * make the parser read local files or URLs (an XML external entity
      * attack, such as {@code <!ENTITY e SYSTEM "file:///etc/passwd">}) or
-     * expand entities without limit. A document with a {@code <!DOCTYPE>} is
-     * refused as malformed, and only XML's built-in entities
-     * ({@code &amp;amp;}, {@code &amp;lt;} …) and character references
-     * ({@code &amp;#160;}) are understood; an HTML entity such as
-     * {@code &amp;nbsp;} is an error.</li>
+     * expand entities without limit. A {@code <!DOCTYPE>} is skipped: nothing
+     * it declares or points to is read, so an external DTD is never fetched.
+     * Only XML's built-in entities ({@code &amp;amp;}, {@code &amp;lt;} …) and
+     * character references ({@code &amp;#160;}) are understood; any other
+     * entity reference, whether declared in a DOCTYPE or an HTML one such as
+     * {@code &amp;nbsp;}, makes the document malformed.</li>
      * <li><b>Coalescing.</b> Adjacent text and CDATA are delivered as one
      * piece, however the parser happens to split them, so an element's text
      * pieces ({@code Node.texts}) only break where a child element comes
@@ -302,6 +318,14 @@ public final class CcdaConverter implements SectionConverter
                 {
                     case XMLStreamConstants.START_ELEMENT ->
                     {
+                        if (stack.size() >= MAX_DEPTH)
+                        {
+                            final var location = reader.getLocation();
+                            throw new ConversionException(
+                                    ErrorCode.CONVERT_XML_MALFORMED,
+                                    location == null ? 0 : Math.max(0, location.
+                                            getCharacterOffset()));
+                        }
                         Node parent = stack.peek();
                         String key = elementKey(reader.getNamespaceURI(),
                                 reader.
