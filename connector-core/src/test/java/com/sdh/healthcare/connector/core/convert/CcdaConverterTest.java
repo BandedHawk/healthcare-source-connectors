@@ -194,6 +194,64 @@ class CcdaConverterTest {
         assertThat(obs.get("value").get(0).toString()).isEqualTo("{\"type\":\"PQ\",\"value\":\"12.5\",\"unit\":\"mg\"}");
     }
 
+    /**
+     * Each branch of {@code CcdaConverter.attributeValue}: attributes the schema types as boolean (BL {@code value},
+     * {@code negationInd}) or integer (INT {@code value}) become JSON booleans and numbers in all their valid
+     * spellings; invalid values, and attributes typed as text (PQ {@code value}, CD {@code code}), stay strings exactly
+     * as written. {@code toString()} keeps the JSON type visible: {@code "\"1\""} is a string, {@code "1"} a number.
+     */
+    @Test
+    void typesBooleanAndIntegerAttributesAndKeepEverythingElseAsWritten() throws Exception {
+        String xml = """
+                <ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                  <component><structuredBody><component><section>
+                    <entry><observation classCode="OBS" moodCode="EVN" negationInd="1">
+                      <value xsi:type="BL" value="true"/>
+                      <value xsi:type="BL" value="false"/>
+                      <value xsi:type="BL" value="1"/>
+                      <value xsi:type="BL" value="0"/>
+                      <value xsi:type="BL" value="yes"/>
+                      <value xsi:type="BL" value="TRUE"/>
+                      <value xsi:type="INT" value="42"/>
+                      <value xsi:type="INT" value="+007"/>
+                      <value xsi:type="INT" value="-12"/>
+                      <value xsi:type="INT" value="-0"/>
+                      <value xsi:type="INT" value="999999999999999999"/>
+                      <value xsi:type="INT" value="1234567890123456789"/>
+                      <value xsi:type="INT" value="3.5"/>
+                      <value xsi:type="INT" value=" 5"/>
+                      <value xsi:type="PQ" value="+007" unit="mg"/>
+                      <value xsi:type="CD" code="1"/>
+                    </observation></entry>
+                    <entry><observation classCode="OBS" moodCode="EVN" negationInd="false"/></entry>
+                    <entry><observation classCode="OBS" moodCode="EVN" negationInd="yes"/></entry>
+                  </section></component></structuredBody></component>
+                </ClinicalDocument>""";
+        JsonNode entries = convert(xml.getBytes(UTF_8))
+                .at("/ClinicalDocument/component/structuredBody/component/0/section/entry");
+        JsonNode values = entries.at("/0/observation/value");
+        List<String> written = new ArrayList<>();
+        for (int i = 0; i < 14; i++) {
+            written.add(values.get(i).get("value").toString());
+        }
+        assertThat(written).containsExactly(
+                // BL value: the four XML Schema spellings, then two that aren't valid booleans.
+                "true", "false", "true", "false", "\"yes\"", "\"TRUE\"",
+                // INT value: plain form (sign and leading zeros dropped), up to 18 digits.
+                "42", "7", "-12", "0", "999999999999999999",
+                // INT value: too long for the pattern, not an integer, or not exactly digits.
+                "\"1234567890123456789\"", "\"3.5\"", "\" 5\"");
+        // Attributes the schema types as text stay strings, even when they look like a number.
+        assertThat(values.get(14).get("value").toString()).isEqualTo("\"+007\"");
+        assertThat(values.get(15).get("code").toString()).isEqualTo("\"1\"");
+        // negationInd on an observation is a schema boolean: valid spellings typed, an invalid one kept.
+        assertThat(entries.at("/0/observation/negationInd").toString()).isEqualTo("true");
+        assertThat(entries.at("/1/observation/negationInd").toString()).isEqualTo("false");
+        assertThat(entries.at("/2/observation/negationInd").toString()).isEqualTo("\"yes\"");
+        // classCode is not typed: always a string.
+        assertThat(entries.at("/0/observation/classCode").toString()).isEqualTo("\"OBS\"");
+    }
+
     @Test
     void outputIsDeterministic() throws Exception {
         byte[] xml = resource("google-synthea-sample1.xml");
