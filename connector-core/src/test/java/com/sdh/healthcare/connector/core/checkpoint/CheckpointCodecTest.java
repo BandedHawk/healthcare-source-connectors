@@ -36,6 +36,27 @@ class CheckpointCodecTest {
         assertThat(codec.decode(codec.encode(c))).isEqualTo(c);
     }
 
+    /**
+     * The restart count is stored only once it is above 0, so a checkpoint written before the count existed still
+     * verifies, and is MAC'd like any other field once it is there.
+     */
+    @Test
+    void restartCountIsStoredOnlyWhenSetAndIsProtected() {
+        Checkpoint c = sample();
+        String fresh = codec.encode(c);
+        assertThat(fresh).doesNotContain("restarts");
+        assertThat(codec.decode(fresh).restarts()).isZero();
+        Checkpoint twice = c.resumed().resumed();
+        String json = codec.encode(twice);
+        assertThat(codec.decode(json)).isEqualTo(twice);
+        assertThat(codec.decode(json).restarts()).isEqualTo(2);
+        assertThatThrownBy(() -> codec.decode(json.replace("\"restarts\":2", "\"restarts\":0")))
+                .isInstanceOf(CheckpointTamperedException.class);
+        assertThatThrownBy(() -> codec.decode(json.replace(",\"restarts\":2", "")))
+                .isInstanceOf(CheckpointTamperedException.class);
+        assertThat(twice.committed(ResumePoint.at(8192, 0, 106), 50, 41).restarts()).isZero();
+    }
+
     @Test
     void anyChangedFieldFailsVerification() {
         String json = codec.encode(sample());
@@ -60,6 +81,6 @@ class CheckpointCodecTest {
     void sequenceInvariantsAreEnforced() {
         Checkpoint c = sample();
         assertThatThrownBy(() -> new Checkpoint(c.fileId(), c.fingerprint(), c.format(), c.fileSize(), c.state(),
-                c.resumeAt(), 10, 9, 10, c.startedAt(), null)).isInstanceOf(IllegalArgumentException.class);
+                c.resumeAt(), 10, 9, 10, c.startedAt(), null, 0)).isInstanceOf(IllegalArgumentException.class);
     }
 }

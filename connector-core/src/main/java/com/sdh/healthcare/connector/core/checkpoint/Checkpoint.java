@@ -24,6 +24,10 @@ import java.util.UUID;
  * @param committedSeq last seq whose data is committed; -1 if none
  * @param publishedSeq last seq whose message the broker acknowledged, as known at this commit; -1 if none
  * @param failure      why the file is being failed; set in {@code FAILING} and {@code FAILED}, else null
+ * @param restarts     how many times splitting has been resumed from this checkpoint without committing a batch
+ *                     since (design §9.2); 0 for a new file and after every batch commit. It rises only when the
+ *                     connector stops part-way through a batch, so a section that stops it every time (by running
+ *                     it out of memory, say) is noticed instead of crashing the connector forever
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -39,7 +43,8 @@ public record Checkpoint(
         long committedSeq,
         long publishedSeq,
         Instant startedAt,
-        Failure failure) {
+        Failure failure,
+        int restarts) {
 
     public enum State {
         SPLITTING, ARCHIVING, COMPLETED, FAILING, FAILED, ABANDONED;
@@ -77,38 +82,47 @@ public record Checkpoint(
         if ((failure != null) != (state == State.FAILING || state == State.FAILED)) {
             throw new IllegalArgumentException("Failure details belong to FAILING and FAILED only");
         }
+        if (restarts < 0) {
+            throw new IllegalArgumentException("Negative restart count");
+        }
     }
 
     /** A new file, nothing split yet. */
     public static Checkpoint start(UUID fileId, String fingerprint, String format, long fileSize, Instant startedAt) {
         return new Checkpoint(fileId, fingerprint, format, fileSize, State.SPLITTING, ResumePoint.START, 0, -1, -1,
-                startedAt, null);
+                startedAt, null, 0);
     }
 
     public static String propertyKey(String connectorId) {
         return PROPERTY_PREFIX + connectorId;
     }
 
-    /** After committing a batch whose last section is {@code lastSeq}. */
+    /** After committing a batch whose last section is {@code lastSeq}. Progress, so the restart count is reset. */
     public Checkpoint committed(ResumePoint resume, long lastSeq, long published) {
         return new Checkpoint(fileId, fingerprint, format, fileSize, state, resume, lastSeq + 1, lastSeq,
-                Math.max(publishedSeq, published), startedAt, failure);
+                Math.max(publishedSeq, published), startedAt, failure, 0);
+    }
+
+    /** Splitting is resuming from this checkpoint: one more restart without progress. */
+    public Checkpoint resumed() {
+        return new Checkpoint(fileId, fingerprint, format, fileSize, state, resumeAt, nextSeq, committedSeq,
+                publishedSeq, startedAt, failure, restarts + 1);
     }
 
     public Checkpoint published(long published) {
         return new Checkpoint(fileId, fingerprint, format, fileSize, state, resumeAt, nextSeq, committedSeq,
-                Math.max(publishedSeq, published), startedAt, failure);
+                Math.max(publishedSeq, published), startedAt, failure, restarts);
     }
 
     /** Moves to a state without failure details (SPLITTING, ARCHIVING, COMPLETED, ABANDONED). */
     public Checkpoint withState(State s) {
         return new Checkpoint(fileId, fingerprint, format, fileSize, s, resumeAt, nextSeq, committedSeq,
-                publishedSeq, startedAt, null);
+                publishedSeq, startedAt, null, restarts);
     }
 
     public Checkpoint failing(Failure f) {
         return new Checkpoint(fileId, fingerprint, format, fileSize, State.FAILING, resumeAt, nextSeq, committedSeq,
-                publishedSeq, startedAt, f);
+                publishedSeq, startedAt, f, restarts);
     }
 
     public Checkpoint failed() {
@@ -116,7 +130,7 @@ public record Checkpoint(
             throw new IllegalStateException("Not failing");
         }
         return new Checkpoint(fileId, fingerprint, format, fileSize, State.FAILED, resumeAt, nextSeq, committedSeq,
-                publishedSeq, startedAt, failure);
+                publishedSeq, startedAt, failure, restarts);
     }
 
     public long sectionCount() {

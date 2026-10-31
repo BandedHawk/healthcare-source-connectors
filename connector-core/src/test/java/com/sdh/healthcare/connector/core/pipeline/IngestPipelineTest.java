@@ -33,8 +33,10 @@ import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
+import com.sdh.healthcare.connector.core.split.SplitException;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
+import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -411,6 +413,98 @@ class IngestPipelineTest {
         SectionIds ids = new SectionIds(IdKeys.loadOrCreate(table, null, keys, KEK));
         assertThat(rows).allSatisfy(r -> assertThat(r.getField(SECTION_ID))
                 .isEqualTo(ids.of(recs.get(((Long) r.getField(SEQ)).intValue()).getBytes(UTF_8))));
+    }
+
+    // ---- restarts without progress (design §9.2) ----
+
+    /** Stops the connector in its first batch, before the batch commits, as an out-of-memory exit would. */
+    static final PipelineHooks STOP_IN_FIRST_BATCH = new PipelineHooks() {
+        @Override
+        public void batchWritten(long lastSeq) {
+            if (lastSeq == BATCH - 1) {
+                throw new SimulatedCrash();
+            }
+        }
+    };
+
+    static byte[] convertibleFile() {
+        return (HEADER + String.join("", records())).getBytes(UTF_8);
+    }
+
+    /** Runs the file in a fresh process that stops as {@code hooks} says, and checks that it did stop. */
+    void stopsWhileSplitting(byte[] file, PipelineHooks hooks) throws Exception {
+        IngestPipeline p = process(converting(), new RecordingPublisher(), hooks);
+        assertThatThrownBy(() -> p.split(SeekableByteSource.of(file))).isInstanceOf(SimulatedCrash.class);
+        p.close();
+    }
+
+    /**
+     * After the connector stops twice in a row in the same batch, that batch is stored without converting any of
+     * it, in case a conversion is what stops it, and announced as failed. The batches after it are converted again.
+     */
+    @Test
+    void aBatchTheConnectorKeepsStoppingInIsStoredUnconverted() throws Exception {
+        byte[] file = convertibleFile();
+        stopsWhileSplitting(file, STOP_IN_FIRST_BATCH); // the first attempt
+        stopsWhileSplitting(file, STOP_IN_FIRST_BATCH); // restart 1: still converting
+        assertThat(process(converting(), new RecordingPublisher(), PipelineHooks.NONE).checkpoint().orElseThrow()
+                .restarts()).isEqualTo(1);
+
+        RecordingPublisher pub = new RecordingPublisher();
+        IngestPipeline p = process(converting(), pub, PipelineHooks.NONE); // restart 2: the batch unconverted
+        IngestPipeline.SplitResult result = p.split(SeekableByteSource.of(file));
+        assertThat(result.sectionCount()).isEqualTo(RECORDS);
+        assertThat(result.checkpoint().restarts()).isZero();
+
+        List<Record> rows = dataRows(catalog.loadTable(tableId), result.fileId());
+        assertThat(rows).hasSize(RECORDS).allSatisfy(r -> assertThat(r.getField(ERROR_CODE))
+                .isEqualTo((Long) r.getField(SEQ) < BATCH ? "CONVERT_SKIPPED" : null));
+        List<ConnectorMessage> msgs = decode(pub.sent);
+        assertThat(msgs.stream().filter(ConnectorMessage.SectionFailed.class::isInstance)).hasSize(BATCH);
+        assertThat(sections(msgs)).hasSize(RECORDS - BATCH)
+                .allSatisfy(m -> assertThat(m.mapping()).isEqualTo("csv-row/1"));
+        assertThat(p.failedSectionCount(result.fileId())).isEqualTo(BATCH);
+    }
+
+    /**
+     * If the connector still stops with conversion off, the next start fails the file instead of resuming it, so
+     * one file can't keep the connector from ever moving on.
+     */
+    @Test
+    void aFileThatKeepsStoppingTheConnectorFails() throws Exception {
+        byte[] file = convertibleFile();
+        for (int attempt = 0; attempt < IngestPipeline.FAIL_AFTER_RESTARTS; attempt++) {
+            stopsWhileSplitting(file, STOP_IN_FIRST_BATCH);
+        }
+        IngestPipeline p = process(converting(), new RecordingPublisher(), PipelineHooks.NONE);
+        assertThatThrownBy(() -> p.split(SeekableByteSource.of(file)))
+                .isInstanceOfSatisfying(SplitException.class, e -> {
+                    assertThat(e.code()).isEqualTo(ErrorCode.RESUME_NO_PROGRESS);
+                    assertThat(e.offset()).isZero();
+                });
+        assertThat(p.checkpoint().orElseThrow().state()).isEqualTo(Checkpoint.State.SPLITTING);
+    }
+
+    /** Stops after a batch has committed are progress: they never count towards skipping conversion or failing. */
+    @Test
+    void restartsAfterProgressDontCount() throws Exception {
+        byte[] file = convertibleFile();
+        for (long stopAfter : new long[] {BATCH - 1, 2 * BATCH - 1}) {
+            stopsWhileSplitting(file, new PipelineHooks() {
+                @Override
+                public void batchCommitted(long lastSeq) {
+                    if (lastSeq == stopAfter) {
+                        throw new SimulatedCrash();
+                    }
+                }
+            });
+            assertThat(process(converting(), new RecordingPublisher(), PipelineHooks.NONE).checkpoint()
+                    .orElseThrow().restarts()).isZero();
+        }
+        IngestPipeline p = process(converting(), new RecordingPublisher(), PipelineHooks.NONE);
+        IngestPipeline.SplitResult result = p.split(SeekableByteSource.of(file));
+        assertThat(result.sectionCount()).isEqualTo(RECORDS);
+        assertThat(p.failedSectionCount(result.fileId())).isZero();
     }
 
     // ---- guards ----

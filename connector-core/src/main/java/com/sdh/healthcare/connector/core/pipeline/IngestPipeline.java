@@ -92,6 +92,18 @@ import org.slf4j.LoggerFactory;
 public final class IngestPipeline implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(IngestPipeline.class);
 
+    /**
+     * Restarts without progress ({@link Checkpoint#restarts()}) after which the uncommitted batch is stored without
+     * converting any of it, {@code CONVERT_SKIPPED}, in case a conversion is what keeps stopping the connector
+     * (design §9.2). One restart is allowed for anything else, such as a redeployment or a lost lease.
+     */
+    public static final int SKIP_CONVERSION_AFTER_RESTARTS = 2;
+    /**
+     * Restarts without progress after which the file is failed, {@code RESUME_NO_PROGRESS}, rather than resumed
+     * again, so a file that stops the connector every time can't keep it from ever moving on (design §9.2).
+     */
+    public static final int FAIL_AFTER_RESTARTS = 3;
+
     /** Outcome of the split phase. The checkpoint is in state {@code ARCHIVING}. */
     public record SplitResult(UUID fileId, long sectionCount, Checkpoint checkpoint) {}
 
@@ -195,8 +207,18 @@ public final class IngestPipeline implements AutoCloseable {
             if (!cp.format().equals(settings.format())) {
                 throw new IllegalStateException("Split format changed while file " + cp.fileId() + " is in progress");
             }
+            // Counted before any work, as a crash in this attempt (an out-of-memory exit, say) can't record anything.
+            cp = cp.resumed();
+            if (cp.restarts() >= FAIL_AFTER_RESTARTS) {
+                throw new SplitException(ErrorCode.RESUME_NO_PROGRESS, cp.resumeAt().offset());
+            }
+            commitCheckpoint(cp);
             Telemetry.get().audit("file.resumed", Fields.of(Attr.FILE_ID, cp.fileId()).with(Attr.SEQ, cp.nextSeq())
-                    .with(Attr.OFFSET, cp.resumeAt().offset()));
+                    .with(Attr.OFFSET, cp.resumeAt().offset()).with(Attr.COUNT, cp.restarts()));
+            if (converter != null && cp.restarts() >= SKIP_CONVERSION_AFTER_RESTARTS) {
+                Telemetry.get().auditWarn("file.conversion_skipped", Fields.of(Attr.FILE_ID, cp.fileId())
+                        .with(Attr.SEQ, cp.nextSeq()).with(Attr.COUNT, cp.restarts()));
+            }
         } else {
             if (src.size() > settings.split().limits().maxFileBytes()) {
                 // Rejected before ingestion (design §6.3): no checkpoint, no file.started.
@@ -224,7 +246,9 @@ public final class IngestPipeline implements AutoCloseable {
             Optional<Section> next;
             while ((next = session.next()).isPresent()) {
                 if (batch == null) {
-                    batch = new Batch(cp.fileId(), cp.format());
+                    // Only the batch the connector kept stopping in goes unconverted: once it commits, the count
+                    // is back to 0.
+                    batch = new Batch(cp.fileId(), cp.format(), cp.restarts() < SKIP_CONVERSION_AFTER_RESTARTS);
                 }
                 batch.add(seq++, next.get(), src);
                 if (batch.full()) {
@@ -286,15 +310,18 @@ public final class IngestPipeline implements AutoCloseable {
         private final int maxPending = settings.encryptWorkers() * 4;
         private final UUID fileId;
         private final String format;
+        /** False to store every section as split, {@code CONVERT_SKIPPED} (see SKIP_CONVERSION_AFTER_RESTARTS). */
+        private final boolean convert;
         private final Span span;
         private long lastSeq = -1;
         private long bytes;
         private int count;
         private Section last;
 
-        Batch(UUID fileId, String format) {
+        Batch(UUID fileId, String format, boolean convert) {
             this.fileId = fileId;
             this.format = format;
+            this.convert = convert;
             this.span = Telemetry.get().span("split.batch", Fields.of(Attr.FILE_ID, fileId).with(Attr.FORMAT, format));
         }
 
@@ -306,9 +333,10 @@ public final class IngestPipeline implements AutoCloseable {
                     if (converter == null) {
                         return new Ready(writer.encryptSmall(fileId, seq, format, section, src));
                     }
-                    if (len > settings.convertMaxBytes()) {
+                    ErrorCode skip = skipReason(len);
+                    if (skip != null) {
                         return new Ready(writer.encrypt(fileId, seq, format, section, section.readAll(src),
-                                Representation.raw(format), ErrorCode.CONVERT_TOO_LARGE, 0));
+                                Representation.raw(format), skip, 0));
                     }
                     return prepare(seq, section, section.readAll(src));
                 }));
@@ -320,9 +348,8 @@ public final class IngestPipeline implements AutoCloseable {
                 drain();
                 if (converter == null) {
                     writer.add(fileId, seq, format, section, src);
-                } else if (len > settings.convertMaxBytes()) {
-                    writer.add(fileId, seq, format, section, src, Representation.raw(format),
-                            ErrorCode.CONVERT_TOO_LARGE, 0);
+                } else if (skipReason(len) != null) {
+                    writer.add(fileId, seq, format, section, src, Representation.raw(format), skipReason(len), 0);
                 } else {
                     store(prepare(seq, section, section.readAll(src)));
                 }
@@ -332,6 +359,12 @@ public final class IngestPipeline implements AutoCloseable {
             bytes += len;
             count++;
             Telemetry.get().bytesRead(section.sourceLength(), "split");
+        }
+
+        /** Why a section of this length isn't converted, or null if it is. */
+        private ErrorCode skipReason(long len) {
+            return !convert ? ErrorCode.CONVERT_SKIPPED
+                    : len > settings.convertMaxBytes() ? ErrorCode.CONVERT_TOO_LARGE : null;
         }
 
         boolean full() {

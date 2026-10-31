@@ -209,10 +209,13 @@ public final class CcdaConverter implements SectionConverter
      * character references ({@code &amp;#160;}) are understood; any other
      * entity reference, whether declared in a DOCTYPE or an HTML one such as
      * {@code &amp;nbsp;}, makes the document malformed.</li>
-     * <li><b>Coalescing.</b> Adjacent text and CDATA are delivered as one
-     * piece, however the parser happens to split them, so an element's text
-     * pieces ({@code Node.texts}) only break where a child element comes
-     * between them.</li>
+     * <li><b>Not coalescing.</b> The parser hands over long text in pieces
+     * (Woodstox up to 4,000 characters, the JDK's parser often fewer) rather
+     * than as one string. The converter puts adjacent pieces back together
+     * into runs itself ({@link Node#texts}), so the JSON is the same as if the
+     * parser had joined them, but a large run, such as a base64 body, is
+     * never held as one string or in one parser buffer: coalescing made that
+     * text take about five times its size in memory.</li>
      * </ul>
      *
      * @return the configured factory
@@ -224,7 +227,7 @@ public final class CcdaConverter implements SectionConverter
         factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
         factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES,
                 false);
-        factory.setProperty(XMLInputFactory.IS_COALESCING, true);
+        factory.setProperty(XMLInputFactory.IS_COALESCING, false);
         return factory;
     }
 
@@ -272,11 +275,59 @@ public final class CcdaConverter implements SectionConverter
          */
         final Map<String, List<Node>> children = new LinkedHashMap<>();
         /**
-         * The element's own text, as the pieces the parser read (text, CDATA
-         * and whitespace), in document order. Pieces are separated by the child
-         * elements between them.
+         * The element's own text, in document order, as runs: a run is the
+         * text (character data, CDATA and whitespace) between two child
+         * elements, comments or processing instructions. Each run is the list
+         * of pieces the parser delivered it in; a run of at most
+         * {@link CcdaConverter#JOIN_LIMIT} characters is joined into one piece
+         * once it ends, so only large runs stay in pieces.
          */
-        final List<String> texts = new ArrayList<>(1);
+        final List<List<String>> texts = new ArrayList<>(1);
+        /** Whether the last thing read inside this element was text. */
+        private boolean inRun;
+
+        /**
+         * Adds a piece of text read inside this element, to the current run
+         * if the last thing read was text, otherwise as a new run.
+         *
+         * @param piece the text as the parser delivered it
+         */
+        void text(String piece)
+        {
+            if (!inRun)
+            {
+                texts.add(List.of(piece));
+                inRun = true;
+            }
+            else
+            {
+                List<String> run = texts.getLast();
+                if (run.size() == 1)
+                {
+                    run = new ArrayList<>(run);
+                    texts.set(texts.size() - 1, run);
+                }
+                run.add(piece);
+            }
+        }
+
+        /**
+         * Ends the current run, if there is one, because something other than
+         * text has been read. A run of several pieces that is no longer than
+         * {@link CcdaConverter#JOIN_LIMIT} is joined into one piece.
+         */
+        void endRun()
+        {
+            if (inRun)
+            {
+                inRun = false;
+                List<String> run = texts.getLast();
+                if (run.size() > 1 && length(run) <= JOIN_LIMIT)
+                {
+                    texts.set(texts.size() - 1, List.of(String.join("", run)));
+                }
+            }
+        }
 
         /**
          * Starts a node for an element whose start tag has just been read. The
@@ -297,11 +348,38 @@ public final class CcdaConverter implements SectionConverter
         }
     }
 
+    /**
+     * The longest run of text, in characters, that is joined into one string
+     * once read. Shorter runs are joined so the tree holds one string per run,
+     * not one per parser piece; longer ones stay in pieces so they are never
+     * copied into one large string.
+     */
+    static final int JOIN_LIMIT = 65_536;
+
     @Override
     public byte[] convert(byte[] section, SplitConfig config) throws
             ConversionException
     {
         CdaModel model = CdaModel.INSTANCE;
+        // Written in a call of its own, so that by the time the JSON is copied
+        // to its exact size, nothing refers to the tree any more and its
+        // memory (as much as the document's text) can be reclaimed.
+        return write(model, read(model, section), section.length).toBytes();
+    }
+
+    /**
+     * Reads a section's XML into a tree of {@link Node}s, the first stage of
+     * {@link #convert}.
+     *
+     * @param model   the CDA model, to look up each element's type
+     * @param section the section's bytes, as given to {@link #convert}
+     * @return the document element, with everything inside it
+     * @throws ConversionException if the XML is malformed, nested more than
+     *                             {@link #MAX_DEPTH} deep, or has no element
+     */
+    private static Node read(CdaModel model, byte[] section) throws
+            ConversionException
+    {
         Node root = null;
         XMLStreamReader reader = null;
         try
@@ -314,7 +392,14 @@ public final class CcdaConverter implements SectionConverter
             Deque<Node> stack = new ArrayDeque<>();
             while (reader.hasNext())
             {
-                switch (reader.next())
+                int event = reader.next();
+                if (!stack.isEmpty() && event != XMLStreamConstants.CHARACTERS
+                        && event != XMLStreamConstants.CDATA
+                        && event != XMLStreamConstants.SPACE)
+                {
+                    stack.peek().endRun();
+                }
+                switch (event)
                 {
                     case XMLStreamConstants.START_ELEMENT ->
                     {
@@ -347,7 +432,7 @@ public final class CcdaConverter implements SectionConverter
                     {
                         if (!stack.isEmpty())
                         {
-                            stack.peek().texts.add(reader.getText());
+                            stack.peek().text(reader.getText());
                         }
                     }
                     case XMLStreamConstants.END_ELEMENT ->
@@ -401,11 +486,28 @@ public final class CcdaConverter implements SectionConverter
         {
             throw new ConversionException(ErrorCode.CONVERT_XML_MALFORMED, 0);
         }
-        JsonWriter writer = new JsonWriter(section.length * 2);
+        return root;
+    }
+
+    /**
+     * Writes a tree read by {@link #read} as JSON, the second stage of
+     * {@link #convert}: one object with the document element under its key.
+     *
+     * @param model the CDA model, to look up each element's type
+     * @param root  the document element
+     * @param size  the size of the section in bytes, to size the output
+     * @return the writer holding the JSON
+     */
+    private static JsonWriter write(CdaModel model, Node root, int size)
+    {
+        // About the size of the document: JSON drops the end tags, and the
+        // sixteenth covers escaping (a large base64 body adds two bytes per
+        // line for its \n).
+        JsonWriter writer = new JsonWriter(size + (size >> 4) + 64);
         writer.beginObject().key(root.key);
         emit(model, root, writer);
         writer.endObject();
-        return writer.toBytes();
+        return writer;
     }
 
     /**
@@ -657,6 +759,55 @@ public final class CcdaConverter implements SectionConverter
     }
 
     /**
+     * All of an element's text, as one list of pieces in document order, to be
+     * written as one string. The pieces are not joined, so a large text is
+     * never copied into one string.
+     *
+     * @param node the element
+     * @return the pieces of all its runs; empty if it has no text
+     */
+    private static List<String> allText(Node node)
+    {
+        return node.texts.size() == 1 ? node.texts.getFirst()
+                : node.texts.stream().flatMap(List::stream).toList();
+    }
+
+    /**
+     * The total length of some pieces of text.
+     *
+     * @param pieces the pieces
+     * @return their combined length in characters
+     */
+    private static long length(List<String> pieces)
+    {
+        long length = 0;
+        for (String piece : pieces)
+        {
+            length += piece.length();
+        }
+        return length;
+    }
+
+    /**
+     * Whether some pieces of text, taken together, are empty or only
+     * whitespace, as {@link String#isBlank()} would say of them joined.
+     *
+     * @param pieces the pieces
+     * @return {@code true} if every piece is blank
+     */
+    private static boolean isBlank(List<String> pieces)
+    {
+        for (String piece : pieces)
+        {
+            if (!piece.isBlank())
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Writes an element that has no attributes and no child elements, only text
      * or nothing at all. It becomes a plain JSON string or an empty object,
      * never an object with a {@code "value"} key:
@@ -675,8 +826,8 @@ public final class CcdaConverter implements SectionConverter
      * document, such as {@code <patient>unknown</patient>}): the text as a
      * string, so nothing in the document is lost.</li>
      * </ul>
-     * The text is every piece the parser read (text, CDATA and whitespace)
-     * joined together.
+     * The text is all of the element's text (character data, CDATA and
+     * whitespace) as one string.
      *
      * @param type the element's type in the model, or {@code null} if the model
      * doesn't know it (treated as carrying text)
@@ -687,8 +838,8 @@ public final class CcdaConverter implements SectionConverter
             JsonWriter writer)
     {
         boolean text = type == null || type.text();
-        String all = String.join("", node.texts);
-        if (!text && all.isBlank())
+        List<String> all = allText(node);
+        if (!text && isBlank(all))
         {
             writer.beginObject().endObject();
         }
@@ -720,15 +871,15 @@ public final class CcdaConverter implements SectionConverter
      * <ul>
      * <li>Types that mix text with elements (the narrative block, ED, names),
      * types that carry no text, and types the model doesn't know: an array of
-     * the text pieces. Whitespace-only pieces (the indentation between child
-     * elements) are dropped.</li>
+     * the text runs ({@link Node#texts}), each as one string. Whitespace-only
+     * runs (the indentation between child elements) are dropped.</li>
      * <li>Other types: all the text joined into one string, kept exactly,
      * whitespace included.</li>
      * </ul>
      * Nothing is written when there is no text.</li>
      * </ol>
      * In mixed content, the interleaving of text and elements is lost: text
-     * pieces are listed under {@code "value"} and elements under their own
+     * runs are listed under {@code "value"} and elements under their own
      * keys, as in Google's XmlToJson output.
      *
      * @param model the CDA model, passed on to {@link #emit} so each child can
@@ -782,8 +933,8 @@ public final class CcdaConverter implements SectionConverter
         var textKey = used.contains("value") ? "#text" : "value";
         if (mixed || !text)
         {
-            List<String> parts = node.texts.stream().filter(s -> !s.isBlank()).
-                    toList();
+            List<List<String>> parts = node.texts.stream().filter(
+                    run -> !isBlank(run)).toList();
             if (!parts.isEmpty())
             {
                 writer.key(textKey).beginArray();
@@ -793,8 +944,8 @@ public final class CcdaConverter implements SectionConverter
         }
         else
         {
-            var all = String.join("", node.texts);
-            if (!all.isEmpty())
+            List<String> all = allText(node);
+            if (length(all) > 0)
             {
                 writer.key(textKey).value(all);
             }

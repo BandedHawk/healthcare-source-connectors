@@ -32,6 +32,12 @@ public enum ErrorCode {
 
     /** A saved resume point doesn't fit the file (wrong file, or a checkpoint from another splitter). */
     RESUME_INVALID,
+    /**
+     * Splitting was resumed {@link com.sdh.healthcare.connector.core.pipeline.IngestPipeline#FAIL_AFTER_RESTARTS}
+     * times in a row without committing anything: something in the file keeps stopping the connector, such as a
+     * section that runs it out of memory even unconverted (design §9.2).
+     */
+    RESUME_NO_PROGRESS,
 
     // Splitting (design §6)
     PARSE_UNTERMINATED_QUOTE,
@@ -62,5 +68,11 @@ public enum ErrorCode {
     CONVERT_EDIFACT_CHARSET,
     CONVERT_XML_MALFORMED,
     /** A section over {@code split.convert-max-bytes}: converting it would need too much memory. */
-    CONVERT_TOO_LARGE
+    CONVERT_TOO_LARGE,
+    /**
+     * Not converted because the connector stopped twice in a row while this section's batch was uncommitted, and
+     * converting one of the batch's sections may be what stops it (by running it out of memory, say). Every
+     * section of that batch is stored in its original form with this code (design §9.2).
+     */
+    CONVERT_SKIPPED
 }

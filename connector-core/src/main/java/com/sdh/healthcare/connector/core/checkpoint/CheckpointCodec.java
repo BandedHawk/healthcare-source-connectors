@@ -62,6 +62,10 @@ public final class CheckpointCodec {
             m.put("failureOffset", c.failure().offset());
             m.put("failedAt", c.failure().failedAt().toString());
         }
+        if (c.restarts() > 0) {
+            // Left out when 0, so checkpoints written before the field existed still verify.
+            m.put("restarts", c.restarts());
+        }
         return m;
     }
 
@@ -84,7 +88,8 @@ public final class CheckpointCodec {
                     JSONObjectUtils.getLong(o, "committedSeq"),
                     JSONObjectUtils.getLong(o, "publishedSeq"),
                     Instant.parse(JSONObjectUtils.getString(o, "startedAt")),
-                    failure);
+                    failure,
+                    o.containsKey("restarts") ? JSONObjectUtils.getInt(o, "restarts") : 0);
         } catch (ParseException e) {
             throw new IllegalArgumentException(e);
         }

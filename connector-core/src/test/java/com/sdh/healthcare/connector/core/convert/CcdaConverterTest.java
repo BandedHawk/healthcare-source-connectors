@@ -381,6 +381,32 @@ class CcdaConverterTest {
         assertMalformed(nested(CcdaConverter.MAX_DEPTH + 1));
     }
 
+    /**
+     * The parser hands long text over in pieces (Woodstox's are 4,000 characters), and the converter keeps large
+     * runs in pieces rather than joining them. The JSON must still be the whole text: a run longer than
+     * {@link CcdaConverter#JOIN_LIMIT}, an emoji whose surrogate pair straddles the first piece boundary, and, in
+     * mixed content, a comment still splitting the text into separate runs.
+     */
+    @Test
+    void longTextReadInPiecesIsWrittenWhole() throws Exception {
+        String title = "a".repeat(3999) + "\uD83D\uDE00" + "b".repeat(10_000);
+        String body = ("QUJD".repeat(19) + "\n").repeat(CcdaConverter.JOIN_LIMIT / 76 * 3);
+        String xml = "<ClinicalDocument xmlns=\"urn:hl7-org:v3\"><title>" + title + "</title>"
+                + "<component><nonXMLBody><text mediaType=\"application/pdf\" representation=\"B64\">" + body
+                + "</text></nonXMLBody></component>"
+                + "<component><structuredBody><component><section><text>x <!--c--> y<content>z</content> w"
+                + "</text></section></component></structuredBody></component></ClinicalDocument>";
+        JsonNode doc = convert(xml.getBytes(UTF_8)).get("ClinicalDocument");
+        assertThat(doc.get("title").asText()).isEqualTo(title);
+        JsonNode components = doc.get("component");
+        JsonNode encoded = components.get(0).get("nonXMLBody").get("text").get("value"); // ED is mixed: an array
+        assertThat(encoded).hasSize(1);
+        assertThat(encoded.get(0).asText()).isEqualTo(body);
+        JsonNode narrative = components.get(1).get("structuredBody").get("component").get(0).get("section")
+                .get("text");
+        assertThat(narrative.get("value")).hasToString("[\"x \",\" y\",\" w\"]");
+    }
+
     @Test
     void undeclaredEntityIsAConversionFailure() {
         String nbsp = "<ClinicalDocument xmlns=\"urn:hl7-org:v3\"><title>Summary&nbsp;(amended)</title></ClinicalDocument>";
