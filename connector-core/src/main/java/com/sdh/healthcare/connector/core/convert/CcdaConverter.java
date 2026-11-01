@@ -135,16 +135,18 @@ public final class CcdaConverter implements SectionConverter
     }
 
     /**
-     * Measured: the document, its text again in the tree, and its JSON (about
-     * its size): 208 MiB of heap for a 64 MB document, with either StAX
-     * parser.
+     * Measured on 64 MB documents: the document, the tree (about 450 bytes per
+     * element) and the JSON. A document of structured entries needs up to 9.6
+     * times its size (566 MiB), because it has many elements; one that is
+     * mostly an embedded file, such as a base64 PDF, needs about 3.8 times.
+     * The structured figure is the one to cover, rounded up.
      *
-     * @return 3.5
+     * @return 10
      */
     @Override
     public double memoryFactor()
     {
-        return 3.5;
+        return 10;
     }
 
     /**
