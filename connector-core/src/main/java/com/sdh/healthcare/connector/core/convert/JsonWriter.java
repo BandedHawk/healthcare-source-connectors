@@ -4,157 +4,314 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.convert;
 
 import java.util.Arrays;
 import java.util.List;
 
 /**
- * Minimal deterministic JSON writer for the converters: compact (no whitespace), keys in the order written,
- * strings escaped per RFC 8259 with non-ASCII left as UTF-8. The caller keeps the structure valid.
- *
- * <p>It writes UTF-8 bytes straight into one buffer, so a section's JSON is held once while it is written,
- * not as characters and then again as bytes. The bytes are exactly those of
- * {@code String.getBytes(UTF_8)} on the same text, an unpaired surrogate included (written as {@code ?}),
- * which matters because a stored section's ID is a hash of these bytes.
- *
- * <p>Text that is already UTF-8 (a converter's source bytes, once checked) can be written straight from those
- * bytes ({@link #utf8}), so a large field is never decoded into a string. For large sections, {@link #build} writes
- * the JSON twice: once only to count its bytes, then into an array of exactly that size, so the JSON is never held
- * twice (a growing buffer, then a trimmed copy).
+ * Writes JSON, one piece at a time, for the section converters. It is small and
+ * does only what they need, and it always writes the same bytes for the same
+ * calls.
+ * <p>
+ * The JSON it writes is compact: no spaces or line breaks. Keys come in the
+ * order they are written. Strings are escaped as the JSON standard (RFC 8259)
+ * requires, and only that: a quote, a backslash and the control characters.
+ * Every other character, accented letters and emoji included, is written as
+ * itself, in UTF-8.
+ * <p>
+ * The caller decides the structure, by calling {@link #beginObject()},
+ * {@link #key}, {@link #value(String)} and so on in the right order. The writer
+ * puts in the commas between items, but doesn't check the structure: a key
+ * outside an object, or an object that is never closed, gives invalid JSON.
+ * <p>
+ * Why it is written this way:
+ * <ul>
+ * <li><b>Memory.</b> It writes UTF-8 bytes straight into one array, so a
+ * section's JSON is held once while it is written, not first as characters and
+ * then again as bytes. Text that is already UTF-8, such as a field of a CSV
+ * record, can be copied from the section's own bytes ({@link #utf8}), so even a
+ * large field is never decoded into a Java string. And for a large section,
+ * {@link #build} writes the JSON twice, the first time only to count its size,
+ * so the result can go straight into an array of exactly that size instead of a
+ * growing buffer that is copied when trimmed.</li>
+ * <li><b>Exact bytes.</b> The bytes are exactly what
+ * {@code String.getBytes(UTF_8)} would give for the same text, including for a
+ * broken character (half of a surrogate pair, written as {@code ?}). A stored
+ * section's ID is a hash of its bytes, so the same section must always give the
+ * same bytes.</li>
+ * </ul>
+ * A writer is used by one thread for one section's JSON, and then discarded.
  *
  * @author Jonas Barnett
  * @since 0.1.0
+ * @see SectionConverter
  */
-final class JsonWriter {
-    /** The largest array the JVM reliably allocates. */
+final class JsonWriter
+{
+
+    /**
+     * The largest array the JVM can reliably create: a few bytes under the
+     * largest {@code int}, as some JVMs keep header words in the array. JSON
+     * that would be larger fails with an {@link OutOfMemoryError}.
+     */
     private static final int MAX_CAPACITY = Integer.MAX_VALUE - 8;
     /**
-     * The size estimate from which {@link #build} counts first and writes once, rather than growing a buffer and
-     * trimming it. Below it the extra pass costs more than the memory it saves.
+     * The estimated size, in bytes, from which {@link #build} writes the JSON
+     * twice, first only counting its size, so it can be held once at exactly
+     * that size. Smaller JSON is written once into a buffer that is trimmed
+     * afterwards: the second pass would cost more time than the memory it
+     * saves. 1 MiB.
      */
     static final int EXACT_SIZE_FROM = 1 << 20;
-    private byte[] buf;
-    private int len;
-    /** True when the bytes are only counted: {@link #buf} is then a scratch buffer, reused from the start. */
+    /**
+     * Where the JSON is written. It grows when it fills up. When only counting,
+     * it is a small scratch area that is reused from the start whenever it
+     * fills up.
+     */
+    private byte[] buffer;
+    /**
+     * How many bytes of {@link #buffer} hold JSON written so far.
+     */
+    private int length;
+    /**
+     * Whether this writer only counts the bytes it would write, to find the
+     * JSON's size, and keeps none of them. {@link #buffer} is then a scratch
+     * area, reused from the start.
+     */
     private final boolean counting;
-    /** Bytes counted before the scratch buffer was last reused. */
+    /**
+     * When only counting: the bytes counted before the scratch area was last
+     * reused. The total so far is this plus {@link #length}
+     * ({@link #size()}). Always {@code 0} for a writer that keeps the JSON.
+     */
     private long counted;
-    /** Whether the next value or key in the current container needs a comma before it. */
+    /**
+     * Whether the next key or value needs a comma before it: {@code true} after
+     * a value or a closed object or array, {@code false} at the start of an
+     * object or array and right after a key.
+     */
     private boolean comma;
     /**
-     * A high surrogate that ended the last piece of a string, waiting to see whether the next piece starts with
-     * its low surrogate; {@code 0} if none.
+     * The first half of a surrogate pair (a character such as an emoji, which
+     * Java holds as two {@code char}s), when it was the last character of one
+     * piece of a string and its second half may start the next piece; {@code 0}
+     * if there is none. See {@link #value(List)}.
      */
     private char pendingHigh;
 
     /**
-     * @param capacity the expected size of the JSON in bytes; the buffer grows if it is exceeded, so a close
-     *                 estimate only saves copying
+     * Creates a writer that keeps the JSON it writes.
+     *
+     * @param capacity the expected size of the JSON in bytes; the buffer grows
+     * if it turns out bigger, so a close estimate only saves copying. At least
+     * 16 bytes are set aside.
      */
-    JsonWriter(int capacity) {
-        buf = new byte[Math.max(16, capacity)];
+    JsonWriter(int capacity)
+    {
+        buffer = new byte[Math.max(16, capacity)];
         counting = false;
     }
 
-    /** A writer that keeps nothing and only counts the bytes it would write ({@link #size()}). */
-    private JsonWriter() {
-        buf = new byte[8192];
+    /**
+     * Creates a writer that keeps nothing and only counts the bytes it would
+     * write, for the first pass of {@link #build}. The count is
+     * {@link #size()}. It needs only an 8 KiB scratch area, whatever the JSON's
+     * size.
+     */
+    private JsonWriter()
+    {
+        buffer = new byte[8192];
         counting = true;
     }
 
-    /** Writes some JSON; called once, or twice by {@link #build}, and must write the same both times. */
+    /**
+     * The code that writes a section's JSON, given to {@link #build}.
+     * <p>
+     * It may be run twice, once on a writer that only counts and once on one
+     * that keeps the JSON, so it must write exactly the same both times: it
+     * must start from the beginning of the section each time, and keep nothing
+     * from the first run.
+     */
     @FunctionalInterface
-    interface Body {
+    interface Body
+    {
+
+        /**
+         * Writes the JSON.
+         *
+         * @param w the writer to write it to
+         * @throws ConversionException if the section can't be converted
+         */
         void write(JsonWriter w) throws ConversionException;
     }
 
     /**
-     * Writes JSON and returns it in an array of exactly its size. Below {@link #EXACT_SIZE_FROM} it is written once
-     * into a buffer of the estimated size; from there, {@code body} is run first on a writer that only counts, then
-     * on one of exactly the counted size, so the JSON is held once. Any conversion error is thrown by the counting
-     * pass, before anything is kept.
+     * Writes a section's JSON and returns it in an array of exactly its size.
+     * This is how converters use the writer.
+     * <p>
+     * How it does so depends on the estimate:
+     * <ul>
+     * <li><b>Under {@link #EXACT_SIZE_FROM} (1 MiB):</b> {@code body} is run
+     * once, into a buffer of the estimated size, which is then trimmed to the
+     * JSON's size if needed.</li>
+     * <li><b>From there:</b> {@code body} is run first on a writer that only
+     * counts, then again on one of exactly the counted size. The JSON is then
+     * held once, with no growing and no trimmed copy. If the section can't be
+     * converted, the first run finds it before anything is kept.</li>
+     * </ul>
      *
-     * @param estimate the expected size of the JSON in bytes (usually the section's size)
-     * @param body     writes the JSON; it must write exactly the same each time it is run
+     * @param estimate the expected size of the JSON in bytes, usually about the
+     * section's size
+     * @param body the code that writes the JSON; it must write exactly the same
+     * each time it is run
      * @return the JSON, as UTF-8
      * @throws ConversionException as thrown by {@code body}
+     * @throws OutOfMemoryError if the JSON is larger than the largest array
+     * Java can create (about 2 GiB)
+     * @throws IllegalStateException if {@code body} wrote a different amount
+     * the second time, which is a bug in the converter
      */
-    static byte[] build(int estimate, Body body) throws ConversionException {
-        if (estimate < EXACT_SIZE_FROM) {
-            JsonWriter w = new JsonWriter(estimate);
-            body.write(w);
-            return w.toBytes();
+    static byte[] build(int estimate, Body body) throws ConversionException
+    {
+        if (estimate < EXACT_SIZE_FROM)
+        {
+            JsonWriter writer = new JsonWriter(estimate);
+            body.write(writer);
+            return writer.toBytes();
         }
+        // First pass: only count the JSON's size.
         JsonWriter counter = new JsonWriter();
         body.write(counter);
         long size = counter.size();
-        if (size > MAX_CAPACITY) {
+        if (size > MAX_CAPACITY)
+        {
             throw new OutOfMemoryError("JSON larger than the largest array");
         }
-        JsonWriter w = new JsonWriter((int) size);
-        body.write(w);
-        if (w.len != size) {
-            throw new IllegalStateException("JSON written twice came out different sizes");
+        // Second pass: write it into an array of exactly that size.
+        JsonWriter writer = new JsonWriter((int) size);
+        body.write(writer);
+        if (writer.length != size)
+        {
+            throw new IllegalStateException(
+                    "JSON written twice came out different sizes");
         }
-        return w.buf;
+        return writer.buffer;
     }
 
-    /** The number of bytes written so far. */
-    long size() {
-        return counted + len;
+    /**
+     * How many bytes of JSON have been written so far, or would have been by a
+     * writer that only counts.
+     *
+     * @return the number of bytes
+     */
+    long size()
+    {
+        return counted + length;
     }
-    JsonWriter beginObject() {
+
+    /**
+     * Starts a JSON object: writes an opening brace, after a comma if one is
+     * needed. Its keys and values follow, and {@link #endObject()} closes it.
+     *
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter beginObject()
+    {
         separate();
         put('{');
         comma = false;
         return this;
     }
 
-    JsonWriter endObject() {
+    /**
+     * Closes the JSON object started last: writes a closing brace.
+     *
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter endObject()
+    {
         put('}');
         comma = true;
         return this;
     }
 
-    JsonWriter beginArray() {
+    /**
+     * Starts a JSON array: writes {@code [}, after a comma if one is needed.
+     * Its values follow, and {@link #endArray()} closes it.
+     *
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter beginArray()
+    {
         separate();
         put('[');
         comma = false;
         return this;
     }
 
-    JsonWriter endArray() {
+    /**
+     * Closes the JSON array started last: writes {@code ]}.
+     *
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter endArray()
+    {
         put(']');
         comma = true;
         return this;
     }
 
-    /** Writes a key; the next call writes its value. */
-    JsonWriter key(String k) {
+    /**
+     * Writes a key in an object, as a JSON string followed by a colon, after a
+     * comma if one is needed. The next call writes the key's value.
+     *
+     * @param key the key's text; it is escaped as JSON requires
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter key(String key)
+    {
         separate();
-        string(k);
+        string(key);
         put(':');
         comma = false;
         return this;
     }
 
-    JsonWriter value(String v) {
+    /**
+     * Writes a JSON string value, after a comma if one is needed.
+     *
+     * @param value the string's text; it is escaped as JSON requires
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter value(String value)
+    {
         separate();
-        string(v);
+        string(value);
         comma = true;
         return this;
     }
 
     /**
-     * Writes pieces of text as one JSON string, exactly as {@link #value(String)} would write them joined, a
-     * surrogate pair split between two pieces included, without joining them into one string first.
+     * Writes several pieces of text as one JSON string value, without joining
+     * them into one Java string first. The C-CDA converter uses it for long
+     * text, which the XML parser hands over in pieces.
+     * <p>
+     * The bytes are exactly those {@link #value(String)} would write for the
+     * pieces joined. That includes a character such as an emoji whose two
+     * halves (a surrogate pair) end up in different pieces: the first half is
+     * held back until the next piece shows whether its second half follows.
+     *
+     * @param pieces the string's text, in order; each is escaped as JSON
+     * requires
+     * @return this writer, so calls can be chained
      */
-    JsonWriter value(List<String> pieces) {
+    JsonWriter value(List<String> pieces)
+    {
         separate();
         put('"');
-        for (String piece : pieces) {
+        for (String piece : pieces)
+        {
             chars(piece);
         }
         closeString();
@@ -162,191 +319,370 @@ final class JsonWriter {
         return this;
     }
 
-    /** Starts a string value, whose text follows in calls to {@link #utf8}; {@link #endString()} closes it. */
-    JsonWriter beginString() {
+    /**
+     * Starts a string value whose text is copied from UTF-8 bytes: writes the
+     * opening quote, after a comma if one is needed. The text follows in calls
+     * to {@link #utf8}, and {@link #endString()} closes it.
+     *
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter beginString()
+    {
         separate();
         put('"');
         return this;
     }
 
     /**
-     * Adds text to a string started by {@link #beginString()}, from bytes that are valid UTF-8 (the caller has
-     * checked). They are copied as they are, escaping only what JSON requires, which gives exactly the bytes
-     * {@link #value(String)} would write for the decoded text.
+     * Adds text to a string started by {@link #beginString()}, copied from
+     * bytes that are already UTF-8.
+     * <p>
+     * The bytes are copied as they are, except for a quote, a backslash or a
+     * control character, which are escaped as JSON requires. This gives exactly
+     * the bytes {@link #value(String)} would write for the same text decoded,
+     * without decoding it. The caller must have checked that the bytes are
+     * valid UTF-8; nothing here checks it again.
+     *
+     * @param bytes the bytes to copy from, such as a whole section
+     * @param from where the text starts in {@code bytes}
+     * @param to where it ends: the position just after its last byte
+     * @return this writer, so calls can be chained
      */
-    JsonWriter utf8(byte[] b, int from, int to) {
+    JsonWriter utf8(byte[] bytes, int from, int to)
+    {
+        // Where the bytes not yet copied start.
         int run = from;
-        for (int i = from; i < to; i++) {
-            int c = b[i] & 0xFF;
-            if (c < 0x20 || c == '"' || c == '\\') {
-                bytes(b, run, i - run);
-                escape((char) c);
+        for (int i = from; i < to; i++)
+        {
+            // The byte, as a number from 0 to 255.
+            int character = bytes[i] & 0xFF;
+            if (character < 0x20 || character == '"' || character == '\\')
+            {
+                bytes(bytes, run, i - run);
+                escape((char) character);
                 run = i + 1;
             }
         }
-        bytes(b, run, to - run);
+        bytes(bytes, run, to - run);
         return this;
     }
 
-    /** Closes a string started by {@link #beginString()}. */
-    JsonWriter endString() {
+    /**
+     * Closes a string started by {@link #beginString()}: writes the closing
+     * quote.
+     *
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter endString()
+    {
         closeString();
         comma = true;
         return this;
     }
 
-    /** A string value from valid UTF-8 bytes: {@link #beginString()}, {@link #utf8}, {@link #endString()}. */
-    JsonWriter valueUtf8(byte[] b, int from, int to) {
-        return beginString().utf8(b, from, to).endString();
+    /**
+     * Writes a whole string value copied from UTF-8 bytes: the same as
+     * {@link #beginString()}, {@link #utf8} and {@link #endString()} in turn.
+     *
+     * @param bytes the bytes to copy from; they must be valid UTF-8
+     * @param from where the text starts in {@code bytes}
+     * @param to where it ends: the position just after its last byte
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter valueUtf8(byte[] bytes, int from, int to)
+    {
+        return beginString().utf8(bytes, from, to).endString();
     }
 
-    /** A literal JSON value (true, false or a number); the caller guarantees it is valid JSON. */
-    JsonWriter literal(String v) {
+    /**
+     * Writes a value exactly as given, without quotes: {@code true},
+     * {@code false} or a number, after a comma if one is needed.
+     *
+     * @param value the value; the caller must make sure it is valid JSON and
+     * only ASCII, as nothing here checks it
+     * @return this writer, so calls can be chained
+     */
+    JsonWriter literal(String value)
+    {
         separate();
-        ascii(v);
+        ascii(value);
         comma = true;
         return this;
     }
 
-    private void separate() {
-        if (comma) {
+    /**
+     * Writes a comma if the next key or value needs one ({@link #comma}).
+     */
+    private void separate()
+    {
+        if (comma)
+        {
             put(',');
         }
     }
 
-    private void string(String s) {
+    /**
+     * Writes a complete JSON string: quotes around the text, escaped as JSON
+     * requires.
+     *
+     * @param text the text
+     */
+    private void string(String text)
+    {
         put('"');
-        chars(s);
+        chars(text);
         closeString();
     }
 
-    /** Closes a string, writing a high surrogate left unpaired at its end as {@code ?}. */
-    private void closeString() {
-        if (pendingHigh != 0) {
+    /**
+     * Writes a string's closing quote. If the text ended with the first half of
+     * a surrogate pair, and no second half followed, that half is written as
+     * {@code ?} first, as {@code String.getBytes(UTF_8)} would write it.
+     */
+    private void closeString()
+    {
+        if (pendingHigh != 0)
+        {
             pendingHigh = 0;
             put('?');
         }
         put('"');
     }
 
-    /** Writes the escaped UTF-8 of part of a string, carrying a trailing high surrogate over to the next part. */
-    private void chars(String s) {
-        int n = s.length();
-        reserve(n + 1);
-        int i = 0;
-        if (pendingHigh != 0 && n > 0) {
+    /**
+     * Writes one piece of a string's text as UTF-8, escaping what JSON
+     * requires.
+     * <p>
+     * Characters are written as {@code String.getBytes(UTF_8)} writes them: one
+     * byte for ASCII, two or three for other characters, and four for a
+     * character outside the basic range (an emoji, say), which Java holds as a
+     * surrogate pair. Half a pair, with no other half next to it, is written as
+     * {@code ?}. A first half at the very end of the piece is held in
+     * {@link #pendingHigh}, because its second half may start the next piece.
+     *
+     * @param string the piece of text
+     */
+    private void chars(String string)
+    {
+        // The piece's length, in Java chars.
+        int size = string.length();
+        reserve(size + 1);
+        // The position of the next char to write.
+        int position = 0;
+        if (pendingHigh != 0 && size > 0)
+        {
+            // Finish the surrogate pair the last piece ended with, if this
+            // piece starts with its second half.
             char high = pendingHigh;
             pendingHigh = 0;
-            if (Character.isLowSurrogate(s.charAt(0))) {
-                codePoint(Character.toCodePoint(high, s.charAt(0)));
-                i = 1;
-            } else {
+            if (Character.isLowSurrogate(string.charAt(0)))
+            {
+                codePoint(Character.toCodePoint(high, string.charAt(0)));
+                position = 1;
+            }
+            else
+            {
                 put('?');
             }
         }
-        for (; i < n; i++) {
-            char c = s.charAt(i);
-            if (c < 0x20 || c == '"' || c == '\\') {
-                escape(c);
-            } else if (c < 0x80) {
-                put(c);
-            } else if (c < 0x800) {
-                ensure(2);
-                buf[len++] = (byte) (0xC0 | c >> 6);
-                buf[len++] = (byte) (0x80 | c & 0x3F);
-            } else if (Character.isHighSurrogate(c) && i + 1 == n) {
-                pendingHigh = c; // its low surrogate may start the next piece
-            } else if (Character.isHighSurrogate(c) && Character.isLowSurrogate(s.charAt(i + 1))) {
-                codePoint(Character.toCodePoint(c, s.charAt(++i)));
-            } else if (Character.isSurrogate(c)) {
-                put('?'); // as String.getBytes(UTF_8) writes an unpaired surrogate
-            } else {
-                ensure(3);
-                buf[len++] = (byte) (0xE0 | c >> 12);
-                buf[len++] = (byte) (0x80 | c >> 6 & 0x3F);
-                buf[len++] = (byte) (0x80 | c & 0x3F);
+        for (; position < size; position++)
+        {
+            char character = string.charAt(position);
+            if (character < 0x20 || character == '"' || character == '\\')
+            {
+                escape(character);
             }
-        }
-    }
-
-    /** Writes the escape for a character JSON doesn't allow in a string as it is: a quote, backslash or control. */
-    private void escape(char c) {
-        switch (c) {
-            case '"' -> ascii("\\\"");
-            case '\\' -> ascii("\\\\");
-            case '\n' -> ascii("\\n");
-            case '\r' -> ascii("\\r");
-            case '\t' -> ascii("\\t");
-            case '\b' -> ascii("\\b");
-            case '\f' -> ascii("\\f");
-            default -> ascii(String.format("\\u%04x", (int) c));
-        }
-    }
-
-    /** Copies bytes that need no escaping. */
-    private void bytes(byte[] b, int from, int n) {
-        if (counting) {
-            counted += n;
-            return;
-        }
-        ensure(n);
-        System.arraycopy(b, from, buf, len, n);
-        len += n;
-    }
-
-    /** Writes a supplementary code point (above U+FFFF) as four UTF-8 bytes. */
-    private void codePoint(int cp) {
-        ensure(4);
-        buf[len++] = (byte) (0xF0 | cp >> 18);
-        buf[len++] = (byte) (0x80 | cp >> 12 & 0x3F);
-        buf[len++] = (byte) (0x80 | cp >> 6 & 0x3F);
-        buf[len++] = (byte) (0x80 | cp & 0x3F);
-    }
-
-    /** Text the caller knows is ASCII: JSON punctuation, escapes and literals. */
-    private void ascii(String s) {
-        ensure(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            buf[len++] = (byte) s.charAt(i);
-        }
-    }
-
-    private void put(char c) {
-        ensure(1);
-        buf[len++] = (byte) c;
-    }
-
-    /** Makes room ahead of time for about {@code n} bytes; a hint only, ignored when counting. */
-    private void reserve(int n) {
-        if (!counting) {
-            ensure(n);
+            else if (character < 0x80)
+            {
+                put(character);
+            }
+            else if (character < 0x800)
+            {
+                ensure(2);
+                buffer[this.length++] = (byte) (0xC0 | character >> 6);
+                buffer[this.length++] = (byte) (0x80 | character & 0x3F);
+            }
+            else if (Character.isHighSurrogate(character)
+                    && position + 1 == size)
+            {
+                // Its second half may start the next piece.
+                pendingHigh = character;
+            }
+            else if (Character.isHighSurrogate(character) && Character.
+                    isLowSurrogate(string.charAt(position + 1)))
+            {
+                codePoint(Character.toCodePoint(character, string.charAt(
+                        ++position)));
+            }
+            else if (Character.isSurrogate(character))
+            {
+                // Half a pair on its own, written as String.getBytes(UTF_8)
+                // writes it.
+                put('?');
+            }
+            else
+            {
+                ensure(3);
+                buffer[this.length++] = (byte) (0xE0 | character >> 12);
+                buffer[this.length++] = (byte) (0x80 | character >> 6 & 0x3F);
+                buffer[this.length++] = (byte) (0x80 | character & 0x3F);
+            }
         }
     }
 
     /**
-     * Makes room for {@code n} more bytes, growing the buffer by half (or more, if needed). When only counting,
-     * the scratch buffer's bytes are counted and it is reused from the start instead.
+     * Writes the escape for a character JSON doesn't allow as itself inside a
+     * string: {@code \"} for a quote, {@code \\} for a backslash, the short
+     * forms {@code \n}, {@code \r}, {@code \t}, {@code \b} and {@code \f}, and
+     * a backslash, the letter {@code u} and four hex digits for any other
+     * control character.
+     *
+     * @param character the quote, backslash or control character
      */
-    private void ensure(int n) {
-        if (counting && n > buf.length - len) {
-            counted += len;
-            len = 0;
-            if (n > buf.length) {
-                buf = new byte[n];
-            }
-            return;
-        }
-        if (n > buf.length - len) {
-            long needed = (long) len + n;
-            if (needed > MAX_CAPACITY) {
-                throw new OutOfMemoryError("JSON larger than the largest array");
-            }
-            buf = Arrays.copyOf(buf, (int) Math.min(MAX_CAPACITY, Math.max(needed, buf.length + (long) (buf.length >> 1))));
+    private void escape(char character)
+    {
+        switch (character)
+        {
+            case '"' ->
+                ascii("\\\"");
+            case '\\' ->
+                ascii("\\\\");
+            case '\n' ->
+                ascii("\\n");
+            case '\r' ->
+                ascii("\\r");
+            case '\t' ->
+                ascii("\\t");
+            case '\b' ->
+                ascii("\\b");
+            case '\f' ->
+                ascii("\\f");
+            default ->
+                ascii(String.format("\\u%04x", (int) character));
         }
     }
 
-    /** The JSON written, as UTF-8; the buffer itself when it is exactly full, otherwise a copy of what was written. */
-    byte[] toBytes() {
-        return len == buf.length ? buf : Arrays.copyOf(buf, len);
+    /**
+     * Copies bytes that need no escaping. When only counting, they are counted
+     * and not copied.
+     *
+     * @param bytes the bytes to copy from
+     * @param from where to start copying
+     * @param size how many bytes to copy
+     */
+    private void bytes(byte[] bytes, int from, int size)
+    {
+        if (counting)
+        {
+            counted += size;
+            return;
+        }
+        ensure(size);
+        System.arraycopy(bytes, from, buffer, length, size);
+        length += size;
+    }
+
+    /**
+     * Writes a character outside the basic range (above U+FFFF, such as an
+     * emoji) as its four UTF-8 bytes.
+     *
+     * @param cp the character's Unicode number (its code point)
+     */
+    private void codePoint(int cp)
+    {
+        ensure(4);
+        buffer[length++] = (byte) (0xF0 | cp >> 18);
+        buffer[length++] = (byte) (0x80 | cp >> 12 & 0x3F);
+        buffer[length++] = (byte) (0x80 | cp >> 6 & 0x3F);
+        buffer[length++] = (byte) (0x80 | cp & 0x3F);
+    }
+
+    /**
+     * Writes text the caller knows is ASCII, one byte per character, without
+     * escaping: JSON punctuation, escapes and literals.
+     *
+     * @param text the text
+     */
+    private void ascii(String text)
+    {
+        ensure(text.length());
+        for (int i = 0; i < text.length(); i++)
+        {
+            buffer[length++] = (byte) text.charAt(i);
+        }
+    }
+
+    /**
+     * Writes one ASCII character as one byte.
+     *
+     * @param character the character, below 128
+     */
+    private void put(char character)
+    {
+        ensure(1);
+        buffer[length++] = (byte) character;
+    }
+
+    /**
+     * Makes room ahead of time for about {@code size} more bytes, so a long
+     * string doesn't grow the buffer several times. It is only a hint: each
+     * write still makes sure of its own room. Ignored when only counting.
+     *
+     * @param size about how many bytes are coming
+     */
+    private void reserve(int size)
+    {
+        if (!counting)
+        {
+            ensure(size);
+        }
+    }
+
+    /**
+     * Makes sure there is room in {@link #buffer} for {@code size} more bytes.
+     * <p>
+     * A writer that keeps the JSON grows the buffer by half, or by more if that
+     * isn't enough. A writer that only counts adds what the scratch area holds
+     * to {@link #counted} and starts again from its beginning, making it bigger
+     * only if {@code size} bytes wouldn't fit even in an empty one.
+     *
+     * @param size how many bytes are about to be written
+     * @throws OutOfMemoryError if the JSON would be larger than the largest
+     * array Java can create
+     */
+    private void ensure(int size)
+    {
+        if (counting && size > buffer.length - length)
+        {
+            counted += length;
+            length = 0;
+            if (size > buffer.length)
+            {
+                buffer = new byte[size];
+            }
+            return;
+        }
+        if (size > buffer.length - length)
+        {
+            // The size the buffer must at least be.
+            long needed = (long) length + size;
+            if (needed > MAX_CAPACITY)
+            {
+                throw new OutOfMemoryError("JSON larger than the largest array");
+            }
+            buffer = Arrays.copyOf(buffer, (int) Math.min(MAX_CAPACITY, Math.
+                    max(needed, buffer.length + (long) (buffer.length >> 1))));
+        }
+    }
+
+    /**
+     * The JSON written, as UTF-8 bytes. Only for a writer that keeps the JSON.
+     *
+     * @return the buffer itself if it is exactly full, otherwise a copy of just
+     * the bytes written
+     */
+    byte[] toBytes()
+    {
+        return length == buffer.length ? buffer : Arrays.copyOf(buffer, length);
     }
 }
