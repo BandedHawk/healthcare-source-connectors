@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-01 (an): documentation only. A plan for source endpoints chosen by configuration (§5.3, not built): local, S3-compatible, SFTP and Iceberg/Parquet sources as plugins behind a `SourceEndpoint` SPI, with splitting and conversion unaware of where files come from. One pipeline per pod, defined in a configuration file shipped with the pod; operator-defined pipelines are deferred to pipeline monitoring and management (§17).
+
 Revision 2026-11-01 (am): documentation only. The performance test was run against the C-CDA tree of revision al (§13.1): throughput is unchanged, allocation is 8% lower and GC pauses about 40% shorter. A comparison is only fair from the same filesystem; the project folder's encrypted home directory made the same code look 10% slower.
 
 Revision 2026-10-31 (al): C-CDA documents of structured entries need about 60% less memory to convert.
@@ -308,6 +310,122 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 - **Anything else:** the file is left in place and the route thread sleeps with exponential backoff (from `retry.initial-backoff`, capped at 5 min), which pauses the pipeline. The next poll tries again.
 
 Nothing in this path logs a path or filename.
+
+### 5.3 Source endpoints (planned)
+
+Not built yet. Today the connector reads only from a local directory (§5). In practice it will rarely run on the machine where files arrive, so where the files come from becomes a choice made in configuration: a local or mounted directory, S3-compatible object storage, SFTP, or Parquet/Iceberg tables. Splitting, conversion, storage and messaging stay unaware of where a file came from.
+
+**Decisions (2026-11-01):**
+- **One pipeline per pod.** A pod reads from one source endpoint, splits and converts one format, and writes to one set of tables. It keeps the one lease, one claim and one checkpoint it has today (§9.3, §9.5), so two pipelines can never race over the same input or the same tables. To ingest more, deploy more pods.
+- **First goal: a configuration file shipped with the pod.** The pipeline is defined in the pod's settings file (a read-only ConfigMap or Secret mount, as in §14.1), inside the secured environment, and applied at startup. A change takes effect on restart.
+- **Later: operator-defined pipelines.** Letting operators define the source type, endpoint and handling through a console or API, without editing configuration by hand, belongs with pipeline monitoring, management and remediation (§17).
+
+**What is already independent of the source.** `connector-core` processes a file through four interfaces and never sees a path:
+
+| Interface | What it does |
+|---|---|
+| `SourceFile` | `open()` gives random-access bytes; `originalName()` (PHI, stored encrypted); `deleteOriginal()` |
+| `SeekableByteSource` | reads at any position, possibly in parallel |
+| `OutcomeRecorder` | completion and failure records, and the encrypted fallback (§11.3) |
+| `SectionSplitter`, `SectionConverter` | found by format name with `ServiceLoader` (§6.1, §6.4) |
+
+Everything tied to a local directory is in `file-connector`, in five classes, and is what becomes the first source plugin:
+- `InboundRoute`: pickup with Camel's `file` component, read locks, oldest first (§5);
+- `InboundDirectoryClaim`: the `.sdh-owner` file (§9.5);
+- `InProgressLocator`: finds the in-progress file after a restart, by listing the directory and checking fingerprints (§5.1);
+- `DirectoryOutcomeRecorder`: `completed/` and `failed/` records inside the inbound directory;
+- `LocalSourceFile`: deletes the file and its `.done` marker.
+
+**Plugins and pipelines.** The code provides plugins, each found by name in a registry: source endpoints, splitters, converters, destinations and queues. The pipeline is configuration that combines them by name, so the service never names a specific type in its wiring, and adding a type means adding a jar, not changing code. Splitters and converters already work this way. The queue doesn't yet: `QueueType` is a fixed list and would become a registry too.
+
+**The source SPI** (`connector-core`, found with `ServiceLoader` by `type`):
+
+```java
+/** One kind of endpoint: "local", "s3", "sftp", "iceberg", ... */
+public interface SourceEndpointProvider {
+    String type();
+    void validate(EndpointConfig config);      // at startup; messages never quote PHI
+    SourceEndpoint open(EndpointConfig config, EndpointContext context) throws IOException;
+}
+
+/** A configured endpoint, such as one directory, bucket prefix or table. */
+public interface SourceEndpoint extends Closeable {
+    String identity();                         // canonical and PHI-free, e.g. "s3://bucket/inbound/"
+    void claim(Owner owner) throws IOException;     // exclusive ownership of the endpoint
+    List<SourceItem> poll(int max) throws IOException;   // items ready to process, oldest first
+    Optional<SourceItem> find(SourceRef ref) throws IOException;   // the in-progress item after a restart
+}
+
+/** One input: a file, an object, or a batch of table rows. */
+public interface SourceItem extends SourceFile {
+    SourceRef ref();     // stable ID and version: path and mtime, key and version ID or ETag, snapshot and rows
+    long size();
+    void complete(Disposition disposition) throws IOException;   // delete, move, or keep (watermark)
+}
+```
+
+`FileProcessor` keeps taking a `SourceFile`, so the pipeline, splitters and converters don't change. Each plugin decides what depends on its endpoint:
+
+| | Local / mounted directory | S3-compatible | SFTP | Iceberg / Parquet |
+|---|---|---|---|---|
+| Ready to process | `.done` marker, or unchanged for `min-age` (§5) | marker object, or an ETag that has stopped changing | `.done` marker, or unchanged for `min-age` | a committed snapshot |
+| Finished | delete | delete, or move to a prefix | delete, or move to a directory | keep; advance a watermark |
+| Claim | `.sdh-owner`, created atomically (§9.5) | claim object written with `If-None-Match: *` | claim file opened with exclusive create | the lease only |
+| After a restart | fingerprint (§5.1) | key and version ID | path, size and mtime, then fingerprint | snapshot, data file and row range |
+| Reading | `FileChannel` | ranged GETs, or staged | offset reads, or staged | staged |
+
+The lease (§9.3) stays the backstop for every endpoint.
+
+**PHI in references.** Paths and object keys often contain patient names or MRNs, which is why `originalName()` is stored only encrypted (§8.2). A `SourceRef` gets the same care: it is stored encrypted in the checkpoint. `identity()` names only the endpoint, never an item, so it can appear in claims, audit events and errors.
+
+**A work directory of its own.** Outcome records and the encrypted fallback are written inside the inbound directory today. A remote source has nowhere to put them, so they move to `sdh.work-dir`, a local encrypted volume on the connector's pod, whatever the source. The `local` plugin can keep using the inbound directory for compatibility.
+
+**Reading directly or staged.** Every file is read at least twice, to split and to archive (§13).
+- **Direct:** reads at a position from the endpoint itself: `FileChannel`, S3 ranged GETs, SFTP reads at an offset. No copy is made, but over a slow link every read costs a round trip.
+- **Staged:** a shared `StagedSource` helper copies the item to the work directory first, so a plugin only has to provide a stream. That suits FTP, HTTPS, and S3 across a WAN. The staged copy is encrypted with a key held only in memory for that file, so after a crash it is unreadable and is fetched again; no plaintext PHI is left on the work volume.
+
+**Configuration** (§14), still one pipeline per pod:
+
+```yaml
+sdh:
+  source:
+    type: s3                               # local | s3 | sftp | iceberg | <plugin>
+    options:                               # passed to the plugin, as split.options are (§6.2)
+      bucket: phi-dropzone
+      prefix: inbound/ccda/
+      region: eu-west-1
+    ready: { mode: marker }                # marker | stable | age
+    after: { mode: move, to: processed/ }  # delete | move | keep
+    read: { mode: direct }                 # direct | staged
+  work-dir: /data/work
+```
+
+- **Credentials** never appear in `options`. They come from workload identity or the environment, through a resolver the connector gives the plugin, as for storage (§8.1).
+- **Compatibility:** the existing `sdh.file.*` settings map to `type: local`, so current deployments keep working unchanged.
+- **Option schemas:** each plugin's options are a Spring `@ConfigurationProperties` class. Startup validation uses it now, and a console can use its metadata later to build forms and check values.
+
+**Iceberg and Parquet sources.** A table holds rows, not files, and the pipeline's unit of work is a file, with its own checkpoint and several commits. One row per item would mean several commits per document, too slow at volume. Two options:
+1. **Virtual files (to try first):** the plugin presents a fixed batch of rows, such as one Parquet data file at one snapshot, as one byte stream of documents, identified by snapshot, data file and row range so it can be rebuilt exactly after a restart. The existing splitter cuts it into sections. Whether the C-CDA splitter accepts several documents in one stream, and in what framing, still needs checking.
+2. **A record source:** a second SPI that hands over documents already one section each, skipping splitting. Faster, but the pipeline needs a batching path.
+
+Archiving also needs deciding for table sources: the original already lives in a lakehouse, so a reference (snapshot and data file) may be enough instead of a copy in `source_files`. That affects what `sdh-admin restore` can do (§11.4).
+
+**Packaging.** `ServiceLoader` finds only jars on the class path, and the app runs with `java -jar app.jar`. Plugins are added when the image is built, as layers of the customer image (§14.3), and signed with it (§14.4). A plugin is code that sees PHI, so plugins are never loaded from a writable mount or downloaded at run time.
+
+**Security** (§7.5):
+- Files wait in plaintext in the source endpoint until processed: the endpoint and the work volume must be encrypted at rest, and reached over encrypted, authenticated connections (TLS, SSH with a pinned host key, SMB 3.1.1 with encryption, or NFSv4.1 with Kerberos `krb5p`).
+- Separate identities: the producer can only write to the endpoint, and the connector can read, and delete or move. The connector's credentials for the endpoint are its own.
+- A Kubernetes NetworkPolicy limits the pod to the endpoint, storage, key service and queue.
+- "Test connection" checks, when they come, only reach the endpoint and check permissions: they never list item names or read contents.
+
+**Order of work:**
+1. **The SPI, with today's directory code behind it as the `local` plugin**, with no change in behaviour. The full suite with `-Pit` is the check.
+2. **`sdh.source` configuration** and the queue chosen by name (`QueueType` becomes a registry).
+3. **`sdh.work-dir`** for outcome records, the fallback and staged copies.
+4. **A contract test kit every plugin must pass:** readiness; a restart after a crash at each step; `complete()` safe to repeat; parallel reads by position; an `identity()` without PHI.
+5. **S3 plugin:** direct and staged reads, the conditional-put claim, marker readiness. It can be tested against SeaweedFS, which the integration suite already runs (§15.1).
+6. **SFTP plugin:** offset reads, exclusive-create claim, pinned host key.
+7. **Iceberg source:** virtual files first, once the splitter's handling of batched documents is checked.
 
 ## 6. Splitting
 
@@ -1727,6 +1845,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 ## 17. Out of scope (for now)
 
 - Multi-instance or high-availability operation. The lease enforces a single writer, and the directory claim keeps each inbound directory to one connector (§9.5).
+- **Operator-defined pipelines:** defining the source type, endpoint and handling through a console or API, without editing configuration by hand. Planned with pipeline monitoring, management and remediation. It will need versioned definitions that apply between files, roles with approval for changes that redirect PHI, audit events for every change, secrets by reference only, and per-environment allow-lists of endpoints, destinations and queues (§5.3).
 - **Host disk capacity:** space for the inbound directory, `completed/` and `failed/` records, and the encrypted local `failed/<fileId>.enc` fallback is the operators' responsibility, through normal system monitoring. The service doesn't reserve, measure or predict disk space.
 - **MinIO:** not supported or tested. Support only if a customer pays for it, including the development and testing it needs (§8.1).
 - **GCP Cloud KMS against the real service:** untested until customer demand requires it (§7.4).
