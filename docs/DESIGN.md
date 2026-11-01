@@ -45,6 +45,12 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-10-31 (al): C-CDA documents of structured entries need about 60% less memory to convert.
+- **C-CDA tree (§6.4):** each element is held in plain arrays instead of lists and maps, and with nothing at all for what it doesn't have. Grouping children by name moved to when the JSON is written. The text run being read is kept once by the reader, not in every element. Whitespace runs, and attribute values of up to 64 characters, are kept once per distinct value and shared (at most 1,024 and 16,384 per document, so a hostile document can't grow the tables without end). A 64 MB document of structured entries needs 231 MiB instead of 566; the memory factor goes from 10 to 5, which still covers a document whose values don't repeat at all (5.0 times its size). Conversion is about 5% faster. The JSON is byte-for-byte the same (680 documents: the test, mapping and Google Synthea samples, 650 mutated ones among them, and the 16 and 64 MB documents).
+
+Revision 2026-10-31 (ak): the conversion budget reserves enough for C-CDA documents of structured entries.
+- **C-CDA memory factor (§6.4):** 3.5 → 10. The 3.5 was measured on a document that was mostly a base64 PDF. A 64 MB document of structured entries needs 566 MiB, 8.8 times its size (9.6 at 16 MB), so the budget reserved 224 MiB for it and let other conversions use the rest. Several large structured sections at once could then run the heap out of memory, which the budget is there to prevent.
+
 Revision 2026-10-31 (aj): the other converters need far less memory, conversions share a memory budget, and two gaps that a hostile or broken file could use are closed.
 - **Converter memory (§6.4):** X12, EDIFACT and CSV no longer decode a section into a string or build a tree; they write the JSON from the section's bytes. Large sections are written twice, counting first, so the JSON is held once at exactly its size. For a 64 MB section: EDIFACT about 2 GiB → 256 MiB, X12 512 → 224 MiB, CSV 384 → 160 MiB, C-CDA 224 → 208 MiB. Before, an EDIFACT section of about 30 MB ran a 1 GiB heap out of memory. The JSON is byte-for-byte unchanged (1,257 test inputs, 400 mutated ones per format among them).
 - **Conversion budget (§6.4):** conversions running at once share `split.convert-memory`, 40% of the heap by default. Each converter states its peak as a multiple of the section's size, and a section that doesn't fit waits.
@@ -413,10 +419,13 @@ Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offse
 
   | Converter | Heap | × section | JSON size |
   |---|---|---|---|
-  | C-CDA | 208 MiB | 3.25 | about the same |
+  | C-CDA, structured entries | 167–231 MiB | 2.6–3.6 (4.0 at 16 MB) | 0.4–0.65 × |
+  | C-CDA, mostly a base64 file | 247 MiB | 3.8 | about the same |
   | X12 | 224 MiB | 3.5 | 2.4 × |
   | EDIFACT | 256 MiB | 4 | 2.6 × |
   | CSV | 160 MiB | 2.5 | about the same |
+
+  C-CDA's figure depends on how many elements a document has, not only its size: it holds the document as a tree before writing the JSON, about 40 bytes per element plus its attributes and text (the structured rows are the master CCD and Epic inpatient test documents, their bodies repeated). Repeated attribute values are shared, and real documents repeat 72–82% of them; with none shared, the structured figure is at most 5.0, which `memoryFactor` covers. Writing the JSON while reading would bring a structured document down to about 110–150 MiB and a base64 one to about 200, but it isn't planned: large documents are usually embedded files, where it saves about 20%, and mapping a C-CDA document needs about 12 times its size anyway.
 
   None decodes a whole section into a string. CSV, X12 and EDIFACT write the JSON from the section's bytes (UTF-8 is copied as it is, escaping only what JSON requires; EDIFACT decodes one component at a time). C-CDA keeps long text in the pieces the parser delivers. From 1 MiB, the JSON is written twice, counting first, so it is held once, in an array of exactly its size (`JsonWriter.build`).
 - **Conversion budget:** conversions running at once share `split.convert-memory` (default 40% of the maximum heap). Each converter states its peak as a multiple of the section's size (`SectionConverter.memoryFactor`: the figures above, rounded up), and a worker takes that much before reading and converting a section, and gives it back once the section is ready to write. A section that doesn't fit waits, first come, first served; one bigger than the whole budget runs alone. Small sections need next to nothing, so only large ones ever wait.

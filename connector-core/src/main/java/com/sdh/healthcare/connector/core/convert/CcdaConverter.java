@@ -15,7 +15,9 @@ import java.io.CharConversionException;
 import java.nio.charset.CharacterCodingException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -135,18 +137,20 @@ public final class CcdaConverter implements SectionConverter
     }
 
     /**
-     * Measured on 64 MB documents: the document, the tree (about 450 bytes per
-     * element) and the JSON. A document of structured entries needs up to 9.6
-     * times its size (566 MiB), because it has many elements; one that is
-     * mostly an embedded file, such as a base64 PDF, needs about 3.8 times.
-     * The structured figure is the one to cover, rounded up.
+     * Measured on 16 and 64 MB documents: the document, the tree and the
+     * JSON. A document of structured entries needs 2.6 to 4.0 times its size,
+     * because it has many elements, and up to 5.0 if none of its attribute
+     * values repeat (real ones repeat most of theirs, which are then shared);
+     * one that is mostly an embedded file, such as a base64 PDF, needs about
+     * 3.8 times. The structured figure with nothing shared is the one to
+     * cover.
      *
-     * @return 10
+     * @return 5
      */
     @Override
     public double memoryFactor()
     {
-        return 10;
+        return 5;
     }
 
     /**
@@ -227,7 +231,7 @@ public final class CcdaConverter implements SectionConverter
      * <li><b>Not coalescing.</b> The parser hands over long text in pieces
      * (Woodstox up to 4,000 characters, the JDK's parser often fewer) rather
      * than as one string. The converter puts adjacent pieces back together
-     * into runs itself ({@link Node#texts}), so the JSON is the same as if the
+     * into runs itself ({@link Node#text}), so the JSON is the same as if the
      * parser had joined them, but a large run, such as a base64 body, is
      * never held as one string or in one parser buffer: coalescing made that
      * text take about five times its size in memory.</li>
@@ -264,9 +268,14 @@ public final class CcdaConverter implements SectionConverter
      * case the element's text goes under {@code "#text"}.</li>
      * </ul>
      * A {@code Node} holds what was read and decided about its element: its
-     * JSON key and schema type, its attributes, its children grouped by key, and
-     * its text. Values are kept exactly as written; typing them is left to the
-     * writing stage.
+     * JSON key and schema type, its attributes, its children and its text.
+     * Values are kept exactly as written; typing them, and grouping the
+     * children by key, is left to the writing stage.
+     * <p>
+     * A document of structured entries has an element for every 60 or so
+     * bytes, so a node holds as little as it can: plain arrays instead of
+     * lists and maps, nothing at all for what an element doesn't have, and
+     * the text run being read kept by the {@link Reading}, not by every node.
      */
     private static final class Node
     {
@@ -279,70 +288,30 @@ public final class CcdaConverter implements SectionConverter
          */
         final String type;
         /**
-         * The attributes as {@code [key, value]} pairs, in the order
-         * {@link CcdaConverter#attributes(XMLStreamReader, Node)} records them, with values
-         * exactly as written.
+         * The attributes as key, value, key, value, and so on, in the order
+         * {@link CcdaConverter#attributes(XMLStreamReader, Node)} records them,
+         * with values exactly as written; {@link #NO_ATTRIBUTES} when there are
+         * none.
          */
-        final List<String[]> attributes = new ArrayList<>(4);
+        String[] attributes = NO_ATTRIBUTES;
         /**
-         * The child elements, grouped by key in the order each key first
-         * appears, each group in document order.
+         * The child elements in document order, in the first
+         * {@link #childCount} places; {@code null} when there are none. Once the
+         * element ends, the array is exactly that long.
          */
-        final Map<String, List<Node>> children = new LinkedHashMap<>();
+        Node[] children;
+        /** How many child elements have been read. */
+        int childCount;
         /**
          * The element's own text, in document order, as runs: a run is the
          * text (character data, CDATA and whitespace) between two child
-         * elements, comments or processing instructions. Each run is the list
-         * of pieces the parser delivered it in; a run of at most
-         * {@link CcdaConverter#JOIN_LIMIT} characters is joined into one piece
-         * once it ends, so only large runs stay in pieces.
+         * elements, comments or processing instructions. A run is a
+         * {@code String}, or a {@code String[]} of the pieces the parser
+         * delivered it in if it is longer than {@link CcdaConverter#JOIN_LIMIT}.
+         * This field is {@code null} with no runs, the run itself with one, and
+         * a {@link Runs} with more.
          */
-        final List<List<String>> texts = new ArrayList<>(1);
-        /** Whether the last thing read inside this element was text. */
-        private boolean inRun;
-
-        /**
-         * Adds a piece of text read inside this element, to the current run
-         * if the last thing read was text, otherwise as a new run.
-         *
-         * @param piece the text as the parser delivered it
-         */
-        void text(String piece)
-        {
-            if (!inRun)
-            {
-                texts.add(List.of(piece));
-                inRun = true;
-            }
-            else
-            {
-                List<String> run = texts.getLast();
-                if (run.size() == 1)
-                {
-                    run = new ArrayList<>(run);
-                    texts.set(texts.size() - 1, run);
-                }
-                run.add(piece);
-            }
-        }
-
-        /**
-         * Ends the current run, if there is one, because something other than
-         * text has been read. A run of several pieces that is no longer than
-         * {@link CcdaConverter#JOIN_LIMIT} is joined into one piece.
-         */
-        void endRun()
-        {
-            if (inRun)
-            {
-                inRun = false;
-                List<String> run = texts.getLast();
-                if (run.size() > 1 && length(run) <= JOIN_LIMIT)
-                {
-                    texts.set(texts.size() - 1, List.of(String.join("", run)));
-                }
-            }
-        }
+        Object text;
 
         /**
          * Starts a node for an element whose start tag has just been read. The
@@ -360,6 +329,219 @@ public final class CcdaConverter implements SectionConverter
         {
             this.key = key;
             this.type = type;
+        }
+
+        /**
+         * Adds a child element, after those read so far.
+         *
+         * @param child the child, whose start tag has just been read
+         */
+        void add(Node child)
+        {
+            if (children == null)
+            {
+                children = new Node[2];
+            }
+            else if (childCount == children.length)
+            {
+                children = Arrays.copyOf(children, childCount * 2);
+            }
+            children[childCount++] = child;
+        }
+
+        /**
+         * Adds a finished run of text, after those read so far.
+         *
+         * @param run the run: a {@code String}, or a {@code String[]} of pieces
+         */
+        void addRun(Object run)
+        {
+            if (text == null)
+            {
+                text = run;
+            }
+            else if (text instanceof Runs runs)
+            {
+                runs.add(run);
+            }
+            else
+            {
+                Runs runs = new Runs();
+                runs.add(text);
+                runs.add(run);
+                text = runs;
+            }
+        }
+
+        /**
+         * Trims the children array to its length, once the element's end tag
+         * has been read and no more children can come.
+         */
+        void end()
+        {
+            if (children != null && childCount < children.length)
+            {
+                children = Arrays.copyOf(children, childCount);
+            }
+        }
+    }
+
+    /** What {@link Node#attributes} holds for an element without attributes. */
+    private static final String[] NO_ATTRIBUTES = new String[0];
+
+    /**
+     * The runs of an element that has more than one, in document order: each
+     * a {@code String} or a {@code String[]}, as {@link Node#text} describes.
+     * A class of its own, so a {@code Node} can tell several runs from one
+     * run held in pieces.
+     */
+    private static final class Runs extends ArrayList<Object>
+    {
+
+        private static final long serialVersionUID = 1L;
+
+        /** Starts empty, with room for the two runs it is made with. */
+        Runs()
+        {
+            super(2);
+        }
+    }
+
+    /**
+     * What {@link CcdaConverter#read} keeps while reading one document, apart
+     * from the stack of open elements: the run of text being read, and the
+     * whitespace runs and attribute values seen so far.
+     * <p>
+     * Only the innermost open element can be in a run, because anything other
+     * than text ends it, so the run is kept here once instead of in every
+     * node.
+     * <p>
+     * Indented documents have a whitespace run between every two tags, and
+     * the same few runs (a line break and some spaces) over and over.
+     * Attribute values repeat too: code systems, template IDs, class and mood
+     * codes, about three in four values in the test documents. Each distinct
+     * short one is kept once and shared, so a repeat costs a reference, not a
+     * string of its own. Both tables have a limit, so a hostile document can't
+     * grow them without end; past it, values are simply kept unshared.
+     */
+    private static final class Reading
+    {
+
+        /** The longest whitespace run, in characters, that is shared. */
+        private static final int SHARED_LENGTH = 256;
+        /**
+         * The most distinct whitespace runs shared per document. An indented
+         * document has a few dozen.
+         */
+        private static final int SHARED_COUNT = 1024;
+        /** The longest attribute value, in characters, that is shared. */
+        private static final int VALUE_LENGTH = 64;
+        /**
+         * The most distinct attribute values shared per document. A 0.5 MB
+         * test document has about 1,000 to 1,400; the values that repeat most
+         * (code systems, template IDs) are among the first seen.
+         */
+        private static final int VALUE_COUNT = 16_384;
+
+        /** The element the run belongs to, or {@code null} with no run. */
+        private Node owner;
+        /** The run's pieces, as the parser delivered them. */
+        private final List<String> pieces = new ArrayList<>();
+        /** The whitespace runs shared so far, each mapped to itself. */
+        private final Map<String, String> whitespace = new HashMap<>();
+        /** The attribute values shared so far, each mapped to itself. */
+        private final Map<String, String> values = new HashMap<>();
+
+        /**
+         * Adds a piece of text read inside an element, to the current run if
+         * the last thing read was text in that element, otherwise as a new
+         * run.
+         *
+         * @param node  the innermost open element
+         * @param piece the text as the parser delivered it
+         */
+        void text(Node node, String piece)
+        {
+            if (owner != node)
+            {
+                endRun();
+                owner = node;
+            }
+            pieces.add(piece);
+        }
+
+        /**
+         * Ends the current run, if there is one, because something other than
+         * text has been read, and gives it to its element. A run of several
+         * pieces that is no longer than {@link CcdaConverter#JOIN_LIMIT} is
+         * joined into one string; a longer one is kept in pieces.
+         */
+        void endRun()
+        {
+            if (owner != null)
+            {
+                Object run;
+                if (pieces.size() == 1)
+                {
+                    run = shared(pieces.getFirst());
+                }
+                else if (length(pieces) <= JOIN_LIMIT)
+                {
+                    run = shared(String.join("", pieces));
+                }
+                else
+                {
+                    run = pieces.toArray(String[]::new);
+                }
+                owner.addRun(run);
+                owner = null;
+                pieces.clear();
+            }
+        }
+
+        /**
+         * The string to keep for a run: the shared copy if it is whitespace
+         * that has been seen before (or is now shared), otherwise the run
+         * itself.
+         *
+         * @param run the run, as one string
+         * @return the run, or an equal string already kept
+         */
+        private String shared(String run)
+        {
+            if (run.length() > SHARED_LENGTH || !run.isBlank())
+            {
+                return run;
+            }
+            String kept = whitespace.get(run);
+            if (kept == null && whitespace.size() < SHARED_COUNT)
+            {
+                whitespace.put(run, run);
+                kept = run;
+            }
+            return kept == null ? run : kept;
+        }
+
+        /**
+         * The string to keep for an attribute value: an equal one already
+         * kept, if there is one.
+         *
+         * @param value the value as the parser gave it
+         * @return the value, or an equal string already kept
+         */
+        String value(String value)
+        {
+            if (value.length() > VALUE_LENGTH)
+            {
+                return value;
+            }
+            String kept = values.get(value);
+            if (kept == null && values.size() < VALUE_COUNT)
+            {
+                values.put(value, value);
+                kept = value;
+            }
+            return kept == null ? value : kept;
         }
     }
 
@@ -408,14 +590,15 @@ public final class CcdaConverter implements SectionConverter
                         section));
             }
             Deque<Node> stack = new ArrayDeque<>();
+            Reading reading = new Reading();
             while (reader.hasNext())
             {
                 int event = reader.next();
-                if (!stack.isEmpty() && event != XMLStreamConstants.CHARACTERS
+                if (event != XMLStreamConstants.CHARACTERS
                         && event != XMLStreamConstants.CDATA
                         && event != XMLStreamConstants.SPACE)
                 {
-                    stack.peek().endRun();
+                    reading.endRun();
                 }
                 switch (event)
                 {
@@ -437,11 +620,10 @@ public final class CcdaConverter implements SectionConverter
                         Node node = new Node(key, type(model, parent, key,
                                 xsiType,
                                 reader));
-                        attributes(reader, node);
+                        attributes(reader, node, reading);
                         if (parent != null)
                         {
-                            parent.children.computeIfAbsent(key,
-                                    k -> new ArrayList<>(1)).add(node);
+                            parent.add(node);
                         }
                         stack.push(node);
                     }
@@ -450,12 +632,13 @@ public final class CcdaConverter implements SectionConverter
                     {
                         if (!stack.isEmpty())
                         {
-                            stack.peek().text(reader.getText());
+                            reading.text(stack.peek(), reader.getText());
                         }
                     }
                     case XMLStreamConstants.END_ELEMENT ->
                     {
                         Node done = stack.pop();
+                        done.end();
                         if (stack.isEmpty())
                         {
                             root = done;
@@ -665,18 +848,28 @@ public final class CcdaConverter implements SectionConverter
      * namespaces come last.
      *
      * @param reader the XML reader, positioned on the element's start tag
-     * @param node   the element being built; its attributes are added to
-     *               {@link Node#attributes} as {@code [key, value]} pairs
+     * @param node   the element being built; its attributes are stored in
+     *               {@link Node#attributes} as key, value, key, value, and so on
+     * @param reading the document being read, whose short repeated values are
+     *               shared ({@link Reading#value})
      */
-    private static void attributes(XMLStreamReader reader, Node node)
+    private static void attributes(XMLStreamReader reader, Node node,
+            Reading reading)
     {
+        int count = reader.getAttributeCount();
+        if (count == 0)
+        {
+            return;
+        }
+        String[] attributes = new String[2 * count];
+        int size = 0;
         Set<String> used = new HashSet<>();
         List<String[]> foreignList = new ArrayList<>();
-        for (int i = 0; i < reader.getAttributeCount(); i++)
+        for (int i = 0; i < count; i++)
         {
             String nameSpace = reader.getAttributeNamespace(i);
             String local = reader.getAttributeLocalName(i);
-            String value = reader.getAttributeValue(i);
+            String value = reading.value(reader.getAttributeValue(i));
             String key;
             if (XSI.equals(nameSpace))
             {
@@ -714,20 +907,20 @@ public final class CcdaConverter implements SectionConverter
                 continue;
             }
             used.add(key);
-            node.attributes.add(new String[]
-            {
-                key, value
-            });
+            attributes[size++] = key;
+            attributes[size++] = value;
         }
         for (String[] foreign : foreignList)
         {
             final String key = used.add(foreign[0]) ? foreign[0] : foreign[1];
             used.add(key);
-            node.attributes.add(new String[]
-            {
-                key, foreign[2]
-            });
+            attributes[size++] = key;
+            attributes[size++] = foreign[2];
         }
+        // Smaller only when xsi:schemaLocation was left out.
+        node.attributes = size == 0 ? NO_ATTRIBUTES
+                : size < attributes.length ? Arrays.copyOf(attributes, size)
+                : attributes;
     }
 
     /**
@@ -760,7 +953,7 @@ public final class CcdaConverter implements SectionConverter
     private static void emit(CdaModel model, Node node, JsonWriter writer)
     {
         CdaModel.Type type = model.type(node.type);
-        if (node.attributes.isEmpty() && node.children.isEmpty())
+        if (node.attributes.length == 0 && node.childCount == 0)
         {
             emitTextOnly(type, node, writer);
         }
@@ -768,6 +961,32 @@ public final class CcdaConverter implements SectionConverter
         {
             emitObject(model, type, node, writer);
         }
+    }
+
+    /**
+     * An element's text runs, in document order.
+     *
+     * @param node the element
+     * @return its runs, each a {@code String} or a {@code String[]}; empty if
+     *         it has no text
+     */
+    private static List<Object> runs(Node node)
+    {
+        return node.text == null ? List.of()
+                : node.text instanceof Runs runs ? runs
+                : List.of(node.text);
+    }
+
+    /**
+     * One text run as a list of pieces.
+     *
+     * @param run the run, a {@code String} or a {@code String[]}
+     * @return its pieces
+     */
+    private static List<String> pieces(Object run)
+    {
+        return run instanceof String piece ? List.of(piece)
+                : Arrays.asList((String[]) run);
     }
 
     /**
@@ -780,8 +999,27 @@ public final class CcdaConverter implements SectionConverter
      */
     private static List<String> allText(Node node)
     {
-        return node.texts.size() == 1 ? node.texts.getFirst()
-                : node.texts.stream().flatMap(List::stream).toList();
+        return node.text instanceof Runs runs
+                ? runs.stream().flatMap(run -> pieces(run).stream()).toList()
+                : node.text == null ? List.of() : pieces(node.text);
+    }
+
+    /**
+     * An element's children grouped by key, in the order each key first
+     * appears, each group in document order: the children as they are written,
+     * all occurrences of a name under one key.
+     *
+     * @param node the element, with at least one child
+     * @return its children by key
+     */
+    private static Map<String, List<Node>> groups(Node node)
+    {
+        Map<String, List<Node>> groups = new LinkedHashMap<>();
+        for (Node child : node.children)
+        {
+            groups.computeIfAbsent(child.key, k -> new ArrayList<>(1)).add(child);
+        }
+        return groups;
     }
 
     /**
@@ -883,7 +1121,7 @@ public final class CcdaConverter implements SectionConverter
      * <ul>
      * <li>Types that mix text with elements (the narrative block, ED, names),
      * types that carry no text, and types the model doesn't know: an array of
-     * the text runs ({@link Node#texts}), each as one string. Whitespace-only
+     * the text runs ({@link Node#text}), each as one string. Whitespace-only
      * runs (the indentation between child elements) are dropped.</li>
      * <li>Other types: all the text joined into one string, kept exactly,
      * whitespace included.</li>
@@ -899,7 +1137,7 @@ public final class CcdaConverter implements SectionConverter
      * @param type this element's type in the model, or {@code null} if the
      * model doesn't know it (unknown elements are treated as mixed content and
      * their children as repeating)
-     * @param node the element: its attributes, its children grouped by name,
+     * @param node the element: its attributes, its children,
      * and its text pieces, as read from the document
      * @param writer where the JSON object is written
      */
@@ -909,19 +1147,21 @@ public final class CcdaConverter implements SectionConverter
         boolean mixed = type == null || type.mixed();
         boolean text = type == null || type.text();
         writer.beginObject();
+        Map<String, List<Node>> children = node.childCount == 0 ? Map.of()
+                : groups(node);
         Set<String> used = new HashSet<>();
-        for (var attribute : node.attributes)
+        String[] attributes = node.attributes;
+        for (int i = 0; i < attributes.length; i += 2)
         {
-            String key = node.children.containsKey(attribute[0]) || used.
-                    contains(attribute[0])
-                    ? "@" + attribute[0] : attribute[0];
+            String name = attributes[i];
+            String key = children.containsKey(name) || used.contains(name)
+                    ? "@" + name : name;
             used.add(key);
             writer.key(key);
-            attributeValue(type == null ? null : type.attributes().get(
-                    attribute[0]),
-                    attribute[1], writer);
+            attributeValue(type == null ? null : type.attributes().get(name),
+                    attributes[i + 1], writer);
         }
-        for (Map.Entry<String, List<Node>> entry : node.children.entrySet())
+        for (Map.Entry<String, List<Node>> entry : children.entrySet())
         {
             var key = used.contains(entry.getKey()) ? "@" + entry.getKey() : entry.
                     getKey();
@@ -945,8 +1185,8 @@ public final class CcdaConverter implements SectionConverter
         var textKey = used.contains("value") ? "#text" : "value";
         if (mixed || !text)
         {
-            List<List<String>> parts = node.texts.stream().filter(
-                    run -> !isBlank(run)).toList();
+            List<List<String>> parts = runs(node).stream().map(
+                    CcdaConverter::pieces).filter(run -> !isBlank(run)).toList();
             if (!parts.isEmpty())
             {
                 writer.key(textKey).beginArray();
