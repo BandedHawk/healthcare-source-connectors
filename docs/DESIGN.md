@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-01 (am): documentation only. The performance test was run against the C-CDA tree of revision al (§13.1): throughput is unchanged, allocation is 8% lower and GC pauses about 40% shorter. A comparison is only fair from the same filesystem; the project folder's encrypted home directory made the same code look 10% slower.
+
 Revision 2026-10-31 (al): C-CDA documents of structured entries need about 60% less memory to convert.
 - **C-CDA tree (§6.4):** each element is held in plain arrays instead of lists and maps, and with nothing at all for what it doesn't have. Grouping children by name moved to when the JSON is written. The text run being read is kept once by the reader, not in every element. Whitespace runs, and attribute values of up to 64 characters, are kept once per distinct value and shared (at most 1,024 and 16,384 per document, so a hostile document can't grow the tables without end). A 64 MB document of structured entries needs 231 MiB instead of 566; the memory factor goes from 10 to 5, which still covers a document whose values don't repeat at all (5.0 times its size). Conversion is about 5% faster. The JSON is byte-for-byte the same (680 documents: the test, mapping and Google Synthea samples, 650 mutated ones among them, and the 16 and 64 MB documents).
 
@@ -1144,6 +1146,22 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 - **What the first heap trial found** (two fixes, revision ad):
   - **The archive buffered far more than a row group.** The first trial failed at 768 and 512 MiB, and even at 1536 MiB every run had 2–6 full collections. Each archive row is an 8 MiB ciphertext chunk, and Iceberg's Parquet writer first checks the row group's size after 100 rows: about 800 MiB in memory before the 128 MiB limit is checked. The writers now check after every row (`IngestTables.WRITE_OVERRIDES`, set at write time so existing tables get it too). After that, full collections are gone at every size, and throughput at 1536 MiB is unchanged.
   - **The out-of-memory error was hidden.** The runs reported Parquet's "Cannot return unfinished footer" instead. When a batch's Parquet file failed part-way, the cleanup closed it again, and Parquet refuses a second close of a failed writer; that error replaced the real one. Both cleanup paths (`Archiver` and `SectionBatchWriter`) now never throw, and `AbandonedBatchTest` checks that the original error is the one reported. In production this would have shown a misleading Parquet error for any write failure part-way through a file.
+
+**C-CDA tree, 2026-11-01** (revision al; 1 GiB of C-CDA, P-256, local disk, Java 26.0.2, same machine). Before is `b9fda58`, after is `ddae8a2`, each in its own worktree on the same disk, run alternately:
+
+| | Before | After |
+|---|---:|---:|
+| MiB/s, 4 runs at 1 GiB heap | 120, 121, 124, 119 | 125, 124, 126, 103 |
+| MiB/s, median | 120.5 | 124.5 |
+| Allocated GiB | 33.0 | 30.3 |
+| Heap after GC, peak MiB (1 GiB / 512 MiB heap) | 453 / 366 | 410 / 302 |
+| GC pause % (1 GiB / 512 MiB heap) | 4.4 / 6.2 | 2.6 / 3.9 |
+| Process RSS, peak MiB (1 GiB / 512 MiB heap) | 1,424 / 878 | 1,403 / 915 |
+
+- **Speed is unchanged:** the medians are 3% apart, within the noise. The 103 is one slow split phase (5.6 s against about 4.0 s).
+- **Less allocation and GC:** 8% less allocated (the same in every run), and about 40% less time in GC pauses at either heap (the memory rows are one run each). The heap still in use after a collection is 10–17% lower.
+- **A small gain here, a large one for large documents:** these sections are 50–350 KB, where the tree was a small part of the pipeline's memory. A 64 MB document of structured entries needs 60% less to convert (§6.4).
+- **Run comparisons from the same filesystem.** The first comparison ran the old code from a worktree under `/tmp` (ext4) and the new code from the project folder, which is on an encrypted home directory (ecryptfs). The new code then looked 10% slower in both phases, even archiving, which doesn't use the converter. The warehouse is written under the checkout's `target/perf`, so its disk is part of the result.
 
 On S3 (SeaweedFS inside the minikube VM, P-256) the results were close to local disk: C-CDA 103 MiB/s, X12 15,298 and CSV 19,490 sections/s. Uploads are not the limit, and SeaweedFS's own CPU use in the VM takes from the same host. Before the sealing-pool fix, P-256 gave X12 15,048 and CSV 19,859 sections/s.
 
