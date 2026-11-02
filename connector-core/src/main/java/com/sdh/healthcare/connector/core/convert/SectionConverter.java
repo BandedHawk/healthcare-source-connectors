@@ -12,7 +12,6 @@ import com.sdh.healthcare.connector.core.split.SplitConfig;
  * Converts one split section to JSON before it is stored (design §6.4). Found
  * by format name in {@link ConverterRegistry}; formats without a converter
  * (FHIR, which is already JSON; generic XML; delimited) are stored as split.
- *
  * <p>
  * Contract:
  * <ul>
@@ -80,11 +79,13 @@ public interface SectionConverter
     }
 
     /**
-     * The most heap {@link #convert} needs at once, as a multiple of the section's size, the section itself
-     * included. The pipeline converts several sections at a time, and uses this to keep them within the heap it
-     * sets aside for conversion: a large section waits until there is room for it. Overestimating only makes large
-     * sections wait sooner; underestimating risks running out of memory. The default, 4, is the most any built-in
-     * converter needs.
+     * The most heap {@link #convert} needs at once, as a multiple of the
+     * section's size, the section itself included. The pipeline converts
+     * several sections at a time, and uses this to keep them within the heap
+     * it sets aside for conversion: a large section waits until there is room
+     * for it. Overestimating only makes large sections wait sooner;
+     * underestimating risks running out of memory. The default, 4, is the most
+     * any built-in converter needs.
      *
      * @return the peak heap as a multiple of the section's size; at least 1
      */
@@ -110,7 +111,7 @@ public interface SectionConverter
      *
      * @param section the section's bytes exactly as split, in the file's own
      *                character encoding; not changed by this method
-     * @param cfg     the connector's split settings, as passed to
+     * @param config  the connector's split settings, as passed to
      *                {@link #validate}, for converters whose output depends on
      *                them
      * @return the section as JSON, encoded in UTF-8, in a new array
@@ -119,5 +120,6 @@ public interface SectionConverter
      *                             it carries an error code and a position,
      *                             never content, so it is safe to log
      */
-    byte[] convert(byte[] section, SplitConfig cfg) throws ConversionException;
+    byte[] convert(byte[] section, SplitConfig config) throws
+            ConversionException;
 }

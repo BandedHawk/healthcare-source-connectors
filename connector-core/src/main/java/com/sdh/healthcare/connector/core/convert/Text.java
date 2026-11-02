@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.convert;
 
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -16,59 +15,135 @@ import java.nio.charset.CoderResult;
 import java.nio.charset.CodingErrorAction;
 
 /**
- * Strict text decoding for converters: invalid bytes fail the section rather than being replaced.
+ * Strict text decoding for the converters. Java's usual decoding replaces a
+ * byte that isn't valid in the character set with a replacement character
+ * ({@code U+FFFD}), so the text quietly changes. Here an invalid byte fails
+ * the section instead, with {@code CONVERT_INVALID_ENCODING} and the byte's
+ * position, so the section is stored as split and nothing is lost.
+ * <p>
+ * A position is always an index into the array given, not a count from the
+ * start of the range decoded, so a converter that decodes part of a section
+ * gets the byte's position in the section.
+ * <p>
+ * The class only has static methods and isn't meant to be created.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class Text {
-    private Text() {}
+final class Text
+{
 
-    /** Decodes {@code len} bytes from {@code from}; on invalid input reports the position of the first bad byte. */
-    static String decode(byte[] b, int from, int len, Charset cs) throws ConversionException {
-        CharsetDecoder d = cs.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT);
-        ByteBuffer in = ByteBuffer.wrap(b, from, len);
-        CharBuffer out = CharBuffer.allocate((int) Math.ceil(len * (double) d.maxCharsPerByte()) + 1);
-        CoderResult r = d.decode(in, out, true);
-        if (r.isError()) {
-            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING, in.position());
-        }
-        r = d.flush(out);
-        if (r.isError()) {
-            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING, in.position());
-        }
-        return out.flip().toString();
+    /** Not used: the class only has static methods. */
+    private Text()
+    {
     }
 
     /**
-     * Checks that {@code len} bytes from {@code from} are valid in {@code cs}, as {@link #decode} would, without
-     * keeping the decoded text: it is decoded a few thousand characters at a time and thrown away. The error
-     * position is the one {@link #decode} would report.
+     * Decodes a range of bytes into text, failing on any byte that isn't valid
+     * in the character set.
+     *
+     * @param bytes   the bytes, such as a section
+     * @param from    where the range starts
+     * @param length  how many bytes it has
+     * @param charset the character set the bytes are in
+     * @return the decoded text
+     * @throws ConversionException {@code CONVERT_INVALID_ENCODING} if a byte
+     *                             isn't valid in the character set, or stands
+     *                             for a character Java's text can't hold; at
+     *                             the position in {@code bytes} of the first
+     *                             such byte
      */
-    static void check(byte[] b, int from, int len, Charset cs) throws ConversionException {
-        CharsetDecoder d = cs.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+    static String decode(byte[] bytes, int from, int length, Charset charset)
+            throws ConversionException
+    {
+        CharsetDecoder decoder = charset.newDecoder().onMalformedInput(
+                CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT);
-        ByteBuffer in = ByteBuffer.wrap(b, from, len);
-        CharBuffer out = CharBuffer.allocate(8192);
-        CoderResult r;
-        while ((r = d.decode(in, out, true)).isOverflow()) {
-            out.clear();
+        // Wrapping keeps the array's indexes, so the buffer's position is the
+        // position in the array.
+        ByteBuffer input = ByteBuffer.wrap(bytes, from, length);
+        // Room for the most characters the bytes can decode into, plus one to
+        // spare, so the text is decoded in one go.
+        CharBuffer output = CharBuffer.allocate((int) Math.ceil(length
+                * (double) decoder.maxCharsPerByte()) + 1);
+        CoderResult result = decoder.decode(input, output, true);
+        if (result.isError())
+        {
+            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING,
+                    input.position());
         }
-        if (r.isError()) {
-            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING, in.position());
+        // Some character sets hold back the last characters until flushed.
+        result = decoder.flush(output);
+        if (result.isError())
+        {
+            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING,
+                    input.position());
         }
-        while ((r = d.flush(out)).isOverflow()) {
-            out.clear();
+        return output.flip().toString();
+    }
+
+    /**
+     * Checks that a range of bytes is valid in the character set, the same way
+     * {@link #decode} does and with the same error position, without keeping
+     * the text. The text is decoded a few thousand characters at a time and
+     * thrown away, so checking a large section needs little memory.
+     *
+     * @param bytes   the bytes, such as a section
+     * @param from    where the range starts
+     * @param length  how many bytes it has
+     * @param charset the character set the bytes should be in
+     * @throws ConversionException {@code CONVERT_INVALID_ENCODING} if a byte
+     *                             isn't valid in the character set, or stands
+     *                             for a character Java's text can't hold; at
+     *                             the position in {@code bytes} of the first
+     *                             such byte
+     */
+    static void check(byte[] bytes, int from, int length, Charset charset)
+            throws ConversionException
+    {
+        CharsetDecoder decoder = charset.newDecoder().onMalformedInput(
+                CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+        // Wrapping keeps the array's indexes, so the buffer's position is the
+        // position in the array.
+        ByteBuffer input = ByteBuffer.wrap(bytes, from, length);
+        // Reused for each part of the text; its contents are never read.
+        CharBuffer output = CharBuffer.allocate(8192);
+        CoderResult result;
+        // An overflow only means the buffer is full: empty it and go on.
+        while ((result = decoder.decode(input, output, true)).isOverflow())
+        {
+            output.clear();
         }
-        if (r.isError()) {
-            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING, in.position());
+        if (result.isError())
+        {
+            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING,
+                    input.position());
+        }
+        // Some character sets hold back the last characters until flushed.
+        while ((result = decoder.flush(output)).isOverflow())
+        {
+            output.clear();
+        }
+        if (result.isError())
+        {
+            throw new ConversionException(ErrorCode.CONVERT_INVALID_ENCODING,
+                    input.position());
         }
     }
 
-    /** Length of a UTF-8 byte order mark at {@code from}, or 0. */
-    static int bom(byte[] b, int from) {
-        return b.length - from >= 3 && (b[from] & 0xff) == 0xEF && (b[from + 1] & 0xff) == 0xBB
-                && (b[from + 2] & 0xff) == 0xBF ? 3 : 0;
+    /**
+     * Tells whether there is a UTF-8 byte order mark at a position: the bytes
+     * {@code EF BB BF}, which some programs put at the start of a file.
+     *
+     * @param bytes the bytes, such as a section
+     * @param from  where to look
+     * @return the mark's length, 3, if there is one there; 0 if not
+     */
+    static int bom(byte[] bytes, int from)
+    {
+        return bytes.length - from >= 3 && (bytes[from] & 0xff) == 0xEF
+                && (bytes[from + 1] & 0xff) == 0xBB
+                && (bytes[from + 2] & 0xff) == 0xBF ? 3 : 0;
     }
 }
