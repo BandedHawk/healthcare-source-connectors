@@ -4,9 +4,11 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.convert;
 
+import com.ctc.wstx.stax.WstxInputFactory;
+import com.sdh.healthcare.connector.contract.position.LineCounter;
+import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.builtin.CcdaSplitter;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -27,11 +29,13 @@ import javax.xml.XMLConstants;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.Location;
 import javax.xml.stream.XMLStreamReader;
+import org.codehaus.stax2.XMLStreamReader2;
 
 /**
  * C-CDA document → JSON in the style of Google's Healthcare Data Harmonization
- * XmlToJson tool (design §6.4, mapping {@code ccda/1}), which binds the
+ * XmlToJson tool (design §6.4, mapping {@code ccda/2}), which binds the
  * document to the CDA schema and writes it as nested JSON:
  * <ul>
  * <li>The document is {@code {"ClinicalDocument": {…}}}; every element is a key
@@ -63,6 +67,15 @@ import javax.xml.stream.XMLStreamReader;
  * collides. {@code xmlns} declarations and {@code xsi:schemaLocation} are not
  * data and are left out.</li>
  * <li>Keys come in document order, so the output is deterministic.</li>
+ * <li><b>Every element written as an object says where it starts in the
+ * section:</b> {@code "#line"} and {@code "#col"}, numbers from 1, the column
+ * in characters, are its first two keys, giving the position of the
+ * {@code <} of its start tag. A mapping reports problems there, so an operator
+ * can find them ({@code SectionOrigin} turns the position into one in the
+ * file). No XML name starts with {@code #}, so the keys never clash with an
+ * attribute or a child. An element written as a plain string, or as an empty
+ * {@code {}} (which a mapping reads as absent), has no position: its parent's
+ * is the nearest. This is what changed from {@code ccda/1}.</li>
  * </ul>
  * Mixed content loses the interleaving of text and child elements, as in
  * Google's output: text parts are listed under {@code "value"} and child
@@ -84,7 +97,18 @@ public final class CcdaConverter implements SectionConverter
      * The version changes only when the JSON shape changes in a way existing
      * readers would get wrong.
      */
-    public static final String MAPPING = "ccda/1";
+    public static final String MAPPING = "ccda/2";
+    /**
+     * The key of the line where an element starts, from 1, in every element
+     * written as an object. The Whistle runtime's check functions read it
+     * (its {@code SourceLocation}), by this name.
+     */
+    static final String LINE_KEY = "#line";
+    /**
+     * The key of the column where an element starts, from 1, in characters;
+     * see {@link #LINE_KEY}.
+     */
+    static final String COLUMN_KEY = "#col";
     /**
      * The namespace of HL7's SDTC extensions to CDA, the elements and
      * attributes US realm documents add to the base standard (such as
@@ -98,7 +122,8 @@ public final class CcdaConverter implements SectionConverter
      * {@code xsi:type}, which can change its schema type, and to leave out
      * {@code xsi:schemaLocation}, which isn't data.
      */
-    private static final String XSI = XMLConstants.W3C_XML_SCHEMA_INSTANCE_NS_URI;
+    private static final String XSI =
+            XMLConstants.W3C_XML_SCHEMA_INSTANCE_NS_URI;
     /**
      * The XML parser factory every document is read with, configured by
      * {@link #factory()}. It is created once and shared, because creating one
@@ -110,19 +135,29 @@ public final class CcdaConverter implements SectionConverter
     private static final XMLInputFactory FACTORY = factory();
     /**
      * The deepest element nesting the converter accepts, counting
-     * {@code ClinicalDocument} as 1. Real C-CDA documents nest about 17 deep, so
-     * this leaves ample room. A document nested deeper is refused as
+     * {@code ClinicalDocument} as 1. Real C-CDA documents nest about 17 deep,
+     * so this leaves ample room. A document nested deeper is refused as
      * {@code CONVERT_XML_MALFORMED} as soon as it goes past the limit.
      * <p>
      * Without a limit, a small document of nothing but nested elements could
-     * build a huge tree and overflow the stack when {@link #emit} writes it out,
-     * since that walks the tree recursively. The parsers have depth limits of
-     * their own (Woodstox 1000, the JDK 100 through its
+     * build a huge tree and overflow the stack when {@link #emit} writes it
+     * out, since that walks the tree recursively. The parsers have depth
+     * limits of their own (Woodstox 1000, the JDK 100 through its
      * {@code jdk.xml.maxElementDepth} setting), but they are defaults that
      * this code doesn't set and that can change; this limit holds whichever
      * parser is in use.
      */
     static final int MAX_DEPTH = 200;
+
+    /**
+     * Creates the converter. It has no settings of its own.
+     * {@link ConverterRegistry#load()} creates it through Java's
+     * {@link java.util.ServiceLoader}, which needs this public constructor
+     * without parameters.
+     */
+    public CcdaConverter()
+    {
+    }
 
     @Override
     public String format()
@@ -138,19 +173,20 @@ public final class CcdaConverter implements SectionConverter
 
     /**
      * Measured on 16 and 64 MB documents: the document, the tree and the
-     * JSON. A document of structured entries needs 2.6 to 4.0 times its size,
-     * because it has many elements, and up to 5.0 if none of its attribute
-     * values repeat (real ones repeat most of theirs, which are then shared);
-     * one that is mostly an embedded file, such as a base64 PDF, needs about
-     * 3.8 times. The structured figure with nothing shared is the one to
-     * cover.
+     * JSON. A document of structured entries needs 2.8 to 4.0 times its size,
+     * because it has many elements, and up to about 5.5 if none of its
+     * attribute values repeat (real ones repeat most of theirs, which are then
+     * shared); one that is mostly an embedded file, such as a base64 PDF,
+     * needs about 3.8 times. The structured figure with nothing shared is the
+     * one to cover. The element positions of {@code ccda/2} added 6 to 11%
+     * (a 64 MB Epic document: 206 to 229 MiB).
      *
-     * @return 5
+     * @return 6
      */
     @Override
     public double memoryFactor()
     {
-        return 5;
+        return 6;
     }
 
     /**
@@ -167,28 +203,57 @@ public final class CcdaConverter implements SectionConverter
      * {@link #isEncodingError}), and {@code CONVERT_XML_MALFORMED} for
      * anything else (broken tags, a {@code <!DOCTYPE>}, an undeclared entity
      * such as {@code &amp;nbsp;}).</li>
-     * <li><b>Where</b>: the parser's offset at the point it noticed the
-     * problem, which can be a few characters after the actual mistake, or
-     * {@code 0} if the parser doesn't say. Both the JDK's parser and Woodstox
-     * count characters, not bytes, so it matches the byte position only while
-     * the document before it is plain ASCII.</li>
+     * <li><b>Where</b>: the byte position in the section of the point the
+     * parser noticed the problem, which can be a few characters after the
+     * actual mistake, or {@code 0} if the parser doesn't say. The parser gives
+     * a line and column, which {@link #bytePosition} turns into the byte
+     * position.</li>
      * </ul>
      * The parser's message is deliberately dropped: it can quote the document,
      * which is patient data, and a {@code ConversionException} must be safe to
      * log.
      *
      * @param exception the parser's error
+     * @param section   the section's bytes, to find the byte position in
      * @return the exception for {@link #convert} to throw
      */
-    private static ConversionException malformed(XMLStreamException exception)
+    private static ConversionException malformed(XMLStreamException exception,
+            byte[] section)
     {
-        int at = exception.getLocation() == null ? 0 : Math.max(0, exception.
-                getLocation().
-                getCharacterOffset());
+        int at = bytePosition(exception.getLocation(), section);
         return new ConversionException(
                 isEncodingError(exception.getNestedException())
-                ? ErrorCode.CONVERT_INVALID_ENCODING : ErrorCode.CONVERT_XML_MALFORMED,
+                ? ErrorCode.CONVERT_INVALID_ENCODING
+                : ErrorCode.CONVERT_XML_MALFORMED,
                 at);
+    }
+
+    /**
+     * Turns a place the parser reports, a line and column, into a byte
+     * position in the section, as a {@link ConversionException} gives it.
+     * <p>
+     * The column is counted in characters, so the section is read as
+     * {@link LineCounter} reads it: as UTF-8. For a document in a single-byte
+     * character set with characters beyond ASCII on the same line, the
+     * position can be early.
+     * <p>
+     * Woodstox gives column 0 when the document ends early (at the end of
+     * its last line); that is taken as the line's start, which is where the
+     * document ends when its last line is complete.
+     *
+     * @param location the parser's location, or {@code null} if it gave none
+     * @param section  the section's bytes
+     * @return the byte position; 0 if the location is missing or unusable
+     */
+    private static int bytePosition(Location location, byte[] section)
+    {
+        if (location == null || location.getLineNumber() < 1)
+        {
+            return 0;
+        }
+        return LineCounter.offsetOf(section, new SourcePosition(
+                location.getLineNumber(),
+                Math.max(1, location.getColumnNumber())));
     }
 
     /**
@@ -211,9 +276,11 @@ public final class CcdaConverter implements SectionConverter
      * Creates and configures the XML parser factory the converter reads every
      * document with. It is made once, when the class loads, and kept in
      * {@link #FACTORY}; {@link #convert} creates a new reader from it for each
-     * document. The parser is whichever StAX implementation is on the class
-     * path (Woodstox in the connector, the JDK's own where Woodstox is absent);
-     * these settings make both behave the same way:
+     * document. The parser is always Woodstox, chosen by name rather than
+     * found on the class path, so the connector and the command-line tools
+     * read a document the same way and report the same positions: Woodstox
+     * gives the start of each start tag ({@link #startOf}), which the JDK's
+     * own parser doesn't. The settings are:
      * <ul>
      * <li><b>Namespace aware.</b> The parser reports each element's and
      * attribute's namespace, which is how CDA, SDTC and {@code xsi} names are
@@ -241,7 +308,7 @@ public final class CcdaConverter implements SectionConverter
      */
     private static XMLInputFactory factory()
     {
-        final var factory = XMLInputFactory.newFactory();
+        final XMLInputFactory factory = new WstxInputFactory();
         factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
         factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
         factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES,
@@ -254,11 +321,12 @@ public final class CcdaConverter implements SectionConverter
      * One element of the document, held in memory between reading the XML and
      * writing the JSON.
      * <p>
-     * The conversion has two stages. {@link CcdaConverter#convert} first reads the whole
-     * document into a tree of {@code Node}s, one per element, and only then
-     * does {@link CcdaConverter#emit} write the tree out as JSON. The JSON can't be written
-     * while the XML is still being read, because how an element is written
-     * depends on things only known once it has been read completely:
+     * The conversion has two stages. {@link CcdaConverter#convert} first
+     * reads the whole document into a tree of {@code Node}s, one per element,
+     * and only then does {@link CcdaConverter#emit} write the tree out as
+     * JSON. The JSON can't be written while the XML is still being read,
+     * because how an element is written depends on things only known once it
+     * has been read completely:
      * <ul>
      * <li>whether a child name occurs more than once, which makes it an
      * array;</li>
@@ -282,22 +350,26 @@ public final class CcdaConverter implements SectionConverter
 
         /** The element's JSON key, from {@link CcdaConverter#elementKey}. */
         final String key;
+        /** The line of the {@code <} of the element's start tag, from 1. */
+        final int line;
+        /** The column of that {@code <}, from 1, in characters. */
+        final int column;
         /**
-         * The element's schema type in the model, from {@link CcdaConverter#type}, or
-         * {@code null} if the model doesn't know it.
+         * The element's schema type in the model, from
+         * {@link CcdaConverter#type}, or {@code null} if the model doesn't
+         * know it.
          */
         final String type;
         /**
          * The attributes as key, value, key, value, and so on, in the order
-         * {@link CcdaConverter#attributes(XMLStreamReader, Node)} records them,
-         * with values exactly as written; {@link #NO_ATTRIBUTES} when there are
-         * none.
+         * {@link CcdaConverter#attributes} records them, with values exactly
+         * as written; {@link #NO_ATTRIBUTES} when there are none.
          */
         String[] attributes = NO_ATTRIBUTES;
         /**
          * The child elements in document order, in the first
-         * {@link #childCount} places; {@code null} when there are none. Once the
-         * element ends, the array is exactly that long.
+         * {@link #childCount} places; {@code null} when there are none. Once
+         * the element ends, the array is exactly that long.
          */
         Node[] children;
         /** How many child elements have been read. */
@@ -307,7 +379,8 @@ public final class CcdaConverter implements SectionConverter
          * text (character data, CDATA and whitespace) between two child
          * elements, comments or processing instructions. A run is a
          * {@code String}, or a {@code String[]} of the pieces the parser
-         * delivered it in if it is longer than {@link CcdaConverter#JOIN_LIMIT}.
+         * delivered it in if it is longer than
+         * {@link CcdaConverter#JOIN_LIMIT}.
          * This field is {@code null} with no runs, the run itself with one, and
          * a {@link Runs} with more.
          */
@@ -319,16 +392,19 @@ public final class CcdaConverter implements SectionConverter
          * and text start empty and are filled in as the rest of the element is
          * read.
          *
-         * @param key  the element's JSON key, from
-         *             {@link CcdaConverter#elementKey}
-         * @param type the element's schema type in the model, from
-         *             {@link CcdaConverter#type}, or {@code null} if the model
-         *             doesn't know it
+         * @param key    the element's JSON key, from
+         *               {@link CcdaConverter#elementKey}
+         * @param type   the element's schema type in the model, from
+         *               {@link CcdaConverter#type}, or {@code null} if the
+         *               model doesn't know it
+         * @param start  where the element's start tag starts in the section
          */
-        Node(String key, String type)
+        Node(String key, String type, Location start)
         {
             this.key = key;
             this.type = type;
+            this.line = Math.max(1, start.getLineNumber());
+            this.column = Math.max(1, start.getColumnNumber());
         }
 
         /**
@@ -398,6 +474,7 @@ public final class CcdaConverter implements SectionConverter
     private static final class Runs extends ArrayList<Object>
     {
 
+        /** The version of the serialized form; a list's, never changed. */
         private static final long serialVersionUID = 1L;
 
         /** Starts empty, with room for the two runs it is made with. */
@@ -451,6 +528,11 @@ public final class CcdaConverter implements SectionConverter
         private final Map<String, String> whitespace = new HashMap<>();
         /** The attribute values shared so far, each mapped to itself. */
         private final Map<String, String> values = new HashMap<>();
+
+        /** Starts a document: no run, nothing shared yet. */
+        Reading()
+        {
+        }
 
         /**
          * Adds a piece of text read inside an element, to the current run if
@@ -604,13 +686,12 @@ public final class CcdaConverter implements SectionConverter
                 {
                     case XMLStreamConstants.START_ELEMENT ->
                     {
+                        Location start = startOf(reader);
                         if (stack.size() >= MAX_DEPTH)
                         {
-                            final var location = reader.getLocation();
                             throw new ConversionException(
                                     ErrorCode.CONVERT_XML_MALFORMED,
-                                    location == null ? 0 : Math.max(0, location.
-                                            getCharacterOffset()));
+                                    bytePosition(start, section));
                         }
                         Node parent = stack.peek();
                         String key = elementKey(reader.getNamespaceURI(),
@@ -618,8 +699,7 @@ public final class CcdaConverter implements SectionConverter
                                         getLocalName(), reader.getPrefix());
                         String xsiType = reader.getAttributeValue(XSI, "type");
                         Node node = new Node(key, type(model, parent, key,
-                                xsiType,
-                                reader));
+                                xsiType, reader), start);
                         attributes(reader, node, reading);
                         if (parent != null)
                         {
@@ -627,7 +707,8 @@ public final class CcdaConverter implements SectionConverter
                         }
                         stack.push(node);
                     }
-                    case XMLStreamConstants.CHARACTERS, XMLStreamConstants.CDATA,
+                    case XMLStreamConstants.CHARACTERS,
+                            XMLStreamConstants.CDATA,
                             XMLStreamConstants.SPACE ->
                     {
                         if (!stack.isEmpty())
@@ -653,19 +734,18 @@ public final class CcdaConverter implements SectionConverter
         }
         catch (XMLStreamException exception)
         {
-            throw malformed(exception);
+            throw malformed(exception, section);
         }
         catch (RuntimeException exception)
         {
-            // Woodstox (on the classpath for Hadoop's Configuration, so it's the
-            // StAX implementation found) reports some errors only when the text
-            // is read, wrapped in an unchecked WstxLazyException: an undeclared
-            // entity such as &nbsp;, for one. Without this it escaped as an
+            // Woodstox reports some errors only when the text is read, wrapped
+            // in an unchecked WstxLazyException: an undeclared entity such as
+            // &nbsp;, for one. Without this it escaped as an
             // unknown error and failed the whole file instead of storing this
             // one section unconverted (found by the demo, design §15.3).
             if (exception.getCause() instanceof XMLStreamException xmlException)
             {
-                throw malformed(xmlException);
+                throw malformed(xmlException, section);
             }
             throw exception;
         }
@@ -691,6 +771,19 @@ public final class CcdaConverter implements SectionConverter
     }
 
     /**
+     * Where the event the reader is on starts: for a start tag, the position
+     * of its {@code <}. Woodstox, the parser {@link #factory()} makes, keeps
+     * where each event starts as well as where it ends.
+     *
+     * @param reader the reader, on a start tag
+     * @return the line and column where it starts
+     */
+    private static Location startOf(XMLStreamReader reader)
+    {
+        return ((XMLStreamReader2) reader).getLocationInfo().getStartLocation();
+    }
+
+    /**
      * Writes a tree read by {@link #read} as JSON, the second stage of
      * {@link #convert}: one object with the document element under its key.
      *
@@ -706,11 +799,11 @@ public final class CcdaConverter implements SectionConverter
     }
 
     /**
-     * Works out the JSON key an element is written under, from its namespace and
-     * name. The key is used three ways: as the element's name in the JSON, to
-     * group repeated elements of the same name under one key, and to look the
-     * element up in its parent's schema type ({@link #type}), so it must match
-     * how the CDA model names elements.
+     * Works out the JSON key an element is written under, from its namespace
+     * and name. The key is used three ways: as the element's name in the
+     * JSON, to group repeated elements of the same name under one key, and to
+     * look the element up in its parent's schema type ({@link #type}), so it
+     * must match how the CDA model names elements.
      * <p>
      * The key depends on the element's namespace, not on the prefix the
      * document happens to use for it:
@@ -749,15 +842,16 @@ public final class CcdaConverter implements SectionConverter
         {
             return "sdtc:" + local;
         }
-        return prefix == null || prefix.isEmpty() ? local : prefix + ":" + local;
+        return prefix == null || prefix.isEmpty()
+                ? local : prefix + ":" + local;
     }
 
     /**
      * Works out which CDA schema type an element is, as its start tag is read.
      * The answer is kept on the element's {@link Node} and drives how it is
      * written: which of its children repeat ({@link #repeats}), which
-     * attributes are booleans or numbers ({@link #attributeValue}), how its text
-     * is written, and, in turn, the types of its own children.
+     * attributes are booleans or numbers ({@link #attributeValue}), how its
+     * text is written, and, in turn, the types of its own children.
      * <p>
      * The type comes from the first of these that applies:
      * <ol>
@@ -808,7 +902,8 @@ public final class CcdaConverter implements SectionConverter
         if (parent != null)
         {
             CdaModel.Type type = model.type(parent.type);
-            CdaModel.Child child = type == null ? null : type.children().get(key);
+            CdaModel.Child child =
+                    type == null ? null : type.children().get(key);
             return child == null ? null : child.type();
         }
         return key.equals(model.rootElement) ? model.rootType : null;
@@ -849,7 +944,8 @@ public final class CcdaConverter implements SectionConverter
      *
      * @param reader the XML reader, positioned on the element's start tag
      * @param node   the element being built; its attributes are stored in
-     *               {@link Node#attributes} as key, value, key, value, and so on
+     *               {@link Node#attributes} as key, value, key, value, and so
+     *               on
      * @param reading the document being read, whose short repeated values are
      *               shared ({@link Reading#value})
      */
@@ -899,7 +995,8 @@ public final class CcdaConverter implements SectionConverter
             }
             else
             {
-                // Other namespaces: local name, unless it collides (resolved below, after the plain attributes).
+                // Other namespaces: local name, unless it collides
+                // (resolved below, after the plain attributes).
                 foreignList.add(new String[]
                 {
                     local, reader.getAttributePrefix(i) + ":" + local, value
@@ -930,9 +1027,9 @@ public final class CcdaConverter implements SectionConverter
      * from {@code ClinicalDocument}, to produce the JSON.
      * <p>
      * It looks up the element's type in the CDA model (the type the schema
-     * gives it in its parent, or its {@code xsi:type}), because the type decides
-     * how the element is written, then hands the element to one of two
-     * methods:
+     * gives it in its parent, or its {@code xsi:type}), because the type
+     * decides how the element is written, then hands the element to one of
+     * two methods:
      * <ul>
      * <li>{@link #emitTextOnly} when it has no attributes and no child
      * elements: a plain string such as {@code "Summary"}, or {@code {}}.</li>
@@ -1017,7 +1114,8 @@ public final class CcdaConverter implements SectionConverter
         Map<String, List<Node>> groups = new LinkedHashMap<>();
         for (Node child : node.children)
         {
-            groups.computeIfAbsent(child.key, k -> new ArrayList<>(1)).add(child);
+            groups.computeIfAbsent(child.key, key -> new ArrayList<>(1))
+                    .add(child);
         }
         return groups;
     }
@@ -1141,12 +1239,14 @@ public final class CcdaConverter implements SectionConverter
      * and its text pieces, as read from the document
      * @param writer where the JSON object is written
      */
-    private static void emitObject(CdaModel model, CdaModel.Type type, Node node,
-            JsonWriter writer)
+    private static void emitObject(CdaModel model, CdaModel.Type type,
+            Node node, JsonWriter writer)
     {
         boolean mixed = type == null || type.mixed();
         boolean text = type == null || type.text();
         writer.beginObject();
+        writer.key(LINE_KEY).literal(Integer.toString(node.line));
+        writer.key(COLUMN_KEY).literal(Integer.toString(node.column));
         Map<String, List<Node>> children = node.childCount == 0 ? Map.of()
                 : groups(node);
         Set<String> used = new HashSet<>();
@@ -1163,8 +1263,8 @@ public final class CcdaConverter implements SectionConverter
         }
         for (Map.Entry<String, List<Node>> entry : children.entrySet())
         {
-            var key = used.contains(entry.getKey()) ? "@" + entry.getKey() : entry.
-                    getKey();
+            var key = used.contains(entry.getKey())
+                    ? "@" + entry.getKey() : entry.getKey();
             used.add(key);
             writer.key(key);
             List<Node> list = entry.getValue();
@@ -1185,8 +1285,10 @@ public final class CcdaConverter implements SectionConverter
         var textKey = used.contains("value") ? "#text" : "value";
         if (mixed || !text)
         {
-            List<List<String>> parts = runs(node).stream().map(
-                    CcdaConverter::pieces).filter(run -> !isBlank(run)).toList();
+            List<List<String>> parts = runs(node).stream()
+                    .map(CcdaConverter::pieces)
+                    .filter(run -> !isBlank(run))
+                    .toList();
             if (!parts.isEmpty())
             {
                 writer.key(textKey).beginArray();
@@ -1230,8 +1332,8 @@ public final class CcdaConverter implements SectionConverter
      * ({@code "3.5"}, {@code "1e3"}, {@code "five"}, an empty value) is written
      * as a string, so an invalid value is kept rather than lost.
      */
-    private static final java.util.regex.Pattern INTEGER = java.util.regex.Pattern.
-            compile("[+-]?[0-9]{1,18}");
+    private static final java.util.regex.Pattern INTEGER =
+            java.util.regex.Pattern.compile("[+-]?[0-9]{1,18}");
 
     /**
      * Writes one attribute's value as JSON, as a JSON Boolean or number when

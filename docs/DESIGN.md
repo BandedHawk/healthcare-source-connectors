@@ -45,6 +45,12 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-02 (ao): problems can be found by line and column, for remediation.
+- **C-CDA JSON is `ccda/2` (§6.4):** every element written as an object starts with `"#line"` and `"#col"`, where its start tag begins in the section. A mapping reports its issues there (the Whistle runtime's `check::at`), so an operator can go straight to the element, or to its nearest present parent when it is missing. The JSON is about 39% larger; the C-CDA memory factor goes from 5 to 6.
+- **The converter always uses Woodstox (§6.4),** chosen by name, so the connector and the command-line tools (`ccda-quickrun`) read a document the same way and report the same positions. Malformed XML is now reported at a byte position; it was a character count.
+- **Sections carry an origin (§6.1, §8.2, §10.1):** where their text starts in the section and in the file, as lines and columns, so a position in a section becomes one in the file (`SectionOrigin.toFile`, in `connector-contract`). A failed section also gives where in the file conversion failed.
+- **Contract 2.1 (§10.1):** `section.stored` and `section.failed` gain `origin`, and `section.failed` gains `errorLine` and `errorColumn`. Six optional `sections` columns, added to existing tables at startup (§8.2).
+
 Revision 2026-11-01 (an): documentation only. A plan for source endpoints chosen by configuration (§5.3, not built): local, S3-compatible, SFTP and Iceberg/Parquet sources as plugins behind a `SourceEndpoint` SPI, with splitting and conversion unaware of where files come from. One pipeline per pod, defined in a configuration file shipped with the pod; operator-defined pipelines are deferred to pipeline monitoring and management (§17).
 
 Revision 2026-11-01 (am): documentation only. The performance test was run against the C-CDA tree of revision al (§13.1): throughput is unchanged, allocation is 8% lower and GC pauses about 40% shorter. A comparison is only fair from the same filesystem; the project folder's encrypted home directory made the same code look 10% slower.
@@ -442,7 +448,7 @@ public interface SectionSplitter {
 public interface SplitSession extends AutoCloseable {
     Optional<Section> next() throws IOException, SplitException;
 }
-record Section(long sourceOffset, long sourceLength, List<Part> parts, ResumePoint resume)  // Part = Literal(bytes) | SourceRange(offset, length)
+record Section(long sourceOffset, long sourceLength, List<Part> parts, ResumePoint resume, SectionOrigin origin)  // Part = Literal(bytes) | SourceRange(offset, length)
 record ResumePoint(long offset, List<Long> context)
 ```
 
@@ -451,6 +457,7 @@ record ResumePoint(long offset, List<Long> context)
 - **Limits:** `SplitterRegistry.open(format, src, from, nextSeq, cfg)` wraps the session and enforces §6.3, counting sections from `nextSeq` so the per-file count survives a resume. Splitters also stop scanning early once a section passes `max-section-bytes`.
 - **Errors:** `SplitException` carries only an `ErrorCode` and a byte offset. Codes: `PARSE_UNTERMINATED_QUOTE`, `PARSE_UNBALANCED_ELEMENT`, `PARSE_XML_MALFORMED`, `PARSE_XML_UNSUPPORTED_ENCODING`, `PARSE_X12_INVALID_ENVELOPE`, `PARSE_X12_UNBALANCED`, `PARSE_X12_CONTROL_MISMATCH`, `PARSE_X12_UNEXPECTED_SEGMENT`, `PARSE_JSON_MALFORMED`, `PARSE_FHIR_UNEXPECTED_RESOURCE`, `RESUME_INVALID`, `LIMIT_*`.
 - **Plug-ins:** new formats are discovered via `ServiceLoader` (proprietary formats can be dropped in as a jar).
+- **Origin (lines and columns):** splitters deal in bytes. The pipeline gives each section its `SectionOrigin` as it comes from the splitter (`SectionOrigins`): where its first source range starts in the section (after any literal the splitter added, such as the XML declaration: usually line 2) and where it starts in the file. It counts the file's lines once, on from the last section, a 64 KiB block at a time. Lines end at LF, CRLF or CR and columns are UTF-8 characters, as XML counts them (`LineCounter`); in a single-byte character set other than ASCII, a column after a byte from 0x80 to 0xBF can be early.
 
 ### 6.2 Built-in splitters
 
@@ -486,7 +493,7 @@ After splitting, each section is converted to JSON and the JSON is what is store
 | Format | Mapping | JSON |
 |---|---|---|
 | `csv` | `csv-row/1` | The record's fields by position: `["1","Doe, Jane","","two\nlines"]`. RFC 4180 quoting; values kept exactly (no trimming, no type inference, empty is `""`). With `csv.header=true` the header is dropped |
-| `ccda` | `ccda/1` | Google Healthcare Data Harmonization XmlToJson style (below) |
+| `ccda` | `ccda/2` | Google Healthcare Data Harmonization XmlToJson style, with element positions (below) |
 | `x12` | `x12/1` | `{"format":"X12","segments":[{"segment_id":"NM1","elements":["41","2","SAMPLE CLINIC","","",…]}]}`. Every segment, envelopes too; empty elements and spaces kept so positions are stable; composites stay one string (`"HC:99213:25"`) |
 | `edifact` | `edifact/1` | `{"format":"EDIFACT","segments":[{"segment_id":"DTM","elements":[["137","20261028","102"]]}]}`. Each element is its list of components; release characters applied; empty elements and components kept. The character set comes from UNB S001 (UNOA/UNOB ASCII, UNOC–UNOK ISO 8859, UNOW/UNOY UTF-8) |
 | `fhir`, `xml`, `delimited` | — | Stored as split: FHIR is already JSON; the others have no agreed mapping |
@@ -507,16 +514,19 @@ The X12 and EDIFACT shape follows common EDI-to-JSON converters (hub.actionedi.c
 - **SDTC extensions keep their prefix** (`"sdtc:raceCode"`), as they sit beside CDA elements of the same name.
 - **Keys come in document order**, so the output is deterministic.
 - **Not data, so left out:** `xmlns` declarations and `xsi:schemaLocation`.
+- **Element positions (`ccda/2`):** every element written as an object starts with `"#line"` and `"#col"`: the line and column (from 1, in characters) of its start tag's `<` in the section. No XML name starts with `#`, so they never clash with an attribute or child. An element written as a string, or as an empty `{}` (which a mapping reads as absent), has none; its parent's is the nearest. They add about 39% to the JSON. Positions are in the section, so the same section gives the same JSON in any file; the section's origin (§6.1) turns them into file positions.
 
 As in Google's output, mixed content loses the interleaving of text and child elements: text parts are listed under `"value"`, child elements under their own keys.
 
-**Who reads it.** The US Core 6.1 C-CDA mapping (`ccda-us-core-6.1` in the `mapping` repository) reads `ccda/1` as stored; it is not reshaped for the mapping, since the stored sections are the durable record, read by other consumers and used for remediation. Google's own Whistle C-CDA mappings read the same style. The mapping's four sample documents are this converter's output for the XML in `connector-core/src/test/resources/ccda/`, so a change to the converter's output is a change to the mapping's input: it needs a new mapping version (`ccda/2`; §8.2, §10.1) and a US Core mapping that accepts it, as stored `ccda/1` sections stay as they are.
+**Who reads it.** The US Core 6.1 C-CDA mapping (`ccda-us-core-6.1` in the `mapping` repository) reads `ccda/2` as stored; it is not reshaped for the mapping, since the stored sections are the durable record, read by other consumers and used for remediation. It passes elements to the Whistle runtime's `check::at`, so each issue it reports gives the element's line and column, or its nearest present parent's. Google's own Whistle C-CDA mappings read the same style and ignore the position keys. The keys make two copies of the same element differ, so a consumer that compares or hashes elements by content must leave them out: the mapping makes ids for elements with no identifier from `check::withoutLocations(element)`, so its resources and their ids are the same as from `ccda/1`. The mapping also reads `ccda/1` sections stored before this change; their issues have no line and column. A change to the converter's output is a change to the mapping's input: it needs a new mapping version (§8.2, §10.1).
+
+**The parser is always Woodstox,** chosen by name (`WstxInputFactory`), not found on the class path. The command-line tools bundle the converter without the connector's other dependencies, and found the JDK's parser instead, which reports where a start tag ends rather than where it starts; with Woodstox everywhere, a document gives the same JSON and the same positions in the connector and in `ccda-quickrun`. A parse error's line and column are turned into the byte position a `ConversionException` gives (they were a character count, wrong after non-ASCII text).
 
 **Checks:**
 - `CcdaConverterTest` converts Google's published Synthea inputs and compares the result with Google's expected JSON, after applying Google's two deletions. One pair always runs; all 13 run with `-Dccda.google.dir`, and all match.
 - `CcdaSamplesTest` converts four real-world documents (USCDI v3 samples, a master CCD, and a de-identified Epic inpatient CCD) and checks that every attribute value and every piece of text in the XML appears in the JSON.
 - DTDs and external entities are refused.
-- An undeclared entity (such as `&nbsp;`) is `CONVERT_XML_MALFORMED`. The StAX parser on the classpath is Woodstox (Hadoop's `Configuration` needs it), and it reports some errors only when the text is read, as an unchecked `WstxLazyException`; the converter treats that like any other XML error. Before this fix, found by the demo (§15.3), such a document failed its whole file with `STORAGE_FAILED` instead of being stored unconverted (`CcdaConverterTest.undeclaredEntityIsAConversionFailure`).
+- An undeclared entity (such as `&nbsp;`) is `CONVERT_XML_MALFORMED`. Woodstox reports some errors only when the text is read, as an unchecked `WstxLazyException`; the converter treats that like any other XML error. Before this fix, found by the demo (§15.3), such a document failed its whole file with `STORAGE_FAILED` instead of being stored unconverted (`CcdaConverterTest.undeclaredEntityIsAConversionFailure`).
 
 **Failures stay with the section, not the file.** A section that can't be converted is stored in its original form (as split), in the same `sections` table and commit, with `error_code` set. It is announced with `section.failed` (§10.1), and the file carries on and completes. Codes:
 - `CONVERT_CSV_FIELD_COUNT`: the record's field count differs from the header's;
@@ -528,9 +538,9 @@ As in Google's output, mixed content loses the interleaving of text and child el
 - `CONVERT_SKIPPED`: the connector stopped twice in a row while the section's batch was uncommitted, so the whole batch was stored unconverted (§9.2);
 - `CONVERT_FAILED`: the converter threw an exception it doesn't use for problems with the section, which means a bug in the converter. Only the exception's class name is logged (`convert.unexpected`), as its message could quote the section.
 
-Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offset, byte position within the section, code), emitted once its batch commits, and the `sdh.sections.failed` metric. Errors in splitting itself, such as an unterminated quote or broken XML, still fail the whole file (§11), because the file can't be divided into sections.
+Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offset, byte position within the section, code), emitted once its batch commits, and the `sdh.sections.failed` metric. Its place in the file, as a line and column, is stored (`error_line`, `error_column`) and sent with `section.failed` (`errorLine`, `errorColumn`): the byte position's line and column in the section, moved by the section's origin. A section stored unconverted for its size or a restart (`CONVERT_TOO_LARGE`, `CONVERT_SKIPPED`), or after a converter bug (`CONVERT_FAILED`), has none. Errors in splitting itself, such as an unterminated quote or broken XML, still fail the whole file (§11), because the file can't be divided into sections.
 
-**Lineage:** `source_offset`/`source_length` (and the message's `sourceOffset`/`sourceLength`) always locate the section in the original, unsplit file, converted or not. Remediation (review, correction, resubmission) is a later piece of work with its own console; failed sections can already be found with `error_code IS NOT NULL` and read with `connector-queue-reader`.
+**Lineage:** `source_offset`/`source_length` (and the message's `sourceOffset`/`sourceLength`) always locate the section in the original, unsplit file, converted or not, and its origin (§6.1) does so in lines and columns. Remediation (review, correction, resubmission) is a later piece of work with its own console; failed sections can already be found with `error_code IS NOT NULL` and read with `connector-queue-reader`.
 
 **Memory and speed:**
 - Single-chunk sections (up to 8 MiB) are converted on the worker pool.
@@ -539,13 +549,13 @@ Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offse
 
   | Converter | Heap | × section | JSON size |
   |---|---|---|---|
-  | C-CDA, structured entries | 167–231 MiB | 2.6–3.6 (4.0 at 16 MB) | 0.4–0.65 × |
+  | C-CDA, structured entries | 169–229 MiB | 2.8–3.7 (4.0 at 16 MB) | 0.55–0.9 × |
   | C-CDA, mostly a base64 file | 247 MiB | 3.8 | about the same |
   | X12 | 224 MiB | 3.5 | 2.4 × |
   | EDIFACT | 256 MiB | 4 | 2.6 × |
   | CSV | 160 MiB | 2.5 | about the same |
 
-  C-CDA's figure depends on how many elements a document has, not only its size: it holds the document as a tree before writing the JSON, about 40 bytes per element plus its attributes and text (the structured rows are the master CCD and Epic inpatient test documents, their bodies repeated). Repeated attribute values are shared, and real documents repeat 72–82% of them; with none shared, the structured figure is at most 5.0, which `memoryFactor` covers. Writing the JSON while reading would bring a structured document down to about 110–150 MiB and a base64 one to about 200, but it isn't planned: large documents are usually embedded files, where it saves about 20%, and mapping a C-CDA document needs about 12 times its size anyway.
+  C-CDA's figure depends on how many elements a document has, not only its size: it holds the document as a tree before writing the JSON, about 40 bytes per element plus its attributes and text (the structured rows are the master CCD and Epic inpatient test documents, their bodies repeated). Repeated attribute values are shared, and real documents repeat 72–82% of them; with none shared, the structured figure is at most about 5.5, which `memoryFactor` (6) covers. The element positions of `ccda/2` (revision ao) added 6–11% (the Epic document: 206 to 229 MiB). Writing the JSON while reading would bring a structured document down to about 110–150 MiB and a base64 one to about 200, but it isn't planned: large documents are usually embedded files, where it saves about 20%, and mapping a C-CDA document needs about 12 times its size anyway.
 
   None decodes a whole section into a string. CSV, X12 and EDIFACT write the JSON from the section's bytes (UTF-8 is copied as it is, escaping only what JSON requires; EDIFACT decodes one component at a time). C-CDA keeps long text in the pieces the parser delivers. From 1 MiB, the JSON is written twice, counting first, so it is held once, in an array of exactly its size (`JsonWriter.build`).
 - **Conversion budget:** conversions running at once share `split.convert-memory` (default 40% of the maximum heap). Each converter states its peak as a multiple of the section's size (`SectionConverter.memoryFactor`: the figures above, rounded up), and a worker takes that much before reading and converting a section, and gives it back once the section is ready to write. A section that doesn't fit waits, first come, first served; one bigger than the whole budget runs alone. Small sections need next to nothing, so only large ones ever wait.
@@ -703,8 +713,13 @@ The namespace is `sdh_ingest` (configurable). There are three tables, each with 
 | batch_id | uuid | |
 | ingested_at | timestamptz | |
 | content_type | string | what the stored bytes are: `application/json` when converted, else the original media type (`text/csv`, `application/xml`, `application/edi-x12`, `application/edifact`, `application/fhir+json`) |
-| mapping | string, optional | the JSON mapping and version (`csv-row/1`, `ccda/1`, `x12/1`, `edifact/1`); null when stored as split |
+| mapping | string, optional | the JSON mapping and version (`csv-row/1`, `ccda/2`, `x12/1`, `edifact/1`); null when stored as split |
 | error_code | string, optional | set when conversion failed and the section is stored in its original form (§6.4) |
+| section_line, section_column | long, int, optional | the section's origin (§6.1): where the text copied from the file starts in the section |
+| source_line, source_column | long, int, optional | where the same text starts in the file |
+| error_line, error_column | long, int, optional | where in the file conversion failed (§6.4) |
+
+- **New columns:** the six line and column columns came with contract 2.1. A table made earlier gets them when the connector starts (`IngestTables.addMissingColumns`): only optional columns are ever added, rows written before read them as null, and a connector that loses the schema commit to another one reloads the table and finds them there.
 
 - **Partitioning:** `day(ingested_at)`. Sort order `file_id, seq, chunk_index`, so readers prune files using min/max statistics.
 - **Parquet settings:** zstd level 1 for the whole table. Row group 128 MiB, target file size 512 MiB. The earlier plan to leave `ciphertext` uncompressed isn't possible: Iceberg sets the Parquet codec per table, not per column (spike finding). zstd passes incompressible ciphertext through at a small CPU cost and almost no size overhead.
@@ -929,8 +944,8 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 | Type | When | Payload (inside encryption) |
 |---|---|---|
 | `file.started` | file picked up (or resumed with a new run) | fileId, format, fileSize, startedAt, connectorId |
-| `section.stored` | after batch commit | messageId, fileId, sectionId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef) |
-| `section.failed` | after batch commit, in seq order with the others | as `section.stored`, with errorCode instead of mapping; the section is stored in its original form (§6.4) |
+| `section.stored` | after batch commit | messageId, fileId, sectionId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef), origin (sectionLine, sectionColumn, sourceLine, sourceColumn) |
+| `section.failed` | after batch commit, in seq order with the others | as `section.stored`, with errorCode instead of mapping, and errorLine and errorColumn when the failure has a place; the section is stored in its original form (§6.4) |
 | `file.completed` | after archive commit | fileId, sectionCount (failed included), failedSectionCount, fileSize, fileDigest, startedAt, completedAt |
 
 - **No `file.failed` message:** failure is reported through OpenTelemetry only, as agreed. Downstream can detect an unfinished file as a `file.started` with no matching `file.completed`.
@@ -939,6 +954,7 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 - **Message IDs:**
   - `section.stored` and `section.failed`: `messageId = sectionId`.
 - **Contract 2.0** (from 1.0): added `contentType`, `mapping`, `section.failed` and `failedSectionCount`. It's a major version because a 1.x reader can't handle the new message type.
+- **Contract 2.1:** added `origin`, `errorLine` and `errorColumn`, all optional, so 2.0 readers ignore them. A reader turns a position in the section (such as one a mapping reports from `ccda/2`) into one in the file with `SectionOrigin.toFile`.
   - `file.started`: `fs-<fileId>`.
   - `file.completed`: `fc-<fileId>`.
 

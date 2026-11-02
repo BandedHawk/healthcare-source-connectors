@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.contract.message;
 
 import com.sdh.healthcare.connector.contract.ContractVersion;
@@ -14,6 +13,8 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFai
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
+import com.sdh.healthcare.connector.contract.position.SectionOrigin;
+import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
@@ -21,142 +22,293 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Converts messages to and from the JSON object carried inside the JWS.
+ * Turns messages into the JSON object carried inside the JWS, and back
+ * (design §10.1). The JSON is given as a map of field names to values:
+ * strings, numbers and nested maps.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class PayloadCodec {
+public final class PayloadCodec
+{
 
-    private PayloadCodec() {}
+    /** Not instantiated: this class only has static methods. */
+    private PayloadCodec()
+    {
+    }
 
-    public static Map<String, Object> toJson(ConnectorMessage m) {
-        Map<String, Object> o = new LinkedHashMap<>();
-        o.put("v", ContractVersion.CURRENT);
-        o.put("type", m.type().wireName());
-        o.put("messageId", m.messageId());
-        o.put("fileId", m.fileId().toString());
-        switch (m) {
-            case FileStarted f -> {
-                o.put("format", f.format());
-                o.put("fileSize", f.fileSize());
-                o.put("startedAt", f.startedAt().toString());
-                o.put("connectorId", f.connectorId());
+    /**
+     * The JSON payload of a message, with this build's contract version.
+     *
+     * @param message the message
+     * @return its fields, in a fixed order
+     */
+    public static Map<String, Object> toJson(ConnectorMessage message)
+    {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("v", ContractVersion.CURRENT);
+        payload.put("type", message.type().wireName());
+        payload.put("messageId", message.messageId());
+        payload.put("fileId", message.fileId().toString());
+        switch (message)
+        {
+            case FileStarted started ->
+            {
+                payload.put("format", started.format());
+                payload.put("fileSize", started.fileSize());
+                payload.put("startedAt", started.startedAt().toString());
+                payload.put("connectorId", started.connectorId());
             }
-            case SectionInStorage s -> {
-                o.put("sectionId", s.sectionId());
-                o.put("seq", s.seq());
-                o.put("sourceOffset", s.sourceOffset());
-                o.put("sourceLength", s.sourceLength());
-                o.put("format", s.format());
-                o.put("contentType", s.contentType());
-                switch (s) {
-                    case SectionStored st when st.mapping() != null -> o.put("mapping", st.mapping());
-                    case SectionFailed f -> o.put("errorCode", f.errorCode());
-                    default -> {
-                        // stored as split: no mapping
+            case SectionInStorage section ->
+            {
+                payload.put("sectionId", section.sectionId());
+                payload.put("seq", section.seq());
+                payload.put("sourceOffset", section.sourceOffset());
+                payload.put("sourceLength", section.sourceLength());
+                payload.put("format", section.format());
+                payload.put("contentType", section.contentType());
+                switch (section)
+                {
+                    case SectionStored stored when stored.mapping() != null ->
+                            payload.put("mapping", stored.mapping());
+                    case SectionFailed failed ->
+                            payload.put("errorCode", failed.errorCode());
+                    default ->
+                    {
+                        // Stored as split: no mapping.
                     }
                 }
-                o.put("plaintextLength", s.plaintextLength());
-                o.put("chunkCount", s.chunkCount());
-                StorageRef r = s.storage();
-                Map<String, Object> st = new LinkedHashMap<>();
-                st.put("catalog", r.catalog());
-                st.put("namespace", r.namespace());
-                st.put("table", r.table());
-                st.put("ingestedDate", r.ingestedDate().toString());
-                st.put("snapshotId", r.snapshotId());
-                st.put("kekRef", r.kekRef());
-                o.put("storage", st);
+                if (section instanceof SectionFailed failed
+                        && failed.errorAt() != null)
+                {
+                    payload.put("errorLine", failed.errorAt().line());
+                    payload.put("errorColumn", failed.errorAt().column());
+                }
+                payload.put("plaintextLength", section.plaintextLength());
+                payload.put("chunkCount", section.chunkCount());
+                if (section.origin() != null)
+                {
+                    payload.put("origin", originFields(section.origin()));
+                }
+                StorageRef ref = section.storage();
+                Map<String, Object> storage = new LinkedHashMap<>();
+                storage.put("catalog", ref.catalog());
+                storage.put("namespace", ref.namespace());
+                storage.put("table", ref.table());
+                storage.put("ingestedDate", ref.ingestedDate().toString());
+                storage.put("snapshotId", ref.snapshotId());
+                storage.put("kekRef", ref.kekRef());
+                payload.put("storage", storage);
             }
-            case FileCompleted c -> {
-                o.put("sectionCount", c.sectionCount());
-                o.put("failedSectionCount", c.failedSectionCount());
-                o.put("fileSize", c.fileSize());
-                o.put("fileDigest", c.fileDigest());
-                o.put("startedAt", c.startedAt().toString());
-                o.put("completedAt", c.completedAt().toString());
+            case FileCompleted completed ->
+            {
+                payload.put("sectionCount", completed.sectionCount());
+                payload.put("failedSectionCount",
+                        completed.failedSectionCount());
+                payload.put("fileSize", completed.fileSize());
+                payload.put("fileDigest", completed.fileDigest());
+                payload.put("startedAt", completed.startedAt().toString());
+                payload.put("completedAt",
+                        completed.completedAt().toString());
             }
         }
-        return o;
+        return payload;
     }
 
-    /** Parses a payload. Unknown fields are ignored so that minor contract versions stay compatible. */
+    /**
+     * Reads a message from its JSON payload. Fields this build doesn't know
+     * are ignored, so payloads of a later minor contract version can be read.
+     *
+     * @param payload the payload's fields
+     * @return the message
+     * @throws UnsupportedContractVersionException if the payload's major
+     *                                             version isn't this build's
+     * @throws IllegalArgumentException            if a required field is
+     *                                             missing, or the message id
+     *                                             doesn't match the message
+     */
     @SuppressWarnings("unchecked")
-    public static ConnectorMessage fromJson(Map<String, Object> o) {
-        String v = (String) o.get("v");
-        if (!ContractVersion.isReadable(v)) {
-            throw new UnsupportedContractVersionException(v);
+    public static ConnectorMessage fromJson(Map<String, Object> payload)
+    {
+        String version = (String) payload.get("v");
+        if (!ContractVersion.isReadable(version))
+        {
+            throw new UnsupportedContractVersionException(version);
         }
-        MessageType type = MessageType.fromWire(str(o, "type"));
-        UUID fileId = UUID.fromString(str(o, "fileId"));
-        ConnectorMessage m =
-                switch (type) {
+        MessageType type = MessageType.fromWire(text(payload, "type"));
+        UUID fileId = UUID.fromString(text(payload, "fileId"));
+        ConnectorMessage message =
+                switch (type)
+                {
                     case FILE_STARTED -> new FileStarted(
                             fileId,
-                            str(o, "format"),
-                            num(o, "fileSize"),
-                            Instant.parse(str(o, "startedAt")),
-                            str(o, "connectorId"));
+                            text(payload, "format"),
+                            number(payload, "fileSize"),
+                            Instant.parse(text(payload, "startedAt")),
+                            text(payload, "connectorId"));
                     case SECTION_STORED -> new SectionStored(
-                            str(o, "sectionId"),
+                            text(payload, "sectionId"),
                             fileId,
-                            num(o, "seq"),
-                            num(o, "sourceOffset"),
-                            num(o, "sourceLength"),
-                            str(o, "format"),
-                            str(o, "contentType"),
-                            (String) o.get("mapping"),
-                            num(o, "plaintextLength"),
-                            Math.toIntExact(num(o, "chunkCount")),
-                            storage(o));
+                            number(payload, "seq"),
+                            number(payload, "sourceOffset"),
+                            number(payload, "sourceLength"),
+                            text(payload, "format"),
+                            text(payload, "contentType"),
+                            (String) payload.get("mapping"),
+                            number(payload, "plaintextLength"),
+                            Math.toIntExact(number(payload, "chunkCount")),
+                            storage(payload),
+                            origin(payload));
                     case SECTION_FAILED -> new SectionFailed(
-                            str(o, "sectionId"),
+                            text(payload, "sectionId"),
                             fileId,
-                            num(o, "seq"),
-                            num(o, "sourceOffset"),
-                            num(o, "sourceLength"),
-                            str(o, "format"),
-                            str(o, "contentType"),
-                            str(o, "errorCode"),
-                            num(o, "plaintextLength"),
-                            Math.toIntExact(num(o, "chunkCount")),
-                            storage(o));
+                            number(payload, "seq"),
+                            number(payload, "sourceOffset"),
+                            number(payload, "sourceLength"),
+                            text(payload, "format"),
+                            text(payload, "contentType"),
+                            text(payload, "errorCode"),
+                            number(payload, "plaintextLength"),
+                            Math.toIntExact(number(payload, "chunkCount")),
+                            storage(payload),
+                            origin(payload),
+                            position(payload, "errorLine", "errorColumn"));
                     case FILE_COMPLETED -> new FileCompleted(
                             fileId,
-                            num(o, "sectionCount"),
-                            num(o, "failedSectionCount"),
-                            num(o, "fileSize"),
-                            str(o, "fileDigest"),
-                            Instant.parse(str(o, "startedAt")),
-                            Instant.parse(str(o, "completedAt")));
+                            number(payload, "sectionCount"),
+                            number(payload, "failedSectionCount"),
+                            number(payload, "fileSize"),
+                            text(payload, "fileDigest"),
+                            Instant.parse(text(payload, "startedAt")),
+                            Instant.parse(text(payload, "completedAt")));
                 };
-        if (!m.messageId().equals(o.get("messageId"))) {
-            throw new IllegalArgumentException("messageId does not match payload");
+        if (!message.messageId().equals(payload.get("messageId")))
+        {
+            throw new IllegalArgumentException(
+                    "messageId does not match payload");
         }
-        return m;
+        return message;
     }
 
+    /**
+     * The JSON fields of a section's origin.
+     *
+     * @param origin the origin
+     * @return its line and column in the section and in the file
+     */
+    private static Map<String, Object> originFields(SectionOrigin origin)
+    {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("sectionLine", origin.inSection().line());
+        fields.put("sectionColumn", origin.inSection().column());
+        fields.put("sourceLine", origin.inFile().line());
+        fields.put("sourceColumn", origin.inFile().column());
+        return fields;
+    }
+
+    /**
+     * Reads where a section is stored from the payload's {@code storage}
+     * field.
+     *
+     * @param payload the payload's fields
+     * @return the storage reference
+     * @throws IllegalArgumentException if a field of it is missing
+     */
     @SuppressWarnings("unchecked")
-    private static StorageRef storage(Map<String, Object> o) {
-        Map<String, Object> st = (Map<String, Object>) req(o, "storage");
-        return new StorageRef(str(st, "catalog"), str(st, "namespace"), str(st, "table"),
-                LocalDate.parse(str(st, "ingestedDate")), num(st, "snapshotId"), str(st, "kekRef"));
+    private static StorageRef storage(Map<String, Object> payload)
+    {
+        Map<String, Object> storage =
+                (Map<String, Object>) required(payload, "storage");
+        return new StorageRef(text(storage, "catalog"),
+                text(storage, "namespace"), text(storage, "table"),
+                LocalDate.parse(text(storage, "ingestedDate")),
+                number(storage, "snapshotId"), text(storage, "kekRef"));
     }
 
-    private static Object req(Map<String, Object> o, String k) {
-        Object v = o.get(k);
-        if (v == null) {
-            throw new IllegalArgumentException("Missing field " + k);
+    /**
+     * Reads a section's origin from the payload's {@code origin} field.
+     *
+     * @param payload the payload's fields
+     * @return the origin; null if the message has none (a connector before
+     *         contract 2.1) or it is incomplete
+     */
+    @SuppressWarnings("unchecked")
+    private static SectionOrigin origin(Map<String, Object> payload)
+    {
+        if (!(payload.get("origin") instanceof Map<?, ?> origin))
+        {
+            return null;
         }
-        return v;
+        Map<String, Object> fields = (Map<String, Object>) origin;
+        SourcePosition inSection =
+                position(fields, "sectionLine", "sectionColumn");
+        SourcePosition inFile = position(fields, "sourceLine", "sourceColumn");
+        return inSection == null || inFile == null
+                ? null : new SectionOrigin(inSection, inFile);
     }
 
-    private static String str(Map<String, Object> o, String k) {
-        return (String) req(o, k);
+    /**
+     * Reads a line and column held in two number fields.
+     *
+     * @param fields    the fields to read from
+     * @param lineKey   the name of the line's field
+     * @param columnKey the name of the column's field
+     * @return the position; null if either field is missing or isn't a
+     *         number
+     */
+    private static SourcePosition position(Map<String, Object> fields,
+            String lineKey, String columnKey)
+    {
+        if (!(fields.get(lineKey) instanceof Number line)
+                || !(fields.get(columnKey) instanceof Number column))
+        {
+            return null;
+        }
+        return new SourcePosition(line.longValue(),
+                Math.toIntExact(column.longValue()));
     }
 
-    private static long num(Map<String, Object> o, String k) {
-        return ((Number) req(o, k)).longValue();
+    /**
+     * Reads a field that must be there.
+     *
+     * @param fields the fields to read from
+     * @param key    the field's name
+     * @return its value
+     * @throws IllegalArgumentException if it is missing or null
+     */
+    private static Object required(Map<String, Object> fields, String key)
+    {
+        Object value = fields.get(key);
+        if (value == null)
+        {
+            throw new IllegalArgumentException("Missing field " + key);
+        }
+        return value;
+    }
+
+    /**
+     * Reads a text field that must be there.
+     *
+     * @param fields the fields to read from
+     * @param key    the field's name
+     * @return its text
+     * @throws IllegalArgumentException if it is missing
+     */
+    private static String text(Map<String, Object> fields, String key)
+    {
+        return (String) required(fields, key);
+    }
+
+    /**
+     * Reads a number field that must be there, as a whole number.
+     *
+     * @param fields the fields to read from
+     * @param key    the field's name
+     * @return its value
+     * @throws IllegalArgumentException if it is missing
+     */
+    private static long number(Map<String, Object> fields, String key)
+    {
+        return ((Number) required(fields, key)).longValue();
     }
 }

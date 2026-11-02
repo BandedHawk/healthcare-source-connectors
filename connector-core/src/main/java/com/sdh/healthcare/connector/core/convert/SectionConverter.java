@@ -48,7 +48,7 @@ public interface SectionConverter
 
     /**
      * The name and version of the JSON this converter produces, such as
-     * {@code "csv-row/1"} or {@code "ccda/1"}. Every converted section is
+     * {@code "csv-row/1"} or {@code "ccda/2"}. Every converted section is
      * stored and announced with it, so whatever reads the JSON downstream
      * knows its shape and can tell when it has changed. A section that could
      * not be converted is stored as split and carries no mapping.
