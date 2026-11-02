@@ -135,6 +135,29 @@ class FlatConvertersTest {
     }
 
     /**
+     * An invalid byte is reported at its position in the section, also when release characters come before it in
+     * the same component: the component is decoded without them, and the position is mapped back.
+     */
+    @Test
+    void edifactEncodingErrorIsReportedAtTheInvalidByte() {
+        String head = "UNB+UNOY:3+S+R+261028:1200+R1'NAD+PE++";
+        String tail = "'UNZ+1+R1'";
+        // 0xFF is never valid in UTF-8. "#" marks where it goes.
+        for (String component : new String[] {"AB#C", "A?+B?:#C", "??#"}) {
+            String text = head + component + tail;
+            int expected = text.indexOf('#');
+            byte[] in = text.getBytes(ISO_8859_1);
+            in[expected] = (byte) 0xFF;
+            assertThatThrownBy(() -> new EdifactConverter().convert(in, SplitConfig.defaults("edifact")))
+                    .as(component)
+                    .isInstanceOfSatisfying(ConversionException.class, e -> {
+                        assertThat(e.code()).isEqualTo(ErrorCode.CONVERT_INVALID_ENCODING);
+                        assertThat(e.position()).isEqualTo(expected);
+                    });
+        }
+    }
+
+    /**
      * Sections from {@code JsonWriter.EXACT_SIZE_FROM} are written twice, counting first. The result must be what the
      * ordinary path gives: the same JSON for a section just under the size as for the same content made larger.
      */

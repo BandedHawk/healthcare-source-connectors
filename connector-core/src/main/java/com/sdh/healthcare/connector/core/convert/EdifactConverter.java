@@ -436,6 +436,45 @@ public final class EdifactConverter implements SectionConverter
     }
 
     /**
+     * Finds where a byte of a component's copy without release characters
+     * ({@link #unreleased}) came from in the section. Used to report an
+     * invalid byte at its real position.
+     * <p>
+     * It walks the component the same way {@link #unreleased} does, counting
+     * the bytes it would copy: a release character is skipped and the byte
+     * after it is the one copied.
+     *
+     * @param section   the section's bytes
+     * @param from      where the component starts
+     * @param to        where it ends: the position of the separator after it
+     * @param release   the release character
+     * @param copyIndex the byte's position in the copy, from 0
+     * @return the byte's position in the section; {@code to} if the copy has
+     *         no byte at {@code copyIndex}, as when an error is found at the
+     *         very end of the copy
+     */
+    private static int sectionPosition(byte[] section, int from, int to,
+            byte release, long copyIndex)
+    {
+        // How many bytes of the copy come before the current position.
+        long copied = 0;
+        for (int position = from; position < to; position++)
+        {
+            if (section[position] == release)
+            {
+                // The byte copied is the one after the release character.
+                position++;
+            }
+            if (copied == copyIndex)
+            {
+                return position;
+            }
+            copied++;
+        }
+        return to;
+    }
+
+    /**
      * The first reading of a section: checks its structure (through
      * {@link #walk}, which does the checking) and records what the first
      * segment says. That is all {@link #convert} needs before it can write
@@ -642,10 +681,10 @@ public final class EdifactConverter implements SectionConverter
          * Decodes a component into text, with any release characters taken
          * out.
          * <p>
-         * An invalid byte is reported at its position in the section. For a
-         * component with release characters, the position is counted from
-         * the component's start in the copy without them, so it can be early
-         * by the number of release characters before the invalid byte.
+         * An invalid byte is reported at its position in the section. A
+         * component with release characters is decoded from a copy without
+         * them, so the position found in the copy is mapped back to the
+         * section ({@link #sectionPosition}).
          *
          * @param from     where the component starts
          * @param to       where it ends
@@ -671,7 +710,8 @@ public final class EdifactConverter implements SectionConverter
             catch (ConversionException error)
             {
                 throw new ConversionException(error.code(),
-                        from + error.position());
+                        sectionPosition(section, from, to,
+                                delimiters.release(), error.position()));
             }
         }
 
