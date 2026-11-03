@@ -8,13 +8,13 @@
 #   SDH_SKIP_BUILD=1 ...                            # reuse the tarball and images already built
 #   SDH_ALLOW_STALE_BASE=1 ...                      # sign although a pinned base image has a newer build (warns)
 #
-# Signs:
-#   - the distribution tarball: a detached signature (file-connector-<v>-dist.tar.gz.sig), verifiable with cosign or
-#     with openssl alone;
-#   - the customer image and the service image: cosign signatures in the registry, next to each image, plus a signed
+# Covers both applications, the splitter (file-connector) and the landing node (landing-connector). Signs:
+#   - each distribution tarball: a detached signature (<app>-<v>-dist.tar.gz.sig), verifiable with cosign or with
+#     openssl alone;
+#   - each customer image and service image: cosign signatures in the registry, next to each image, plus a signed
 #     CycloneDX SBOM of each image as an attestation.
-# Writes to file-connector/target/release/: the tarball and its signature, the public key (cosign.pub), the SBOMs
-# (jar, customer image, service image), their vulnerability reports (*.vulns.json, not published) and
+# Writes to target/release/: the tarballs and their signatures, the public key (cosign.pub), the SBOMs (each jar,
+# customer image and service image), their vulnerability reports (*.vulns.json, not published) and
 # image-digests.txt.
 #
 # Environment:
@@ -37,9 +37,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COSIGN_IMAGE="gcr.io/projectsigstore/cosign:v2.4.1"
 SYFT_IMAGE="anchore/syft:v1.54.1"
 REGISTRY_IMAGE="registry:2.8.3"
-OUT="$ROOT/file-connector/target/release"
+APPS=(file-connector landing-connector)
+OUT="$ROOT/target/release"
 
-echo ">> Base images (file-connector/docker/base-images.env)"
+echo ">> Base images (docker/base-images.env)"
 if ! "$ROOT/scripts/base-images.sh"; then
   if [[ "${SDH_ALLOW_STALE_BASE:-0}" == "1" ]]; then
     echo "   WARNING: signing with a stale base image (SDH_ALLOW_STALE_BASE=1)"
@@ -50,16 +51,20 @@ if ! "$ROOT/scripts/base-images.sh"; then
 fi
 
 if [[ "${SDH_SKIP_BUILD:-0}" != "1" ]]; then
-  (cd "$ROOT" && ./mvnw -q -pl file-connector -am -Pdist package -DskipTests)
+  (cd "$ROOT" && ./mvnw -q -pl file-connector,landing-connector -am -Pdist package -DskipTests)
 fi
 VERSION="$(cd "$ROOT" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
-TARBALL="$ROOT/file-connector/target/file-connector-$VERSION-dist.tar.gz"
-[[ -f "$TARBALL" ]] || { echo "No tarball at $TARBALL; build with -Pdist" >&2; exit 1; }
+for app in "${APPS[@]}"; do
+  tarball="$ROOT/$app/target/$app-$VERSION-dist.tar.gz"
+  [[ -f "$tarball" ]] || { echo "No tarball at $tarball; build with -Pdist" >&2; exit 1; }
+done
 
 source "$ROOT/scripts/minikube-env.sh"
 if [[ "${SDH_SKIP_BUILD:-0}" != "1" ]]; then
-  SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 "$ROOT/scripts/build-image.sh" customer
-  SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 "$ROOT/scripts/build-image.sh" service
+  for app in "${APPS[@]}"; do
+    SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 "$ROOT/scripts/build-image.sh" "$app" customer
+    SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 "$ROOT/scripts/build-image.sh" "$app" service
+  done
 fi
 
 # Files reach the tool containers through a volume in the VM: the host's directories aren't mounted there.
@@ -122,15 +127,19 @@ else
   REGISTRY="$SDH_REGISTRY"
 fi
 
-echo ">> Distribution tarball"
-TAR_NAME="$(basename "$TARBALL")"
-cp "$TARBALL" "$OUT/"
-cp "$ROOT/file-connector/target/sbom.cdx.json" "$OUT/file-connector-$VERSION-jar.cdx.json"
-put "$TARBALL" "$TAR_NAME"
+echo ">> Distribution tarballs"
+TAR_NAMES=()
+for app in "${APPS[@]}"; do
+  tarball="$ROOT/$app/target/$app-$VERSION-dist.tar.gz"
+  TAR_NAMES+=("$(basename "$tarball")")
+  cp "$tarball" "$OUT/"
+  cp "$ROOT/$app/target/sbom.cdx.json" "$OUT/$app-$VERSION-jar.cdx.json"
+  put "$tarball" "$(basename "$tarball")"
+  echo "   $(basename "$tarball")"
+done
 
 : > "$OUT/image-digests.txt"
-for variant in customer service; do
-  if [[ "$variant" == "customer" ]]; then name="file-connector"; else name="file-connector-service"; fi
+for name in file-connector file-connector-service landing-connector landing-connector-service; do
   local_tag="sdh/$name:$VERSION"
   remote_tag="$REGISTRY/$name:$VERSION"
   echo ">> Image $local_tag"
@@ -150,11 +159,13 @@ done
 SDH_VULN_SCAN_IN_VM=1 "$ROOT/scripts/vuln-scan.sh" "$OUT"/*.cdx.json
 
 echo ">> Signing"
-cosign sign-blob --yes --key "$KEY" --tlog-upload=false --output-signature "/work/$TAR_NAME.sig" \
-  "/work/$TAR_NAME" >/dev/null 2>&1
-get "$TAR_NAME.sig" "$OUT/$TAR_NAME.sig"
-chmod 0644 "$OUT/$TAR_NAME.sig"   # published alongside the tarball
-echo "   $TAR_NAME.sig"
+for TAR_NAME in "${TAR_NAMES[@]}"; do
+  cosign sign-blob --yes --key "$KEY" --tlog-upload=false --output-signature "/work/$TAR_NAME.sig" \
+    "/work/$TAR_NAME" >/dev/null 2>&1
+  get "$TAR_NAME.sig" "$OUT/$TAR_NAME.sig"
+  chmod 0644 "$OUT/$TAR_NAME.sig"   # published alongside the tarball
+  echo "   $TAR_NAME.sig"
+done
 while read -r ref; do
   name="${ref##*/}"; name="${name%@*}"
   # Signed by digest, never by tag, so the signature covers exactly these bytes.
@@ -168,13 +179,16 @@ echo ">> Verifying, as a customer would (public key only)"
 failures=0
 ok() { echo "   ok    $1"; }
 bad() { echo "   FAIL  $1"; failures=$((failures + 1)); }
-if cosign verify-blob --key /work/cosign.pub --insecure-ignore-tlog=true --signature "/work/$TAR_NAME.sig" \
-  "/work/$TAR_NAME" >/dev/null 2>&1; then ok "tarball signature (cosign)"; else bad "tarball signature (cosign)"; fi
-# Without cosign: the signature is base64 ECDSA over the file's SHA-256.
-if base64 -d "$OUT/$TAR_NAME.sig" > "$OUT/.sig.der" \
-  && openssl dgst -sha256 -verify "$OUT/cosign.pub" -signature "$OUT/.sig.der" "$OUT/$TAR_NAME" >/dev/null; then
-  ok "tarball signature (openssl)"; else bad "tarball signature (openssl)"; fi
-rm -f "$OUT/.sig.der"
+for TAR_NAME in "${TAR_NAMES[@]}"; do
+  if cosign verify-blob --key /work/cosign.pub --insecure-ignore-tlog=true --signature "/work/$TAR_NAME.sig" \
+    "/work/$TAR_NAME" >/dev/null 2>&1; then ok "$TAR_NAME signature (cosign)"; else bad "$TAR_NAME signature (cosign)"; fi
+  # Without cosign: the signature is base64 ECDSA over the file's SHA-256.
+  if base64 -d "$OUT/$TAR_NAME.sig" > "$OUT/.sig.der" \
+    && openssl dgst -sha256 -verify "$OUT/cosign.pub" -signature "$OUT/.sig.der" "$OUT/$TAR_NAME" >/dev/null; then
+    ok "$TAR_NAME signature (openssl)"; else bad "$TAR_NAME signature (openssl)"; fi
+  rm -f "$OUT/.sig.der"
+done
+TAR_NAME="${TAR_NAMES[0]}"
 # A changed byte must fail.
 cp "$OUT/$TAR_NAME" "$OUT/.tampered"
 printf 'x' | dd of="$OUT/.tampered" bs=1 seek=1000 conv=notrunc status=none

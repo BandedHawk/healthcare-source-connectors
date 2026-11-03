@@ -1,16 +1,22 @@
 # Example configuration for the file connector (Smile Digital Health Inc.). Copy to application.yml in this
 # directory and adjust. Values shown are defaults where they exist; remove what you don't need.
 # Secrets don't belong here: use environment variables (SDH_CRYPTO_KEYSTORE_PASSWORD,
-# SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE, SDH_LEASE_JDBC_PASSWORD, ...) or a configtree: mount.
+# SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE, SDH_CRYPTO_KEYS_INBOX_PASSPHRASE, SDH_LEASE_JDBC_PASSWORD, ...) or a configtree: mount.
 sdh:
   connector-id: file-connector
   encrypt-workers: 0              # 0 = one per CPU core
-  file:
-    inbound-dir: /data/inbound
-    read-lock: changed            # changed | marker (<name>.done)
-    min-age: 30s
-    poll-interval: 5s
-    include: "*"                  # Ant-style
+  landing:                        # where items come from: one landing node's intake (see its distribution)
+    intake: claims                # must match the landing node's sdh.landing.intake
+    # Where the landing node sends item.landed: a Camel consumer URI, used as it is. It must acknowledge a message
+    # only once it is handled. For Kafka: automatic commits (the default) with maxPollRecords=1, so a commit never
+    # covers a message not yet handled; breakOnFirstError=true; and autoOffsetReset=earliest, so a new consumer group
+    # starts at the first message.
+    queue-uri: "kafka:sdh.landing.claims?brokers=kafka:9093&securityProtocol=SSL&groupId=file-connector&autoOffsetReset=earliest&maxPollRecords=1&breakOnFirstError=true"
+    idle-wait: 5s
+    storage:                      # the landing node's catalog; catalog defaults to sdh.storage.catalog
+      catalog-name: sdh
+      namespace: sdh_landing
+      # catalog: { ... }          # only if landing uses another catalog or storage account
   split:
     format: ccda                  # ccda | xml | x12 | edifact | fhir | csv | delimited | <plugin>
     boundary: ClinicalDocument    # optional; format default
@@ -37,7 +43,6 @@ sdh:
       s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
       client: { region: us-east-1 }
     commit: { max-sections: 10000, max-bytes: 512MB, max-interval: 30s }
-    archive: { commit-bytes: 512MB }
   lease:
     name: file-connector
     jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
@@ -50,12 +55,12 @@ sdh:
     keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
     keys:
       sections-kek: sections-kek/1                          # keystore alias, or the KMS key ref
-      source-files-kek: source-files-kek/1
-      failed-files-kek: failed-files-kek/1
+      landed-items-kek: landed-items-kek/1                  # unwrap only: reads landed items
       signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
       # signing: { kid: connector-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
       recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
-      recovery-public: /run/secrets/recovery-public.pem
+      inbox: { kid: splitter-2026, pem: /run/secrets/inbox.pem }   # item.landed is encrypted to this; passphrase: env
+      landing-signer: { kid: landing-2026, pem: /run/secrets/landing-signer.pem }   # the landing node's public key
     aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
     gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC
     vault: { address: "https://vault:8200", token-file: /vault/secrets/token, mount: transit }   # vault-transit
@@ -67,11 +72,11 @@ sdh:
   telemetry:                      # unset endpoint = no export
     otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env
     metric-interval: 60s
-  maintenance:                    # runs between files
+  maintenance:                    # runs between items
     enabled: true
     interval: 1h
     snapshot-retention: 7d
     min-snapshots: 10
     compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
     orphans: { enabled: true, interval: 24h, min-age: 3d }
-    retention: { sections: 30d, source-files: 365d, failed-files: 365d }   # unset = keep forever (default)
+    retention: { sections: 30d }  # unset = keep forever (default)

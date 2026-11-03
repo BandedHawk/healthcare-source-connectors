@@ -334,7 +334,7 @@ class PolarisIT {
                     Map.of(AdminCli.OPERATOR_ENV, "polaris-it"));
             assertThat(status).as(out.toString(UTF_8)).isZero();
             assertThat(out.toString(UTF_8)).containsPattern("checkpoint: +item .+ FAILED \\(csv\\)")
-                    .containsPattern("archive source_files: +last file " + done.fileId() + " finished");
+                    .containsPattern("inbox: +no items waiting");
 
             // Maintenance through the REST catalog, between files.
             writerLock.lock();

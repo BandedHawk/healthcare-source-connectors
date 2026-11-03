@@ -116,6 +116,28 @@ public final class ItemProcessor
     }
 
     /**
+     * The checkpoint of the last item started, finished or not.
+     *
+     * @return its checkpoint; empty if no item has been started
+     */
+    public Optional<Checkpoint> last()
+    {
+        return pipeline.checkpoint();
+    }
+
+    /**
+     * Counts an item's stored sections that failed conversion and are kept
+     * in their original form.
+     *
+     * @param itemId the item
+     * @return how many there are
+     */
+    public long failedSectionCount(UUID itemId)
+    {
+        return pipeline.failedSectionCount(itemId);
+    }
+
+    /**
      * Processes an item: a new one, the one in progress, or one already
      * finished (which changes nothing). Traced as {@code ingest.item}.
      *

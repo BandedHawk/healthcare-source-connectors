@@ -1,0 +1,38 @@
+# Landing node configuration for scripts/k8s-minikube.sh, mounted from the ConfigMap landing-claims-config as the
+# landing README describes. Secrets come from the landing-claims-env secret as environment variables. The inbox key
+# fingerprint and the services' namespace (SERVICES_NS) are filled in by the script.
+sdh:
+  connector-id: landing-claims
+  landing:
+    intake: claims
+    source:
+      path: /data/intake
+      access: read-write
+      after: move
+      move-to: /data/intake/landed
+      settle: 2s
+      poll-interval: 500ms
+  storage:
+    catalog-name: sdh
+    catalog:
+      type: jdbc
+      uri: jdbc:postgresql://postgres.SERVICES_NS:5432/sdh
+      jdbc.user: sdh
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://sdh-warehouse/wh
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      s3: { endpoint: "http://seaweedfs.SERVICES_NS:8333", path-style-access: true, access-key-id: sdh-k8s-access,
+            secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+      client: { region: us-east-1 }
+  lease:
+    jdbc: { url: "jdbc:postgresql://postgres.SERVICES_NS:5432/sdh", username: sdh }
+  crypto:
+    keystore: { path: /run/secrets/keks.p12 }
+    keys:
+      landed-items-kek: landed-items-kek/1
+      signing: { kid: landing-2026, pem: /run/secrets/signing.pem }
+      recipient: { kid: splitter-2026, pem: /run/secrets/splitter-inbox.pem, sha256: "INBOX_SHA256" }
+  queue:
+    type: kafka
+    uri: "kafka:sdh-landing-claims?brokers=kafka.SERVICES_NS:9092"

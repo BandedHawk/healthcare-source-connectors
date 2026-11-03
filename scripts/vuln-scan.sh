@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Scans CycloneDX SBOMs for known vulnerabilities with grype and applies the release policy (design §14.5).
 #
-#   scripts/vuln-scan.sh file-connector/target/release/*.cdx.json
+#   scripts/vuln-scan.sh target/release/*.cdx.json
 #   scripts/vuln-scan.sh file-connector/target/sbom.cdx.json        # just the jar's dependencies
 #   SDH_IT_STOP=1 scripts/vuln-scan.sh ...                          # stop the VM afterwards
 #
 # Policy: fails when any SBOM has a High or Critical vulnerability with a fix available (a newer package, library or
-# base image exists), unless it is accepted in file-connector/docker/vuln-accepted.yaml with a reason. Unfixed and
+# base image exists), unless it is accepted in docker/vuln-accepted.yaml with a reason. Unfixed and
 # lower-severity findings are reported, not failed: there is nothing to upgrade to yet.
 #
 # Writes <sbom>.vulns.json (grype's full report) next to each SBOM, and prints a summary per SBOM and every finding
@@ -17,7 +17,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GRYPE_IMAGE="anchore/grype:v0.120.1"
-ACCEPTED="$ROOT/file-connector/docker/vuln-accepted.yaml"
+ACCEPTED="$ROOT/docker/vuln-accepted.yaml"
 DB_VOL="sdh-grype-db"
 (($# > 0)) || { echo "usage: $0 <sbom.cdx.json>..." >&2; exit 2; }
 for f in "$@"; do [[ -f "$f" ]] || { echo "No such SBOM: $f" >&2; exit 2; }; done
@@ -84,6 +84,6 @@ if ((failed == 0)); then
   echo ">> No fixable High or Critical vulnerabilities"
 else
   echo ">> $failed SBOM(s) fail the policy: upgrade the package or base image (scripts/base-images.sh update), or" \
-    "accept the finding in file-connector/docker/vuln-accepted.yaml with a reason" >&2
+    "accept the finding in docker/vuln-accepted.yaml with a reason" >&2
   exit 1
 fi

@@ -26,8 +26,9 @@
     <module>connector-queue-reader</module>
     <module>connector-kms</module>
     <module>connector-runtime</module>
-    <module>file-connector</module>
+    <!-- Before file-connector: its image tests (-Pit) run the landing node's packaged jar and kit. -->
     <module>landing-connector</module>
+    <module>file-connector</module>
   </modules>
 
   <properties>

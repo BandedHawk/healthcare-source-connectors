@@ -1,12 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Base image updates only (design §14.5): a pull request when a pinned tag in file-connector/docker/base-images.env moves to a new digest. Re-run the image tests on the branch before merging.",
+  "description": "Base image updates only (design §14.5): a pull request when a pinned tag in docker/base-images.env moves to a new digest. Re-run the image tests on the branch before merging.",
   "enabledManagers": ["custom.regex"],
   "customManagers": [
     {
       "customType": "regex",
       "description": "Base images pinned as <image>:<tag>@sha256:<digest>",
-      "managerFilePatterns": ["/^file-connector/docker/base-images\\.env$/"],
+      "managerFilePatterns": ["/^docker/base-images\\.env$/"],
       "matchStrings": [
         "_IMAGE=(?<depName>[^:@\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]{64})"
       ],

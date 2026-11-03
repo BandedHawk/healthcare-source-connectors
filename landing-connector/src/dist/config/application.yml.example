@@ -1,0 +1,61 @@
+# Example configuration for a landing node (Smile Digital Health Inc.). Copy to application.yml in this directory
+# and adjust. Values shown are defaults where they exist; remove what you don't need. Run one node per intake, and
+# optionally a standby beside it (standby: true) that takes over when the active node stops.
+# Secrets don't belong here: use environment variables (SDH_CRYPTO_KEYSTORE_PASSWORD,
+# SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE, SDH_LEASE_JDBC_PASSWORD, ...) or a configtree: mount.
+sdh:
+  connector-id: landing-claims
+  landing:
+    intake: claims                # names the lease (landing/<intake>), the checkpoint and the ledger entries
+    standby: false                # true: wait for the lease for as long as it takes
+    source:
+      path: /data/intake
+      access: read-only           # read-only | read-write (checked at startup with a probe file)
+      after: delete               # read-write only: delete | move | rename
+      move-to: /data/intake-landed   # for move; relative paths are kept
+      rename-suffix: .landed      # for rename
+      ready: settled              # settled (unchanged for settle) | marker (<name>.done)
+      settle: 2m
+      include: "*"                # Ant-style
+      recursive: false
+      poll-interval: 10s
+  storage:
+    catalog-name: sdh             # also sent in item.landed messages
+    namespace: sdh_landing
+    commit-bytes: 512MB
+    catalog:                      # Iceberg catalog properties, passed through unchanged
+      type: rest                  # rest | jdbc
+      uri: https://polaris:8181/api/catalog
+      warehouse: sdh              # the Polaris catalog name
+      rest.auth.type: oauth2
+      credential: "sdh-landing:${POLARIS_CLIENT_SECRET}"   # client id:secret, secret from the environment
+      scope: PRINCIPAL_ROLE:ALL
+      oauth2-server-uri: https://polaris:8181/api/catalog/v1/oauth/tokens
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO   # or ...gcp.gcs.GCSFileIO, ...azure.adlsv2.ADLSFileIO
+      s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
+      client: { region: us-east-1 }
+  lease:                          # the name is always landing/<intake>
+    jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
+    ttl: 60s
+    renew-interval: 15s
+    safety-margin: 10s
+  crypto:
+    wrap-provider: local          # local | aws-kms | gcp-kms | azure-keyvault | vault-transit
+    sign-provider: local          # same choices, independently
+    keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
+    keys:
+      landed-items-kek: landed-items-kek/1                  # keystore alias, or the KMS key ref
+      signing: { kid: landing-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
+      # signing: { kid: landing-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
+      recipient: { kid: splitter-2026, pem: /run/secrets/splitter-inbox.pem, sha256: "ab12..." }   # the splitter's inbox public key
+    aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
+    gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC
+    vault: { address: "https://vault:8200", token-file: /vault/secrets/token, mount: transit }   # vault-transit
+  queue:                          # where item.landed goes; the splitter consumes it
+    type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
+    uri: "kafka:sdh.landing.claims?brokers=kafka:9093&securityProtocol=SSL"
+    artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
+  retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
+  telemetry:                      # unset endpoint = no export
+    otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env
+    metric-interval: 60s

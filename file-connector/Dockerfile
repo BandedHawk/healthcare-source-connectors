@@ -8,8 +8,8 @@
 #
 # or use scripts/build-image.sh, which does both against the minikube VM's Docker daemon.
 #
-# Run it as deployed: read-only root filesystem, a writable /tmp (noexec is fine), the inbound directory and
-# secrets mounted as volumes, all capabilities dropped. The image itself runs as uid/gid 10001.
+# Run it as deployed: read-only root filesystem, a writable /tmp (noexec is fine), the secrets mounted as a volume,
+# all capabilities dropped. The image itself runs as uid/gid 10001.
 # Operator commands: `sdh-admin <command>` inside a running container, or `<image> admin <command>` as a one-off.
 #
 # scripts/build-image.sh passes both base images pinned by digest from docker/base-images.env (design §14.5); the
@@ -49,17 +49,15 @@ RUN set -eu; \
 
 FROM ${JRE_IMAGE}
 LABEL org.opencontainers.image.title="file-connector (service)" \
-      org.opencontainers.image.description="Splits inbound healthcare files into encrypted Iceberg sections and announces them" \
+      org.opencontainers.image.description="Splits landed healthcare files into encrypted Iceberg sections and announces them" \
       org.opencontainers.image.vendor="Smile Digital Health Inc." \
       org.opencontainers.image.licenses="LicenseRef-Proprietary" \
       org.opencontainers.image.documentation="Third-party notices: /app/legal/NOTICE and /app/legal/THIRD-PARTY.txt"
 
-# No home directory or login shell. The app owns nothing in the image except the inbound mount point.
+# No home directory or login shell. The app owns nothing in the image.
 RUN groupadd --system --gid 10001 sdh \
  && useradd --system --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sdh \
- && mkdir -p /data/inbound /run/secrets \
- && chown 10001:10001 /data/inbound \
- && chmod 0750 /data/inbound
+ && mkdir -p /run/secrets
 
 WORKDIR /app
 COPY --from=extract /build/layers/dependencies/ ./

@@ -18,10 +18,11 @@ import java.util.Map;
 import java.util.stream.Stream;
 import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.ExecConfig;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 
 /**
- * The customer image (design §14.3), built as scripts/build-image.sh builds it: the distribution kit's
+ * The customer images (design §14.3), built as scripts/build-image.sh builds them: each distribution kit's
  * {@code container/Dockerfile} on the distroless Java 25 base, then {@code docker/customer-inventory.Dockerfile}
  * adds the OS package inventory. No shell, so operator commands run the JVM directly and files are read by copying
  * them out.
@@ -30,21 +31,21 @@ import org.testcontainers.images.builder.ImageFromDockerfile;
  * @since 0.1.0
  */
 class CustomerImageIT extends ContainerImageItBase {
-    static final String KIT_IMAGE = "sdh/file-connector:it-kit";
 
     @Override
-    ImageFromDockerfile image() throws Exception {
+    ImageFromDockerfile image(String module) throws Exception {
+        String kitImage = "sdh/" + module + ":it-kit";
         Path kit;
-        try (Stream<Path> s = Files.list(Path.of("target"))) {
+        try (Stream<Path> s = Files.list(module(module).resolve("target"))) {
             Path dir = s.filter(p -> p.getFileName().toString().endsWith("-dist-dir")).findFirst()
-                    .orElseThrow(() -> new IllegalStateException("Package file-connector first (mvn -Pit verify)"));
+                    .orElseThrow(() -> new IllegalStateException("Package " + module + " first (mvn -Pit verify)"));
             try (Stream<Path> inner = Files.list(dir)) {
                 kit = inner.findFirst().orElseThrow();
             }
         }
         // The kit's own Dockerfile with the kit as the build context, as `docker build -f container/Dockerfile .`
         // would use them.
-        ImageFromDockerfile fromKit = new ImageFromDockerfile(KIT_IMAGE, false)
+        ImageFromDockerfile fromKit = new ImageFromDockerfile(kitImage, false)
                 .withFileFromPath("Dockerfile", kit.resolve("container/Dockerfile"))
                 .withBuildArg("JAVA_IMAGE", baseImage("DISTROLESS_IMAGE"));
         try (Stream<Path> entries = Files.list(kit)) {
@@ -53,9 +54,9 @@ class CustomerImageIT extends ContainerImageItBase {
             }
         }
         fromKit.get();
-        return new ImageFromDockerfile("sdh/file-connector:it", false)
-                .withFileFromPath("Dockerfile", Path.of("docker", "customer-inventory.Dockerfile"))
-                .withBuildArg("KIT_IMAGE", KIT_IMAGE);
+        return new ImageFromDockerfile("sdh/" + module + ":it", false)
+                .withFileFromPath("Dockerfile", Path.of("..", "docker", "customer-inventory.Dockerfile"))
+                .withBuildArg("KIT_IMAGE", kitImage);
     }
 
     @Override
@@ -85,7 +86,7 @@ class CustomerImageIT extends ContainerImageItBase {
      * core utilities or package tools, which is most of the GPL userland a full base image brings.
      */
     @Override
-    void checkBaseImage(List<String> packages) {
+    void checkBaseImage(GenericContainer<?> container, List<String> packages) {
         assertThat(packages).contains("temurin-25-jre", "libc6")
                 .doesNotContain("bash", "dash", "busybox", "coreutils", "findutils", "grep", "sed", "tar", "gzip",
                         "dpkg", "apt", "util-linux", "login", "passwd");

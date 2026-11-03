@@ -51,6 +51,8 @@ public final class TestKeys {
     public final Path recoveryPem;
     /** The splitter's own private key, which {@code item.landed} messages are sealed to. */
     public final Path inboxPem;
+    /** The public half of the splitter's inbox key: the landing node's recipient. */
+    public final Path inboxPublicPem;
     /** The landing node's signing key: the private half for a landing node, the public half for the splitter. */
     public final Path landingSigningPem;
     public final Path landingSignerPem;
@@ -85,6 +87,7 @@ public final class TestKeys {
         recipientPem = Files.writeString(dir.resolve("recipient.pem"), publicPem(recipient.getPublic()));
         recoveryPem = Files.writeString(dir.resolve("recovery-public.pem"), publicPem(recovery.getPublic()));
         inboxPem = encryptedPrivatePem(dir.resolve("inbox.pem"), inbox.getPrivate(), INBOX_PASSPHRASE);
+        inboxPublicPem = Files.writeString(dir.resolve("inbox-public.pem"), publicPem(inbox.getPublic()));
         landingSigningPem = encryptedPrivatePem(dir.resolve("landing-signing.pem"), landingSigning.getPrivate(),
                 SIGNING_PASSPHRASE);
         landingSignerPem = Files.writeString(dir.resolve("landing-signer.pem"),

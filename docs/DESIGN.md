@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
+
 Revision 2026-11-03 (as): built step 3a of landing (§5.3.10, §5.3.12): the splitter now reads only from landing. It takes `item.landed` messages into a durable inbox table, acknowledges each once it is committed, and splits the inbox's items in order, reading each from `landed_items` by chunk. Directory pickup, fingerprints, `InProgressLocator`, archiving to `source_files` and `failed_files`, the local fallback and the `completed/` and `failed/` records are gone from the splitter (§5, §8.2, §11). `restore` reads the landed item. The splitter has its own key pair for `item.landed`, and trusts the landing node's signing key (§7.4). New error code `MESSAGE_REJECTED`. The `-Pit` suite, the Kubernetes run, the images and the demo are rewritten for two stages in step 3b.
 
 Revision 2026-11-03 (ar): built step 2 of landing (§5.3.10): `landing-connector`, a Spring Boot application with a local directory intake. It lists the directory with Camel's `file` component, lands each item once it has settled (or its `.done` marker is there), writes the ledger entry, sends `item.landed`, and on a read-write source deletes, moves or renames the item. It recovers from a crash at any step, and can run as a standby. What the two applications share moved from `file-connector` into a new library, `connector-runtime` (§3): the common settings, key loading, publishers, telemetry export, the directory claim, the lease database and the exit hook. New error codes `INTAKE_NOT_WRITABLE` and `INTAKE_UNREACHABLE`. Retention and maintenance of the landing tables, and an image for the node, are still to do.
@@ -113,7 +115,7 @@ Revision 2026-10-29 (ac): two upgrade guards.
 
 Revision 2026-10-29 (ab): fixed what the first vulnerability scan found (§14.5). Security overrides in the parent POM: Jackson 2.22.3, `amqp-client` 5.37.0, Guava 33.7.2, `lz4-java` 1.11.4 and `snappy-java` 1.1.10.12. The two bundled copies that can't be upgraded (Jackson inside `parquet-jackson`, Guava inside `hadoop-shaded-guava`) are accepted with reasons in `vuln-accepted.yaml`: our code reaches neither. The scan now passes, and a full release run signs and verifies. All unit tests and integration tests pass.
 
-Revision 2026-10-29 (aa): vulnerability scanning and base image updates (§14.5). The three base images are pinned by digest in one file, `file-connector/docker/base-images.env`, which the build script and both image tests read; the service image's Temurin bases were unpinned before. `scripts/base-images.sh` checks or updates the pins, Renovate opens a pull request when a pinned tag gets a new build, and `sign-release.sh` refuses to sign with a stale base. `scripts/vuln-scan.sh` scans the three SBOMs with grype, and `sign-release.sh` signs nothing unless it passes: no High or Critical vulnerability with a fix available, other than ones accepted with a reason. The first scan fails: 12 fixable High vulnerabilities in Java dependencies, two of them in copies bundled inside other jars. Fixing them is not done yet. The distroless pin was already behind; it now follows `nonroot`, and the image tests pass on the new bases.
+Revision 2026-10-29 (aa): vulnerability scanning and base image updates (§14.5). The three base images are pinned by digest in one file, `docker/base-images.env`, which the build script and both image tests read; the service image's Temurin bases were unpinned before. `scripts/base-images.sh` checks or updates the pins, Renovate opens a pull request when a pinned tag gets a new build, and `sign-release.sh` refuses to sign with a stale base. `scripts/vuln-scan.sh` scans the three SBOMs with grype, and `sign-release.sh` signs nothing unless it passes: no High or Critical vulnerability with a fix available, other than ones accepted with a reason. The first scan fails: 12 fixable High vulnerabilities in Java dependencies, two of them in copies bundled inside other jars. Fixing them is not done yet. The distroless pin was already behind; it now follows `nonroot`, and the image tests pass on the new bases.
 
 Revision 2026-10-29 (z): SBOMs and signing (§14.4, `scripts/sign-release.sh`). A CycloneDX SBOM of the application jar is built at `package` and ships in the kit as `legal/sbom.cdx.json`. Each image gets its own SBOM, made by syft and attached as a signed attestation. The tarball gets a detached signature (verifiable with openssl alone), and both images are signed by digest. The release key is in Azure Key Vault. Tested end to end with a throwaway key and with the Key Vault key, both into a throwaway registry. The run also fixed `.dockerignore`, which had broken `build-image.sh service` since revision (u).
 
@@ -638,7 +640,7 @@ flowchart LR
 - **Receiving:** each message is opened with the splitter's own private key and verified against the landing node's public key. It must be `item.landed`, for the configured intake, and point at the configured landing catalog, namespace and `landed_items`. A message that fails a check is audited as `inbox.rejected` (`MESSAGE_REJECTED`, with a PHI-free reason) and dropped: delivering it again won't change it.
 - **Recording:** one commit per message, then the message is acknowledged. A repeat (the same item ID, found in an in-memory set loaded at startup) is acknowledged without a new row. If the commit fails after its retries, the route tries again in place with a growing pause, and doesn't take the next message until it succeeds.
 - **Position:** a MAC'd table property `sdh.inbox.<connectorId>` holds the last finished `seq`. It is moved after each item is `COMPLETED` or `FAILED`. A tampered value stops startup.
-- **Consumer URI:** `sdh.landing.queue-uri` is a Camel endpoint URI, used as it is. It must acknowledge when the route finishes, not on receipt: for Kafka, with automatic offset commits off. Step 3b sets this for each broker.
+- **Consumer URI:** `sdh.landing.queue-uri` is a Camel endpoint URI, used as it is. It must acknowledge a message only once the route has handled it, never on receipt. For Kafka: `groupId=<splitter>&autoOffsetReset=earliest&maxPollRecords=1&breakOnFirstError=true`, with automatic commits (the default). The route handles each record before the next poll, and the client's automatic commit, made at a poll, covers only records returned by earlier polls, so it never covers one not yet handled. One record per poll keeps that true at shutdown too, when the client commits the position of everything it has returned. `breakOnFirstError` makes a failed record be fetched again rather than skipped, and `earliest` makes a new group start at the first message. Turning automatic commits off (`autoCommitEnable=false`) without committing in the route would commit nothing. A repeat after a crash is harmless: the inbox recognises it.
 
 **Worker** (`InboxWorker`): a single thread takes the next item after the position, waiting up to `sdh.landing.idle-wait` for one to arrive.
 - If the checkpoint holds a different item in progress (a file from before landing, or the last item of an inbox that was replaced), it is marked `ABANDONED` first. Sections already stored stay.
@@ -1590,7 +1592,7 @@ sdh:
   encrypt-workers: 0              # 0 = one per CPU core
   landing:                        # what the splitter reads (§5.3.12)
     intake: claims                # item.landed for other intakes is refused
-    queue-uri: "kafka:sdh.landing.claims?brokers=kafka:9093&groupId=sdh-splitter-claims&autoCommitEnable=false&allowManualCommit=true"
+    queue-uri: "kafka:sdh.landing.claims?brokers=kafka:9093&groupId=sdh-splitter-claims&autoOffsetReset=earliest&maxPollRecords=1&breakOnFirstError=true"   # §5.3.12
     idle-wait: 5s
     storage: { catalog-name: sdh, namespace: sdh_landing }   # catalog: defaults to storage.catalog
   split:
@@ -1667,19 +1669,19 @@ Compared with the earlier sketch:
 
 ### 14.1 Container images (built)
 
-There are two images, built from the same jar and the same JVM options:
+Each application, the splitter (`file-connector`) and the landing node (`landing-connector`), has two images, built from its jar and the same JVM options:
 
 | Image | For | Built from | Base | Shell | Size |
 |---|---|---|---|---|---|
-| **Service** (`sdh/file-connector-service`) | our own hosted service only; never given to customers | `file-connector/Dockerfile` | `eclipse-temurin:25-jre-noble` (Ubuntu) | yes, with `sdh-admin` | about 513 MB |
-| **Customer** (`sdh/file-connector`) | distribution to customers | the distribution kit's `container/Dockerfile` plus the OS inventory step (§14.3) | `gcr.io/distroless/java25-debian13:nonroot`, pinned by digest (§14.5) | no | about 437 MB |
+| **Service** (`sdh/file-connector-service`, `sdh/landing-connector-service`) | our own hosted service only; never given to customers | `<module>/Dockerfile` | `eclipse-temurin:25-jre-noble` (Ubuntu) | yes; the splitter's has `sdh-admin` | about 513 MB |
+| **Customer** (`sdh/file-connector`, `sdh/landing-connector`) | distribution to customers | the distribution kit's `container/Dockerfile` plus the OS inventory step (§14.3) | `gcr.io/distroless/java25-debian13:nonroot`, pinned by digest (§14.5) | no | about 437 MB |
 
-`scripts/build-image.sh [service|customer]` runs Maven and then `docker build` against the minikube VM's Docker daemon (override the tag with `SDH_IMAGE`, the customer base with `SDH_JAVA_IMAGE`; extra arguments go to `docker build`). Both images run as uid/gid 10001 with a read-only root filesystem and the same mounts, so the Kubernetes settings below apply to both. What follows describes the service image; §14.3 describes the customer image's differences.
+`scripts/build-image.sh [file-connector|landing-connector] [service|customer]` runs Maven and then `docker build` against the minikube VM's Docker daemon (the application defaults to `file-connector`, also called `splitter`, and `landing` names the landing node; override the tag with `SDH_IMAGE`, the customer base with `SDH_JAVA_IMAGE`; extra arguments go to `docker build`). The landing images differ from the splitter's only in the jar, the labels, the intake mount point `/data/intake`, and having no operator commands. Both images run as uid/gid 10001 with a read-only root filesystem and the same mounts, so the Kubernetes settings below apply to both. What follows describes the service image; §14.3 describes the customer image's differences.
 
 - **Base:** `eclipse-temurin:25-jre-noble`, with `25-jdk-noble` for the build stage, both pinned by digest in `docker/base-images.env` (§14.5). The Dockerfile's own defaults are the bare tags, for a plain `docker build`.
 - **Layers:** Spring Boot's `-Djarmode=tools extract --layers`, copied as four layers with dependencies first, so a code change rebuilds a few hundred KB rather than 200 MB. The image is about 513 MB.
-- **User:** uid/gid 10001 (`sdh`), with no home directory or login shell. Everything under `/app` is root-owned and read-only to it; only `/data/inbound` belongs to it.
-- **Operator commands:** `/usr/local/bin/sdh-admin` runs `admin` (§11.4) with the same JVM options and `-Xmx512m` (`@/app/admin.args`), so it fits beside the connector's JVM: `kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status`. With a read-only root filesystem, restore into `/tmp` (then `kubectl cp`) or the inbound volume. As a one-off container, arguments after the image name go to the app: `docker run … <image> admin status`.
+- **User:** uid/gid 10001 (`sdh`), with no home directory or login shell. Everything under `/app` is root-owned and read-only to it. Nothing in the splitter's image belongs to it; in the landing image, only the intake mount point `/data/intake`.
+- **Operator commands:** `/usr/local/bin/sdh-admin` runs `admin` (§11.4) with the same JVM options and `-Xmx512m` (`@/app/admin.args`), so it fits beside the connector's JVM: `kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status`. With a read-only root filesystem, restore into `/tmp` and read the file from there (`kubectl cp` with the service image; through `kubectl debug` with the customer image, §14.3). As a one-off container, arguments after the image name go to the app: `docker run … <image> admin status`.
 - **Legal:** `/app/legal/` holds `LICENSE`, `NOTICE`, `THIRD-PARTY.txt` and `licenses/`, extracted from the jar at build time, and `os-packages.txt`, the OS package inventory generated in the final stage (§14.2). The OCI labels give the vendor (Smile Digital Health Inc.), `org.opencontainers.image.licenses=LicenseRef-Proprietary` and a pointer to these files. The JRE's notices stay in `/opt/java/openjdk/legal` and the OS packages' in `/usr/share/doc`.
 - **Health:** there is no HTTP endpoint. The process is the health signal: fatal conditions exit with status 70 (`FatalExit`) and the orchestrator restarts it.
 
@@ -1699,12 +1701,12 @@ There are two images, built from the same jar and the same JVM options:
 
 | Path | Mount | Contents |
 |---|---|---|
-| `/data/inbound` | writable volume, shared with whatever delivers files | Inbound files; the app writes `completed/` and `failed/` (§5) |
+| `/data/intake` | landing only: the intake directory, shared with whatever delivers files; writable for a read-write source | Files to land (§5.3.11) |
 | `/tmp` | writable `emptyDir`/tmpfs; `noexec` is fine | `S3FileIO` stages multipart uploads here before sending them: the same bytes as the object store gets, with section payloads already encrypted. Allow about 1 GiB |
-| `/run/secrets` | read-only secret volume | Local mode: `keks.p12`, `signing.pem`, `recipient.pem`, `recovery.pem` (paths are configuration, §14). Mode 0400 or 0440 |
+| `/run/secrets` | read-only secret volume | Local mode: the splitter's `keks.p12`, `signing.pem`, `recipient.pem`, `inbox.pem`, `landing-signer.pem`; the landing node's `keks.p12`, `signing.pem` and the splitter's inbox public key (paths are configuration, §14). Mode 0400 or 0440 |
 | configuration | ConfigMap via `SPRING_CONFIG_ADDITIONAL_LOCATION`, or `SPRING_APPLICATION_JSON` | `sdh.*` (§14). Passwords and passphrases come from environment variables or a `configtree:` mount |
 
-**Kubernetes.** The pod settings, as in the customer README's Deployment (§14.3). That Deployment is tested on a Kubernetes 1.37 cluster, in a namespace that enforces the restricted Pod Security Standard (§15.2); `ServiceImageIT` and `CustomerImageIT` apply the same constraints in Docker:
+**Kubernetes.** The splitter's pod settings, as in the customer README's Deployment (§14.3). The landing node's are the same with two replicas (an active node and a standby, both with `SDH_LANDING_STANDBY=true`, so the first to take the lease lands), the intake volume at `/data/intake`, and a 1 GiB memory limit. That Deployment is tested on a Kubernetes 1.37 cluster, in a namespace that enforces the restricted Pod Security Standard (§15.2); `ServiceImageIT` and `CustomerImageIT` apply the same constraints in Docker:
 
 ```yaml
 spec:
@@ -1731,12 +1733,10 @@ spec:
             - secretRef: { name: file-connector-env }   # keys are variable names: SDH_CRYPTO_KEYSTORE_PASSWORD, ...
           resources: { limits: { memory: 2Gi } }   # heap 1 GiB (MaxRAMPercentage=50, §13.1)
           volumeMounts:
-            - { name: inbound, mountPath: /data/inbound }
             - { name: tmp, mountPath: /tmp }
             - { name: keys, mountPath: /run/secrets, readOnly: true }
             - { name: config, mountPath: /config, readOnly: true }
       volumes:
-        - { name: inbound, persistentVolumeClaim: { claimName: file-connector-inbound } }
         - { name: tmp, emptyDir: { sizeLimit: 1Gi } }
         - { name: keys, secret: { secretName: file-connector-keys, defaultMode: 0440 } }
         - { name: config, configMap: { name: file-connector-config } }
@@ -1813,7 +1813,7 @@ None forces GPL terms on the connector, because every GPL or LGPL option has a p
 
 ### 14.3 Distribution tarball and customer image (built)
 
-Customers get the connector in two forms, both built from one distribution kit:
+Customers get each application, the splitter and the landing node, in two forms, both built from its distribution kit. What follows describes the splitter's; the landing node's (`landing-connector/src/dist/`, `landing-connector-<version>`) has the same layout, with `bin/landing-connector` and no `bin/sdh-admin` or `admin.args`, an intake mount point instead of none, and its own README and `application.yml.example`.
 - **The tarball**, `file-connector/target/file-connector-<version>-dist.tar.gz` (`-Pdist`, or the NetBeans action **Build distribution tarball**). It has no Java runtime: customers run it on a host with Java 25, or build their own image from it. Either way they receive nothing from us under the GPL.
 - **The customer image**, which we build from the same kit on the distroless Java 25 base.
 
@@ -1825,7 +1825,7 @@ The kit is also built as a directory on every `package` (`target/file-connector-
 | `bin/file-connector`, `bin/sdh-admin` | host start scripts: `java @config/jvm.options $JAVA_OPTS -jar app.jar`, with `SPRING_CONFIG_ADDITIONAL_LOCATION` pointing at `config/` |
 | `config/jvm.options` | the PHI hygiene flags, shared with both images |
 | `config/application.yml.example` | the §14 reference configuration, without references to this document |
-| `container/Dockerfile`, `container.options`, `admin.args`, `inbound/` | the customer image build |
+| `container/Dockerfile`, `container.options`, `admin.args` | the customer image build (the landing kit adds `intake/`, its mount point) |
 | `native/linux-amd64/`, `native/linux-arm64/` | `libzstd-jni.so` and `libsnappyjava.so`, unpacked from their jars at build time (`maven-dependency-plugin`) |
 | `legal/` | `LICENSE`, `NOTICE`, `THIRD-PARTY.txt`, `licenses/` (§14.2), `sbom.cdx.json` (§14.4) |
 | `README.md` | for customers: requirements, configuration, host and container use, a Kubernetes manifest, operator commands, troubleshooting |
@@ -1834,13 +1834,13 @@ The kit is also built as a directory on every `package` (`target/file-connector-
 - **Base:** `ARG JAVA_IMAGE` defaults to `gcr.io/distroless/java25-debian13:nonroot`; customers pin their own.
 - **No `RUN` steps**, so shell-less bases work:
   - the native libraries come prebuilt from the kit, chosen by BuildKit's `TARGETARCH` (amd64 on the classic builder);
-  - the inbound mount point is copied in with `--chown=10001:10001`.
+  - in the landing image, the intake mount point is copied in with `--chown=10001:10001`.
 - **User:** a numeric uid/gid 10001 with no account entry, so `-Duser.home=/tmp` is set in `container.options`.
 - **Labels:** the vendor and license, as on the service image.
 
-**Customer image** (`scripts/build-image.sh customer`, tag `sdh/file-connector:<version>`):
+**Customer image** (`scripts/build-image.sh [landing] customer`, tag `sdh/file-connector:<version>` or `sdh/landing-connector:<version>`):
 1. `container/Dockerfile`, built from the kit directory on `gcr.io/distroless/java25-debian13:nonroot`, pinned by digest in `docker/base-images.env` (§14.5).
-2. `file-connector/docker/customer-inventory.Dockerfile` adds `/app/legal/os-packages.txt`. The image has no shell, so a `busybox` build stage reads the base's package records (`/var/lib/dpkg/status.d/`) and resolves each package's copyright file. `busybox` isn't in the result. This step is our build tooling and isn't in the kit.
+2. `docker/customer-inventory.Dockerfile` adds `/app/legal/os-packages.txt`. The image has no shell, so a `busybox` build stage reads the base's package records (`/var/lib/dpkg/status.d/`) and resolves each package's copyright file. `busybox` isn't in the result. This step is our build tooling and isn't in the kit.
 
 The base holds 25 Debian packages: the Temurin 25 JRE (as `temurin-25-jre`), glibc, the GCC runtime libraries, zlib, fonts, certificates and timezone data. It has no shell, core utilities or package tools.
 
@@ -1851,12 +1851,12 @@ The base holds 25 Debian packages: the Temurin 25 JRE (as `temurin-25-jre`), gli
 | Base | Ubuntu 24.04 with Temurin (`eclipse-temurin:25-jre-noble`) | distroless Debian 13 with Temurin as a package |
 | Layers | Spring Boot layers, so a code change rebuilds a few hundred KB | the jar as one layer; the kit build has no extraction step |
 | Account | `sdh` (10001) in `/etc/passwd` | numeric 10001 |
-| Operator commands | `sdh-admin <command>` | `kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args <command> --operator <name>` |
+| Operator commands (splitter) | `sdh-admin <command>` | `kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args <command> --operator <name>`; a restored item in `/tmp` is read through `kubectl debug` at `/proc/1/root/tmp/<id>`, because `kubectl cp` needs `tar` |
 | Troubleshooting | `kubectl exec -- sh` | `kubectl debug -it <pod> --image=busybox --target=file-connector --profile=restricted` (an ephemeral container; kubectl 1.27 or later). The profile is needed where the namespace enforces the restricted Pod Security Standard. The connector's files are under `/proc/1/root/` |
 
 Both images use the same JVM options files and the same Kubernetes settings (§14.1).
 
-**Tests:** `ServiceImageIT` and `CustomerImageIT` share one test body (`ContainerImageItBase`): ingest, downstream read-back, operator commands, no PHI in the log, and the legal files. File checks read files out of the container, so they work without a shell. Shell-only checks run on the service image only: the uid as seen inside, no writes outside the volumes, nothing unpacked into `/tmp`. `CustomerImageIT` also checks that:
+**Tests:** `ServiceImageIT` and `CustomerImageIT` share one test body (`ContainerImageItBase`), which runs both applications' images: landing and splitting, downstream read-back, failover, operator commands, no PHI in the logs, and the legal files (§15.1). File checks read files out of the container, so they work without a shell. Shell-only checks run on the service image only: the uid as seen inside, no writes outside the volumes, nothing unpacked into `/tmp`. `CustomerImageIT` also checks that:
 - the image has no shell;
 - `os-packages.txt` lists the JRE and glibc;
 - every package's copyright file exists;
@@ -1870,32 +1870,32 @@ Customers' security teams need to know what is in what we ship, and that it came
 
 | SBOM | Made by | Covers | Where |
 |---|---|---|---|
-| Application jar | `cyclonedx-maven-plugin` 2.9.1 at `package` (parent `pluginManagement`, bound in `file-connector`) | the runtime dependencies bundled in `app.jar` (380 components, each with its POM's licenses) | `file-connector/target/sbom.cdx.json`; in the kit and tarball as `legal/sbom.cdx.json` |
+| Application jar | `cyclonedx-maven-plugin` 2.9.1 at `package` (parent `pluginManagement`, bound in `file-connector` and `landing-connector`) | the runtime dependencies bundled in `app.jar` (380 components in the splitter's, each with its POM's licenses) | `<module>/target/sbom.cdx.json`; in the kit and tarball as `legal/sbom.cdx.json` |
 | Customer image | syft 1.54.1, from the pushed image | the OS packages (25 Debian packages, the Temurin JRE among them) and the Java components found in `app.jar` (399, more than the jar SBOM's 380 because syft also finds copies bundled inside other jars) | a signed attestation on the image in the registry; a copy in `target/release/` |
 | Service image | the same | the same for the Ubuntu base (108 packages) | the same |
 
 An SBOM lists licenses as each project declares them; the elections for dual-licensed components (§14.2) are in `THIRD-PARTY.txt`.
 
 **Signing** with cosign 2.4.1:
-- **Tarball:** a detached signature, `file-connector-<v>-dist.tar.gz.sig`: base64 ECDSA P-256 over the file's SHA-256. Customers can verify it with cosign or with openssl alone: `openssl dgst -sha256 -verify cosign.pub -signature <(base64 -d <file>.sig) <file>`.
-- **Images** (customer and service): signed by digest, never by tag, with the signature stored in the registry next to the image. Each image's SBOM is attached as a signed CycloneDX attestation, which a Kubernetes admission policy (Sigstore policy-controller, Kyverno) can require.
+- **Tarballs:** a detached signature each, `<app>-<v>-dist.tar.gz.sig`: base64 ECDSA P-256 over the file's SHA-256. Customers can verify it with cosign or with openssl alone: `openssl dgst -sha256 -verify cosign.pub -signature <(base64 -d <file>.sig) <file>`.
+- **Images** (customer and service, for both applications): signed by digest, never by tag, with the signature stored in the registry next to the image. Each image's SBOM is attached as a signed CycloneDX attestation, which a Kubernetes admission policy (Sigstore policy-controller, Kyverno) can require.
 - **Key:** the release key is an EC P-256 key in **Azure Key Vault** (decision 2026-10-29), referenced as `SDH_SIGNING_KEY=azurekms://<vault>.vault.azure.net/<key>`. The private key never leaves Key Vault; cosign authenticates with a service principal (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) that has the Key Vault Crypto User role. Without `SDH_SIGNING_KEY` the script generates a throwaway key, for testing only. The public key, `cosign.pub`, is published with each release.
 - **No public transparency log:** signatures aren't uploaded to Sigstore's Rekor, which would publish the artifact digests and our key's fingerprint. The key is the trust anchor, so verification passes `--insecure-ignore-tlog=true`. Keyless signing (a CI identity plus Rekor) was considered and not chosen.
 
 **The script:**
-- builds the tarball (`-Pdist`) and both images, or reuses them (`SDH_SKIP_BUILD=1`);
+- builds both tarballs (`-Pdist`) and all four images, or reuses them (`SDH_SKIP_BUILD=1`);
 - pushes the images to `SDH_REGISTRY`, or to a throwaway `registry:2` inside the VM;
 - generates the image SBOMs, signs everything and attests the SBOMs;
 - verifies:
-  - the tarball signature with cosign and with openssl;
+  - each tarball's signature with cosign and with openssl;
   - that a tampered tarball is rejected;
   - each image's signature and SBOM attestation;
   - that another key is rejected.
-- writes `file-connector/target/release/`: the tarball and its signature, `cosign.pub`, the three SBOMs and `image-digests.txt`.
+- writes `target/release/` (at the top level): the tarballs and their signatures, `cosign.pub`, the six SBOMs (two jars, four images) and `image-digests.txt`.
 
 cosign, syft and the registry run as pinned containers in the `sdh-it` VM, so nothing is installed on the host. Files reach them through a Docker volume, because the VM doesn't mount host directories.
 
-**Runs** (2026-10-29):
+**Runs** (2026-10-29, before the landing node was added; not yet run with it):
 - With a throwaway key and registry, all eight checks pass.
 - With the Key Vault key, all eight checks pass too. The key is `sdh-release` (EC P-256) in vault `sdh-ingestion-1`, used by the service principal `sdh-release-signer` with Key Vault Crypto User on the vault; the images went to the throwaway registry. The vault uses Azure role-based access; a principal without the role gets 403 `ForbiddenByRbac` on the first call (reading the public key), before anything is signed. The client secret expires, which stops signing until it is replaced; the key, `cosign.pub` and existing signatures are unaffected.
 
@@ -1909,7 +1909,7 @@ The first run also found that `scripts/build-image.sh service` had been failing 
 
 Two checks keep known vulnerabilities out of a release: the base images must be the newest builds of their tags, and the SBOMs must pass a vulnerability scan. `sign-release.sh` runs both before it signs anything, so an artifact that fails either is never signed and doesn't verify.
 
-**Base images.** All three are pinned in one file, `file-connector/docker/base-images.env`, as `<image>:<tag>@sha256:<digest>`: the tag is what we follow, the digest is what we build. `scripts/build-image.sh`, `ServiceImageIT` and `CustomerImageIT` read it, so the tests build on exactly what a release does.
+**Base images.** All three are pinned in one file, `docker/base-images.env`, as `<image>:<tag>@sha256:<digest>`: the tag is what we follow, the digest is what we build. `scripts/build-image.sh`, `ServiceImageIT` and `CustomerImageIT` read it, so the tests build on exactly what a release does.
 
 | Pin | Image | Tag followed |
 |---|---|---|
@@ -1924,9 +1924,9 @@ When a tag moves to a new digest, its maintainers have published a new build, us
 
 Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsafe.failIfNoSpecifiedTests=false`.
 
-**Vulnerability scan.** `scripts/vuln-scan.sh <sbom>…` scans CycloneDX SBOMs with grype 0.120.1 (a pinned container in the VM; its database is refreshed on each run and kept in a Docker volume). `sign-release.sh` scans the jar SBOM and both image SBOMs. The image SBOMs matter: they include the OS packages and the copies of libraries bundled inside other jars, which the Maven SBOM doesn't list.
+**Vulnerability scan.** `scripts/vuln-scan.sh <sbom>…` scans CycloneDX SBOMs with grype 0.120.1 (a pinned container in the VM; its database is refreshed on each run and kept in a Docker volume). `sign-release.sh` scans both jar SBOMs and all four image SBOMs. The image SBOMs matter: they include the OS packages and the copies of libraries bundled inside other jars, which the Maven SBOM doesn't list.
 - **Policy:** the scan fails on any High or Critical vulnerability with a fix available, meaning a newer package, library or base image exists. Unfixed findings and lower severities are reported but don't fail it: there is nothing to upgrade to yet, and they are what a base image update brings fixes for.
-- **Exceptions:** `file-connector/docker/vuln-accepted.yaml`, grype ignore rules, each naming the vulnerability and the package, with a reason. They are reviewed at each release. There is no override switch; an accepted finding is a written decision.
+- **Exceptions:** `docker/vuln-accepted.yaml`, grype ignore rules, each naming the vulnerability and the package, with a reason. They are reviewed at each release. There is no override switch; an accepted finding is a written decision.
 - **Output:** grype's full report next to each SBOM (`*.vulns.json`, kept, not published), a summary per SBOM and each failing finding.
 - The scan can be rerun on an earlier release's SBOMs to see whether newly published vulnerabilities affect it.
 
@@ -1988,7 +1988,7 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 
 | Test | Containers | Verifies |
 |---|---|---|
-| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The Spring Boot app as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. It drops a good and a bad file. The good file has one record with a missing field: that section arrives as `section.failed` and reads back in its original form, and the file still completes with `failedSectionCount` 1; the others read back as JSON rows. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. A second connector with a different lease name on the same directory is refused by the directory claim (§9.5) and the running one carries on. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
+| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The splitter as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. `TestLanding` lands a good and a bad file in the same catalog and announces them (§5.3.12). The good file has one record with a missing field: that section arrives as `section.failed` and reads back in its original form, and the file still completes with `failedSectionCount` 1; the others read back as JSON rows. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. A second connector with a different lease name on the same directory is refused by the directory claim (§9.5) and the running one carries on. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
 | `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = fileId, metadata headers, per-file order, `acks=all` + idempotence |
 | `RabbitMqIT` | `rabbitmq:4.2.9-management-alpine` | `message_id`, content type, headers, publisher confirms (`CORRELATED`) |
 | `ArtemisIT` | `apache/activemq-artemis:2.44.0-alpine` | `JMSXGroupID`, and duplicates dropped by `_AMQ_DUPL_ID` |
@@ -2002,7 +2002,7 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 | `AdlsIT` | `mcr.microsoft.com/azure-storage/azurite:3.35.0`, `postgres:18.4` | Azure Data Lake Storage Gen2 through `ADLSFileIO`: the same checks as `GcsIT`, except orphan cleanup, which Azurite can't support (no Data Lake directory listing). The test lists objects through the Blob API instead |
 | `AdlsAzureIT` | a real ADLS Gen2 storage account (opt-in), `postgres:18.4` | The `GcsIT` checks, orphan cleanup included, on Azure itself: listing goes through `ADLSFileIO.listPrefix`, as orphan cleanup's does. Skipped unless `SDH_ADLS_ACCOUNT` is set. Credentials: `SDH_ADLS_KEY` (account key), `SDH_ADLS_SAS`, or the default Azure credential chain; the identity needs Storage Blob Data Contributor. Each run creates a filesystem `sdh-it-<random>`, writes only synthetic data, and deletes it. Run: `set -a; source <env file>; set +a; scripts/it-minikube.sh -pl file-connector -am -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dit.test=AdlsAzureIT -Dfailsafe.failIfNoSpecifiedTests=false`. First run (2026-10-29, account in a new subscription, Standard LRS, hierarchical namespace): found the relative-path listing (§8.4); passes after the fix |
 | `PolarisIT` | `apache/polaris:1.8.0`, `chrislusf/seaweedfs:4.48`, `postgres:18.4` | The connector on a real Iceberg REST catalog (§8.1). The test creates the Polaris catalog through the management API (S3 storage with `stsUnavailable`, since SeaweedFS has no STS). It runs the `FullStackIT` flow on Polaris: ingest a good and a bad file, read every section back with a separate REST client, restore the archive, compact, delete a stray object, purge by retention, and check that no object holds plaintext or a filename. It also runs admin `status` against the same catalog. Fencing (§9.3) with two separate REST clients: a properties-only checkpoint commits as a marker snapshot; a stale holder is fenced after its successor establishes; the race between building and committing is rejected by the server (`assert-ref-snapshot-id`); and the control case shows a plain Iceberg transaction is not fenced. The SEDA queue stands in for the broker, which is covered elsewhere |
-| `ServiceImageIT`, `CustomerImageIT` | the service image (`Dockerfile`) or the customer image (the kit's `container/Dockerfile` on distroless, plus the inventory step) + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | Each image as deployed (§14.1, §14.3), sharing one test body (`ContainerImageItBase`): read-only root filesystem, `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges`, a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the inbound directory is a volume that a second container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`. It checks that the process runs as 10001 and can't write outside its volumes; that a good and a bad file end in `completed/` and `failed/`; that downstream reads every section back from the host; that the console log has no PHI marker or filename; that `sdh-admin status` and `sdh-admin restore` work inside the running container without taking the lease; that `/app/legal/` holds our notice (with the HL7 attribution), a complete `THIRD-PARTY.txt` (including zstd-jni and snappy-java, whose native libraries are unpacked) and the license texts; that `os-packages.txt` lists every OS package and each has its copyright file; and that the JRE's notices are present; and that nothing native or `hs_err` was written to `/tmp`. The container log is saved to `target/container-image-it.log` |
+| `ServiceImageIT`, `CustomerImageIT` | both applications' service images (each `Dockerfile`) or customer images (each kit's `container/Dockerfile` on distroless, plus the inventory step) + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | Both stages as deployed (§14.1, §14.3), sharing one test body (`ContainerImageItBase`): two landing nodes for one intake (active and standby, with a 15 s lease) and the splitter, each with a read-only root filesystem, a `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges` and a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the intake directory is a volume that a busybox container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`; `item.landed` goes over Kafka. It checks that each process runs as 10001 and can't write outside its volumes; that a good and a bad file are landed (moved to `landed/`), announced and split, and downstream reads every section back from the host; that `sdh-admin status` and `restore --to /tmp` work inside the running splitter without taking the lease, and the restored item, read the way the README describes (a busybox container sharing the splitter's process namespace reads `/proc/1/root/tmp/<id>`), matches what was delivered; that when the active landing node is killed, the standby takes the lease and lands the next file; that the splitter, restarted, takes the lease at epoch 2 and splits another; that no container's log has a PHI marker or filename; that nothing native or `hs_err` was written to `/tmp`; and, in both images, that `/app/legal/` holds our notice (the splitter's with the HL7 attribution), a complete `THIRD-PARTY.txt` (including zstd-jni and snappy-java, whose native libraries are unpacked), the license texts, and `os-packages.txt` with every OS package and its copyright file, and that the JRE's notices are present. The logs are saved to `target/<variant>-image-it.log` and `target/<variant>-landing-image-it.log` |
 | `VaultTransitIT` | `hashicorp/vault:2.1.1` (dev mode) | `vault-transit` built purely from connector settings (address, token file): wrap with associated data, ES256 signing, message round trip; a wrong token fails startup naming the KEK and HTTP 403 |
 
 **Running it on minikube with KVM2:** use `scripts/it-minikube.sh`, which needs no local Docker daemon. The script:
@@ -2020,7 +2020,7 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 - **Clock skew:** object timestamps come from the VM's clock, which ran about 0.1 s ahead of the host after repeated stops and starts. The orphan-cleanup checks plant a stray object and clean up straight away, so they run maintenance with its clock a minute ahead. In production, orphans must be at least `orphans.min-age` (3 days) old, so skew between the connector and the store doesn't matter.
 - **Status check:** `minikube status` exits non-zero without Kubernetes, so the script checks the host state instead.
 
-**Failsafe:** it tests `target/classes`, because Spring Boot's repackaged jar keeps classes under `BOOT-INF/`.
+**Failsafe:** it tests `target/classes`, because Spring Boot's repackaged jar keeps classes under `BOOT-INF/`. The image tests build from `../landing-connector/target/` too, so `landing-connector` comes before `file-connector` in the reactor.
 
 **Time:** with images cached in the VM, the whole build (135 unit tests + 18 ITs, including building the image) takes about 3 min 10 s. The first run pulls several GB of images.
 
@@ -2032,43 +2032,44 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 
 ### 15.2 Kubernetes run (`scripts/k8s-minikube.sh`)
 
-The customer image on a real Kubernetes cluster, deployed from the Deployment in the customer README (§14.3). The script takes that YAML block out of `file-connector/src/dist/README.md` and applies it unchanged apart from the image name, so the manifest customers copy is the one tested. `scripts/k8s-minikube.sh service` runs the service image instead.
+Both stages' customer images on a real Kubernetes cluster, each deployed from the Deployment in its customer README (§14.3). The script takes the YAML blocks out of `landing-connector/src/dist/README.md` and `file-connector/src/dist/README.md` and applies them unchanged apart from the image names, so the manifests customers copy are the ones tested. `scripts/k8s-minikube.sh service` runs the service images instead.
 
-**Cluster:** a minikube profile of its own, `sdh-k8s`: single node, Kubernetes 1.37, KVM2 with the Docker runtime, 4 CPUs, 8 GB (override with `SDH_K8S_*`). The `sdh-it` profile runs no Kubernetes, and the tests shouldn't share a cluster used for other work. The kubeconfig is `~/.kube/sdh-k8s`, so the user's current kubectl context doesn't change; kubectl comes from `minikube kubectl`. The image is built straight into the node's Docker daemon (`build-image.sh` with `SDH_IT_PROFILE=sdh-k8s`), so no registry is needed. `SDH_IT_STOP=1` stops the VM afterwards; `minikube delete -p sdh-k8s` removes it.
+**Cluster:** a minikube profile of its own, `sdh-k8s`: single node, Kubernetes 1.37, KVM2 with the Docker runtime, 4 CPUs, 8 GB (override with `SDH_K8S_*`). The `sdh-it` profile runs no Kubernetes, and the tests shouldn't share a cluster used for other work. The kubeconfig is `~/.kube/sdh-k8s`, so the user's current kubectl context doesn't change; kubectl comes from `minikube kubectl`. The images are built straight into the node's Docker daemon (`build-image.sh` with `SDH_IT_PROFILE=sdh-k8s`), so no registry is needed. `SDH_IT_STOP=1` stops the VM afterwards; `minikube delete -p sdh-k8s` removes it.
 
 **Setup:**
-- **Connector namespace** (`sdh-k8s-test`) enforces the **restricted** Pod Security Standard, so anything the manifest leaves out is refused by the API server. It holds the connector, the inbound PVC (the minikube hostpath provisioner) and a busybox pod that shares the PVC and delivers files.
+- **Stages' namespace** (`sdh-k8s-test`) enforces the **restricted** Pod Security Standard, so anything a manifest leaves out is refused by the API server. It holds the landing Deployment (two replicas), the splitter, the intake PVC (the minikube hostpath provisioner; ReadWriteOnce is enough on one node) and a busybox pod that shares the PVC and delivers files.
 - **Services namespace** (`sdh-k8s-test-services`): Postgres (lease and JDBC catalog), SeaweedFS and Kafka (`file-connector/src/test/k8s/services.yaml`). These images don't meet the restricted standard.
-- **Keys and configuration** as an operator would make them: `keytool` and `openssl` generate the keystore and PEM files, which go in a Secret; the passwords go in a Secret passed with `envFrom`; `application.yml` (`file-connector/src/test/k8s/application.yml`) goes in a ConfigMap.
+- **Keys and configuration** as an operator would make them: `keytool` and `openssl` generate the keystore and PEM files (the splitter's signing and inbox keys, the landing node's signing key, downstream's public key), which go in a Secret per application; the passwords go in a Secret passed with `envFrom`; each `application.yml` (`file-connector/src/test/k8s/application.yml` and `landing-application.yml`) goes in a ConfigMap.
 
 **What it checks:**
-- the Deployment is admitted under the restricted standard, and the pod runs as 10001 with a read-only root filesystem;
-- a good and a bad CSV file end in `completed/` and `failed/`;
-- all 23 messages reach Kafka, and none holds the PHI marker;
-- the pod log holds no PHI marker or filename;
-- `status` and `restore` run through `kubectl exec` with `--operator`, and the restored file matches;
-- the README's `kubectl debug` command starts and sees the connector's files;
-- after a pod delete, the replacement takes the lease over (epoch 2) and ingests;
-- after the JVM is killed with SIGKILL from the node (as the OOM killer would), the restarted connector waits for the dead holder's lease to lapse and takes over (epoch 3), with no `LEASE_HELD` exits. A forced pod delete wouldn't test this: the kubelet still sends SIGTERM first, so the JVM shuts down cleanly and releases the lease. Nor can a debug container send the signal, because the kernel ignores signals sent to a namespace's PID 1 from inside it;
-- a copy of the Deployment is refused with `LEASE_HELD`, and another connector on the same directory with `INBOUND_DIR_CLAIMED`, while the running one keeps the lease.
+- both Deployments are admitted under the restricted standard, and the pods run as 10001 with a read-only root filesystem and half their memory limit as heap;
+- one landing pod lands and the other waits as a standby;
+- a good and a bad CSV file are landed (moved to `landed/`), and two `item.landed` messages reach Kafka;
+- all 23 splitter messages reach Kafka; no message on either topic holds the PHI marker;
+- no pod log holds the PHI marker or a filename;
+- `status` and `restore --to /tmp` run through `kubectl exec` with `--operator`; the README's `kubectl debug` command starts, sees the splitter's files, and reads the restored item out of `/proc/1/root/tmp/`, which matches what was delivered;
+- after the active landing pod is deleted, the standby takes over and lands the next file, the splitter splits it, and the replacement pod becomes the new standby;
+- after a splitter pod delete, the replacement takes the lease over (epoch 2) and splits;
+- after the splitter's JVM is killed with SIGKILL from the node (as the OOM killer would), the restarted splitter waits for the dead holder's lease to lapse and takes over (epoch 3), with no `LEASE_HELD` exits. A forced pod delete wouldn't test this: the kubelet still sends SIGTERM first, so the JVM shuts down cleanly and releases the lease. Nor can a debug container send the signal, because the kernel ignores signals sent to a namespace's PID 1 from inside it;
+- a copy of the splitter's Deployment is refused with `LEASE_HELD`, and a landing node for another intake on the same directory with `INBOUND_DIR_CLAIMED`, while the running splitter keeps the lease.
 
-The connector's log is saved to `file-connector/target/k8s-minikube.log`. A run takes about 10 minutes.
+The splitter's log is saved to `file-connector/target/k8s-minikube.log` and the landing pods' to `k8s-minikube-landing.log`. A run takes about 12 minutes (first run of the two-stage version, 2026-11-03: all 39 checks pass; the standby took over 4 s after the active pod was deleted).
 
 **What it found, all fixed:**
 - **Secrets:** the README's Deployment passed only the lease password, so the connector exited with `sdh.crypto.keystore.password is required`. Secrets now come from one Secret through `envFrom` (§14.1).
 - **Operator name:** `kubectl exec` can't set an environment variable, and the customer image has no `env`, so `$SDH_OPERATOR` couldn't be given per command. The README suggested putting one name in the pod spec, which would credit every command to the same person. Admin commands now take `--operator <name>` (§11.4).
 - **`kubectl debug`:** refused in a restricted namespace, because the debug container didn't set `allowPrivilegeEscalation: false` or drop all capabilities. The README now adds `--profile=restricted`. The debug container then runs as 10001 and reaches the connector's files under `/proc/1/root/`.
-- **`kubectl cp`:** needs `tar` in the container, which the customer image doesn't have. The README now restores to the inbound volume instead.
+- **`kubectl cp`:** needs `tar` in the container, which the customer image doesn't have. The README restored to the inbound volume instead; since step 3b, which removed it, the README restores to `/tmp` and reads the file through `kubectl debug`.
 - **`application.yml.example`:** `recipient` and `recovery-public` were indented under `vault:`, so the file wasn't valid YAML.
 
 - **Takeover after a crash:** the restarted connector exited with `LEASE_HELD` until the old lease lapsed, so Kubernetes' restart delays added to the TTL: 54–94 s, with the pod in `CrashLoopBackOff`. Startup now waits for the lease (§9.3): 57 s, no restarts.
-- **Test isolation:** minikube's hostpath provisioner reuses a claim's directory, contents and all, for the same namespace and claim name. The script empties the inbound volume before each run.
+- **Test isolation:** minikube's hostpath provisioner reuses a claim's directory, contents and all, for the same namespace and claim name. The script empties the intake volume before each run.
 
 **Not covered:** managed clusters (EKS, AKS, GKE) and their storage classes; NetworkPolicies; a ReadWriteMany volume shared with a delivery service on another node; KMS and object-storage credentials from workload identity.
 
 ### 15.3 Demonstration (`-Pdemo`)
 
-A demonstration of the connector at work, for showing people rather than testing: C-CDA files are delivered one at a time, and the console shows the connector's log, its audit events, and its OpenTelemetry traces and metrics as each goes through. At the end, a downstream consumer reads the converted documents back and excerpts are shown.
+A demonstration of the splitter at work, for showing people rather than testing: C-CDA files are landed one at a time and announced to the splitter, and the console shows its log, its audit events, and its OpenTelemetry traces and metrics as each goes through. `TestLanding` stands in for the landing node, writing to the same catalog and sending sealed `item.landed` messages over a SEDA queue; the landing node itself isn't run. At the end, a downstream consumer reads the converted documents back and excerpts are shown.
 
 **Running it:** `./mvnw -Pdemo -pl file-connector -am verify`, or the NetBeans actions (root project > Run Maven). Only `-Pdemo` includes `*Demo.java`, so no normal build, `-Pit` or `-Pperf` run runs it.
 - **Demo (in-process):** one JVM, no Docker, under a minute. Embedded Postgres for the lease and JDBC catalog, Iceberg tables on local disk under `file-connector/target/demo/warehouse/`, and a Camel SEDA queue standing in for the broker.
@@ -2088,10 +2089,10 @@ A demonstration of the connector at work, for showing people rather than testing
 | `07-epic-inpatient.xml` | one document | completed: the connector carries on after failures |
 
 **What the console shows,** for each file:
-- the file's name, what should happen, and its delivery (written under a hidden name, then renamed);
-- the connector's log lines and audit events (`file.discovered`, `file.started`, `batch.committed`, `section.failed`, `file.failing`, `file.archived`, `file.completed`), each with its trace and span IDs;
-- the result: the file ID, the finished-file record from `completed/` or `failed/`, and whether it was as expected;
-- `[otel trace]`: the file's trace as a tree (`ingest.file` > `split.batch` > `storage.commit`, `publish.batch`, `archive`) with durations and attributes;
+- the file's name, what should happen, and its landing (the item ID, and the `item.landed` message sent);
+- the splitter's log lines and audit events (`inbox.added`, `file.started`, `batch.committed`, `section.failed`, `file.failing`, `file.split`, `file.completed`, `file.failed`), each with its trace and span IDs;
+- the result, from the splitter's checkpoint once the item is finished: its state, section counts or failure, and whether it was as expected;
+- `[otel trace]`: the item's trace as a tree (`ingest.item` > `split.batch` > `storage.commit`, `publish.batch`) with durations and attributes;
 - `[otel log]`: the audit events as OpenTelemetry log records;
 - `[otel metrics]` every 15 s: the `sdh.*` metrics as running totals.
 

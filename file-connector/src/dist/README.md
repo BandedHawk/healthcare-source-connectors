@@ -2,9 +2,11 @@
 
 Copyright (c) 2026 Smile Digital Health Inc. All rights reserved. See `legal/LICENSE`.
 
-The file connector watches an inbound directory, splits each healthcare file (C-CDA, X12, EDIFACT, FHIR, CSV and
-others) into sections, stores every section encrypted in Apache Iceberg tables, and announces each one on a message
-queue with a signed, encrypted message.
+The file connector takes each healthcare file (C-CDA, X12, EDIFACT, FHIR, CSV and others) that a landing node has
+landed, splits it into sections, stores every section encrypted in Apache Iceberg tables, and announces each one on a
+message queue with a signed, encrypted message. Files reach it only through a landing node (the
+`landing-connector` distribution), which stores each one as received and tells the file connector about it with an
+`item.landed` message.
 
 This distribution contains no Java runtime. Run it on a host with Java 25, or build a container image from it
 on a Java 25 base image of your choice.
@@ -57,9 +59,11 @@ require the signature before the image runs.
 - A message broker: Kafka, Amazon SQS, Google Pub/Sub, Azure Service Bus or Event Hubs, ActiveMQ Artemis or RabbitMQ.
 - Keys: a local keystore and PEM files, or a KMS (AWS KMS, Azure Key Vault or HashiCorp Vault Transit). Google
   Cloud KMS is available but untested against the live service; contact Smile Digital Health before relying on
-  it in production.
+  it in production. Besides its own keys, the connector needs `landed-items-kek` (to read landed items), its inbox
+  key pair (the landing node encrypts `item.landed` to the public half) and the landing node's signing public key.
+- A landing node for the intake, and the queue it sends `item.landed` on.
 
-Run exactly one connector per inbound directory. A second instance is refused at startup, after waiting up to
+Run exactly one connector per intake. A second instance is refused at startup, after waiting up to
 70 seconds (the lease's TTL plus its safety margin) in case the first one has crashed. A connector restarted after a
 crash waits the same way and takes over once the old lease lapses.
 
@@ -69,6 +73,7 @@ Copy `config/application.yml.example` to `config/application.yml` and edit it. P
 variables, never in the file:
 - `SDH_CRYPTO_KEYSTORE_PASSWORD`
 - `SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE`
+- `SDH_CRYPTO_KEYS_INBOX_PASSPHRASE`
 - `SDH_LEASE_JDBC_PASSWORD`
 - catalog and storage credentials
 
@@ -107,21 +112,22 @@ The base image brings its own notices. For Debian-based images such as distroles
 
 ## Deploy on Kubernetes
 
-The connector needs:
-- **`/data/inbound`:** a writable volume, shared with whatever delivers files.
+The connector needs no data volume: files come from landing. It needs:
 - **`/tmp`:** a writable `emptyDir` of about 1 GiB; `noexec` is fine. Uploads to object storage are staged here, with section data already encrypted.
 - **`/run/secrets`:** the keys, as a read-only secret volume (local key mode only).
 - **Configuration:** a ConfigMap mounted as `application.yml`, with `SPRING_CONFIG_ADDITIONAL_LOCATION` pointing at it.
 - **Secrets:** a Secret whose keys are environment variable names, passed whole with `envFrom`. It holds
   `SDH_CRYPTO_KEYSTORE_PASSWORD`, `SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE` (both local key mode only),
+  `SDH_CRYPTO_KEYS_INBOX_PASSPHRASE`,
   `SDH_LEASE_JDBC_PASSWORD`, and whatever `application.yml` refers to as `${...}`, such as catalog and storage
   credentials.
 
 ```sh
 kubectl create secret generic file-connector-keys --from-file=keks.p12 --from-file=signing.pem \
-  --from-file=recipient.pem --from-file=recovery-public.pem
+  --from-file=recipient.pem --from-file=inbox.pem --from-file=landing-signer.pem
 kubectl create secret generic file-connector-env --from-literal=SDH_CRYPTO_KEYSTORE_PASSWORD=… \
-  --from-literal=SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE=… --from-literal=SDH_LEASE_JDBC_PASSWORD=…
+  --from-literal=SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE=… --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE=… \
+  --from-literal=SDH_LEASE_JDBC_PASSWORD=…
 kubectl create configmap file-connector-config --from-file=application.yml
 ```
 
@@ -130,7 +136,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: file-connector }
 spec:
-  replicas: 1                          # one connector per inbound directory
+  replicas: 1                          # one connector per intake
   strategy: { type: Recreate }
   selector: { matchLabels: { app: file-connector } }
   template:
@@ -155,12 +161,10 @@ spec:
             capabilities: { drop: [ALL] }
           resources: { limits: { memory: 2Gi } }   # the heap is half the limit; the rest is the JVM's own memory and operator commands
           volumeMounts:
-            - { name: inbound, mountPath: /data/inbound }
             - { name: tmp, mountPath: /tmp }
             - { name: keys, mountPath: /run/secrets, readOnly: true }
             - { name: config, mountPath: /config, readOnly: true }
       volumes:
-        - { name: inbound, persistentVolumeClaim: { claimName: file-connector-inbound } }
         - { name: tmp, emptyDir: { sizeLimit: 1Gi } }
         - { name: keys, secret: { secretName: file-connector-keys, defaultMode: 0440 } }
         - { name: config, configMap: { name: file-connector-config } }
@@ -178,8 +182,9 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 ```
 
 `--operator` names who is running the command, for the audit log; on a host, `$SDH_OPERATOR` does the same.
-`restore` writes to the inbound volume with `--to /data/inbound/failed` (never picked up); take the file from there
-through whatever delivers files. `kubectl cp` can't copy out of this image, because it needs `tar`.
+`restore --file-id <id> --to /tmp` decrypts a landed item into the pod's `/tmp`. `kubectl cp` can't copy out of this
+image, because it needs `tar`; read it through a debug container instead (below), from `/proc/1/root/tmp/<id>`,
+and delete it when you're done.
 
 ### Troubleshooting
 

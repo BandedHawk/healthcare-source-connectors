@@ -119,7 +119,20 @@ public final class TestLanding
     public LandedItem land(String content, String originalName)
             throws Exception
     {
-        byte[] bytes = content.getBytes(UTF_8);
+        return land(content.getBytes(UTF_8), originalName);
+    }
+
+    /**
+     * Lands one item, byte for byte.
+     *
+     * @param bytes        its bytes
+     * @param originalName its original name; may be null
+     * @return the landed item
+     * @throws Exception if it can't be landed
+     */
+    public LandedItem land(byte[] bytes, String originalName)
+            throws Exception
+    {
         return lander.land(new NewItem(UuidV7.next(System.currentTimeMillis()),
                 ItemKind.FILE, null, originalName, null),
                 offset -> new ByteArrayInputStream(bytes, (int) offset,

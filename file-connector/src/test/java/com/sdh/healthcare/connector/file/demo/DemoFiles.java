@@ -66,7 +66,7 @@ final class DemoFiles {
                                 + " is stored in its original form (CONVERT_XML_MALFORMED) and the other two convert"),
                 new DemoFile("05-truncated-batch.xml", unclosedBatch(epic5, truncated), "FAILED", 1, 0,
                         "fails: the file stops part-way through its second document (PARSE_UNBALANCED_ELEMENT); the"
-                                + " first document was already stored, and the original goes to failed_files"),
+                                + " first document was already stored, and the original stays in landing"),
                 new DemoFile("06-utf16-document.xml", utf16(alice), "FAILED", 0, 0,
                         "fails at once: UTF-16 isn't supported (PARSE_XML_UNSUPPORTED_ENCODING)"),
                 new DemoFile("07-epic-inpatient.xml", single(epic7), "COMPLETED", 1, 0,

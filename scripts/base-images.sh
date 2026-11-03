@@ -2,7 +2,7 @@
 # Checks or updates the pinned base images (design §14.5) against their registries.
 #
 #   scripts/base-images.sh            # check: exit 1 if any pinned tag has moved to a new digest
-#   scripts/base-images.sh update     # rewrite file-connector/docker/base-images.env with the current digests
+#   scripts/base-images.sh update     # rewrite docker/base-images.env with the current digests
 #
 # Each pin is <image>:<tag>@sha256:<digest>. The tag is what we follow; the digest is what we build. When a tag
 # moves, its maintainers have published a new build of it, usually with security fixes. After an update, rebuild
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PINS="$ROOT/file-connector/docker/base-images.env"
+PINS="$ROOT/docker/base-images.env"
 MODE="${1:-check}"
 [[ "$MODE" == "check" || "$MODE" == "update" ]] || { echo "usage: $0 [check|update]" >&2; exit 2; }
 

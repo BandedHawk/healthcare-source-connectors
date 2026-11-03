@@ -1,8 +1,12 @@
-# Connector configuration for scripts/k8s-minikube.sh, mounted from the ConfigMap file-connector-config as the
+# Splitter configuration for scripts/k8s-minikube.sh, mounted from the ConfigMap file-connector-config as the
 # README describes. Secrets come from the file-connector-env secret as environment variables. The recipient
 # fingerprint and the services' namespace (SERVICES_NS) are filled in by the script.
 sdh:
-  file: { min-age: 500ms, poll-interval: 200ms }
+  landing:
+    intake: claims
+    # Automatic offset commits, one message per poll, so a commit covers only messages already handled;
+    # breakOnFirstError keeps a failed one from being skipped (design §5.3.12).
+    queue-uri: "kafka:sdh-landing-claims?brokers=kafka.SERVICES_NS:9092&groupId=file-connector&autoOffsetReset=earliest&maxPollRecords=1&breakOnFirstError=true"
   split:
     format: csv
     options: { csv: { header: true } }
@@ -25,11 +29,11 @@ sdh:
     keystore: { path: /run/secrets/keks.p12 }
     keys:
       sections-kek: sections-kek/1
-      source-files-kek: source-files-kek/1
-      failed-files-kek: failed-files-kek/1
+      landed-items-kek: landed-items-kek/1
       signing: { kid: connector-2026, pem: /run/secrets/signing.pem }
       recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "RECIPIENT_SHA256" }
-      recovery-public: /run/secrets/recovery-public.pem
+      inbox: { kid: splitter-2026, pem: /run/secrets/inbox.pem }
+      landing-signer: { kid: landing-2026, pem: /run/secrets/landing-signer.pem }
   queue:
     type: kafka
     uri: "kafka:sdh-sections?brokers=kafka.SERVICES_NS:9092"

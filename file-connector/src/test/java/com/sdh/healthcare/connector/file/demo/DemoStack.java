@@ -61,6 +61,9 @@ interface DemoStack extends AutoCloseable {
 
     String describe();
 
+    /** The Iceberg catalog's properties, shared by the splitter and the landing stand-in. */
+    Map<String, String> catalog();
+
     /** The catalog, lease and queue settings for the connector. */
     Map<String, String> properties();
 
@@ -90,7 +93,8 @@ interface DemoStack extends AutoCloseable {
                     + "), a SEDA queue standing in for the broker";
         }
 
-        Map<String, String> catalog() {
+        @Override
+        public Map<String, String> catalog() {
             Map<String, String> c = new LinkedHashMap<>();
             c.put("type", "jdbc");
             c.put("uri", pg.getJdbcUrl("postgres", "postgres"));
@@ -179,7 +183,8 @@ interface DemoStack extends AutoCloseable {
                     + "), Kafka (" + kafka.getBootstrapServers() + ")";
         }
 
-        Map<String, String> catalog() {
+        @Override
+        public Map<String, String> catalog() {
             Map<String, String> c = new LinkedHashMap<>();
             c.put("type", "jdbc");
             c.put("uri", postgres.getJdbcUrl());

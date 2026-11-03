@@ -365,10 +365,11 @@ class FullStackIT {
             }
             Thread.sleep(1000);
         }
-        assertThat(exported).contains("\"ingest.file\"", "\"split.batch\"", "\"storage.commit\"",
-                "\"publish.batch\"", "\"archive\"", "\"maintenance\"",
-                "sdh.audit.file.started", "sdh.audit.batch.committed", "sdh.audit.file.completed",
-                "sdh.audit.file.failed", "sdh.audit.lease.acquired", "sdh.audit.connector.directory_claimed", "sdh.audit.maintenance.retention",
+        assertThat(exported).contains("\"ingest.item\"", "\"split.batch\"", "\"storage.commit\"",
+                "\"publish.batch\"", "\"maintenance\"",
+                "sdh.audit.inbox.added", "sdh.audit.file.started", "sdh.audit.batch.committed",
+                "sdh.audit.file.completed", "sdh.audit.file.failed", "sdh.audit.lease.acquired",
+                "sdh.audit.maintenance.retention",
                 "sdh.sections.stored", "sdh.files.completed", "sdh.files.failed", "sdh.commit.duration");
         assertThat(exported).as("no PHI or filenames in exported telemetry")
                 .doesNotContain(MARKER).doesNotContain("good.csv").doesNotContain("bad.csv");
