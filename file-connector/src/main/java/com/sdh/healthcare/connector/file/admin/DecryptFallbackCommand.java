@@ -9,7 +9,7 @@ package com.sdh.healthcare.connector.file.admin;
 
 import com.sdh.healthcare.connector.core.crypto.RecoveryEnvelope;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;

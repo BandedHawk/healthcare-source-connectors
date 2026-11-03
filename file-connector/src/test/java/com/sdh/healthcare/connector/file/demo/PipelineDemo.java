@@ -16,11 +16,11 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFai
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.file.TestKeys;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.file.demo.DemoFiles.DemoFile;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
-import com.sdh.healthcare.connector.file.telemetry.AllowListSpanExporter;
-import com.sdh.healthcare.connector.file.telemetry.AuditOnlyLogRecordExporter;
+import com.sdh.healthcare.connector.runtime.telemetry.AllowListSpanExporter;
+import com.sdh.healthcare.connector.runtime.telemetry.AuditOnlyLogRecordExporter;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;

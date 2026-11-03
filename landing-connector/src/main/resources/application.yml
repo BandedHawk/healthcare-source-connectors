@@ -1,0 +1,45 @@
+spring:
+  application:
+    name: landing-connector
+  main:
+    banner-mode: off
+
+camel:
+  main:
+    name: landing-connector
+    # PHI hygiene (design §7.5): no body logging, tracing or message history.
+    tracing: false
+    backlog-tracing: false
+    message-history: false
+    log-mask: true
+    log-exhausted-message-body: false
+    # Keeps the JVM alive: the app has no web server or other non-daemon
+    # thread.
+    run-controller: true
+
+# Telemetry (design §12): exported through sdh.telemetry.otlp with the PHI
+# allow-list filter, so Boot's own OTLP exporters are off.
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+    export:
+      otlp:
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
+  otlp:
+    metrics:
+      export:
+        enabled: false
+
+# Azure's JDK HTTP client warns on every request about a header it sets
+# itself (design §8.1).
+logging:
+  level:
+    com.azure.core.http.jdk.httpclient.JdkHttpClient: error
+
+sdh:
+  connector-id: landing-connector

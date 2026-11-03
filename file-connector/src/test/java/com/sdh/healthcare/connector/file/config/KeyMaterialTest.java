@@ -7,6 +7,9 @@
 
 package com.sdh.healthcare.connector.file.config;
 
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.Pem;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -31,21 +34,21 @@ class KeyMaterialTest {
     @TempDir
     Path dir;
 
-    static ConnectorProperties.Crypto crypto(TestKeys k, String recipientPin, Path signingPem) throws Exception {
+    static CommonSettings.Crypto crypto(TestKeys k, String recipientPin, Path signingPem) throws Exception {
         return crypto(k, recipientPin, signingPem, "local", "local", null);
     }
 
-    static ConnectorProperties.Crypto crypto(TestKeys k, String recipientPin, Path signingPem, String wrap,
+    static CommonSettings.Crypto crypto(TestKeys k, String recipientPin, Path signingPem, String wrap,
             String sign, String signingKeyRef) {
-        return new ConnectorProperties.Crypto(wrap, sign,
-                new ConnectorProperties.Keystore(k.keystore, TestKeys.KS_PASSWORD),
-                new ConnectorProperties.Keys(TestKeys.SECTIONS, TestKeys.SOURCE, TestKeys.FAILED,
-                        new ConnectorProperties.Signing("connector-2026", signingPem, TestKeys.SIGNING_PASSPHRASE,
+        return new CommonSettings.Crypto(wrap, sign,
+                new CommonSettings.Keystore(k.keystore, TestKeys.KS_PASSWORD),
+                new CommonSettings.Keys(TestKeys.SECTIONS, TestKeys.SOURCE, TestKeys.FAILED, null,
+                        new CommonSettings.Signing("connector-2026", signingPem, TestKeys.SIGNING_PASSPHRASE,
                                 signingKeyRef),
-                        new ConnectorProperties.Recipient("downstream-2026", k.recipientPem, recipientPin),
+                        new CommonSettings.Recipient("downstream-2026", k.recipientPem, recipientPin),
                         k.recoveryPem),
-                new ConnectorProperties.Aws(null, null), new ConnectorProperties.Gcp(null),
-                new ConnectorProperties.Vault(null, null, null, "transit", null));
+                new CommonSettings.Aws(null, null), new CommonSettings.Gcp(null),
+                new CommonSettings.Vault(null, null, null, "transit", null));
     }
 
     @Test
@@ -97,8 +100,8 @@ class KeyMaterialTest {
         assertThatThrownBy(() -> KeyMaterial.load(crypto(k, pin, plain)))
                 .isInstanceOf(GeneralSecurityException.class).hasMessageContaining("encrypted");
 
-        ConnectorProperties.Crypto c = crypto(k, pin, k.signingPem);
-        assertThatThrownBy(() -> KeyMaterial.load(new ConnectorProperties.Crypto("hsm-x", "local", c.keystore(),
+        CommonSettings.Crypto c = crypto(k, pin, k.signingPem);
+        assertThatThrownBy(() -> KeyMaterial.load(new CommonSettings.Crypto("hsm-x", "local", c.keystore(),
                 c.keys(), c.aws(), c.gcp(), c.vault()))).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown key provider");
     }

@@ -7,6 +7,7 @@
 
 package com.sdh.healthcare.connector.file.it;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -15,8 +16,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.file.TestKeys;
-import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import java.nio.file.Files;
 import java.security.PublicKey;
 import java.security.SecureRandom;
@@ -38,17 +38,17 @@ final class KmsItSupport {
         return new TestKeys(Files.createTempDirectory("sdh-kms-it"));
     }
 
-    static ConnectorProperties.Crypto crypto(TestKeys k, String provider, String sectionsKek, String sourceKek,
-            String failedKek, String signingKeyRef, ConnectorProperties.Aws aws, ConnectorProperties.Vault vault)
+    static CommonSettings.Crypto crypto(TestKeys k, String provider, String sectionsKek, String sourceKek,
+            String failedKek, String signingKeyRef, CommonSettings.Aws aws, CommonSettings.Vault vault)
             throws Exception {
-        return new ConnectorProperties.Crypto(provider, provider,
-                new ConnectorProperties.Keystore(null, null),
-                new ConnectorProperties.Keys(sectionsKek, sourceKek, failedKek,
-                        new ConnectorProperties.Signing("connector-kms", null, null, signingKeyRef),
-                        new ConnectorProperties.Recipient("downstream-2026", k.recipientPem,
+        return new CommonSettings.Crypto(provider, provider,
+                new CommonSettings.Keystore(null, null),
+                new CommonSettings.Keys(sectionsKek, sourceKek, failedKek, null,
+                        new CommonSettings.Signing("connector-kms", null, null, signingKeyRef),
+                        new CommonSettings.Recipient("downstream-2026", k.recipientPem,
                                 KeyMaterial.fingerprint(k.recipient.getPublic())),
                         k.recoveryPem),
-                aws, new ConnectorProperties.Gcp(null), vault);
+                aws, new CommonSettings.Gcp(null), vault);
     }
 
     /**

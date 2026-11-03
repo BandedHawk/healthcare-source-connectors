@@ -7,6 +7,7 @@
 
 package com.sdh.healthcare.connector.file.it;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import static com.sdh.healthcare.connector.file.it.KmsItSupport.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -18,8 +19,7 @@ import com.azure.security.keyvault.keys.models.KeyOperation;
 import com.github.nagyesta.lowkeyvault.testcontainers.LowkeyVaultContainer;
 import com.github.nagyesta.lowkeyvault.testcontainers.LowkeyVaultContainerBuilder;
 import com.sdh.healthcare.connector.file.TestKeys;
-import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.kms.AzureKeyVaultKeyProvider;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -96,9 +96,9 @@ class AzureKeyVaultIT {
         // The provider's own emulator-friendly constructor: same builder code as production, plus our HTTP client.
         AzureKeyVaultKeyProvider provider = AzureKeyVaultKeyProvider.create(credential, emulatorHttp());
         TestKeys k = localKeys();
-        ConnectorProperties.Crypto c = crypto(k, "azure-keyvault", id.get("sections-kek"), id.get("source-kek"),
-                id.get("failed-kek"), id.get("signing"), new ConnectorProperties.Aws(null, null),
-                new ConnectorProperties.Vault(null, null, null, "transit", null));
+        CommonSettings.Crypto c = crypto(k, "azure-keyvault", id.get("sections-kek"), id.get("source-kek"),
+                id.get("failed-kek"), id.get("signing"), new CommonSettings.Aws(null, null),
+                new CommonSettings.Vault(null, null, null, "transit", null));
         try (KeyMaterial km = KeyMaterial.load(c, (name, cfg) -> provider)) {
             // The wrapped key records the versioned key ID, so a rotated key still unwraps old data.
             assertThat(km.wrap().wrap(id.get("sections-kek"), new byte[32]).keyRef()).isEqualTo(id.get("sections-kek"));

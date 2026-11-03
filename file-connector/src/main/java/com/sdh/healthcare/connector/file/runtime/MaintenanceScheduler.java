@@ -7,6 +7,7 @@
 
 package com.sdh.healthcare.connector.file.runtime;
 
+import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.contract.table.SectionsTable;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;

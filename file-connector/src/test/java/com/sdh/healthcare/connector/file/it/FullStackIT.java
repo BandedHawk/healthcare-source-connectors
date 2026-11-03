@@ -7,6 +7,7 @@
 
 package com.sdh.healthcare.connector.file.it;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -21,10 +22,10 @@ import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.core.storage.ArchiveReader;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
-import com.sdh.healthcare.connector.file.ingest.InboundDirectoryClaim;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
-import com.sdh.healthcare.connector.file.runtime.FatalExit;
+import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
@@ -345,9 +346,9 @@ class FullStackIT {
 
         // A second connector on the same directory with a different lease name (so the lease can't stop it) is
         // refused by the directory claim before it opens storage, and releases its lease (design §9.5).
-        ConnectorProperties.Lease l = props.lease();
+        CommonSettings.Lease l = props.lease();
         ConnectorProperties second = new ConnectorProperties(props.connectorId(), props.file(), props.split(),
-                props.storage(), new ConnectorProperties.Lease(l.jdbc(), "second-connector", l.ttl(),
+                props.storage(), new CommonSettings.Lease(l.jdbc(), "second-connector", l.ttl(),
                         l.renewInterval(), l.safetyMargin()),
                 props.crypto(), props.queue(), props.retry(), props.maintenance(), props.telemetry(),
                 props.encryptWorkers());

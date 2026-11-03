@@ -45,6 +45,20 @@ public enum ErrorCode
     INBOUND_DIR_CLAIMED,
 
     /**
+     * A read-write intake's source can't be written, so items couldn't be
+     * deleted, moved or renamed after landing (design §5.3). The landing
+     * node won't start.
+     */
+    INTAKE_NOT_WRITABLE,
+
+    /**
+     * An intake's source can't be reached or listed, such as a network
+     * share that is down. The landing node keeps trying, and reports when
+     * the source is back.
+     */
+    INTAKE_UNREACHABLE,
+
+    /**
      * A commit that conflicts with another writer. Not raised at present:
      * conflicting commits are retried (design §9).
      */

@@ -7,13 +7,14 @@
 
 package com.sdh.healthcare.connector.file.admin;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.contract.table.SectionsTable;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.storage.ArchiveTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import java.time.Duration;
@@ -93,7 +94,7 @@ final class AdminContext implements AutoCloseable {
 
     JdbcLeaseStore leaseStore() {
         if (leaseDb == null) {
-            ConnectorProperties.Jdbc jdbc = props.lease().jdbc();
+            CommonSettings.Jdbc jdbc = props.lease().jdbc();
             if (jdbc.url() == null || jdbc.url().isBlank()) {
                 throw new IllegalArgumentException("sdh.lease.jdbc.url is required");
             }

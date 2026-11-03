@@ -16,9 +16,9 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileComple
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.core.storage.ArchiveReader;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
-import com.sdh.healthcare.connector.file.runtime.FatalExit;
+import com.sdh.healthcare.connector.runtime.FatalExit;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;

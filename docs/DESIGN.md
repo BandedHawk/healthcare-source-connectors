@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-03 (ar): built step 2 of landing (§5.3.10): `landing-connector`, a Spring Boot application with a local directory intake. It lists the directory with Camel's `file` component, lands each item once it has settled (or its `.done` marker is there), writes the ledger entry, sends `item.landed`, and on a read-write source deletes, moves or renames the item. It recovers from a crash at any step, and can run as a standby. What the two applications share moved from `file-connector` into a new library, `connector-runtime` (§3): the common settings, key loading, publishers, telemetry export, the directory claim, the lease database and the exit hook. New error codes `INTAKE_NOT_WRITABLE` and `INTAKE_UNREACHABLE`. Retention and maintenance of the landing tables, and an image for the node, are still to do.
+
 Revision 2026-11-03 (aq): built step 1 of landing (§5.3.10), in `connector-core` `landing/`. `ItemLander` stores an item as a stream in encrypted chunks, resumably, with a summary row and the same keyed digest as archived files; `LandedItems` reads it back and checks it. `LandingLedger` and `LedgerIndex` record what has been landed, without PHI, and repair the last entry after a crash. `LandingCheckpoint` holds progress. `item.landed` is contract 2.2 (§10.1), and the item ID becomes the splitter's file ID (§5.3.6). `LeaseKeeper.acquireAsStandby` waits for the lease for as long as it takes (§5.3.5). Nothing runs these yet; the landing node is step 2.
 
 Revision 2026-11-03 (ap): documentation only. Ingestion becomes two stages (§5.3, not built), replacing the source-endpoint plan of revision an. A landing node per intake, with a standby, takes data from directories, SFTP, SMB, HTTP push, the seven queues, buckets and Iceberg tables through a fixed list of Camel components, and stores it as received in its own namespace, `sdh_landing`. It then signals the splitter with an `item.landed` message. Read-only sources are tracked with a ledger, so nothing is landed twice. The landed copy replaces `source_files`, and the splitter reads only from landing. How producers find the source of a problem in their data is still open (§5.3.8).
@@ -206,7 +208,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │       ├── crypto/       KeyProvider SPI, section key derivation, chunk encryption
 │       └── table/        sections table schema, partition spec, sort order
 ├── connector-queue-reader/              library jar for consumers (§10.2); depends on contract only
-├── connector-kms/                       library jar: KMS KeyProviders (§7.4); used by file-connector, optional for readers
+├── connector-kms/                       library jar: KMS KeyProviders (§7.4); used by the applications, optional for readers
 │   └── com.sdh.healthcare.connector.reader
 ├── connector-core/                      library jar (no main class)
 │   └── com.sdh.healthcare.connector.core
@@ -218,17 +220,30 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │       ├── publish/      MessagePublisher SPI, OutboundMessage (broker adapters live in the connector app, §10.3)
 │       ├── telemetry/    Telemetry facade (spans, audit events, metrics), Attr allow-list, Fields, error codes
 │       └── pipeline/     source-agnostic ingest pipeline (read → split → encrypt → write → commit → publish)
+├── connector-runtime/                   library jar: what the two applications share
+│   └── com.sdh.healthcare.connector.runtime
+│       ├── config/       CommonSettings (shared sdh.* records), ConnectorSettings, KeyMaterial, PEM reading
+│       ├── publish/      QueueType (broker adapters), Publishers, CamelMessagePublisher, ServiceBusPublisher
+│       ├── telemetry/    OTLP exporters, AllowListSpanExporter, AuditOnlyLogRecordExporter
+│       └── FatalExit, InboundDirectoryClaim (§9.5), LeaseDatabase
+├── landing-connector/                   Spring Boot application: the landing node (§5.3)
+│   └── com.sdh.healthcare.connector.landing
+│       ├── LandingConnectorApplication
+│       ├── config/       LandingProperties (sdh.*), SourceSettings (checked source settings)
+│       ├── runtime/      LandingRuntime (startup order), LandingConfiguration (Spring wiring, gauges)
+│       ├── route/        IntakeRoute (directory listing)
+│       └── intake/       IntakeService (land, record, announce, finish; recovery), Readiness, Announcer,
+│                         IntakeSource, LocalDirectorySource
 └── file-connector/                      Spring Boot application; service image (Dockerfile, §14.1); distribution kit
     │                                    (src/dist, src/assembly) and customer image (§14.3)
     └── com.sdh.healthcare.connector.file
         ├── FileConnectorApplication
-        ├── config/       ConnectorProperties (sdh.*), KeyMaterial (local key provider), PEM reading
-        ├── runtime/      ConnectorRuntime (startup order), ConnectorConfiguration (Spring wiring), FatalExit,
+        ├── config/       ConnectorProperties (sdh.*; the shared records are in connector-runtime)
+        ├── runtime/      ConnectorRuntime (startup order), ConnectorConfiguration (Spring wiring),
         │                 MaintenanceScheduler
         ├── route/        InboundRoute (directory discovery)
         ├── ingest/       InboundService (per-file handling, in-progress recovery, backoff)
-        ├── publish/      QueueType (broker adapters), CamelMessagePublisher
-        ├── telemetry/    OTLP exporters, AllowListSpanExporter, AuditOnlyLogRecordExporter, inbound age gauge
+        ├── telemetry/    InboundGauge (inbound age gauge)
         ├── source/       LocalSourceFile, DirectoryOutcomeRecorder (completed/ and failed/ records, local fallback)
         └── admin/        operator commands: AdminCli (restore, decrypt-fallback, status), §11.4
 ```
@@ -321,9 +336,9 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Landing: two-stage ingestion (step 1 built)
+### 5.3 Landing: two-stage ingestion (steps 1 and 2 built)
 
-Decided 2026-11-03. Step 1 of §5.3.10 is built: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Nothing runs them yet; the landing node is step 2. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own.
+Decided 2026-11-03. Steps 1 and 2 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). The splitter doesn't read from landing yet (step 3). Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own.
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
@@ -414,8 +429,8 @@ Chunks committed without a summary row belong to an item that wasn't finished (a
 #### 5.3.3 Already landed, and duplicates
 
 - **The key** is the source reference plus size and modification time (§5.3.2). An item seen with the same key is skipped.
-- **Changed in place:** the same path with a new size or time is landed as a new item, and `item.changed` is logged with both item IDs. Producers don't append, so this means a file was rewritten.
-- **Same content, new name:** the item is landed again, as agreed, and `item.duplicate_content` is logged with both item IDs, because their content digests match. The splitter processes it like any other.
+- **Changed in place:** the same path with a new size or time is landed as a new item. Producers don't append, so this means a file was rewritten. An item that changes *while* it is being landed is given up (`item.changed`, with its item ID) and landed afresh once it settles again. *Planned:* logging the earlier item's ID with a rewrite.
+- **Same content, new name:** the item is landed again, as agreed, and `item.duplicate_content` is logged with the new item's ID, the number of earlier items with the same content, and the first of them, because their content digests match. The splitter processes it like any other.
 - **Lots of old files:** every poll lists the whole source, and on a read-only source that list only grows. Listing time and size are reported (`sdh.intake.list_duration`, `sdh.intake.listed_items`) so an operator sees it before it hurts. Producers can help by writing into dated subdirectories, which the intake can be told to scan (`recursive`, `max-depth`).
 
 #### 5.3.4 Network shares and remote sources
@@ -436,10 +451,10 @@ Metrics: `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age`, `sdh.intake.outag
 
 #### 5.3.5 One node per intake, and a standby
 
-- **The lease** is the one in §9.3, named after the intake. Fencing on the landing tables rejects any commit from an old holder.
-- **Standby:** a second pod for the same intake waits for the lease for as long as it takes, instead of failing after TTL + margin as a connector does now (`lease.standby: true`, `LeaseKeeper.acquireAsStandby`, built). Its readiness probe stays false, so a Service sends HTTP pushes only to the holder. When the holder stops renewing, the standby takes over within one TTL (60 s by default); after a clean shutdown, at once.
+- **The lease** is the one in §9.3, named `landing/<intake>` (`sdh.lease.name` isn't used), so two nodes for one intake always share it. Fencing on the landing tables rejects any commit from an old holder.
+- **Standby:** a second pod for the same intake waits for the lease for as long as it takes, instead of failing after TTL + margin as a connector does now (`sdh.landing.standby: true`, `LeaseKeeper.acquireAsStandby`, built). Its readiness probe stays false, so a Service sends HTTP pushes only to the holder. When the holder stops renewing, the standby takes over within one TTL (60 s by default); after a clean shutdown, at once.
 - **Recovering cleanly:** the new holder fences the tables, then:
-  - finishes the item in progress, from its checkpoint, if the source still has it unchanged;
+  - finishes the item in progress, from its checkpoint, if the source still has it unchanged. Built for directories: until the first full listing ends, only that item can land; if the listing doesn't find it, it is given up (`item.abandoned`) and its checkpoint cleared;
   - adds ledger rows for any summary row without one (§5.3.2);
   - sends `item.landed` again for items whose message may not have been acknowledged (message IDs make this safe, §10.1);
   - starts the intake.
@@ -525,7 +540,7 @@ sdh:
 #### 5.3.10 Order of work
 
 1. **Landing storage (built):** `landed_items` and `landing_ledger`, the landing checkpoint, `item.landed` in `connector-contract`, and the lease's standby mode.
-2. **The landing node** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry.
+2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). Left for later: retention and maintenance of the landing tables, the listing metrics of §5.3.3, and an image and distribution kit for the node.
 3. **The splitter reads from landing:** an `item.landed` consumer, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. The `-Pit` suite and the Kubernetes run (§15.2) are the check, with failover of both stages.
 4. **SFTP and SMB,** with the failure cases of §5.3.4 tested against containers that are cut off, restarted and given wrong keys.
 5. **HTTP push,** with OAuth2 and mTLS.
@@ -537,6 +552,67 @@ sdh:
 - **Several formats in one intake:** a splitter handles one format (§6). If one intake can carry several, the landing node or the splitter has to tell them apart.
 - **Camel's SMB component** on SMB 3 with encryption required, its timeouts, and what it logs.
 - **The ledger's memory** with tens of millions of items: `LandingLedgerTest` checks 100,000 keys; the sizes above are from the layout, not measured.
+
+#### 5.3.11 The landing node as built (step 2)
+
+`landing-connector` is a Spring Boot application, one per intake. It shares `connector-runtime` with `file-connector`.
+
+**Startup** (`LandingRuntime`), in order:
+1. Check the settings and load the keys: only `landed-items-kek`, the signing key and the recipient's key. There is no recovery key: the node has no local fallback (§5.3.6).
+2. Take the lease `landing/<intake>`: as a standby, waiting for as long as it takes; otherwise as §9.3, failing with `LEASE_HELD`.
+3. On a read-write source, claim the directory (§9.5) and run the write probe: a hidden file is created and deleted in the source, and in the `move-to` directory for `move`. A failure is `INTAKE_NOT_WRITABLE` (`intake.not_writable`), and startup fails.
+4. Open the landing catalog and both tables, fence them with the lease's epoch, and load the ID key from `landed_items`, creating it if it's new. The landing storage has its own ID key, because it may be in another catalog from the splitter's.
+5. Load the ledger's entries for the intake into the `LedgerIndex`, and start the publisher.
+6. Recover (`IntakeService.recoverAtStartup`): repair the ledger, note an unfinished item to resume, and send `item.landed` again for the last landed item. Then the route starts.
+
+**Listing** (`IntakeRoute`): Camel's `file` component with `noop` and `idempotent=false`, so Camel never changes the source and every listing offers every file, oldest first. Hidden files, markers, renamed items and a `move-to` directory inside the source are left out. An empty listing still sends one empty message, so the node knows when each listing ends.
+
+**Each item** (`IntakeService`), one at a time:
+1. Hash its path with the ID key and look it up in the index with its size and modification time. If it's already landed, only its after-action is done (in case it was cut short), and nothing else.
+2. Otherwise wait until it's ready (`Readiness`): the same size and time across listings for `settle`, by the node's own clock; or, with `ready: marker`, as soon as Camel sees its `.done` marker.
+3. Land it under a new UUIDv7 item ID. If its size or time differs from the listing when it's opened, or the bytes read don't match, it is given up (`item.changed`) and forgotten until it settles again.
+4. Write its ledger entry, and add it to the index. If the index says an earlier item may have the same content, the ledger confirms it and `item.duplicate_content` is logged.
+5. Send `item.landed` and wait for the broker's acknowledgement (30 s, with the retry settings). Until it's acknowledged, nothing else is landed: the next listing sends it again first.
+6. On a read-write source: delete it, move it to `move-to` keeping its relative path, or rename it with `rename-suffix`; and delete its marker. A target that is taken gets `.1`, `.2` and so on: nothing is overwritten. A file that has changed since it was listed is left for its turn.
+
+A crash between any two steps is safe: between 3 and 4 the ledger is repaired; between 4 and 5 the message is sent again at startup; between 5 and 6 step 1 finishes the job. Message IDs (`il-<itemId>`) make a repeated message harmless.
+
+**Errors.** Lease loss, an unknown commit outcome, a tampered checkpoint, a broken invariant and a lost claim stop the process (status 70). Anything else (storage or broker down, an unreadable file, a failed after-action) is retried at the next listing, after a backoff that doubles up to 5 minutes. A source that can't be listed (missing, unmounted, no permission) is reported once with `intake.unreachable` (`INTAKE_UNREACHABLE`), and again with `intake.reachable` when it's back.
+
+**Telemetry.** Audit events: `connector.started`, `item.landed`, `item.announced`, `item.resumed`, `item.changed`, `item.abandoned`, `item.cleared`, `item.duplicate_content`, `ledger.repaired`, `intake.unreachable`, `intake.reachable`, `intake.not_writable`, and the lease events. Metrics: `sdh.items.landed` (by intake), `sdh.bytes.read` with stage `land`, and gauges `sdh.landing.source_reachable` and `sdh.landing.items_waiting`. No path or filename is logged; Camel logs the configured directory when the route starts, as the file connector does.
+
+**Settings** for a directory intake:
+
+```yaml
+sdh:
+  connector-id: landing-claims
+  landing:
+    intake: claims                 # names the lease, the checkpoint and the ledger entries
+    standby: false                 # true: wait for the lease as a standby
+    source:
+      path: /data/claims
+      access: read-write           # read-only (default) | read-write
+      after: move                  # read-write: delete (default) | move | rename; read-only: none
+      move-to: /data/claims-landed
+      rename-suffix: .landed
+      ready: settled               # settled (default) | marker
+      settle: 2m
+      include: "*"                 # Ant-style pattern
+      recursive: false
+      poll-interval: 10s
+  storage:
+    catalog: { type: jdbc, uri: ..., warehouse: ... }   # as §14
+    catalog-name: sdh
+    namespace: sdh_landing
+    commit-bytes: 512MB
+  crypto:
+    keys: { landed-items-kek: landed-items-kek/1, signing: {...}, recipient: {...} }
+  queue: { type: kafka, uri: "kafka:sdh.landing.claims?brokers=kafka:9093" }   # where item.landed goes
+```
+
+The broader shape in §5.3.9 (`type`, `uri`, `batch`, `http`) comes with the later steps.
+
+**Tests:** `IntakeServiceTest` (settling, read-only and read-write sources, a rewritten file, duplicate content, a failed send, a failed after-action, resuming after a crash, giving up a vanished item, an unreachable source), `LocalDirectorySourceTest`, `ReadinessTest`, `SourceSettingsTest`, and `LandingConnectorApplicationTest`: the whole node on embedded Postgres, a JDBC catalog, key files and a SEDA queue.
 
 ## 6. Splitting
 

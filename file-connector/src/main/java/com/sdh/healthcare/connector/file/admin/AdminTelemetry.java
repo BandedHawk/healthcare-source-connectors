@@ -7,10 +7,11 @@
 
 package com.sdh.healthcare.connector.file.admin;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.telemetry.AuditOnlyLogRecordExporter;
-import com.sdh.healthcare.connector.file.telemetry.TelemetryConfiguration;
+import com.sdh.healthcare.connector.runtime.telemetry.AuditOnlyLogRecordExporter;
+import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
@@ -37,7 +38,7 @@ final class AdminTelemetry implements AutoCloseable {
     }
 
     static AdminTelemetry install(ConnectorProperties props) {
-        ConnectorProperties.Otlp otlp = props.telemetry().otlp();
+        CommonSettings.Otlp otlp = props.telemetry().otlp();
         if (otlp.endpoint() == null || otlp.endpoint().isBlank()) {
             return new AdminTelemetry(null);
         }

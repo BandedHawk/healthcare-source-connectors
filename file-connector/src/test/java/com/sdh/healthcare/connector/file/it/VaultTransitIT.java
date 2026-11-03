@@ -7,13 +7,13 @@
 
 package com.sdh.healthcare.connector.file.it;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import static com.sdh.healthcare.connector.file.it.KmsItSupport.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.file.TestKeys;
-import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.kms.VaultTransitKeyProvider;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -69,9 +69,9 @@ class VaultTransitIT {
         TestKeys k = localKeys();
         Path tokenFile = Files.writeString(Files.createTempFile("vault-token", ""), "root-token\n");
         // The default provider factory: exactly what the running service builds from sdh.crypto.vault.*.
-        ConnectorProperties.Crypto c = crypto(k, "vault-transit", "sections-kek", "source-kek", "failed-kek",
-                "signing", new ConnectorProperties.Aws(null, null),
-                new ConnectorProperties.Vault(address, null, tokenFile, "transit", null));
+        CommonSettings.Crypto c = crypto(k, "vault-transit", "sections-kek", "source-kek", "failed-kek",
+                "signing", new CommonSettings.Aws(null, null),
+                new CommonSettings.Vault(address, null, tokenFile, "transit", null));
         try (KeyMaterial km = KeyMaterial.load(c)) {
             assertThat(new String(km.wrap().wrap("sections-kek", new byte[32]).wrapped())).startsWith("vault:v1:");
             assertUsable(km, k, "sections-kek", VaultTransitKeyProvider.create(address, "transit", () -> "root-token",
@@ -82,9 +82,9 @@ class VaultTransitIT {
     @Test
     void aWrongTokenFailsStartupClearly() throws Exception {
         TestKeys k = localKeys();
-        ConnectorProperties.Crypto c = crypto(k, "vault-transit", "sections-kek", "source-kek", "failed-kek",
-                "signing", new ConnectorProperties.Aws(null, null),
-                new ConnectorProperties.Vault(address, "wrong", null, "transit", null));
+        CommonSettings.Crypto c = crypto(k, "vault-transit", "sections-kek", "source-kek", "failed-kek",
+                "signing", new CommonSettings.Aws(null, null),
+                new CommonSettings.Vault(address, "wrong", null, "transit", null));
         assertThatThrownBy(() -> KeyMaterial.load(c)).hasMessageContaining("sections-kek")
                 .hasMessageContaining("403");
     }

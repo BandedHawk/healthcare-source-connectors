@@ -206,7 +206,7 @@ public final class ItemLander
     {
 
         /** Creates the exception, with a fixed message without PHI. */
-        ItemChangedException()
+        public ItemChangedException()
         {
             super("Item changed while it was being landed");
         }

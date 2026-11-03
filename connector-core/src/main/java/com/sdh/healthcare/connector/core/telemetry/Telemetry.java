@@ -80,6 +80,9 @@ public final class Telemetry
     /** Files processed to the end. */
     private final LongCounter filesCompleted;
 
+    /** Items landed and announced, by intake. */
+    private final LongCounter itemsLanded;
+
     /** Files that failed, by error code and stage. */
     private final LongCounter filesFailed;
 
@@ -125,6 +128,9 @@ public final class Telemetry
                         "section.stored messages acknowledged by the broker")
                 .build();
         filesCompleted = meter.counterBuilder("sdh.files.completed").build();
+        itemsLanded = meter.counterBuilder("sdh.items.landed")
+                .setDescription("Items landed and announced, by intake")
+                .build();
         filesFailed = meter.counterBuilder("sdh.files.failed")
                 .setDescription("By error code and stage").build();
         sectionsFailed = meter.counterBuilder("sdh.sections.failed")
@@ -330,6 +336,16 @@ public final class Telemetry
     {
         sectionsFailed.add(1, Fields.of(Attr.ERROR_CODE, code)
                 .with(Attr.FORMAT, format).toAttributes());
+    }
+
+    /**
+     * Counts an item landed and announced with {@code item.landed}.
+     *
+     * @param intake the intake it came in through
+     */
+    public void itemLanded(String intake)
+    {
+        itemsLanded.add(1, Fields.of(Attr.INTAKE, intake).toAttributes());
     }
 
     /** Counts a file processed to the end. */

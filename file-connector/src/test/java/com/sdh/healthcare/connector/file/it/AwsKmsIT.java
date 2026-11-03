@@ -7,12 +7,12 @@
 
 package com.sdh.healthcare.connector.file.it;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import static com.sdh.healthcare.connector.file.it.KmsItSupport.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.file.TestKeys;
-import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.kms.AwsKmsKeyProvider;
 import java.net.URI;
 import org.junit.jupiter.api.AfterAll;
@@ -73,8 +73,8 @@ class AwsKmsIT {
         }
         TestKeys k = localKeys();
         // The sections KEK is referenced by alias; the wrapped key must record the real key ARN.
-        ConnectorProperties.Crypto c = crypto(k, "aws-kms", "alias/sdh-sections", source, failed, signing,
-                new ConnectorProperties.Aws("us-east-1", null), new ConnectorProperties.Vault(null, null, null,
+        CommonSettings.Crypto c = crypto(k, "aws-kms", "alias/sdh-sections", source, failed, signing,
+                new CommonSettings.Aws("us-east-1", null), new CommonSettings.Vault(null, null, null,
                         "transit", null));
         AwsKmsKeyProvider provider = new AwsKmsKeyProvider(client());
         try (KeyMaterial km = KeyMaterial.load(c, (name, cfg) -> provider)) {

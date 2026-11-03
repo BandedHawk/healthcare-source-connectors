@@ -1,0 +1,37 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+
+package com.sdh.healthcare.connector.runtime;
+
+/**
+ * Stops the process with a non-zero status so the orchestrator restarts it (design §9.3, §11). Used for lease loss,
+ * unknown commit outcomes, a tampered checkpoint and broken invariants. {@code reason} must be PHI-free.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
+@FunctionalInterface
+public interface FatalExit {
+    int STATUS = 70;
+
+    void exit(String reason);
+
+    /**
+     * The production hook: records a {@code connector.fatal} audit event, then exits with {@link #STATUS} from
+     * another thread, so Spring's shutdown hooks can run (and stop the routes) without deadlock.
+     *
+     * @return the hook
+     */
+    static FatalExit exitProcess() {
+        return reason -> {
+            com.sdh.healthcare.connector.core.telemetry.Telemetry.get().auditError("connector.fatal",
+                    com.sdh.healthcare.connector.core.telemetry.Fields.of(
+                            com.sdh.healthcare.connector.core.telemetry.Attr.REASON, reason));
+            Thread.ofPlatform().name("sdh-fatal-exit").start(() -> System.exit(STATUS));
+        };
+    }
+}

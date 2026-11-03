@@ -7,6 +7,7 @@
 
 package com.sdh.healthcare.connector.file.it;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -21,8 +22,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileComple
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.file.TestKeys;
-import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import java.net.URI;
 import java.nio.file.Files;
@@ -335,16 +335,16 @@ abstract class ContainerImageItBase {
         assertThat(upstreamExec("sh", "-c", "ls /data/inbound/failed | grep -c '\\.json$'")).isEqualTo("0:1");
 
         // Downstream, from the host: Kafka → connector-queue-reader → sections from SeaweedFS.
-        ConnectorProperties.Crypto hostCrypto = new ConnectorProperties.Crypto("local", "local",
-                new ConnectorProperties.Keystore(keys.keystore, TestKeys.KS_PASSWORD),
-                new ConnectorProperties.Keys(TestKeys.SECTIONS, TestKeys.SOURCE, TestKeys.FAILED,
-                        new ConnectorProperties.Signing("connector-2026", keys.signingPem, TestKeys.SIGNING_PASSPHRASE,
+        CommonSettings.Crypto hostCrypto = new CommonSettings.Crypto("local", "local",
+                new CommonSettings.Keystore(keys.keystore, TestKeys.KS_PASSWORD),
+                new CommonSettings.Keys(TestKeys.SECTIONS, TestKeys.SOURCE, TestKeys.FAILED, null,
+                        new CommonSettings.Signing("connector-2026", keys.signingPem, TestKeys.SIGNING_PASSPHRASE,
                                 null),
-                        new ConnectorProperties.Recipient("downstream-2026", keys.recipientPem,
+                        new CommonSettings.Recipient("downstream-2026", keys.recipientPem,
                                 KeyMaterial.fingerprint(keys.recipient.getPublic())),
                         keys.recoveryPem),
-                new ConnectorProperties.Aws(null, null), new ConnectorProperties.Gcp(null),
-                new ConnectorProperties.Vault(null, null, null, "transit", null));
+                new CommonSettings.Aws(null, null), new CommonSettings.Gcp(null),
+                new CommonSettings.Vault(null, null, null, "transit", null));
         List<ConnectorMessage> msgs = new ArrayList<>();
         try (KeyMaterial km = KeyMaterial.load(hostCrypto);
                 QueueReader reader = QueueReader.builder()

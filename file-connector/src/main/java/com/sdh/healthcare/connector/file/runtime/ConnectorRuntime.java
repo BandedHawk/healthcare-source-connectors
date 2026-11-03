@@ -7,6 +7,8 @@
 
 package com.sdh.healthcare.connector.file.runtime;
 
+import com.sdh.healthcare.connector.runtime.FatalExit;
+import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
@@ -25,13 +27,12 @@ import com.sdh.healthcare.connector.core.split.SplitterRegistry;
 import com.sdh.healthcare.connector.core.storage.Archiver;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.config.KeyMaterial;
-import com.sdh.healthcare.connector.file.ingest.InboundDirectoryClaim;
-import com.sdh.healthcare.connector.file.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.file.publish.Publishers;
-import com.sdh.healthcare.connector.file.publish.QueueType;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
+import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
+import com.sdh.healthcare.connector.runtime.publish.Publishers;
+import com.sdh.healthcare.connector.runtime.publish.QueueType;
 import com.sdh.healthcare.connector.file.source.DirectoryOutcomeRecorder;
-import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import java.io.Closeable;
 import java.io.IOException;
@@ -111,7 +112,7 @@ public final class ConnectorRuntime implements AutoCloseable {
         Catalog catalog = null;
         LeaseKeeper lease = null;
         try {
-            ds = dataSource(p.lease().jdbc());
+            ds = LeaseDatabase.dataSource(p.lease().jdbc());
             JdbcLeaseStore store = new JdbcLeaseStore(ds, p.lease().jdbc().table(), Duration.ofSeconds(10));
             store.createTableIfMissing();
             // Waits for a lease left by a crashed instance; fails with LEASE_HELD (non-zero exit) if another
@@ -148,7 +149,7 @@ public final class ConnectorRuntime implements AutoCloseable {
                     .withConversion(p.split().convert() ? ConverterRegistry.load() : ConverterRegistry.none(),
                             p.split().convertMaxBytes().toBytes())
                     .withConvertMemory(p.split().convertMemory() == null ? 0 : p.split().convertMemory().toBytes());
-            configureBroker(camel, queueType, p.queue());
+            Publishers.configureBroker(camel, queueType, p.queue());
             ClosablePublisher publisher = Publishers.create(camel, queueType, queueUri);
             Clock clock = Clock.systemUTC();
             IngestPipeline pipeline = new IngestPipeline(settings, sections, committer, keys.wrap(), ids, splitters,
@@ -216,25 +217,6 @@ public final class ConnectorRuntime implements AutoCloseable {
                 l.maxSectionsPerFile() != null ? l.maxSectionsPerFile() : d.maxSectionsPerFile()));
     }
 
-    private static HikariDataSource dataSource(ConnectorProperties.Jdbc jdbc) {
-        HikariConfig c = new HikariConfig();
-        c.setJdbcUrl(Required.require(jdbc.url(), "sdh.lease.jdbc.url"));
-        c.setUsername(jdbc.username());
-        c.setPassword(jdbc.password());
-        c.setMaximumPoolSize(2);
-        c.setConnectionTimeout(10_000);
-        c.setPoolName("sdh-lease");
-        return new HikariDataSource(c);
-    }
-
-    /** Artemis needs a JMS connection factory on the jms component; other brokers configure themselves. */
-    private static void configureBroker(CamelContext camel, QueueType type, ConnectorProperties.Queue q) {
-        if (type == QueueType.ARTEMIS && q.artemis().brokerUrl() != null) {
-            var cf = new org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory(q.artemis().brokerUrl(),
-                    q.artemis().username(), q.artemis().password());
-            camel.getComponent("jms", org.apache.camel.component.jms.JmsComponent.class).setConnectionFactory(cf);
-        }
-    }
 
     public InboundDirectoryClaim claim() {
         return claim;

@@ -11,9 +11,9 @@ import static com.sdh.healthcare.connector.file.it.ItSupport.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
-import com.sdh.healthcare.connector.file.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.file.publish.Publishers;
-import com.sdh.healthcare.connector.file.publish.QueueType;
+import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
+import com.sdh.healthcare.connector.runtime.publish.Publishers;
+import com.sdh.healthcare.connector.runtime.publish.QueueType;
 import jakarta.jms.Connection;
 import jakarta.jms.MessageConsumer;
 import jakarta.jms.Session;

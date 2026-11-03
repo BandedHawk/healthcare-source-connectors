@@ -10,9 +10,9 @@ package com.sdh.healthcare.connector.file.it;
 import static com.sdh.healthcare.connector.file.it.ItSupport.*;
 
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
-import com.sdh.healthcare.connector.file.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.file.publish.Publishers;
-import com.sdh.healthcare.connector.file.publish.QueueType;
+import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
+import com.sdh.healthcare.connector.runtime.publish.Publishers;
+import com.sdh.healthcare.connector.runtime.publish.QueueType;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;

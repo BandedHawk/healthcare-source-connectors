@@ -25,7 +25,9 @@
     <module>connector-core</module>
     <module>connector-queue-reader</module>
     <module>connector-kms</module>
+    <module>connector-runtime</module>
     <module>file-connector</module>
+    <module>landing-connector</module>
   </modules>
 
   <properties>
@@ -251,6 +253,11 @@
       <dependency>
         <groupId>com.sdh.healthcare</groupId>
         <artifactId>connector-queue-reader</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sdh.healthcare</groupId>
+        <artifactId>connector-runtime</artifactId>
         <version>${project.version}</version>
       </dependency>
 
