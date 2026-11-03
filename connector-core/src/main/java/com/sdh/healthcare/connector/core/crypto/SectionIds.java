@@ -4,72 +4,139 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.crypto;
 
+import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * {@code sectionId = base32(HMAC-SHA-256(idKey, sectionPlaintext))} (design §7.3).
+ * Works out section IDs (design §7.3):
+ * {@code sectionId = base32(HMAC-SHA-256(idKey, sectionPlaintext))}. The
+ * same section always gets the same ID, which downstream systems use to
+ * spot duplicates, and without the ID key the ID says nothing about the
+ * content. Also makes the ID key's other MACs, such as checkpoints'.
+ * Thread-safe.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class SectionIds {
-    private static final char[] ALPHABET = "abcdefghijklmnopqrstuvwxyz234567".toCharArray();
+public final class SectionIds
+{
 
+    /** The HMAC algorithm. */
+    private static final String ALGORITHM = "HmacSHA256";
+
+    /** How long the ID key must be: 32 bytes, 256 bits. */
+    private static final int KEY_BYTES = 32;
+
+    /** The 32 characters of base32 (RFC 4648), in lower case. */
+    private static final char[] ALPHABET =
+            "abcdefghijklmnopqrstuvwxyz234567".toCharArray();
+
+    /** How many bits a base32 character encodes. */
+    private static final int BITS_PER_CHARACTER = 5;
+
+    /** Picks the low 5 bits: one base32 character's worth. */
+    private static final int CHARACTER_MASK = 0b11111;
+
+    /** The ID key. */
     private final SecretKeySpec idKey;
 
-    public SectionIds(byte[] idKey) {
-        if (idKey.length != 32) {
+    /**
+     * Creates IDs with an ID key.
+     *
+     * @param idKey the ID key ({@link IdKeys})
+     * @throws IllegalArgumentException if the key isn't 256 bits
+     */
+    public SectionIds(byte[] idKey)
+    {
+        if (idKey.length != KEY_BYTES)
+        {
             throw new IllegalArgumentException("ID key must be 256 bits");
         }
-        this.idKey = new SecretKeySpec(idKey, "HmacSHA256");
+        this.idKey = new SecretKeySpec(idKey, ALGORITHM);
     }
 
-    public Mac newMac() {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
+    /**
+     * Makes an HMAC with the ID key, as section IDs use.
+     *
+     * @return a new HMAC, ready for input
+     */
+    public Mac newMac()
+    {
+        try
+        {
+            Mac mac = Mac.getInstance(ALGORITHM);
             mac.init(idKey);
             return mac;
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException(e);
+        }
+        catch (GeneralSecurityException unavailable)
+        {
+            throw new IllegalStateException(unavailable);
         }
     }
 
     /**
-     * An HMAC with the ID key, already fed a domain label. Used for checkpoint MACs and fingerprints, so
-     * those values can never collide with a section ID (which is unlabelled, design §7.3).
+     * Makes an HMAC with the ID key that has already been given a label and
+     * a zero byte. It is used for checkpoint MACs and fingerprints, so those
+     * values can never be the same as a section ID, which has no label
+     * (design §7.3).
+     *
+     * @param label what the MAC is for, in ASCII
+     * @return a new HMAC, ready for the rest of its input
      */
-    public Mac newLabelledMac(String label) {
+    public Mac newLabelledMac(String label)
+    {
         Mac mac = newMac();
-        mac.update(label.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        mac.update(label.getBytes(StandardCharsets.US_ASCII));
         mac.update((byte) 0);
         return mac;
     }
 
-    public String of(byte[] plaintext) {
+    /**
+     * Works out a section's ID.
+     *
+     * @param plaintext the section's plaintext
+     * @return its ID: 52 base32 characters
+     */
+    public String of(byte[] plaintext)
+    {
         return encode(newMac().doFinal(plaintext));
     }
 
-    /** RFC 4648 base32, lower case, no padding. */
-    public static String encode(byte[] bytes) {
-        StringBuilder sb = new StringBuilder((bytes.length * 8 + 4) / 5);
-        int buffer = 0;
-        int bits = 0;
-        for (byte b : bytes) {
-            buffer = (buffer << 8) | (b & 0xff);
-            bits += 8;
-            while (bits >= 5) {
-                sb.append(ALPHABET[(buffer >>> (bits - 5)) & 31]);
-                bits -= 5;
+    /**
+     * Writes bytes in base32 (RFC 4648), in lower case and without padding.
+     *
+     * @param bytes the bytes
+     * @return the base32 text
+     */
+    public static String encode(byte[] bytes)
+    {
+        StringBuilder text = new StringBuilder(
+                (bytes.length * Byte.SIZE + BITS_PER_CHARACTER - 1)
+                        / BITS_PER_CHARACTER);
+        // Bits not yet written, at the low end of pending.
+        int pending = 0;
+        int pendingBits = 0;
+        for (byte value : bytes)
+        {
+            pending = (pending << Byte.SIZE) | (value & 0xff);
+            pendingBits += Byte.SIZE;
+            while (pendingBits >= BITS_PER_CHARACTER)
+            {
+                pendingBits -= BITS_PER_CHARACTER;
+                text.append(ALPHABET[(pending >>> pendingBits)
+                        & CHARACTER_MASK]);
             }
         }
-        if (bits > 0) {
-            sb.append(ALPHABET[(buffer << (5 - bits)) & 31]);
+        if (pendingBits > 0)
+        {
+            // The last few bits, padded with zeros to a whole character.
+            text.append(ALPHABET[(pending << (BITS_PER_CHARACTER
+                    - pendingBits)) & CHARACTER_MASK]);
         }
-        return sb.toString();
+        return text.toString();
     }
 }
