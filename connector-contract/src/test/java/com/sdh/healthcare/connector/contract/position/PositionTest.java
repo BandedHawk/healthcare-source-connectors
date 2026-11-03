@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Random;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -88,6 +89,50 @@ class PositionTest
         assertThat(counter.position())
                 .isEqualTo(LineCounter.positionOf(text, text.length));
         assertThat(counter.count()).isEqualTo(text.length);
+    }
+
+    /**
+     * Counting bytes in blocks, as a file is counted, gives the same line,
+     * column and count as counting them one at a time. The texts are random
+     * mixes of line ends, UTF-8 continuation bytes and byte order marks, cut
+     * into random blocks, so a CRLF or a mark is often split between two.
+     * A copy taken between blocks counts on the same.
+     */
+    @Test
+    void blocksCountTheSameAsSingleBytes()
+    {
+        byte[] alphabet = {'a', '\n', '\r', (byte) 0xC3, (byte) 0xA9,
+                (byte) 0xEF, (byte) 0xBB, (byte) 0xBF};
+        Random random = new Random(42);
+        for (int trial = 0; trial < 2_000; trial++)
+        {
+            byte[] text = new byte[random.nextInt(40)];
+            for (int index = 0; index < text.length; index++)
+            {
+                text[index] = alphabet[random.nextInt(alphabet.length)];
+            }
+            LineCounter single = new LineCounter();
+            for (byte value : text)
+            {
+                single.add(value);
+            }
+            LineCounter blocks = new LineCounter();
+            int from = 0;
+            while (from < text.length)
+            {
+                int length = 1 + random.nextInt(text.length - from);
+                blocks.add(text, from, length);
+                from += length;
+                // A copy counts on just as the counter it came from.
+                if (random.nextBoolean())
+                {
+                    blocks = blocks.copy();
+                }
+            }
+            assertThat(blocks.position()).as("trial %d", trial)
+                    .isEqualTo(single.position());
+            assertThat(blocks.count()).isEqualTo(single.count());
+        }
     }
 
     /**

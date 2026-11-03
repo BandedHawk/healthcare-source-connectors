@@ -70,10 +70,65 @@ public final class LineCounter
      */
     public void add(byte[] bytes, int from, int length)
     {
-        for (int index = from; index < from + length; index++)
+        int end = from + length;
+        int index = from;
+        // The byte order mark is only looked for at the start of the text.
+        while (index < end && byteOrderMark >= 0)
         {
-            add(bytes[index]);
+            add(bytes[index++]);
         }
+        count += end - index;
+        if (index == end)
+        {
+            return;
+        }
+        // The same counting as add(byte), done in bulk: a file is counted on
+        // the split thread, which limits large sections. Every CR ends a
+        // line, and every LF that doesn't follow a CR.
+        int breaks = 0;
+        int crlfs = afterCarriageReturn && bytes[index] == '\n' ? 1 : 0;
+        for (int at = index; at < end; at++)
+        {
+            byte value = bytes[at];
+            breaks += (value == '\n' ? 1 : 0) + (value == '\r' ? 1 : 0);
+        }
+        for (int at = index + 1; at < end; at++)
+        {
+            crlfs += bytes[at - 1] == '\r' && bytes[at] == '\n' ? 1 : 0;
+        }
+        line += breaks - crlfs;
+        // The column counts the characters after the last line end.
+        int lastBreak = end - 1;
+        while (lastBreak >= index && bytes[lastBreak] != '\n'
+                && bytes[lastBreak] != '\r')
+        {
+            lastBreak--;
+        }
+        if (lastBreak >= index)
+        {
+            column = 1;
+        }
+        column += characters(bytes, lastBreak + 1, end);
+        afterCarriageReturn = bytes[end - 1] == '\r';
+    }
+
+    /**
+     * Counts the characters in some UTF-8 bytes: every byte but the
+     * continuation bytes, 10xxxxxx.
+     *
+     * @param bytes the bytes
+     * @param from  where they start in the array
+     * @param end   where they end, not included
+     * @return how many characters start there
+     */
+    private static int characters(byte[] bytes, int from, int end)
+    {
+        int characters = 0;
+        for (int at = from; at < end; at++)
+        {
+            characters += (bytes[at] & 0xC0) != 0x80 ? 1 : 0;
+        }
+        return characters;
     }
 
     /**
@@ -108,6 +163,23 @@ public final class LineCounter
             // bytes, 10xxxxxx.
             column++;
         }
+    }
+
+    /**
+     * Makes a counter that has counted the same bytes as this one, to count
+     * on from here separately.
+     *
+     * @return a new counter in the same state
+     */
+    public LineCounter copy()
+    {
+        LineCounter copy = new LineCounter();
+        copy.line = line;
+        copy.column = column;
+        copy.count = count;
+        copy.afterCarriageReturn = afterCarriageReturn;
+        copy.byteOrderMark = byteOrderMark;
+        return copy;
     }
 
     /**

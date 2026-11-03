@@ -457,7 +457,7 @@ record ResumePoint(long offset, List<Long> context)
 - **Limits:** `SplitterRegistry.open(format, src, from, nextSeq, cfg)` wraps the session and enforces §6.3, counting sections from `nextSeq` so the per-file count survives a resume. Splitters also stop scanning early once a section passes `max-section-bytes`.
 - **Errors:** `SplitException` carries only an `ErrorCode` and a byte offset. Codes: `PARSE_UNTERMINATED_QUOTE`, `PARSE_UNBALANCED_ELEMENT`, `PARSE_XML_MALFORMED`, `PARSE_XML_UNSUPPORTED_ENCODING`, `PARSE_X12_INVALID_ENVELOPE`, `PARSE_X12_UNBALANCED`, `PARSE_X12_CONTROL_MISMATCH`, `PARSE_X12_UNEXPECTED_SEGMENT`, `PARSE_JSON_MALFORMED`, `PARSE_FHIR_UNEXPECTED_RESOURCE`, `RESUME_INVALID`, `LIMIT_*`.
 - **Plug-ins:** new formats are discovered via `ServiceLoader` (proprietary formats can be dropped in as a jar).
-- **Origin (lines and columns):** splitters deal in bytes. The pipeline gives each section its `SectionOrigin` as it comes from the splitter (`SectionOrigins`): where its first source range starts in the section (after any literal the splitter added, such as the XML declaration: usually line 2) and where it starts in the file. It counts the file's lines once, on from the last section, a 64 KiB block at a time. Lines end at LF, CRLF or CR and columns are UTF-8 characters, as XML counts them (`LineCounter`); in a single-byte character set other than ASCII, a column after a byte from 0x80 to 0xBF can be early.
+- **Origin (lines and columns):** splitters deal in bytes. The pipeline gives each section its `SectionOrigin` as it comes from the splitter (`SectionOrigins`): where its first source range starts in the section (after any literal the splitter added, such as the XML declaration: usually line 2) and where it starts in the file. It counts the file's lines once, on from the last section, a 64 KiB block at a time; a background thread (`sdh-lines`) counts ahead and leaves a mark every block, so the split thread counts only from the last mark before a section (§13.1). Lines end at LF, CRLF or CR and columns are UTF-8 characters, as XML counts them (`LineCounter`); in a single-byte character set other than ASCII, a column after a byte from 0x80 to 0xBF can be early.
 
 ### 6.2 Built-in splitters
 
@@ -1296,6 +1296,37 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 - **Less allocation and GC:** 8% less allocated (the same in every run), and about 40% less time in GC pauses at either heap (the memory rows are one run each). The heap still in use after a collection is 10–17% lower.
 - **A small gain here, a large one for large documents:** these sections are 50–350 KB, where the tree was a small part of the pipeline's memory. A 64 MB document of structured entries needs 60% less to convert (§6.4).
 - **Run comparisons from the same filesystem.** The first comparison ran the old code from a worktree under `/tmp` (ext4) and the new code from the project folder, which is on an encrypted home directory (ecryptfs). The new code then looked 10% slower in both phases, even archiving, which doesn't use the converter. The warehouse is written under the checkout's `target/perf`, so its disk is part of the result.
+
+**Source positions, 2026-11-02** (1 GiB of C-CDA and of X12, P-256, local disk, Java 26.0.2, same machine). Before is `a8049fe`, positions is `89284da` (line and column on C-CDA elements and on section origins), and fixed is `89284da` with the two fixes below. Each is a copy under `/tmp`, run alternately; the rows come from the same session, so compare within a row:
+
+| | Before | Positions | Fixed |
+|---|---:|---:|---:|
+| C-CDA MiB/s, 1 GiB heap | 124, 125, 126 | 110, 115, 115 | — |
+| C-CDA MiB/s, 1 GiB heap (another session) | 134, 134, 135 | — | 124, 126, 82 |
+| C-CDA MiB/s, 512 MiB heap | 121, 127, 124 | — | 114, 119, 113 |
+| C-CDA split phase, s | 3.8–4.0 | 5.0–5.1 | 4.2–4.3 |
+| C-CDA allocated GiB | 30.3 | 33.9 | 33.9 |
+| C-CDA heap after GC, peak MiB (1 GiB / 512 MiB heap) | 397–431 / 261–272 | 467 / 241 | 459–477 / 260–315 |
+| C-CDA process RSS, peak MiB (1 GiB / 512 MiB heap) | 1,393–1,429 / 886–902 | 1,400 / 894 | 1,400–1,442 / 880–884 |
+| X12 sections/s | 19,526–19,931 | 19,115 | 19,135–19,372 |
+| Stored ÷ source (C-CDA) | 0.49 | 0.54 | 0.54 |
+
+- **Positions cost C-CDA 9–12%, all in the split phase** (about 1.2 s more per GiB). The archive phase is unchanged, as are X12 (−3%, the noise level) and CSV.
+- **Most of it was counting lines on the split thread.** `SectionOrigins` reads the file a second time to find each section's line and column. It ran on the split thread, the one that bounds C-CDA, and `LineCounter` counted a byte at a time (0.6–1.0 s per GiB). With origins turned off, the split phase was 4.1–4.4 s. Two fixes:
+  - `LineCounter` counts a block with local variables: 0.45 s per GiB;
+  - a background thread (`sdh-lines`) counts the file ahead of the split thread and leaves a mark every 64 KiB, for at most 64 MiB ahead. The split thread starts from the last mark before each section, so for C-CDA it counts at most 64 KiB a section instead of the whole file. Positions are the same whether the marks are ahead or not (`SectionOriginsTest`).
+- **What's left, about 7%, is the positions themselves.** Every element gains `#line` and `#col`, so the JSON is 10% larger and allocation 12% higher, and the encrypt, zstd and Parquet work grows with it. Dropping them would change mapping `ccda/2`; not worth it for 7%.
+- **Memory:** RSS is unchanged at both heaps; the heap still in use after a collection is up to about 10% higher. 512 MiB stays comfortable. The background count adds one thread, a 64 KiB buffer and at most 1,024 small marks.
+- **The 82** is one slow run (split phase 8.5 s, main thread 61% busy, so waiting rather than working); it didn't recur in three more runs.
+
+**In the cluster** (`scripts/k8s-minikube.sh`, then a 400 MiB C-CDA file, 2,073 sections, through the README's Deployment with its 2 GiB limit; 4 CPUs, SeaweedFS and Kafka in the same VM; runs alternated):
+
+| Image | Time, s | Container memory, peak MiB | Restarts |
+|---|---:|---:|---:|
+| Before | 10.1, 10.0 | 1,394, 1,389 | 0 |
+| Fixed | 10.3, 9.6 | 1,350, 1,345 | 0 |
+
+The cluster is bound by its 4 CPUs and its in-VM storage, so it shows no difference in speed, and memory stays well within the limit. All of the deployment checks pass.
 
 On S3 (SeaweedFS inside the minikube VM, P-256) the results were close to local disk: C-CDA 103 MiB/s, X12 15,298 and CSV 19,490 sections/s. Uploads are not the limit, and SeaweedFS's own CPU use in the VM takes from the same host. Before the sealing-pool fix, P-256 gave X12 15,048 and CSV 19,859 sections/s.
 

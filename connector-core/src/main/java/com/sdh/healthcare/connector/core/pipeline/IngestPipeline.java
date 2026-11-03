@@ -403,13 +403,13 @@ public final class IngestPipeline implements AutoCloseable
 
         Batch batch = null;
         Future<Long> inFlightPublish = null;
+        // Lines and columns, so failures and mapping issues can be found in
+        // the file (SectionOrigin).
         try (SplitSession session = splitters.open(current.format(), source,
-                current.resumeAt(), current.nextSeq(), settings.split()))
+                current.resumeAt(), current.nextSeq(), settings.split());
+                SectionOrigins origins = new SectionOrigins(source))
         {
             long seq = current.nextSeq();
-            // Lines and columns, so failures and mapping issues can be found
-            // in the file (SectionOrigin).
-            SectionOrigins origins = new SectionOrigins(source);
             Optional<Section> next;
             while ((next = session.next()).isPresent())
             {
@@ -812,7 +812,8 @@ public final class IngestPipeline implements AutoCloseable
                 return null;
             }
             int offset = (int) Math.max(0, Math.min(position, raw.length));
-            return section.origin().toFile(LineCounter.positionOf(raw, offset));
+            SourcePosition inSection = LineCounter.positionOf(raw, offset);
+            return section.origin().toFile(inSection);
         }
 
         /**
