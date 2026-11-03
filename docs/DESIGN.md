@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-03 (ap): documentation only. Ingestion becomes two stages (§5.3, not built), replacing the source-endpoint plan of revision an. A landing node per intake, with a standby, takes data from directories, SFTP, SMB, HTTP push, the seven queues, buckets and Iceberg tables through a fixed list of Camel components, and stores it as received in its own namespace, `sdh_landing`. It then signals the splitter with an `item.landed` message. Read-only sources are tracked with a ledger, so nothing is landed twice. The landed copy replaces `source_files`, and the splitter reads only from landing. How producers find the source of a problem in their data is still open (§5.3.8).
+
 Revision 2026-11-02 (ao): problems can be found by line and column, for remediation.
 - **C-CDA JSON is `ccda/2` (§6.4):** every element written as an object starts with `"#line"` and `"#col"`, where its start tag begins in the section. A mapping reports its issues there (the Whistle runtime's `check::at`), so an operator can go straight to the element, or to its nearest present parent when it is missing. The JSON is about 39% larger; the C-CDA memory factor goes from 5 to 6.
 - **The converter always uses Woodstox (§6.4),** chosen by name, so the connector and the command-line tools (`ccda-quickrun`) read a document the same way and report the same positions. Malformed XML is now reported at a byte position; it was a character count.
@@ -317,121 +319,218 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Source endpoints (planned)
+### 5.3 Landing: two-stage ingestion (planned)
 
-Not built yet. Today the connector reads only from a local directory (§5). In practice it will rarely run on the machine where files arrive, so where the files come from becomes a choice made in configuration: a local or mounted directory, S3-compatible object storage, SFTP, or Parquet/Iceberg tables. Splitting, conversion, storage and messaging stay unaware of where a file came from.
+Not built yet. Decided 2026-11-03; this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own.
 
-**Decisions (2026-11-01):**
-- **One pipeline per pod.** A pod reads from one source endpoint, splits and converts one format, and writes to one set of tables. It keeps the one lease, one claim and one checkpoint it has today (§9.3, §9.5), so two pipelines can never race over the same input or the same tables. To ingest more, deploy more pods.
-- **First goal: a configuration file shipped with the pod.** The pipeline is defined in the pod's settings file (a read-only ConfigMap or Secret mount, as in §14.1), inside the secured environment, and applied at startup. A change takes effect on restart.
-- **Later: operator-defined pipelines.** Letting operators define the source type, endpoint and handling through a console or API, without editing configuration by hand, belongs with pipeline monitoring, management and remediation (§17).
+Ingestion becomes two stages:
+1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
+2. **Splitting.** The connector as it is today (§4 onwards), but reading only from landing. It consumes `item.landed` messages, splits, converts and stores sections as now, and flags problems in the data. It no longer picks up files itself, and no longer archives originals: the landed copy is the archive.
 
-**What is already independent of the source.** `connector-core` processes a file through four interfaces and never sees a path:
-
-| Interface | What it does |
-|---|---|
-| `SourceFile` | `open()` gives random-access bytes; `originalName()` (PHI, stored encrypted); `deleteOriginal()` |
-| `SeekableByteSource` | reads at any position, possibly in parallel |
-| `OutcomeRecorder` | completion and failure records, and the encrypted fallback (§11.3) |
-| `SectionSplitter`, `SectionConverter` | found by format name with `ServiceLoader` (§6.1, §6.4) |
-
-Everything tied to a local directory is in `file-connector`, in five classes, and is what becomes the first source plugin:
-- `InboundRoute`: pickup with Camel's `file` component, read locks, oldest first (§5);
-- `InboundDirectoryClaim`: the `.sdh-owner` file (§9.5);
-- `InProgressLocator`: finds the in-progress file after a restart, by listing the directory and checking fingerprints (§5.1);
-- `DirectoryOutcomeRecorder`: `completed/` and `failed/` records inside the inbound directory;
-- `LocalSourceFile`: deletes the file and its `.done` marker.
-
-**Plugins and pipelines.** The code provides plugins, each found by name in a registry: source endpoints, splitters, converters, destinations and queues. The pipeline is configuration that combines them by name, so the service never names a specific type in its wiring, and adding a type means adding a jar, not changing code. Splitters and converters already work this way. The queue doesn't yet: `QueueType` is a fixed list and would become a registry too.
-
-**The source SPI** (`connector-core`, found with `ServiceLoader` by `type`):
-
-```java
-/** One kind of endpoint: "local", "s3", "sftp", "iceberg", ... */
-public interface SourceEndpointProvider {
-    String type();
-    void validate(EndpointConfig config);      // at startup; messages never quote PHI
-    SourceEndpoint open(EndpointConfig config, EndpointContext context) throws IOException;
-}
-
-/** A configured endpoint, such as one directory, bucket prefix or table. */
-public interface SourceEndpoint extends Closeable {
-    String identity();                         // canonical and PHI-free, e.g. "s3://bucket/inbound/"
-    void claim(Owner owner) throws IOException;     // exclusive ownership of the endpoint
-    List<SourceItem> poll(int max) throws IOException;   // items ready to process, oldest first
-    Optional<SourceItem> find(SourceRef ref) throws IOException;   // the in-progress item after a restart
-}
-
-/** One input: a file, an object, or a batch of table rows. */
-public interface SourceItem extends SourceFile {
-    SourceRef ref();     // stable ID and version: path and mtime, key and version ID or ETag, snapshot and rows
-    long size();
-    void complete(Disposition disposition) throws IOException;   // delete, move, or keep (watermark)
-}
+```mermaid
+flowchart LR
+  P1[SFTP / SMB / local dir<br/>read-only or read-write] --> L
+  P2[HTTP push<br/>OAuth2 or mTLS] --> L
+  P3[Queues<br/>batched] --> L
+  P4[Buckets / Iceberg tables] --> L
+  L[Landing node<br/>one per intake, plus standby] -->|chunks + summary row| T[(sdh_landing<br/>landed_items, landing_ledger)]
+  L -->|item.landed| Q[Landing queue]
+  Q --> S[Splitter<br/>one per intake]
+  T -->|reads by chunk| S
+  S --> U[(sdh_ingest<br/>sections)]
+  S -->|section.stored, file.completed| D[Downstream queue]
 ```
 
-`FileProcessor` keeps taking a `SourceFile`, so the pipeline, splitters and converters don't change. Each plugin decides what depends on its endpoint:
+**Decisions (2026-11-03):**
+- **Two stages,** signalled by queue, as above. Push and queue senders need an answer in seconds, which they couldn't get while a large file was being split.
+- **One landing node per intake,** with a standby that takes over cleanly (below). An *intake* is one configured source: a directory, a share, a bucket prefix, an HTTP endpoint, a queue or a table.
+- **Landing storage is its own namespace,** `sdh_landing` by default, with its own catalog settings, KEK and access policy. Customers can keep it in the same catalog and bucket as the other stages, or in separate ones, depending on budget. Iceberg for every stage keeps one storage architecture across the medallion layers: landing is bronze.
+- **The landed copy replaces `source_files`.** Each original is stored once.
+- **Landed items never change.** If a producer's data has a problem, the producer fixes it at their end and sends it again; we never edit landed data.
+- **Retention of landed data is set by the customer,** possibly up to the legal limit for keeping records, which can be many years.
+- **No guarantees about producers:** sizes, rates, naming, clean-up and timing are all unknown. Files may stay on a source indefinitely. Producers never append to a file they have dropped.
+- **Camel components from a fixed list.** More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
+- **Dropped:** FHIR push (the end of the pipeline is a FHIR repository, so pushing FHIR through this ingestion adds little beyond MDM) and NFS (Camel has no NFS component, and a mount moves failure handling outside the application).
 
-| | Local / mounted directory | S3-compatible | SFTP | Iceberg / Parquet |
+#### 5.3.1 Intakes
+
+| Intake | Camel component | Ready to land | Already landed? | Resume a large item |
 |---|---|---|---|---|
-| Ready to process | `.done` marker, or unchanged for `min-age` (§5) | marker object, or an ETag that has stopped changing | `.done` marker, or unchanged for `min-age` | a committed snapshot |
-| Finished | delete | delete, or move to a prefix | delete, or move to a directory | keep; advance a watermark |
-| Claim | `.sdh-owner`, created atomically (§9.5) | claim object written with `If-None-Match: *` | claim file opened with exclusive create | the lease only |
-| After a restart | fingerprint (§5.1) | key and version ID | path, size and mtime, then fingerprint | snapshot, data file and row range |
-| Reading | `FileChannel` | ranged GETs, or staged | offset reads, or staged | staged |
+| Local or mounted directory | `file` | unchanged for `settle` | ledger: path, size, mtime | yes |
+| SFTP | `sftp` | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
+| SMB share | `smb` (SMB 3, encryption required) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
+| Object bucket | `aws2-s3`, `azure-storage-blob`, `google-storage` | present (objects appear whole); `settle` optional | ledger: bucket, key, version ID or ETag | yes, ranged reads |
+| HTTP push | `platform-http` | the whole request body received | `Idempotency-Key` header, if sent | no: the sender retries |
+| Queue | the seven brokers of §10.3, as consumers | a batch is full or its time is up | broker message ID | no: unacknowledged messages are redelivered |
+| Iceberg table | Iceberg API (no Camel component) | a committed snapshot | table UUID, data file path | yes, by row group |
 
-The lease (§9.3) stays the backstop for every endpoint.
+**Readiness (`settle`).** A file or object is ready once its size and modification time have stayed the same for `settle` (configurable per intake; default 2 minutes). The time is measured by the landing node's own observations across polls, not by comparing the file's timestamp with our clock, because a share's or server's clock may be wrong. An intake whose producer writes a `<name>.done` marker can wait for the marker instead (`ready: marker`).
 
-**PHI in references.** Paths and object keys often contain patient names or MRNs, which is why `originalName()` is stored only encrypted (§8.2). A `SourceRef` gets the same care: it is stored encrypted in the checkpoint. `identity()` names only the endpoint, never an item, so it can appear in claims, audit events and errors.
+**Permissions (`access`).**
+- `read-only`: the source is never changed. Items are recognised as already landed by the ledger (§5.3.3).
+- `read-write`: after an item is landed, `after` says what happens to it: `delete`, `move` to a directory, or `rename` with a suffix. The ledger is still written, so an item is not landed twice if the action fails or is interrupted.
+- **Startup check:** a `read-write` intake creates and removes a hidden probe file. If that fails, startup fails with `INTAKE_NOT_WRITABLE` instead of landing items it can't then clear. Every intake checks it can list and read.
 
-**A work directory of its own.** Outcome records and the encrypted fallback are written inside the inbound directory today. A remote source has nowhere to put them, so they move to `sdh.work-dir`, a local encrypted volume on the connector's pod, whatever the source. The `local` plugin can keep using the inbound directory for compatibility.
+**HTTP push.**
+- Each intake chooses OAuth2 (a bearer JWT checked against the issuer's keys, audience and a required scope) or mTLS (the client certificate checked against the intake's trusted CAs and an allow-list of subjects). For mTLS, TLS ends at the pod (the ingress passes TLS through), so the certificate the node checks is the sender's own.
+- `POST /intakes/<intake>/items`. The body is streamed straight into landing chunks, never held whole in memory or written to disk in plaintext. There is no size limit unless the intake sets `max-item-bytes`.
+- The answer is `202 Accepted` with a receipt (§5.3.6), sent only after the item's commit. A sender that loses the connection before then doesn't know the outcome and sends again; an `Idempotency-Key` header makes that safe (the same key returns the first receipt).
+- While no node holds the intake's lease (a failover), there is no ready pod behind the Service and senders get a connection error or `503` with `Retry-After`.
 
-**Reading directly or staged.** Every file is read at least twice, to split and to archive (§13).
-- **Direct:** reads at a position from the endpoint itself: `FileChannel`, S3 ranged GETs, SFTP reads at an offset. No copy is made, but over a slow link every read costs a round trip.
-- **Staged:** a shared `StagedSource` helper copies the item to the work directory first, so a plugin only has to provide a stream. That suits FTP, HTTPS, and S3 across a WAN. The staged copy is encrypted with a key held only in memory for that file, so after a crash it is unreadable and is fetched again; no plaintext PHI is left on the work volume.
+**Queues.**
+- Messages are landed in batches, so a stream of small messages doesn't become a stream of commits and `item.landed` messages. A batch closes at `batch.max-messages`, `batch.max-bytes` or `batch.max-wait`, whichever comes first (defaults 1,000, 64 MiB, 5 s).
+- A batch is one item. It keeps each message's offset and length, and its broker message ID, in a record index, so the splitter can treat every message as its own unit, whatever the format.
+- Messages are acknowledged (or, for Kafka and Event Hubs, their offsets committed) only after the batch's commit. A crash before then means redelivery; redelivered messages already landed are recognised by message ID and acknowledged without landing them again.
 
-**Configuration** (§14), still one pipeline per pod:
+**Iceberg tables.** For each new snapshot that only adds data, each added data file becomes one item: its Parquet bytes, landed as they are. Data files never change, so the table UUID and file path identify them for good. A snapshot that deletes or overwrites rows can't be expressed as new items: it raises `intake.table_rewrite` and nothing is landed for it. Plain Parquet files in a bucket are bucket items.
+
+#### 5.3.2 Landing storage
+
+Namespace `sdh_landing` (configurable), with its own catalog properties, so it can be on another catalog, bucket or storage account.
+
+**`landed_items`** has the same layout and encryption as `source_files` today (§8.2): the item in 8 MiB chunks, one row per chunk, then a summary row (`chunk_index = -1`) written in the item's final commit. A summary row means the item is fully landed. The summary row holds:
+- `item_id` (UUIDv7), `intake`, `kind` (`file`, `object`, `push`, `message-batch`, `table-file`), `size`, `landed_at`;
+- `item_digest`, the keyed chained digest of §5.1 (it was `fileDigest`);
+- encrypted, because they can hold PHI: the original name or path, the producer's reference (§5.3.6), the content's SHA-256, and for message batches the record index;
+- `replaces_item_id`, when the producer says the item replaces an earlier one (§5.3.6).
+
+Chunks committed without a summary row belong to an item that wasn't finished (a push that broke off, an item that changed while being read). Maintenance removes them once they are older than a day and no checkpoint refers to them.
+
+**`landing_ledger`** records what has been landed, with no PHI: hashes, sizes and times only.
+- **Key:** `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ path or key)`, plus size and modification time (or version ID or ETag; or the message ID's hash for queues), and the item's content digest.
+- **Kept longer than the data.** Retention purges `landed_items`, but a file that stays on a read-only source would then be landed again. The ledger has its own retention, by default forever.
+- **Written straight after the item's commit.** Iceberg has no multi-table commit (§8.2), so at startup any summary row without a ledger row gets one. An item is never landed twice for that reason.
+- **In memory:** the node keeps 128-bit keys in a compact set, about 24 bytes per item: 10 million items need about 240 MB. The set is loaded at startup. `sdh.landing.ledger_items` reports its size.
+- **Why not a modification-time watermark:** copies made with `cp -p` or `rsync -t` keep old times, so a watermark would miss them.
+
+**Checkpoint.** `sdh.landing.<intake>` on `landed_items`, MAC'd like §9.1: the item in progress, its encrypted source reference, size, modification time, next block and chain hash. Large items are committed every `commit-bytes`, as archives are today, so a 1 TB file isn't read again from the start after a restart.
+
+**Retention:** `maintenance.retention.landed-items`, set by the customer (unset keeps items forever). An item still referred to by a splitter checkpoint is never purged. Purging uses the existing retention run (§8.4).
+
+#### 5.3.3 Already landed, and duplicates
+
+- **The key** is the source reference plus size and modification time (§5.3.2). An item seen with the same key is skipped.
+- **Changed in place:** the same path with a new size or time is landed as a new item, and `item.changed` is logged with both item IDs. Producers don't append, so this means a file was rewritten.
+- **Same content, new name:** the item is landed again, as agreed, and `item.duplicate_content` is logged with both item IDs, because their content digests match. The splitter processes it like any other.
+- **Lots of old files:** every poll lists the whole source, and on a read-only source that list only grows. Listing time and size are reported (`sdh.intake.list_duration`, `sdh.intake.listed_items`) so an operator sees it before it hurts. Producers can help by writing into dated subdirectories, which the intake can be told to scan (`recursive`, `max-depth`).
+
+#### 5.3.4 Network shares and remote sources
+
+SFTP, SMB, buckets and queues fail in ways a local disk doesn't. The landing node handles each case, and reports it without names or paths:
+
+| Problem | Handling | Reported as |
+|---|---|---|
+| Server unreachable, or a connection that drops | connect and read timeouts (`connectTimeout`, `soTimeout`, SFTP `serverAliveInterval`, smbj timeouts), so nothing hangs; reconnect with backoff | `intake.unavailable` (reason `NETWORK`); `intake.recovered` with the outage length |
+| Drops in the middle of an item | committed chunks are kept; on reconnect the item resumes at the next block, if its size and modification time haven't changed. If they have, the partial item is dropped and landed again from the start | `item.resumed`, or `item.restarted` |
+| Item deleted or renamed while being read | the partial item is dropped; if it reappears it is landed then | `item.vanished` |
+| Credentials rejected, or permission removed | no fast retries, which could lock the account; retry at `auth-retry-interval` (default 5 min) | `intake.unavailable` (reason `AUTH` or `PERMISSION`) |
+| SFTP host key changed | never accepted automatically; the intake stops until an operator updates the pinned key | `intake.unavailable` (reason `HOST_KEY`) |
+| Share or bucket no longer exists | as for credentials | `intake.unavailable` (reason `NOT_FOUND`) |
+| `after` action fails on a read-write intake | the item is already landed and in the ledger, so it isn't landed again; the action is retried each poll | `item.after_failed` |
+
+Metrics: `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age`, `sdh.intake.outage_seconds`, alongside the landing metrics (§5.3.7). Camel's consumers send errors to our handler (`bridgeErrorHandler`), and the route's own logging is switched off, so no path or filename reaches a log.
+
+#### 5.3.5 One node per intake, and a standby
+
+- **The lease** is the one in §9.3, named after the intake. Fencing on the landing tables rejects any commit from an old holder.
+- **Standby:** a second pod for the same intake waits for the lease for as long as it takes, instead of failing after TTL + margin as a connector does now (`lease.standby: true`). Its readiness probe stays false, so a Service sends HTTP pushes only to the holder. When the holder stops renewing, the standby takes over within one TTL (60 s by default); after a clean shutdown, at once.
+- **Recovering cleanly:** the new holder fences the tables, then:
+  - finishes the item in progress, from its checkpoint, if the source still has it unchanged;
+  - adds ledger rows for any summary row without one (§5.3.2);
+  - sends `item.landed` again for items whose message may not have been acknowledged (message IDs make this safe, §10.1);
+  - starts the intake.
+  Queue messages that weren't acknowledged are redelivered by the broker, and push senders retry, so nothing is lost and, thanks to the ledger, nothing is landed twice.
+- **Claims** (§9.5) stay on read-write directories and shares, so two intakes with different names can't land the same source. A read-only source can't hold a claim; there, unique intake names are the only guard, and it is a deployment rule.
+
+#### 5.3.6 Signalling the splitter, and what changes in it
+
+**`item.landed`** goes on the intake's landing queue, read only by its splitter, never by downstream consumers. It is sealed like every other message (§10.1). Payload: item ID, intake, kind, size, item digest, `landed_at`, whether there is a record index, `replaces_item_id`, and the storage reference (catalog, namespace, table, landing day, snapshot ID, KEK ref). Message ID `il-<itemId>`, ordering key = intake.
+
+**The splitter:**
+- consumes `item.landed`, one item at a time, in order, and acknowledges it only once the item is `COMPLETED` or `FAILED`;
+- reads the item from `landed_items` by chunk, with random access, so splitting works as today;
+- records the item ID in its checkpoint, so after a restart it finds its item directly. Fingerprints, `InProgressLocator`, the directory claim and deleting originals all go from the splitter;
+- has no archive step: `file.completed` refers to the item ID, and `source_files` and `failed_files` are retired. A failed item stays in landing, and `restore` reads it from there;
+- doesn't need the local encrypted fallback (§11.3) any more, because a landed item is already in storage. The landing node doesn't need one either: until an item is committed, the source still has it, the push sender retries, or the broker redelivers. `decrypt-fallback` stays for fallback files that already exist.
+
+`file.completed` gains an optional `itemId`, so this is contract 2.2 for downstream readers (§10.2).
+
+#### 5.3.7 Telemetry
+
+Everything goes through `Telemetry` and the allow-list (§12). No path, filename, object key or producer reference appears in telemetry; `Attr` gains `sdh.intake`, `sdh.item_id` and `sdh.kind`.
+- **Traces:** `land.item` (root, one per item) contains `read` blocks, `storage.commit` and `publish.batch`.
+- **Audit events:** `item.discovered`, `item.landed` (bytes), `item.skipped` (already landed; counted, not logged one by one), `item.changed`, `item.duplicate_content`, `item.resumed`, `item.restarted`, `item.vanished`, `item.after_failed`, `intake.unavailable` and `intake.recovered`, `intake.table_rewrite`, plus the lease events of §12.
+- **Metrics:** `sdh.landing.items` and `sdh.landing.bytes` (by intake and kind), `sdh.landing.duplicates`, `sdh.landing.backlog` (items seen but not yet landed) and `sdh.landing.oldest_waiting_age`, `sdh.landing.ledger_items`, `sdh.landing.batch_size` for queues, and the intake health metrics of §5.3.4.
+
+#### 5.3.8 Helping producers find the source of a problem (open)
+
+When the splitter flags a problem, the producer has to find it in their own data and send a fix. Telemetry can't tell them: it carries no names, and it goes to our operators, not to them. To be decided:
+
+**What we can give back:**
+- **At landing, a receipt:** item ID, size, the SHA-256 of the content as we received it, and `landed_at`. With the SHA-256 a producer can find the exact file or message on their side, without our sending a name.
+- **The producer's own reference:** an `X-Correlation-Id` header on a push, the broker message ID on a queue, or the path for a file. It is stored encrypted with the item, because a path can hold PHI.
+- **When a problem is found:** item ID, the producer's reference, the error code, and where it is: byte offset, line and column (the splitter already records these, §6.1 and §6.4), and for a message batch, which message.
+- **Resubmission:** a producer says an item replaces an earlier one (a `Replaces` header, or a marker file next to the new file), and we record `replaces_item_id`. This is the `replaces_file_id` left unbuilt in §11.4.
+
+**How it could reach them** (one or more):
+1. **HTTP intakes:** a status endpoint, `GET /intakes/<intake>/items/<itemId>`, using the same authentication as the push, and showing only that producer's items.
+2. **Read-write file intakes:** a result file the producer can read, such as `<name>.sdh-result.json`, or one in a `results/` directory. A read-only intake can't do this.
+3. **A results queue** the producer subscribes to, with sealed messages like ours.
+4. **A report or console,** with the pipeline management and remediation work (§17).
+
+**Questions for that discussion:** are producers our customers' own teams, or outside organisations, and must a producer only ever see its own items? Which of the channels above do producers need? Is a human-readable report needed, or is a machine-readable result enough?
+
+#### 5.3.9 Configuration
+
+One intake per landing node:
 
 ```yaml
 sdh:
-  source:
-    type: s3                               # local | s3 | sftp | iceberg | <plugin>
-    options:                               # passed to the plugin, as split.options are (§6.2)
-      bucket: phi-dropzone
-      prefix: inbound/ccda/
-      region: eu-west-1
-    ready: { mode: marker }                # marker | stable | age
-    after: { mode: move, to: processed/ }  # delete | move | keep
-    read: { mode: direct }                 # direct | staged
-  work-dir: /data/work
+  connector-id: landing-claims-sftp
+  landing:
+    intake: claims-sftp                    # names the lease, checkpoint, ledger keys and metrics
+    source:
+      type: sftp                           # file | sftp | smb | s3 | azure-blob | gcs | http | queue | iceberg
+      uri: "sftp://dropzone.example.org:22/outbound/claims?knownHostsFile=/run/secrets/known_hosts&strictHostKeyChecking=yes&privateKeyFile=/run/secrets/sftp_key"
+      access: read-only                    # read-only | read-write
+      after: { mode: move, to: processed/ }   # read-write only: delete | move | rename
+      ready: { mode: stable, settle: 2m }     # stable | marker
+      recursive: false
+      max-item-bytes: 0                    # 0 = no limit
+      auth-retry-interval: 5m
+    batch: { max-messages: 1000, max-bytes: 64MB, max-wait: 5s }   # queue intakes
+    http:                                  # http intakes
+      auth: oauth2                         # oauth2 | mtls
+      oauth2: { issuer: "https://idp.example.org", audience: sdh-landing, scope: sdh.push }
+      # mtls: { trusted-cas: /run/secrets/producer-ca.pem, subjects: ["CN=claims-producer"] }
+    queue: { type: kafka, uri: "kafka:sdh.landing.claims?brokers=kafka:9093&securityProtocol=SSL" }   # where item.landed goes
+  storage:                                 # as §14, for the landing namespace
+    namespace: sdh_landing
+  crypto:
+    keys: { landed-items-kek: landed-items-kek/1 }
+  lease: { name: landing-claims-sftp, standby: true }
+  maintenance:
+    retention: { landed-items: 3650d, ledger: forever }
 ```
 
-- **Credentials** never appear in `options`. They come from workload identity or the environment, through a resolver the connector gives the plugin, as for storage (§8.1).
-- **Compatibility:** the existing `sdh.file.*` settings map to `type: local`, so current deployments keep working unchanged.
-- **Option schemas:** each plugin's options are a Spring `@ConfigurationProperties` class. Startup validation uses it now, and a console can use its metadata later to build forms and check values.
+- **The URI is checked** against the fixed list of components and against options that must be set or must not be. For example, `strictHostKeyChecking=no` is refused, and so is a password written in the URI. Credentials come from mounted secrets or the environment, never from the URI itself.
+- **The splitter's configuration** loses `sdh.file.*` and gains the landing queue it reads from and the landing catalog it reads items from (read access only, with unwrap rights on `landed-items-kek`).
 
-**Iceberg and Parquet sources.** A table holds rows, not files, and the pipeline's unit of work is a file, with its own checkpoint and several commits. One row per item would mean several commits per document, too slow at volume. Two options:
-1. **Virtual files (to try first):** the plugin presents a fixed batch of rows, such as one Parquet data file at one snapshot, as one byte stream of documents, identified by snapshot, data file and row range so it can be rebuilt exactly after a restart. The existing splitter cuts it into sections. Whether the C-CDA splitter accepts several documents in one stream, and in what framing, still needs checking.
-2. **A record source:** a second SPI that hands over documents already one section each, skipping splitting. Faster, but the pipeline needs a batching path.
+#### 5.3.10 Order of work
 
-Archiving also needs deciding for table sources: the original already lives in a lakehouse, so a reference (snapshot and data file) may be enough instead of a copy in `source_files`. That affects what `sdh-admin restore` can do (§11.4).
+1. **Landing storage:** `landed_items` and `landing_ledger`, the landing checkpoint, `item.landed` in `connector-contract`, and the lease's standby mode.
+2. **The landing node** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry.
+3. **The splitter reads from landing:** an `item.landed` consumer, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. The `-Pit` suite and the Kubernetes run (§15.2) are the check, with failover of both stages.
+4. **SFTP and SMB,** with the failure cases of §5.3.4 tested against containers that are cut off, restarted and given wrong keys.
+5. **HTTP push,** with OAuth2 and mTLS.
+6. **Queue intakes,** batched, for the seven brokers.
+7. **Buckets,** then **Iceberg tables.**
+8. **Producer feedback** (§5.3.8), once its open questions are settled.
 
-**Packaging.** `ServiceLoader` finds only jars on the class path, and the app runs with `java -jar app.jar`. Plugins are added when the image is built, as layers of the customer image (§14.3), and signed with it (§14.4). A plugin is code that sees PHI, so plugins are never loaded from a writable mount or downloaded at run time.
-
-**Security** (§7.5):
-- Files wait in plaintext in the source endpoint until processed: the endpoint and the work volume must be encrypted at rest, and reached over encrypted, authenticated connections (TLS, SSH with a pinned host key, SMB 3.1.1 with encryption, or NFSv4.1 with Kerberos `krb5p`).
-- Separate identities: the producer can only write to the endpoint, and the connector can read, and delete or move. The connector's credentials for the endpoint are its own.
-- A Kubernetes NetworkPolicy limits the pod to the endpoint, storage, key service and queue.
-- "Test connection" checks, when they come, only reach the endpoint and check permissions: they never list item names or read contents.
-
-**Order of work:**
-1. **The SPI, with today's directory code behind it as the `local` plugin**, with no change in behaviour. The full suite with `-Pit` is the check.
-2. **`sdh.source` configuration** and the queue chosen by name (`QueueType` becomes a registry).
-3. **`sdh.work-dir`** for outcome records, the fallback and staged copies.
-4. **A contract test kit every plugin must pass:** readiness; a restart after a crash at each step; `complete()` safe to repeat; parallel reads by position; an `identity()` without PHI.
-5. **S3 plugin:** direct and staged reads, the conditional-put claim, marker readiness. It can be tested against SeaweedFS, which the integration suite already runs (§15.1).
-6. **SFTP plugin:** offset reads, exclusive-create claim, pinned host key.
-7. **Iceberg source:** virtual files first, once the splitter's handling of batched documents is checked.
+**Still to check before building:**
+- **Several formats in one intake:** a splitter handles one format (§6). If one intake can carry several, the landing node or the splitter has to tell them apart.
+- **Camel's SMB component** on SMB 3 with encryption required, its timeouts, and what it logs.
+- **The ledger's memory** with tens of millions of items.
 
 ## 6. Splitting
 
@@ -1893,6 +1992,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 
 - Multi-instance or high-availability operation. The lease enforces a single writer, and the directory claim keeps each inbound directory to one connector (§9.5).
 - **Operator-defined pipelines:** defining the source type, endpoint and handling through a console or API, without editing configuration by hand. Planned with pipeline monitoring, management and remediation. It will need versioned definitions that apply between files, roles with approval for changes that redirect PHI, audit events for every change, secrets by reference only, and per-environment allow-lists of endpoints, destinations and queues (§5.3).
+- **Several landing nodes for one intake at once:** each intake has one active node and a standby (§5.3.5).
 - **Host disk capacity:** space for the inbound directory, `completed/` and `failed/` records, and the encrypted local `failed/<fileId>.enc` fallback is the operators' responsibility, through normal system monitoring. The service doesn't reserve, measure or predict disk space.
 - **MinIO:** not supported or tested. Support only if a customer pays for it, including the development and testing it needs (§8.1).
 - **GCP Cloud KMS against the real service:** untested until customer demand requires it (§7.4).
