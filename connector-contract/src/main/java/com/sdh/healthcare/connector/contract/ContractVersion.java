@@ -30,9 +30,12 @@ public final class ContractVersion
     /**
      * The minor version. 1: sections carry their origin (where their text
      * starts, as a line and column in the section and in the file), and
-     * failed sections where in the file they failed.
+     * failed sections where in the file they failed. 2: the
+     * {@code item.landed} message, which a landing node sends to its
+     * splitter. Downstream readers never receive it, so it doesn't need a
+     * new major version.
      */
-    public static final int MINOR = 1;
+    public static final int MINOR = 2;
 
     /** The version this build writes, as "major.minor", such as "2.1". */
     public static final String CURRENT = MAJOR + "." + MINOR;

@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.contract.message;
 import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
@@ -90,15 +91,7 @@ public final class PayloadCodec
                 {
                     payload.put("origin", originFields(section.origin()));
                 }
-                StorageRef ref = section.storage();
-                Map<String, Object> storage = new LinkedHashMap<>();
-                storage.put("catalog", ref.catalog());
-                storage.put("namespace", ref.namespace());
-                storage.put("table", ref.table());
-                storage.put("ingestedDate", ref.ingestedDate().toString());
-                storage.put("snapshotId", ref.snapshotId());
-                storage.put("kekRef", ref.kekRef());
-                payload.put("storage", storage);
+                payload.put("storage", storageFields(section.storage()));
             }
             case FileCompleted completed ->
             {
@@ -110,6 +103,15 @@ public final class PayloadCodec
                 payload.put("startedAt", completed.startedAt().toString());
                 payload.put("completedAt",
                         completed.completedAt().toString());
+            }
+            case ItemLanded landed ->
+            {
+                payload.put("intake", landed.intake());
+                payload.put("kind", landed.kind());
+                payload.put("size", landed.size());
+                payload.put("itemDigest", landed.itemDigest());
+                payload.put("landedAt", landed.landedAt().toString());
+                payload.put("storage", storageFields(landed.storage()));
             }
         }
         return payload;
@@ -181,6 +183,14 @@ public final class PayloadCodec
                             text(payload, "fileDigest"),
                             Instant.parse(text(payload, "startedAt")),
                             Instant.parse(text(payload, "completedAt")));
+                    case ITEM_LANDED -> new ItemLanded(
+                            fileId,
+                            text(payload, "intake"),
+                            text(payload, "kind"),
+                            number(payload, "size"),
+                            text(payload, "itemDigest"),
+                            Instant.parse(text(payload, "landedAt")),
+                            storage(payload));
                 };
         if (!message.messageId().equals(payload.get("messageId")))
         {
@@ -188,6 +198,24 @@ public final class PayloadCodec
                     "messageId does not match payload");
         }
         return message;
+    }
+
+    /**
+     * The JSON fields of where a section or item is stored.
+     *
+     * @param ref where it is stored
+     * @return its catalog, namespace, table, day, snapshot and KEK
+     */
+    private static Map<String, Object> storageFields(StorageRef ref)
+    {
+        Map<String, Object> storage = new LinkedHashMap<>();
+        storage.put("catalog", ref.catalog());
+        storage.put("namespace", ref.namespace());
+        storage.put("table", ref.table());
+        storage.put("ingestedDate", ref.ingestedDate().toString());
+        storage.put("snapshotId", ref.snapshotId());
+        storage.put("kekRef", ref.kekRef());
+        return storage;
     }
 
     /**

@@ -13,14 +13,16 @@ import java.util.UUID;
 
 /**
  * A message a connector publishes (design §10.1): a file was started, a
- * section is in storage, or a file was completed. The payload is always
- * sealed: signed, then encrypted.
+ * section is in storage, or a file was completed. A landing node publishes
+ * one more, to its splitter only: an item was landed (design §5.3.6). The
+ * payload is always sealed: signed, then encrypted.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
-        ConnectorMessage.SectionInStorage, ConnectorMessage.FileCompleted
+        ConnectorMessage.SectionInStorage, ConnectorMessage.FileCompleted,
+        ConnectorMessage.ItemLanded
 {
 
     /**
@@ -387,6 +389,52 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         public String messageId()
         {
             return "fc-" + fileId;
+        }
+    }
+
+    /**
+     * An item was landed: stored exactly as received, encrypted, in the
+     * landing tables (design §5.3). Sent by a landing node to its splitter
+     * only, never to downstream readers. The splitter processes the item
+     * under its item id, so the item id is also the file id of every
+     * section and message that comes from it.
+     *
+     * @param fileId     the item's id
+     * @param intake     the name of the intake it came in through
+     * @param kind       what it is, such as {@code file} or
+     *                   {@code message-batch}
+     * @param size       its size, in bytes
+     * @param itemDigest its keyed digest, as {@code file.completed} reports
+     *                   a file's
+     * @param landedAt   when its landing was committed
+     * @param storage    where it is stored; the date is the day it was
+     *                   landed, the table's partition
+     */
+    record ItemLanded(UUID fileId, String intake, String kind, long size,
+            String itemDigest, Instant landedAt, StorageRef storage)
+            implements ConnectorMessage
+    {
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#ITEM_LANDED}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.ITEM_LANDED;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "il-" and the item id
+         */
+        @Override
+        public String messageId()
+        {
+            return "il-" + fileId;
         }
     }
 

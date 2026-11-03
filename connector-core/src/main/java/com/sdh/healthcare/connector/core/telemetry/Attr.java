@@ -81,7 +81,19 @@ public enum Attr
      * A byte position within a section, such as where conversion failed
      * (design §6.4).
      */
-    POSITION("sdh.position");
+    POSITION("sdh.position"),
+
+    /**
+     * The name of a landing intake (design §5.3), such as
+     * {@code claims-sftp}: chosen in configuration, never a path or host.
+     */
+    INTAKE("sdh.intake"),
+
+    /** A landed item's ID, a UUID: never its name or path. */
+    ITEM_ID("sdh.item_id"),
+
+    /** What kind of item was landed, such as {@code file}. */
+    KIND("sdh.kind");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

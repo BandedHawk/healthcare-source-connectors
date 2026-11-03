@@ -115,6 +115,29 @@ class LeaseKeeperTest {
     }
 
     @Test
+    void aStandbyWaitsAsLongAsItTakes() throws Exception {
+        // The active node runs for an hour; the standby keeps waiting, then takes over once it lapses.
+        HeldStore store = new HeldStore();
+        store.freeAt = now.get() + Duration.ofHours(1).toNanos();
+        long start = now.get();
+        LeaseKeeper k = LeaseKeeper.acquire(store, "l", "me", SETTINGS, null, now::get, this::sleep, lost::add,
+                false);
+        assertThat(k.epoch()).isEqualTo(7);
+        assertThat(Duration.ofNanos(now.get() - start)).isEqualTo(Duration.ofHours(1));
+        assertThat(sleeps).allSatisfy(d -> assertThat(d).isEqualTo(LeaseKeeper.STARTUP_POLL));
+    }
+
+    @Test
+    void anInterruptedStandbyGivesUp() {
+        HeldStore store = new HeldStore();
+        store.freeAt = Long.MAX_VALUE;
+        assertThatThrownBy(() -> LeaseKeeper.acquire(store, "l", "me", SETTINGS, null, now::get, d -> {
+            throw new InterruptedException();
+        }, lost::add, false)).isInstanceOf(LeaseHeldException.class);
+        assertThat(Thread.interrupted()).as("interrupt flag restored").isTrue();
+    }
+
+    @Test
     void anInterruptedWaitGivesUp() {
         HeldStore store = new HeldStore();
         store.freeAt = Long.MAX_VALUE;

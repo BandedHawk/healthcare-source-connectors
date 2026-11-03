@@ -173,7 +173,9 @@ public final class IngestTables
 
     /**
      * Creates a table, and its namespace if needed, or loads it if it exists
-     * and adds any optional columns it lacks.
+     * and adds any optional columns it lacks. Every table is given the
+     * {@link #PROPERTIES} the design relies on. The landing tables are
+     * created through this too (design §5.3.2).
      *
      * @param catalog   the Iceberg catalog
      * @param namespace the namespace the table is in
@@ -183,8 +185,8 @@ public final class IngestTables
      * @param order     its sort order, for a new table
      * @return the table
      */
-    private static Table create(Catalog catalog, String namespace, String name,
-            Schema schema, PartitionSpec spec, SortOrder order)
+    public static Table create(Catalog catalog, String namespace,
+            String name, Schema schema, PartitionSpec spec, SortOrder order)
     {
         Namespace tableNamespace = Namespace.of(namespace);
         if (catalog instanceof SupportsNamespaces namespaces

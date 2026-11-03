@@ -125,10 +125,33 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable {
         return acquire(store, leaseName, owner, settings, System::nanoTime, d -> Thread.sleep(d), onLost, true);
     }
 
+    /**
+     * Acquires the lease as a standby (design §5.3.5): waits for it for as long as it takes, then starts background
+     * renewal. A standby pod for a landing intake calls this, so it takes over within one TTL of the active node
+     * stopping, without exiting and restarting in between.
+     *
+     * @throws LeaseHeldException if the wait is interrupted
+     */
+    public static LeaseKeeper acquireAsStandby(LeaseStore store, String leaseName, String owner, Settings settings,
+            Consumer<LeaseLostException> onLost) throws LeaseHeldException {
+        return acquire(store, leaseName, owner, settings, null, System::nanoTime, d -> Thread.sleep(d), onLost,
+                true);
+    }
+
     static LeaseKeeper acquire(LeaseStore store, String leaseName, String owner, Settings settings,
             LongSupplier nanoClock, Sleeper sleeper, Consumer<LeaseLostException> onLost, boolean scheduleRenewals)
             throws LeaseHeldException {
-        long waitUntil = nanoClock.getAsLong() + settings.startupWait().toNanos();
+        return acquire(store, leaseName, owner, settings, settings.startupWait(), nanoClock, sleeper, onLost,
+                scheduleRenewals);
+    }
+
+    /**
+     * @param maxWait how long to wait for a held lease; null waits for as long as it takes (standby)
+     */
+    static LeaseKeeper acquire(LeaseStore store, String leaseName, String owner, Settings settings,
+            Duration maxWait, LongSupplier nanoClock, Sleeper sleeper, Consumer<LeaseLostException> onLost,
+            boolean scheduleRenewals) throws LeaseHeldException {
+        long waitUntil = maxWait == null ? 0 : nanoClock.getAsLong() + maxWait.toNanos();
         boolean waiting = false;
         while (true) {
             long sentAt = nanoClock.getAsLong();
@@ -138,13 +161,17 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable {
                 return new LeaseKeeper(store, grant, sentAt + settings.localValidity().toNanos(), settings,
                         nanoClock, onLost, scheduleRenewals);
             } catch (LeaseHeldException e) {
-                long left = waitUntil - nanoClock.getAsLong();
+                long left = maxWait == null ? Long.MAX_VALUE : waitUntil - nanoClock.getAsLong();
                 if (left <= 0) {
                     throw e;
                 }
                 if (!waiting) {
                     // The holder ID is host, PID and a random suffix: no PHI.
-                    LOG.info("lease.waiting holder={} up_to_s={}", e.holder(), settings.startupWait().toSeconds());
+                    if (maxWait == null) {
+                        LOG.info("lease.standby holder={}", e.holder());
+                    } else {
+                        LOG.info("lease.waiting holder={} up_to_s={}", e.holder(), maxWait.toSeconds());
+                    }
                     waiting = true;
                 }
                 try {

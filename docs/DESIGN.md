@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-03 (aq): built step 1 of landing (§5.3.10), in `connector-core` `landing/`. `ItemLander` stores an item as a stream in encrypted chunks, resumably, with a summary row and the same keyed digest as archived files; `LandedItems` reads it back and checks it. `LandingLedger` and `LedgerIndex` record what has been landed, without PHI, and repair the last entry after a crash. `LandingCheckpoint` holds progress. `item.landed` is contract 2.2 (§10.1), and the item ID becomes the splitter's file ID (§5.3.6). `LeaseKeeper.acquireAsStandby` waits for the lease for as long as it takes (§5.3.5). Nothing runs these yet; the landing node is step 2.
+
 Revision 2026-11-03 (ap): documentation only. Ingestion becomes two stages (§5.3, not built), replacing the source-endpoint plan of revision an. A landing node per intake, with a standby, takes data from directories, SFTP, SMB, HTTP push, the seven queues, buckets and Iceberg tables through a fixed list of Camel components, and stores it as received in its own namespace, `sdh_landing`. It then signals the splitter with an `item.landed` message. Read-only sources are tracked with a ledger, so nothing is landed twice. The landed copy replaces `source_files`, and the splitter reads only from landing. How producers find the source of a problem in their data is still open (§5.3.8).
 
 Revision 2026-11-02 (ao): problems can be found by line and column, for remediation.
@@ -319,9 +321,9 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Landing: two-stage ingestion (planned)
+### 5.3 Landing: two-stage ingestion (step 1 built)
 
-Not built yet. Decided 2026-11-03; this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own.
+Decided 2026-11-03. Step 1 of §5.3.10 is built: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Nothing runs them yet; the landing node is step 2. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own.
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
@@ -388,22 +390,24 @@ flowchart LR
 
 Namespace `sdh_landing` (configurable), with its own catalog properties, so it can be on another catalog, bucket or storage account.
 
-**`landed_items`** has the same layout and encryption as `source_files` today (§8.2): the item in 8 MiB chunks, one row per chunk, then a summary row (`chunk_index = -1`) written in the item's final commit. A summary row means the item is fully landed. The summary row holds:
-- `item_id` (UUIDv7), `intake`, `kind` (`file`, `object`, `push`, `message-batch`, `table-file`), `size`, `landed_at`;
-- `item_digest`, the keyed chained digest of §5.1 (it was `fileDigest`);
-- encrypted, because they can hold PHI: the original name or path, the producer's reference (§5.3.6), the content's SHA-256, and for message batches the record index;
-- `replaces_item_id`, when the producer says the item replaces an earlier one (§5.3.6).
+**`landed_items`** (`LandingTables`, written by `ItemLander`, read by `LandedItems`) is encrypted like `source_files` (§8.2): the item in 8 MiB chunks, one row per chunk, then a summary row (`chunk_index = -1`) written in the item's final commit. A summary row means the item is fully landed.
+- **Read as a stream,** because a push's size isn't known in advance. A chunk is known to be the last by reading one chunk ahead.
+- **Chunk rows** carry only `item_id`, `chunk_index`, `ciphertext`, `bdk_wrapped`, `kek_ref`, `batch_id` and `landed_at` (the partition). The chunk key is HKDF(BDK, itemId, seq 0) as for sections. The chunk count in the AAD is 0, because it isn't known when a chunk is written; the summary row's count and the digest catch a missing, extra or moved chunk instead.
+- **The summary row** holds `intake`, `kind` (`file`, `object`, `push`, `message-batch`, `table-file`), `item_size`, `chunk_count`, `chunk_size`, `item_digest` with `digest_block_size`, `started_at`, the source reference (`source_ref_hash`, `source_size`, `source_version`), the encrypted original name or path (`original_name_enc`, seq −1 as for archives), and `replaces_item_id`.
+- **`item_digest`** is the keyed chained digest of §5.1, with the same label and blocks, so a file's item digest equals the file digest the splitter reports for it. Tested.
+- **Size check:** when the source gave a size, the bytes read must match it exactly, or the landing stops with `ItemChangedException` and nothing is finished.
+- **Not yet:** the producer's reference, the content's SHA-256 and the record index for message batches come with the steps that need them (§5.3.8, step 6). `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
 
 Chunks committed without a summary row belong to an item that wasn't finished (a push that broke off, an item that changed while being read). Maintenance removes them once they are older than a day and no checkpoint refers to them.
 
 **`landing_ledger`** records what has been landed, with no PHI: hashes, sizes and times only.
 - **Key:** `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ path or key)`, plus size and modification time (or version ID or ETag; or the message ID's hash for queues), and the item's content digest.
 - **Kept longer than the data.** Retention purges `landed_items`, but a file that stays on a read-only source would then be landed again. The ledger has its own retention, by default forever.
-- **Written straight after the item's commit.** Iceberg has no multi-table commit (§8.2), so at startup any summary row without a ledger row gets one. An item is never landed twice for that reason.
-- **In memory:** the node keeps 128-bit keys in a compact set, about 24 bytes per item: 10 million items need about 240 MB. The set is loaded at startup. `sdh.landing.ledger_items` reports its size.
+- **Written straight after the item's commit.** Iceberg has no multi-table commit (§8.2), so a crash in between leaves the last item without a ledger row. Items are landed one at a time, so only the last can be missing: at startup `LandingLedger.repair` adds it from the done checkpoint. An item is never landed twice for that reason. Tested.
+- **In memory (`LedgerIndex`):** the node keeps each sighting's 128-bit key in a compact set (about 24 bytes per item), and 60 bits of each item's digest in another (about 12 bytes per item): 10 million items need about 360 MB. The digest set only says an earlier item *may* have the same content; `LandingLedger.itemsWithDigest` gives the exact items. The sets are loaded at startup. `sdh.landing.ledger_items` reports their size.
 - **Why not a modification-time watermark:** copies made with `cp -p` or `rsync -t` keep old times, so a watermark would miss them.
 
-**Checkpoint.** `sdh.landing.<intake>` on `landed_items`, MAC'd like §9.1: the item in progress, its encrypted source reference, size, modification time, next block and chain hash. Large items are committed every `commit-bytes`, as archives are today, so a 1 TB file isn't read again from the start after a restart.
+**Checkpoint.** `sdh.landing.<intake>` on `landed_items` (`LandingCheckpoint`), MAC'd like §9.1: the item in progress, its kind, its source reference (the keyed hash, size and version: no PHI, and the intake finds the item again by hashing what it lists), the next block and the chain hash; once done, the size, digest and landing time. Resuming checks that the source reference is unchanged, or fails with `ItemChangedException`. An unfinished item must be finished or cleared (`ItemLander.clear`) before another starts. Large items are committed every `commit-bytes`, as archives are today, so a 1 TB file isn't read again from the start after a restart.
 
 **Retention:** `maintenance.retention.landed-items`, set by the customer (unset keeps items forever). An item still referred to by a splitter checkpoint is never purged. Purging uses the existing retention run (§8.4).
 
@@ -433,7 +437,7 @@ Metrics: `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age`, `sdh.intake.outag
 #### 5.3.5 One node per intake, and a standby
 
 - **The lease** is the one in §9.3, named after the intake. Fencing on the landing tables rejects any commit from an old holder.
-- **Standby:** a second pod for the same intake waits for the lease for as long as it takes, instead of failing after TTL + margin as a connector does now (`lease.standby: true`). Its readiness probe stays false, so a Service sends HTTP pushes only to the holder. When the holder stops renewing, the standby takes over within one TTL (60 s by default); after a clean shutdown, at once.
+- **Standby:** a second pod for the same intake waits for the lease for as long as it takes, instead of failing after TTL + margin as a connector does now (`lease.standby: true`, `LeaseKeeper.acquireAsStandby`, built). Its readiness probe stays false, so a Service sends HTTP pushes only to the holder. When the holder stops renewing, the standby takes over within one TTL (60 s by default); after a clean shutdown, at once.
 - **Recovering cleanly:** the new holder fences the tables, then:
   - finishes the item in progress, from its checkpoint, if the source still has it unchanged;
   - adds ledger rows for any summary row without one (§5.3.2);
@@ -444,16 +448,18 @@ Metrics: `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age`, `sdh.intake.outag
 
 #### 5.3.6 Signalling the splitter, and what changes in it
 
-**`item.landed`** goes on the intake's landing queue, read only by its splitter, never by downstream consumers. It is sealed like every other message (§10.1). Payload: item ID, intake, kind, size, item digest, `landed_at`, whether there is a record index, `replaces_item_id`, and the storage reference (catalog, namespace, table, landing day, snapshot ID, KEK ref). Message ID `il-<itemId>`, ordering key = intake.
+**`item.landed`** (`ConnectorMessage.ItemLanded`, built) goes on the intake's landing queue, read only by its splitter, never by downstream consumers. It is sealed like every other message (§10.1). Payload: the item ID (in `fileId`), intake, kind, size, item digest, `landedAt`, and the storage reference (catalog, namespace, table, the day of the summary row, a snapshot that holds the item, KEK ref). Message ID `il-<itemId>`. `replaces_item_id` and the record index will be added as optional fields when their steps need them.
+
+**The item ID is the file ID.** The splitter processes an item under its item ID, so every section, `section.stored` and `file.completed` from it carries the item ID as its `fileId`, and downstream can go from any section back to the landed original with no extra field.
 
 **The splitter:**
 - consumes `item.landed`, one item at a time, in order, and acknowledges it only once the item is `COMPLETED` or `FAILED`;
 - reads the item from `landed_items` by chunk, with random access, so splitting works as today;
 - records the item ID in its checkpoint, so after a restart it finds its item directly. Fingerprints, `InProgressLocator`, the directory claim and deleting originals all go from the splitter;
-- has no archive step: `file.completed` refers to the item ID, and `source_files` and `failed_files` are retired. A failed item stays in landing, and `restore` reads it from there;
+- has no archive step: `source_files` and `failed_files` are retired. A failed item stays in landing, and `restore` reads it from there;
 - doesn't need the local encrypted fallback (§11.3) any more, because a landed item is already in storage. The landing node doesn't need one either: until an item is committed, the source still has it, the push sender retries, or the broker redelivers. `decrypt-fallback` stays for fallback files that already exist.
 
-`file.completed` gains an optional `itemId`, so this is contract 2.2 for downstream readers (§10.2).
+**Contract 2.2** adds `item.landed`. Downstream readers never receive it, so it is a minor version (§10.2).
 
 #### 5.3.7 Telemetry
 
@@ -518,7 +524,7 @@ sdh:
 
 #### 5.3.10 Order of work
 
-1. **Landing storage:** `landed_items` and `landing_ledger`, the landing checkpoint, `item.landed` in `connector-contract`, and the lease's standby mode.
+1. **Landing storage (built):** `landed_items` and `landing_ledger`, the landing checkpoint, `item.landed` in `connector-contract`, and the lease's standby mode.
 2. **The landing node** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry.
 3. **The splitter reads from landing:** an `item.landed` consumer, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. The `-Pit` suite and the Kubernetes run (§15.2) are the check, with failover of both stages.
 4. **SFTP and SMB,** with the failure cases of §5.3.4 tested against containers that are cut off, restarted and given wrong keys.
@@ -530,7 +536,7 @@ sdh:
 **Still to check before building:**
 - **Several formats in one intake:** a splitter handles one format (§6). If one intake can carry several, the landing node or the splitter has to tell them apart.
 - **Camel's SMB component** on SMB 3 with encryption required, its timeouts, and what it logs.
-- **The ledger's memory** with tens of millions of items.
+- **The ledger's memory** with tens of millions of items: `LandingLedgerTest` checks 100,000 keys; the sizes above are from the layout, not measured.
 
 ## 6. Splitting
 
@@ -1054,6 +1060,7 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
   - `section.stored` and `section.failed`: `messageId = sectionId`.
 - **Contract 2.0** (from 1.0): added `contentType`, `mapping`, `section.failed` and `failedSectionCount`. It's a major version because a 1.x reader can't handle the new message type.
 - **Contract 2.1:** added `origin`, `errorLine` and `errorColumn`, all optional, so 2.0 readers ignore them. A reader turns a position in the section (such as one a mapping reports from `ccda/2`) into one in the file with `SectionOrigin.toFile`.
+- **Contract 2.2:** added `item.landed`, which a landing node sends to its splitter (§5.3.6). Downstream readers never receive it, so it is a minor version; a 2.1 reader given one would reject it as an unknown type.
   - `file.started`: `fs-<fileId>`.
   - `file.completed`: `fc-<fileId>`.
 

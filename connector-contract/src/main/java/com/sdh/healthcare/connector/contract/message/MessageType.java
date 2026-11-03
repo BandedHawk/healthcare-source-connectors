@@ -21,7 +21,8 @@ public enum MessageType {
     FILE_STARTED("file.started"),
     SECTION_STORED("section.stored"),
     SECTION_FAILED("section.failed"),
-    FILE_COMPLETED("file.completed");
+    FILE_COMPLETED("file.completed"),
+    ITEM_LANDED("item.landed");
 
     private final String wireName;
 

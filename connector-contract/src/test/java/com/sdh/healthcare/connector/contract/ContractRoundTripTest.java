@@ -132,7 +132,11 @@ class ContractRoundTripTest
                         new SourcePosition(75, 12)),
                 new ConnectorMessage.FileCompleted(fileId, 3, 1, 999,
                         "digest", java.time.Instant.EPOCH,
-                        java.time.Instant.EPOCH)))
+                        java.time.Instant.EPOCH),
+                new ConnectorMessage.ItemLanded(fileId, "claims-sftp", "file",
+                        999, "digest", java.time.Instant.EPOCH,
+                        new StorageRef("cat", "sdh_landing", "landed_items",
+                                LocalDate.of(2026, 11, 3), 43L, "kek-2"))))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
                     .isEqualTo(message);
