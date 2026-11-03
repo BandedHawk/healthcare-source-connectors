@@ -130,22 +130,48 @@ public final class CommonSettings
     }
 
     /**
-     * Which keys to use. Each application requires the KEKs of its own
-     * tables only.
+     * Which keys to use. Each application requires only the keys it needs.
      *
-     * @param sectionsKek    the KEK of the {@code sections} table
-     * @param sourceFilesKek the KEK of {@code source_files}
-     * @param failedFilesKek the KEK of {@code failed_files}
-     * @param landedItemsKek the KEK of {@code landed_items} (design §5.3)
+     * @param sectionsKek    the KEK of the {@code sections} table; the
+     *                       splitter only
+     * @param landedItemsKek the KEK of {@code landed_items} (design §5.3):
+     *                       the landing node wraps with it, the splitter
+     *                       only unwraps
      * @param signing        the message signing key
-     * @param recipient      the public key messages are encrypted to
-     * @param recoveryPublic the public key of the local fallback
-     *                       (design §11.3); the file connector only
+     * @param recipient      the public key messages are encrypted to: for
+     *                       the landing node, the splitter's inbox key
+     * @param inbox          the splitter's own key pair, which
+     *                       {@code item.landed} messages are encrypted to;
+     *                       the splitter only
+     * @param landingSigner  the landing node's signing public key, which
+     *                       {@code item.landed} messages must be signed
+     *                       with; the splitter only
      */
-    public record Keys(String sectionsKek, String sourceFilesKek,
-            String failedFilesKek, String landedItemsKek,
+    public record Keys(String sectionsKek, String landedItemsKek,
             @DefaultValue Signing signing, @DefaultValue Recipient recipient,
-            Path recoveryPublic)
+            @DefaultValue InboxKey inbox, @DefaultValue Signer landingSigner)
+    {
+    }
+
+    /**
+     * The splitter's private key for {@code item.landed} messages (design
+     * §5.3.6): an encrypted PKCS#8 PEM, EC P-256.
+     *
+     * @param kid        the key ID the landing node puts in message headers
+     * @param pem        the PEM file
+     * @param passphrase its passphrase, from the environment
+     */
+    public record InboxKey(String kid, Path pem, String passphrase)
+    {
+    }
+
+    /**
+     * A signer's public key, which messages must verify against.
+     *
+     * @param kid the key ID in message headers
+     * @param pem the public key's PEM file
+     */
+    public record Signer(String kid, Path pem)
     {
     }
 

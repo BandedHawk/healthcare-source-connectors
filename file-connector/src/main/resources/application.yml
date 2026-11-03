@@ -43,6 +43,5 @@ logging:
     com.azure.core.http.jdk.httpclient.JdkHttpClient: error
 
 sdh:
-  file:
-    inbound-dir: /data/inbound
-    min-age: 30s
+  landing:
+    idle-wait: 5s

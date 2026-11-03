@@ -350,16 +350,16 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
     }
 
     /**
-     * Every section of a file was stored and published, and the original was
-     * archived.
+     * Every section of a file was stored and published. The original is
+     * the landed item with the same ID (design §5.3.6).
      *
      * @param fileId             the file's id
      * @param sectionCount       all its sections, failed ones included
      * @param failedSectionCount the sections that failed conversion and were
      *                           stored in their original form
      * @param fileSize           the file's size, in bytes
-     * @param fileDigest         the archived file's keyed digest
-     *                           ({@code Archiver})
+     * @param fileDigest         the keyed digest of the original, as
+     *                           landed
      * @param startedAt          when the connector started on the file
      * @param completedAt        when it finished
      */

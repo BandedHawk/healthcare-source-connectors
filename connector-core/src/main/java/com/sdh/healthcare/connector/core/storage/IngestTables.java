@@ -88,36 +88,6 @@ public final class IngestTables
     }
 
     /**
-     * Creates or loads the {@code source_files} table, where completed files
-     * are archived.
-     *
-     * @param catalog   the Iceberg catalog
-     * @param namespace the namespace the table is in, created if missing
-     * @return the table
-     */
-    public static Table sourceFiles(Catalog catalog, String namespace)
-    {
-        Schema schema = ArchiveTables.SOURCE_FILES_SCHEMA;
-        return create(catalog, namespace, ArchiveTables.SOURCE_FILES, schema,
-                ArchiveTables.spec(schema), ArchiveTables.sortOrder(schema));
-    }
-
-    /**
-     * Creates or loads the {@code failed_files} table, where files that
-     * failed are archived.
-     *
-     * @param catalog   the Iceberg catalog
-     * @param namespace the namespace the table is in, created if missing
-     * @return the table
-     */
-    public static Table failedFiles(Catalog catalog, String namespace)
-    {
-        Schema schema = ArchiveTables.FAILED_FILES_SCHEMA;
-        return create(catalog, namespace, ArchiveTables.FAILED_FILES, schema,
-                ArchiveTables.spec(schema), ArchiveTables.sortOrder(schema));
-    }
-
-    /**
      * Adds to an existing table the optional columns of a schema it doesn't
      * have yet, so a table made by an earlier version takes the columns a
      * later contract adds (such as the line and column ones of 2.1). Rows

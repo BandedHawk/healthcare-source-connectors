@@ -16,17 +16,21 @@ import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
-import com.sdh.healthcare.connector.core.pipeline.FileProcessor;
+import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
+import com.sdh.healthcare.connector.core.pipeline.UuidV7;
+import com.sdh.healthcare.connector.core.landing.ItemKind;
+import com.sdh.healthcare.connector.core.landing.ItemLander;
+import com.sdh.healthcare.connector.core.landing.LandedItem;
+import com.sdh.healthcare.connector.core.landing.LandedItemSource;
+import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.landing.NewItem;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
-import com.sdh.healthcare.connector.core.pipeline.OutcomeRecorder;
 import com.sdh.healthcare.connector.core.pipeline.PipelineSettings;
-import com.sdh.healthcare.connector.core.pipeline.SourceFile;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
-import com.sdh.healthcare.connector.core.storage.Archiver;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -63,12 +67,12 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Throughput and memory use of the whole ingest path (design §13): split, hash, compress, encrypt, Parquet write,
- * fenced commits, message sealing, then the archive pass. Run with {@code -Pperf} (see {@code scripts/perf.sh}, or the
+ * fenced commits and message sealing, after the file is landed (the landing pass). Run with {@code -Pperf} (see {@code scripts/perf.sh}, or the
  * NetBeans actions in {@code nbactions.xml}); never part of the normal build or the integration tests, because the
  * results depend on the machine.
  *
  * <p>The pipeline is assembled as the connector assembles it, with production defaults: commits every 10,000
- * sections or 512 MiB, one encrypt worker per core, 512 MiB archive commits. The broker is replaced by a counter
+ * sections or 512 MiB, one encrypt worker per core, 512 MiB landing commits. The broker is replaced by a counter
  * that acknowledges at once, so broker latency is excluded; every message is still sealed (ECDH-ES + ES256).
  *
  * <p>Settings (system properties): {@code perf.size} per file (default 1GiB), {@code perf.formats} (default
@@ -85,8 +89,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ThroughputPerf {
     static final String SECTIONS_KEK = "sections-kek/1";
-    static final String SOURCE_KEK = "source-kek/1";
-    static final String FAILED_KEK = "failed-kek/1";
+    static final String LANDED_KEK = "landed-items-kek/1";
     static final Path OUT = Path.of("target", "perf");
 
     final long size = parseSize(System.getProperty("perf.size", "1GiB"));
@@ -100,7 +103,6 @@ class ThroughputPerf {
     AesKeyWrapProvider keys;
     KeyPair signer;
     KeyPair recipient;
-    KeyPair recovery;
     InMemorySpanExporter spans;
 
     static Stream<String> formats() {
@@ -113,8 +115,8 @@ class ThroughputPerf {
         backend = PerfStorage.create(storage);
         KeyGenerator kg = KeyGenerator.getInstance("AES");
         kg.init(256);
-        keys = new AesKeyWrapProvider(Map.of(SECTIONS_KEK, kg.generateKey(), SOURCE_KEK, kg.generateKey(),
-                FAILED_KEK, kg.generateKey()));
+        keys = new AesKeyWrapProvider(Map.of(SECTIONS_KEK, kg.generateKey(), LANDED_KEK,
+                kg.generateKey()));
         signer = ec();
         recipient = switch (recipientType) {
             case "ec" -> ec();
@@ -125,7 +127,6 @@ class ThroughputPerf {
             }
             default -> throw new IllegalArgumentException("perf.recipient must be ec or rsa");
         };
-        recovery = ec();
         spans = InMemorySpanExporter.create();
         Telemetry.install(OpenTelemetrySdk.builder()
                 .setTracerProvider(SdkTracerProvider.builder().addSpanProcessor(SimpleSpanProcessor.create(spans))
@@ -151,7 +152,7 @@ class ThroughputPerf {
                 .append(System.getProperty("java.version")).append(", ").append(System.getProperty("os.arch"))
                 .append(".\n\n");
         b.append("## Throughput\n\n");
-        b.append("| Format | Size MiB | Sections | Total s | MiB/s | Sections/s | Split s (MiB/s) | Archive s (MiB/s)"
+        b.append("| Format | Size MiB | Sections | Total s | MiB/s | Sections/s | Split s (MiB/s) | Land s (MiB/s)"
                 + " | Avg cores | Busiest thread | Stored ÷ source |\n");
         b.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|\n");
         results.forEach(r -> b.append(r.throughputRow()).append('\n'));
@@ -199,7 +200,7 @@ class ThroughputPerf {
             long heapInUsePeak, long directPeak, long rssPeak, long allocated, long gcPauseMs, long fullGcs) {
 
         static final String CSV_HEADER = "timestamp,storage,recipient,max_heap_mib,workers,format,size_mib,sections,"
-                + "total_s,mib_per_s,sections_per_s,split_s,archive_s,avg_cores,busiest_thread,busiest_pct,"
+                + "total_s,mib_per_s,sections_per_s,split_s,land_s,avg_cores,busiest_thread,busiest_pct,"
                 + "stored_ratio,heap_after_gc_peak_mib,heap_in_use_peak_mib,direct_peak_mib,rss_peak_mib,"
                 + "allocated_gib,allocation_mib_per_s,gc_pause_pct,full_gcs";
 
@@ -252,8 +253,7 @@ class ThroughputPerf {
         Catalog catalog = backend.catalog();
         String ns = "perf_" + format + "_" + UUID.randomUUID().toString().substring(0, 8);
         Table sections = IngestTables.sections(catalog, ns);
-        Table source = IngestTables.sourceFiles(catalog, ns);
-        Table failed = IngestTables.failedFiles(catalog, ns);
+        Table source = LandingTables.landedItems(catalog, ns);
         FencedCommitter committer = new FencedCommitter(new LeaseToken() {
             public long epoch() {
                 return 1;
@@ -261,7 +261,7 @@ class ThroughputPerf {
 
             public void checkHeld() {}
         });
-        for (Table t : List.of(sections, source, failed)) {
+        for (Table t : List.of(sections, source)) {
             committer.establish(t);
         }
         SectionIds ids = new SectionIds(IdKeys.loadOrCreate(sections, committer, keys, SECTIONS_KEK));
@@ -272,10 +272,9 @@ class ThroughputPerf {
         try (IngestPipeline pipeline = new IngestPipeline(settings, sections, committer, keys, ids,
                 SplitterRegistry.load(), new MessageSealer(new ECDSASigner((ECPrivateKey) signer.getPrivate()),
                         "connector", recipient.getPublic(), "downstream"), pub, clock)) {
-            FileProcessor processor = new FileProcessor(pipeline,
-                    new Archiver(source, committer, keys, ids, Archiver.Settings.defaults("perf", SOURCE_KEK), clock),
-                    new Archiver(failed, committer, keys, ids, Archiver.Settings.defaults("perf", FAILED_KEK), clock),
-                    new NoRecords(), (java.security.interfaces.ECPublicKey) recovery.getPublic());
+            ItemProcessor processor = new ItemProcessor(pipeline);
+            ItemLander lander = new ItemLander(source, committer, keys, ids,
+                    ItemLander.Settings.defaults("perf", LANDED_KEK), clock);
 
             System.gc();
             spans.reset();
@@ -288,7 +287,15 @@ class ThroughputPerf {
             long cpu0 = os.getProcessCpuTime();
             long[] gc0 = gcTotals();
             long t0 = System.nanoTime();
-            FileProcessor.Outcome o = processor.process(new PathSource(input));
+            UUID itemId = UuidV7.next(clock.millis());
+            LandedItem landed = lander.land(new NewItem(itemId, ItemKind.FILE, null, null, null), offset -> {
+                var in = Files.newInputStream(input);
+                in.skipNBytes(offset);
+                return in;
+            });
+            long landNanos = System.nanoTime() - t0;
+            ItemProcessor.Outcome o = processor.process(itemId, landed.digest(),
+                    () -> LandedItemSource.open(source, itemId, keys));
             long wall = System.nanoTime() - t0;
             long cpu = os.getProcessCpuTime() - cpu0;
             long allocated = threadMx.getTotalThreadAllocatedBytes() - allocated0;
@@ -297,15 +304,14 @@ class ThroughputPerf {
             long[] gc1 = gcTotals();
             ThreadCpu.Busiest busiest = threads.busiest(wall);
 
-            assertThat(o.result()).as("outcome").isEqualTo(FileProcessor.Result.COMPLETED);
+            assertThat(o.result()).as("outcome").isEqualTo(ItemProcessor.Result.COMPLETED);
             assertThat(o.sectionCount()).isEqualTo(g.sections());
             // Every generated section converts to JSON; a raw fallback would measure the wrong path.
             assertThat(pipeline.failedSectionCount(o.fileId())).as("sections stored raw").isZero();
             assertThat(pub.count.get()).as("file.started + sections + file.completed").isEqualTo(g.sections() + 2);
 
-            long archiveNanos = spans.getFinishedSpanItems().stream().filter(s -> s.getName().equals("archive"))
-                    .mapToLong(s -> s.getEndEpochNanos() - s.getStartEpochNanos()).sum();
-            long splitNanos = wall - archiveNanos;
+            long archiveNanos = landNanos;
+            long splitNanos = wall - landNanos;
             sections.refresh();
             source.refresh();
             long stored = totalSize(sections) + totalSize(source);
@@ -504,36 +510,6 @@ class ThroughputPerf {
         public CompletableFuture<Void> publish(OutboundMessage message) {
             count.incrementAndGet();
             return CompletableFuture.completedFuture(null);
-        }
-    }
-
-    /** A file on local disk, kept after processing so the harness controls clean-up. */
-    record PathSource(Path path) implements SourceFile {
-        @Override
-        public SeekableByteSource open() throws IOException {
-            return SeekableByteSource.open(path);
-        }
-
-        @Override
-        public Optional<String> originalName() {
-            return Optional.of(path.getFileName().toString());
-        }
-
-        @Override
-        public void deleteOriginal() {}
-    }
-
-    /** Outcome records aren't part of what's measured. */
-    static final class NoRecords implements OutcomeRecorder {
-        @Override
-        public void completed(CompletionRecord r) {}
-
-        @Override
-        public void failed(FailureRecord r) {}
-
-        @Override
-        public FallbackFile openFallback(UUID fileId) {
-            throw new UnsupportedOperationException("no fallback in throughput runs");
         }
     }
 }

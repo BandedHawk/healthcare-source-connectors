@@ -44,6 +44,7 @@ class ConnectorPropertiesTest {
         assertThat(p.lease().ttl()).isEqualTo(Duration.ofSeconds(90));
         assertThat(p.lease().renewInterval()).isEqualTo(Duration.ofSeconds(15));
         assertThat(p.storage().commit().maxSections()).isEqualTo(10_000);
-        assertThat(p.file().readLock()).isEqualTo("changed");
+        assertThat(p.landing().idleWait()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(p.landing().storage().namespace()).isEqualTo("sdh_landing");
     }
 }

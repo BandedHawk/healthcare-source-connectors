@@ -44,7 +44,7 @@ class VaultTransitIT {
         vault.start();
         address = URI.create(vault.getHttpHostAddress());
         post("sys/mounts/transit", "{\"type\":\"transit\"}");
-        for (String kek : new String[] {"sections-kek", "source-kek", "failed-kek"}) {
+        for (String kek : new String[] {"sections-kek", "landed-items-kek"}) {
             post("transit/keys/" + kek, "{\"type\":\"aes256-gcm96\"}");
         }
         post("transit/keys/signing", "{\"type\":\"ecdsa-p256\"}");
@@ -69,7 +69,7 @@ class VaultTransitIT {
         TestKeys k = localKeys();
         Path tokenFile = Files.writeString(Files.createTempFile("vault-token", ""), "root-token\n");
         // The default provider factory: exactly what the running service builds from sdh.crypto.vault.*.
-        CommonSettings.Crypto c = crypto(k, "vault-transit", "sections-kek", "source-kek", "failed-kek",
+        CommonSettings.Crypto c = crypto(k, "vault-transit", "sections-kek", "landed-items-kek",
                 "signing", new CommonSettings.Aws(null, null),
                 new CommonSettings.Vault(address, null, tokenFile, "transit", null));
         try (KeyMaterial km = KeyMaterial.load(c)) {
@@ -82,7 +82,7 @@ class VaultTransitIT {
     @Test
     void aWrongTokenFailsStartupClearly() throws Exception {
         TestKeys k = localKeys();
-        CommonSettings.Crypto c = crypto(k, "vault-transit", "sections-kek", "source-kek", "failed-kek",
+        CommonSettings.Crypto c = crypto(k, "vault-transit", "sections-kek", "landed-items-kek",
                 "signing", new CommonSettings.Aws(null, null),
                 new CommonSettings.Vault(address, "wrong", null, "transit", null));
         assertThatThrownBy(() -> KeyMaterial.load(c)).hasMessageContaining("sections-kek")

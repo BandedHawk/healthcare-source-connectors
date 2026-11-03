@@ -10,24 +10,21 @@ package com.sdh.healthcare.connector.file.admin;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseStatus;
+import com.sdh.healthcare.connector.core.inbox.Inbox;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
-import com.sdh.healthcare.connector.core.storage.ArchiveCheckpoint;
+import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
-import java.io.IOException;
 import java.io.PrintStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Stream;
 import org.apache.iceberg.Table;
 
 /**
- * {@code status}: the lease, the checkpoint (with the file in progress), archive progress and the inbound backlog
- * (design §11.4). Reads only. Each part is reported on its own, so an unreachable KMS still leaves the lease and
- * backlog visible; the exit status is 1 if any part couldn't be read.
+ * {@code status}: the lease, the checkpoint (with the item in progress) and the inbox backlog (design §11.4). Reads
+ * only. Each part is reported on its own, so an unreachable KMS still leaves the lease visible; the exit status is 1
+ * if any part couldn't be read.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -35,7 +32,7 @@ import org.apache.iceberg.Table;
 final class StatusCommand implements AdminCommand {
     static final String USAGE = """
             status
-                Shows the lease, the checkpoint and file in progress, archive progress and the inbound backlog.
+                Shows the lease, the checkpoint and item in progress, and the inbox backlog.
                 Reads only: takes no lease and changes nothing.""";
 
     @Override
@@ -57,9 +54,7 @@ final class StatusCommand implements AdminCommand {
     public void run(AdminArgs a, AdminContext ctx, AuditRecord audit, PrintStream out) throws Exception {
         boolean ok = part(out, "lease", () -> lease(ctx));
         ok &= part(out, "checkpoint", () -> checkpoint(ctx, audit));
-        ok &= part(out, "archive source_files", () -> archive(ctx, ctx.sourceFiles()));
-        ok &= part(out, "archive failed_files", () -> archive(ctx, ctx.failedFiles()));
-        ok &= part(out, "inbound", () -> inbound(ctx.props().file().inboundDir()));
+        ok &= part(out, "inbox", () -> inbox(ctx));
         if (!ok) {
             throw new PartialStatusException();
         }
@@ -100,13 +95,13 @@ final class StatusCommand implements AdminCommand {
         sections.refresh();
         String raw = sections.properties().get(Checkpoint.propertyKey(ctx.props().connectorId()));
         if (raw == null) {
-            return "none (no file processed yet)";
+            return "none (no item processed yet)";
         }
         Checkpoint c = new CheckpointCodec(ctx.ids()).decode(raw);
         audit.add(Attr.FILE_ID, c.fileId());
         audit.add(Attr.STATE, c.state());
         StringBuilder b = new StringBuilder();
-        b.append("file ").append(c.fileId()).append(' ').append(c.state()).append(" (").append(c.format())
+        b.append("item ").append(c.fileId()).append(' ').append(c.state()).append(" (").append(c.format())
                 .append(")");
         if (c.state() == Checkpoint.State.SPLITTING) {
             long at = c.resumeAt().offset();
@@ -126,48 +121,19 @@ final class StatusCommand implements AdminCommand {
         }
         if (c.state() == Checkpoint.State.SPLITTING && c.restarts() > 0) {
             b.append(String.format("%n%-21s restarted %d time(s) in a row without progress; at %d the batch is"
-                    + " stored unconverted, at %d the file fails", "", c.restarts(),
+                    + " stored unconverted, at %d the item fails", "", c.restarts(),
                     IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS, IngestPipeline.FAIL_AFTER_RESTARTS));
         }
         return b.toString();
     }
 
-    private static String archive(AdminContext ctx, Table table) throws Exception {
-        table.refresh();
-        String raw = table.properties().get(ArchiveCheckpoint.propertyKey(ctx.props().connectorId()));
-        if (raw == null) {
-            return "nothing archived yet";
-        }
-        ArchiveCheckpoint c = ArchiveCheckpoint.codec(ctx.ids()).decode(raw);
-        if (c.done()) {
-            return "last file " + c.fileId() + " finished " + c.finishedAt();
-        }
-        return "file " + c.fileId() + " in progress, " + c.nextBlock() + " blocks archived";
-    }
-
-    private static String inbound(Path dir) throws IOException {
-        if (dir == null) {
-            return "sdh.file.inbound-dir not set";
-        }
-        if (!Files.isDirectory(dir)) {
-            return "directory not found here";
-        }
-        long count = 0;
-        long oldest = Long.MAX_VALUE;
-        try (Stream<Path> s = Files.list(dir)) {
-            for (Path p : (Iterable<Path>) s::iterator) {
-                String n = p.getFileName().toString();
-                if (Files.isRegularFile(p) && !n.startsWith(".") && !n.endsWith(".done")) {
-                    count++;
-                    oldest = Math.min(oldest, Files.getLastModifiedTime(p).toMillis());
-                }
-            }
-        }
-        if (count == 0) {
-            return "no files waiting";
-        }
-        return count + (count == 1 ? " file" : " files") + " waiting, oldest modified "
-                + human(Duration.ofMillis(Instant.now().toEpochMilli() - oldest)) + " ago";
+    private static String inbox(AdminContext ctx) throws Exception {
+        // Read only: load() and backlog() never commit, so no committer is needed.
+        Inbox inbox = new Inbox(ctx.inbox(), null, ctx.ids(), ctx.props().connectorId(), RetryPolicy.DEFAULT,
+                Clock.systemUTC());
+        inbox.load();
+        long backlog = inbox.backlog();
+        return backlog == 0 ? "no items waiting" : backlog + (backlog == 1 ? " item" : " items") + " waiting";
     }
 
     static String human(Duration d) {

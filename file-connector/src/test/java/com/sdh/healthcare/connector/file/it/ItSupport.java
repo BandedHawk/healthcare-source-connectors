@@ -12,7 +12,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
+import com.sdh.healthcare.connector.file.TestKeys;
+import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,7 +33,31 @@ import org.testcontainers.DockerClientFactory;
  * @since 0.1.0
  */
 final class ItSupport {
+    /** The intake the splitter serves in the integration tests. */
+    static final String INTAKE = "claims";
+
     private ItSupport() {}
+
+    /** The splitter's own inbox key and the landing node's signing key, as {@code sdh.crypto.keys.*} settings. */
+    static Map<String, String> splitterKeys(TestKeys keys) {
+        Map<String, String> c = new LinkedHashMap<>();
+        c.put("sdh.crypto.keys.inbox.kid", TestKeys.INBOX_KID);
+        c.put("sdh.crypto.keys.inbox.pem", keys.inboxPem.toString());
+        c.put("sdh.crypto.keys.inbox.passphrase", TestKeys.INBOX_PASSPHRASE);
+        c.put("sdh.crypto.keys.landing-signer.kid", TestKeys.LANDING_SIGNER_KID);
+        c.put("sdh.crypto.keys.landing-signer.pem", keys.landingSignerPem.toString());
+        return c;
+    }
+
+    /** Waits until the splitter has finished {@code items} items from its inbox, and nothing is in progress. */
+    static void awaitSplit(ConnectorRuntime runtime, long items, Duration timeout) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline
+                && (runtime.inbox().position() < items || runtime.processor().inProgress().isPresent())) {
+            Thread.sleep(200);
+        }
+        assertThat(runtime.inbox().position()).as("items split").isGreaterThanOrEqualTo(items);
+    }
 
     /** Fails (not skips) with a pointer to the runner script when no Docker API is reachable. */
     static void requireDocker() {

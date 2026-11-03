@@ -7,6 +7,7 @@
 
 package com.sdh.healthcare.connector.file;
 
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -38,29 +39,40 @@ public final class TestKeys {
     public static final String KS_PASSWORD = "ks-secret";
     public static final String SIGNING_PASSPHRASE = "sign-secret";
     public static final String SECTIONS = "sections-kek/1";
-    public static final String SOURCE = "source-files-kek/1";
-    public static final String FAILED = "failed-files-kek/1";
+    public static final String LANDED = "landed-items-kek/1";
+    public static final String INBOX_PASSPHRASE = "inbox-secret";
+    public static final String LANDING_SIGNER_KID = "landing-2026";
+    public static final String INBOX_KID = "splitter-2026";
 
     public final Path dir;
     public final Path keystore;
     public final Path signingPem;
     public final Path recipientPem;
     public final Path recoveryPem;
+    /** The splitter's own private key, which {@code item.landed} messages are sealed to. */
+    public final Path inboxPem;
+    /** The landing node's signing key: the private half for a landing node, the public half for the splitter. */
+    public final Path landingSigningPem;
+    public final Path landingSignerPem;
     public final KeyPair signing;
     public final KeyPair recipient;
     public final KeyPair recovery;
+    public final KeyPair inbox;
+    public final KeyPair landingSigning;
 
     public TestKeys(Path dir) throws Exception {
         this.dir = dir;
         signing = ec();
         recipient = ec();
         recovery = ec();
+        inbox = ec();
+        landingSigning = ec();
 
         KeyStore ks = KeyStore.getInstance("PKCS12");
         ks.load(null, null);
         KeyGenerator kg = KeyGenerator.getInstance("AES");
         kg.init(256);
-        for (String alias : new String[] {SECTIONS, SOURCE, FAILED}) {
+        for (String alias : new String[] {SECTIONS, LANDED}) {
             ks.setEntry(alias, new KeyStore.SecretKeyEntry(kg.generateKey()),
                     new KeyStore.PasswordProtection(KS_PASSWORD.toCharArray()));
         }
@@ -72,6 +84,27 @@ public final class TestKeys {
         Files.writeString(signingPem, pem("ENCRYPTED PRIVATE KEY", encrypt(signing.getPrivate(), SIGNING_PASSPHRASE)));
         recipientPem = Files.writeString(dir.resolve("recipient.pem"), publicPem(recipient.getPublic()));
         recoveryPem = Files.writeString(dir.resolve("recovery-public.pem"), publicPem(recovery.getPublic()));
+        inboxPem = encryptedPrivatePem(dir.resolve("inbox.pem"), inbox.getPrivate(), INBOX_PASSPHRASE);
+        landingSigningPem = encryptedPrivatePem(dir.resolve("landing-signing.pem"), landingSigning.getPrivate(),
+                SIGNING_PASSPHRASE);
+        landingSignerPem = Files.writeString(dir.resolve("landing-signer.pem"),
+                publicPem(landingSigning.getPublic()));
+    }
+
+    /**
+     * The splitter's key settings.
+     *
+     * @param recipientPin  the downstream recipient key's pinned fingerprint
+     * @param signingPem    the splitter's signing key
+     * @param signingKeyRef the KMS signing key, or null for the local one
+     * @return the settings
+     */
+    public CommonSettings.Keys splitterKeys(String recipientPin, Path signingPem, String signingKeyRef) {
+        return new CommonSettings.Keys(SECTIONS, LANDED,
+                new CommonSettings.Signing("connector-2026", signingPem, SIGNING_PASSPHRASE, signingKeyRef),
+                new CommonSettings.Recipient("downstream-2026", recipientPem, recipientPin),
+                new CommonSettings.InboxKey(INBOX_KID, inboxPem, INBOX_PASSPHRASE),
+                new CommonSettings.Signer(LANDING_SIGNER_KID, landingSignerPem));
     }
 
     /** Writes {@code key} as an encrypted PKCS#8 PEM with owner-only permissions, as an operator would keep it. */

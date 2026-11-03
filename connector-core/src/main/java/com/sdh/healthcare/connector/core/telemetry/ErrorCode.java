@@ -59,6 +59,14 @@ public enum ErrorCode
     INTAKE_UNREACHABLE,
 
     /**
+     * An {@code item.landed} message the splitter won't take: it can't be
+     * opened or verified, isn't {@code item.landed}, or names another
+     * intake or landing table. It is dropped, and the landing node's
+     * ledger still has the item.
+     */
+    MESSAGE_REJECTED,
+
+    /**
      * A commit that conflicts with another writer. Not raised at present:
      * conflicting commits are retried (design §9).
      */

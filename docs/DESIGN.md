@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-03 (as): built step 3a of landing (§5.3.10, §5.3.12): the splitter now reads only from landing. It takes `item.landed` messages into a durable inbox table, acknowledges each once it is committed, and splits the inbox's items in order, reading each from `landed_items` by chunk. Directory pickup, fingerprints, `InProgressLocator`, archiving to `source_files` and `failed_files`, the local fallback and the `completed/` and `failed/` records are gone from the splitter (§5, §8.2, §11). `restore` reads the landed item. The splitter has its own key pair for `item.landed`, and trusts the landing node's signing key (§7.4). New error code `MESSAGE_REJECTED`. The `-Pit` suite, the Kubernetes run, the images and the demo are rewritten for two stages in step 3b.
+
 Revision 2026-11-03 (ar): built step 2 of landing (§5.3.10): `landing-connector`, a Spring Boot application with a local directory intake. It lists the directory with Camel's `file` component, lands each item once it has settled (or its `.done` marker is there), writes the ledger entry, sends `item.landed`, and on a read-write source deletes, moves or renames the item. It recovers from a crash at any step, and can run as a standby. What the two applications share moved from `file-connector` into a new library, `connector-runtime` (§3): the common settings, key loading, publishers, telemetry export, the directory claim, the lease database and the exit hook. New error codes `INTAKE_NOT_WRITABLE` and `INTAKE_UNREACHABLE`. Retention and maintenance of the landing tables, and an image for the node, are still to do.
 
 Revision 2026-11-03 (aq): built step 1 of landing (§5.3.10), in `connector-core` `landing/`. `ItemLander` stores an item as a stream in encrypted chunks, resumably, with a summary row and the same keyed digest as archived files; `LandedItems` reads it back and checks it. `LandingLedger` and `LedgerIndex` record what has been landed, without PHI, and repair the last entry after a crash. `LandingCheckpoint` holds progress. `item.landed` is contract 2.2 (§10.1), and the item ID becomes the splitter's file ID (§5.3.6). `LeaseKeeper.acquireAsStandby` waits for the lease for as long as it takes (§5.3.5). Nothing runs these yet; the landing node is step 2.
@@ -297,6 +299,8 @@ Files are processed **one at a time, oldest first**. This keeps ordering predict
 
 ## 5. Directory handling (Camel)
 
+**Since step 3a (§5.3.12) the splitter no longer picks up files.** This section describes how it did, which is now the landing node's job (§5.3.11). The checkpoint, digest and lifecycle parts still apply to the splitter, with the item ID as the file ID.
+
 - **Consumer:** `camel-file` watches `sdh.file.inbound-dir`, non-recursive, with `sortBy=file:modified`, `maxMessagesPerPoll=1` and **`eagerMaxMessagesPerPoll=false`**. Without the last option Camel applies the one-file limit while scanning, before sorting, so "oldest first" depended on directory order. The spike route had this bug; the application test caught it.
 - **Re-offering:** `noop=true` and `idempotent=false`, so a file that couldn't be handled (for example, storage was down) is offered again on the next poll. Successful files are deleted by the processor, so they aren't seen twice.
 - **Partially written files:** a configurable read lock (`changed` by default) waits until the file size and modification time stay unchanged for `min-age`. With `read-lock: marker` the route waits for `<name>.done`, and the marker is deleted together with the original. `include` is an Ant-style pattern; hidden files are never picked up.
@@ -336,9 +340,9 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Landing: two-stage ingestion (steps 1 and 2 built)
+### 5.3 Landing: two-stage ingestion (steps 1, 2 and 3a built)
 
-Decided 2026-11-03. Steps 1 and 2 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). The splitter doesn't read from landing yet (step 3). Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own.
+Decided 2026-11-03. Steps 1 and 2 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b, the deployment and integration tests for two stages, is next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own.
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
@@ -468,7 +472,7 @@ Metrics: `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age`, `sdh.intake.outag
 **The item ID is the file ID.** The splitter processes an item under its item ID, so every section, `section.stored` and `file.completed` from it carries the item ID as its `fileId`, and downstream can go from any section back to the landed original with no extra field.
 
 **The splitter:**
-- consumes `item.landed`, one item at a time, in order, and acknowledges it only once the item is `COMPLETED` or `FAILED`;
+- records each `item.landed` in a durable inbox table and acknowledges the message once that commit is done, then splits the inbox's items one at a time, in order (decided 2026-11-03 over holding the message until the item is finished, which would tie a long split to the broker's redelivery timeout);
 - reads the item from `landed_items` by chunk, with random access, so splitting works as today;
 - records the item ID in its checkpoint, so after a restart it finds its item directly. Fingerprints, `InProgressLocator`, the directory claim and deleting originals all go from the splitter;
 - has no archive step: `source_files` and `failed_files` are retired. A failed item stays in landing, and `restore` reads it from there;
@@ -541,7 +545,7 @@ sdh:
 
 1. **Landing storage (built):** `landed_items` and `landing_ledger`, the landing checkpoint, `item.landed` in `connector-contract`, and the lease's standby mode.
 2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). Left for later: retention and maintenance of the landing tables, the listing metrics of §5.3.3, and an image and distribution kit for the node.
-3. **The splitter reads from landing:** an `item.landed` consumer, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. The `-Pit` suite and the Kubernetes run (§15.2) are the check, with failover of both stages.
+3. **The splitter reads from landing.** 3a (built, §5.3.12): an `item.landed` consumer and inbox, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. 3b: an image for the landing node, the build and Kubernetes scripts, and the `-Pit` suite, the Kubernetes run (§15.2) and the demo rewritten for two stages, with failover of both stages.
 4. **SFTP and SMB,** with the failure cases of §5.3.4 tested against containers that are cut off, restarted and given wrong keys.
 5. **HTTP push,** with OAuth2 and mTLS.
 6. **Queue intakes,** batched, for the seven brokers.
@@ -613,6 +617,46 @@ sdh:
 The broader shape in §5.3.9 (`type`, `uri`, `batch`, `http`) comes with the later steps.
 
 **Tests:** `IntakeServiceTest` (settling, read-only and read-write sources, a rewritten file, duplicate content, a failed send, a failed after-action, resuming after a crash, giving up a vanished item, an unreachable source), `LocalDirectorySourceTest`, `ReadinessTest`, `SourceSettingsTest`, and `LandingConnectorApplicationTest`: the whole node on embedded Postgres, a JDBC catalog, key files and a SEDA queue.
+
+#### 5.3.12 The splitter as built (step 3a)
+
+The splitter (`file-connector`) now reads only from landing.
+
+```mermaid
+flowchart LR
+  Q[Landing queue] -->|item.landed| R[InboxRoute<br/>open, check, record]
+  R -->|one commit per message, then ack| I[(sdh_ingest.inbox)]
+  I -->|next by seq| W[InboxWorker<br/>one item at a time]
+  T[(sdh_landing.landed_items)] -->|LandedItemSource, by chunk| W
+  W --> P[ItemProcessor → IngestPipeline]
+  P --> U[(sdh_ingest.sections)]
+  P -->|file.started, section.stored, file.completed| D[Downstream queue]
+```
+
+**Inbox** (`connector-core` `inbox/`):
+- The `inbox` table sits in the splitter's namespace, beside `sections`, and is fenced with the same lease. It has one row per item: `seq` (from 1), `item_id`, `intake`, `kind`, `item_size`, `item_digest`, `landed_at`, `received_at`. There is no PHI.
+- **Receiving:** each message is opened with the splitter's own private key and verified against the landing node's public key. It must be `item.landed`, for the configured intake, and point at the configured landing catalog, namespace and `landed_items`. A message that fails a check is audited as `inbox.rejected` (`MESSAGE_REJECTED`, with a PHI-free reason) and dropped: delivering it again won't change it.
+- **Recording:** one commit per message, then the message is acknowledged. A repeat (the same item ID, found in an in-memory set loaded at startup) is acknowledged without a new row. If the commit fails after its retries, the route tries again in place with a growing pause, and doesn't take the next message until it succeeds.
+- **Position:** a MAC'd table property `sdh.inbox.<connectorId>` holds the last finished `seq`. It is moved after each item is `COMPLETED` or `FAILED`. A tampered value stops startup.
+- **Consumer URI:** `sdh.landing.queue-uri` is a Camel endpoint URI, used as it is. It must acknowledge when the route finishes, not on receipt: for Kafka, with automatic offset commits off. Step 3b sets this for each broker.
+
+**Worker** (`InboxWorker`): a single thread takes the next item after the position, waiting up to `sdh.landing.idle-wait` for one to arrive.
+- If the checkpoint holds a different item in progress (a file from before landing, or the last item of an inbox that was replaced), it is marked `ABANDONED` first. Sections already stored stay.
+- The item is processed under its item ID (`ItemProcessor`): a new one is split; one in progress resumes from its checkpoint; one already finished is skipped without being read.
+- Only a problem with the item itself fails it: a split or limit error, too many restarts without progress (§9.2), or landed chunks that are missing or altered (`SOURCE_READ_FAILED`, stage `landing`). Anything else (storage, the broker or the KMS down) is retried from the checkpoint with a growing pause, up to 5 minutes, because the item is safe in landing. Lease loss, `CommitStateUnknownException`, a tampered checkpoint and broken invariants stop the process, as before.
+- The writer lock is held while an item is processed, so maintenance (now on `sections` and `inbox`) runs only between items. The inbox has no retention: its rows are how repeats are recognised.
+
+**Reading items** (`LandedItemSource`): it implements `SeekableByteSource`, so the splitters work unchanged. Chunks are read four at a time and the last two windows are kept decrypted. Each chunk's GCM tag binds it to the item and its index, so a chunk that is missing, moved or altered is refused. The digest isn't worked out again here, because splitting needn't read in order; `file.completed` carries the digest recorded at landing, and `restore` checks it. `landed_items` is loaded when the first item needs it, never created by the splitter, and refreshed as each item is opened.
+
+**Checkpoint states:** `ARCHIVING` keeps its name but now means "split, finishing": `file.completed` is published, then `COMPLETED` committed. `FAILING` → `FAILED` announces any unannounced sections, as before (§11.2).
+
+**Keys** (`sdh.crypto.keys`): `sections-kek` (wrap and unwrap, probed at startup), `landed-items-kek` (unwrap only, not probed; reading the landing ID key checks it), `inbox` (the splitter's own EC private key: an encrypted PEM for now, a KMS later) and `landing-signer` (the landing node's public key). The landing node's `recipient` is the splitter's inbox public key. `source-files-kek`, `failed-files-kek` and `recovery-public` are gone.
+
+**Settings:** `sdh.landing.intake`, `sdh.landing.queue-uri`, `sdh.landing.idle-wait` (default 5 s), and `sdh.landing.storage` (`catalog`, defaulting to `sdh.storage.catalog`; `catalog-name`; `namespace`, default `sdh_landing`). `sdh.file.*`, `sdh.storage.archive` and the source and failed retention settings are gone.
+
+**Telemetry:** the `sdh.inbox.backlog` gauge, and the `inbox.added`, `inbox.repeat` and `inbox.rejected` audit events. The `ingest.item` span replaces `ingest.file`.
+
+**Tests:** `ItemProcessorTest`, `LandedItemSourceTest`, `InboxTest`, and the Spring tests `FileConnectorApplicationTest` and `AdminCommandsTest`. In those, `TestLanding` plays the landing node: it lands items in the same catalog and sends sealed `item.landed` messages over SEDA. The splitter takes items in order, records a repeat once, refuses another intake, another catalog and an unknown signer, and fails a bad item. The integration tests that drive the splitter (`FullStackIT`, `PolarisIT`, the object-store tests) use `TestLanding` too. The image tests and the demo still assume directory pickup until step 3b.
 
 ## 6. Splitting
 
@@ -904,6 +948,7 @@ The namespace is `sdh_ingest` (configurable). There are three tables, each with 
 
 - **Partitioning:** `day(ingested_at)`. Sort order `file_id, seq, chunk_index`, so readers prune files using min/max statistics.
 - **Parquet settings:** zstd level 1 for the whole table. Row group 128 MiB, target file size 512 MiB. The earlier plan to leave `ciphertext` uncompressed isn't possible: Iceberg sets the Parquet codec per table, not per column (spike finding). zstd passes incompressible ciphertext through at a small CPU cost and almost no size overhead.
+- **Retired in step 3a (§5.3.12):** `source_files` and `failed_files` are no longer written; the landed copy in `landed_items` is the original. The splitter's namespace now has `sections` and `inbox`. What follows is kept as a record of the old layout.
 - **`source_files`** holds the raw original in 8 MiB chunks, one row per chunk: `file_id`, `chunk_index`, `chunk_count`, `chunk_size`, `file_size`, `ciphertext`, `bdk_wrapped`, `kek_ref`, `batch_id`, `archived_at` (partition `day(archived_at)`, sort `file_id, chunk_index`). Chunk key = HKDF(BDK, fileId, seq 0); AAD = fileId ‖ 0 ‖ chunkIndex ‖ chunkCount.
 - **Summary row:** values known only at the end go on one row with `chunk_index = -1`, written in the final archive commit: `original_name_enc` (the filename, encrypted with seq −1), `file_digest`, `digest_block_size`, `section_count`, `started_at` and `completed_at`. A file with a summary row is fully archived.
 - **`failed_files`** has the same layout. Its summary row adds `failure_stage`, `failure_offset`, `failure_seq`, `error_code`, `failed_at` and `replaces_file_id`. `replaces_file_id` is not filled in yet; it waits for the admin resubmit flow.
@@ -963,7 +1008,7 @@ Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintain
 - only partitions with enough small files are compacted, within budget;
 - replaced files are deleted once their snapshot ages out;
 - retention drops only whole old days and removes their files at once, with no empty snapshot when there's nothing to delete;
-- retention works on archive tables;
+- retention works on `landed_items`, by `landed_at`;
 - orphan cleanup deletes old strays but not recent ones or anything referenced;
 - a fenced-out instance changes nothing.
 
@@ -1234,16 +1279,19 @@ if (m instanceof SectionStored s) {
 | Splitter error | `split` | the splitter's `PARSE_*` / `LIMIT_*` code and offset |
 | The connector stopped three times in a row without committing a batch (§9.2) | `split` | `RESUME_NO_PROGRESS`, at the resume offset |
 | Broker didn't acknowledge after retries | `publish` | `PUBLISH_FAILED` |
-| Reading the source failed | `split` or `archive` | `SOURCE_READ_FAILED` |
-| Storage, catalog or KMS still failing after retries | `split` or `archive` | `STORAGE_FAILED` |
+| The landed item is missing, or its chunks are missing or altered | `landing` | `SOURCE_READ_FAILED` |
+| Storage, catalog or KMS still failing after retries | none: the item is tried again later from its checkpoint (§5.3.12) | |
 
 These never fail a file. They stop the process, which then restarts from the checkpoint: lease loss, `CommitStateUnknownException`, a tampered checkpoint, or a broken invariant (`IllegalStateException`).
 
 ### 11.1 Completing a file
 
-After the split phase: archive the original to `source_files`, publish `file.completed`, write `completed/<fileId>.json`, delete the original, then commit `COMPLETED`. The original is deleted only after its archive is committed, and every step can be repeated (message ID dedup, records overwritten, deleting a missing file is fine). So a crash anywhere just repeats the remaining steps, and once the archive is done the source is no longer needed. A failure while archiving fails the file through §11.2, which archives it to `failed_files` instead.
+**Since step 3a:** after the split phase, `file.completed` is published with the digest recorded at landing, then `COMPLETED` committed. There is no archive step and no original to delete; the inbox position then moves past the item (§5.3.12). Before step 3a: archive the original to `source_files`, publish `file.completed`, write `completed/<fileId>.json`, delete the original, then commit `COMPLETED`. The original is deleted only after its archive is committed, and every step can be repeated (message ID dedup, records overwritten, deleting a missing file is fine). So a crash anywhere just repeats the remaining steps, and once the archive is done the source is no longer needed. A failure while archiving fails the file through §11.2, which archives it to `failed_files` instead.
 
 ### 11.2 Failing a file
+
+**Since step 3a,** steps 1, 2 and 4 are as below. There is no archive (step 3) and no record or original to delete (step 5): the failed item stays in landing, and `restore` reads it from there. Only a problem with the item itself fails it (§5.3.12).
+
 1. Commit the decision: checkpoint `FAILING` with stage, code and offset. If storage is down this can't be recorded; the file still goes to the local fallback.
 2. Already-committed and published sections stay where they are, each tied to its `file_id`.
 3. The whole original is archived into `failed_files`. It goes to the local fallback `failed/<fileId>.enc` instead (§11.3) when the file is over `max-file-bytes`, when `FAILING` couldn't be recorded, or when the archive fails (storage or KMS unreachable). If even the fallback can't be written, the original is kept and the error propagates.
@@ -1251,6 +1299,8 @@ After the split phase: archive the original to `source_files`, publish `file.com
 5. Write `failed/<fileId>.json`, delete the original, log `file.failed` (fileId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the `sdh.audit.file.failed` event and `sdh.files.failed` metric report it (§12). Attempt count isn't recorded yet.
 
 ### 11.3 Local fallback format
+
+**Retired in step 3a:** neither stage writes fallback files any more (§5.3.6). `RecoveryEnvelope` stays so `decrypt-fallback` can open files written before.
 
 `RecoveryEnvelope` (`connector-core` `crypto/`), streaming and any size:
 - **Header:** `"SDHFB1"` ‖ fileId ‖ SHA-256(recovery public key) ‖ an ephemeral EC public key.
@@ -1267,9 +1317,9 @@ After the split phase: archive the original to `source_files`, publish `file.com
 
 | Command | Does |
 |---|---|
-| `restore --file-id X --to <dir> [--from-offset N \| --unprocessed] [--table failed\|source] [--original-name]` | Decrypts an archived file from `failed_files` (looked up first) or `source_files`. `--unprocessed` starts after the last committed section of a failed file, found from the summary row's `failure_seq` and that section's source range: the part that never reached downstream. A tail repeats no headers or envelopes before that point (an X12 interchange header, a CSV header row), so it may need them added before resubmission. For a failed file, the stage, error code, offset and last committed seq are printed first |
+| `restore --file-id X --to <dir> [--from-offset N \| --unprocessed] [--original-name]` | Decrypts a landed item from `landed_items` (step 3a; before that, from the archive tables). `--unprocessed` starts at the end of the item's last stored section, found from `sections`: the part that never reached downstream. A tail repeats no headers or envelopes before that point (an X12 interchange header, a CSV header row), so it may need them added before resubmission. The landing ID key, unwrapped with `landed-items-kek`, checks the digest over the whole item |
 | `decrypt-fallback --file failed/<id>.enc --key <recovery.pem> --to <dir> [--original-name]` | Decrypts a local fallback file (§11.3). The recovery private key must be an encrypted PKCS#8 PEM, with owner-only or group-read permissions as for the signing key (§7.4); its passphrase comes from `$SDH_RECOVERY_PASSPHRASE`, never an argument. Needs no catalog, lease or KMS |
-| `status` | Shows the lease (holder, epoch, time left, read with the database clock), the checkpoint (file in progress, state, percentage split, sections committed and published, failure details), each archive table's progress, and the inbound backlog. Each part is shown on its own, so an unreachable KMS still leaves the lease and backlog visible; the exit status is 1 if any part couldn't be read |
+| `status` | Shows the lease (holder, epoch, time left, read with the database clock), the checkpoint (item in progress, state, percentage split, sections committed and published, failure details), and the inbox backlog. Each part is shown on its own, so an unreachable KMS still leaves the lease visible; the exit status is 1 if any part couldn't be read |
 
 **Output safety:**
 - Decrypted output goes to a hidden temporary file with owner-only permissions. It is renamed into place only after the digest (restore) or envelope integrity (fallback) has been verified, and deleted otherwise, so no unverified plaintext is left behind.
@@ -1538,12 +1588,11 @@ Bound to `ConnectorProperties`. Secrets come from environment variables, which S
 sdh:
   connector-id: file-connector
   encrypt-workers: 0              # 0 = one per CPU core
-  file:
-    inbound-dir: /data/inbound
-    read-lock: changed            # changed | marker (<name>.done)
-    min-age: 30s
-    poll-interval: 5s
-    include: "*"                  # Ant-style
+  landing:                        # what the splitter reads (§5.3.12)
+    intake: claims                # item.landed for other intakes is refused
+    queue-uri: "kafka:sdh.landing.claims?brokers=kafka:9093&groupId=sdh-splitter-claims&autoCommitEnable=false&allowManualCommit=true"
+    idle-wait: 5s
+    storage: { catalog-name: sdh, namespace: sdh_landing }   # catalog: defaults to storage.catalog
   split:
     format: ccda                  # ccda | xml | x12 | edifact | fhir | csv | delimited | <plugin>
     boundary: ClinicalDocument    # optional; format default
@@ -1571,7 +1620,6 @@ sdh:
       s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
       client: { region: us-east-1 }
     commit: { max-sections: 10000, max-bytes: 512MB, max-interval: 30s }
-    archive: { commit-bytes: 512MB }
   lease:
     name: file-connector
     jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
@@ -1584,15 +1632,15 @@ sdh:
     keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
     keys:
       sections-kek: sections-kek/1                          # keystore alias, or the KMS key ref
-      source-files-kek: source-files-kek/1
-      failed-files-kek: failed-files-kek/1
+      landed-items-kek: landed-items-kek/1                  # unwrap only
+      inbox: { kid: splitter-2026, pem: /run/secrets/inbox.pem }   # opens item.landed; passphrase: env
+      landing-signer: { kid: landing-2026, pem: /run/secrets/landing-signer.pem }   # public key
       signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
       # signing: { kid: connector-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
     aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
     gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC
     vault: { address: "https://vault:8200", token-file: /vault/secrets/token, mount: transit }   # vault-transit
       recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
-      recovery-public: /run/secrets/recovery-public.pem
   queue:
     type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
     uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"
@@ -1608,7 +1656,7 @@ sdh:
     min-snapshots: 10
     compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
     orphans: { enabled: true, interval: 24h, min-age: 3d }
-    retention: { sections: 30d, source-files: 365d, failed-files: 365d }   # unset = keep forever (default)
+    retention: { sections: 30d }   # unset = keep forever (default); landed items: the landing node's settings
 ```
 
 Compared with the earlier sketch:

@@ -315,7 +315,56 @@ public final class IngestPipeline implements AutoCloseable
      */
     public SplitResult split(SeekableByteSource source) throws Exception
     {
-        String fingerprint = fingerprint(source);
+        return split(source, fingerprint(source), null);
+    }
+
+    /**
+     * Runs the split phase for a landed item (design §5.3.6): as
+     * {@link #split(SeekableByteSource)}, but the item's ID is the file ID,
+     * and the checkpoint recognises the item by its ID instead of a
+     * fingerprint of its content.
+     *
+     * @param source the item's bytes
+     * @param itemId the item's ID
+     * @return the outcome
+     * @throws IllegalStateException if a different item is still in
+     *                               progress
+     * @throws SplitException        if the item is too large, can't be
+     *                               split, or has stopped the connector too
+     *                               often
+     * @throws Exception             if storage or the broker fails beyond
+     *                               retrying
+     */
+    public SplitResult split(SeekableByteSource source, UUID itemId)
+            throws Exception
+    {
+        return split(source, itemFingerprint(itemId), itemId);
+    }
+
+    /**
+     * What a landed item's checkpoint holds in place of a fingerprint.
+     *
+     * @param itemId the item's ID
+     * @return {@code item:} and the ID
+     */
+    public static String itemFingerprint(UUID itemId)
+    {
+        return "item:" + itemId;
+    }
+
+    /**
+     * Runs the split phase.
+     *
+     * @param source      the file or item
+     * @param fingerprint what recognises it in the checkpoint
+     * @param fileId      the ID to give it if it is new; null for a new
+     *                    UUIDv7
+     * @return the outcome
+     * @throws Exception as {@link #split(SeekableByteSource)}
+     */
+    private SplitResult split(SeekableByteSource source, String fingerprint,
+            UUID fileId) throws Exception
+    {
         Checkpoint current = checkpoint().orElse(null);
         if (current != null && current.fingerprint().equals(fingerprint)
                 && current.state() == Checkpoint.State.ARCHIVING)
@@ -372,7 +421,8 @@ public final class IngestPipeline implements AutoCloseable
                 // file.started.
                 throw new SplitException(ErrorCode.LIMIT_FILE_SIZE, 0);
             }
-            current = Checkpoint.start(UuidV7.next(clock.millis()),
+            current = Checkpoint.start(fileId != null ? fileId
+                    : UuidV7.next(clock.millis()),
                     fingerprint, settings.format(), source.size(),
                     clock.instant());
             commitCheckpoint(current);

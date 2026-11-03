@@ -13,7 +13,7 @@ import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
-import com.sdh.healthcare.connector.core.storage.ArchiveTables;
+import com.sdh.healthcare.connector.core.inbox.InboxTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import java.time.Clock;
 import java.time.Duration;
@@ -31,8 +31,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Runs table maintenance (design §8.4) on all three ingest tables every {@code interval}, between files: it only
- * proceeds if it can take the writer lock without waiting, so it never overlaps with ingest.
+ * Runs table maintenance (design §8.4) on the {@code sections} and {@code inbox} tables every {@code interval},
+ * between items: it only proceeds if it can take the writer lock without waiting, so it never overlaps with ingest.
+ * Only {@code sections} has retention: the inbox keeps every row, to recognise items delivered again.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -59,11 +60,9 @@ public final class MaintenanceScheduler implements AutoCloseable {
         this.fatal = fatal;
         this.clock = clock;
         this.maintenance = new TableMaintenance(runtime.committer(), settings(props), clock);
-        for (Duration d : new Duration[] {props.retention().sections(), props.retention().sourceFiles(),
-                props.retention().failedFiles()}) {
-            if (d != null && d.compareTo(Duration.ofDays(1)) < 0) {
-                throw new IllegalArgumentException("sdh.maintenance.retention values must be at least 1 day");
-            }
+        Duration sections = props.retention().sections();
+        if (sections != null && sections.compareTo(Duration.ofDays(1)) < 0) {
+            throw new IllegalArgumentException("sdh.maintenance.retention values must be at least 1 day");
         }
         if (props.orphans().minAge().compareTo(Duration.ofHours(1)) < 0) {
             throw new IllegalArgumentException("sdh.maintenance.orphans.min-age must be at least 1 hour");
@@ -89,7 +88,7 @@ public final class MaintenanceScheduler implements AutoCloseable {
 
     private void tick() {
         if (!writer.tryLock()) {
-            LOG.info("maintenance.skipped reason=file_in_progress");
+            LOG.info("maintenance.skipped reason=item_in_progress");
             return;
         }
         try {
@@ -112,12 +111,9 @@ public final class MaintenanceScheduler implements AutoCloseable {
                 && !now.isBefore(lastOrphanRun.plus(props.orphans().interval()));
         List<TableMaintenance.Report> reports = new ArrayList<>();
         for (Target t : List.of(
-                new Target(runtime.sections(), SectionsTable.INGESTED_AT,
+                new Target(runtime.tables().sections(), SectionsTable.INGESTED_AT,
                         Optional.ofNullable(props.retention().sections())),
-                new Target(runtime.sourceFiles(), ArchiveTables.ARCHIVED_AT,
-                        Optional.ofNullable(props.retention().sourceFiles())),
-                new Target(runtime.failedFiles(), ArchiveTables.ARCHIVED_AT,
-                        Optional.ofNullable(props.retention().failedFiles())))) {
+                new Target(runtime.tables().inbox(), InboxTables.RECEIVED_AT, Optional.empty()))) {
             reports.add(maintenance.run(t.table(), t.timeColumn(), t.retention(), orphans));
         }
         if (orphans) {

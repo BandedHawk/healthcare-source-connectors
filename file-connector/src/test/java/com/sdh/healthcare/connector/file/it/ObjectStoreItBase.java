@@ -17,23 +17,21 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionSto
 import com.sdh.healthcare.connector.contract.table.SectionsTable;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
-import com.sdh.healthcare.connector.core.storage.ArchiveReader;
+import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.file.TestKeys;
+import com.sdh.healthcare.connector.file.TestLanding;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.reader.QueueReader;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.FileTime;
 import java.security.interfaces.ECPublicKey;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,9 +53,9 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * The connector on an object store other than S3 (design §8.1), with a JDBC catalog and Postgres for the lease:
- * ingest, downstream read-back through the store's own FileIO, archive restore, maintenance, and no plaintext
- * anywhere in the bucket. Each subclass supplies the store (an emulator) and its Iceberg FileIO settings.
+ * The splitter on an object store other than S3 (design §8.1), with a JDBC catalog and Postgres for the lease: items
+ * landed in the same store are split, read back downstream through the store's own FileIO, restored from landing,
+ * maintained, and no plaintext is anywhere in the bucket. The test stands in for the landing node. Each subclass supplies the store (an emulator) and its Iceberg FileIO settings.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -75,8 +73,8 @@ abstract class ObjectStoreItBase {
         }
     }
 
-    /** Everything one store's test needs outside Spring: inbound directory, keys, Postgres and the configuration. */
-    record Fixture(Path inbound, TestKeys keys, PostgreSQLContainer postgres, Map<String, String> catalog,
+    /** Everything one store's test needs outside Spring: keys, Postgres and the configuration. */
+    record Fixture(TestKeys keys, PostgreSQLContainer postgres, Map<String, String> catalog,
             String queue) {
 
         /** {@code storeProps}: the FileIO settings and warehouse; the JDBC catalog settings are added here. */
@@ -91,15 +89,14 @@ abstract class ObjectStoreItBase {
             catalog.put("jdbc.password", pg.getPassword());
             catalog.put("jdbc.schema-version", "V1");
             catalog.putAll(storeProps);
-            return new Fixture(Files.createDirectories(root.resolve("inbound")),
-                    new TestKeys(Files.createDirectories(root.resolve("keys"))), pg, catalog, "sdh-" + name);
+            return new Fixture(new TestKeys(Files.createDirectories(root.resolve("keys"))), pg, catalog, "sdh-" + name);
         }
 
         void register(DynamicPropertyRegistry r) {
             Map<String, String> c = new LinkedHashMap<>();
-            c.put("sdh.file.inbound-dir", inbound.toString());
-            c.put("sdh.file.min-age", "300ms");
-            c.put("sdh.file.poll-interval", "200ms");
+            c.put("sdh.landing.intake", ItSupport.INTAKE);
+            c.put("sdh.landing.queue-uri", landedQueue());
+            c.put("sdh.landing.idle-wait", "200ms");
             c.put("sdh.split.format", "csv");
             c.put("sdh.split.options.csv.header", "true");
             c.put("sdh.storage.catalog-name", "sdh");
@@ -111,8 +108,7 @@ abstract class ObjectStoreItBase {
             c.put("sdh.crypto.keystore.path", keys.keystore.toString());
             c.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
             c.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
-            c.put("sdh.crypto.keys.source-files-kek", TestKeys.SOURCE);
-            c.put("sdh.crypto.keys.failed-files-kek", TestKeys.FAILED);
+            c.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
             c.put("sdh.crypto.keys.signing.kid", "connector-2026");
             c.put("sdh.crypto.keys.signing.pem", keys.signingPem.toString());
             c.put("sdh.crypto.keys.signing.passphrase", TestKeys.SIGNING_PASSPHRASE);
@@ -123,10 +119,15 @@ abstract class ObjectStoreItBase {
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }
-            c.put("sdh.crypto.keys.recovery-public", keys.recoveryPem.toString());
+            ItSupport.splitterKeys(keys).forEach(c::put);
             c.put("sdh.queue.type", "camel");
             c.put("sdh.queue.uri", "seda:" + queue + "?size=100000");
             c.forEach((k, v) -> r.add(k, () -> v));
+        }
+
+        /** Where the splitter takes {@code item.landed} messages from. */
+        String landedQueue() {
+            return "seda:" + queue + "-landed?size=1000";
         }
 
         /** A separate catalog client, as a downstream process would have. A JDBC catalog finds tables by name. */
@@ -163,19 +164,13 @@ abstract class ObjectStoreItBase {
             records.add(rec);
             file.append(rec);
         }
-        Path good = f.inbound().resolve("good.csv");
-        Files.writeString(good, file);
-        Files.setLastModifiedTime(good, FileTime.from(Instant.now().minusSeconds(30)));
-        Path bad = f.inbound().resolve("bad.csv");
-        Files.writeString(bad, header + "1," + MARKER + ",\"never closed\n");
-
-        long deadline = System.currentTimeMillis() + 120_000;
-        while (System.currentTimeMillis() < deadline && (Files.exists(good) || Files.exists(bad))) {
-            Thread.sleep(250);
-        }
+        TestLanding landing = new TestLanding(f.catalog(), runtime.keys().wrap(), f.keys(), ItSupport.INTAKE);
+        LandedItem good = landing.land(file.toString(), "good.csv");
+        LandedItem bad = landing.land(header + "1," + MARKER + ",\"never closed\n", "bad.csv");
+        landing.announce(camel, f.landedQueue(), good);
+        landing.announce(camel, f.landedQueue(), bad);
+        ItSupport.awaitSplit(runtime, 2, Duration.ofMinutes(2));
         assertThat(FATAL).isEmpty();
-        assertThat(good).doesNotExist();
-        assertThat(bad).doesNotExist();
 
         List<ConnectorMessage> msgs = new ArrayList<>();
         ConsumerTemplate consumer = camel.createConsumerTemplate();
@@ -200,16 +195,13 @@ abstract class ObjectStoreItBase {
             }
             FileCompleted done = msgs.stream().filter(FileCompleted.class::isInstance)
                     .map(FileCompleted.class::cast).findFirst().orElseThrow();
-            ByteArrayOutputStream restored = new ByteArrayOutputStream();
-            ArchiveReader.restore(runtime.sourceFiles(), done.fileId(), runtime.keys().wrap(), runtime.ids(), 0,
-                    restored);
-            assertThat(restored.toString(UTF_8)).isEqualTo(file.toString());
+            assertThat(new String(landing.restore(done.fileId()), UTF_8)).isEqualTo(file.toString());
 
             // Maintenance, between files: compaction, orphan cleanup where the emulator can list, then retention.
             writerLock.lock();
             try {
-                FileIO io = runtime.sections().io();
-                String dataPrefix = runtime.sections().location() + "/data/";
+                FileIO io = runtime.tables().sections().io();
+                String dataPrefix = runtime.tables().sections().location() + "/data/";
                 String stray = dataPrefix + "stray-crashed-batch.parquet";
                 boolean orphans = orphanCleanupSupported();
                 if (orphans) {
@@ -221,7 +213,7 @@ abstract class ObjectStoreItBase {
                 // ahead of this JVM's; a minute's lead keeps the just-planted stray old enough to count as an orphan.
                 var report = new TableMaintenance(runtime.committer(), new MaintenanceSettings(Duration.ofDays(7), 10,
                         true, 0.75, 2, 8L << 30, Duration.ZERO), Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
-                        .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.empty(), orphans);
+                        .run(runtime.tables().sections(), SectionsTable.INGESTED_AT, Optional.empty(), orphans);
                 assertThat(report.compactedFiles()).as("30 sections in batches of 7").isEqualTo(5);
                 if (orphans) {
                     assertThat(report.orphansDeleted()).isEqualTo(1);
@@ -233,7 +225,7 @@ abstract class ObjectStoreItBase {
                 }
                 var purge = new TableMaintenance(runtime.committer(), MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
-                        .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.of(Duration.ofDays(1)), false);
+                        .run(runtime.tables().sections(), SectionsTable.INGESTED_AT, Optional.of(Duration.ofDays(1)), false);
                 assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
                 assertThat(list(dataPrefix)).as("PHI data objects physically removed").isEmpty();
             } finally {
@@ -242,7 +234,7 @@ abstract class ObjectStoreItBase {
         }
 
         // Nothing the connector wrote is readable: data, manifests and metadata alike.
-        FileIO io = runtime.sections().io();
+        FileIO io = runtime.tables().sections().io();
         String warehouse = f.catalog().get("warehouse");
         List<String> objects = list(warehouse);
         assertThat(objects).isNotEmpty();

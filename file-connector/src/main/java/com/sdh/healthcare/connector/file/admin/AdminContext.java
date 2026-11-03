@@ -12,7 +12,8 @@ import com.sdh.healthcare.connector.contract.table.SectionsTable;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
-import com.sdh.healthcare.connector.core.storage.ArchiveTables;
+import com.sdh.healthcare.connector.core.inbox.InboxTables;
+import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.zaxxer.hikari.HikariConfig;
@@ -36,7 +37,9 @@ final class AdminContext implements AutoCloseable {
     private final ConnectorProperties props;
     private KeyMaterial keys;
     private Catalog catalog;
+    private Catalog landingCatalog;
     private SectionIds ids;
+    private SectionIds landingIds;
     private HikariDataSource leaseDb;
 
     AdminContext(ConnectorProperties props) {
@@ -65,9 +68,23 @@ final class AdminContext implements AutoCloseable {
         return catalog;
     }
 
+    /** The landing catalog: {@code sdh.landing.storage.catalog}, or the splitter's own when that is unset. */
+    Catalog landingCatalog() {
+        if (landingCatalog == null) {
+            Map<String, String> c = props.landing().storage().catalog();
+            landingCatalog = c == null || c.isEmpty() ? catalog()
+                    : CatalogUtil.buildIcebergCatalog(props.landing().storage().catalogName(), c, null);
+        }
+        return landingCatalog;
+    }
+
     Table table(String name) {
+        return load(catalog(), props.storage().namespace(), name);
+    }
+
+    private static Table load(Catalog catalog, String namespace, String name) {
         try {
-            return catalog().loadTable(TableIdentifier.of(props.storage().namespace(), name));
+            return catalog.loadTable(TableIdentifier.of(namespace, name));
         } catch (NoSuchTableException e) {
             throw new IllegalStateException("Table " + name + " does not exist: the connector has never run here");
         }
@@ -77,12 +94,20 @@ final class AdminContext implements AutoCloseable {
         return table(SectionsTable.DEFAULT_NAME);
     }
 
-    Table sourceFiles() {
-        return table(ArchiveTables.SOURCE_FILES);
+    Table inbox() {
+        return table(InboxTables.INBOX);
     }
 
-    Table failedFiles() {
-        return table(ArchiveTables.FAILED_FILES);
+    Table landedItems() {
+        return load(landingCatalog(), props.landing().storage().namespace(), LandingTables.LANDED_ITEMS);
+    }
+
+    /** The landing node's ID key, for checking a landed item's digest; unwrapped with the landed-items KEK. */
+    SectionIds landingIds() throws Exception {
+        if (landingIds == null) {
+            landingIds = new SectionIds(IdKeys.load(landedItems(), keys().wrap()));
+        }
+        return landingIds;
     }
 
     SectionIds ids() throws Exception {
@@ -115,6 +140,13 @@ final class AdminContext implements AutoCloseable {
     public void close() {
         if (keys != null) {
             keys.close();
+        }
+        if (landingCatalog != catalog && landingCatalog instanceof AutoCloseable c) {
+            try {
+                c.close();
+            } catch (Exception ignored) {
+                // exiting
+            }
         }
         if (catalog instanceof AutoCloseable c) {
             try {

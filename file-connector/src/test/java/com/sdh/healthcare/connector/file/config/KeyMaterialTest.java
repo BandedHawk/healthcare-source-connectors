@@ -42,11 +42,7 @@ class KeyMaterialTest {
             String sign, String signingKeyRef) {
         return new CommonSettings.Crypto(wrap, sign,
                 new CommonSettings.Keystore(k.keystore, TestKeys.KS_PASSWORD),
-                new CommonSettings.Keys(TestKeys.SECTIONS, TestKeys.SOURCE, TestKeys.FAILED, null,
-                        new CommonSettings.Signing("connector-2026", signingPem, TestKeys.SIGNING_PASSPHRASE,
-                                signingKeyRef),
-                        new CommonSettings.Recipient("downstream-2026", k.recipientPem, recipientPin),
-                        k.recoveryPem),
+                k.splitterKeys(recipientPin, signingPem, signingKeyRef),
                 new CommonSettings.Aws(null, null), new CommonSettings.Gcp(null),
                 new CommonSettings.Vault(null, null, null, "transit", null));
     }
@@ -57,7 +53,7 @@ class KeyMaterialTest {
         KeyMaterial m = KeyMaterial.load(crypto(k, KeyMaterial.fingerprint(k.recipient.getPublic()), k.signingPem));
         assertThat(m.signerKid()).isEqualTo("connector-2026");
         assertThat(m.recipient()).isEqualTo(k.recipient.getPublic());
-        assertThat(m.recovery()).isEqualTo(k.recovery.getPublic());
+        assertThat(m.inbox()).isNotNull();
         byte[] dek = new byte[32];
         assertThat(m.wrap().unwrap(m.wrap().wrap(TestKeys.SECTIONS, dek))).isEqualTo(dek);
     }

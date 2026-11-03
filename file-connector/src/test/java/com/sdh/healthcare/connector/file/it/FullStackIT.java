@@ -19,8 +19,9 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionSto
 import com.sdh.healthcare.connector.contract.table.SectionsTable;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
-import com.sdh.healthcare.connector.core.storage.ArchiveReader;
+import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.file.TestKeys;
+import com.sdh.healthcare.connector.file.TestLanding;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
@@ -85,7 +86,6 @@ class FullStackIT {
     static final String S3_CONFIG = """
             {"identities":[{"name":"sdh","credentials":[{"accessKey":"%s","secretKey":"%s"}],
               "actions":["Admin","Read","Write","List","Tagging"]}]}""".formatted(ACCESS_KEY, SECRET_KEY);
-    static final Path INBOUND;
     static final TestKeys KEYS;
     static final PostgreSQLContainer POSTGRES;
     static final GenericContainer<?> SEAWEED;
@@ -108,12 +108,12 @@ class FullStackIT {
                 logs: {receivers: [otlp], exporters: [file]}
             """;
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
+    static final String LANDED_QUEUE = "seda:sdh-fullstack-landed?size=1000";
 
     static {
         ItSupport.requireDocker();
         try {
             Path root = Files.createTempDirectory("sdh-fullstack");
-            INBOUND = Files.createDirectories(root.resolve("inbound"));
             KEYS = new TestKeys(Files.createDirectories(root.resolve("keys")));
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
@@ -181,9 +181,9 @@ class FullStackIT {
         try (S3Client s3 = s3()) {
             s3.createBucket(b -> b.bucket(BUCKET));
         }
-        r.add("sdh.file.inbound-dir", INBOUND::toString);
-        r.add("sdh.file.min-age", () -> "500ms");
-        r.add("sdh.file.poll-interval", () -> "200ms");
+        r.add("sdh.landing.intake", () -> ItSupport.INTAKE);
+        r.add("sdh.landing.queue-uri", () -> LANDED_QUEUE);
+        r.add("sdh.landing.idle-wait", () -> "200ms");
         r.add("sdh.split.format", () -> "csv");
         r.add("sdh.split.options.csv.header", () -> "true");
         r.add("sdh.storage.catalog-name", () -> "sdh");
@@ -195,8 +195,7 @@ class FullStackIT {
         r.add("sdh.crypto.keystore.path", KEYS.keystore::toString);
         r.add("sdh.crypto.keystore.password", () -> TestKeys.KS_PASSWORD);
         r.add("sdh.crypto.keys.sections-kek", () -> TestKeys.SECTIONS);
-        r.add("sdh.crypto.keys.source-files-kek", () -> TestKeys.SOURCE);
-        r.add("sdh.crypto.keys.failed-files-kek", () -> TestKeys.FAILED);
+        r.add("sdh.crypto.keys.landed-items-kek", () -> TestKeys.LANDED);
         r.add("sdh.crypto.keys.signing.kid", () -> "connector-2026");
         r.add("sdh.crypto.keys.signing.pem", KEYS.signingPem::toString);
         r.add("sdh.crypto.keys.signing.passphrase", () -> TestKeys.SIGNING_PASSPHRASE);
@@ -204,7 +203,7 @@ class FullStackIT {
         r.add("sdh.crypto.keys.recipient.pem", KEYS.recipientPem::toString);
         String pin = KeyMaterial.fingerprint(KEYS.recipient.getPublic());
         r.add("sdh.crypto.keys.recipient.sha256", () -> pin);
-        r.add("sdh.crypto.keys.recovery-public", KEYS.recoveryPem::toString);
+        ItSupport.splitterKeys(KEYS).forEach((k, v) -> r.add(k, () -> v));
         r.add("sdh.telemetry.otlp.endpoint",
                 () -> "http://" + COLLECTOR.getHost() + ":" + COLLECTOR.getMappedPort(4318));
         r.add("sdh.telemetry.metric-interval", () -> "1s");
@@ -251,19 +250,13 @@ class FullStackIT {
         // the file still completes (design §6.4).
         String shortRow = "30," + MARKER + "-short\n";
         file.append(shortRow);
-        Path good = INBOUND.resolve("good.csv");
-        Files.writeString(good, file);
-        Files.setLastModifiedTime(good, FileTime.from(Instant.now().minusSeconds(30)));
-        Path bad = INBOUND.resolve("bad.csv");
-        Files.writeString(bad, header + "1," + MARKER + ",\"never closed\n");
-
-        long deadline = System.currentTimeMillis() + 120_000;
-        while (System.currentTimeMillis() < deadline && (Files.exists(good) || Files.exists(bad))) {
-            Thread.sleep(250);
-        }
+        TestLanding landing = new TestLanding(catalogProps(), runtime.keys().wrap(), KEYS, ItSupport.INTAKE);
+        LandedItem good = landing.land(file.toString(), "good.csv");
+        LandedItem bad = landing.land(header + "1," + MARKER + ",\"never closed\n", "bad.csv");
+        landing.announce(camel, LANDED_QUEUE, good);
+        landing.announce(camel, LANDED_QUEUE, bad);
+        ItSupport.awaitSplit(runtime, 2, Duration.ofMinutes(2));
         assertThat(FATAL).isEmpty();
-        assertThat(good).doesNotExist();
-        assertThat(bad).doesNotExist();
 
         // Downstream: Kafka → connector-queue-reader → sections from S3.
         List<ConnectorMessage> msgs = new ArrayList<>();
@@ -305,15 +298,12 @@ class FullStackIT {
                     .map(FileCompleted.class::cast).findFirst().orElseThrow();
             assertThat(done.sectionCount()).isEqualTo(31);
             assertThat(done.failedSectionCount()).isEqualTo(1);
-            ByteArrayOutputStream restored = new ByteArrayOutputStream();
-            ArchiveReader.restore(runtime.sourceFiles(), done.fileId(), runtime.keys().wrap(), runtime.ids(), 0,
-                    restored);
-            assertThat(restored.toString(UTF_8)).isEqualTo(file.toString());
+            assertThat(new String(landing.restore(done.fileId()), UTF_8)).isEqualTo(file.toString());
 
             // Maintenance on real S3, between files (route idle, writer lock held).
             writerLock.lock();
             try {
-                String dataPrefix = keyOf(runtime.sections().location()) + "/data/";
+                String dataPrefix = keyOf(runtime.tables().sections().location()) + "/data/";
                 String stray = dataPrefix + "stray-crashed-batch.parquet";
                 try (S3Client s3 = s3()) {
                     s3.putObject(b -> b.bucket(BUCKET).key(stray),
@@ -323,7 +313,7 @@ class FullStackIT {
                 // ahead of this JVM's; a minute's lead keeps the just-planted stray old enough to count as an orphan.
                 var report = new TableMaintenance(runtime.committer(), new MaintenanceSettings(Duration.ofDays(7), 10,
                         true, 0.75, 2, 8L << 30, Duration.ZERO), Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
-                        .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.empty(), true);
+                        .run(runtime.tables().sections(), SectionsTable.INGESTED_AT, Optional.empty(), true);
                 assertThat(report.compactedFiles()).as("31 sections in batches of 7").isEqualTo(5);
                 assertThat(report.orphansDeleted()).isEqualTo(1);
                 assertThat(keys(dataPrefix)).doesNotContain(stray);
@@ -336,7 +326,7 @@ class FullStackIT {
                 // Retention: three days on, a one-day policy drops today's partition and purges its objects at once.
                 var purge = new TableMaintenance(runtime.committer(), MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
-                        .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.of(Duration.ofDays(1)), false);
+                        .run(runtime.tables().sections(), SectionsTable.INGESTED_AT, Optional.of(Duration.ofDays(1)), false);
                 assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
                 assertThat(keys(dataPrefix)).as("PHI data objects physically removed").isEmpty();
             } finally {
@@ -344,20 +334,6 @@ class FullStackIT {
             }
         }
 
-        // A second connector on the same directory with a different lease name (so the lease can't stop it) is
-        // refused by the directory claim before it opens storage, and releases its lease (design §9.5).
-        CommonSettings.Lease l = props.lease();
-        ConnectorProperties second = new ConnectorProperties(props.connectorId(), props.file(), props.split(),
-                props.storage(), new CommonSettings.Lease(l.jdbc(), "second-connector", l.ttl(),
-                        l.renewInterval(), l.safetyMargin()),
-                props.crypto(), props.queue(), props.retry(), props.maintenance(), props.telemetry(),
-                props.encryptWorkers());
-        assertThatThrownBy(() -> ConnectorRuntime.start(second, camel, FATAL::add))
-                .isInstanceOf(InboundDirectoryClaim.ClaimedException.class)
-                .hasMessageContaining("lease-name=file-connector");
-        assertThat(Files.readString(INBOUND.resolve(InboundDirectoryClaim.FILE))).contains("lease-name=file-connector");
-        // The running connector still owns it and carries on.
-        runtime.claim().verify();
         assertThat(FATAL).isEmpty();
 
         // Nothing in object storage is readable: data files, manifests and metadata alike.

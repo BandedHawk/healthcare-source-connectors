@@ -84,7 +84,7 @@ class AzureKeyVaultIT {
         // Versioned key IDs: Lowkey rejects wrapKey on an unversioned ID (real Key Vault accepts it and uses the
         // latest version), and versioned IDs are equally valid configuration.
         java.util.Map<String, String> id = new java.util.HashMap<>();
-        for (String name : new String[] {"sections-kek", "source-kek", "failed-kek"}) {
+        for (String name : new String[] {"sections-kek", "landed-items-kek"}) {
             // Key Vault needs wrapKey/unwrapKey on a KEK; Lowkey also checks encrypt/decrypt when wrapping.
             id.put(name, keys.createRsaKey(new CreateRsaKeyOptions(name).setKeySize(3072).setKeyOperations(
                     KeyOperation.WRAP_KEY, KeyOperation.UNWRAP_KEY, KeyOperation.ENCRYPT, KeyOperation.DECRYPT))
@@ -96,8 +96,8 @@ class AzureKeyVaultIT {
         // The provider's own emulator-friendly constructor: same builder code as production, plus our HTTP client.
         AzureKeyVaultKeyProvider provider = AzureKeyVaultKeyProvider.create(credential, emulatorHttp());
         TestKeys k = localKeys();
-        CommonSettings.Crypto c = crypto(k, "azure-keyvault", id.get("sections-kek"), id.get("source-kek"),
-                id.get("failed-kek"), id.get("signing"), new CommonSettings.Aws(null, null),
+        CommonSettings.Crypto c = crypto(k, "azure-keyvault", id.get("sections-kek"),
+                id.get("landed-items-kek"), id.get("signing"), new CommonSettings.Aws(null, null),
                 new CommonSettings.Vault(null, null, null, "transit", null));
         try (KeyMaterial km = KeyMaterial.load(c, (name, cfg) -> provider)) {
             // The wrapped key records the versioned key ID, so a rotated key still unwraps old data.

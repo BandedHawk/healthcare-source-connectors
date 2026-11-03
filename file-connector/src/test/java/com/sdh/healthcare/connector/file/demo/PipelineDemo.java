@@ -162,8 +162,7 @@ class PipelineDemo {
         p.put("sdh.crypto.keystore.path", KEYS.keystore.toString());
         p.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
         p.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
-        p.put("sdh.crypto.keys.source-files-kek", TestKeys.SOURCE);
-        p.put("sdh.crypto.keys.failed-files-kek", TestKeys.FAILED);
+        p.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
         p.put("sdh.crypto.keys.signing.kid", "connector-2026");
         p.put("sdh.crypto.keys.signing.pem", KEYS.signingPem.toString());
         p.put("sdh.crypto.keys.signing.passphrase", TestKeys.SIGNING_PASSPHRASE);

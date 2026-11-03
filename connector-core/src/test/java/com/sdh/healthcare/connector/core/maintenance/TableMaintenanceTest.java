@@ -20,8 +20,10 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
-import com.sdh.healthcare.connector.core.storage.ArchiveTables;
-import com.sdh.healthcare.connector.core.storage.Archiver;
+import com.sdh.healthcare.connector.core.landing.ItemKind;
+import com.sdh.healthcare.connector.core.landing.ItemLander;
+import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.landing.NewItem;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.storage.SectionBatchWriter;
 import java.io.IOException;
@@ -235,24 +237,26 @@ class TableMaintenanceTest {
     }
 
     @Test
-    void retentionWorksOnArchiveTablesByArchivedAt() throws Exception {
-        Table t = IngestTables.sourceFiles(catalog, namespace);
+    void retentionWorksOnLandedItemsByLandedAt() throws Exception {
+        Table t = LandingTables.landedItems(catalog, namespace);
         committer.establish(t);
         SectionIds ids = new SectionIds(new byte[32]);
         RetryPolicy fast = new RetryPolicy(1, Duration.ZERO, Duration.ZERO);
-        Archiver.Settings as = Archiver.Settings.defaults("c", "k").withSizes(64, 256, 256).withRetry(fast);
-        new Archiver(t, committer, keys, ids, as, Clock.fixed(OLD_DAY, ZoneOffset.UTC))
-                .archive(UUID.randomUUID(), SeekableByteSource.of(new byte[300]), Optional.of("old.csv"), (r, at) -> {});
+        ItemLander.Settings ls = ItemLander.Settings.defaults("c", "k").withSizes(64, 256, 256).withRetry(fast);
+        new ItemLander(t, committer, keys, ids, ls, Clock.fixed(OLD_DAY, ZoneOffset.UTC))
+                .land(new NewItem(UUID.randomUUID(), ItemKind.FILE, null, "old.csv", null),
+                        offset -> new java.io.ByteArrayInputStream(new byte[300]));
         UUID recent = UUID.randomUUID();
-        new Archiver(t, committer, keys, ids, as, Clock.fixed(RECENT_DAY, ZoneOffset.UTC))
-                .archive(recent, SeekableByteSource.of(new byte[100]), Optional.of("new.csv"), (r, at) -> {});
+        new ItemLander(t, committer, keys, ids, ls, Clock.fixed(RECENT_DAY, ZoneOffset.UTC))
+                .land(new NewItem(recent, ItemKind.FILE, null, "new.csv", null),
+                        offset -> new java.io.ByteArrayInputStream(new byte[100]));
 
         maintenance(settings(Duration.ofDays(7), 10, 50, 8L << 30, Duration.ofDays(3)))
-                .run(t, ArchiveTables.ARCHIVED_AT, Optional.of(Duration.ofDays(5)), false);
+                .run(t, LandingTables.LANDED_AT, Optional.of(Duration.ofDays(5)), false);
 
         t.refresh();
         try (CloseableIterable<Record> rs = IcebergGenerics.read(t).build()) {
-            assertThat(rs).isNotEmpty().allMatch(r -> r.getField(ArchiveTables.FILE_ID).equals(recent));
+            assertThat(rs).isNotEmpty().allMatch(r -> r.getField(LandingTables.ITEM_ID).equals(recent));
         }
     }
 

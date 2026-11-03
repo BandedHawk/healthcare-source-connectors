@@ -16,9 +16,6 @@ import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
-import com.sdh.healthcare.connector.core.split.SeekableByteSource;
-import com.sdh.healthcare.connector.core.storage.Archiver;
-import com.sdh.healthcare.connector.core.storage.IngestTables;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
@@ -27,7 +24,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 import javax.crypto.KeyGenerator;
@@ -258,22 +254,6 @@ class ItemLanderTest
                 .isEqualTo(item.source().hash());
         assertThat(LandedItems.originalName(summary, keys))
                 .contains("inbound/jones-mrn-123.xml");
-
-        // The digest is the archive's file digest, so the splitter's
-        // file.completed reports the same value for the item.
-        Table archive = IngestTables.sourceFiles(catalog, "sdh_ingest");
-        FencedCommitter archiveCommitter = committer();
-        archiveCommitter.establish(archive);
-        String fileDigest = new Archiver(archive, archiveCommitter, keys, ids,
-                Archiver.Settings.defaults("c", KEK)
-                        .withSizes(CHUNK, BLOCK, BLOCK),
-                Clock.systemUTC())
-                .archive(UUID.randomUUID(), SeekableByteSource.of(bytes),
-                        Optional.empty(), (row, at) ->
-                        {
-                        })
-                .digest();
-        assertThat(landed.digest()).isEqualTo(fileDigest);
     }
 
     /** No name or path appears in the table's clear columns. */

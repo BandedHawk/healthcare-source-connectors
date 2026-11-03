@@ -60,20 +60,18 @@ class AwsKmsIT {
     @Test
     void wrapsWithSymmetricKeysAndSignsWithAnEccKey() throws Exception {
         String sections;
-        String source;
-        String failed;
+        String landed;
         String signing;
         try (KmsClient admin = client()) {
             sections = admin.createKey(b -> b.description("sections-kek")).keyMetadata().arn();
-            source = admin.createKey(b -> b.description("source-kek")).keyMetadata().arn();
-            failed = admin.createKey(b -> b.description("failed-kek")).keyMetadata().arn();
+            landed = admin.createKey(b -> b.description("landed-items-kek")).keyMetadata().arn();
             signing = admin.createKey(b -> b.keySpec(KeySpec.ECC_NIST_P256).keyUsage(KeyUsageType.SIGN_VERIFY))
                     .keyMetadata().arn();
             admin.createAlias(b -> b.aliasName("alias/sdh-sections").targetKeyId(sections));
         }
         TestKeys k = localKeys();
         // The sections KEK is referenced by alias; the wrapped key must record the real key ARN.
-        CommonSettings.Crypto c = crypto(k, "aws-kms", "alias/sdh-sections", source, failed, signing,
+        CommonSettings.Crypto c = crypto(k, "aws-kms", "alias/sdh-sections", landed, signing,
                 new CommonSettings.Aws("us-east-1", null), new CommonSettings.Vault(null, null, null,
                         "transit", null));
         AwsKmsKeyProvider provider = new AwsKmsKeyProvider(client());

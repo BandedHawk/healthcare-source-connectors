@@ -107,7 +107,7 @@ class AdlsAzureIT extends ObjectStoreItBase {
      */
     @Override
     List<String> list(String location) {
-        var io = (SupportsPrefixOperations) runtime.sections().io();
+        var io = (SupportsPrefixOperations) runtime.tables().sections().io();
         String root = "abfss://" + Azure.FILESYSTEM + "@" + Azure.HOST + "/";
         return StreamSupport.stream(io.listPrefix(location).spliterator(), false).map(FileInfo::location)
                 .map(p -> p.contains("://") ? p : root + (p.startsWith("/") ? p.substring(1) : p)).toList();

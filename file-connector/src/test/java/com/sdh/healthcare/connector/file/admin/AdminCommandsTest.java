@@ -7,7 +7,6 @@
 
 package com.sdh.healthcare.connector.file.admin;
 
-import static com.sdh.healthcare.connector.core.storage.ArchiveTables.FAILURE_SEQ;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -16,8 +15,9 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarte
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.core.crypto.RecoveryEnvelope;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
-import com.sdh.healthcare.connector.core.storage.ArchiveReader;
+import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.file.TestKeys;
+import com.sdh.healthcare.connector.file.TestLanding;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.runtime.FatalExit;
@@ -27,10 +27,8 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.interfaces.ECPublicKey;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -69,7 +67,10 @@ import org.springframework.test.context.DynamicPropertySource;
 @ExtendWith(OutputCaptureExtension.class)
 class AdminCommandsTest {
     static final Path ROOT;
-    static final Path INBOUND;
+    static final String INTAKE = "claims";
+    static final String LANDED_QUEUE = "seda:sdh-admin-landed?size=1000";
+    /** The JDBC catalog's properties, for the landing stand-in. */
+    static final Map<String, String> CATALOG = new LinkedHashMap<>();
     static final TestKeys KEYS;
     static final EmbeddedPostgres PG;
     /** The connector's settings, also given to the admin commands as --key=value overrides. */
@@ -83,25 +84,25 @@ class AdminCommandsTest {
     static {
         try {
             ROOT = Files.createTempDirectory("sdh-admin");
-            INBOUND = Files.createDirectories(ROOT.resolve("inbound"));
             KEYS = new TestKeys(Files.createDirectories(ROOT.resolve("keys")));
             PG = EmbeddedPostgres.start();
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }
         String jdbc = PG.getJdbcUrl("postgres", "postgres");
-        CONFIG.put("sdh.file.inbound-dir", INBOUND.toString());
-        CONFIG.put("sdh.file.min-age", "200ms");
-        CONFIG.put("sdh.file.poll-interval", "100ms");
+        CATALOG.put("type", "jdbc");
+        CATALOG.put("uri", jdbc);
+        CATALOG.put("warehouse", "memory://wh-" + UUID.randomUUID());
+        CATALOG.put("io-impl", "org.apache.iceberg.inmemory.InMemoryFileIO");
+        CATALOG.put("jdbc.user", "postgres");
+        CATALOG.put("jdbc.password", "postgres");
+        CATALOG.put("jdbc.schema-version", "V1");
+        CONFIG.put("sdh.landing.intake", INTAKE);
+        CONFIG.put("sdh.landing.queue-uri", LANDED_QUEUE);
+        CONFIG.put("sdh.landing.idle-wait", "100ms");
         CONFIG.put("sdh.split.format", "csv");
-        CONFIG.put("sdh.storage.catalog-name", "sdh");
-        CONFIG.put("sdh.storage.catalog.type", "jdbc");
-        CONFIG.put("sdh.storage.catalog.uri", jdbc);
-        CONFIG.put("sdh.storage.catalog.warehouse", "memory://wh-" + UUID.randomUUID());
-        CONFIG.put("sdh.storage.catalog.io-impl", "org.apache.iceberg.inmemory.InMemoryFileIO");
-        CONFIG.put("sdh.storage.catalog[jdbc.user]", "postgres");
-        CONFIG.put("sdh.storage.catalog[jdbc.password]", "postgres");
-        CONFIG.put("sdh.storage.catalog[jdbc.schema-version]", "V1");
+        CONFIG.put("sdh.storage.catalog-name", TestLanding.CATALOG);
+        CATALOG.forEach((k, v) -> CONFIG.put("sdh.storage.catalog[" + k + "]", v));
         CONFIG.put("sdh.storage.commit.max-sections", "5");
         CONFIG.put("sdh.lease.jdbc.url", jdbc);
         CONFIG.put("sdh.lease.jdbc.username", "postgres");
@@ -109,8 +110,12 @@ class AdminCommandsTest {
         CONFIG.put("sdh.crypto.keystore.path", KEYS.keystore.toString());
         CONFIG.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
         CONFIG.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
-        CONFIG.put("sdh.crypto.keys.source-files-kek", TestKeys.SOURCE);
-        CONFIG.put("sdh.crypto.keys.failed-files-kek", TestKeys.FAILED);
+        CONFIG.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
+        CONFIG.put("sdh.crypto.keys.inbox.kid", TestKeys.INBOX_KID);
+        CONFIG.put("sdh.crypto.keys.inbox.pem", KEYS.inboxPem.toString());
+        CONFIG.put("sdh.crypto.keys.inbox.passphrase", TestKeys.INBOX_PASSPHRASE);
+        CONFIG.put("sdh.crypto.keys.landing-signer.kid", TestKeys.LANDING_SIGNER_KID);
+        CONFIG.put("sdh.crypto.keys.landing-signer.pem", KEYS.landingSignerPem.toString());
         CONFIG.put("sdh.crypto.keys.signing.kid", "connector-2026");
         CONFIG.put("sdh.crypto.keys.signing.pem", KEYS.signingPem.toString());
         CONFIG.put("sdh.crypto.keys.signing.passphrase", TestKeys.SIGNING_PASSPHRASE);
@@ -121,7 +126,6 @@ class AdminCommandsTest {
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }
-        CONFIG.put("sdh.crypto.keys.recovery-public", KEYS.recoveryPem.toString());
         CONFIG.put("sdh.queue.type", "camel");
         CONFIG.put("sdh.queue.uri", "seda:sdh-admin-out?size=100000");
         CONFIG.put("sdh.retry.max-attempts", "2");
@@ -153,36 +157,28 @@ class AdminCommandsTest {
 
     @BeforeAll
     void ingest() throws Exception {
-        Path good = write("good-smith.csv", GOOD, 20);
-        Path bad = write("bad-jones.csv", BAD, 10);
-        long deadline = System.currentTimeMillis() + 60_000;
-        while (System.currentTimeMillis() < deadline && (Files.exists(good) || Files.exists(bad))) {
-            Thread.sleep(100);
-        }
-        assertThat(FATAL).isEmpty();
-        assertThat(good).doesNotExist();
-        assertThat(bad).doesNotExist();
+        TestLanding landing = new TestLanding(CATALOG, runtime.keys().wrap(), KEYS, INTAKE);
+        LandedItem good = landing.land(GOOD, "good-smith.csv");
+        LandedItem bad = landing.land(BAD, "bad-jones.csv");
+        landing.announce(camel, LANDED_QUEUE, good);
+        landing.announce(camel, LANDED_QUEUE, bad);
         MessageOpener opener = new MessageOpener(Map.of("downstream-2026", KEYS.recipient.getPrivate()),
                 Map.of("connector-2026", (ECPublicKey) KEYS.signing.getPublic()));
         ConsumerTemplate consumer = camel.createConsumerTemplate();
         List<FileStarted> started = new ArrayList<>();
-        String body;
-        while ((body = consumer.receiveBody("seda:sdh-admin-out", 500, String.class)) != null) {
-            ConnectorMessage m = opener.open(body.getBytes(UTF_8));
-            if (m instanceof FileStarted s) {
+        long deadline = System.currentTimeMillis() + 60_000;
+        while (System.currentTimeMillis() < deadline && (started.size() < 2 || runtime.inbox().backlog() > 0
+                || runtime.processor().inProgress().isPresent())) {
+            String body = consumer.receiveBody("seda:sdh-admin-out?size=100000", 200, String.class);
+            if (body != null && opener.open(body.getBytes(UTF_8)) instanceof FileStarted s) {
                 started.add(s);
             }
         }
-        assertThat(started).hasSize(2);
-        goodId = started.get(0).fileId();
-        badId = started.get(1).fileId();
-    }
-
-    static Path write(String name, String content, int ageSeconds) throws Exception {
-        Path p = INBOUND.resolve(name);
-        Files.writeString(p, content);
-        Files.setLastModifiedTime(p, FileTime.from(Instant.now().minusSeconds(ageSeconds)));
-        return p;
+        assertThat(FATAL).isEmpty();
+        assertThat(started).extracting(FileStarted::fileId).containsExactly(good.itemId(), bad.itemId());
+        assertThat(runtime.inbox().backlog()).isZero();
+        goodId = good.itemId();
+        badId = bad.itemId();
     }
 
     record Result(int status, String out, String err) {}
@@ -215,19 +211,15 @@ class AdminCommandsTest {
         Path dir = newDir();
         Result whole = admin("restore", "--file-id", badId.toString(), "--to", dir.toString());
         assertThat(whole.status()).as(whole.err()).isZero();
-        assertThat(whole.out()).contains("failed file: stage split, error PARSE_UNTERMINATED_QUOTE")
-                .contains("from failed_files, digest verified");
+        assertThat(whole.out()).contains("from landing, digest verified");
         assertThat(Files.readString(dir.resolve(badId.toString()))).isEqualTo(BAD);
         assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(dir.resolve(badId.toString()))))
                 .isEqualTo("rw-------");
 
-        // The tail starts right after the last committed section.
-        long lastSeq = (Long) ArchiveReader.summary(runtime.failedFiles(), badId).orElseThrow().getField(FAILURE_SEQ);
-        assertThat(lastSeq).isGreaterThanOrEqualTo(4);
-        int from = 0;
-        for (int i = 0; i <= lastSeq; i++) {
-            from = BAD.indexOf('\n', from) + 1;
-        }
+        // The tail starts right after the last stored section: at least one batch of five was committed.
+        int from = (int) RestoreCommand.unprocessedFrom(runtime.tables().sections(), badId);
+        assertThat(BAD.substring(0, from)).endsWith("\n");
+        assertThat(BAD.substring(0, from).chars().filter(c -> c == '\n').count()).isGreaterThanOrEqualTo(5);
         Result tail = admin("restore", "--file-id", badId.toString(), "--to", dir.toString(), "--unprocessed");
         assertThat(tail.status()).as(tail.err()).isZero();
         assertThat(Files.readString(dir.resolve(badId + ".from-" + from))).isEqualTo(BAD.substring(from));
@@ -239,7 +231,7 @@ class AdminCommandsTest {
         assertThat(names(dir)).containsExactly(badId.toString(), badId + ".from-" + from);
 
         assertThat(log.getAll()).contains("admin.restore operator=alice file_id=" + badId)
-                .contains("result=ok").contains("admin.restore operator=alice file_id=" + badId + " table=failed_files"
+                .contains("result=ok").contains("admin.restore operator=alice file_id=" + badId + " table=landed_items"
                         + " offset=0 result=failed reason=FileAlreadyExistsException");
     }
 
@@ -248,7 +240,7 @@ class AdminCommandsTest {
         Path dir = newDir();
         Result r = admin("restore", "--file-id", goodId.toString(), "--to", dir.toString(), "--original-name");
         assertThat(r.status()).as(r.err()).isZero();
-        assertThat(r.out()).contains("from source_files").contains("under its original name")
+        assertThat(r.out()).contains("from landing").contains("under its original name")
                 .doesNotContain("good-smith");
         assertThat(Files.readString(dir.resolve("good-smith.csv"))).isEqualTo(GOOD);
 
@@ -257,25 +249,22 @@ class AdminCommandsTest {
         assertThat(partial.status()).as(partial.err()).isZero();
         assertThat(Files.readString(dir.resolve(goodId + ".from-8"))).isEqualTo(GOOD.substring(8));
 
+        // A completed item has no unprocessed tail.
         Result unprocessed = admin("restore", "--file-id", goodId.toString(), "--to", dir.toString(),
                 "--unprocessed");
-        assertThat(unprocessed.status()).isEqualTo(2);
-        assertThat(unprocessed.err()).contains("failed files only");
+        assertThat(unprocessed.status()).as(unprocessed.err()).isZero();
+        assertThat(Files.size(dir.resolve(goodId + ".from-" + GOOD.length()))).isZero();
     }
 
     @Test
     void statusShowsTheLeaseCheckpointAndBacklogWithoutTakingTheLease() throws Exception {
-        Path waiting = INBOUND.resolve(".not-counted");
-        Files.writeString(waiting, "hidden");
         Result r = admin("status");
         assertThat(r.status()).as(r.out() + r.err()).isZero();
         assertThat(r.out())
                 .containsPattern("lease: +file-connector held by .+, epoch 1, renewed .+, expires in \\d+s")
-                .containsPattern("checkpoint: +file " + badId + " FAILED \\(csv\\)")
+                .containsPattern("checkpoint: +item " + badId + " FAILED \\(csv\\)")
                 .contains("stage split, PARSE_UNTERMINATED_QUOTE")
-                .containsPattern("archive failed_files: +last file " + badId + " finished")
-                .containsPattern("archive source_files: +last file " + goodId + " finished")
-                .containsPattern("inbound: +no files waiting");
+                .containsPattern("inbox: +no items waiting");
         // Still ours: the connector renews the same epoch.
         assertThat(runtime.committer()).isNotNull();
         assertThat(admin("status").out()).contains("epoch 1,");
@@ -287,7 +276,7 @@ class AdminCommandsTest {
         assertThat(r.status()).isEqualTo(1);
         assertThat(r.out()).containsPattern("lease: +file-connector held by")
                 .containsPattern("checkpoint: +unavailable \\(")
-                .containsPattern("inbound: +no files waiting");
+                .containsPattern("inbox: +unavailable \\(");
     }
 
     @Test
@@ -355,7 +344,7 @@ class AdminCommandsTest {
         assertThat(admin("restore", "--file-id", "not-a-uuid", "--to", ROOT.toString()).err())
                 .contains("must be a UUID");
         assertThat(admin("restore", "--file-id", UUID.randomUUID().toString(), "--to", ROOT.toString()).err())
-                .contains("No finished archive");
+                .contains("No fully landed item");
     }
 
     @Test

@@ -22,9 +22,10 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
-import com.sdh.healthcare.connector.core.storage.ArchiveReader;
+import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.TestKeys;
+import com.sdh.healthcare.connector.file.TestLanding;
 import com.sdh.healthcare.connector.file.admin.AdminCli;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
@@ -104,18 +105,17 @@ class PolarisIT {
     static final String MARKER = "PHI-MARKER-9b2e";
 
     static final Network NETWORK = Network.newNetwork();
-    static final Path INBOUND;
     static final TestKeys KEYS;
     static final PostgreSQLContainer POSTGRES;
     static final GenericContainer<?> SEAWEED;
     static final GenericContainer<?> POLARIS;
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
+    static final String LANDED_QUEUE = "seda:sdh-polaris-landed?size=1000";
 
     static {
         ItSupport.requireDocker();
         try {
             Path root = Files.createTempDirectory("sdh-polaris");
-            INBOUND = Files.createDirectories(root.resolve("inbound"));
             KEYS = new TestKeys(Files.createDirectories(root.resolve("keys")));
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
@@ -246,9 +246,9 @@ class PolarisIT {
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry r) throws Exception {
-        CONFIG.put("sdh.file.inbound-dir", INBOUND.toString());
-        CONFIG.put("sdh.file.min-age", "300ms");
-        CONFIG.put("sdh.file.poll-interval", "200ms");
+        CONFIG.put("sdh.landing.intake", ItSupport.INTAKE);
+        CONFIG.put("sdh.landing.queue-uri", LANDED_QUEUE);
+        CONFIG.put("sdh.landing.idle-wait", "200ms");
         CONFIG.put("sdh.split.format", "csv");
         CONFIG.put("sdh.split.options.csv.header", "true");
         CONFIG.put("sdh.storage.catalog-name", "sdh");
@@ -260,15 +260,14 @@ class PolarisIT {
         CONFIG.put("sdh.crypto.keystore.path", KEYS.keystore.toString());
         CONFIG.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
         CONFIG.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
-        CONFIG.put("sdh.crypto.keys.source-files-kek", TestKeys.SOURCE);
-        CONFIG.put("sdh.crypto.keys.failed-files-kek", TestKeys.FAILED);
+        CONFIG.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
         CONFIG.put("sdh.crypto.keys.signing.kid", "connector-2026");
         CONFIG.put("sdh.crypto.keys.signing.pem", KEYS.signingPem.toString());
         CONFIG.put("sdh.crypto.keys.signing.passphrase", TestKeys.SIGNING_PASSPHRASE);
         CONFIG.put("sdh.crypto.keys.recipient.kid", "downstream-2026");
         CONFIG.put("sdh.crypto.keys.recipient.pem", KEYS.recipientPem.toString());
         CONFIG.put("sdh.crypto.keys.recipient.sha256", KeyMaterial.fingerprint(KEYS.recipient.getPublic()));
-        CONFIG.put("sdh.crypto.keys.recovery-public", KEYS.recoveryPem.toString());
+        CONFIG.putAll(ItSupport.splitterKeys(KEYS));
         CONFIG.put("sdh.queue.type", "camel");
         CONFIG.put("sdh.queue.uri", "seda:sdh-polaris?size=100000");
         CONFIG.forEach((k, v) -> r.add(k, () -> v));
@@ -293,19 +292,13 @@ class PolarisIT {
             records.add(rec);
             file.append(rec);
         }
-        Path good = INBOUND.resolve("good.csv");
-        Files.writeString(good, file);
-        Files.setLastModifiedTime(good, FileTime.from(Instant.now().minusSeconds(30)));
-        Path bad = INBOUND.resolve("bad.csv");
-        Files.writeString(bad, header + "1," + MARKER + ",\"never closed\n");
-
-        long deadline = System.currentTimeMillis() + 120_000;
-        while (System.currentTimeMillis() < deadline && (Files.exists(good) || Files.exists(bad))) {
-            Thread.sleep(250);
-        }
+        TestLanding landing = new TestLanding(catalogProps(), runtime.keys().wrap(), KEYS, ItSupport.INTAKE);
+        LandedItem good = landing.land(file.toString(), "good.csv");
+        LandedItem bad = landing.land(header + "1," + MARKER + ",\"never closed\n", "bad.csv");
+        landing.announce(camel, LANDED_QUEUE, good);
+        landing.announce(camel, LANDED_QUEUE, bad);
+        ItSupport.awaitSplit(runtime, 2, Duration.ofMinutes(2));
         assertThat(FATAL).isEmpty();
-        assertThat(good).doesNotExist();
-        assertThat(bad).doesNotExist();
 
         // Downstream, with its own REST client.
         List<ConnectorMessage> msgs = new ArrayList<>();
@@ -331,10 +324,7 @@ class PolarisIT {
             }
             FileCompleted done = msgs.stream().filter(FileCompleted.class::isInstance)
                     .map(FileCompleted.class::cast).findFirst().orElseThrow();
-            ByteArrayOutputStream restored = new ByteArrayOutputStream();
-            ArchiveReader.restore(runtime.sourceFiles(), done.fileId(), runtime.keys().wrap(), runtime.ids(), 0,
-                    restored);
-            assertThat(restored.toString(UTF_8)).isEqualTo(file.toString());
+            assertThat(new String(landing.restore(done.fileId()), UTF_8)).isEqualTo(file.toString());
 
             // Admin status reads the checkpoint through its own REST client, while the connector holds the lease.
             ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -343,13 +333,13 @@ class PolarisIT {
             int status = AdminCli.run(args, new PrintStream(out, true, UTF_8), new PrintStream(out, true, UTF_8),
                     Map.of(AdminCli.OPERATOR_ENV, "polaris-it"));
             assertThat(status).as(out.toString(UTF_8)).isZero();
-            assertThat(out.toString(UTF_8)).containsPattern("checkpoint: +file .+ FAILED \\(csv\\)")
+            assertThat(out.toString(UTF_8)).containsPattern("checkpoint: +item .+ FAILED \\(csv\\)")
                     .containsPattern("archive source_files: +last file " + done.fileId() + " finished");
 
             // Maintenance through the REST catalog, between files.
             writerLock.lock();
             try {
-                String dataPrefix = keyOf(runtime.sections().location()) + "/data/";
+                String dataPrefix = keyOf(runtime.tables().sections().location()) + "/data/";
                 String stray = dataPrefix + "stray-crashed-batch.parquet";
                 try (S3Client s3 = s3()) {
                     s3.putObject(b -> b.bucket(BUCKET).key(stray),
@@ -359,7 +349,7 @@ class PolarisIT {
                 // ahead of this JVM's; a minute's lead keeps the just-planted stray old enough to count as an orphan.
                 var report = new TableMaintenance(runtime.committer(), new MaintenanceSettings(Duration.ofDays(7), 10,
                         true, 0.75, 2, 8L << 30, Duration.ZERO), Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
-                        .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.empty(), true);
+                        .run(runtime.tables().sections(), SectionsTable.INGESTED_AT, Optional.empty(), true);
                 assertThat(report.compactedFiles()).as("30 sections in batches of 7").isEqualTo(5);
                 assertThat(report.orphansDeleted()).isEqualTo(1);
                 assertThat(keys(dataPrefix)).doesNotContain(stray);
@@ -369,7 +359,7 @@ class PolarisIT {
                 }
                 var purge = new TableMaintenance(runtime.committer(), MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
-                        .run(runtime.sections(), SectionsTable.INGESTED_AT, Optional.of(Duration.ofDays(1)), false);
+                        .run(runtime.tables().sections(), SectionsTable.INGESTED_AT, Optional.of(Duration.ofDays(1)), false);
                 assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
                 assertThat(keys(dataPrefix)).as("PHI data objects physically removed").isEmpty();
             } finally {

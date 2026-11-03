@@ -14,6 +14,10 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.landing.ItemKind;
+import com.sdh.healthcare.connector.core.landing.ItemLander;
+import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.landing.NewItem;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import java.io.IOException;
@@ -63,20 +67,20 @@ class AbandonedBatchTest {
     }
 
     @Test
-    void archiveReportsTheWriteFailureNotTheSecondClose() {
-        Table table = failingClose(IngestTables.sourceFiles(catalog, "sdh_ingest"));
+    void landingReportsTheWriteFailureNotTheSecondClose() {
+        Table table = failingClose(LandingTables.landedItems(catalog, "sdh_landing"));
         FencedCommitter committer = new FencedCommitter(new LeaseToken() {
             public long epoch() { return 1; }
             public void checkHeld() {}
         });
         committer.establish(table);
-        Archiver archiver = new Archiver(table, committer, keys, new SectionIds(new byte[32]),
-                Archiver.Settings.defaults("file-connector", "k").withSizes(1024, 4096, 4096)
+        ItemLander lander = new ItemLander(table, committer, keys, new SectionIds(new byte[32]),
+                ItemLander.Settings.defaults("intake", "k").withSizes(1024, 4096, 4096)
                         .withRetry(new RetryPolicy(1, Duration.ofMillis(1), Duration.ofMillis(1))),
                 Clock.systemUTC());
 
-        assertThatThrownBy(() -> archiver.archive(UUID.randomUUID(), SeekableByteSource.of(new byte[5000]),
-                Optional.empty(), (r, at) -> {}))
+        assertThatThrownBy(() -> lander.land(new NewItem(UUID.randomUUID(), ItemKind.FILE, null, null, null),
+                offset -> new java.io.ByteArrayInputStream(new byte[5000])))
                 .hasRootCauseMessage(FAILURE);
     }
 

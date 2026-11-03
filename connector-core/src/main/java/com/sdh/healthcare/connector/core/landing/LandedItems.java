@@ -191,7 +191,7 @@ public final class LandedItems
      * @return copies of the rows
      * @throws IOException if the table can't be read
      */
-    private static List<Record> rows(Table table, Expression filter)
+    static List<Record> rows(Table table, Expression filter)
             throws IOException
     {
         List<Record> rows = new ArrayList<>();

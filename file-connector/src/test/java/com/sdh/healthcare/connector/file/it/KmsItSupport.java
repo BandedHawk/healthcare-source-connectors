@@ -38,16 +38,17 @@ final class KmsItSupport {
         return new TestKeys(Files.createTempDirectory("sdh-kms-it"));
     }
 
-    static CommonSettings.Crypto crypto(TestKeys k, String provider, String sectionsKek, String sourceKek,
-            String failedKek, String signingKeyRef, CommonSettings.Aws aws, CommonSettings.Vault vault)
+    static CommonSettings.Crypto crypto(TestKeys k, String provider, String sectionsKek, String landedKek,
+            String signingKeyRef, CommonSettings.Aws aws, CommonSettings.Vault vault)
             throws Exception {
         return new CommonSettings.Crypto(provider, provider,
                 new CommonSettings.Keystore(null, null),
-                new CommonSettings.Keys(sectionsKek, sourceKek, failedKek, null,
+                new CommonSettings.Keys(sectionsKek, landedKek,
                         new CommonSettings.Signing("connector-kms", null, null, signingKeyRef),
                         new CommonSettings.Recipient("downstream-2026", k.recipientPem,
                                 KeyMaterial.fingerprint(k.recipient.getPublic())),
-                        k.recoveryPem),
+                        new CommonSettings.InboxKey(TestKeys.INBOX_KID, k.inboxPem, TestKeys.INBOX_PASSPHRASE),
+                        new CommonSettings.Signer(TestKeys.LANDING_SIGNER_KID, k.landingSignerPem)),
                 aws, new CommonSettings.Gcp(null), vault);
     }
 

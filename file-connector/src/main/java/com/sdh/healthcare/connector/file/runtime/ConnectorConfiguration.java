@@ -4,18 +4,16 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.runtime;
 
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.telemetry.InboundGauge;
+import com.sdh.healthcare.connector.file.inbox.InboxRoute;
+import com.sdh.healthcare.connector.file.inbox.InboxWorker;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
-import com.sdh.healthcare.connector.file.ingest.InboundService;
-import com.sdh.healthcare.connector.file.route.InboundRoute;
 import java.time.Clock;
 import java.util.concurrent.locks.ReentrantLock;
-import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import org.apache.camel.CamelContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,7 +25,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 
 /**
- * Spring wiring: runtime, inbound service and route, and the startup sequence.
+ * The splitter's Spring wiring: the runtime, the inbox route and worker,
+ * maintenance, and the startup sequence.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -35,54 +34,132 @@ import org.springframework.context.annotation.Import;
 @Configuration
 @EnableConfigurationProperties(ConnectorProperties.class)
 @Import(TelemetryConfiguration.class)
-public class ConnectorConfiguration {
-    private static final Logger LOG = LoggerFactory.getLogger(ConnectorConfiguration.class);
+public class ConnectorConfiguration
+{
 
+    /** Logs when the route starts. */
+    private static final Logger LOG =
+            LoggerFactory.getLogger(ConnectorConfiguration.class);
+
+    /**
+     * Exits the process on a fatal error; tests put their own in its place.
+     *
+     * @return the exit hook
+     */
     @Bean
     @ConditionalOnMissingBean
-    FatalExit fatalExit() {
+    FatalExit fatalExit()
+    {
         return FatalExit.exitProcess();
     }
 
-    /** Takes {@link Telemetry} so the SDK is installed before the lease and pipeline emit anything. */
+    /**
+     * Starts the runtime. Takes {@link Telemetry} so the SDK is installed
+     * before the lease and the pipeline record anything.
+     *
+     * @param properties the splitter's settings
+     * @param camel      the Camel context
+     * @param fatal      the exit hook
+     * @param telemetry  the installed telemetry
+     * @return the runtime
+     * @throws Exception if it can't start
+     */
     @Bean(destroyMethod = "close")
-    ConnectorRuntime connectorRuntime(ConnectorProperties props, CamelContext camel, FatalExit fatal,
-            Telemetry telemetry) throws Exception {
-        InboundGauge.register(telemetry, props.file().inboundDir());
-        return ConnectorRuntime.start(props, camel, fatal);
+    ConnectorRuntime connectorRuntime(ConnectorProperties properties,
+            CamelContext camel, FatalExit fatal, Telemetry telemetry)
+            throws Exception
+    {
+        ConnectorRuntime runtime =
+                ConnectorRuntime.start(properties, camel, fatal);
+        telemetry.gauge("sdh.inbox.backlog", "{item}",
+                "Landed items waiting to be split",
+                () -> runtime.inbox().backlog());
+        return runtime;
     }
 
-    /** Held while a file is handled; maintenance runs only when it can take it without waiting. */
+    /**
+     * Held while an item is processed; maintenance runs only when it can
+     * take it without waiting.
+     *
+     * @return the lock
+     */
     @Bean
-    ReentrantLock writerLock() {
+    ReentrantLock writerLock()
+    {
         return new ReentrantLock();
     }
 
-    @Bean
-    InboundService inboundService(ConnectorRuntime runtime, ConnectorProperties props, FatalExit fatal,
-            ReentrantLock writerLock) {
-        return new InboundService(runtime.processor(), runtime.claim(), props.file(),
-                props.retry().initialBackoff(), fatal, writerLock);
+    /**
+     * Splits the inbox's items. Closed before the runtime, so no item is
+     * being processed when the lease is released.
+     *
+     * @param runtime    the runtime
+     * @param properties the splitter's settings
+     * @param fatal      the exit hook
+     * @param writerLock held while an item is processed
+     * @return the worker, not yet started
+     */
+    @Bean(destroyMethod = "close")
+    InboxWorker inboxWorker(ConnectorRuntime runtime,
+            ConnectorProperties properties, FatalExit fatal,
+            ReentrantLock writerLock)
+    {
+        return new InboxWorker(runtime.processor(), runtime.inbox(),
+                runtime.tables().landedItems(), runtime.keys().wrap(),
+                properties.landing().idleWait(),
+                properties.retry().initialBackoff(), fatal, writerLock);
     }
 
+    /**
+     * Runs table maintenance between items.
+     *
+     * @param runtime    the runtime
+     * @param properties the splitter's settings
+     * @param writerLock held while an item is processed
+     * @param fatal      the exit hook
+     * @return the scheduler
+     */
     @Bean(initMethod = "start", destroyMethod = "close")
-    MaintenanceScheduler maintenanceScheduler(ConnectorRuntime runtime, ConnectorProperties props,
-            ReentrantLock writerLock, FatalExit fatal) {
-        return new MaintenanceScheduler(runtime, props.maintenance(), writerLock, fatal, Clock.systemUTC());
+    MaintenanceScheduler maintenanceScheduler(ConnectorRuntime runtime,
+            ConnectorProperties properties, ReentrantLock writerLock,
+            FatalExit fatal)
+    {
+        return new MaintenanceScheduler(runtime, properties.maintenance(),
+                writerLock, fatal, Clock.systemUTC());
     }
 
+    /**
+     * The route that takes {@code item.landed} messages into the inbox.
+     *
+     * @param runtime    the runtime
+     * @param properties the splitter's settings
+     * @param fatal      the exit hook
+     * @return the route
+     */
     @Bean
-    InboundRoute inboundRoute(ConnectorProperties props, InboundService service) {
-        return new InboundRoute(props.file(), service);
+    InboxRoute inboxRoute(ConnectorRuntime runtime,
+            ConnectorProperties properties, FatalExit fatal)
+    {
+        return new InboxRoute(properties.landing().queueUri(),
+                runtime.receiver(), runtime.retry(), fatal);
     }
 
-    /** Finish any in-progress file before the inbound route is allowed to pick up new ones (design §5). */
+    /**
+     * Starts the worker, which first finishes or abandons any item left
+     * in progress, then the route (design §5.3.6).
+     *
+     * @param worker the worker
+     * @param camel  the Camel context
+     * @return the startup step
+     */
     @Bean
-    ApplicationRunner startInbound(InboundService service, CamelContext camel) {
-        return args -> {
-            service.recoverAtStartup();
-            camel.getRouteController().startRoute(ConnectorRuntime.InboundRouteIds.INBOUND);
-            LOG.info("inbound.started");
+    ApplicationRunner startInbox(InboxWorker worker, CamelContext camel)
+    {
+        return arguments ->
+        {
+            worker.start();
+            camel.getRouteController().startRoute(InboxRoute.ROUTE_ID);
+            LOG.info("inbox.started");
         };
     }
 }

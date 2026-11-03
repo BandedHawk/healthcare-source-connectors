@@ -89,7 +89,7 @@ class GcsIT extends ObjectStoreItBase {
 
     @Override
     List<String> list(String location) {
-        var io = (SupportsPrefixOperations) runtime.sections().io();
+        var io = (SupportsPrefixOperations) runtime.tables().sections().io();
         return StreamSupport.stream(io.listPrefix(location).spliterator(), false).map(FileInfo::location).toList();
     }
 

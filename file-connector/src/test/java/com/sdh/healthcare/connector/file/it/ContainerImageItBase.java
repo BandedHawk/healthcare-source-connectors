@@ -248,8 +248,7 @@ abstract class ContainerImageItBase {
                 "keystore", Map.of("path", "/run/secrets/keks.p12"),
                 "keys", Map.of(
                         "sections-kek", TestKeys.SECTIONS,
-                        "source-files-kek", TestKeys.SOURCE,
-                        "failed-files-kek", TestKeys.FAILED,
+                        "landed-items-kek", TestKeys.LANDED,
                         "signing", Map.of("kid", "connector-2026", "pem", "/run/secrets/signing.pem"),
                         "recipient", Map.of("kid", "downstream-2026", "pem", "/run/secrets/recipient.pem",
                                 "sha256", KeyMaterial.fingerprint(keys.recipient.getPublic())),
@@ -337,12 +336,7 @@ abstract class ContainerImageItBase {
         // Downstream, from the host: Kafka → connector-queue-reader → sections from SeaweedFS.
         CommonSettings.Crypto hostCrypto = new CommonSettings.Crypto("local", "local",
                 new CommonSettings.Keystore(keys.keystore, TestKeys.KS_PASSWORD),
-                new CommonSettings.Keys(TestKeys.SECTIONS, TestKeys.SOURCE, TestKeys.FAILED, null,
-                        new CommonSettings.Signing("connector-2026", keys.signingPem, TestKeys.SIGNING_PASSPHRASE,
-                                null),
-                        new CommonSettings.Recipient("downstream-2026", keys.recipientPem,
-                                KeyMaterial.fingerprint(keys.recipient.getPublic())),
-                        keys.recoveryPem),
+                keys.splitterKeys(KeyMaterial.fingerprint(keys.recipient.getPublic()), keys.signingPem, null),
                 new CommonSettings.Aws(null, null), new CommonSettings.Gcp(null),
                 new CommonSettings.Vault(null, null, null, "transit", null));
         List<ConnectorMessage> msgs = new ArrayList<>();
