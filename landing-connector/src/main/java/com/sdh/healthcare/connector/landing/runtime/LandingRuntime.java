@@ -26,8 +26,11 @@ import com.sdh.healthcare.connector.landing.config.SourceSettings;
 import com.sdh.healthcare.connector.landing.intake.Announcer;
 import com.sdh.healthcare.connector.landing.intake.IntakeNotWritableException;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
+import com.sdh.healthcare.connector.landing.intake.IntakeSource;
 import com.sdh.healthcare.connector.landing.intake.LocalDirectorySource;
 import com.sdh.healthcare.connector.landing.intake.Readiness;
+import com.sdh.healthcare.connector.landing.intake.SftpSource;
+import com.sdh.healthcare.connector.landing.intake.SmbSource;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
@@ -37,6 +40,7 @@ import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
 import com.sdh.healthcare.connector.runtime.publish.QueueType;
 import com.zaxxer.hikari.HikariDataSource;
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
@@ -89,6 +93,9 @@ public final class LandingRuntime implements AutoCloseable
     /** The source's checked settings. */
     private final SourceSettings source;
 
+    /** Where items come from. */
+    private final IntakeSource intakeSource;
+
     /** Lands the intake's items. */
     private final IntakeService service;
 
@@ -118,13 +125,14 @@ public final class LandingRuntime implements AutoCloseable
      * @param publisher  sends messages
      * @param keys       the keys
      * @param source     the source's settings
+     * @param intakeSource where items come from
      * @param service    lands the intake's items
      * @param tables     the landing tables
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
-            KeyMaterial keys, SourceSettings source, IntakeService service,
-            Tables tables)
+            KeyMaterial keys, SourceSettings source, IntakeSource intakeSource,
+            IntakeService service, Tables tables)
     {
         this.camel = camel;
         this.dataSource = dataSource;
@@ -133,6 +141,7 @@ public final class LandingRuntime implements AutoCloseable
         this.publisher = publisher;
         this.keys = keys;
         this.source = source;
+        this.intakeSource = intakeSource;
         this.service = service;
         this.tables = tables;
     }
@@ -166,13 +175,19 @@ public final class LandingRuntime implements AutoCloseable
         LeaseKeeper lease = null;
         Catalog catalog = null;
         ClosablePublisher publisher = null;
+        IntakeSource intakeSource = null;
         try
         {
             dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
             lease = acquire(properties, dataSource, fatal);
-            LocalDirectorySource directory = new LocalDirectorySource(source);
+            intakeSource = switch (source.type())
+            {
+                case DIRECTORY -> new LocalDirectorySource(source);
+                case SFTP -> new SftpSource(source);
+                case SMB -> new SmbSource(source);
+            };
             InboundDirectoryClaim claim = null;
-            if (source.writable())
+            if (source.writable() && !source.remote())
             {
                 claim = InboundDirectoryClaim.claim(source.path(),
                         new InboundDirectoryClaim.Owner(
@@ -180,7 +195,10 @@ public final class LandingRuntime implements AutoCloseable
                                 properties.leaseName(),
                                 storageSettings.catalogName(),
                                 storageSettings.namespace()));
-                checkWritable(directory, intake);
+            }
+            if (source.writable())
+            {
+                checkWritable(intakeSource, intake);
             }
 
             catalog = CatalogUtil.buildIcebergCatalog(
@@ -217,7 +235,7 @@ public final class LandingRuntime implements AutoCloseable
                             keys.recipient(), keys.recipientKid()),
                     publisher, storageSettings.catalogName(),
                     storageSettings.namespace(), retry, ACK_TIMEOUT);
-            IntakeService service = new IntakeService(intake, directory,
+            IntakeService service = new IntakeService(intake, intakeSource,
                     new Readiness(source.settle(), System::nanoTime),
                     new IntakeService.Storage(lander, ledger, index, ids),
                     announcer, claim, fatal, clock,
@@ -226,11 +244,12 @@ public final class LandingRuntime implements AutoCloseable
                     Fields.of(Attr.INTAKE, intake)
                             .with(Attr.EPOCH, lease.epoch()));
             return new LandingRuntime(camel, dataSource, catalog, lease,
-                    publisher, keys, source, service,
+                    publisher, keys, source, intakeSource, service,
                     new Tables(committer, items, ledgerTable, lander));
         }
         catch (Exception | Error failure)
         {
+            closeQuietly(intakeSource);
             closeQuietly(publisher);
             closeQuietly(catalog);
             closeQuietly(lease);
@@ -274,17 +293,21 @@ public final class LandingRuntime implements AutoCloseable
 
     /**
      * Runs the write probe of a read-write source, reporting a failure.
+     * A remote source that can't be reached stops startup too: the node
+     * never lands items it couldn't then clear.
      *
-     * @param directory the source
-     * @param intake    the intake's name
+     * @param intakeSource the source
+     * @param intake       the intake's name
      * @throws IntakeNotWritableException if it can't be written
+     * @throws IOException                if a remote source can't be
+     *                                    reached
      */
-    private static void checkWritable(LocalDirectorySource directory,
-            String intake) throws IntakeNotWritableException
+    private static void checkWritable(IntakeSource intakeSource,
+            String intake) throws IOException
     {
         try
         {
-            directory.checkWritable();
+            intakeSource.checkWritable();
         }
         catch (IntakeNotWritableException failure)
         {
@@ -316,6 +339,16 @@ public final class LandingRuntime implements AutoCloseable
     }
 
     /**
+     * Where items come from, for the route.
+     *
+     * @return the source
+     */
+    public IntakeSource intakeSource()
+    {
+        return intakeSource;
+    }
+
+    /**
      * The source's checked settings, for the route.
      *
      * @return the settings
@@ -338,6 +371,7 @@ public final class LandingRuntime implements AutoCloseable
             LOG.warn("connector.stop_route_failed error={}",
                     failure.getClass().getSimpleName());
         }
+        closeQuietly(intakeSource);
         closeQuietly(publisher);
         keys.close();
         closeQuietly(lease);

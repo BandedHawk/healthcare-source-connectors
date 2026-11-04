@@ -40,6 +40,9 @@ management:
 logging:
   level:
     com.azure.core.http.jdk.httpclient.JdkHttpClient: error
+    # smbj logs share paths and file names (design §5.3.4); the node reports
+    # SMB failures itself, without them. JSch's logging is off in code.
+    com.hierynomus: off
 
 sdh:
   connector-id: landing-connector

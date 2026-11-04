@@ -58,6 +58,8 @@ public interface IntakeSource
      * a read-only source.
      *
      * @throws IntakeNotWritableException if it can't be changed
+     * @throws IOException                 if a remote source can't be
+     *                                     reached to check
      */
-    void checkWritable() throws IntakeNotWritableException;
+    void checkWritable() throws IOException;
 }

@@ -19,6 +19,25 @@ sdh:
       include: "*"                # Ant-style
       recursive: false
       poll-interval: 10s
+      type: directory             # directory | sftp | smb; for sftp and smb, path and move-to are absolute
+      auth-retry-interval: 5m     # sftp and smb: wait after refused credentials, a missing share or a new host key
+      sftp:                       # type: sftp
+        host: dropzone.example.org
+        port: 22
+        user: sdh
+        private-key: /run/secrets/sftp_key   # OpenSSH format; SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE
+        # or a password: SDH_LANDING_SOURCE_SFTP_PASSWORD
+        known-hosts: /run/secrets/known_hosts    # required: the server's pinned host key
+        connect-timeout: 15s
+        read-timeout: 60s         # a stalled connection is dropped within this
+      smb:                        # type: smb (SMB 3, encryption required, NTLMv2)
+        host: fileserver.example.org
+        port: 445
+        share: outbound           # the share name alone; path and move-to are within it, / being its root
+        domain: EXAMPLE
+        user: sdh                 # password: SDH_LANDING_SOURCE_SMB_PASSWORD
+        connect-timeout: 15s
+        read-timeout: 60s
   storage:
     catalog-name: sdh             # also sent in item.landed messages
     namespace: sdh_landing

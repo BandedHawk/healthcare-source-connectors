@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-03 (av): built step 4 of landing, SFTP and SMB intakes (§5.3.14). They use JSch and smbj directly, polled by a Camel timer, with explicit settings in place of a Camel URI (§5.3.9). SMB is SMB 3 with encryption required and NTLMv2; a share that doesn't encrypt, and a guest or anonymous login, are refused. A problem reaching the source is reported once by reason as `intake.unreachable` (`NETWORK`, `AUTH`, `PERMISSION`, `HOST_KEY`, `NOT_FOUND`, `ENCRYPTION`) and `intake.reachable` when it ends; all but `NETWORK` are retried only every `auth-retry-interval`. An item cut off part way resumes from its checkpoint, which also fixes a crash after a read failed mid-item (§5.3.4). Tested against embedded SSHD, and against OpenSSH and Samba containers behind Toxiproxy. New dependencies: JSch, smbj and Bouncy Castle (§14.2).
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -344,9 +346,9 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Landing: two-stage ingestion (steps 1, 2 and 3a built)
+### 5.3 Landing: two-stage ingestion (steps 1 to 4 built)
 
-Decided 2026-11-03. Steps 1 and 2 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b, the deployment and integration tests for two stages, is next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own.
+Decided 2026-11-03. Steps 1 to 4 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14); HTTP push is next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14).
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
@@ -374,7 +376,7 @@ flowchart LR
 - **Landed items never change.** If a producer's data has a problem, the producer fixes it at their end and sends it again; we never edit landed data.
 - **Retention of landed data is set by the customer,** possibly up to the legal limit for keeping records, which can be many years.
 - **No guarantees about producers:** sizes, rates, naming, clean-up and timing are all unknown. Files may stay on a source indefinitely. Producers never append to a file they have dropped.
-- **Camel components from a fixed list.** More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
+- **Camel components from a fixed list.** SFTP and SMB are the exception (decided 2026-11-03, §5.3.14): they use JSch and smbj directly, polled by a Camel timer, so that timeouts, encryption, host keys and logging are under our control and the settings are explicit rather than a URI. More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
 - **Dropped:** FHIR push (the end of the pipeline is a FHIR repository, so pushing FHIR through this ingestion adds little beyond MDM) and NFS (Camel has no NFS component, and a mount moves failure handling outside the application).
 
 #### 5.3.1 Intakes
@@ -382,8 +384,8 @@ flowchart LR
 | Intake | Camel component | Ready to land | Already landed? | Resume a large item |
 |---|---|---|---|---|
 | Local or mounted directory | `file` | unchanged for `settle` | ledger: path, size, mtime | yes |
-| SFTP | `sftp` | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
-| SMB share | `smb` (SMB 3, encryption required) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
+| SFTP | JSch, polled by a Camel timer (built) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
+| SMB share | smbj, SMB 3 with encryption required, polled by a Camel timer (built) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
 | Object bucket | `aws2-s3`, `azure-storage-blob`, `google-storage` | present (objects appear whole); `settle` optional | ledger: bucket, key, version ID or ETag | yes, ranged reads |
 | HTTP push | `platform-http` | the whole request body received | `Idempotency-Key` header, if sent | no: the sender retries |
 | Queue | the seven brokers of §10.3, as consumers | a batch is full or its time is up | broker message ID | no: unacknowledged messages are redelivered |
@@ -447,15 +449,16 @@ SFTP, SMB, buckets and queues fail in ways a local disk doesn't. The landing nod
 
 | Problem | Handling | Reported as |
 |---|---|---|
-| Server unreachable, or a connection that drops | connect and read timeouts (`connectTimeout`, `soTimeout`, SFTP `serverAliveInterval`, smbj timeouts), so nothing hangs; reconnect with backoff | `intake.unavailable` (reason `NETWORK`); `intake.recovered` with the outage length |
-| Drops in the middle of an item | committed chunks are kept; on reconnect the item resumes at the next block, if its size and modification time haven't changed. If they have, the partial item is dropped and landed again from the start | `item.resumed`, or `item.restarted` |
-| Item deleted or renamed while being read | the partial item is dropped; if it reappears it is landed then | `item.vanished` |
-| Credentials rejected, or permission removed | no fast retries, which could lock the account; retry at `auth-retry-interval` (default 5 min) | `intake.unavailable` (reason `AUTH` or `PERMISSION`) |
-| SFTP host key changed | never accepted automatically; the intake stops until an operator updates the pinned key | `intake.unavailable` (reason `HOST_KEY`) |
-| Share or bucket no longer exists | as for credentials | `intake.unavailable` (reason `NOT_FOUND`) |
-| `after` action fails on a read-write intake | the item is already landed and in the ledger, so it isn't landed again; the action is retried each poll | `item.after_failed` |
+| Server unreachable, or a connection that drops | connect and read timeouts (`connect-timeout`, `read-timeout`; SFTP keep-alives are derived from the read timeout), so nothing hangs; retried at the next poll | `intake.unreachable` (reason `NETWORK`); `intake.reachable` when it is back |
+| Drops in the middle of an item | committed chunks are kept; on reconnect the item resumes at the next block, if its size and modification time haven't changed. If they have, the partial item is dropped and landed again once it settles | `item.changed` if it changed; *planned:* `item.resumed`, `item.restarted` |
+| Item deleted or renamed while being read | the partial item is given up when a full listing doesn't find it; if it reappears it is landed then | `item.abandoned` (*planned:* `item.vanished`) |
+| Credentials rejected, or permission removed | no fast retries, which could lock the account; retry at `auth-retry-interval` (default 5 min) | `intake.unreachable` (reason `AUTH` or `PERMISSION`) |
+| SFTP host key changed or not pinned | never accepted automatically; retried at `auth-retry-interval` until an operator updates the pinned key | `intake.unreachable` (reason `HOST_KEY`) |
+| SMB share that doesn't encrypt, or a guest login | refused, as for credentials | `intake.unreachable` (reason `ENCRYPTION`, or `AUTH` for a guest) |
+| Share, directory or bucket no longer exists | as for credentials | `intake.unreachable` (reason `NOT_FOUND`) |
+| `after` action fails on a read-write intake | the item is already landed and in the ledger, so it isn't landed again; the action is retried each poll | `intake.retry`; *planned:* `item.after_failed` |
 
-Metrics: `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age`, `sdh.intake.outage_seconds`, alongside the landing metrics (§5.3.7). Camel's consumers send errors to our handler (`bridgeErrorHandler`), and the route's own logging is switched off, so no path or filename reaches a log.
+Each reason is reported once, until the source is reachable again or the reason changes; the event carries `ERROR_CODE INTAKE_UNREACHABLE` and no names or paths. *Planned:* the metrics `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age` and `sdh.intake.outage_seconds`, alongside the landing metrics (§5.3.7). JSch's and smbj's own logging is switched off, because their messages hold paths; their exceptions are classified and dropped, never kept as a cause (§5.3.14).
 
 #### 5.3.5 One node per intake, and a standby
 
@@ -488,7 +491,7 @@ Metrics: `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age`, `sdh.intake.outag
 
 Everything goes through `Telemetry` and the allow-list (§12). No path, filename, object key or producer reference appears in telemetry; `Attr` gains `sdh.intake`, `sdh.item_id` and `sdh.kind`.
 - **Traces:** `land.item` (root, one per item) contains `read` blocks, `storage.commit` and `publish.batch`.
-- **Audit events:** `item.discovered`, `item.landed` (bytes), `item.skipped` (already landed; counted, not logged one by one), `item.changed`, `item.duplicate_content`, `item.resumed`, `item.restarted`, `item.vanished`, `item.after_failed`, `intake.unavailable` and `intake.recovered`, `intake.table_rewrite`, plus the lease events of §12.
+- **Audit events:** `item.discovered`, `item.landed` (bytes), `item.skipped` (already landed; counted, not logged one by one), `item.changed`, `item.duplicate_content`, `item.resumed`, `item.restarted`, `item.vanished`, `item.after_failed`, `intake.unreachable` (with a reason, built) and `intake.reachable` (built), `intake.table_rewrite`, plus the lease events of §12.
 - **Metrics:** `sdh.landing.items` and `sdh.landing.bytes` (by intake and kind), `sdh.landing.duplicates`, `sdh.landing.backlog` (items seen but not yet landed) and `sdh.landing.oldest_waiting_age`, `sdh.landing.ledger_items`, `sdh.landing.batch_size` for queues, and the intake health metrics of §5.3.4.
 
 #### 5.3.8 Helping producers find the source of a problem (open)
@@ -519,8 +522,9 @@ sdh:
   landing:
     intake: claims-sftp                    # names the lease, checkpoint, ledger keys and metrics
     source:
-      type: sftp                           # file | sftp | smb | s3 | azure-blob | gcs | http | queue | iceberg
-      uri: "sftp://dropzone.example.org:22/outbound/claims?knownHostsFile=/run/secrets/known_hosts&strictHostKeyChecking=yes&privateKeyFile=/run/secrets/sftp_key"
+      type: sftp                           # directory | sftp | smb built; later s3 | azure-blob | gcs | http | queue | iceberg
+      path: /outbound/claims
+      sftp: { host: dropzone.example.org, user: sdh, private-key: /run/secrets/sftp_key, known-hosts: /run/secrets/known_hosts }
       access: read-only                    # read-only | read-write
       after: { mode: move, to: processed/ }   # read-write only: delete | move | rename
       ready: { mode: stable, settle: 2m }     # stable | marker
@@ -542,7 +546,8 @@ sdh:
     retention: { landed-items: 3650d }   # the ledger is always kept
 ```
 
-- **The URI is checked** against the fixed list of components and against options that must be set or must not be. For example, `strictHostKeyChecking=no` is refused, and so is a password written in the URI. Credentials come from mounted secrets or the environment, never from the URI itself.
+- **SFTP and SMB have explicit settings,** not a URI (§5.3.14). Their passwords and key passphrase come from the environment.
+- **A URI, for the Camel intakes still to come, is checked** against the fixed list of components and against options that must be set or must not be. For example, `strictHostKeyChecking=no` is refused, and so is a password written in the URI. Credentials come from mounted secrets or the environment, never from the URI itself.
 - **The splitter's configuration** loses `sdh.file.*` and gains the landing queue it reads from and the landing catalog it reads items from (read access only, with unwrap rights on `landed-items-kek`).
 
 #### 5.3.10 Order of work
@@ -550,7 +555,7 @@ sdh:
 1. **Landing storage (built):** `landed_items` and `landing_ledger`, the landing checkpoint, `item.landed` in `connector-contract`, and the lease's standby mode.
 2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). Left for later: the listing metrics of §5.3.3. The image and kit came in step 3b, retention and maintenance after it (§5.3.13).
 3. **The splitter reads from landing.** 3a (built, §5.3.12): an `item.landed` consumer and inbox, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. 3b: an image for the landing node, the build and Kubernetes scripts, and the `-Pit` suite, the Kubernetes run (§15.2) and the demo rewritten for two stages, with failover of both stages.
-4. **SFTP and SMB,** with the failure cases of §5.3.4 tested against containers that are cut off, restarted and given wrong keys.
+4. **SFTP and SMB (built),** with the failure cases of §5.3.4 tested against containers that are cut off, stalled, restarted and given wrong keys (§5.3.14). Left for later: Kerberos for SMB, the intake metrics and the planned events of §5.3.4, and claims on remote sources.
 5. **HTTP push,** with OAuth2 and mTLS.
 6. **Queue intakes,** batched, for the seven brokers.
 7. **Buckets,** then **Iceberg tables.**
@@ -558,7 +563,6 @@ sdh:
 
 **Still to check before building:**
 - **Several formats in one intake:** a splitter handles one format (§6). If one intake can carry several, the landing node or the splitter has to tell them apart.
-- **Camel's SMB component** on SMB 3 with encryption required, its timeouts, and what it logs.
 - **The ledger's memory** with tens of millions of items: `LandingLedgerTest` checks 100,000 keys; the sizes above are from the layout, not measured.
 
 #### 5.3.11 The landing node as built (step 2)
@@ -683,6 +687,49 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 **Settings:** as §14's `sdh.maintenance`, with `retention.landed-items` in place of `retention.sections`.
 
 **Tests:** `LandingRetentionTest` lands an item a minute before midnight in 40-second batches. Retention keeps all of it and reads it back whole, and purges an older item completely. Without the guard, the same purge takes the item's first day. A checkpoint of an unfinished item keeps rows from its start. `MaintenanceSchedulerTest` checks the minimum. `LandingConnectorApplicationTest` runs a pass over both tables with retention set.
+
+#### 5.3.14 SFTP and SMB as built (step 4)
+
+`sdh.landing.source.type` is `directory` (the default), `sftp` or `smb`. Both remote sources implement `RemoteSource` (`list`, `open` at an offset, `afterLanding`, `checkWritable`, `reachable`, `close`) and share `RemoteListing`, which applies the same rules as the directory intake: hidden names and the `move-to` directory are skipped, `recursive` is honoured, and markers, the rename suffix and `include` are applied. Items are listed oldest first. Paths are absolute: on the server for SFTP, within the share for SMB.
+
+**Decided 2026-11-03: the libraries directly, not Camel's components.** Camel's `sftp` and `smb` endpoints are configured by URI, poll and download in their own way, and log paths. Calling JSch and smbj directly lets the node read at an offset to resume, set every timeout, check encryption after login, and classify errors without keeping their messages. `RemoteIntakeRoute` is a Camel timer (`poll-interval`) that lists the source and hands each item to `IntakeService`, as `IntakeRoute` does for a directory.
+
+**Polling** (`RemoteIntakeRoute.poll`):
+- A failed listing goes to `IntakeService.onListingFailed` with its reason. After a reason that retries slowly (all but `NETWORK`), polls are skipped for `auth-retry-interval`.
+- If the connection breaks while items are offered, the listing stops without being reported done, so the unfinished item isn't given up because the rest of the listing went missing.
+- After a read fails part way, `IntakeService` reloads the checkpoint, so the next listing resumes the item. Before, the next item would have stopped the node with "Another item is still being landed".
+
+**SFTP** (`SftpSource`, JSch 2.28 from `com.github.mwiede`):
+- **Host keys** come from a required `known-hosts` file, with `StrictHostKeyChecking=yes`; an unknown or changed key is `HOST_KEY`.
+- **Login** with a private key (OpenSSH format, with an optional passphrase) or a password.
+- **Timeouts:** `connect-timeout` and `read-timeout`. JSch's keep-alive also sets the socket timeout, and notices a stall only after interval × (count + 1), so the node sets the interval to `read-timeout` / 4, with a count of 3.
+- **Versions** are the modification time, in whole seconds as SFTP gives it. A read checks it with `lstat` first, and a failed read drops the session and reports `NETWORK`.
+- **`after`:** delete, move (creating directories, and adding `.1`, `.2` … to a name already taken) or rename; markers are removed with their item. The write probe puts and removes a hidden file.
+
+**SMB** (`SmbSource`, smbj 0.15 with Bouncy Castle for NTLM's MD4):
+- **SMB 3 only** (3.1.1, 3.0.2, 3.0), with encryption asked for. smbj treats that as a preference, so after login the node requires the session to encrypt, or reports `ENCRYPTION`. Guest and anonymous sessions are `AUTH`; DFS is off.
+- **Login:** NTLMv2, with `domain`, `user` and a password. Kerberos is left for later.
+- **Timeouts:** smbj has no connect timeout of its own, so the node gives it a socket factory with `connect-timeout`; `read-timeout` is smbj's request timeout.
+- **Reads** are at an offset, in pieces of up to 1 MiB. Reparse points are skipped. A share that isn't a disk share is `NOT_FOUND`.
+- **`after`** uses rename, as for SFTP. The probe creates a hidden file and removes it.
+- **Errors:** NT status codes map to a reason; anything else is `NETWORK`.
+
+**No PHI in logs:** both libraries' logging is off (`JSch.setLogger(null)`, `com.hierynomus: off` in `application.yml`), and `IntakeUnavailableException` keeps only the reason and the cause's class name, never the cause, whose message may hold a path.
+
+**Settings** (`sdh.landing.source`, checked by `SftpSettings` and `SmbSettings`, whose `toString` hides secrets):
+- `type`, `auth-retry-interval` (5m).
+- `sftp`: `host`, `port` (22), `user`, `private-key`, `private-key-passphrase`, `password`, `known-hosts`, `connect-timeout` (15s), `read-timeout` (60s). Known hosts and a key or password are required.
+- `smb`: `host`, `port` (445), `share` (a name, no slashes), `domain`, `user`, `password`, `connect-timeout` (15s), `read-timeout` (60s).
+- Secrets from the environment: `SDH_LANDING_SOURCE_SFTP_PASSWORD`, `SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE`, `SDH_LANDING_SOURCE_SMB_PASSWORD`.
+
+**Not built:** claims on remote sources (§5.3.5; the claim is only for local read-write directories), Kerberos, and the intake metrics and planned events of §5.3.4.
+
+**Tests:**
+- `SftpSourceTest` (embedded Apache SSHD): ordering and offset reads, password login, an unpinned host key, rejected credentials, a missing or unreadable directory, a server that drops part way, an item that changed, moves with markers, rename and delete, and the probe on a directory it can't write.
+- `RemoteIntakeRouteTest`: offering items, a listing cut short, the wait after refused credentials, and an immediate retry after a network failure. `IntakeServiceTest` adds resuming an item whose read broke, and reporting a failed listing by reason.
+- `SftpLandingApplicationTest`: the whole node on embedded SSHD, through an outage (reason `NETWORK`) and back, with no filenames in the logs.
+- `SftpIntakeIT` (OpenSSH container behind Toxiproxy): list, read and move; a cut connection, then resume; a stalled connection dropped within 20 s; a server restart; a wrong key against a changed host key.
+- `SmbIntakeIT` (two Samba containers, one requiring encryption and one with it off, behind Toxiproxy): an encrypted share works end to end; the unencrypted one is `ENCRYPTION`; a wrong password is `AUTH` and a missing share `NOT_FOUND`; a cut, a stall and a restart.
 
 ## 6. Splitting
 
@@ -1827,6 +1874,7 @@ Our `LICENSE` and `NOTICE` are added to every jar as Maven resources from the re
 **Licenses in use:** almost all Apache-2.0, MIT or BSD. The rest:
 - **offered under a choice:** the ten components in the election table above;
 - **single license:** `pem-keystore` (EPL-1.0), `reactive-streams` (MIT-0).
+- **in the landing node:** JSch (BSD-3-Clause, which its POM calls "Revised BSD", and ISC for the jBCrypt code it bundles; both apply, though `THIRD-PARTY.txt` lists them as a choice), Bouncy Castle (its own licence, the MIT text, merged as MIT), smbj and its ASN.1 library (Apache-2.0), and mbassador (MIT, with its copyright line in `copyrights.properties`).
 
 None forces GPL terms on the connector, because every GPL or LGPL option has a permissive or weak-copyleft alternative. For EPL-1.0 and EPL-2.0 components distributed in binary form, the project URL in `THIRD-PARTY.txt` points to the source.
 

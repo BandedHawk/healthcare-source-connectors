@@ -10,7 +10,9 @@ import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
+import com.sdh.healthcare.connector.landing.intake.RemoteSource;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
+import com.sdh.healthcare.connector.landing.route.RemoteIntakeRoute;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
@@ -23,6 +25,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.UnaryOperator;
 import org.apache.camel.CamelContext;
+import org.apache.camel.builder.RouteBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationRunner;
@@ -132,14 +135,20 @@ public class LandingConfiguration
     }
 
     /**
-     * The route that lists the source.
+     * The route that lists the source: Camel's file component for a
+     * directory, the node's own listing for a remote source.
      *
      * @param runtime the runtime
      * @return the route
      */
     @Bean
-    IntakeRoute intakeRoute(LandingRuntime runtime)
+    RouteBuilder intakeRoute(LandingRuntime runtime)
     {
+        if (runtime.intakeSource() instanceof RemoteSource remote)
+        {
+            return new RemoteIntakeRoute(runtime.source(), remote,
+                    runtime.service(), System::nanoTime);
+        }
         return new IntakeRoute(runtime.source(), runtime.service());
     }
 

@@ -9,9 +9,11 @@ package com.sdh.healthcare.connector.landing.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Tests for {@link SourceSettings}.
@@ -36,7 +38,8 @@ class SourceSettingsTest
     {
         return new LandingProperties.Source(Path.of("/data/in"), access,
                 after, moveTo, ".landed", ready, Duration.ofMinutes(2), "*",
-                false, Duration.ofSeconds(10));
+                false, Duration.ofSeconds(10), "directory",
+                Duration.ofMinutes(5), null, null);
     }
 
     /** Each access mode has a sensible default after-action. */
@@ -78,5 +81,108 @@ class SourceSettingsTest
         assertThatThrownBy(() -> SourceSettings.of(
                 source("read-only", null, null, "soon")))
                 .hasMessageContaining("sdh.landing.source.ready");
+    }
+
+    /** A temporary directory for key files. */
+    @TempDir
+    Path root;
+
+    /**
+     * Remote source settings as bound.
+     *
+     * @param type the source's type
+     * @param path its path
+     * @param sftp the SFTP settings
+     * @param smb  the SMB settings
+     * @return the settings
+     */
+    static LandingProperties.Source remote(String type, Path path,
+            LandingProperties.Sftp sftp, LandingProperties.Smb smb)
+    {
+        return new LandingProperties.Source(path, "read-only", null, null,
+                ".landed", "settled", Duration.ofMinutes(2), "*", false,
+                Duration.ofSeconds(10), type, Duration.ofMinutes(5), sftp,
+                smb);
+    }
+
+    /**
+     * SFTP settings as bound.
+     *
+     * @param knownHosts the known_hosts file; may be null
+     * @param key        the key file; may be null
+     * @param password   the password; may be null
+     * @return the settings
+     */
+    static LandingProperties.Sftp sftp(Path knownHosts, Path key,
+            String password)
+    {
+        return new LandingProperties.Sftp("sftp.example.org", 22, "sdh", key,
+                null, password, knownHosts, Duration.ofSeconds(15),
+                Duration.ofSeconds(60));
+    }
+
+    /**
+     * SMB settings as bound.
+     *
+     * @param share the share's name
+     * @return the settings
+     */
+    static LandingProperties.Smb smb(String share)
+    {
+        return new LandingProperties.Smb("files.example.org", 445, share,
+                "CORP", "sdh", "s3cret", Duration.ofSeconds(15),
+                Duration.ofSeconds(60));
+    }
+
+    /**
+     * An SFTP source needs a pinned host key, a way to log in and an
+     * absolute path; its settings never show the password.
+     *
+     * @throws Exception if a file can't be written
+     */
+    @Test
+    void checksAnSftpSource() throws Exception
+    {
+        Path knownHosts = Files.writeString(root.resolve("known_hosts"), "");
+        SourceSettings settings = SourceSettings.of(remote("sftp",
+                Path.of("/outbound/claims/"), sftp(knownHosts, null, "s3cret"),
+                null));
+        assertThat(settings.remote()).isTrue();
+        assertThat(settings.path()).isEqualTo(Path.of("/outbound/claims"));
+        assertThat(settings.sftp().toString()).doesNotContain("s3cret");
+
+        assertThatThrownBy(() -> SourceSettings.of(remote("sftp",
+                Path.of("/in"), sftp(null, null, "s3cret"), null)))
+                .hasMessageContaining("sdh.landing.source.sftp.known-hosts");
+        assertThatThrownBy(() -> SourceSettings.of(remote("sftp",
+                Path.of("/in"), sftp(knownHosts, null, null), null)))
+                .hasMessageContaining("sdh.landing.source.sftp.password");
+        assertThatThrownBy(() -> SourceSettings.of(remote("sftp",
+                Path.of("/in"), sftp(knownHosts, root.resolve("missing"),
+                        null), null)))
+                .hasMessageContaining("sdh.landing.source.sftp.private-key");
+        assertThatThrownBy(() -> SourceSettings.of(remote("sftp",
+                Path.of("in"), sftp(knownHosts, null, "s3cret"), null)))
+                .hasMessageContaining("sdh.landing.source.path")
+                .hasMessageContaining("absolute");
+    }
+
+    /**
+     * An SMB source needs a share's name, not a path, and never shows the
+     * password.
+     */
+    @Test
+    void checksAnSmbSource()
+    {
+        SourceSettings settings = SourceSettings.of(remote("smb",
+                Path.of("/"), null, smb("intake")));
+        assertThat(settings.path()).isEqualTo(Path.of("/"));
+        assertThat(settings.smb().toString()).doesNotContain("s3cret");
+        assertThatThrownBy(() -> SourceSettings.of(remote("smb",
+                Path.of("/"), null, smb("intake/claims"))))
+                .hasMessageContaining("sdh.landing.source.smb.share");
+        assertThatThrownBy(() -> SourceSettings.of(remote("ftp",
+                Path.of("/"), null, smb("intake"))))
+                .hasMessageContaining("sdh.landing.source.type");
     }
 }

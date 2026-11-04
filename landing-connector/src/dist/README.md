@@ -67,6 +67,8 @@ variables, never in the file:
 - `SDH_CRYPTO_KEYSTORE_PASSWORD`
 - `SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE`
 - `SDH_LEASE_JDBC_PASSWORD`
+- `SDH_LANDING_SOURCE_SFTP_PASSWORD` or `SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE`, for an SFTP source
+- `SDH_LANDING_SOURCE_SMB_PASSWORD`, for an SMB source
 - catalog and storage credentials
 
 Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` becomes `SDH_LEASE_JDBC_URL`) or as
@@ -75,6 +77,18 @@ an argument (`--sdh.lease.jdbc.url=…`).
 The source is read-only by default: files are left where they are, and a ledger keeps them from being landed twice.
 With `access: read-write`, each file is deleted, moved or renamed once it has landed and been announced; the node
 checks at startup that it can do so.
+
+The source is a local or mounted directory (`type: directory`), an SFTP server (`type: sftp`) or an SMB share
+(`type: smb`):
+- **SFTP:** the server's host key must be pinned in a known-hosts file; an unknown or changed key is never
+  accepted. Log in with a private key in OpenSSH format, or a password.
+- **SMB:** SMB 3 with encryption only, NTLMv2 with a user and password; guest and anonymous logins are refused, and
+  so is a share that doesn't encrypt.
+- **Paths** on a remote source are absolute paths on the server (`path`, `move-to`).
+- **Outages:** a dropped or stalled connection is noticed within `read-timeout` and retried at each poll; an item
+  cut off part way resumes where it stopped. Refused credentials, a missing share or a changed host key are retried
+  only every `auth-retry-interval`, so an account isn't locked. Each is reported once, by reason, as
+  `intake.unreachable`, and `intake.reachable` when it is back. No names or paths are logged.
 
 Landed items are kept forever unless you set `sdh.maintenance.retention.landed-items` (at least `7d`, so the
 splitter has time to read each item). Retention removes whole days, and never part of an item. The ledger is always

@@ -110,7 +110,15 @@ public record LandingProperties(
      *                     {@code settled}
      * @param include      an Ant-style pattern of the paths to pick up
      * @param recursive    whether to look in subdirectories
-     * @param pollInterval how often the directory is listed
+     * @param pollInterval how often the source is listed
+     * @param type         {@code directory} (the default), {@code sftp} or
+     *                     {@code smb}
+     * @param authRetryInterval how long to wait before trying a remote
+     *                     source again after its credentials, permissions,
+     *                     host key or share were refused, so an account
+     *                     isn't locked by retries
+     * @param sftp         the SFTP server, for {@code sftp}
+     * @param smb          the SMB share, for {@code smb}
      */
     public record Source(Path path,
             @DefaultValue("read-only") String access,
@@ -121,7 +129,68 @@ public record LandingProperties(
             @DefaultValue("2m") Duration settle,
             @DefaultValue("*") String include,
             @DefaultValue("false") boolean recursive,
-            @DefaultValue("10s") Duration pollInterval)
+            @DefaultValue("10s") Duration pollInterval,
+            @DefaultValue("directory") String type,
+            @DefaultValue("5m") Duration authRetryInterval,
+            @DefaultValue Sftp sftp,
+            @DefaultValue Smb smb)
+    {
+    }
+
+    /**
+     * An SFTP server (design §5.3.4). The source's {@code path} is the
+     * directory on the server. The password and the key's passphrase come
+     * from the environment, never the file.
+     *
+     * @param host                the server's name or address
+     * @param port                its port
+     * @param user                the account
+     * @param privateKey          the account's private key file, if it uses
+     *                            one
+     * @param privateKeyPassphrase the key's passphrase, if it has one
+     * @param password            the account's password, if it uses one
+     * @param knownHosts          a {@code known_hosts} file holding the
+     *                            server's host key; required, since an
+     *                            unknown key is never accepted
+     * @param connectTimeout      how long to wait for the connection
+     * @param readTimeout         how long a connection may stall before
+     *                            it is dropped
+     */
+    public record Sftp(String host,
+            @DefaultValue("22") int port,
+            String user,
+            Path privateKey,
+            String privateKeyPassphrase,
+            String password,
+            Path knownHosts,
+            @DefaultValue("15s") Duration connectTimeout,
+            @DefaultValue("60s") Duration readTimeout)
+    {
+    }
+
+    /**
+     * An SMB share (design §5.3.4), over SMB 3 with encryption required.
+     * The source's {@code path} is the directory within the share,
+     * {@code /} for its root. The password comes from the environment,
+     * never the file.
+     *
+     * @param host           the server's name or address
+     * @param port           its port
+     * @param share          the share's name
+     * @param domain         the account's domain; empty for a local account
+     * @param user           the account
+     * @param password       its password
+     * @param connectTimeout how long to wait for the connection
+     * @param readTimeout    how long a read or other request may wait
+     */
+    public record Smb(String host,
+            @DefaultValue("445") int port,
+            String share,
+            @DefaultValue("") String domain,
+            String user,
+            String password,
+            @DefaultValue("15s") Duration connectTimeout,
+            @DefaultValue("60s") Duration readTimeout)
     {
     }
 

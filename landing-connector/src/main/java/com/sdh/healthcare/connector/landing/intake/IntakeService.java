@@ -124,11 +124,23 @@ public final class IntakeService
     /** An unfinished item to resume, if a listing finds it; or null. */
     private LandingCheckpoint unfinished;
 
+    /**
+     * Whether a landing stopped part-way, so the checkpoint may hold an
+     * unfinished item that {@link #unfinished} doesn't know of yet.
+     */
+    private boolean checkpointStale;
+
+    /** Whether the current listing has found the unfinished item. */
+    private boolean unfinishedListed;
+
     /** A landed item whose message isn't acknowledged yet; or null. */
     private LandedItem unannounced;
 
     /** Whether the source was unreachable at the last listing. */
     private volatile boolean unreachable;
+
+    /** Why, while it is unreachable; null for a directory. */
+    private IntakeProblem lastProblem;
 
     /** Errors in a row, for the backoff. */
     private int consecutiveErrors;
@@ -216,6 +228,7 @@ public final class IntakeService
     private void handle(ListedItem item) throws Exception
     {
         ensureRecovered();
+        reloadUnfinished();
         if (claim != null)
         {
             claim.verify();
@@ -228,6 +241,7 @@ public final class IntakeService
         {
             if (unfinished.source().hash().equals(ref.hash()))
             {
+                unfinishedListed = true;
                 land(new NewItem(unfinished.itemId(), unfinished.kind(),
                         ref, item.ref(), null), item);
             }
@@ -259,19 +273,15 @@ public final class IntakeService
             ensureRecovered();
             if (!source.reachable())
             {
-                if (!unreachable)
-                {
-                    unreachable = true;
-                    Telemetry.get().auditError("intake.unreachable",
-                            Fields.of(Attr.INTAKE, intake).with(
-                                    Attr.ERROR_CODE,
-                                    ErrorCode.INTAKE_UNREACHABLE));
-                }
+                markUnreachable(null);
                 return;
             }
             nowReachable();
             readiness.listingDone();
-            if (unfinished != null)
+            reloadUnfinished();
+            boolean listed = unfinishedListed;
+            unfinishedListed = false;
+            if (unfinished != null && !listed)
             {
                 UUID itemId = unfinished.itemId();
                 discard(itemId);
@@ -288,6 +298,50 @@ public final class IntakeService
         {
             writer.unlock();
         }
+    }
+
+    /**
+     * Called when a remote source couldn't be listed. Reported once, until
+     * a listing works again; nothing else changes, so an unfinished item
+     * is kept to resume.
+     *
+     * @param problem what went wrong, with no names or paths
+     */
+    public void onListingFailed(IntakeProblem problem)
+    {
+        writer.lock();
+        try
+        {
+            unfinishedListed = false;
+            markUnreachable(problem);
+        }
+        finally
+        {
+            writer.unlock();
+        }
+    }
+
+    /**
+     * Reports the source unreachable, unless it already is for the same
+     * reason.
+     *
+     * @param problem why, for a remote source; null for a directory
+     */
+    private void markUnreachable(IntakeProblem problem)
+    {
+        if (unreachable && problem == lastProblem)
+        {
+            return;
+        }
+        unreachable = true;
+        lastProblem = problem;
+        Fields fields = Fields.of(Attr.INTAKE, intake)
+                .with(Attr.ERROR_CODE, ErrorCode.INTAKE_UNREACHABLE);
+        if (problem != null)
+        {
+            fields = fields.with(Attr.REASON, problem.name());
+        }
+        Telemetry.get().auditError("intake.unreachable", fields);
     }
 
     /**
@@ -379,12 +433,22 @@ public final class IntakeService
         }
         catch (ItemLander.ItemChangedException changed)
         {
+            checkpointStale = false;
             discard(item.itemId());
             readiness.forget(listed.ref());
             Telemetry.get().auditWarn("item.changed",
                     Fields.of(Attr.ITEM_ID, item.itemId())
                             .with(Attr.INTAKE, intake));
             return;
+        }
+        catch (Exception failure)
+        {
+            // A read or commit failed part-way: chunks may be committed
+            // under a checkpoint, so the item must be resumed, not
+            // started again under a new ID.
+            checkpointStale = true;
+            unfinishedListed = true;
+            throw failure;
         }
         unfinished = null;
         boolean seenContent =
@@ -399,6 +463,25 @@ public final class IntakeService
         announcePending();
         source.afterLanding(listed);
         readiness.forget(listed.ref());
+    }
+
+    /**
+     * After a landing stopped part-way, picks up the unfinished item from
+     * the checkpoint, so the next listing resumes it. A storage failure
+     * here is retried with the next item, like any other.
+     *
+     * @throws Exception if the checkpoint can't be read
+     */
+    private void reloadUnfinished() throws Exception
+    {
+        if (!checkpointStale)
+        {
+            return;
+        }
+        Optional<LandingCheckpoint> stored = storage.lander().checkpoint();
+        unfinished = stored.isPresent() && !stored.get().done()
+                && stored.get().source() != null ? stored.get() : null;
+        checkpointStale = false;
     }
 
     /**
@@ -463,6 +546,7 @@ public final class IntakeService
         if (unreachable)
         {
             unreachable = false;
+            lastProblem = null;
             Telemetry.get().audit("intake.reachable",
                     Fields.of(Attr.INTAKE, intake));
         }

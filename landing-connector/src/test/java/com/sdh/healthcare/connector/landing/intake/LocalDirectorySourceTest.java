@@ -47,7 +47,8 @@ class LocalDirectorySourceTest
         return SourceSettings.of(new LandingProperties.Source(
                 root.resolve("in"), access, after, root.resolve("done"),
                 ".landed", ready, Duration.ZERO, "*", true,
-                Duration.ofSeconds(1)));
+                Duration.ofSeconds(1), "directory", Duration.ofMinutes(5),
+                null, null));
     }
 
     /**

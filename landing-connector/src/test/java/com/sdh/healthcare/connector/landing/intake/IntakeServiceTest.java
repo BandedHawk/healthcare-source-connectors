@@ -25,6 +25,7 @@ import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -154,7 +155,8 @@ class IntakeServiceTest
     {
         return SourceSettings.of(new LandingProperties.Source(
                 root.resolve("in"), access, null, null, ".landed", "settled",
-                Duration.ZERO, "*", false, Duration.ofSeconds(1)));
+                Duration.ZERO, "*", false, Duration.ofSeconds(1), "directory",
+                Duration.ofMinutes(5), null, null));
     }
 
     /**
@@ -475,6 +477,110 @@ class IntakeServiceTest
         assertThat(messages.get(0).fileId()).isEqualTo(unfinished.itemId());
         assertThat(messages.get(0).size()).isEqualTo(item.size());
         assertThat(root.resolve("in/big.csv")).doesNotExist();
+    }
+
+    /**
+     * A read that breaks part-way, as a network source's can, leaves the
+     * item to resume at the next listing under the same ID, even with the
+     * listing's end in between; nothing stops the process.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void resumesAnItemWhoseReadBroke() throws Exception
+    {
+        LocalDirectorySource directory =
+                new LocalDirectorySource(settings("read-write"));
+        AtomicInteger breaks = new AtomicInteger(1);
+        IntakeSource flaky = new IntakeSource()
+        {
+            @Override
+            public InputStream open(ListedItem item, long offset)
+                    throws IOException
+            {
+                InputStream input = directory.open(item, offset);
+                if (breaks.getAndDecrement() <= 0)
+                {
+                    return input;
+                }
+                return new FilterInputStream(input)
+                {
+                    private int left = 12;
+
+                    @Override
+                    public int read(byte[] buffer, int from, int length)
+                            throws IOException
+                    {
+                        if (left <= 0 && length > 0)
+                        {
+                            throw new IOException("connection reset");
+                        }
+                        int read = super.read(buffer, from,
+                                Math.min(length, left));
+                        left -= Math.max(read, 0);
+                        return read;
+                    }
+                };
+            }
+
+            @Override
+            public void afterLanding(ListedItem item) throws IOException
+            {
+                directory.afterLanding(item);
+            }
+
+            @Override
+            public boolean reachable()
+            {
+                return true;
+            }
+
+            @Override
+            public void checkWritable()
+            {
+            }
+        };
+        FencedCommitter committer = committer();
+        ItemLander lander = lander(committer);
+        IntakeService service = service(flaky, lander, committer,
+                Duration.ZERO);
+        ListedItem item = write("big.csv", "0123456789abcdefghijklmnop");
+        service.onListed(item);
+        LandingCheckpoint broken = lander.checkpoint().orElseThrow();
+        assertThat(broken.done()).isFalse();
+        service.onListingDone();
+        assertThat(lander.checkpoint()).as("kept to resume").isPresent();
+
+        service.onListed(write("other.csv", "later"));
+        assertThat(sent).as("nothing else lands first").isEmpty();
+        service.onListed(item);
+        assertThat(fatal).isEmpty();
+        assertThat(landed()).singleElement().satisfies(message ->
+        {
+            assertThat(message.fileId()).isEqualTo(broken.itemId());
+            assertThat(message.size()).isEqualTo(item.size());
+        });
+        service.onListed(listed("other.csv"));
+        assertThat(sent).hasSize(2);
+    }
+
+    /**
+     * A remote source that can't be listed is reported with its reason,
+     * once, and the report is cleared when a listing works again.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void reportsAFailedListingWithItsReason() throws Exception
+    {
+        IntakeService service = service(
+                new LocalDirectorySource(settings("read-only")),
+                Duration.ZERO);
+        service.onListingFailed(IntakeProblem.AUTH);
+        service.onListingFailed(IntakeProblem.AUTH);
+        assertThat(service.reachable()).isFalse();
+        service.onListingDone();
+        assertThat(service.reachable()).isTrue();
     }
 
     /**

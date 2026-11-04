@@ -11,9 +11,10 @@ import java.time.Duration;
 import java.util.Locale;
 
 /**
- * A directory source's settings, checked and turned into types (design
+ * A source's settings, checked and turned into types (design §5.3.1,
  * §5.3.4). Bad settings stop the node at startup, with a message that names
- * the setting.
+ * the setting. For a remote source, paths are on the server (within the
+ * share, for SMB) and must be absolute.
  *
  * @param path         the directory, made absolute
  * @param access       whether the node may change the directory
@@ -27,17 +28,39 @@ import java.util.Locale;
  *                     marker
  * @param include      an Ant-style pattern of the paths to pick up
  * @param recursive    whether to look in subdirectories
- * @param pollInterval how often the directory is listed
+ * @param pollInterval how often the source is listed
+ * @param type         what kind of source it is
+ * @param authRetryInterval how long a remote source waits after its
+ *                     credentials, permissions, host key or share were
+ *                     refused
+ * @param sftp         the server, for {@link Type#SFTP}; null otherwise
+ * @param smb          the share, for {@link Type#SMB}; null otherwise
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record SourceSettings(Path path, Access access, After after,
         Path moveTo, String renameSuffix, boolean marker, Duration settle,
-        String include, boolean recursive, Duration pollInterval)
+        String include, boolean recursive, Duration pollInterval,
+        Type type, Duration authRetryInterval, SftpSettings sftp,
+        SmbSettings smb)
 {
 
     /** What a marker file's name adds to its item's name. */
     public static final String MARKER_SUFFIX = ".done";
+
+    /** What kind of source it is. */
+    public enum Type
+    {
+
+        /** A local or mounted directory, listed by Camel's file component. */
+        DIRECTORY,
+
+        /** A directory on an SFTP server. */
+        SFTP,
+
+        /** A directory on an SMB share. */
+        SMB
+    }
 
     /** Whether the node may change the source. */
     public enum Access
@@ -80,7 +103,9 @@ public record SourceSettings(Path path, Access access, After after,
             throw new IllegalArgumentException(
                     "sdh.landing.source.path is required");
         }
-        Path path = source.path().toAbsolutePath().normalize();
+        Type type = parse(Type.class, source.type(),
+                "sdh.landing.source.type");
+        Path path = place(source.path(), type, "sdh.landing.source.path");
         Access access = parse(Access.class, source.access(),
                 "sdh.landing.source.access");
         After after = source.after() == null
@@ -106,7 +131,8 @@ public record SourceSettings(Path path, Access access, After after,
                 throw new IllegalArgumentException(
                         "sdh.landing.source.move-to is required with move");
             }
-            moveTo = source.moveTo().toAbsolutePath().normalize();
+            moveTo = place(source.moveTo(), type,
+                    "sdh.landing.source.move-to");
             if (moveTo.equals(path))
             {
                 throw new IllegalArgumentException(
@@ -138,10 +164,56 @@ public record SourceSettings(Path path, Access access, After after,
             throw new IllegalArgumentException(
                     "sdh.landing.source.poll-interval must be positive");
         }
+        if (type != Type.DIRECTORY && (source.authRetryInterval() == null
+                || source.authRetryInterval().isNegative()
+                || source.authRetryInterval().isZero()))
+        {
+            throw new IllegalArgumentException(
+                    "sdh.landing.source.auth-retry-interval must be positive");
+        }
         return new SourceSettings(path, access, after, moveTo,
                 source.renameSuffix(), marker,
                 marker ? Duration.ZERO : source.settle(), source.include(),
-                source.recursive(), source.pollInterval());
+                source.recursive(), source.pollInterval(), type,
+                source.authRetryInterval(),
+                type == Type.SFTP ? SftpSettings.of(source.sftp()) : null,
+                type == Type.SMB ? SmbSettings.of(source.smb()) : null);
+    }
+
+    /**
+     * Whether the source is on a server rather than a local or mounted
+     * directory.
+     *
+     * @return true for SFTP and SMB
+     */
+    public boolean remote()
+    {
+        return type != Type.DIRECTORY;
+    }
+
+    /**
+     * Normalises a path setting: a local one is made absolute; a remote
+     * one must already be, since there is no working directory to resolve
+     * it against.
+     *
+     * @param value   the setting
+     * @param type    the source's type
+     * @param setting its name, for the message
+     * @return the normalised path
+     * @throws IllegalArgumentException if a remote path is relative
+     */
+    private static Path place(Path value, Type type, String setting)
+    {
+        if (type == Type.DIRECTORY)
+        {
+            return value.toAbsolutePath().normalize();
+        }
+        if (!value.isAbsolute())
+        {
+            throw new IllegalArgumentException(setting + " must be absolute"
+                    + " on a remote source (/ is the share's root on SMB)");
+        }
+        return value.normalize();
     }
 
     /**
