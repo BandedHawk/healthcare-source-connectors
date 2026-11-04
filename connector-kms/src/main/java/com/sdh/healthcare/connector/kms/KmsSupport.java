@@ -8,7 +8,6 @@ package com.sdh.healthcare.connector.kms;
 
 import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.crypto.impl.ECDSA;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
@@ -152,16 +151,5 @@ final class KmsSupport
         // is kept for operators.
         return new IllegalStateException(
                 operation + " failed: " + cause.getMessage(), cause);
-    }
-
-    /**
-     * An I/O exception with a message.
-     *
-     * @param message the message
-     * @return the exception
-     */
-    static IOException io(String message)
-    {
-        return new IOException(message);
     }
 }

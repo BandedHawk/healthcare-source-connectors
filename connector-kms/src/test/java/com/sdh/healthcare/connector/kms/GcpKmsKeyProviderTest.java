@@ -43,7 +43,6 @@ import java.security.SecureRandom;
 import java.security.Signature;
 import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECGenParameterSpec;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.UUID;
 import javax.crypto.Cipher;
@@ -341,16 +340,5 @@ class GcpKmsKeyProviderTest
                     .setPem(pem).build());
             observer.onCompleted();
         }
-    }
-
-    /**
-     * A copy of some bytes.
-     *
-     * @param bytes the bytes
-     * @return the copy
-     */
-    static byte[] copy(byte[] bytes)
-    {
-        return Arrays.copyOf(bytes, bytes.length);
     }
 }
