@@ -81,7 +81,7 @@ public final class SplitterRegistry {
         if (src.size() > limits.maxFileBytes()) {
             throw new SplitException(ErrorCode.LIMIT_FILE_SIZE, 0);
         }
-        return new LimitedSession(get(format).open(src, from, cfg), limits, nextSeq, from.offset());
+        return new LimitedSession(get(format).open(src, from, cfg), limits, nextSeq, from);
     }
 
     /**
@@ -99,16 +99,16 @@ public final class SplitterRegistry {
             throw new SplitException(ErrorCode.LIMIT_FILE_SIZE, 0);
         }
         return new LimitedSession(new RecordSession(get(format), src, offsets, from, cfg), limits, nextSeq,
-                from.offset());
+                from);
     }
 
     private static final class LimitedSession implements SplitSession {
         private final SplitSession inner;
         private final SplitLimits limits;
         private long seq;
-        private long lastResume;
+        private ResumePoint lastResume;
 
-        LimitedSession(SplitSession inner, SplitLimits limits, long nextSeq, long from) {
+        LimitedSession(SplitSession inner, SplitLimits limits, long nextSeq, ResumePoint from) {
             this.inner = inner;
             this.limits = limits;
             this.seq = nextSeq;
@@ -128,7 +128,9 @@ public final class SplitterRegistry {
                 if (seq >= limits.maxSectionsPerFile()) {
                     throw new SplitException(ErrorCode.LIMIT_SECTION_COUNT, section.sourceOffset());
                 }
-                lastResume = Math.max(lastResume, section.resume().offset());
+                if (section.resume().isAfter(lastResume)) {
+                    lastResume = section.resume();
+                }
                 seq++;
                 return s;
             }
@@ -138,10 +140,10 @@ public final class SplitterRegistry {
             if (seq >= limits.maxSectionsPerFile()) {
                 throw new SplitException(ErrorCode.LIMIT_SECTION_COUNT, section.sourceOffset());
             }
-            if (section.resume().offset() <= lastResume) {
-                throw new IllegalStateException("Splitter made no progress at offset " + lastResume);
+            if (!section.resume().isAfter(lastResume)) {
+                throw new IllegalStateException("Splitter made no progress at offset " + lastResume.offset());
             }
-            lastResume = section.resume().offset();
+            lastResume = section.resume();
             seq++;
             return s;
         }

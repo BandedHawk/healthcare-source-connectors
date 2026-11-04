@@ -43,6 +43,10 @@ import java.util.concurrent.TimeUnit;
  * Lines and columns are counted as {@link LineCounter} counts them: lines end
  * at LF, CRLF or CR, and columns are characters of UTF-8.
  * <p>
+ * A splitter whose sections aren't text of the file, such as the rows of
+ * a Parquet file, gives each section its origin itself; that origin is
+ * kept, and the file is counted only once a section without one comes.
+ * <p>
  * One instance serves one file, on one thread; close it when the file is
  * split.
  *
@@ -80,11 +84,15 @@ final class SectionOrigins implements AutoCloseable
     /** A mark taken from the queue that is past the last section asked for. */
     private LineCounter nextMark;
 
+    /** Whether the background count has been started. */
+    private boolean counting;
+
     /** The block the file is read into, made on first use. */
     private byte[] block;
 
     /**
-     * Starts counting a file from its start, and the background count.
+     * Prepares to count a file from its start. The background count starts
+     * with the first section that needs it.
      *
      * @param source the file the sections come from; read from two threads
      *               at once
@@ -92,19 +100,28 @@ final class SectionOrigins implements AutoCloseable
     SectionOrigins(SeekableByteSource source)
     {
         this.source = source;
-        Thread.ofPlatform().name("sdh-lines").daemon(true)
-                .start(this::countAhead);
     }
 
     /**
      * Gives a section its origin.
      *
      * @param section a section of the file, as the splitter made it
-     * @return the same section with its origin
+     * @return the same section with its origin; the splitter's own, if it
+     *         gave one
      * @throws IOException if the file can't be read
      */
     Section withOrigin(Section section) throws IOException
     {
+        if (section.origin() != null)
+        {
+            return section;
+        }
+        if (!counting)
+        {
+            counting = true;
+            Thread.ofPlatform().name("sdh-lines").daemon(true)
+                    .start(this::countAhead);
+        }
         LineCounter added = new LineCounter();
         long fileOffset = section.sourceOffset();
         for (Section.Part part : section.parts())

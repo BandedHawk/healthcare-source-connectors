@@ -86,8 +86,8 @@ With `access: read-write`, each file is deleted, moved or renamed once it has la
 checks at startup that it can do so.
 
 The source is a local or mounted directory (`type: directory`), an SFTP server (`type: sftp`), an SMB share
-(`type: smb`), a bucket (`type: s3`, `azure-blob` or `gcs`), HTTP push (`type: http`), or a message queue
-(`type: queue`):
+(`type: smb`), a bucket (`type: s3`, `azure-blob` or `gcs`), an Iceberg table (`type: iceberg`), HTTP push
+(`type: http`), or a message queue (`type: queue`):
 - **SFTP:** the server's host key must be pinned in a known-hosts file; an unknown or changed key is never
   accepted. Log in with a private key in OpenSSH format, or a password.
 - **SMB:** SMB 3 with encryption only, NTLMv2 with a user and password; guest and anonymous logins are refused, and
@@ -99,6 +99,15 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   credentials). Objects appear whole, so `settle: 0s` is usually enough. An object written again is a new version
   and is landed again. `move` and `rename` copy, then delete; the copy and delete happen only if the object hasn't
   changed since it was listed.
+- **Iceberg tables:** the table is read through its own catalog (`sdh.landing.source.table`), read-only, every
+  `poll-interval`. Each Parquet data file that an append adds is landed as one item, exactly as it is; set the file
+  connector's format to `parquet` to split it into one JSON section per row. With `start: earliest` (the default),
+  the rows the table holds at the first start are landed first, then each append; with `latest`, only appends made
+  after the first start. A compaction lands nothing. An overwrite or delete can't be landed as new items: it is
+  reported as `intake.table_rewrite` and passed over, so tell the producer to append. Files that aren't Parquet, are
+  encrypted, or (at the first start) have row-level deletes are skipped and reported. How far the intake has got is
+  kept on the ledger table, so a restart carries on; keep the source table's snapshots for longer than the node
+  could be down, or `intake.table_history_lost` is reported and some appends may be missed.
 - **Paths** on a remote source are absolute paths on the server (`path`, `move-to`); on a bucket they are key
   prefixes, `/` being the bucket's root, so `path: /inbound` reads keys under `inbound/`.
 - **Outages:** a dropped or stalled connection is noticed within `read-timeout` and retried at each poll; an item

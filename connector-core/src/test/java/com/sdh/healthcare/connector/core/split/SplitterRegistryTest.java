@@ -29,7 +29,8 @@ class SplitterRegistryTest {
     @Test
     void serviceLoaderFindsBuiltIns() {
         assertThat(SplitterRegistry.load().formats())
-                .containsExactlyInAnyOrder("ccda", "xml", "x12", "edifact", "fhir", "csv", "delimited");
+                .containsExactlyInAnyOrder("ccda", "xml", "x12", "edifact", "fhir", "csv", "delimited",
+                        "parquet");
     }
 
     @Test

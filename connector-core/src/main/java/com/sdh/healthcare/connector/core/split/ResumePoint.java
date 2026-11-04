@@ -38,6 +38,30 @@ public record ResumePoint(long offset, List<Long> context) {
         return new ResumePoint(offset, c);
     }
 
+    /**
+     * Whether this point is past another: a greater offset, or the same
+     * offset with a greater context, compared entry by entry, a longer
+     * context being past a shorter one it starts with. A splitter whose
+     * sections share an offset, such as the rows of a Parquet row group,
+     * counts on in its context.
+     *
+     * @param other the other point
+     * @return true if this point is past it
+     */
+    public boolean isAfter(ResumePoint other) {
+        if (offset != other.offset) {
+            return offset > other.offset;
+        }
+        int common = Math.min(context.size(), other.context.size());
+        for (int i = 0; i < common; i++) {
+            int order = Long.compare(context.get(i), other.context.get(i));
+            if (order != 0) {
+                return order > 0;
+            }
+        }
+        return context.size() > other.context.size();
+    }
+
     /** Compact text form for the checkpoint: {@code "<offset>"} or {@code "<offset>:<c0>,<c1>,..."}. */
     public String encode() {
         if (context.isEmpty()) {

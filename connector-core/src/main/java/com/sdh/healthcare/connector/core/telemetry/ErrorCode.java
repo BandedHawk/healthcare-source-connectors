@@ -156,6 +156,18 @@ public enum ErrorCode
     PARSE_JSON_MALFORMED,
 
     /**
+     * A Parquet file that can't be read: no footer, a broken footer or
+     * page, or a row group the footer doesn't describe.
+     */
+    PARSE_PARQUET_MALFORMED,
+
+    /**
+     * A Parquet column of a type with no JSON form here, such as a variant
+     * or a geometry.
+     */
+    PARSE_PARQUET_UNSUPPORTED_TYPE,
+
+    /**
      * A FHIR file holding something other than the resources expected, such
      * as an item that isn't an object or has the wrong resource type.
      */

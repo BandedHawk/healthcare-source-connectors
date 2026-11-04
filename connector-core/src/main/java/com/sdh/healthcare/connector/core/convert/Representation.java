@@ -47,7 +47,8 @@ public record Representation(String contentType, String mapping)
             "xml", "application/xml",
             "x12", "application/edi-x12",
             "edifact", "application/edifact",
-            "fhir", "application/fhir+json");
+            "fhir", "application/fhir+json",
+            "parquet", JSON);
 
     /**
      * The representation of a converted section.

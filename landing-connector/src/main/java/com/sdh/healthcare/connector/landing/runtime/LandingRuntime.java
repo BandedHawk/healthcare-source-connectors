@@ -29,6 +29,7 @@ import com.sdh.healthcare.connector.landing.intake.Announcer;
 import com.sdh.healthcare.connector.landing.intake.AzureBlobSource;
 import com.sdh.healthcare.connector.landing.intake.BatchService;
 import com.sdh.healthcare.connector.landing.intake.GcsSource;
+import com.sdh.healthcare.connector.landing.intake.IcebergTableSource;
 import com.sdh.healthcare.connector.landing.intake.IntakeNotWritableException;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.intake.LandingIntake;
@@ -39,6 +40,7 @@ import com.sdh.healthcare.connector.landing.intake.Readiness;
 import com.sdh.healthcare.connector.landing.intake.S3Source;
 import com.sdh.healthcare.connector.landing.intake.SftpSource;
 import com.sdh.healthcare.connector.landing.intake.SmbSource;
+import com.sdh.healthcare.connector.landing.intake.TableProgress;
 import com.sdh.healthcare.connector.landing.route.EventHubsSupport;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.web.PushController;
@@ -244,6 +246,8 @@ public final class LandingRuntime implements AutoCloseable
                 case S3 -> new S3Source(source);
                 case AZURE_BLOB -> new AzureBlobSource(source);
                 case GCS -> new GcsSource(source);
+                case ICEBERG -> new IcebergTableSource(
+                        properties.landing().intake(), source);
                 case HTTP, QUEUE -> null;
             };
             InboundDirectoryClaim claim = null;
@@ -287,6 +291,11 @@ public final class LandingRuntime implements AutoCloseable
             LandingLedger ledger =
                     new LandingLedger(ledgerTable, committer, retry);
             LedgerIndex index = ledger.load(intake);
+            if (intakeSource instanceof IcebergTableSource tableSource)
+            {
+                tableSource.attach(new TableProgress(ledgerTable, committer,
+                        ids, intake));
+            }
 
             Publishers.configureBroker(camel, queueType, properties.queue());
             publisher = Publishers.create(camel, queueType, queueUri);

@@ -19,8 +19,9 @@ sdh:
       include: "*"                # Ant-style
       recursive: false
       poll-interval: 10s
-      type: directory             # directory | sftp | smb | s3 | azure-blob | gcs | http | queue; for sftp, smb and
-                                  # buckets, path and move-to are absolute (in a bucket, key prefixes: / is its root)
+      type: directory             # directory | sftp | smb | s3 | azure-blob | gcs | iceberg | http | queue; for sftp,
+                                  # smb and buckets, path and move-to are absolute (in a bucket, key prefixes: / is
+                                  # its root)
       auth-retry-interval: 5m     # remote sources: wait after refused credentials, a missing share or bucket, or a
                                   # new host key
       sftp:                       # type: sftp
@@ -53,6 +54,16 @@ sdh:
         # anonymous: false        # send no credentials (a public bucket, or an emulator)
         connect-timeout: 15s
         read-timeout: 60s
+      table:                      # type: iceberg (access: read-only); each Parquet data file an append adds is an item
+        catalog:                  # the source table's own catalog: Iceberg catalog properties, passed through unchanged
+          type: rest
+          uri: https://producer-catalog:8181/api/catalog
+          warehouse: claims
+          credential: "sdh-reader:${SOURCE_CATALOG_SECRET}"
+        catalog-name: source
+        identifier: ehr.claims    # namespace.table
+        start: earliest           # earliest: the rows the table holds now, then each append | latest: only later
+                                  # appends
     http:                         # type: http; producers POST to https://<host>:<port>/intakes/<intake>/items
       port: 8443
       tls:                        # required; key password: SDH_LANDING_HTTP_TLS_PRIVATE_KEY_PASSWORD

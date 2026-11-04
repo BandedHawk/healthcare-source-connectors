@@ -412,7 +412,7 @@ class BucketIntakeIT
                 new LandingProperties.Source(Path.of("/in"), access, after,
                         Path.of("/done"), ".landed", "settled", Duration.ZERO,
                         "**/*", true, Duration.ofSeconds(1), store,
-                        Duration.ofMinutes(5), null, null, bucket));
+                        Duration.ofMinutes(5), null, null, bucket, null));
         source = switch (store)
         {
             case "s3" -> new S3Source(settings);

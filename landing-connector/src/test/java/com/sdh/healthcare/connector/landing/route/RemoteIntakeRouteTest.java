@@ -117,7 +117,7 @@ class RemoteIntakeRouteTest
                 new LandingProperties.Source(Path.of("/in"), "read-only",
                         null, null, ".landed", "settled", Duration.ZERO, "*",
                         false, Duration.ofSeconds(10), "directory",
-                        Duration.ofMinutes(5), null, null, null));
+                        Duration.ofMinutes(5), null, null, null, null));
         route = new RemoteIntakeRoute(settings, source, service, now::get);
     }
 

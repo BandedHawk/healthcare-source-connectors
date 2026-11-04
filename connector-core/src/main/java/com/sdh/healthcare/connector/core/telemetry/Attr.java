@@ -93,7 +93,13 @@ public enum Attr
     ITEM_ID("sdh.item_id"),
 
     /** What kind of item was landed, such as {@code file}. */
-    KIND("sdh.kind");
+    KIND("sdh.kind"),
+
+    /**
+     * An Iceberg snapshot's ID, a number: of a table an intake reads
+     * (design §5.3.18), never its data or file paths.
+     */
+    SNAPSHOT_ID("sdh.snapshot_id");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

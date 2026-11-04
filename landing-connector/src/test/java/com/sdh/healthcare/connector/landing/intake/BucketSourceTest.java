@@ -53,7 +53,7 @@ class BucketSourceTest
                 "s3", Duration.ofMinutes(5), null, null,
                 new LandingProperties.Bucket("b", null, "eu-west-1", false,
                         null, null, null, null, false, Duration.ofSeconds(1),
-                        Duration.ofSeconds(1))));
+                        Duration.ofSeconds(1)), null));
     }
 
     /**

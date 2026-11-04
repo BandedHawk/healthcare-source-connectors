@@ -314,7 +314,8 @@ public record LandingProperties(
      * @param pollInterval how often the source is listed
      * @param type         {@code directory} (the default), {@code sftp},
      *                     {@code smb}, {@code s3}, {@code azure-blob},
-     *                     {@code gcs}, {@code http} or {@code queue}
+     *                     {@code gcs}, {@code iceberg}, {@code http} or
+     *                     {@code queue}
      * @param authRetryInterval how long to wait before trying a remote
      *                     source again after its credentials, permissions,
      *                     host key or share were refused, so an account
@@ -323,6 +324,7 @@ public record LandingProperties(
      * @param smb          the SMB share, for {@code smb}
      * @param bucket       the bucket or container, for {@code s3},
      *                     {@code azure-blob} and {@code gcs}
+     * @param table        the table, for {@code iceberg}
      */
     public record Source(Path path,
             @DefaultValue("read-only") String access,
@@ -338,7 +340,8 @@ public record LandingProperties(
             @DefaultValue("5m") Duration authRetryInterval,
             @DefaultValue Sftp sftp,
             @DefaultValue Smb smb,
-            @DefaultValue Bucket bucket)
+            @DefaultValue Bucket bucket,
+            @DefaultValue Table table)
     {
     }
 
@@ -448,6 +451,39 @@ public record LandingProperties(
         public String toString()
         {
             return "Bucket[" + name + ", endpoint=" + endpoint + "]";
+        }
+    }
+
+    /**
+     * An Iceberg table an intake reads (design §5.3.18): each data file an
+     * append adds is landed as one item. The catalog is the table's own,
+     * not the landing catalog; its secrets come from the environment.
+     *
+     * @param catalog     Iceberg catalog properties, passed through as they
+     *                    are: {@code type}, {@code uri}, {@code warehouse},
+     *                    {@code io-impl}, and so on
+     * @param catalogName the catalog's name
+     * @param identifier  the table, as {@code namespace.table}
+     * @param start       {@code earliest}, to land every row the table
+     *                    holds and then each append, or {@code latest}, to
+     *                    land only appends from the first start on
+     */
+    public record Table(Map<String, String> catalog,
+            @DefaultValue("source") String catalogName,
+            String identifier,
+            @DefaultValue("earliest") String start)
+    {
+
+        /**
+         * Shows the table without the catalog's properties, which may hold
+         * a secret.
+         *
+         * @return the table's name
+         */
+        @Override
+        public String toString()
+        {
+            return "Table[" + catalogName + ":" + identifier + "]";
         }
     }
 

@@ -18,7 +18,8 @@ import java.util.Locale;
  * store) and must be absolute.
  *
  * @param path         the directory, made absolute; null for
- *                     {@link Type#HTTP} and {@link Type#QUEUE}
+ *                     {@link Type#ICEBERG}, {@link Type#HTTP} and
+ *                     {@link Type#QUEUE}
  * @param access       whether the node may change the directory
  * @param after        what happens to an item after landing
  * @param moveTo       where {@link After#MOVE} puts items, made absolute;
@@ -40,6 +41,7 @@ import java.util.Locale;
  * @param bucket       the bucket, for {@link Type#S3},
  *                     {@link Type#AZURE_BLOB} and {@link Type#GCS}; null
  *                     otherwise
+ * @param table        the table, for {@link Type#ICEBERG}; null otherwise
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -47,7 +49,7 @@ public record SourceSettings(Path path, Access access, After after,
         Path moveTo, String renameSuffix, boolean marker, Duration settle,
         String include, boolean recursive, Duration pollInterval,
         Type type, Duration authRetryInterval, SftpSettings sftp,
-        SmbSettings smb, BucketSettings bucket)
+        SmbSettings smb, BucketSettings bucket, TableSettings table)
 {
 
     /** What a marker file's name adds to its item's name. */
@@ -74,6 +76,13 @@ public record SourceSettings(Path path, Access access, After after,
 
         /** A prefix in a Google Cloud Storage bucket. */
         GCS,
+
+        /**
+         * An Iceberg table, whose appended data files are landed; it has
+         * its own settings ({@link TableSettings}), is always read-only,
+         * and its files are ready once committed.
+         */
+        ICEBERG,
 
         /**
          * Items pushed to the node over HTTP; its endpoint has its own
@@ -142,7 +151,12 @@ public record SourceSettings(Path path, Access access, After after,
         {
             return new SourceSettings(null, Access.READ_ONLY, After.NONE,
                     null, null, false, Duration.ZERO, null, false,
-                    source.pollInterval(), type, null, null, null, null);
+                    source.pollInterval(), type, null, null, null, null,
+                    null);
+        }
+        if (type == Type.ICEBERG)
+        {
+            return table(source);
         }
         if (source.path() == null)
         {
@@ -223,18 +237,58 @@ public record SourceSettings(Path path, Access access, After after,
                 type == Type.SFTP ? SftpSettings.of(source.sftp()) : null,
                 type == Type.SMB ? SmbSettings.of(source.smb()) : null,
                 type.bucket() ? BucketSettings.of(type, source.bucket())
-                        : null);
+                        : null, null);
+    }
+
+    /**
+     * Checks an Iceberg table intake's settings: read-only, ready once
+     * committed, and listed every poll.
+     *
+     * @param source the settings as bound
+     * @return the checked settings
+     * @throws IllegalArgumentException if a setting doesn't fit
+     */
+    private static SourceSettings table(LandingProperties.Source source)
+    {
+        if (parse(Access.class, source.access(), "sdh.landing.source.access")
+                != Access.READ_ONLY || (source.after() != null
+                        && parse(After.class, source.after(),
+                                "sdh.landing.source.after") != After.NONE))
+        {
+            throw new IllegalArgumentException("sdh.landing.source.access"
+                    + " must be read-only on an iceberg source: a table's"
+                    + " files are never changed");
+        }
+        if (source.pollInterval().isZero()
+                || source.pollInterval().isNegative())
+        {
+            throw new IllegalArgumentException(
+                    "sdh.landing.source.poll-interval must be positive");
+        }
+        if (source.authRetryInterval() == null
+                || source.authRetryInterval().isNegative()
+                || source.authRetryInterval().isZero())
+        {
+            throw new IllegalArgumentException(
+                    "sdh.landing.source.auth-retry-interval must be positive");
+        }
+        return new SourceSettings(null, Access.READ_ONLY, After.NONE, null,
+                null, false, Duration.ZERO, null, false,
+                source.pollInterval(), Type.ICEBERG,
+                source.authRetryInterval(), null, null, null,
+                TableSettings.of(source.table()));
     }
 
     /**
      * Whether the source is on a server rather than a local or mounted
      * directory.
      *
-     * @return true for SFTP, SMB and the object stores
+     * @return true for SFTP, SMB, the object stores and Iceberg tables
      */
     public boolean remote()
     {
-        return type == Type.SFTP || type == Type.SMB || type.bucket();
+        return type == Type.SFTP || type == Type.SMB || type.bucket()
+                || type == Type.ICEBERG;
     }
 
     /**

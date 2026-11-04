@@ -156,7 +156,7 @@ class IntakeServiceTest
         return SourceSettings.of(new LandingProperties.Source(
                 root.resolve("in"), access, null, null, ".landed", "settled",
                 Duration.ZERO, "*", false, Duration.ofSeconds(1), "directory",
-                Duration.ofMinutes(5), null, null, null));
+                Duration.ofMinutes(5), null, null, null, null));
     }
 
     /**

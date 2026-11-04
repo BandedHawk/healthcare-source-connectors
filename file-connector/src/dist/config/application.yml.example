@@ -18,7 +18,7 @@ sdh:
       namespace: sdh_landing
       # catalog: { ... }          # only if landing uses another catalog or storage account
   split:
-    format: ccda                  # ccda | xml | x12 | edifact | fhir | csv | delimited | <plugin>
+    format: ccda                  # ccda | xml | x12 | edifact | fhir | csv | delimited | parquet | <plugin>
     boundary: ClinicalDocument    # optional; format default
     options:                      # format options; nested keys become dotted names
       namespace: urn:hl7-org:v3

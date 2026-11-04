@@ -58,7 +58,7 @@ class BucketSettingsTest
         return new LandingProperties.Source(Path.of(path), "read-only", null,
                 null, ".landed", "settled", Duration.ZERO, "*", false,
                 Duration.ofSeconds(10), type, Duration.ofMinutes(5), null,
-                null, bucket);
+                null, bucket, null);
     }
 
     /**

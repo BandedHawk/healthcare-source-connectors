@@ -257,7 +257,7 @@ class SftpIntakeIT
                         toxiproxy.getHost(),
                         toxiproxy.getMappedPort(PROXY_PORT), USER, key, null,
                         null, pinned, Duration.ofSeconds(5), readTimeout),
-                null, null));
+                null, null, null));
     }
 
     /**
