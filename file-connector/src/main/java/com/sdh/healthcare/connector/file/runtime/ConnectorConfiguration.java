@@ -48,6 +48,11 @@ public class ConnectorConfiguration
     private static final Logger LOG =
             LoggerFactory.getLogger(ConnectorConfiguration.class);
 
+    /** Created by Spring. */
+    public ConnectorConfiguration()
+    {
+    }
+
     /**
      * Exits the process on a fatal error; tests put their own in its place.
      *

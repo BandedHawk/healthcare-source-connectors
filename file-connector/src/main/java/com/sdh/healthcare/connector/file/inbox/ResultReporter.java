@@ -184,13 +184,13 @@ public final class ResultReporter
         List<Integer> starts = new ArrayList<>();
         starts.add(0);
         long bytes = 0;
-        for (int i = 0; i < problems.size(); i++)
+        for (int index = 0; index < problems.size(); index++)
         {
-            int size = PayloadCodec.encodedSize(problems.get(i)) + 1;
-            int inPart = i - starts.getLast();
+            int size = PayloadCodec.encodedSize(problems.get(index)) + 1;
+            int inPart = index - starts.getLast();
             if (inPart > 0 && (inPart == partSize || bytes + size > partBytes))
             {
-                starts.add(i);
+                starts.add(index);
                 bytes = 0;
             }
             bytes += size;

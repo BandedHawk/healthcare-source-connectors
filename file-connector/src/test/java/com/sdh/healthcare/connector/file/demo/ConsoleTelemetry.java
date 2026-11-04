@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.demo;
 
 import io.opentelemetry.api.common.Attributes;
@@ -15,7 +14,9 @@ import io.opentelemetry.sdk.logs.data.LogRecordData;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.metrics.InstrumentType;
 import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
+import io.opentelemetry.sdk.metrics.data.DoublePointData;
 import io.opentelemetry.sdk.metrics.data.HistogramPointData;
+import io.opentelemetry.sdk.metrics.data.LongPointData;
 import io.opentelemetry.sdk.metrics.data.MetricData;
 import io.opentelemetry.sdk.metrics.data.PointData;
 import io.opentelemetry.sdk.metrics.export.MetricExporter;
@@ -37,178 +38,377 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * Prints the connector's OpenTelemetry output to the console for the demo (design §12). The demo wraps these in the
- * production filters ({@code AllowListSpanExporter}, {@code AuditOnlyLogRecordExporter}), so what's printed is exactly
- * what a collector would receive: allow-listed attributes only, no filenames or record content.
+ * Prints the connector's OpenTelemetry output to the console for the demo
+ * (design §12). The demo wraps these in the production filters
+ * ({@code AllowListSpanExporter}, {@code AuditOnlyLogRecordExporter}), so
+ * what's printed is exactly what a collector would receive: allow-listed
+ * attributes only, no filenames or record content.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class ConsoleTelemetry {
+final class ConsoleTelemetry
+{
+
+    /** Where everything is printed. */
     static final PrintStream OUT = System.out;
-    static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneId.systemDefault());
 
-    private ConsoleTelemetry() {}
+    /** Times of day, in the local zone. */
+    static final DateTimeFormatter TIME = DateTimeFormatter
+            .ofPattern("HH:mm:ss.SSS").withZone(ZoneId.systemDefault());
 
-    static String attrs(Attributes a) {
-        Map<String, String> sorted = new TreeMap<>();
-        a.forEach((k, v) -> sorted.put(k.getKey(), String.valueOf(v)));
-        return sorted.entrySet().stream().map(e -> e.getKey() + "=" + e.getValue()).collect(Collectors.joining(" "));
+    /** Not instantiable. */
+    private ConsoleTelemetry()
+    {
     }
 
-    static String ms(long nanos) {
-        return nanos >= 1_000_000_000L ? String.format(Locale.ROOT, "%.2f s", nanos / 1e9)
+    /**
+     * Attributes as {@code key=value} pairs, sorted by key.
+     *
+     * @param attributes the attributes
+     * @return the pairs, separated by spaces
+     */
+    static String attrs(Attributes attributes)
+    {
+        Map<String, String> sorted = new TreeMap<>();
+        attributes.forEach((key, value) ->
+                sorted.put(key.getKey(), String.valueOf(value)));
+        return sorted.entrySet().stream()
+                .map(entry -> entry.getKey() + "=" + entry.getValue())
+                .collect(Collectors.joining(" "));
+    }
+
+    /**
+     * A duration in milliseconds, or seconds from one second up.
+     *
+     * @param nanos the duration in nanoseconds
+     * @return the text, such as {@code 12 ms} or {@code 1.50 s}
+     */
+    static String ms(long nanos)
+    {
+        return nanos >= 1_000_000_000L
+                ? String.format(Locale.ROOT, "%.2f s", nanos / 1e9)
                 : String.format(Locale.ROOT, "%d ms", nanos / 1_000_000);
     }
 
     /**
-     * Traces as trees. Spans are held until their trace's root span ends (it ends last), then the whole trace is
-     * printed: one tree per file, showing where its time went.
+     * Traces as trees. Spans are held until their trace's root span ends
+     * (it ends last), then the whole trace is printed: one tree per file,
+     * showing where its time went.
      */
-    static final class SpanTrees implements SpanExporter {
-        private final Map<String, List<SpanData>> pending = new ConcurrentHashMap<>();
+    static final class SpanTrees implements SpanExporter
+    {
 
+        /** Ended spans of unfinished traces, by trace ID. */
+        private final Map<String, List<SpanData>> pending =
+                new ConcurrentHashMap<>();
+
+        /** Created by the demo. */
+        SpanTrees()
+        {
+        }
+
+        /**
+         * Holds spans, and prints a trace once its root ends.
+         *
+         * @param spans the ended spans
+         * @return success
+         */
         @Override
-        public CompletableResultCode export(Collection<SpanData> spans) {
-            for (SpanData s : spans) {
-                pending.computeIfAbsent(s.getTraceId(), t -> new ArrayList<>()).add(s);
-                if (!s.getParentSpanContext().isValid()) {
-                    print(pending.remove(s.getTraceId()), s);
+        public CompletableResultCode export(Collection<SpanData> spans)
+        {
+            for (SpanData span : spans)
+            {
+                pending.computeIfAbsent(span.getTraceId(),
+                        trace -> new ArrayList<>()).add(span);
+                if (!span.getParentSpanContext().isValid())
+                {
+                    print(pending.remove(span.getTraceId()), span);
                 }
             }
             return CompletableResultCode.ofSuccess();
         }
 
-        private synchronized void print(List<SpanData> trace, SpanData root) {
+        /**
+         * Prints a trace as a tree.
+         *
+         * @param trace every span of the trace
+         * @param root the root span
+         */
+        private synchronized void print(List<SpanData> trace, SpanData root)
+        {
             Map<String, List<SpanData>> children = new LinkedHashMap<>();
-            for (SpanData s : trace) {
-                if (s != root) {
-                    children.computeIfAbsent(s.getParentSpanId(), p -> new ArrayList<>()).add(s);
+            for (SpanData span : trace)
+            {
+                if (span != root)
+                {
+                    children.computeIfAbsent(span.getParentSpanId(),
+                            parent -> new ArrayList<>()).add(span);
                 }
             }
-            children.values().forEach(l -> l.sort(Comparator.comparingLong(SpanData::getStartEpochNanos)));
-            StringBuilder b = new StringBuilder();
-            b.append("\n[otel trace] ").append(root.getTraceId()).append(", ").append(trace.size()).append(" spans\n");
-            line(b, root, "", "", children);
-            OUT.print(b);
+            children.values().forEach(siblings -> siblings.sort(
+                    Comparator.comparingLong(SpanData::getStartEpochNanos)));
+            StringBuilder text = new StringBuilder();
+            text.append("\n[otel trace] ").append(root.getTraceId())
+                    .append(", ").append(trace.size()).append(" spans\n");
+            line(text, root, "", "", children);
+            OUT.print(text);
             OUT.flush();
         }
 
-        private void line(StringBuilder b, SpanData s, String lead, String branch, Map<String, List<SpanData>> kids) {
-            b.append("  ").append(lead).append(branch).append(s.getName()).append("  ")
-                    .append(ms(s.getEndEpochNanos() - s.getStartEpochNanos()));
-            if (s.getStatus().getStatusCode() == StatusCode.ERROR) {
-                b.append("  ERROR");
+        /**
+         * Appends a span's line and, below it, its children's.
+         *
+         * @param text where to append
+         * @param span the span
+         * @param lead the tree lines inherited from its ancestors
+         * @param branch the span's own branch, or empty for the root
+         * @param children each span's children, by parent span ID
+         */
+        private void line(StringBuilder text, SpanData span, String lead,
+                String branch, Map<String, List<SpanData>> children)
+        {
+            text.append("  ").append(lead).append(branch)
+                    .append(span.getName()).append("  ")
+                    .append(ms(span.getEndEpochNanos()
+                            - span.getStartEpochNanos()));
+            if (span.getStatus().getStatusCode() == StatusCode.ERROR)
+            {
+                text.append("  ERROR");
             }
-            String a = attrs(s.getAttributes());
-            if (!a.isEmpty()) {
-                b.append("  ").append(a);
+            String attributes = attrs(span.getAttributes());
+            if (!attributes.isEmpty())
+            {
+                text.append("  ").append(attributes);
             }
-            b.append('\n');
-            List<SpanData> cs = kids.getOrDefault(s.getSpanId(), List.of());
-            String next = lead + (branch.isEmpty() ? "" : branch.startsWith("├") ? "│  " : "   ");
-            for (int i = 0; i < cs.size(); i++) {
-                line(b, cs.get(i), next, i == cs.size() - 1 ? "└─ " : "├─ ", kids);
+            text.append('\n');
+            List<SpanData> own =
+                    children.getOrDefault(span.getSpanId(), List.of());
+            String next = lead + (branch.isEmpty() ? ""
+                    : branch.startsWith("├") ? "│  " : "   ");
+            for (int index = 0; index < own.size(); index++)
+            {
+                line(text, own.get(index), next,
+                        index == own.size() - 1 ? "└─ " : "├─ ", children);
             }
         }
 
+        /**
+         * Nothing to flush.
+         *
+         * @return success
+         */
         @Override
-        public CompletableResultCode flush() {
+        public CompletableResultCode flush()
+        {
             return CompletableResultCode.ofSuccess();
         }
 
+        /**
+         * Nothing to shut down.
+         *
+         * @return success
+         */
         @Override
-        public CompletableResultCode shutdown() {
+        public CompletableResultCode shutdown()
+        {
             return CompletableResultCode.ofSuccess();
         }
     }
 
     /** Audit events as OpenTelemetry log records, one line each. */
-    static final class LogLines implements LogRecordExporter {
+    static final class LogLines implements LogRecordExporter
+    {
+
+        /** Created by the demo. */
+        LogLines()
+        {
+        }
+
+        /**
+         * Prints each record.
+         *
+         * @param logs the records
+         * @return success
+         */
         @Override
-        public CompletableResultCode export(Collection<LogRecordData> logs) {
-            for (LogRecordData l : logs) {
-                // Audit events are emitted without a timestamp; the SDK records when it observed them.
-                long at = l.getTimestampEpochNanos() != 0 ? l.getTimestampEpochNanos() : l.getObservedTimestampEpochNanos();
-                OUT.println("[otel log]   " + TIME.format(Instant.ofEpochSecond(0, at)) + "  "
-                        + l.getEventName() + "  " + attrs(l.getAttributes()));
+        public CompletableResultCode export(Collection<LogRecordData> logs)
+        {
+            for (LogRecordData log : logs)
+            {
+                // Audit events are emitted without a timestamp; the SDK
+                // records when it observed them.
+                long at = log.getTimestampEpochNanos() != 0
+                        ? log.getTimestampEpochNanos()
+                        : log.getObservedTimestampEpochNanos();
+                OUT.println("[otel log]   "
+                        + TIME.format(Instant.ofEpochSecond(0, at)) + "  "
+                        + log.getEventName() + "  "
+                        + attrs(log.getAttributes()));
             }
             OUT.flush();
             return CompletableResultCode.ofSuccess();
         }
 
+        /**
+         * Nothing to flush.
+         *
+         * @return success
+         */
         @Override
-        public CompletableResultCode flush() {
+        public CompletableResultCode flush()
+        {
             return CompletableResultCode.ofSuccess();
         }
 
+        /**
+         * Nothing to shut down.
+         *
+         * @return success
+         */
         @Override
-        public CompletableResultCode shutdown() {
+        public CompletableResultCode shutdown()
+        {
             return CompletableResultCode.ofSuccess();
         }
     }
 
-    /** The connector's own metrics ({@code sdh.*}), as running totals, each time the reader collects them. */
-    static final class MetricTable implements MetricExporter {
+    /**
+     * The connector's own metrics ({@code sdh.*}), as running totals, each
+     * time the reader collects them.
+     */
+    static final class MetricTable implements MetricExporter
+    {
+
+        /** Created by the demo. */
+        MetricTable()
+        {
+        }
+
+        /**
+         * Prints the connector's metrics as a table.
+         *
+         * @param metrics every metric collected
+         * @return success
+         */
         @Override
-        public CompletableResultCode export(Collection<MetricData> metrics) {
-            List<MetricData> ours = metrics.stream().filter(m -> m.getName().startsWith("sdh."))
-                    .sorted(Comparator.comparing(MetricData::getName)).toList();
-            if (ours.isEmpty()) {
+        public CompletableResultCode export(Collection<MetricData> metrics)
+        {
+            List<MetricData> ours = metrics.stream()
+                    .filter(metric -> metric.getName().startsWith("sdh."))
+                    .sorted(Comparator.comparing(MetricData::getName))
+                    .toList();
+            if (ours.isEmpty())
+            {
                 return CompletableResultCode.ofSuccess();
             }
-            StringBuilder b = new StringBuilder("\n[otel metrics] " + TIME.format(Instant.now()) + "\n");
-            for (MetricData m : ours) {
-                for (PointData p : points(m)) {
-                    b.append(String.format(Locale.ROOT, "  %-34s %-26s %s%n", m.getName(), value(p, m.getUnit()),
-                            attrs(p.getAttributes())));
+            StringBuilder text = new StringBuilder(
+                    "\n[otel metrics] " + TIME.format(Instant.now()) + "\n");
+            for (MetricData metric : ours)
+            {
+                for (PointData point : points(metric))
+                {
+                    text.append(String.format(Locale.ROOT,
+                            "  %-34s %-26s %s%n", metric.getName(),
+                            value(point, metric.getUnit()),
+                            attrs(point.getAttributes())));
                 }
             }
-            OUT.print(b);
+            OUT.print(text);
             OUT.flush();
             return CompletableResultCode.ofSuccess();
         }
 
-        static Collection<? extends PointData> points(MetricData m) {
-            return switch (m.getType()) {
-                case LONG_SUM -> m.getLongSumData().getPoints();
-                case DOUBLE_SUM -> m.getDoubleSumData().getPoints();
-                case LONG_GAUGE -> m.getLongGaugeData().getPoints();
-                case DOUBLE_GAUGE -> m.getDoubleGaugeData().getPoints();
-                case HISTOGRAM -> m.getHistogramData().getPoints();
+        /**
+         * A metric's points, for the types the connector uses.
+         *
+         * @param metric the metric
+         * @return its points, or none for another type
+         */
+        static Collection<? extends PointData> points(MetricData metric)
+        {
+            return switch (metric.getType())
+            {
+                case LONG_SUM -> metric.getLongSumData().getPoints();
+                case DOUBLE_SUM -> metric.getDoubleSumData().getPoints();
+                case LONG_GAUGE -> metric.getLongGaugeData().getPoints();
+                case DOUBLE_GAUGE -> metric.getDoubleGaugeData().getPoints();
+                case HISTOGRAM -> metric.getHistogramData().getPoints();
                 default -> List.of();
             };
         }
 
-        static String value(PointData p, String unit) {
-            String u = unit == null || unit.isEmpty() || unit.equals("1") || unit.startsWith("{") ? "" : " " + unit;
-            return switch (p) {
-                case io.opentelemetry.sdk.metrics.data.LongPointData l -> l.getValue() + u;
-                case io.opentelemetry.sdk.metrics.data.DoublePointData d ->
-                        String.format(Locale.ROOT, "%.3f%s", d.getValue(), u);
-                case HistogramPointData h -> String.format(Locale.ROOT, "n=%d avg=%.3f%s max=%.3f", h.getCount(),
-                        h.getCount() == 0 ? 0 : h.getSum() / h.getCount(), u, h.hasMax() ? h.getMax() : 0);
+        /**
+         * A point's value with its unit; a histogram as count, average and
+         * maximum.
+         *
+         * @param point the point
+         * @param unit the metric's unit; {@code 1} and {@code {…}} aren't
+         *        shown
+         * @return the text
+         */
+        static String value(PointData point, String unit)
+        {
+            String shown = unit == null || unit.isEmpty() || unit.equals("1")
+                    || unit.startsWith("{") ? "" : " " + unit;
+            return switch (point)
+            {
+                case LongPointData longPoint -> longPoint.getValue() + shown;
+                case DoublePointData doublePoint -> String.format(Locale.ROOT,
+                        "%.3f%s", doublePoint.getValue(), shown);
+                case HistogramPointData histogram -> String.format(
+                        Locale.ROOT, "n=%d avg=%.3f%s max=%.3f",
+                        histogram.getCount(),
+                        histogram.getCount() == 0 ? 0
+                                : histogram.getSum() / histogram.getCount(),
+                        shown, histogram.hasMax() ? histogram.getMax() : 0);
                 default -> "?";
             };
         }
 
+        /**
+         * Running totals.
+         *
+         * @param type the instrument type
+         * @return cumulative
+         */
         @Override
-        public AggregationTemporality getAggregationTemporality(InstrumentType type) {
+        public AggregationTemporality getAggregationTemporality(
+                InstrumentType type)
+        {
             return AggregationTemporality.CUMULATIVE;
         }
 
+        /**
+         * The data may be kept between exports.
+         *
+         * @return immutable data
+         */
         @Override
-        public MemoryMode getMemoryMode() {
+        public MemoryMode getMemoryMode()
+        {
             return MemoryMode.IMMUTABLE_DATA;
         }
 
+        /**
+         * Nothing to flush.
+         *
+         * @return success
+         */
         @Override
-        public CompletableResultCode flush() {
+        public CompletableResultCode flush()
+        {
             return CompletableResultCode.ofSuccess();
         }
 
+        /**
+         * Nothing to shut down.
+         *
+         * @return success
+         */
         @Override
-        public CompletableResultCode shutdown() {
+        public CompletableResultCode shutdown()
+        {
             return CompletableResultCode.ofSuccess();
         }
     }

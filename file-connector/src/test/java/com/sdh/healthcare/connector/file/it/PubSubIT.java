@@ -4,11 +4,14 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.it;
 
-import static com.sdh.healthcare.connector.file.it.ItSupport.*;
+import static com.sdh.healthcare.connector.file.it.ItSupport.assertDelivered;
+import static com.sdh.healthcare.connector.file.it.ItSupport.interleaved;
+import static com.sdh.healthcare.connector.file.it.ItSupport.publishAll;
+import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
 
+import com.google.api.gax.core.CredentialsProvider;
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
@@ -24,6 +27,7 @@ import com.google.pubsub.v1.Subscription;
 import com.google.pubsub.v1.SubscriptionName;
 import com.google.pubsub.v1.TopicName;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.file.it.ItSupport.Received;
 import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
 import com.sdh.healthcare.connector.runtime.publish.QueueType;
@@ -31,6 +35,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.apache.camel.component.google.pubsub.GooglePubsubComponent;
 import org.apache.camel.impl.DefaultCamelContext;
@@ -40,78 +45,129 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.gcloud.PubSubEmulatorContainer;
 
 /**
- * Design §10.3 pubsub: orderingKey = fileId with message ordering enabled, metadata as attributes.
+ * Design §10.3 pubsub: orderingKey = fileId with message ordering enabled,
+ * metadata as attributes.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class PubSubIT {
+class PubSubIT
+{
+
+    /** The Pub/Sub emulator. */
     static PubSubEmulatorContainer emulator;
 
+    /** Starts the emulator. */
     @BeforeAll
-    static void start() {
+    static void start()
+    {
         requireDocker();
-        emulator = new PubSubEmulatorContainer("gcr.io/google.com/cloudsdktool/google-cloud-cli:590.0.0-emulators");
+        emulator = new PubSubEmulatorContainer("gcr.io/google.com/"
+                + "cloudsdktool/google-cloud-cli:590.0.0-emulators");
         emulator.start();
     }
 
+    /** Stops the emulator. */
     @AfterAll
-    static void stop() {
-        if (emulator != null) {
+    static void stop()
+    {
+        if (emulator != null)
+        {
             emulator.stop();
         }
     }
 
+    /**
+     * Messages arrive in order per file, with their attributes.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void orderedDeliveryWithAttributes() throws Exception {
+    void orderedDeliveryWithAttributes() throws Exception
+    {
         String project = "sdh-it";
-        ManagedChannel channel = ManagedChannelBuilder.forTarget(emulator.getEmulatorEndpoint()).usePlaintext().build();
-        var transport = FixedTransportChannelProvider.create(GrpcTransportChannel.create(channel));
-        var creds = NoCredentialsProvider.create();
+        ManagedChannel channel = ManagedChannelBuilder
+                .forTarget(emulator.getEmulatorEndpoint()).usePlaintext()
+                .build();
+        FixedTransportChannelProvider transport =
+                FixedTransportChannelProvider.create(
+                        GrpcTransportChannel.create(channel));
+        CredentialsProvider credentials = NoCredentialsProvider.create();
         TopicName topic = TopicName.of(project, "sdh-sections");
-        SubscriptionName sub = SubscriptionName.of(project, "sdh-reader");
-        try (TopicAdminClient topics = TopicAdminClient.create(TopicAdminSettings.newBuilder()
-                .setTransportChannelProvider(transport).setCredentialsProvider(creds).build());
-                SubscriptionAdminClient subs = SubscriptionAdminClient.create(SubscriptionAdminSettings.newBuilder()
-                        .setTransportChannelProvider(transport).setCredentialsProvider(creds).build())) {
+        SubscriptionName subscription =
+                SubscriptionName.of(project, "sdh-reader");
+        try (TopicAdminClient topics = TopicAdminClient.create(
+                        TopicAdminSettings.newBuilder()
+                                .setTransportChannelProvider(transport)
+                                .setCredentialsProvider(credentials).build());
+                SubscriptionAdminClient subscriptions =
+                        SubscriptionAdminClient.create(
+                                SubscriptionAdminSettings.newBuilder()
+                                        .setTransportChannelProvider(transport)
+                                        .setCredentialsProvider(credentials)
+                                        .build()))
+        {
             topics.createTopic(topic);
-            subs.createSubscription(Subscription.newBuilder().setName(sub.toString()).setTopic(topic.toString())
-                    .setEnableMessageOrdering(true).setAckDeadlineSeconds(60).build());
+            subscriptions.createSubscription(Subscription.newBuilder()
+                    .setName(subscription.toString())
+                    .setTopic(topic.toString())
+                    .setEnableMessageOrdering(true)
+                    .setAckDeadlineSeconds(60).build());
 
-            List<OutboundMessage> sent = interleaved(UUID.randomUUID(), UUID.randomUUID(), 50);
-            try (DefaultCamelContext camel = new DefaultCamelContext()) {
+            List<OutboundMessage> sent =
+                    interleaved(UUID.randomUUID(), UUID.randomUUID(), 50);
+            try (DefaultCamelContext camel = new DefaultCamelContext())
+            {
                 GooglePubsubComponent component = new GooglePubsubComponent();
                 component.setEndpoint(emulator.getEmulatorEndpoint());
                 component.setAuthenticate(false);
                 camel.addComponent("google-pubsub", component);
                 camel.start();
-                String uri = QueueType.PUBSUB.effectiveUri("google-pubsub:" + project + ":sdh-sections"
-                        + "?pubsubEndpoint=" + emulator.getEmulatorEndpoint());
-                try (ClosablePublisher pub = Publishers.create(camel, QueueType.PUBSUB, uri)) {
-                    publishAll(pub, sent);
+                String uri = QueueType.PUBSUB.effectiveUri("google-pubsub:"
+                        + project + ":sdh-sections" + "?pubsubEndpoint="
+                        + emulator.getEmulatorEndpoint());
+                try (ClosablePublisher publisher =
+                        Publishers.create(camel, QueueType.PUBSUB, uri))
+                {
+                    publishAll(publisher, sent);
                 }
             }
 
             List<Received> got = new ArrayList<>();
             long deadline = System.currentTimeMillis() + 60_000;
-            while (got.size() < sent.size() && System.currentTimeMillis() < deadline) {
-                List<ReceivedMessage> batch = subs.pullCallable().call(PullRequest.newBuilder()
-                        .setSubscription(sub.toString()).setMaxMessages(100).build()).getReceivedMessagesList();
+            while (got.size() < sent.size()
+                    && System.currentTimeMillis() < deadline)
+            {
+                List<ReceivedMessage> batch = subscriptions.pullCallable()
+                        .call(PullRequest.newBuilder()
+                                .setSubscription(subscription.toString())
+                                .setMaxMessages(100).build())
+                        .getReceivedMessagesList();
                 List<String> acks = new ArrayList<>();
-                for (ReceivedMessage rm : batch) {
-                    PubsubMessage m = rm.getMessage();
-                    var a = m.getAttributesMap();
-                    got.add(new Received(a.get("messageId"), a.get("type"), a.get("fileId"), a.get("contentType"),
-                            m.getOrderingKey(), m.getData().toStringUtf8()));
-                    acks.add(rm.getAckId());
+                for (ReceivedMessage received : batch)
+                {
+                    PubsubMessage message = received.getMessage();
+                    Map<String, String> attributes =
+                            message.getAttributesMap();
+                    got.add(new Received(attributes.get("messageId"),
+                            attributes.get("type"), attributes.get("fileId"),
+                            attributes.get("contentType"),
+                            message.getOrderingKey(),
+                            message.getData().toStringUtf8()));
+                    acks.add(received.getAckId());
                 }
-                if (!acks.isEmpty()) {
-                    subs.acknowledgeCallable().call(AcknowledgeRequest.newBuilder().setSubscription(sub.toString())
-                            .addAllAckIds(acks).build());
+                if (!acks.isEmpty())
+                {
+                    subscriptions.acknowledgeCallable().call(
+                            AcknowledgeRequest.newBuilder()
+                                    .setSubscription(subscription.toString())
+                                    .addAllAckIds(acks).build());
                 }
             }
             assertDelivered(sent, got, true);
-        } finally {
+        }
+        finally
+        {
             channel.shutdownNow();
         }
     }

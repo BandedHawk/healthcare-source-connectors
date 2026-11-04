@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.it;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -22,74 +21,116 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 
 /**
- * The customer images (design §14.3), built as scripts/build-image.sh builds them: each distribution kit's
- * {@code container/Dockerfile} on the distroless Java 25 base, then {@code docker/customer-inventory.Dockerfile}
- * adds the OS package inventory. No shell, so operator commands run the JVM directly and files are read by copying
- * them out.
+ * The customer images (design §14.3), built as scripts/build-image.sh
+ * builds them: each distribution kit's {@code container/Dockerfile} on the
+ * distroless Java 25 base, then {@code docker/customer-inventory.Dockerfile}
+ * adds the OS package inventory. No shell, so operator commands run the JVM
+ * directly and files are read by copying them out.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class CustomerImageIT extends ContainerImageItBase {
+class CustomerImageIT extends ContainerImageItBase
+{
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    ImageFromDockerfile image(String module) throws Exception {
+    ImageFromDockerfile image(String module) throws Exception
+    {
         String kitImage = "sdh/" + module + ":it-kit";
         Path kit;
-        try (Stream<Path> s = Files.list(module(module).resolve("target"))) {
-            Path dir = s.filter(p -> p.getFileName().toString().endsWith("-dist-dir")).findFirst()
-                    .orElseThrow(() -> new IllegalStateException("Package " + module + " first (mvn -Pit verify)"));
-            try (Stream<Path> inner = Files.list(dir)) {
+        try (Stream<Path> paths = Files.list(module(module).resolve("target")))
+        {
+            Path dir = paths.filter(path -> path.getFileName().toString()
+                            .endsWith("-dist-dir"))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException("Package "
+                            + module + " first (mvn -Pit verify)"));
+            try (Stream<Path> inner = Files.list(dir))
+            {
                 kit = inner.findFirst().orElseThrow();
             }
         }
-        // The kit's own Dockerfile with the kit as the build context, as `docker build -f container/Dockerfile .`
-        // would use them.
+        // The kit's own Dockerfile with the kit as the build context, as
+        // `docker build -f container/Dockerfile .` would use them.
         ImageFromDockerfile fromKit = new ImageFromDockerfile(kitImage, false)
-                .withFileFromPath("Dockerfile", kit.resolve("container/Dockerfile"))
+                .withFileFromPath("Dockerfile",
+                        kit.resolve("container/Dockerfile"))
                 .withBuildArg("JAVA_IMAGE", baseImage("DISTROLESS_IMAGE"));
-        try (Stream<Path> entries = Files.list(kit)) {
-            for (Path e : entries.toList()) {
-                fromKit.withFileFromPath(e.getFileName().toString(), e);
+        try (Stream<Path> entries = Files.list(kit))
+        {
+            for (Path entry : entries.toList())
+            {
+                fromKit.withFileFromPath(entry.getFileName().toString(),
+                        entry);
             }
         }
         fromKit.get();
         return new ImageFromDockerfile("sdh/" + module + ":it", false)
-                .withFileFromPath("Dockerfile", Path.of("..", "docker", "customer-inventory.Dockerfile"))
+                .withFileFromPath("Dockerfile", Path.of("..", "docker",
+                        "customer-inventory.Dockerfile"))
                 .withBuildArg("KIT_IMAGE", kitImage);
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    boolean hasShell() {
+    boolean hasShell()
+    {
         return false;
     }
 
-    /** As the README documents: the JVM with the image's argument files, SDH_OPERATOR set for the exec. */
+    /**
+     * {@inheritDoc}
+     *
+     * <p>As the README documents: the JVM with the image's argument files,
+     * SDH_OPERATOR set for the exec.
+     */
     @Override
-    String admin(String... args) throws Exception {
-        assertThat(app.isRunning()).as("connector still running; its log:\n%s", APP_LOG.toUtf8String()).isTrue();
-        List<String> cmd = new ArrayList<>(List.of("java", "@/app/jvm.options", "@/app/container.options",
+    String admin(String... args) throws Exception
+    {
+        assertThat(app.isRunning())
+                .as("connector still running; its log:\n%s",
+                        APP_LOG.toUtf8String())
+                .isTrue();
+        List<String> command = new ArrayList<>(List.of("java",
+                "@/app/jvm.options", "@/app/container.options",
                 "@/app/admin.args"));
-        cmd.addAll(List.of(args));
-        ExecResult r = app.execInContainer(UTF_8, ExecConfig.builder().command(cmd.toArray(String[]::new))
+        command.addAll(List.of(args));
+        ExecResult result = app.execInContainer(UTF_8, ExecConfig.builder()
+                .command(command.toArray(String[]::new))
                 .envVars(Map.of("SDH_OPERATOR", "it-operator")).build());
-        return r.getExitCode() + ":" + r.getStdout().strip() + r.getStderr().strip();
+        return result.getExitCode() + ":" + result.getStdout().strip()
+                + result.getStderr().strip();
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    String variant() {
+    String variant()
+    {
         return "customer";
     }
 
     /**
-     * Only what Java needs: the JRE as a Debian package, the C library and a few data and font libraries. No shell,
-     * core utilities or package tools, which is most of the GPL userland a full base image brings.
+     * {@inheritDoc}
+     *
+     * <p>Only what Java needs: the JRE as a Debian package, the C library
+     * and a few data and font libraries. No shell, core utilities or
+     * package tools, which is most of the GPL userland a full base image
+     * brings.
      */
     @Override
-    void checkBaseImage(GenericContainer<?> container, List<String> packages) {
+    void checkBaseImage(GenericContainer<?> container, List<String> packages)
+    {
         assertThat(packages).contains("temurin-25-jre", "libc6")
-                .doesNotContain("bash", "dash", "busybox", "coreutils", "findutils", "grep", "sed", "tar", "gzip",
-                        "dpkg", "apt", "util-linux", "login", "passwd");
+                .doesNotContain("bash", "dash", "busybox", "coreutils",
+                        "findutils", "grep", "sed", "tar", "gzip", "dpkg",
+                        "apt", "util-linux", "login", "passwd");
         assertThat(packages).hasSizeLessThan(40);
     }
 }

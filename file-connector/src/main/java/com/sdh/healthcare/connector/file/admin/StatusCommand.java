@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.admin;
 
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
@@ -22,137 +21,248 @@ import java.util.Set;
 import org.apache.iceberg.Table;
 
 /**
- * {@code status}: the lease, the checkpoint (with the item in progress) and the inbox backlog (design §11.4). Reads
- * only. Each part is reported on its own, so an unreachable KMS still leaves the lease visible; the exit status is 1
- * if any part couldn't be read.
+ * {@code status}: the lease, the checkpoint (with the item in progress)
+ * and the inbox backlog (design §11.4). Reads only. Each part is reported
+ * on its own, so an unreachable KMS still leaves the lease visible; the
+ * exit status is 1 if any part couldn't be read.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class StatusCommand implements AdminCommand {
+final class StatusCommand implements AdminCommand
+{
+
+    /** The command's help. */
     static final String USAGE = """
             status
-                Shows the lease, the checkpoint and item in progress, and the inbox backlog.
-                Reads only: takes no lease and changes nothing.""";
+                Shows the lease, the checkpoint and item in progress, and
+                the inbox backlog. Reads only: takes no lease and changes
+                nothing.""";
+
+    /** Creates the command. */
+    StatusCommand()
+    {
+    }
 
     @Override
-    public String name() {
+    public String name()
+    {
         return "status";
     }
 
     @Override
-    public Set<String> options() {
+    public Set<String> options()
+    {
         return Set.of();
     }
 
     @Override
-    public Set<String> flags() {
+    public Set<String> flags()
+    {
         return Set.of();
     }
 
     @Override
-    public void run(AdminArgs a, AdminContext ctx, AuditRecord audit, PrintStream out) throws Exception {
-        boolean ok = part(out, "lease", () -> lease(ctx));
-        ok &= part(out, "checkpoint", () -> checkpoint(ctx, audit));
-        ok &= part(out, "inbox", () -> inbox(ctx));
-        if (!ok) {
+    public void run(AdminArgs arguments, AdminContext context,
+            AuditRecord audit, PrintStream out) throws Exception
+    {
+        boolean ok = part(out, "lease", () -> lease(context));
+        ok &= part(out, "checkpoint", () -> checkpoint(context, audit));
+        ok &= part(out, "inbox", () -> inbox(context));
+        if (!ok)
+        {
             throw new PartialStatusException();
         }
     }
 
+    /** Reads one part of the status. */
     @FunctionalInterface
-    private interface Part {
+    private interface Part
+    {
+
+        /**
+         * Reads the part.
+         *
+         * @return the text to show
+         * @throws Exception if the part can't be read
+         */
         String read() throws Exception;
     }
 
-    private static boolean part(PrintStream out, String label, Part p) {
-        try {
-            out.printf("%-21s %s%n", label + ":", p.read());
+    /**
+     * Prints one part, or that it is unavailable.
+     *
+     * @param out where to print
+     * @param label the part's label
+     * @param part reads the part
+     * @return true if the part was read
+     */
+    private static boolean part(PrintStream out, String label, Part part)
+    {
+        try
+        {
+            out.printf("%-21s %s%n", label + ":", part.read());
             return true;
-        } catch (Exception e) {
-            out.printf("%-21s unavailable (%s: %s)%n", label + ":", e.getClass().getSimpleName(), e.getMessage());
+        }
+        catch (Exception failure)
+        {
+            out.printf("%-21s unavailable (%s: %s)%n", label + ":",
+                    failure.getClass().getSimpleName(), failure.getMessage());
             return false;
         }
     }
 
-    private static String lease(AdminContext ctx) {
-        String name = ctx.props().lease().name();
-        Optional<LeaseStatus> s = ctx.leaseStore().inspect(name);
-        if (s.isEmpty()) {
+    /**
+     * The lease: who holds it and until when, or when it expired.
+     *
+     * @param context the admin context
+     * @return the text to show
+     */
+    private static String lease(AdminContext context)
+    {
+        String name = context.properties().lease().name();
+        Optional<LeaseStatus> inspected = context.leaseStore().inspect(name);
+        if (inspected.isEmpty())
+        {
             return name + " never held";
         }
-        LeaseStatus l = s.get();
-        if (l.live()) {
-            return "%s held by %s, epoch %d, renewed %s, expires in %s".formatted(name, l.owner(), l.epoch(),
-                    l.renewedAt(), human(l.remaining()));
+        LeaseStatus lease = inspected.get();
+        if (lease.live())
+        {
+            return "%s held by %s, epoch %d, renewed %s, expires in %s"
+                    .formatted(name, lease.owner(), lease.epoch(),
+                            lease.renewedAt(), human(lease.remaining()));
         }
-        return "%s free (expired %s ago; last holder %s, epoch %d)".formatted(name, human(l.remaining().negated()),
-                l.owner(), l.epoch());
+        return "%s free (expired %s ago; last holder %s, epoch %d)"
+                .formatted(name, human(lease.remaining().negated()),
+                        lease.owner(), lease.epoch());
     }
 
-    private static String checkpoint(AdminContext ctx, AuditRecord audit) throws Exception {
-        Table sections = ctx.sections();
+    /**
+     * The checkpoint: the item in progress or last processed, and how far
+     * it got.
+     *
+     * @param context the admin context
+     * @param audit the audit event, given the item's ID and state
+     * @return the text to show
+     * @throws Exception if the table or ID key can't be read
+     */
+    private static String checkpoint(AdminContext context, AuditRecord audit)
+            throws Exception
+    {
+        Table sections = context.sections();
         sections.refresh();
-        String raw = sections.properties().get(Checkpoint.propertyKey(ctx.props().connectorId()));
-        if (raw == null) {
+        String raw = sections.properties().get(Checkpoint.propertyKey(
+                context.properties().connectorId()));
+        if (raw == null)
+        {
             return "none (no item processed yet)";
         }
-        Checkpoint c = new CheckpointCodec(ctx.ids()).decode(raw);
-        audit.add(Attr.FILE_ID, c.fileId());
-        audit.add(Attr.STATE, c.state());
-        StringBuilder b = new StringBuilder();
-        b.append("item ").append(c.fileId()).append(' ').append(c.state()).append(" (").append(c.format())
-                .append(")");
-        if (c.state() == Checkpoint.State.SPLITTING) {
-            long at = c.resumeAt().offset();
-            b.append(String.format(", %.1f%% split (offset %d of %d bytes)",
-                    c.fileSize() == 0 ? 100.0 : 100.0 * at / c.fileSize(), at, c.fileSize()));
-        } else {
-            b.append(", ").append(c.fileSize()).append(" bytes");
+        Checkpoint checkpoint = new CheckpointCodec(context.ids()).decode(raw);
+        audit.add(Attr.FILE_ID, checkpoint.fileId());
+        audit.add(Attr.STATE, checkpoint.state());
+        StringBuilder text = new StringBuilder();
+        text.append("item ").append(checkpoint.fileId()).append(' ')
+                .append(checkpoint.state()).append(" (")
+                .append(checkpoint.format()).append(")");
+        if (checkpoint.state() == Checkpoint.State.SPLITTING)
+        {
+            long at = checkpoint.resumeAt().offset();
+            text.append(String.format(", %.1f%% split (offset %d of %d bytes)",
+                    checkpoint.fileSize() == 0 ? 100.0
+                            : 100.0 * at / checkpoint.fileSize(),
+                    at, checkpoint.fileSize()));
         }
-        b.append(", sections committed ").append(c.sectionCount()).append(", published ")
-                .append(c.publishedSeq() + 1).append(", started ").append(c.startedAt());
-        if (c.failure() != null) {
-            b.append(String.format("%n%-21s stage %s, %s at offset %d, at %s", "", c.failure().stage(),
-                    c.failure().code(), c.failure().offset(), c.failure().failedAt()));
+        else
+        {
+            text.append(", ").append(checkpoint.fileSize()).append(" bytes");
         }
-        if (c.state().inProgress()) {
-            b.append(String.format("%n%-21s in progress: the connector resumes it on start", ""));
+        text.append(", sections committed ")
+                .append(checkpoint.sectionCount()).append(", published ")
+                .append(checkpoint.publishedSeq() + 1).append(", started ")
+                .append(checkpoint.startedAt());
+        if (checkpoint.failure() != null)
+        {
+            text.append(String.format("%n%-21s stage %s, %s at offset %d,"
+                    + " at %s", "", checkpoint.failure().stage(),
+                    checkpoint.failure().code(),
+                    checkpoint.failure().offset(),
+                    checkpoint.failure().failedAt()));
         }
-        if (c.state() == Checkpoint.State.SPLITTING && c.restarts() > 0) {
-            b.append(String.format("%n%-21s restarted %d time(s) in a row without progress; at %d the batch is"
-                    + " stored unconverted, at %d the item fails", "", c.restarts(),
-                    IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS, IngestPipeline.FAIL_AFTER_RESTARTS));
+        if (checkpoint.state().inProgress())
+        {
+            text.append(String.format(
+                    "%n%-21s in progress: the connector resumes it on start",
+                    ""));
         }
-        return b.toString();
+        if (checkpoint.state() == Checkpoint.State.SPLITTING
+                && checkpoint.restarts() > 0)
+        {
+            text.append(String.format("%n%-21s restarted %d time(s) in a row"
+                    + " without progress; at %d the batch is"
+                    + " stored unconverted, at %d the item fails", "",
+                    checkpoint.restarts(),
+                    IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS,
+                    IngestPipeline.FAIL_AFTER_RESTARTS));
+        }
+        return text.toString();
     }
 
-    private static String inbox(AdminContext ctx) throws Exception {
-        // Read only: load() and backlog() never commit, so no committer is needed.
-        Inbox inbox = new Inbox(ctx.inbox(), null, ctx.ids(), ctx.props().connectorId(), RetryPolicy.DEFAULT,
+    /**
+     * The inbox backlog.
+     *
+     * @param context the admin context
+     * @return the text to show
+     * @throws Exception if the inbox or ID key can't be read
+     */
+    private static String inbox(AdminContext context) throws Exception
+    {
+        // Read only: load() and backlog() never commit, so no committer is
+        // needed.
+        Inbox inbox = new Inbox(context.inbox(), null, context.ids(),
+                context.properties().connectorId(), RetryPolicy.DEFAULT,
                 Clock.systemUTC());
         inbox.load();
         long backlog = inbox.backlog();
-        return backlog == 0 ? "no items waiting" : backlog + (backlog == 1 ? " item" : " items") + " waiting";
+        return backlog == 0 ? "no items waiting"
+                : backlog + (backlog == 1 ? " item" : " items") + " waiting";
     }
 
-    static String human(Duration d) {
-        long s = Math.max(0, d.toSeconds());
-        if (s < 120) {
-            return s + "s";
+    /**
+     * A duration in its largest sensible unit: seconds up to 2 minutes,
+     * minutes up to 2 hours, hours up to 2 days, then days.
+     *
+     * @param duration the duration; negative counts as zero
+     * @return the text, such as {@code 90s} or {@code 3h}
+     */
+    static String human(Duration duration)
+    {
+        long seconds = Math.max(0, duration.toSeconds());
+        if (seconds < 120)
+        {
+            return seconds + "s";
         }
-        if (s < 7200) {
-            return s / 60 + "m";
+        if (seconds < 7200)
+        {
+            return seconds / 60 + "m";
         }
-        if (s < 172_800) {
-            return s / 3600 + "h";
+        if (seconds < 172_800)
+        {
+            return seconds / 3600 + "h";
         }
-        return s / 86_400 + "d";
+        return seconds / 86_400 + "d";
     }
 
-    /** Some parts of the status couldn't be read; they are shown as unavailable. */
-    static final class PartialStatusException extends Exception {
-        PartialStatusException() {
+    /**
+     * Some parts of the status couldn't be read; they are shown as
+     * unavailable.
+     */
+    static final class PartialStatusException extends Exception
+    {
+
+        /** Creates the exception. */
+        PartialStatusException()
+        {
             super("Some status parts are unavailable");
         }
     }

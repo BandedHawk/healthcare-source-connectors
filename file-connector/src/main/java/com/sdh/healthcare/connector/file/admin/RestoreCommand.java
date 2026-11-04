@@ -49,6 +49,11 @@ final class RestoreCommand implements AdminCommand
                 --original-name name the output after the original file
                                 instead of <id>""";
 
+    /** Creates the command. */
+    RestoreCommand()
+    {
+    }
+
     @Override
     public String name()
     {

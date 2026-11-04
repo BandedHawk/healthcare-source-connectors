@@ -4,17 +4,16 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.config;
 
-import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
-import com.sdh.healthcare.connector.runtime.config.Pem;
-import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.sdh.healthcare.connector.file.TestKeys;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.config.Pem;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,93 +29,184 @@ import org.junit.jupiter.api.io.TempDir;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class KeyMaterialTest {
+class KeyMaterialTest
+{
+
+    /** Where the key files are written. */
     @TempDir
     Path dir;
 
-    static CommonSettings.Crypto crypto(TestKeys k, String recipientPin, Path signingPem) throws Exception {
-        return crypto(k, recipientPin, signingPem, "local", "local", null);
+    /**
+     * Local key settings.
+     *
+     * @param keys the key files
+     * @param recipientPin the recipient key's pinned fingerprint
+     * @param signingPem the signing key
+     * @return the settings
+     * @throws Exception if the settings can't be made
+     */
+    static CommonSettings.Crypto crypto(TestKeys keys, String recipientPin,
+            Path signingPem) throws Exception
+    {
+        return crypto(keys, recipientPin, signingPem, "local", "local", null);
     }
 
-    static CommonSettings.Crypto crypto(TestKeys k, String recipientPin, Path signingPem, String wrap,
-            String sign, String signingKeyRef) {
+    /**
+     * Key settings with chosen providers.
+     *
+     * @param keys the key files
+     * @param recipientPin the recipient key's pinned fingerprint
+     * @param signingPem the signing key
+     * @param wrap the KEK provider
+     * @param sign the signing provider
+     * @param signingKeyRef the KMS signing key, or null for the local one
+     * @return the settings
+     */
+    static CommonSettings.Crypto crypto(TestKeys keys, String recipientPin,
+            Path signingPem, String wrap, String sign, String signingKeyRef)
+    {
         return new CommonSettings.Crypto(wrap, sign,
-                new CommonSettings.Keystore(k.keystore, TestKeys.KS_PASSWORD),
-                k.splitterKeys(recipientPin, signingPem, signingKeyRef),
-                new CommonSettings.Aws(null, null), new CommonSettings.Gcp(null),
+                new CommonSettings.Keystore(keys.keystore,
+                        TestKeys.KS_PASSWORD),
+                keys.splitterKeys(recipientPin, signingPem, signingKeyRef),
+                new CommonSettings.Aws(null, null),
+                new CommonSettings.Gcp(null),
                 new CommonSettings.Vault(null, null, null, "transit", null));
     }
 
+    /**
+     * Every key loads, and the KEK wraps and unwraps.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void loadsAllKeys() throws Exception {
-        TestKeys k = new TestKeys(dir);
-        KeyMaterial m = KeyMaterial.load(crypto(k, KeyMaterial.fingerprint(k.recipient.getPublic()), k.signingPem));
-        assertThat(m.signerKid()).isEqualTo("connector-2026");
-        assertThat(m.recipient()).isEqualTo(k.recipient.getPublic());
-        assertThat(m.inbox()).isNotNull();
+    void loadsAllKeys() throws Exception
+    {
+        TestKeys keys = new TestKeys(dir);
+        KeyMaterial material = KeyMaterial.load(crypto(keys,
+                KeyMaterial.fingerprint(keys.recipient.getPublic()),
+                keys.signingPem));
+        assertThat(material.signerKid()).isEqualTo("connector-2026");
+        assertThat(material.recipient()).isEqualTo(keys.recipient.getPublic());
+        assertThat(material.inbox()).isNotNull();
         byte[] dek = new byte[32];
-        assertThat(m.wrap().unwrap(m.wrap().wrap(TestKeys.SECTIONS, dek))).isEqualTo(dek);
+        assertThat(material.wrap().unwrap(
+                material.wrap().wrap(TestKeys.SECTIONS, dek))).isEqualTo(dek);
     }
 
+    /**
+     * A keystore or signing key readable by others or writable by the
+     * group is refused.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void refusesWorldReadableOrGroupWritableKeystoreAndSigningKey() throws Exception {
-        TestKeys k = new TestKeys(dir);
-        String pin = KeyMaterial.fingerprint(k.recipient.getPublic());
-        Files.setPosixFilePermissions(k.keystore, PosixFilePermissions.fromString("rw-rw----"));
-        assertThatThrownBy(() -> KeyMaterial.load(crypto(k, pin, k.signingPem)))
-                .isInstanceOf(IOException.class).hasMessageContaining("others or writable by group");
-        Files.setPosixFilePermissions(k.keystore, PosixFilePermissions.fromString("rw-------"));
-        Files.setPosixFilePermissions(k.signingPem, PosixFilePermissions.fromString("rw----r--"));
-        assertThatThrownBy(() -> KeyMaterial.load(crypto(k, pin, k.signingPem)))
-                .isInstanceOf(IOException.class).hasMessageContaining("others or writable by group");
+    void refusesWorldReadableOrGroupWritableKeystoreAndSigningKey()
+            throws Exception
+    {
+        TestKeys keys = new TestKeys(dir);
+        String pin = KeyMaterial.fingerprint(keys.recipient.getPublic());
+        Files.setPosixFilePermissions(keys.keystore,
+                PosixFilePermissions.fromString("rw-rw----"));
+        assertThatThrownBy(() -> KeyMaterial.load(
+                crypto(keys, pin, keys.signingPem)))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("others or writable by group");
+        Files.setPosixFilePermissions(keys.keystore,
+                PosixFilePermissions.fromString("rw-------"));
+        Files.setPosixFilePermissions(keys.signingPem,
+                PosixFilePermissions.fromString("rw----r--"));
+        assertThatThrownBy(() -> KeyMaterial.load(
+                crypto(keys, pin, keys.signingPem)))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("others or writable by group");
     }
 
-    /** Kubernetes secret volumes with an fsGroup: read-only for owner and group (0440). */
+    /**
+     * Kubernetes secret volumes with an fsGroup: read-only for owner and
+     * group (0440).
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void acceptsGroupReadOnlyKeyFiles() throws Exception {
-        TestKeys k = new TestKeys(dir);
-        String pin = KeyMaterial.fingerprint(k.recipient.getPublic());
-        Files.setPosixFilePermissions(k.keystore, PosixFilePermissions.fromString("r--r-----"));
-        Files.setPosixFilePermissions(k.signingPem, PosixFilePermissions.fromString("r--r-----"));
-        try (KeyMaterial m = KeyMaterial.load(crypto(k, pin, k.signingPem))) {
-            assertThat(m.signerKid()).isNotBlank();
+    void acceptsGroupReadOnlyKeyFiles() throws Exception
+    {
+        TestKeys keys = new TestKeys(dir);
+        String pin = KeyMaterial.fingerprint(keys.recipient.getPublic());
+        Files.setPosixFilePermissions(keys.keystore,
+                PosixFilePermissions.fromString("r--r-----"));
+        Files.setPosixFilePermissions(keys.signingPem,
+                PosixFilePermissions.fromString("r--r-----"));
+        try (KeyMaterial material =
+                KeyMaterial.load(crypto(keys, pin, keys.signingPem)))
+        {
+            assertThat(material.signerKid()).isNotBlank();
         }
     }
 
+    /**
+     * A wrong recipient pin, an unencrypted signing key and an unknown
+     * provider are refused.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void refusesWrongPinUnencryptedSigningKeyAndOtherProviders() throws Exception {
-        TestKeys k = new TestKeys(dir);
-        assertThatThrownBy(() -> KeyMaterial.load(crypto(k, "00".repeat(32), k.signingPem)))
-                .isInstanceOf(GeneralSecurityException.class).hasMessageContaining("pinned");
+    void refusesWrongPinUnencryptedSigningKeyAndOtherProviders()
+            throws Exception
+    {
+        TestKeys keys = new TestKeys(dir);
+        assertThatThrownBy(() -> KeyMaterial.load(
+                crypto(keys, "00".repeat(32), keys.signingPem)))
+                .isInstanceOf(GeneralSecurityException.class)
+                .hasMessageContaining("pinned");
 
         Path plain = dir.resolve("plain.pem");
-        Files.createFile(plain, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
-        Files.writeString(plain, "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n");
-        String pin = KeyMaterial.fingerprint(k.recipient.getPublic());
-        assertThatThrownBy(() -> KeyMaterial.load(crypto(k, pin, plain)))
-                .isInstanceOf(GeneralSecurityException.class).hasMessageContaining("encrypted");
+        Files.createFile(plain, PosixFilePermissions.asFileAttribute(
+                PosixFilePermissions.fromString("rw-------")));
+        Files.writeString(plain, "-----BEGIN PRIVATE KEY-----\nAAAA\n"
+                + "-----END PRIVATE KEY-----\n");
+        String pin = KeyMaterial.fingerprint(keys.recipient.getPublic());
+        assertThatThrownBy(() -> KeyMaterial.load(crypto(keys, pin, plain)))
+                .isInstanceOf(GeneralSecurityException.class)
+                .hasMessageContaining("encrypted");
 
-        CommonSettings.Crypto c = crypto(k, pin, k.signingPem);
-        assertThatThrownBy(() -> KeyMaterial.load(new CommonSettings.Crypto("hsm-x", "local", c.keystore(),
-                c.keys(), c.aws(), c.gcp(), c.vault()))).isInstanceOf(IllegalArgumentException.class)
+        CommonSettings.Crypto crypto = crypto(keys, pin, keys.signingPem);
+        assertThatThrownBy(() -> KeyMaterial.load(new CommonSettings.Crypto(
+                "hsm-x", "local", crypto.keystore(), crypto.keys(),
+                crypto.aws(), crypto.gcp(), crypto.vault())))
+                .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown key provider");
     }
 
+    /**
+     * A key encrypted by {@code openssl pkcs8 -topk8} reads with the right
+     * passphrase only. Skipped without openssl.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void readsAnOpensslEncryptedKey() throws Exception {
+    void readsAnOpensslEncryptedKey() throws Exception
+    {
         Path key = dir.resolve("ossl.pem");
-        Process p;
-        try {
-            p = new ProcessBuilder("sh", "-c", "openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 "
-                    + "| openssl pkcs8 -topk8 -v2 aes-256-cbc -passout pass:pw -out '" + key + "'")
+        Process process;
+        try
+        {
+            process = new ProcessBuilder("sh", "-c", "openssl genpkey"
+                    + " -algorithm EC -pkeyopt ec_paramgen_curve:P-256 "
+                    + "| openssl pkcs8 -topk8 -v2 aes-256-cbc -passout pass:pw"
+                    + " -out '" + key + "'")
                     .redirectErrorStream(true).start();
-        } catch (IOException e) {
+        }
+        catch (IOException failure)
+        {
             assumeTrue(false, "openssl not available");
             return;
         }
-        assumeTrue(p.waitFor() == 0, "openssl failed");
-        assertThat(Pem.encryptedPrivateKey(key, "pw".toCharArray())).isInstanceOf(ECPrivateKey.class);
-        assertThatThrownBy(() -> Pem.encryptedPrivateKey(key, "wrong".toCharArray()))
+        assumeTrue(process.waitFor() == 0, "openssl failed");
+        assertThat(Pem.encryptedPrivateKey(key, "pw".toCharArray()))
+                .isInstanceOf(ECPrivateKey.class);
+        assertThatThrownBy(() -> Pem.encryptedPrivateKey(key,
+                "wrong".toCharArray()))
                 .isInstanceOf(GeneralSecurityException.class);
     }
 }

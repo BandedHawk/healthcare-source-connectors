@@ -32,6 +32,7 @@ import com.sdh.healthcare.connector.file.inbox.InboxRoute;
 import com.sdh.healthcare.connector.file.inbox.LandedItemsTable;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.LeaseDatabase;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings.Lease;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
@@ -310,7 +311,7 @@ public final class ConnectorRuntime implements AutoCloseable
     private static LeaseKeeper acquire(ConnectorProperties properties,
             HikariDataSource dataSource, FatalExit fatal) throws Exception
     {
-        var settings = properties.lease();
+        Lease settings = properties.lease();
         JdbcLeaseStore store = new JdbcLeaseStore(dataSource,
                 settings.jdbc().table(), Duration.ofSeconds(10));
         store.createTableIfMissing();

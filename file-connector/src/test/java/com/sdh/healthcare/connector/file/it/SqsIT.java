@@ -4,12 +4,15 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.it;
 
-import static com.sdh.healthcare.connector.file.it.ItSupport.*;
+import static com.sdh.healthcare.connector.file.it.ItSupport.assertDelivered;
+import static com.sdh.healthcare.connector.file.it.ItSupport.interleaved;
+import static com.sdh.healthcare.connector.file.it.ItSupport.publishAll;
+import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
 
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.file.it.ItSupport.Received;
 import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
 import com.sdh.healthcare.connector.runtime.publish.QueueType;
@@ -34,72 +37,125 @@ import software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 
 /**
- * Design §10.3 sqs on a FIFO queue: MessageGroupId = fileId, MessageDeduplicationId = messageId. Runs against
- * ElasticMQ, an SQS-compatible server (no cloud account or LocalStack token needed).
+ * Design §10.3 sqs on a FIFO queue: MessageGroupId = fileId,
+ * MessageDeduplicationId = messageId. Runs against ElasticMQ, an
+ * SQS-compatible server (no cloud account or LocalStack token needed).
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class SqsIT {
+class SqsIT
+{
+
+    /** The SQS-compatible server. */
     static GenericContainer<?> elasticmq;
 
+    /** Starts the server. */
     @BeforeAll
-    static void start() {
+    static void start()
+    {
         requireDocker();
-        elasticmq = new GenericContainer<>("softwaremill/elasticmq-native:1.7.1")
+        elasticmq = new GenericContainer<>(
+                "softwaremill/elasticmq-native:1.7.1")
                 .withExposedPorts(9324)
                 .waitingFor(Wait.forListeningPort());
         elasticmq.start();
     }
 
+    /** Stops the server. */
     @AfterAll
-    static void stop() {
-        if (elasticmq != null) {
+    static void stop()
+    {
+        if (elasticmq != null)
+        {
             elasticmq.stop();
         }
     }
 
+    /**
+     * A FIFO queue groups messages by file and drops republished ones.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void fifoGroupsAndDeduplicates() throws Exception {
-        String endpoint = "http://" + elasticmq.getHost() + ":" + elasticmq.getMappedPort(9324);
-        SqsClient sqs = SqsClient.builder().endpointOverride(URI.create(endpoint)).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("x", "x"))).build();
-        String queueUrl = sqs.createQueue(b -> b.queueName("sdh.fifo").attributes(Map.of(
-                QueueAttributeName.FIFO_QUEUE, "true",
-                QueueAttributeName.CONTENT_BASED_DEDUPLICATION, "false"))).queueUrl();
+    void fifoGroupsAndDeduplicates() throws Exception
+    {
+        String endpoint = "http://" + elasticmq.getHost() + ":"
+                + elasticmq.getMappedPort(9324);
+        SqsClient sqs = SqsClient.builder()
+                .endpointOverride(URI.create(endpoint))
+                .region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create("x", "x")))
+                .build();
+        String queueUrl = sqs.createQueue(request -> request
+                .queueName("sdh.fifo")
+                .attributes(Map.of(QueueAttributeName.FIFO_QUEUE, "true",
+                        QueueAttributeName.CONTENT_BASED_DEDUPLICATION,
+                        "false")))
+                .queueUrl();
 
-        List<OutboundMessage> sent = interleaved(UUID.randomUUID(), UUID.randomUUID(), 25);
-        try (DefaultCamelContext camel = new DefaultCamelContext()) {
+        List<OutboundMessage> sent =
+                interleaved(UUID.randomUUID(), UUID.randomUUID(), 25);
+        try (DefaultCamelContext camel = new DefaultCamelContext())
+        {
             camel.start();
-            String uri = QueueType.SQS.effectiveUri("aws2-sqs:sdh.fifo?overrideEndpoint=true&uriEndpointOverride="
-                    + endpoint + "&region=us-east-1&accessKey=x&secretKey=x&autoCreateQueue=false");
-            try (ClosablePublisher pub = Publishers.create(camel, QueueType.SQS, uri)) {
-                publishAll(pub, sent);
-                publishAll(pub, sent.subList(0, 6)); // same message IDs again: dropped by FIFO dedup
+            String uri = QueueType.SQS.effectiveUri("aws2-sqs:sdh.fifo"
+                    + "?overrideEndpoint=true&uriEndpointOverride=" + endpoint
+                    + "&region=us-east-1&accessKey=x&secretKey=x"
+                    + "&autoCreateQueue=false");
+            try (ClosablePublisher publisher =
+                    Publishers.create(camel, QueueType.SQS, uri))
+            {
+                publishAll(publisher, sent);
+                // The same message IDs again: dropped by FIFO deduplication.
+                publishAll(publisher, sent.subList(0, 6));
             }
         }
 
         List<Received> got = new ArrayList<>();
-        while (true) {
-            List<Message> batch = sqs.receiveMessage(b -> b.queueUrl(queueUrl).maxNumberOfMessages(10)
+        while (true)
+        {
+            List<Message> batch = sqs.receiveMessage(request -> request
+                    .queueUrl(queueUrl).maxNumberOfMessages(10)
                     .waitTimeSeconds(1).messageAttributeNames("All")
-                    .messageSystemAttributeNames(MessageSystemAttributeName.MESSAGE_GROUP_ID)).messages();
-            if (batch.isEmpty()) {
+                    .messageSystemAttributeNames(
+                            MessageSystemAttributeName.MESSAGE_GROUP_ID))
+                    .messages();
+            if (batch.isEmpty())
+            {
                 break;
             }
-            for (Message m : batch) {
-                Map<String, MessageAttributeValue> a = m.messageAttributes();
-                got.add(new Received(val(a, "messageId"), val(a, "type"), val(a, "fileId"), val(a, "contentType"),
-                        m.attributes().get(MessageSystemAttributeName.MESSAGE_GROUP_ID), m.body()));
-                sqs.deleteMessage(b -> b.queueUrl(queueUrl).receiptHandle(m.receiptHandle()));
+            for (Message message : batch)
+            {
+                Map<String, MessageAttributeValue> attributes =
+                        message.messageAttributes();
+                got.add(new Received(value(attributes, "messageId"),
+                        value(attributes, "type"),
+                        value(attributes, "fileId"),
+                        value(attributes, "contentType"),
+                        message.attributes().get(
+                                MessageSystemAttributeName.MESSAGE_GROUP_ID),
+                        message.body()));
+                sqs.deleteMessage(request -> request.queueUrl(queueUrl)
+                        .receiptHandle(message.receiptHandle()));
             }
         }
         sqs.close();
         assertDelivered(sent, got, true);
     }
 
-    static String val(Map<String, MessageAttributeValue> a, String k) {
-        MessageAttributeValue v = a.get(k);
-        return v == null ? null : v.stringValue();
+    /**
+     * A message attribute's text.
+     *
+     * @param attributes the message's attributes
+     * @param name the attribute name
+     * @return its text, or null if absent
+     */
+    static String value(Map<String, MessageAttributeValue> attributes,
+            String name)
+    {
+        MessageAttributeValue value = attributes.get(name);
+        return value == null ? null : value.stringValue();
     }
 }

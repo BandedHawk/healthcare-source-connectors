@@ -4,12 +4,15 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.it;
 
-import static com.sdh.healthcare.connector.file.it.ItSupport.*;
+import static com.sdh.healthcare.connector.file.it.ItSupport.assertDelivered;
+import static com.sdh.healthcare.connector.file.it.ItSupport.interleaved;
+import static com.sdh.healthcare.connector.file.it.ItSupport.publishAll;
+import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
 
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.file.it.ItSupport.Received;
 import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
 import com.sdh.healthcare.connector.runtime.publish.QueueType;
@@ -33,62 +36,105 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.kafka.KafkaContainer;
 
 /**
- * Design §10.3 kafka: record key = fileId, acks=all + idempotent producer, metadata as record headers.
+ * Design §10.3 kafka: record key = fileId, acks=all + idempotent producer,
+ * metadata as record headers.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class KafkaIT {
+class KafkaIT
+{
+
+    /** The broker. */
     static KafkaContainer kafka;
 
+    /** Starts the broker. */
     @BeforeAll
-    static void start() {
+    static void start()
+    {
         requireDocker();
         kafka = new KafkaContainer("apache/kafka:4.2.2");
         kafka.start();
     }
 
+    /** Stops the broker. */
     @AfterAll
-    static void stop() {
-        if (kafka != null) {
+    static void stop()
+    {
+        if (kafka != null)
+        {
             kafka.stop();
         }
     }
 
-    static String header(ConsumerRecord<String, String> r, String name) {
-        Header h = r.headers().lastHeader(name);
-        return h == null ? null : new String(h.value(), StandardCharsets.UTF_8);
+    /**
+     * A record header's value.
+     *
+     * @param record the record
+     * @param name the header name
+     * @return its value as UTF-8, or null if absent
+     */
+    static String header(ConsumerRecord<String, String> record, String name)
+    {
+        Header header = record.headers().lastHeader(name);
+        return header == null ? null
+                : new String(header.value(), StandardCharsets.UTF_8);
     }
 
+    /**
+     * Messages are keyed by file, acknowledged, and arrive in order within
+     * their partition.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void keyedOrderedAcknowledgedDelivery() throws Exception {
+    void keyedOrderedAcknowledgedDelivery() throws Exception
+    {
         String bootstrap = kafka.getBootstrapServers();
-        try (Admin admin = Admin.create(Map.of("bootstrap.servers", bootstrap))) {
-            admin.createTopics(List.of(new NewTopic("sdh-sections", 3, (short) 1))).all().get();
+        try (Admin admin =
+                Admin.create(Map.of("bootstrap.servers", bootstrap)))
+        {
+            admin.createTopics(List.of(new NewTopic("sdh-sections", 3,
+                    (short) 1))).all().get();
         }
-        List<OutboundMessage> sent = interleaved(UUID.randomUUID(), UUID.randomUUID(), 100);
-        try (DefaultCamelContext camel = new DefaultCamelContext()) {
+        List<OutboundMessage> sent =
+                interleaved(UUID.randomUUID(), UUID.randomUUID(), 100);
+        try (DefaultCamelContext camel = new DefaultCamelContext())
+        {
             camel.start();
-            String uri = QueueType.KAFKA.effectiveUri("kafka:sdh-sections?brokers=" + bootstrap);
-            try (ClosablePublisher pub = Publishers.create(camel, QueueType.KAFKA, uri)) {
-                publishAll(pub, sent);
+            String uri = QueueType.KAFKA.effectiveUri(
+                    "kafka:sdh-sections?brokers=" + bootstrap);
+            try (ClosablePublisher publisher =
+                    Publishers.create(camel, QueueType.KAFKA, uri))
+            {
+                publishAll(publisher, sent);
             }
         }
 
         List<ConsumerRecord<String, String>> records = new ArrayList<>();
-        try (KafkaConsumer<String, String> c = new KafkaConsumer<>(Map.of("bootstrap.servers", bootstrap,
-                "group.id", "it", "auto.offset.reset", "earliest"), new StringDeserializer(),
-                new StringDeserializer())) {
-            c.subscribe(List.of("sdh-sections"));
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(
+                Map.of("bootstrap.servers", bootstrap, "group.id", "it",
+                        "auto.offset.reset", "earliest"),
+                new StringDeserializer(), new StringDeserializer()))
+        {
+            consumer.subscribe(List.of("sdh-sections"));
             long deadline = System.currentTimeMillis() + 60_000;
-            while (records.size() < sent.size() && System.currentTimeMillis() < deadline) {
-                c.poll(Duration.ofMillis(500)).forEach(records::add);
+            while (records.size() < sent.size()
+                    && System.currentTimeMillis() < deadline)
+            {
+                consumer.poll(Duration.ofMillis(500)).forEach(records::add);
             }
         }
-        records.sort(Comparator.<ConsumerRecord<String, String>>comparingInt(ConsumerRecord::partition)
+        records.sort(Comparator
+                .<ConsumerRecord<String, String>>comparingInt(
+                        ConsumerRecord::partition)
                 .thenComparingLong(ConsumerRecord::offset));
-        List<Received> got = records.stream().map(r -> new Received(header(r, "messageId"), header(r, "type"),
-                header(r, "fileId"), header(r, "contentType"), r.key(), r.value())).toList();
+        List<Received> got = records.stream()
+                .map(record -> new Received(header(record, "messageId"),
+                        header(record, "type"), header(record, "fileId"),
+                        header(record, "contentType"), record.key(),
+                        record.value()))
+                .toList();
         assertDelivered(sent, got, true);
     }
 }

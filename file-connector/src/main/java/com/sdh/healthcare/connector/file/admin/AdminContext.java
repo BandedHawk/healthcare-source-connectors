@@ -4,10 +4,8 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.admin;
 
-import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.contract.table.SectionsTable;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
@@ -15,6 +13,7 @@ import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.inbox.InboxTables;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -27,135 +26,275 @@ import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 
 /**
- * What the admin commands read from, opened only when a command needs it. Strictly read-only: tables are loaded,
- * never created; the ID key is never created; the lease is inspected, never taken (design §11.4).
+ * What the admin commands read from, opened only when a command needs it.
+ * Strictly read-only: tables are loaded, never created; the ID key is never
+ * created; the lease is inspected, never taken (design §11.4).
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class AdminContext implements AutoCloseable {
-    private final ConnectorProperties props;
+final class AdminContext implements AutoCloseable
+{
+
+    /** The connector configuration. */
+    private final ConnectorProperties properties;
+
+    /** The KEKs, once loaded. */
     private KeyMaterial keys;
+
+    /** The splitter's catalog, once built. */
     private Catalog catalog;
+
+    /** The landing catalog, once built; may be {@link #catalog}. */
     private Catalog landingCatalog;
+
+    /** The splitter's ID key, once loaded. */
     private SectionIds ids;
+
+    /** The landing node's ID key, once loaded. */
     private SectionIds landingIds;
+
+    /** The read-only lease database pool, once opened. */
     private HikariDataSource leaseDb;
 
-    AdminContext(ConnectorProperties props) {
-        this.props = props;
+    /**
+     * Opens nothing yet.
+     *
+     * @param properties the connector configuration
+     */
+    AdminContext(ConnectorProperties properties)
+    {
+        this.properties = properties;
     }
 
-    ConnectorProperties props() {
-        return props;
+    /**
+     * The connector configuration.
+     *
+     * @return the configuration
+     */
+    ConnectorProperties properties()
+    {
+        return properties;
     }
 
-    KeyMaterial keys() throws Exception {
-        if (keys == null) {
-            keys = KeyMaterial.load(props.crypto());
+    /**
+     * The KEKs, loaded on first use.
+     *
+     * @return the key material
+     * @throws Exception if the keys can't be loaded
+     */
+    KeyMaterial keys() throws Exception
+    {
+        if (keys == null)
+        {
+            keys = KeyMaterial.load(properties.crypto());
         }
         return keys;
     }
 
-    Catalog catalog() {
-        if (catalog == null) {
-            Map<String, String> c = props.storage().catalog();
-            if (c == null || c.isEmpty()) {
-                throw new IllegalArgumentException("sdh.storage.catalog is required");
+    /**
+     * The splitter's catalog, built on first use.
+     *
+     * @return the catalog
+     * @throws IllegalArgumentException if no catalog is configured
+     */
+    Catalog catalog()
+    {
+        if (catalog == null)
+        {
+            Map<String, String> settings = properties.storage().catalog();
+            if (settings == null || settings.isEmpty())
+            {
+                throw new IllegalArgumentException(
+                        "sdh.storage.catalog is required");
             }
-            catalog = CatalogUtil.buildIcebergCatalog(props.storage().catalogName(), c, null);
+            catalog = CatalogUtil.buildIcebergCatalog(
+                    properties.storage().catalogName(), settings, null);
         }
         return catalog;
     }
 
-    /** The landing catalog: {@code sdh.landing.storage.catalog}, or the splitter's own when that is unset. */
-    Catalog landingCatalog() {
-        if (landingCatalog == null) {
-            Map<String, String> c = props.landing().storage().catalog();
-            landingCatalog = c == null || c.isEmpty() ? catalog()
-                    : CatalogUtil.buildIcebergCatalog(props.landing().storage().catalogName(), c, null);
+    /**
+     * The landing catalog: {@code sdh.landing.storage.catalog}, or the
+     * splitter's own when that is unset.
+     *
+     * @return the catalog
+     */
+    Catalog landingCatalog()
+    {
+        if (landingCatalog == null)
+        {
+            Map<String, String> settings =
+                    properties.landing().storage().catalog();
+            landingCatalog = settings == null || settings.isEmpty()
+                    ? catalog()
+                    : CatalogUtil.buildIcebergCatalog(
+                            properties.landing().storage().catalogName(),
+                            settings, null);
         }
         return landingCatalog;
     }
 
-    Table table(String name) {
-        return load(catalog(), props.storage().namespace(), name);
+    /**
+     * A table in the splitter's namespace.
+     *
+     * @param name the table name
+     * @return the table
+     * @throws IllegalStateException if the table doesn't exist
+     */
+    Table table(String name)
+    {
+        return load(catalog(), properties.storage().namespace(), name);
     }
 
-    private static Table load(Catalog catalog, String namespace, String name) {
-        try {
+    /**
+     * Loads a table, never creating it.
+     *
+     * @param catalog the catalog
+     * @param namespace the namespace
+     * @param name the table name
+     * @return the table
+     * @throws IllegalStateException if the table doesn't exist
+     */
+    private static Table load(Catalog catalog, String namespace, String name)
+    {
+        try
+        {
             return catalog.loadTable(TableIdentifier.of(namespace, name));
-        } catch (NoSuchTableException e) {
-            throw new IllegalStateException("Table " + name + " does not exist: the connector has never run here");
+        }
+        catch (NoSuchTableException failure)
+        {
+            throw new IllegalStateException("Table " + name
+                    + " does not exist: the connector has never run here");
         }
     }
 
-    Table sections() {
+    /**
+     * The sections table.
+     *
+     * @return the table
+     */
+    Table sections()
+    {
         return table(SectionsTable.DEFAULT_NAME);
     }
 
-    Table inbox() {
+    /**
+     * The inbox table.
+     *
+     * @return the table
+     */
+    Table inbox()
+    {
         return table(InboxTables.INBOX);
     }
 
-    Table landedItems() {
-        return load(landingCatalog(), props.landing().storage().namespace(), LandingTables.LANDED_ITEMS);
+    /**
+     * The landing node's landed items table.
+     *
+     * @return the table
+     */
+    Table landedItems()
+    {
+        return load(landingCatalog(), properties.landing().storage()
+                .namespace(), LandingTables.LANDED_ITEMS);
     }
 
-    /** The landing node's ID key, for checking a landed item's digest; unwrapped with the landed-items KEK. */
-    SectionIds landingIds() throws Exception {
-        if (landingIds == null) {
-            landingIds = new SectionIds(IdKeys.load(landedItems(), keys().wrap()));
+    /**
+     * The landing node's ID key, for checking a landed item's digest;
+     * unwrapped with the landed-items KEK.
+     *
+     * @return the ID key
+     * @throws Exception if the key can't be loaded or unwrapped
+     */
+    SectionIds landingIds() throws Exception
+    {
+        if (landingIds == null)
+        {
+            landingIds = new SectionIds(
+                    IdKeys.load(landedItems(), keys().wrap()));
         }
         return landingIds;
     }
 
-    SectionIds ids() throws Exception {
-        if (ids == null) {
+    /**
+     * The splitter's ID key.
+     *
+     * @return the ID key
+     * @throws Exception if the key can't be loaded or unwrapped
+     */
+    SectionIds ids() throws Exception
+    {
+        if (ids == null)
+        {
             ids = new SectionIds(IdKeys.load(sections(), keys().wrap()));
         }
         return ids;
     }
 
-    JdbcLeaseStore leaseStore() {
-        if (leaseDb == null) {
-            CommonSettings.Jdbc jdbc = props.lease().jdbc();
-            if (jdbc.url() == null || jdbc.url().isBlank()) {
-                throw new IllegalArgumentException("sdh.lease.jdbc.url is required");
+    /**
+     * The lease store, through a read-only pool of one connection.
+     *
+     * @return the lease store
+     * @throws IllegalArgumentException if no lease database is configured
+     */
+    JdbcLeaseStore leaseStore()
+    {
+        if (leaseDb == null)
+        {
+            CommonSettings.Jdbc jdbc = properties.lease().jdbc();
+            if (jdbc.url() == null || jdbc.url().isBlank())
+            {
+                throw new IllegalArgumentException(
+                        "sdh.lease.jdbc.url is required");
             }
-            HikariConfig c = new HikariConfig();
-            c.setJdbcUrl(jdbc.url());
-            c.setUsername(jdbc.username());
-            c.setPassword(jdbc.password());
-            c.setMaximumPoolSize(1);
-            c.setConnectionTimeout(10_000);
-            c.setReadOnly(true);
-            c.setPoolName("sdh-admin");
-            leaseDb = new HikariDataSource(c);
+            HikariConfig pool = new HikariConfig();
+            pool.setJdbcUrl(jdbc.url());
+            pool.setUsername(jdbc.username());
+            pool.setPassword(jdbc.password());
+            pool.setMaximumPoolSize(1);
+            pool.setConnectionTimeout(10_000);
+            pool.setReadOnly(true);
+            pool.setPoolName("sdh-admin");
+            leaseDb = new HikariDataSource(pool);
         }
-        return new JdbcLeaseStore(leaseDb, props.lease().jdbc().table(), Duration.ofSeconds(10));
+        return new JdbcLeaseStore(leaseDb, properties.lease().jdbc().table(),
+                Duration.ofSeconds(10));
     }
 
+    /** Closes whatever was opened, ignoring catalog close failures. */
     @Override
-    public void close() {
-        if (keys != null) {
+    public void close()
+    {
+        if (keys != null)
+        {
             keys.close();
         }
-        if (landingCatalog != catalog && landingCatalog instanceof AutoCloseable c) {
-            try {
-                c.close();
-            } catch (Exception ignored) {
+        if (landingCatalog != catalog
+                && landingCatalog instanceof AutoCloseable closeable)
+        {
+            try
+            {
+                closeable.close();
+            }
+            catch (Exception ignored)
+            {
                 // exiting
             }
         }
-        if (catalog instanceof AutoCloseable c) {
-            try {
-                c.close();
-            } catch (Exception ignored) {
+        if (catalog instanceof AutoCloseable closeable)
+        {
+            try
+            {
+                closeable.close();
+            }
+            catch (Exception ignored)
+            {
                 // exiting
             }
         }
-        if (leaseDb != null) {
+        if (leaseDb != null)
+        {
             leaseDb.close();
         }
     }

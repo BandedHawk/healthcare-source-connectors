@@ -152,12 +152,12 @@ class ResultReporterTest
         List<String> keys = new ArrayList<>();
         List<String> refs = new ArrayList<>();
         List<Failed> failed = new ArrayList<>();
-        for (int i = 0; i < count; i++)
+        for (int index = 0; index < count; index++)
         {
-            offsets.add(i * 1_000_000_000L);
+            offsets.add(index * 1_000_000_000L);
             keys.add(null);
             refs.add("\"".repeat(255));
-            failed.add(new Failed(i, i * 1_000_000_000L + 7,
+            failed.add(new Failed(index, index * 1_000_000_000L + 7,
                     "CONVERT_CSV_FIELD_COUNT",
                     new SourcePosition(Long.MAX_VALUE, Integer.MAX_VALUE)));
         }

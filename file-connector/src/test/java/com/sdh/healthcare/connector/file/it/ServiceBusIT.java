@@ -4,16 +4,20 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.it;
 
-import static com.sdh.healthcare.connector.file.it.ItSupport.*;
+import static com.sdh.healthcare.connector.file.it.ItSupport.assertDelivered;
+import static com.sdh.healthcare.connector.file.it.ItSupport.interleaved;
+import static com.sdh.healthcare.connector.file.it.ItSupport.publishAll;
+import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
 
 import com.azure.messaging.servicebus.ServiceBusClientBuilder;
 import com.azure.messaging.servicebus.ServiceBusReceivedMessage;
+import com.azure.messaging.servicebus.ServiceBusReceiverClient;
 import com.azure.messaging.servicebus.ServiceBusSessionReceiverClient;
 import com.azure.messaging.servicebus.models.ServiceBusReceiveMode;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.file.it.ItSupport.Received;
 import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
 import com.sdh.healthcare.connector.runtime.publish.QueueType;
@@ -32,32 +36,52 @@ import org.testcontainers.images.builder.Transferable;
 import org.testcontainers.mssqlserver.MSSQLServerContainer;
 
 /**
- * Design §10.3 servicebus: SessionId = fileId, MessageId = messageId with duplicate detection, metadata as
- * application properties. Microsoft's emulator, backed by SQL Server; config is copied in (no host mounts). The
- * emulator caps the duplicate-detection window at 5 minutes.
+ * Design §10.3 servicebus: SessionId = fileId, MessageId = messageId with
+ * duplicate detection, metadata as application properties. Microsoft's
+ * emulator, backed by SQL Server; config is copied in (no host mounts).
+ * The emulator caps the duplicate-detection window at 5 minutes.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class ServiceBusIT {
+class ServiceBusIT
+{
+
+    /**
+     * The emulator's configuration: one session queue, duplicate detection
+     * on.
+     */
     static final String CONFIG = """
-            {"UserConfig":{"Namespaces":[{"Name":"sbemulatorns","Queues":[{"Name":"sdh","Properties":{
-              "DeadLetteringOnMessageExpiration":false,"DefaultMessageTimeToLive":"PT1H",
-              "DuplicateDetectionHistoryTimeWindow":"PT5M","ForwardDeadLetteredMessagesTo":"","ForwardTo":"",
-              "LockDuration":"PT1M","MaxDeliveryCount":3,"RequiresDuplicateDetection":true,"RequiresSession":true}}],
+            {"UserConfig":{"Namespaces":[{"Name":"sbemulatorns","Queues":\
+            [{"Name":"sdh","Properties":{
+              "DeadLetteringOnMessageExpiration":false,\
+            "DefaultMessageTimeToLive":"PT1H",
+              "DuplicateDetectionHistoryTimeWindow":"PT5M",\
+            "ForwardDeadLetteredMessagesTo":"","ForwardTo":"",
+              "LockDuration":"PT1M","MaxDeliveryCount":3,\
+            "RequiresDuplicateDetection":true,"RequiresSession":true}}],
               "Topics":[]}],"Logging":{"Type":"File"}}}""";
 
+    /** The network the emulator and its database share. */
     static Network network;
+
+    /** The emulator's database. */
     static MSSQLServerContainer sql;
+
+    /** The Service Bus emulator. */
     static ServiceBusEmulatorContainer servicebus;
 
+    /** Starts the database and the emulator. */
     @BeforeAll
-    static void start() {
+    static void start()
+    {
         requireDocker();
         network = Network.newNetwork();
-        sql = new MSSQLServerContainer("mcr.microsoft.com/mssql/server:2022-CU26-ubuntu-22.04")
+        sql = new MSSQLServerContainer(
+                "mcr.microsoft.com/mssql/server:2022-CU26-ubuntu-22.04")
                 .acceptLicense().withNetwork(network);
-        servicebus = new ServiceBusEmulatorContainer("mcr.microsoft.com/azure-messaging/servicebus-emulator:2.0.0")
+        servicebus = new ServiceBusEmulatorContainer(
+                "mcr.microsoft.com/azure-messaging/servicebus-emulator:2.0.0")
                 .acceptLicense()
                 .withConfig(Transferable.of(CONFIG))
                 .withMsSqlServerContainer(sql)
@@ -65,43 +89,74 @@ class ServiceBusIT {
         servicebus.start();
     }
 
+    /** Stops the emulator and the database. */
     @AfterAll
-    static void stop() {
-        if (servicebus != null) {
+    static void stop()
+    {
+        if (servicebus != null)
+        {
             servicebus.stop();
         }
-        if (sql != null) {
+        if (sql != null)
+        {
             sql.stop();
         }
-        if (network != null) {
+        if (network != null)
+        {
             network.close();
         }
     }
 
+    /**
+     * Each file's messages arrive in their own session, and republished
+     * ones are dropped.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void sessionsPerFileAndDuplicatesDropped() throws Exception {
-        String cs = servicebus.getConnectionString();
-        List<OutboundMessage> sent = interleaved(UUID.randomUUID(), UUID.randomUUID(), 20);
-        try (DefaultCamelContext camel = new DefaultCamelContext()) {
+    void sessionsPerFileAndDuplicatesDropped() throws Exception
+    {
+        String connectionString = servicebus.getConnectionString();
+        List<OutboundMessage> sent =
+                interleaved(UUID.randomUUID(), UUID.randomUUID(), 20);
+        try (DefaultCamelContext camel = new DefaultCamelContext())
+        {
             camel.start();
-            String uri = QueueType.SERVICEBUS.effectiveUri("azure-servicebus:sdh?serviceBusType=queue"
-                    + "&producerOperation=sendMessages&connectionString=RAW(" + cs + ")");
-            try (ClosablePublisher pub = Publishers.create(camel, QueueType.SERVICEBUS, uri)) {
-                publishAll(pub, sent);
-                publishAll(pub, sent.subList(0, 4)); // duplicate detection on MessageId drops these
+            String uri = QueueType.SERVICEBUS.effectiveUri(
+                    "azure-servicebus:sdh?serviceBusType=queue"
+                    + "&producerOperation=sendMessages&connectionString=RAW("
+                    + connectionString + ")");
+            try (ClosablePublisher publisher =
+                    Publishers.create(camel, QueueType.SERVICEBUS, uri))
+            {
+                publishAll(publisher, sent);
+                // Duplicate detection on MessageId drops these.
+                publishAll(publisher, sent.subList(0, 4));
             }
         }
 
         List<Received> got = new ArrayList<>();
-        try (ServiceBusSessionReceiverClient sessions = new ServiceBusClientBuilder().connectionString(cs)
-                .sessionReceiver().queueName("sdh").receiveMode(ServiceBusReceiveMode.RECEIVE_AND_DELETE)
-                .buildClient()) {
-            for (int s = 0; s < 2; s++) {
-                var receiver = sessions.acceptNextSession();
-                for (ServiceBusReceivedMessage m : receiver.receiveMessages(100, Duration.ofSeconds(5))) {
-                    Map<String, Object> p = m.getApplicationProperties();
-                    got.add(new Received(m.getMessageId(), str(p.get("type")), str(p.get("fileId")),
-                            m.getContentType(), m.getSessionId(), m.getBody().toString()));
+        try (ServiceBusSessionReceiverClient sessions =
+                new ServiceBusClientBuilder()
+                        .connectionString(connectionString)
+                        .sessionReceiver().queueName("sdh")
+                        .receiveMode(ServiceBusReceiveMode.RECEIVE_AND_DELETE)
+                        .buildClient())
+        {
+            for (int session = 0; session < 2; session++)
+            {
+                ServiceBusReceiverClient receiver =
+                        sessions.acceptNextSession();
+                for (ServiceBusReceivedMessage message :
+                        receiver.receiveMessages(100, Duration.ofSeconds(5)))
+                {
+                    Map<String, Object> properties =
+                            message.getApplicationProperties();
+                    got.add(new Received(message.getMessageId(),
+                            text(properties.get("type")),
+                            text(properties.get("fileId")),
+                            message.getContentType(), message.getSessionId(),
+                            message.getBody().toString()));
                 }
                 receiver.close();
             }
@@ -109,7 +164,14 @@ class ServiceBusIT {
         assertDelivered(sent, got, true);
     }
 
-    static String str(Object o) {
-        return o == null ? null : o.toString();
+    /**
+     * A property value as text.
+     *
+     * @param value the value, or null
+     * @return its text, or null
+     */
+    static String text(Object value)
+    {
+        return value == null ? null : value.toString();
     }
 }

@@ -4,16 +4,19 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.file.it;
 
-import static com.sdh.healthcare.connector.file.it.ItSupport.*;
+import static com.sdh.healthcare.connector.file.it.ItSupport.assertDelivered;
+import static com.sdh.healthcare.connector.file.it.ItSupport.interleaved;
+import static com.sdh.healthcare.connector.file.it.ItSupport.publishAll;
+import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
 
 import com.azure.messaging.eventhubs.EventHubClientBuilder;
 import com.azure.messaging.eventhubs.EventHubConsumerClient;
 import com.azure.messaging.eventhubs.models.EventPosition;
 import com.azure.messaging.eventhubs.models.PartitionEvent;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.file.it.ItSupport.Received;
 import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
 import com.sdh.healthcare.connector.runtime.publish.QueueType;
@@ -31,28 +34,44 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.images.builder.Transferable;
 
 /**
- * Design §10.3 eventhubs: partitionKey = fileId keeps each file in one partition, in order. The adapter carries no
- * metadata here (messageId is inside the payload), so only key, order and body are checked.
+ * Design §10.3 eventhubs: partitionKey = fileId keeps each file in one
+ * partition, in order. The adapter carries no metadata here (messageId is
+ * inside the payload), so only key, order and body are checked.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class EventHubsIT {
+class EventHubsIT
+{
+
+    /** The emulator's configuration: one event hub with 4 partitions. */
     static final String CONFIG = """
-            {"UserConfig":{"NamespaceConfig":[{"Type":"EventHub","Name":"emulatorns1","Entities":[
-              {"Name":"sdh","PartitionCount":"4","ConsumerGroups":[{"Name":"it"}]}]}],
+            {"UserConfig":{"NamespaceConfig":[{"Type":"EventHub",\
+            "Name":"emulatorns1","Entities":[
+              {"Name":"sdh","PartitionCount":"4",\
+            "ConsumerGroups":[{"Name":"it"}]}]}],
               "LoggingConfig":{"Type":"File"}}}""";
 
+    /** The network the emulator and its storage share. */
     static Network network;
+
+    /** The emulator's storage. */
     static AzuriteContainer azurite;
+
+    /** The Event Hubs emulator. */
     static EventHubsEmulatorContainer eventhubs;
 
+    /** Starts the storage and the emulator. */
     @BeforeAll
-    static void start() {
+    static void start()
+    {
         requireDocker();
         network = Network.newNetwork();
-        azurite = new AzuriteContainer("mcr.microsoft.com/azure-storage/azurite:3.35.0").withNetwork(network);
-        eventhubs = new EventHubsEmulatorContainer("mcr.microsoft.com/azure-messaging/eventhubs-emulator:2.2.0")
+        azurite = new AzuriteContainer(
+                "mcr.microsoft.com/azure-storage/azurite:3.35.0")
+                .withNetwork(network);
+        eventhubs = new EventHubsEmulatorContainer(
+                "mcr.microsoft.com/azure-messaging/eventhubs-emulator:2.2.0")
                 .acceptLicense()
                 .withConfig(Transferable.of(CONFIG))
                 .withAzuriteContainer(azurite)
@@ -60,40 +79,64 @@ class EventHubsIT {
         eventhubs.start();
     }
 
+    /** Stops the emulator and the storage. */
     @AfterAll
-    static void stop() {
-        if (eventhubs != null) {
+    static void stop()
+    {
+        if (eventhubs != null)
+        {
             eventhubs.stop();
         }
-        if (azurite != null) {
+        if (azurite != null)
+        {
             azurite.stop();
         }
-        if (network != null) {
+        if (network != null)
+        {
             network.close();
         }
     }
 
+    /**
+     * Each file's events stay in one partition, in order.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void eachFileStaysInOnePartitionInOrder() throws Exception {
+    void eachFileStaysInOnePartitionInOrder() throws Exception
+    {
         String base = eventhubs.getConnectionString();
-        String cs = base + (base.endsWith(";") ? "" : ";") + "EntityPath=sdh";
-        List<OutboundMessage> sent = interleaved(UUID.randomUUID(), UUID.randomUUID(), 30);
-        try (DefaultCamelContext camel = new DefaultCamelContext()) {
+        String connectionString = base + (base.endsWith(";") ? "" : ";")
+                + "EntityPath=sdh";
+        List<OutboundMessage> sent =
+                interleaved(UUID.randomUUID(), UUID.randomUUID(), 30);
+        try (DefaultCamelContext camel = new DefaultCamelContext())
+        {
             camel.start();
-            String uri = QueueType.EVENTHUBS.effectiveUri("azure-eventhubs:?connectionString=RAW(" + cs + ")");
-            try (ClosablePublisher pub = Publishers.create(camel, QueueType.EVENTHUBS, uri)) {
-                publishAll(pub, sent);
+            String uri = QueueType.EVENTHUBS.effectiveUri(
+                    "azure-eventhubs:?connectionString=RAW("
+                            + connectionString + ")");
+            try (ClosablePublisher publisher =
+                    Publishers.create(camel, QueueType.EVENTHUBS, uri))
+            {
+                publishAll(publisher, sent);
             }
         }
 
         List<Received> got = new ArrayList<>();
-        try (EventHubConsumerClient consumer = new EventHubClientBuilder().connectionString(cs)
-                .consumerGroup("it").buildConsumerClient()) {
-            for (String partition : consumer.getPartitionIds()) {
-                for (PartitionEvent e : consumer.receiveFromPartition(partition, 200, EventPosition.earliest(),
-                        Duration.ofSeconds(5))) {
-                    String body = e.getData().getBodyAsString();
-                    got.add(new Received(body.substring(4), null, null, null, e.getData().getPartitionKey(), body));
+        try (EventHubConsumerClient consumer = new EventHubClientBuilder()
+                .connectionString(connectionString)
+                .consumerGroup("it").buildConsumerClient())
+        {
+            for (String partition : consumer.getPartitionIds())
+            {
+                for (PartitionEvent event : consumer.receiveFromPartition(
+                        partition, 200, EventPosition.earliest(),
+                        Duration.ofSeconds(5)))
+                {
+                    String body = event.getData().getBodyAsString();
+                    got.add(new Received(body.substring(4), null, null, null,
+                            event.getData().getPartitionKey(), body));
                 }
             }
         }

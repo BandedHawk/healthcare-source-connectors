@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.file;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.cfg.PackageVersion;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
@@ -20,11 +21,12 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.maintenance.TableMaintenance.Report;
 import com.sdh.healthcare.connector.file.inbox.InboxReceiver;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
-import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -196,15 +198,19 @@ class FileConnectorApplicationTest
         return catalog;
     }
 
+    /** The app's Camel context. */
     @Autowired
     CamelContext camel;
 
+    /** The running connector. */
     @Autowired
     ConnectorRuntime runtime;
 
+    /** Runs table maintenance. */
     @Autowired
     MaintenanceScheduler maintenance;
 
+    /** The lock the writer holds while it writes. */
     @Autowired
     ReentrantLock writerLock;
 
@@ -226,6 +232,10 @@ class FileConnectorApplicationTest
         return text.toString();
     }
 
+    /**
+     * Every broker's Camel component resolves, and Jackson 2 is the pinned
+     * version.
+     */
     @Test
     void everyBrokerComponentResolvesAndJackson2IsPinned()
     {
@@ -236,10 +246,17 @@ class FileConnectorApplicationTest
             assertThat(camel.getComponent(component)).as(component)
                     .isNotNull();
         }
-        assertThat(com.fasterxml.jackson.databind.cfg.PackageVersion.VERSION
+        assertThat(PackageVersion.VERSION
                 .toString()).startsWith("2.22");
     }
 
+    /**
+     * Landed items are split in order, once each; a bad one fails, repeats
+     * and strangers are refused, every item's result reaches the producer,
+     * and maintenance compacts between items.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void splitsLandedItemsInOrderOnceEachAndFailsABadOne() throws Exception
     {
@@ -335,7 +352,7 @@ class FileConnectorApplicationTest
         writerLock.lock();
         try
         {
-            var reports = maintenance.runOnce();
+            List<Report> reports = maintenance.runOnce();
             assertThat(reports).hasSize(2);
             assertThat(reports.getFirst().compactedFiles())
                     .isGreaterThanOrEqualTo(2);
