@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.runtime.publish;
 
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
@@ -15,7 +14,10 @@ import com.sdh.healthcare.connector.core.publish.MessagePublisher;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public interface ClosablePublisher extends MessagePublisher, AutoCloseable {
+public interface ClosablePublisher extends MessagePublisher, AutoCloseable
+{
+
+    /** Releases the publisher's connections, without a checked failure. */
     @Override
     void close();
 }

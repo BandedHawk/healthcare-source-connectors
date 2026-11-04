@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.runtime.publish;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -29,37 +28,65 @@ import org.junit.jupiter.api.Test;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class CamelMessagePublisherTest {
+class CamelMessagePublisherTest
+{
 
+    /** How many messages are sent. */
+    static final int COUNT = 200;
+
+    /**
+     * Messages arrive in the order sent, and a failed send fails its
+     * future.
+     *
+     * @throws Exception if Camel can't start
+     */
     @Test
-    void sendsInOrderAndReportsFailures() throws Exception {
-        try (DefaultCamelContext camel = new DefaultCamelContext()) {
-            camel.addRoutes(new RouteBuilder() {
+    void sendsInOrderAndReportsFailures() throws Exception
+    {
+        try (DefaultCamelContext camel = new DefaultCamelContext())
+        {
+            camel.addRoutes(new RouteBuilder()
+            {
                 @Override
-                public void configure() {
-                    from("direct:broken").throwException(new IllegalStateException("broker said no"));
+                public void configure()
+                {
+                    from("direct:broken").throwException(
+                            new IllegalStateException("broker said no"));
                 }
             });
             camel.start();
             UUID file = UUID.randomUUID();
             List<CompletableFuture<Void>> acks = new ArrayList<>();
-            try (CamelMessagePublisher pub = new CamelMessagePublisher(camel, QueueType.CAMEL, "mock:out")) {
-                for (int i = 0; i < 200; i++) {
-                    acks.add(pub.publish(new OutboundMessage("m" + i, MessageType.SECTION_STORED, file,
+            try (CamelMessagePublisher publisher = new CamelMessagePublisher(
+                    camel, QueueType.CAMEL, "mock:out"))
+            {
+                for (int i = 0; i < COUNT; i++)
+                {
+                    acks.add(publisher.publish(new OutboundMessage("m" + i,
+                            MessageType.SECTION_STORED, file,
                             ("body" + i).getBytes(StandardCharsets.US_ASCII))));
                 }
-                CompletableFuture.allOf(acks.toArray(CompletableFuture[]::new)).get();
+                CompletableFuture.allOf(
+                        acks.toArray(CompletableFuture[]::new)).get();
             }
-            MockEndpoint mock = camel.getEndpoint("mock:out", MockEndpoint.class);
-            assertThat(mock.getExchanges()).hasSize(200);
-            for (int i = 0; i < 200; i++) {
-                assertThat(mock.getExchanges().get(i).getIn().getBody(String.class)).isEqualTo("body" + i);
-                assertThat(mock.getExchanges().get(i).getIn().getHeader("messageId")).isEqualTo("m" + i);
+            MockEndpoint mock = camel.getEndpoint("mock:out",
+                    MockEndpoint.class);
+            assertThat(mock.getExchanges()).hasSize(COUNT);
+            for (int i = 0; i < COUNT; i++)
+            {
+                assertThat(mock.getExchanges().get(i).getIn()
+                        .getBody(String.class)).isEqualTo("body" + i);
+                assertThat(mock.getExchanges().get(i).getIn()
+                        .getHeader("messageId")).isEqualTo("m" + i);
             }
-            try (CamelMessagePublisher broken = new CamelMessagePublisher(camel, QueueType.CAMEL, "direct:broken")) {
-                CompletableFuture<Void> f = broken.publish(new OutboundMessage("x", MessageType.FILE_STARTED, file,
-                        new byte[0]));
-                assertThatThrownBy(f::get).isInstanceOf(ExecutionException.class)
+            try (CamelMessagePublisher broken = new CamelMessagePublisher(
+                    camel, QueueType.CAMEL, "direct:broken"))
+            {
+                CompletableFuture<Void> sent = broken.publish(
+                        new OutboundMessage("x", MessageType.FILE_STARTED,
+                                file, new byte[0]));
+                assertThatThrownBy(sent::get)
+                        .isInstanceOf(ExecutionException.class)
                         .hasCauseInstanceOf(IllegalStateException.class);
             }
         }

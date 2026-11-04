@@ -4,10 +4,10 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.runtime.telemetry;
 
 import com.sdh.healthcare.connector.core.telemetry.Attr;
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.sdk.common.CompletableResultCode;
@@ -20,73 +20,129 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * Last line of PHI defence for traces (design §12): whatever produced a span, only allow-listed attribute keys are
- * exported. Span events (including exception events, whose messages could hold PHI) and link attributes are dropped.
+ * The last line of PHI defence for traces (design §12): whatever produced a
+ * span, only allow-listed attribute keys are exported. Span events
+ * (including exception events, whose messages could hold PHI) and link
+ * attributes are dropped.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class AllowListSpanExporter implements SpanExporter {
+public final class AllowListSpanExporter implements SpanExporter
+{
+
+    /** Exports the cleaned spans. */
     private final SpanExporter delegate;
 
-    public AllowListSpanExporter(SpanExporter delegate) {
+    /**
+     * Wraps an exporter.
+     *
+     * @param delegate exports the cleaned spans
+     */
+    public AllowListSpanExporter(SpanExporter delegate)
+    {
         this.delegate = delegate;
     }
 
-    static Attributes filter(Attributes in) {
-        AttributesBuilder b = Attributes.builder();
-        in.forEach((k, v) -> {
-            if (Attr.ALLOWED_KEYS.contains(k.getKey())) {
+    /**
+     * Keeps only the allow-listed attributes ({@link Attr#ALLOWED_KEYS}).
+     *
+     * @param attributes the attributes
+     * @return those with allowed keys
+     */
+    static Attributes filter(Attributes attributes)
+    {
+        AttributesBuilder kept = Attributes.builder();
+        attributes.forEach((key, value) ->
+        {
+            if (Attr.ALLOWED_KEYS.contains(key.getKey()))
+            {
                 @SuppressWarnings("unchecked")
-                io.opentelemetry.api.common.AttributeKey<Object> key = (io.opentelemetry.api.common.AttributeKey<Object>) k;
-                b.put(key, v);
+                AttributeKey<Object> anyKey = (AttributeKey<Object>) key;
+                kept.put(anyKey, value);
             }
         });
-        return b.build();
+        return kept.build();
     }
 
-    static SpanData clean(SpanData span) {
-        Attributes attrs = filter(span.getAttributes());
-        return new DelegatingSpanData(span) {
+    /**
+     * A span with only allowed attributes, no events, and links without
+     * attributes.
+     *
+     * @param span the span
+     * @return the cleaned span
+     */
+    static SpanData clean(SpanData span)
+    {
+        Attributes attributes = filter(span.getAttributes());
+        return new DelegatingSpanData(span)
+        {
             @Override
-            public Attributes getAttributes() {
-                return attrs;
+            public Attributes getAttributes()
+            {
+                return attributes;
             }
 
             @Override
-            public int getTotalAttributeCount() {
-                return attrs.size();
+            public int getTotalAttributeCount()
+            {
+                return attributes.size();
             }
 
             @Override
-            public List<EventData> getEvents() {
+            public List<EventData> getEvents()
+            {
                 return List.of();
             }
 
             @Override
-            public int getTotalRecordedEvents() {
+            public int getTotalRecordedEvents()
+            {
                 return 0;
             }
 
             @Override
-            public List<LinkData> getLinks() {
-                return span.getLinks().stream().map(l -> LinkData.create(l.getSpanContext())).toList();
+            public List<LinkData> getLinks()
+            {
+                return span.getLinks().stream()
+                        .map(link -> LinkData.create(link.getSpanContext()))
+                        .toList();
             }
         };
     }
 
+    /**
+     * Exports the spans, cleaned.
+     *
+     * @param spans the spans
+     * @return the delegate's result
+     */
     @Override
-    public CompletableResultCode export(Collection<SpanData> spans) {
-        return delegate.export(spans.stream().map(AllowListSpanExporter::clean).toList());
+    public CompletableResultCode export(Collection<SpanData> spans)
+    {
+        return delegate.export(
+                spans.stream().map(AllowListSpanExporter::clean).toList());
     }
 
+    /**
+     * Flushes the delegate.
+     *
+     * @return its result
+     */
     @Override
-    public CompletableResultCode flush() {
+    public CompletableResultCode flush()
+    {
         return delegate.flush();
     }
 
+    /**
+     * Shuts the delegate down.
+     *
+     * @return its result
+     */
     @Override
-    public CompletableResultCode shutdown() {
+    public CompletableResultCode shutdown()
+    {
         return delegate.shutdown();
     }
 }
