@@ -62,7 +62,7 @@ import org.slf4j.LoggerFactory;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class IntakeService
+public final class IntakeService implements LandingIntake
 {
 
     /** The longest wait after repeated errors. */
@@ -179,6 +179,7 @@ public final class IntakeService
      * Recovers from a crash, before the route starts. If storage or the
      * broker is down, recovery is tried again before each item.
      */
+    @Override
     public void recoverAtStartup()
     {
         writer.lock();
@@ -350,6 +351,7 @@ public final class IntakeService
      *
      * @return the lock
      */
+    @Override
     public ReentrantLock writerLock()
     {
         return writer;
@@ -508,6 +510,21 @@ public final class IntakeService
      */
     private void reportDuplicate(LandedItem landed) throws Exception
     {
+        reportDuplicate(storage, intake, landed);
+    }
+
+    /**
+     * Warns that a landed item has the same content as items landed
+     * before, if the ledger confirms it.
+     *
+     * @param storage the landing storage
+     * @param intake  the intake's name
+     * @param landed  the new item
+     * @throws Exception if the ledger can't be read
+     */
+    static void reportDuplicate(Storage storage, String intake,
+            LandedItem landed) throws Exception
+    {
         List<UUID> others = storage.ledger().itemsWithDigest(landed.digest())
                 .stream().filter(other -> !other.equals(landed.itemId()))
                 .toList();
@@ -618,7 +635,7 @@ public final class IntakeService
      * @param failure the error
      * @return the reason
      */
-    private static String reason(Throwable failure)
+    static String reason(Throwable failure)
     {
         if (failure instanceof LeaseLostException lost)
         {

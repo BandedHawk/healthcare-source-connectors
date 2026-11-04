@@ -19,6 +19,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileFormat;
@@ -67,9 +68,13 @@ public final class LandingLedger
      * @param itemId   its ID
      * @param digest   its digest
      * @param landedAt when it was landed
+     * @param size     its size in bytes; -1 for an entry written before
+     *                 sizes were recorded
+     * @param sha256   the plain SHA-256 of its bytes, in lower-case hex;
+     *                 null if not known
      */
     public record Entry(String intake, SourceRef source, UUID itemId,
-            String digest, Instant landedAt)
+            String digest, Instant landedAt, long size, String sha256)
     {
 
         /**
@@ -81,7 +86,8 @@ public final class LandingLedger
         public static Entry of(LandedItem item)
         {
             return new Entry(item.intake(), item.source(), item.itemId(),
-                    item.digest(), item.landedAt());
+                    item.digest(), item.landedAt(), item.size(),
+                    item.sha256());
         }
     }
 
@@ -194,6 +200,47 @@ public final class LandingLedger
     }
 
     /**
+     * Finds the entry of an intake's item by its source reference: for an
+     * HTTP push, the first item sent with an idempotency key, so the same
+     * receipt can be given again.
+     *
+     * @param intake the intake's name
+     * @param source the source reference
+     * @return the earliest such entry; empty if there is none
+     * @throws IOException if the table can't be read
+     */
+    public Optional<Entry> find(String intake, SourceRef source)
+            throws IOException
+    {
+        table.refresh();
+        Entry first = null;
+        try (CloseableIterable<Record> scan = IcebergGenerics.read(table)
+                .where(Expressions.and(Expressions.equal(INTAKE, intake),
+                        Expressions.equal(SOURCE_REF_HASH, source.hash()),
+                        Expressions.equal(SOURCE_SIZE, source.size()),
+                        Expressions.equal(SOURCE_VERSION, source.version())))
+                .build())
+        {
+            for (Record row : scan)
+            {
+                Long size = (Long) row.getField(ITEM_SIZE);
+                Entry entry = new Entry(intake, source,
+                        (UUID) row.getField(ITEM_ID),
+                        (String) row.getField(ITEM_DIGEST),
+                        ((OffsetDateTime) row.getField(LANDED_AT)).toInstant(),
+                        size == null ? -1 : size,
+                        (String) row.getField(ITEM_SHA256));
+                if (first == null
+                        || entry.landedAt().isBefore(first.landedAt()))
+                {
+                    first = entry;
+                }
+            }
+        }
+        return Optional.ofNullable(first);
+    }
+
+    /**
      * The items landed with a digest: the exact answer when
      * {@link LedgerIndex#mayHaveContent} says there may be some.
      *
@@ -268,6 +315,8 @@ public final class LandingLedger
                 row.setField(ITEM_DIGEST, entry.digest());
                 row.setField(LANDED_AT, OffsetDateTime.ofInstant(
                         entry.landedAt(), ZoneOffset.UTC));
+                row.setField(ITEM_SIZE, entry.size());
+                row.setField(ITEM_SHA256, entry.sha256());
                 writer.write(row);
             }
         }

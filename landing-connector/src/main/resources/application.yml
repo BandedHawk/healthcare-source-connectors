@@ -3,6 +3,12 @@ spring:
     name: landing-connector
   main:
     banner-mode: off
+  # HTTP push (design §5.3.15): uploads would be parsed into temporary
+  # files, unencrypted, before the route saw them; the endpoint takes the
+  # body as it is.
+  servlet:
+    multipart:
+      enabled: false
 
 camel:
   main:
@@ -13,8 +19,8 @@ camel:
     message-history: false
     log-mask: true
     log-exhausted-message-body: false
-    # Keeps the JVM alive: the app has no web server or other non-daemon
-    # thread.
+    # Keeps the JVM alive: only an http intake has a web server, and no
+    # other thread is non-daemon.
     run-controller: true
 
 # Telemetry (design §12): exported through sdh.telemetry.otlp with the PHI

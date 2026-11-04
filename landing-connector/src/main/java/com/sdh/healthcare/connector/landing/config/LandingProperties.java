@@ -19,6 +19,7 @@ import com.sdh.healthcare.connector.runtime.config.ConnectorSettings;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
@@ -80,10 +81,82 @@ public record LandingProperties(
      *                standby for the active node, instead of exiting if
      *                it is held
      * @param source  where items are picked up
+     * @param http    the push endpoint, for a source of type {@code http}
      */
     public record Landing(String intake,
             @DefaultValue("false") boolean standby,
-            @DefaultValue Source source)
+            @DefaultValue Source source,
+            @DefaultValue Http http)
+    {
+    }
+
+    /**
+     * The HTTP push endpoint (design §5.3.15): {@code POST
+     * /intakes/<intake>/items}, over TLS, with OAuth2 or mTLS. Secrets come
+     * from the environment, never the file.
+     *
+     * @param port         the HTTPS port
+     * @param auth         {@code oauth2} (a bearer JWT) or {@code mtls} (a
+     *                     client certificate)
+     * @param tls          the server's certificate and key
+     * @param oauth2       how bearer tokens are checked, for {@code oauth2}
+     * @param mtls         which client certificates are accepted, for
+     *                     {@code mtls}
+     * @param maxItemBytes the largest body accepted; 0 for no limit
+     * @param maxWait      how long a push waits while another is landed,
+     *                     before it is turned away with 503
+     * @param retryAfter   the {@code Retry-After} sent with a 503
+     * @param readTimeout  how long the body may stall before the push is
+     *                     dropped
+     */
+    public record Http(@DefaultValue("8443") int port,
+            String auth,
+            @DefaultValue Tls tls,
+            @DefaultValue OAuth2 oauth2,
+            @DefaultValue Mtls mtls,
+            @DefaultValue("0") DataSize maxItemBytes,
+            @DefaultValue("30s") Duration maxWait,
+            @DefaultValue("30s") Duration retryAfter,
+            @DefaultValue("60s") Duration readTimeout)
+    {
+    }
+
+    /**
+     * The server's TLS certificate, in PEM files.
+     *
+     * @param certificate        the certificate chain
+     * @param privateKey         its private key
+     * @param privateKeyPassword the key's password, if it is encrypted
+     */
+    public record Tls(Path certificate, Path privateKey,
+            String privateKeyPassword)
+    {
+    }
+
+    /**
+     * How bearer tokens are checked: signed by the issuer's keys, for the
+     * audience, with the scope.
+     *
+     * @param issuer    the issuer, as in the tokens' {@code iss} claim; its
+     *                  keys are found through its OpenID discovery document
+     * @param jwkSetUri the issuer's key set, when it has no discovery
+     *                  document
+     * @param audience  the audience the tokens must name
+     * @param scope     the scope the tokens must carry
+     */
+    public record OAuth2(String issuer, String jwkSetUri, String audience,
+            String scope)
+    {
+    }
+
+    /**
+     * Which client certificates are accepted: issued by one of the trusted
+     * CAs, with a subject on the list.
+     *
+     * @param trustedCas the CA certificates, in a PEM file
+     * @param subjects   the accepted subjects, as distinguished names
+     */
+    public record Mtls(Path trustedCas, List<String> subjects)
     {
     }
 
@@ -111,8 +184,8 @@ public record LandingProperties(
      * @param include      an Ant-style pattern of the paths to pick up
      * @param recursive    whether to look in subdirectories
      * @param pollInterval how often the source is listed
-     * @param type         {@code directory} (the default), {@code sftp} or
-     *                     {@code smb}
+     * @param type         {@code directory} (the default), {@code sftp},
+     *                     {@code smb} or {@code http}
      * @param authRetryInterval how long to wait before trying a remote
      *                     source again after its credentials, permissions,
      *                     host key or share were refused, so an account

@@ -21,17 +21,21 @@ import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import com.sdh.healthcare.connector.landing.config.HttpSettings;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
 import com.sdh.healthcare.connector.landing.intake.Announcer;
 import com.sdh.healthcare.connector.landing.intake.IntakeNotWritableException;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
+import com.sdh.healthcare.connector.landing.intake.LandingIntake;
+import com.sdh.healthcare.connector.landing.intake.PushService;
 import com.sdh.healthcare.connector.landing.intake.IntakeSource;
 import com.sdh.healthcare.connector.landing.intake.LocalDirectorySource;
 import com.sdh.healthcare.connector.landing.intake.Readiness;
 import com.sdh.healthcare.connector.landing.intake.SftpSource;
 import com.sdh.healthcare.connector.landing.intake.SmbSource;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
+import com.sdh.healthcare.connector.landing.web.PushController;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import com.sdh.healthcare.connector.runtime.LeaseDatabase;
@@ -96,8 +100,11 @@ public final class LandingRuntime implements AutoCloseable
     /** Where items come from. */
     private final IntakeSource intakeSource;
 
-    /** Lands the intake's items. */
+    /** Lands a listing intake's items; null for an HTTP intake. */
     private final IntakeService service;
+
+    /** Lands an HTTP intake's pushes; null for a listing intake. */
+    private final PushService pushService;
 
     /** The landing tables, for maintenance. */
     private final Tables tables;
@@ -126,13 +133,14 @@ public final class LandingRuntime implements AutoCloseable
      * @param keys       the keys
      * @param source     the source's settings
      * @param intakeSource where items come from
-     * @param service    lands the intake's items
+     * @param service    lands a listing intake's items; null for HTTP
+     * @param pushService lands an HTTP intake's pushes; null otherwise
      * @param tables     the landing tables
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
             KeyMaterial keys, SourceSettings source, IntakeSource intakeSource,
-            IntakeService service, Tables tables)
+            IntakeService service, PushService pushService, Tables tables)
     {
         this.camel = camel;
         this.dataSource = dataSource;
@@ -143,6 +151,7 @@ public final class LandingRuntime implements AutoCloseable
         this.source = source;
         this.intakeSource = intakeSource;
         this.service = service;
+        this.pushService = pushService;
         this.tables = tables;
     }
 
@@ -163,6 +172,12 @@ public final class LandingRuntime implements AutoCloseable
                 "sdh.landing.intake");
         SourceSettings source =
                 SourceSettings.of(properties.landing().source());
+        HttpSettings http = null;
+        if (source.type() == SourceSettings.Type.HTTP)
+        {
+            PushController.path(intake);
+            http = HttpSettings.of(properties.landing().http());
+        }
         LandingProperties.Storage storageSettings = properties.storage();
         Map<String, String> catalogProperties = require(
                 storageSettings.catalog(), "sdh.storage.catalog");
@@ -185,6 +200,7 @@ public final class LandingRuntime implements AutoCloseable
                 case DIRECTORY -> new LocalDirectorySource(source);
                 case SFTP -> new SftpSource(source);
                 case SMB -> new SmbSource(source);
+                case HTTP -> null;
             };
             InboundDirectoryClaim claim = null;
             if (source.writable() && !source.remote())
@@ -235,16 +251,28 @@ public final class LandingRuntime implements AutoCloseable
                             keys.recipient(), keys.recipientKid()),
                     publisher, storageSettings.catalogName(),
                     storageSettings.namespace(), retry, ACK_TIMEOUT);
-            IntakeService service = new IntakeService(intake, intakeSource,
-                    new Readiness(source.settle(), System::nanoTime),
-                    new IntakeService.Storage(lander, ledger, index, ids),
-                    announcer, claim, fatal, clock,
-                    properties.retry().initialBackoff());
+            IntakeService.Storage storage =
+                    new IntakeService.Storage(lander, ledger, index, ids);
+            IntakeService service = null;
+            PushService pushService = null;
+            if (http != null)
+            {
+                pushService = new PushService(intake, storage, announcer,
+                        fatal, clock, http.maxItemBytes(), http.maxWait());
+            }
+            else
+            {
+                service = new IntakeService(intake, intakeSource,
+                        new Readiness(source.settle(), System::nanoTime),
+                        storage, announcer, claim, fatal, clock,
+                        properties.retry().initialBackoff());
+            }
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.INTAKE, intake)
                             .with(Attr.EPOCH, lease.epoch()));
             return new LandingRuntime(camel, dataSource, catalog, lease,
                     publisher, keys, source, intakeSource, service,
+                    pushService,
                     new Tables(committer, items, ledgerTable, lander));
         }
         catch (Exception | Error failure)
@@ -319,13 +347,33 @@ public final class LandingRuntime implements AutoCloseable
     }
 
     /**
-     * The intake's service, for the route.
+     * A listing intake's service, for the route.
      *
-     * @return the service
+     * @return the service; null for an HTTP intake
      */
     public IntakeService service()
     {
         return service;
+    }
+
+    /**
+     * An HTTP intake's service, for the route.
+     *
+     * @return the service; null for a listing intake
+     */
+    public PushService pushService()
+    {
+        return pushService;
+    }
+
+    /**
+     * The intake, whichever kind it is: for recovery and maintenance.
+     *
+     * @return the intake
+     */
+    public LandingIntake intake()
+    {
+        return service != null ? service : pushService;
     }
 
     /**
@@ -362,14 +410,17 @@ public final class LandingRuntime implements AutoCloseable
     @Override
     public void close()
     {
-        try
+        if (service != null)
         {
-            camel.getRouteController().stopRoute(IntakeRoute.ROUTE_ID);
-        }
-        catch (Exception failure)
-        {
-            LOG.warn("connector.stop_route_failed error={}",
-                    failure.getClass().getSimpleName());
+            try
+            {
+                camel.getRouteController().stopRoute(IntakeRoute.ROUTE_ID);
+            }
+            catch (Exception failure)
+            {
+                LOG.warn("connector.stop_route_failed error={}",
+                        failure.getClass().getSimpleName());
+            }
         }
         closeQuietly(intakeSource);
         closeQuietly(publisher);

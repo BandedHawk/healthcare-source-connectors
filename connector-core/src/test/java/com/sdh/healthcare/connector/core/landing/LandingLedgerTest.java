@@ -166,7 +166,7 @@ class LandingLedgerTest
                 new LandingLedger(ledgerTable, committer(), RETRY);
         UUID itemId = UUID.randomUUID();
         ledger.record(List.of(new LandingLedger.Entry(INTAKE, null, itemId,
-                "abcdefghijkl234567", Instant.now())));
+                "abcdefghijkl234567", Instant.now(), 1, null)));
         LedgerIndex index = ledger.load(INTAKE);
         assertThat(index.size()).isZero();
         assertThat(index.mayHaveContent("abcdefghijkl234567")).isTrue();
@@ -197,6 +197,33 @@ class LandingLedgerTest
         assertThat(index.contains(item.source().key())).isTrue();
         assertThat(ledger.load(INTAKE).contains(item.source().key())).isTrue();
         assertThat(ledger.repair(lander, index)).isFalse();
+    }
+
+    /**
+     * An entry is found by its source reference, with the item's size and
+     * SHA-256, as an HTTP push's receipt needs.
+     */
+    @Test
+    void findsAnEntryByItsSourceReference() throws Exception
+    {
+        LandingLedger ledger =
+                new LandingLedger(ledgerTable, committer(), RETRY);
+        SourceRef ref = SourceRef.of(ids, INTAKE, "push key", -1, "");
+        UUID itemId = UUID.randomUUID();
+        Instant landedAt = Instant.parse("2026-11-04T10:15:30Z");
+        ledger.record(List.of(new LandingLedger.Entry(INTAKE, ref, itemId,
+                "abcdefghijkl234567", landedAt, 42, "00ff")));
+
+        assertThat(ledger.find(INTAKE, ref)).hasValueSatisfying(entry ->
+        {
+            assertThat(entry.itemId()).isEqualTo(itemId);
+            assertThat(entry.size()).isEqualTo(42);
+            assertThat(entry.sha256()).isEqualTo("00ff");
+            assertThat(entry.landedAt()).isEqualTo(landedAt);
+        });
+        assertThat(ledger.find(INTAKE,
+                SourceRef.of(ids, INTAKE, "other key", -1, ""))).isEmpty();
+        assertThat(ledger.find("other", ref)).isEmpty();
     }
 
     /** The reference hash depends on the intake and the reference only. */

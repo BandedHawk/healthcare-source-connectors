@@ -19,7 +19,7 @@ sdh:
       include: "*"                # Ant-style
       recursive: false
       poll-interval: 10s
-      type: directory             # directory | sftp | smb; for sftp and smb, path and move-to are absolute
+      type: directory             # directory | sftp | smb | http; for sftp and smb, path and move-to are absolute
       auth-retry-interval: 5m     # sftp and smb: wait after refused credentials, a missing share or a new host key
       sftp:                       # type: sftp
         host: dropzone.example.org
@@ -38,6 +38,24 @@ sdh:
         user: sdh                 # password: SDH_LANDING_SOURCE_SMB_PASSWORD
         connect-timeout: 15s
         read-timeout: 60s
+    http:                         # type: http; producers POST to https://<host>:<port>/intakes/<intake>/items
+      port: 8443
+      tls:                        # required; key password: SDH_LANDING_HTTP_TLS_PRIVATE_KEY_PASSWORD
+        certificate: /run/secrets/tls.crt   # PEM, with its chain
+        private-key: /run/secrets/tls.key   # PEM
+      auth: oauth2                # oauth2 | mtls
+      oauth2:                     # a bearer JWT: signed by the issuer, for the audience, with the scope
+        issuer: https://idp.example.org/realms/producers
+        # jwk-set-uri: https://idp.example.org/realms/producers/certs   # default: from the issuer's metadata
+        audience: sdh-landing
+        scope: sdh.push
+      # mtls:                     # a client certificate from a trusted CA, with a listed subject
+      #   trusted-cas: /run/secrets/producer-ca.pem
+      #   subjects: ["CN=claims-producer,O=Example"]
+      max-item-bytes: 0           # 0 = no limit; larger pushes get 413
+      max-wait: 30s               # a push waits this long for the one before it, then gets 503
+      retry-after: 30s            # the Retry-After sent with a 503
+      read-timeout: 60s           # a stalled sender is dropped after this
   storage:
     catalog-name: sdh             # also sent in item.landed messages
     namespace: sdh_landing

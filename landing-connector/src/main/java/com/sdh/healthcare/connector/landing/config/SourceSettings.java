@@ -16,7 +16,8 @@ import java.util.Locale;
  * the setting. For a remote source, paths are on the server (within the
  * share, for SMB) and must be absolute.
  *
- * @param path         the directory, made absolute
+ * @param path         the directory, made absolute; null for
+ *                     {@link Type#HTTP}
  * @param access       whether the node may change the directory
  * @param after        what happens to an item after landing
  * @param moveTo       where {@link After#MOVE} puts items, made absolute;
@@ -59,7 +60,14 @@ public record SourceSettings(Path path, Access access, After after,
         SFTP,
 
         /** A directory on an SMB share. */
-        SMB
+        SMB,
+
+        /**
+         * Items pushed to the node over HTTP; its endpoint has its own
+         * settings ({@link HttpSettings}), and none of the listing ones
+         * apply.
+         */
+        HTTP
     }
 
     /** Whether the node may change the source. */
@@ -98,13 +106,19 @@ public record SourceSettings(Path path, Access access, After after,
      */
     public static SourceSettings of(LandingProperties.Source source)
     {
+        Type type = parse(Type.class, source.type(),
+                "sdh.landing.source.type");
+        if (type == Type.HTTP)
+        {
+            return new SourceSettings(null, Access.READ_ONLY, After.NONE,
+                    null, null, false, Duration.ZERO, null, false,
+                    source.pollInterval(), type, null, null, null);
+        }
         if (source.path() == null)
         {
             throw new IllegalArgumentException(
                     "sdh.landing.source.path is required");
         }
-        Type type = parse(Type.class, source.type(),
-                "sdh.landing.source.type");
         Path path = place(source.path(), type, "sdh.landing.source.path");
         Access access = parse(Access.class, source.access(),
                 "sdh.landing.source.access");
@@ -188,7 +202,7 @@ public record SourceSettings(Path path, Access access, After after,
      */
     public boolean remote()
     {
-        return type != Type.DIRECTORY;
+        return type == Type.SFTP || type == Type.SMB;
     }
 
     /**

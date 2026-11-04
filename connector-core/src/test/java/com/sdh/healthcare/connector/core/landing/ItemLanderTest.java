@@ -19,9 +19,11 @@ import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
+import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -254,6 +256,13 @@ class ItemLanderTest
                 .isEqualTo(item.source().hash());
         assertThat(LandedItems.originalName(summary, keys))
                 .contains("inbound/jones-mrn-123.xml");
+        String sha256 = HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(bytes));
+        assertThat(landed.sha256()).isEqualTo(sha256);
+        assertThat(summary.getField(LandingTables.ITEM_SHA256))
+                .isEqualTo(sha256);
+        assertThat(lander().land(item, opener(bytes)).sha256())
+                .isEqualTo(sha256);
     }
 
     /** No name or path appears in the table's clear columns. */
@@ -355,6 +364,8 @@ class ItemLanderTest
         assertThat(landed.digest()).isEqualTo(expected);
         assertThat(readBack(item.itemId())).isEqualTo(bytes);
         assertThat(chunkRows(item.itemId())).isEqualTo(13);
+        // The plain hash can't be carried over a restart.
+        assertThat(landed.sha256()).isNull();
     }
 
     /** Landing a finished item again changes nothing. */

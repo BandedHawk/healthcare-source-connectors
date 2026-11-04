@@ -82,6 +82,10 @@ public class LandingConfiguration
     {
         LandingRuntime runtime =
                 LandingRuntime.start(properties, camel, fatal);
+        if (runtime.service() == null)
+        {
+            return runtime;
+        }
         telemetry.gauge("sdh.landing.source_reachable", "1",
                 "1 if the intake's source could be listed last time",
                 () -> runtime.service().reachable() ? 1 : 0);
@@ -131,19 +135,30 @@ public class LandingConfiguration
                                 wholeItems),
                         MaintenanceScheduler.Target.of(tables.ledger(),
                                 LandingTables.LANDED_AT, Optional.empty())),
-                runtime.service().writerLock(), fatal, Clock.systemUTC());
+                runtime.intake().writerLock(), fatal, Clock.systemUTC());
     }
 
     /**
      * The route that lists the source: Camel's file component for a
-     * directory, the node's own listing for a remote source.
+     * directory, the node's own listing for a remote source. An HTTP intake
+     * has no route: its endpoint is {@code PushController}.
      *
      * @param runtime the runtime
-     * @return the route
+     * @return the route; one with nothing in it for HTTP
      */
     @Bean
     RouteBuilder intakeRoute(LandingRuntime runtime)
     {
+        if (runtime.pushService() != null)
+        {
+            return new RouteBuilder()
+            {
+                @Override
+                public void configure()
+                {
+                }
+            };
+        }
         if (runtime.intakeSource() instanceof RemoteSource remote)
         {
             return new RemoteIntakeRoute(runtime.source(), remote,
@@ -153,7 +168,9 @@ public class LandingConfiguration
     }
 
     /**
-     * Recovers from any crash, then starts listing (design §5.3.5).
+     * Recovers from any crash, then starts listing (design §5.3.5). An
+     * HTTP intake takes pushes as soon as its server is up; each push
+     * recovers first if this hasn't yet.
      *
      * @param runtime the runtime
      * @param camel   the Camel context
@@ -164,8 +181,11 @@ public class LandingConfiguration
     {
         return arguments ->
         {
-            runtime.service().recoverAtStartup();
-            camel.getRouteController().startRoute(IntakeRoute.ROUTE_ID);
+            runtime.intake().recoverAtStartup();
+            if (runtime.service() != null)
+            {
+                camel.getRouteController().startRoute(IntakeRoute.ROUTE_ID);
+            }
             LOG.info("intake.started");
         };
     }

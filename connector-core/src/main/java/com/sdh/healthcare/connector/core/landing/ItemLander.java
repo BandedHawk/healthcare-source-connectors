@@ -27,6 +27,8 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
@@ -34,6 +36,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -429,6 +432,9 @@ public final class ItemLander
                             .with(Attr.OFFSET, offset));
         }
         long expectedSize = item.source() == null ? -1 : item.source().size();
+        // The plain SHA-256 can't be carried across a restart, so a resumed
+        // item has none.
+        MessageDigest sha256 = resumeFrom == null ? newSha256() : null;
 
         Batch batch = null;
         try (InputStream input = opener.open(offset))
@@ -465,6 +471,10 @@ public final class ItemLander
                     link.update(chain);
                 }
                 link.update(current);
+                if (sha256 != null)
+                {
+                    sha256.update(current);
+                }
                 batch.chunk(item.itemId(), (int) chunkIndex, current);
                 Arrays.fill(current, (byte) 0);
                 boolean blockEnds = last
@@ -477,8 +487,10 @@ public final class ItemLander
                 {
                     String digest = SectionIds.encode(chain);
                     int chunkCount = (int) (chunkIndex + 1);
+                    String plainHash = sha256 == null ? null
+                            : HexFormat.of().formatHex(sha256.digest());
                     batch.summary(item, chunkCount, bytesRead, digest,
-                            startedAt);
+                            plainHash, startedAt);
                     Instant landedAt = batch.landedAt.toInstant();
                     LandingCheckpoint done = new LandingCheckpoint(
                             item.itemId(), item.kind(), item.source(),
@@ -496,7 +508,7 @@ public final class ItemLander
                     return new LandedItem(item.itemId(), settings.intake(),
                             item.kind(), item.source(), bytesRead, digest,
                             landedAt, snapshotId(snapshot),
-                            settings.kekRef());
+                            settings.kekRef(), plainHash);
                 }
                 if (blockEnds && batch.bytes >= settings.commitBytes())
                 {
@@ -541,7 +553,25 @@ public final class ItemLander
                 checkpoint.kind(), checkpoint.source(), checkpoint.size(),
                 checkpoint.digest(), checkpoint.landedAt(),
                 snapshotId(table.currentSnapshot()),
-                (String) summary.getField(KEK_REF));
+                (String) summary.getField(KEK_REF),
+                (String) summary.getField(ITEM_SHA256));
+    }
+
+    /**
+     * A new SHA-256 digest.
+     *
+     * @return the digest
+     */
+    private static MessageDigest newSha256()
+    {
+        try
+        {
+            return MessageDigest.getInstance("SHA-256");
+        }
+        catch (NoSuchAlgorithmException unavailable)
+        {
+            throw new IllegalStateException(unavailable);
+        }
     }
 
     /**
@@ -709,10 +739,11 @@ public final class ItemLander
          * @param chunkCount how many chunks it is stored in
          * @param size       its size, in bytes
          * @param digest     its digest
+         * @param sha256     its plain SHA-256, in hex; null if it was resumed
          * @param startedAt  when landing it started
          */
         void summary(NewItem item, int chunkCount, long size, String digest,
-                Instant startedAt)
+                String sha256, Instant startedAt)
         {
             GenericRecord row = row(item.itemId(), SUMMARY_ROW, new byte[0]);
             row.setField(INTAKE, settings.intake());
@@ -721,6 +752,7 @@ public final class ItemLander
             row.setField(CHUNK_COUNT, chunkCount);
             row.setField(CHUNK_SIZE, settings.chunkSize());
             row.setField(ITEM_DIGEST, digest);
+            row.setField(ITEM_SHA256, sha256);
             row.setField(DIGEST_BLOCK_SIZE, settings.blockSize());
             row.setField(STARTED_AT,
                     OffsetDateTime.ofInstant(startedAt, ZoneOffset.UTC));

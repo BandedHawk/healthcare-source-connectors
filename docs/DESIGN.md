@@ -47,6 +47,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 
 Revision 2026-11-03 (av): built step 4 of landing, SFTP and SMB intakes (§5.3.14). They use JSch and smbj directly, polled by a Camel timer, with explicit settings in place of a Camel URI (§5.3.9). SMB is SMB 3 with encryption required and NTLMv2; a share that doesn't encrypt, and a guest or anonymous login, are refused. A problem reaching the source is reported once by reason as `intake.unreachable` (`NETWORK`, `AUTH`, `PERMISSION`, `HOST_KEY`, `NOT_FOUND`, `ENCRYPTION`) and `intake.reachable` when it ends; all but `NETWORK` are retried only every `auth-retry-interval`. An item cut off part way resumes from its checkpoint, which also fixes a crash after a read failed mid-item (§5.3.4). Tested against embedded SSHD, and against OpenSSH and Samba containers behind Toxiproxy. New dependencies: JSch, smbj and Bouncy Castle (§14.2).
 
+Revision 2026-11-04 (aw): built step 5 of landing, HTTP push (§5.3.15). `sdh.landing.source.type: http` starts a web server, and only then; the other intakes still run without one. Decided 2026-11-04: the endpoint is a Spring MVC controller on Spring Boot's Tomcat with Spring Security, not Camel's `platform-http`, because `platform-http` reads the whole request body before the route runs, into memory or a plaintext temporary file. A push is authenticated by OAuth2 (a JWT checked against the issuer's keys, audience and scope) or mTLS (a client certificate from a trusted CA, with a listed subject), streamed straight into landing, and answered `202` with a receipt that carries the SHA-256 of the body. An `Idempotency-Key` is scoped to its sender. A push waits up to `max-wait` for the one before it, then gets `503` with `Retry-After`. The ledger gained `item_size` and `item_sha256`, and `landed_items` gained `item_sha256` (§5.3.2). New dependencies: Spring Web MVC, Spring Security with the OAuth2 resource server, Tomcat and Nimbus JOSE + JWT (§14.2).
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -346,9 +348,9 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Landing: two-stage ingestion (steps 1 to 4 built)
+### 5.3 Landing: two-stage ingestion (steps 1 to 5 built)
 
-Decided 2026-11-03. Steps 1 to 4 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14); HTTP push is next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14).
+Decided 2026-11-03. Steps 1 to 5 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14). Step 5: HTTP push (§5.3.15); queue intakes are next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14).
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
@@ -376,7 +378,7 @@ flowchart LR
 - **Landed items never change.** If a producer's data has a problem, the producer fixes it at their end and sends it again; we never edit landed data.
 - **Retention of landed data is set by the customer,** possibly up to the legal limit for keeping records, which can be many years.
 - **No guarantees about producers:** sizes, rates, naming, clean-up and timing are all unknown. Files may stay on a source indefinitely. Producers never append to a file they have dropped.
-- **Camel components from a fixed list.** SFTP and SMB are the exception (decided 2026-11-03, §5.3.14): they use JSch and smbj directly, polled by a Camel timer, so that timeouts, encryption, host keys and logging are under our control and the settings are explicit rather than a URI. More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
+- **Camel components from a fixed list.** SFTP, SMB and HTTP push are the exceptions. SFTP and SMB (decided 2026-11-03, §5.3.14) use JSch and smbj directly, polled by a Camel timer, so that timeouts, encryption, host keys and logging are under our control and the settings are explicit rather than a URI. HTTP push (decided 2026-11-04, §5.3.15) is a Spring MVC controller, because Camel's `platform-http` can't stream a request body. More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
 - **Dropped:** FHIR push (the end of the pipeline is a FHIR repository, so pushing FHIR through this ingestion adds little beyond MDM) and NFS (Camel has no NFS component, and a mount moves failure handling outside the application).
 
 #### 5.3.1 Intakes
@@ -387,7 +389,7 @@ flowchart LR
 | SFTP | JSch, polled by a Camel timer (built) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
 | SMB share | smbj, SMB 3 with encryption required, polled by a Camel timer (built) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
 | Object bucket | `aws2-s3`, `azure-storage-blob`, `google-storage` | present (objects appear whole); `settle` optional | ledger: bucket, key, version ID or ETag | yes, ranged reads |
-| HTTP push | `platform-http` | the whole request body received | `Idempotency-Key` header, if sent | no: the sender retries |
+| HTTP push | Spring MVC and Spring Security, not `platform-http` (built, §5.3.15) | the whole request body received | `Idempotency-Key` header, if sent | no: the sender retries |
 | Queue | the seven brokers of §10.3, as consumers | a batch is full or its time is up | broker message ID | no: unacknowledged messages are redelivered |
 | Iceberg table | Iceberg API (no Camel component) | a committed snapshot | table UUID, data file path | yes, by row group |
 
@@ -401,8 +403,8 @@ flowchart LR
 **HTTP push.**
 - Each intake chooses OAuth2 (a bearer JWT checked against the issuer's keys, audience and a required scope) or mTLS (the client certificate checked against the intake's trusted CAs and an allow-list of subjects). For mTLS, TLS ends at the pod (the ingress passes TLS through), so the certificate the node checks is the sender's own.
 - `POST /intakes/<intake>/items`. The body is streamed straight into landing chunks, never held whole in memory or written to disk in plaintext. There is no size limit unless the intake sets `max-item-bytes`.
-- The answer is `202 Accepted` with a receipt (§5.3.6), sent only after the item's commit. A sender that loses the connection before then doesn't know the outcome and sends again; an `Idempotency-Key` header makes that safe (the same key returns the first receipt).
-- While no node holds the intake's lease (a failover), there is no ready pod behind the Service and senders get a connection error or `503` with `Retry-After`.
+- The answer is `202 Accepted` with a receipt (§5.3.8), sent only after the item's commit. A sender that loses the connection before then doesn't know the outcome and sends again; an `Idempotency-Key` header makes that safe (the same key returns the first receipt).
+- While no node holds the intake's lease (a failover), there is no ready pod behind the Service and senders get a connection error. A push that waits too long for the one before it gets `503` with `Retry-After`.
 
 **Queues.**
 - Messages are landed in batches, so a stream of small messages doesn't become a stream of commits and `item.landed` messages. A batch closes at `batch.max-messages`, `batch.max-bytes` or `batch.max-wait`, whichever comes first (defaults 1,000, 64 MiB, 5 s).
@@ -418,15 +420,16 @@ Namespace `sdh_landing` (configurable), with its own catalog properties, so it c
 **`landed_items`** (`LandingTables`, written by `ItemLander`, read by `LandedItems`) is encrypted like `source_files` (§8.2): the item in 8 MiB chunks, one row per chunk, then a summary row (`chunk_index = -1`) written in the item's final commit. A summary row means the item is fully landed.
 - **Read as a stream,** because a push's size isn't known in advance. A chunk is known to be the last by reading one chunk ahead.
 - **Chunk rows** carry only `item_id`, `chunk_index`, `ciphertext`, `bdk_wrapped`, `kek_ref`, `batch_id` and `landed_at` (the partition). The chunk key is HKDF(BDK, itemId, seq 0) as for sections. The chunk count in the AAD is 0, because it isn't known when a chunk is written; the summary row's count and the digest catch a missing, extra or moved chunk instead.
-- **The summary row** holds `intake`, `kind` (`file`, `object`, `push`, `message-batch`, `table-file`), `item_size`, `chunk_count`, `chunk_size`, `item_digest` with `digest_block_size`, `started_at`, the source reference (`source_ref_hash`, `source_size`, `source_version`), the encrypted original name or path (`original_name_enc`, seq −1 as for archives), and `replaces_item_id`.
+- **The summary row** holds `intake`, `kind` (`file`, `object`, `push`, `message-batch`, `table-file`), `item_size`, `chunk_count`, `chunk_size`, `item_digest` with `digest_block_size`, `started_at`, the source reference (`source_ref_hash`, `source_size`, `source_version`), the encrypted original name or path (`original_name_enc`, seq −1 as for archives), `replaces_item_id`, and `item_sha256`, the SHA-256 of the content (built in step 5; none for an item resumed after a restart, §5.3.15).
 - **`item_digest`** is the keyed chained digest of §5.1, with the same label and blocks, so a file's item digest equals the file digest the splitter reports for it. Tested.
 - **Size check:** when the source gave a size, the bytes read must match it exactly, or the landing stops with `ItemChangedException` and nothing is finished.
-- **Not yet:** the producer's reference, the content's SHA-256 and the record index for message batches come with the steps that need them (§5.3.8, step 6). `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
+- **Not yet:** the producer's reference and the record index for message batches come with the steps that need them (§5.3.8, step 6). `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
 
 Chunks committed without a summary row belong to an item that wasn't finished (a push that broke off, an item that changed while being read). Nothing reads them. For now they are removed only by retention, with the rest of their day (§5.3.13); removing them sooner needs their files rewritten, and isn't built.
 
 **`landing_ledger`** records what has been landed, with no PHI: hashes, sizes and times only.
 - **Key:** `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ path or key)`, plus size and modification time (or version ID or ETag; or the message ID's hash for queues), and the item's content digest.
+- **Size and SHA-256:** each entry also has `item_size` and `item_sha256` (step 5), so a push's receipt can be given again from the ledger alone.
 - **Kept longer than the data.** Retention purges `landed_items`, but a file that stays on a read-only source would then be landed again. The ledger has its own retention, by default forever.
 - **Written straight after the item's commit.** Iceberg has no multi-table commit (§8.2), so a crash in between leaves the last item without a ledger row. Items are landed one at a time, so only the last can be missing: at startup `LandingLedger.repair` adds it from the done checkpoint. An item is never landed twice for that reason. Tested.
 - **In memory (`LedgerIndex`):** the node keeps each sighting's 128-bit key in a compact set (about 24 bytes per item), and 60 bits of each item's digest in another (about 12 bytes per item): 10 million items need about 360 MB. The digest set only says an earlier item *may* have the same content; `LandingLedger.itemsWithDigest` gives the exact items. The sets are loaded at startup. `sdh.landing.ledger_items` reports their size.
@@ -522,7 +525,7 @@ sdh:
   landing:
     intake: claims-sftp                    # names the lease, checkpoint, ledger keys and metrics
     source:
-      type: sftp                           # directory | sftp | smb built; later s3 | azure-blob | gcs | http | queue | iceberg
+      type: sftp                           # directory | sftp | smb | http built; later s3 | azure-blob | gcs | queue | iceberg
       path: /outbound/claims
       sftp: { host: dropzone.example.org, user: sdh, private-key: /run/secrets/sftp_key, known-hosts: /run/secrets/known_hosts }
       access: read-only                    # read-only | read-write
@@ -532,7 +535,9 @@ sdh:
       max-item-bytes: 0                    # 0 = no limit
       auth-retry-interval: 5m
     batch: { max-messages: 1000, max-bytes: 64MB, max-wait: 5s }   # queue intakes
-    http:                                  # http intakes
+    http:                                  # http intakes (§5.3.15)
+      port: 8443
+      tls: { certificate: /run/secrets/tls.crt, private-key: /run/secrets/tls.key }
       auth: oauth2                         # oauth2 | mtls
       oauth2: { issuer: "https://idp.example.org", audience: sdh-landing, scope: sdh.push }
       # mtls: { trusted-cas: /run/secrets/producer-ca.pem, subjects: ["CN=claims-producer"] }
@@ -556,7 +561,7 @@ sdh:
 2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). Left for later: the listing metrics of §5.3.3. The image and kit came in step 3b, retention and maintenance after it (§5.3.13).
 3. **The splitter reads from landing.** 3a (built, §5.3.12): an `item.landed` consumer and inbox, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. 3b: an image for the landing node, the build and Kubernetes scripts, and the `-Pit` suite, the Kubernetes run (§15.2) and the demo rewritten for two stages, with failover of both stages.
 4. **SFTP and SMB (built),** with the failure cases of §5.3.4 tested against containers that are cut off, stalled, restarted and given wrong keys (§5.3.14). Left for later: Kerberos for SMB, the intake metrics and the planned events of §5.3.4, and claims on remote sources.
-5. **HTTP push,** with OAuth2 and mTLS.
+5. **HTTP push (built),** with OAuth2 and mTLS (§5.3.15). Left for later: the status endpoint and correlation IDs of §5.3.8, and an HTTP readiness probe.
 6. **Queue intakes,** batched, for the seven brokers.
 7. **Buckets,** then **Iceberg tables.**
 8. **Producer feedback** (§5.3.8), once its open questions are settled.
@@ -730,6 +735,55 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 - `SftpLandingApplicationTest`: the whole node on embedded SSHD, through an outage (reason `NETWORK`) and back, with no filenames in the logs.
 - `SftpIntakeIT` (OpenSSH container behind Toxiproxy): list, read and move; a cut connection, then resume; a stalled connection dropped within 20 s; a server restart; a wrong key against a changed host key.
 - `SmbIntakeIT` (two Samba containers, one requiring encryption and one with it off, behind Toxiproxy): an encrypted share works end to end; the unencrypted one is `ENCRYPTION`; a wrong password is `AUTH` and a missing share `NOT_FOUND`; a cut, a stall and a restart.
+
+#### 5.3.15 HTTP push as built (step 5)
+
+`sdh.landing.source.type: http` makes the node a push intake. `WebServerSwitch`, an `EnvironmentPostProcessor`, sets `spring.main.web-application-type` to `servlet` for it and to `none` for every other type, so the other intakes still start no web server and no Spring Security defaults. A push intake has no listing, no `path` and no Camel route of its own; the rest of the node (lease, storage, ledger, `item.landed`, maintenance) is as in §5.3.11.
+
+**Decided 2026-11-04: Spring MVC, not Camel's `platform-http`.** The plan was `platform-http` on Spring Boot's server, so that HTTP sits among the other Camel intakes. It can't stream: its binding reads the whole body before the route runs, into a byte array, or with streaming on into a cache that spills to a plaintext temporary file, and the Spring Boot consumer has no setting to stop it. Either breaks the rule that a body is never held whole or written in plaintext. So `PushController` is a plain `@RestController`, on the same Tomcat, with Spring Security. The intake type is still chosen at run time, like the others.
+
+**The request.** `POST /intakes/<intake>/items`, over TLS only:
+- The body is read from the request's own stream, in landing's chunks, through `PushService`. Multipart is off (`spring.servlet.multipart.enabled: false`) and Tomcat's `maxPostSize` is 0, so neither spools a body to disk; a form or multipart content type gets `415`.
+- `Content-Length` is checked if sent: a body shorter or longer than stated is `400`. Chunked bodies are fine.
+- `max-item-bytes` (0 = no limit) is checked as the body arrives: `413`.
+- `Idempotency-Key`, if sent, is 1 to 255 visible ASCII characters, or `400`.
+- Every answer has `Cache-Control: no-store`. Any other path or method is refused.
+
+**Authentication** (`PushWebConfiguration`), one of:
+- **`oauth2`:** a bearer JWT. Its keys come from `jwk-set-uri`, or from the issuer's metadata if that isn't set, fetched on the first push. Signatures: RS, PS and ES at 256, 384 and 512; never HS or unsigned. The issuer, the audience, a non-blank `sub` and the scope are all required. No token is `401`; a valid token without the scope is `403`.
+- **`mtls`:** TLS requires a client certificate from `trusted-cas`; a certificate from another CA, or none, fails the handshake. Its subject must be in `subjects`, compared in RFC 2253 canonical form, so case and spacing don't matter; an unlisted subject is `403`. TLS must end at the pod for this (the ingress passes TLS through).
+
+**The sender** is the token's issuer and subject, or the certificate's canonical subject. It is used only to scope the idempotency key, and is hashed with it; it is never stored in plain or logged.
+
+**`PushService`** lands one push at a time, under the writer lock that maintenance also takes:
+- **Waiting:** a push waits up to `max-wait` (30s) for the one before it, then gets `503` with `Retry-After` (`retry-after`, 30s) and `push.busy`.
+- **Replays:** with an `Idempotency-Key`, the source reference is the hash of the sender and key. A reference already in the ledger gets the first push's receipt again (`push.replayed`) and lands nothing; the same key from another sender is a new push. Without a key, every push is new.
+- **Receipt** (`Receipt`): `itemId`, `intake`, `size`, `sha256` and `landedAt`, as JSON, sent only after the item's commit. `landedAt` is to the microsecond, as stored, so a replay gives exactly the same receipt.
+- **A push can't resume.** If its body breaks off, is the wrong length or is too large, or storage fails, its checkpoint is cleared at once (`item.abandoned`); the committed chunks stay, without a summary row, until retention removes them. The answer is `400`, `413` or `503`, and `push.broken` or `push.too_large` says which.
+- **After the commit,** the ledger entry and the `item.landed` message are written. If either fails, the receipt still holds (the item is committed), and they are finished before the next push lands (`push.finish_deferred`); until they are, pushes get `503`. So an item is never announced behind a newer one.
+- **Startup** repairs the ledger, clears an unfinished push and announces the last landed item again, as for the other intakes. A push that arrives before that has run does it first.
+- Fatal errors stop the node, as in §5.3.11.
+
+**SHA-256** (decided 2026-11-04, for the receipt of §5.3.8): `ItemLander` hashes every item as it lands it, for every intake, and stores the hex in `landed_items.item_sha256` on the summary row and in `landing_ledger.item_sha256`, beside the new `item_size`. An item resumed after a restart has none, since its first chunks weren't read again; for a push, which never resumes, it is always there. `LandingLedger.find` gives the entry for a source reference.
+
+**Readiness.** The port opens only once the node holds the lease, so a standby isn't sent pushes. There is no HTTP health endpoint yet: use a TCP probe on the push port.
+
+**Settings** (`sdh.landing.http`, checked by `HttpSettings`, whose `toString` hides the key's password):
+- `port` (8443), `auth` (`oauth2` or `mtls`), `max-item-bytes` (0), `max-wait` (30s), `retry-after` (30s), `read-timeout` (60s; also the connection timeout).
+- `tls`: `certificate` (PEM, with its chain), `private-key` (PEM) and `private-key-password`. Required.
+- `oauth2`: `issuer` and `jwk-set-uri` (both `https`), `audience` and `scope`, all but `jwk-set-uri` required.
+- `mtls`: `trusted-cas` (PEM) and `subjects` (at least one).
+- Secret from the environment: `SDH_LANDING_HTTP_TLS_PRIVATE_KEY_PASSWORD`.
+
+**No PHI in logs:** no body, sender, key or header is logged; events carry the item ID, the intake and byte counts only.
+
+**Not built:** the status endpoint and correlation IDs of §5.3.8, a health endpoint, and push metrics.
+
+**Tests:**
+- `PushServiceTest`: a landed push and its replays, scoped by sender and across a restart; a body that breaks off after chunks were committed; bodies too large, short or long; a broker outage, during which nothing more lands; an unfinished push cleared at startup; a fatal error.
+- `PushOAuth2ApplicationTest` (the whole node, with a JWKS served by the test): a 1.5 MB body streamed in chunks, with its receipt, its `item.landed` and no PHI in the logs; replays scoped by sender; no token, and tokens signed by another key, from another issuer, for another audience, expired or without the scope; too large, cut off, form and bad-key requests; a busy intake.
+- `PushMtlsApplicationTest`: a listed client whose subject is written differently, and its replay; an unlisted subject; a certificate from another CA; no certificate.
+- `ItemLanderTest` and `LandingLedgerTest`: the SHA-256 (none after a resume) and `find`.
 
 ## 6. Splitting
 
@@ -1754,7 +1808,7 @@ Each application, the splitter (`file-connector`) and the landing node (`landing
 - **User:** uid/gid 10001 (`sdh`), with no home directory or login shell. Everything under `/app` is root-owned and read-only to it. Nothing in the splitter's image belongs to it; in the landing image, only the intake mount point `/data/intake`.
 - **Operator commands:** `/usr/local/bin/sdh-admin` runs `admin` (§11.4) with the same JVM options and `-Xmx512m` (`@/app/admin.args`), so it fits beside the connector's JVM: `kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status`. With a read-only root filesystem, restore into `/tmp` and read the file from there (`kubectl cp` with the service image; through `kubectl debug` with the customer image, §14.3). As a one-off container, arguments after the image name go to the app: `docker run … <image> admin status`.
 - **Legal:** `/app/legal/` holds `LICENSE`, `NOTICE`, `THIRD-PARTY.txt` and `licenses/`, extracted from the jar at build time, and `os-packages.txt`, the OS package inventory generated in the final stage (§14.2). The OCI labels give the vendor (Smile Digital Health Inc.), `org.opencontainers.image.licenses=LicenseRef-Proprietary` and a pointer to these files. The JRE's notices stay in `/opt/java/openjdk/legal` and the OS packages' in `/usr/share/doc`.
-- **Health:** there is no HTTP endpoint. The process is the health signal: fatal conditions exit with status 70 (`FatalExit`) and the orchestrator restarts it.
+- **Health:** there is no health endpoint. Only a landing node with an HTTP push intake listens at all, on its push port (§5.3.15). The process is the health signal: fatal conditions exit with status 70 (`FatalExit`) and the orchestrator restarts it.
 
 **JVM flags.** These are in two argument files, shared by both images and the distribution (`file-connector/src/dist/`): `/app/jvm.options` holds the PHI hygiene flags, which also apply on a host, and `/app/container.options` the container-only settings (heap from the memory limit, `/tmp`, native library paths). `ENTRYPOINT` is `java @/app/jvm.options @/app/container.options -jar /app/app.jar`, and operator commands add `@/app/admin.args`. `JDK_JAVA_OPTIONS` and `JAVA_TOOL_OPTIONS` are read before the command line, so they can add tuning (e.g. `-Xmx`) but can't undo these:
 
@@ -1874,7 +1928,7 @@ Our `LICENSE` and `NOTICE` are added to every jar as Maven resources from the re
 **Licenses in use:** almost all Apache-2.0, MIT or BSD. The rest:
 - **offered under a choice:** the ten components in the election table above;
 - **single license:** `pem-keystore` (EPL-1.0), `reactive-streams` (MIT-0).
-- **in the landing node:** JSch (BSD-3-Clause, which its POM calls "Revised BSD", and ISC for the jBCrypt code it bundles; both apply, though `THIRD-PARTY.txt` lists them as a choice), Bouncy Castle (its own licence, the MIT text, merged as MIT), smbj and its ASN.1 library (Apache-2.0), and mbassador (MIT, with its copyright line in `copyrights.properties`).
+- **in the landing node:** JSch (BSD-3-Clause, which its POM calls "Revised BSD", and ISC for the jBCrypt code it bundles; both apply, though `THIRD-PARTY.txt` lists them as a choice), Bouncy Castle (its own licence, the MIT text, merged as MIT), smbj and its ASN.1 library (Apache-2.0), and mbassador (MIT, with its copyright line in `copyrights.properties`); for HTTP push, Spring Web MVC, Spring Security with its OAuth2 resource server, Tomcat and Nimbus JOSE + JWT (all Apache-2.0).
 
 None forces GPL terms on the connector, because every GPL or LGPL option has a permissive or weak-copyleft alternative. For EPL-1.0 and EPL-2.0 components distributed in binary form, the project URL in `THIRD-PARTY.txt` points to the source.
 

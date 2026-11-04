@@ -113,6 +113,13 @@ public final class LandingTables
     /** The item this one replaces, when its producer says so. */
     public static final String REPLACES_ITEM_ID = "replaces_item_id";
 
+    /**
+     * The plain SHA-256 of the item's bytes, in lower-case hex, for its
+     * producer to check against; null for an item resumed part-way, whose
+     * hash couldn't be carried over.
+     */
+    public static final String ITEM_SHA256 = "item_sha256";
+
     /** The columns of {@value #LANDED_ITEMS}. */
     public static final Schema LANDED_ITEMS_SCHEMA = new Schema(
             required(1, ITEM_ID, Types.UUIDType.get()),
@@ -137,7 +144,9 @@ public final class LandingTables
             optional(20, SOURCE_VERSION, Types.StringType.get()),
             optional(21, ORIGINAL_NAME_ENC, Types.BinaryType.get(),
                     "encrypted original name or path"),
-            optional(22, REPLACES_ITEM_ID, Types.UUIDType.get()));
+            optional(22, REPLACES_ITEM_ID, Types.UUIDType.get()),
+            optional(23, ITEM_SHA256, Types.StringType.get(),
+                    "SHA-256 of the item, in hex"));
 
     /** The columns of {@value #LEDGER}. */
     public static final Schema LEDGER_SCHEMA = new Schema(
@@ -148,7 +157,10 @@ public final class LandingTables
             required(4, SOURCE_VERSION, Types.StringType.get()),
             required(5, ITEM_ID, Types.UUIDType.get()),
             required(6, ITEM_DIGEST, Types.StringType.get()),
-            required(7, LANDED_AT, Types.TimestampType.withZone()));
+            required(7, LANDED_AT, Types.TimestampType.withZone()),
+            optional(8, ITEM_SIZE, Types.LongType.get()),
+            optional(9, ITEM_SHA256, Types.StringType.get(),
+                    "SHA-256 of the item, in hex"));
 
     /** Not used: there are only static methods. */
     private LandingTables()

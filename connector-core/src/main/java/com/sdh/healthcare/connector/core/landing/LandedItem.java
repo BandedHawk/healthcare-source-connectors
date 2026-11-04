@@ -24,12 +24,14 @@ import java.util.UUID;
  * @param snapshotId a snapshot of {@value LandingTables#LANDED_ITEMS} that
  *                   holds the whole item
  * @param kekRef     the KEK that wrapped its summary row's data key
+ * @param sha256     the plain SHA-256 of its bytes, in lower-case hex; null
+ *                   if it was resumed part-way
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record LandedItem(UUID itemId, String intake, ItemKind kind,
         SourceRef source, long size, String digest, Instant landedAt,
-        long snapshotId, String kekRef)
+        long snapshotId, String kekRef, String sha256)
 {
 
     /**

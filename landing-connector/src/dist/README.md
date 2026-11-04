@@ -69,6 +69,7 @@ variables, never in the file:
 - `SDH_LEASE_JDBC_PASSWORD`
 - `SDH_LANDING_SOURCE_SFTP_PASSWORD` or `SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE`, for an SFTP source
 - `SDH_LANDING_SOURCE_SMB_PASSWORD`, for an SMB source
+- `SDH_LANDING_HTTP_TLS_PRIVATE_KEY_PASSWORD`, for an HTTP push intake whose TLS key has a password
 - catalog and storage credentials
 
 Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` becomes `SDH_LEASE_JDBC_URL`) or as
@@ -78,8 +79,8 @@ The source is read-only by default: files are left where they are, and a ledger 
 With `access: read-write`, each file is deleted, moved or renamed once it has landed and been announced; the node
 checks at startup that it can do so.
 
-The source is a local or mounted directory (`type: directory`), an SFTP server (`type: sftp`) or an SMB share
-(`type: smb`):
+The source is a local or mounted directory (`type: directory`), an SFTP server (`type: sftp`), an SMB share
+(`type: smb`), or HTTP push (`type: http`):
 - **SFTP:** the server's host key must be pinned in a known-hosts file; an unknown or changed key is never
   accepted. Log in with a private key in OpenSSH format, or a password.
 - **SMB:** SMB 3 with encryption only, NTLMv2 with a user and password; guest and anonymous logins are refused, and
@@ -89,6 +90,15 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   cut off part way resumes where it stopped. Refused credentials, a missing share or a changed host key are retried
   only every `auth-retry-interval`, so an account isn't locked. Each is reported once, by reason, as
   `intake.unreachable`, and `intake.reachable` when it is back. No names or paths are logged.
+- **HTTP push:** producers send each item as the body of `POST https://<host>:8443/intakes/<intake>/items`, over
+  TLS (`sdh.landing.http.tls`). They authenticate with an OAuth2 bearer token (checked for the issuer, audience and
+  scope) or with a client certificate (from `trusted-cas`, with a subject in `subjects`). The body is streamed into
+  landing, never held whole or written to disk unencrypted. The answer is `202` with a receipt: the item ID, size,
+  SHA-256 and landing time. A producer that isn't sure a push arrived sends it again with the same
+  `Idempotency-Key` header and gets the same receipt. Pushes are landed one at a time; one that waits longer than
+  `max-wait` gets `503` with `Retry-After`, as does any push while storage or the broker is down. A body larger
+  than `max-item-bytes` gets `413`, and one cut off gets `400`. The port opens only on the active node, so a
+  standby isn't sent pushes; use a TCP probe on it.
 
 Landed items are kept forever unless you set `sdh.maintenance.retention.landed-items` (at least `7d`, so the
 splitter has time to read each item). Retention removes whole days, and never part of an item. The ledger is always
@@ -132,6 +142,9 @@ The node needs:
 - **`/run/secrets`:** the keys, as a read-only secret volume (local key mode only).
 - **Configuration:** a ConfigMap mounted as `application.yml`, with `SPRING_CONFIG_ADDITIONAL_LOCATION` pointing at it.
 - **Secrets:** a Secret whose keys are environment variable names, passed whole with `envFrom`.
+- **HTTP push only:** a Service for the push port, the TLS certificate and key in the secret volume, and a TCP
+  readiness probe on the port, so only the active node receives pushes. For mTLS, the ingress or load balancer
+  must pass TLS through to the pod, so that the node sees the client's own certificate.
 
 Two replicas give an active node and a standby: both run with `standby: true`, the first to take the lease lands,
 and the other waits. The intake volume must be mountable by both pods (`ReadWriteMany`, or `ReadOnlyMany` for a

@@ -338,6 +338,12 @@
         <artifactId>bcprov-jdk18on</artifactId>
         <version>${bouncycastle.version}</version>
       </dependency>
+      <!-- Test only: certificates for the HTTP push tests. -->
+      <dependency>
+        <groupId>org.bouncycastle</groupId>
+        <artifactId>bcpkix-jdk18on</artifactId>
+        <version>${bouncycastle.version}</version>
+      </dependency>
       <dependency>
         <groupId>org.apache.sshd</groupId>
         <artifactId>sshd-sftp</artifactId>
