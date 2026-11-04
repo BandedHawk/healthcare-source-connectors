@@ -4,42 +4,87 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.contract.jose;
 
 import com.sdh.healthcare.connector.contract.message.UnsupportedContractVersionException;
 
 /**
- * A message could not be trusted or understood. The message text never contains payload content.
+ * A message couldn't be trusted or understood. The message text never
+ * contains payload content: it is the reason's name.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public class MessageRejectedException extends Exception {
-    public enum Reason {
+public class MessageRejectedException extends Exception
+{
+
+    /** Why a message was rejected. */
+    public enum Reason
+    {
+        /** It isn't a well-formed JWE holding a JWS. */
         MALFORMED,
+
+        /** It uses an algorithm outside the allowed list. */
         ALGORITHM_NOT_ALLOWED,
+
+        /** It is encrypted to a key ID this reader doesn't have. */
         UNKNOWN_RECIPIENT_KEY,
+
+        /** It couldn't be decrypted. */
         DECRYPT_FAILED,
+
+        /** It is signed with a key ID this reader doesn't trust. */
         UNKNOWN_SIGNER,
+
+        /** Its signature doesn't verify. */
         BAD_SIGNATURE,
+
+        /** Its contract major version isn't supported. */
         UNSUPPORTED_VERSION,
+
+        /** Its payload couldn't be read as a message. */
         BAD_PAYLOAD
     }
 
+    /** Why the message was rejected. */
     private final Reason reason;
 
-    public MessageRejectedException(Reason reason) {
+    /**
+     * Creates the exception.
+     *
+     * @param reason why the message was rejected
+     */
+    public MessageRejectedException(Reason reason)
+    {
         super(reason.name());
         this.reason = reason;
     }
 
-    public MessageRejectedException(Reason reason, Throwable cause) {
-        super(reason.name(), cause instanceof UnsupportedContractVersionException ? cause : null);
-        this.reason = cause instanceof UnsupportedContractVersionException ? Reason.UNSUPPORTED_VERSION : reason;
+    /**
+     * Creates the exception from a failure. An unsupported contract version
+     * becomes {@link Reason#UNSUPPORTED_VERSION} and is kept as the cause;
+     * any other cause is dropped, since its message could hold payload
+     * content.
+     *
+     * @param reason why the message was rejected
+     * @param cause  the failure
+     */
+    public MessageRejectedException(Reason reason, Throwable cause)
+    {
+        super(reason.name(),
+                cause instanceof UnsupportedContractVersionException
+                        ? cause : null);
+        this.reason = cause instanceof UnsupportedContractVersionException
+                ? Reason.UNSUPPORTED_VERSION : reason;
     }
 
-    public Reason reason() {
+    /**
+     * Why the message was rejected.
+     *
+     * @return the reason
+     */
+    public Reason reason()
+    {
         return reason;
     }
 }
