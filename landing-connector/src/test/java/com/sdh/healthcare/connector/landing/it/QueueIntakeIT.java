@@ -9,6 +9,27 @@ package com.sdh.healthcare.connector.landing.it;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.azure.messaging.eventhubs.EventData;
+import com.azure.messaging.eventhubs.EventDataBatch;
+import com.azure.messaging.eventhubs.EventHubClientBuilder;
+import com.azure.messaging.eventhubs.EventHubProducerClient;
+import com.azure.messaging.servicebus.ServiceBusClientBuilder;
+import com.azure.messaging.servicebus.ServiceBusMessage;
+import com.azure.messaging.servicebus.ServiceBusSenderClient;
+import com.azure.storage.blob.BlobContainerClientBuilder;
+import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.grpc.GrpcTransportChannel;
+import com.google.api.gax.rpc.FixedTransportChannelProvider;
+import com.google.cloud.pubsub.v1.Publisher;
+import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
+import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
+import com.google.cloud.pubsub.v1.TopicAdminClient;
+import com.google.cloud.pubsub.v1.TopicAdminSettings;
+import com.google.protobuf.ByteString;
+import com.google.pubsub.v1.PubsubMessage;
+import com.google.pubsub.v1.Subscription;
+import com.google.pubsub.v1.SubscriptionName;
+import com.google.pubsub.v1.TopicName;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
@@ -27,8 +48,11 @@ import com.sdh.healthcare.connector.landing.intake.Announcer;
 import com.sdh.healthcare.connector.landing.intake.BatchService;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.route.ArtemisIntakeRoute;
+import com.sdh.healthcare.connector.landing.route.EventHubsSupport;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.route.QueueIntakeRoute;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 import jakarta.jms.Connection;
 import jakarta.jms.MessageProducer;
 import jakarta.jms.Session;
@@ -53,6 +77,7 @@ import javax.crypto.KeyGenerator;
 import org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory;
 import org.apache.camel.CamelContext;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.component.google.pubsub.GooglePubsubComponent;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Table;
@@ -72,9 +97,16 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.util.unit.DataSize;
 import org.testcontainers.activemq.ArtemisContainer;
+import org.testcontainers.azure.AzuriteContainer;
+import org.testcontainers.azure.EventHubsEmulatorContainer;
+import org.testcontainers.azure.ServiceBusEmulatorContainer;
 import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.Network;
 import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.gcloud.PubSubEmulatorContainer;
+import org.testcontainers.images.builder.Transferable;
 import org.testcontainers.kafka.KafkaContainer;
+import org.testcontainers.mssqlserver.MSSQLServerContainer;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
@@ -83,7 +115,8 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 
 /**
  * The queue intake against real brokers (design §5.3.16): Kafka, SQS (on
- * ElasticMQ), RabbitMQ and Artemis. For each, a node lands a batch but
+ * ElasticMQ), RabbitMQ, Artemis, and the Pub/Sub, Service Bus and Event
+ * Hubs emulators. For each, a node lands a batch but
  * crashes before it can announce it, so nothing is acknowledged; a new
  * node then lands every message exactly once: the crashed batch's
  * messages, delivered again, are recognised by their IDs, and the rest are
@@ -123,6 +156,10 @@ class QueueIntakeIT
     /** No Artemis connection. */
     static final LandingProperties.Artemis NO_ARTEMIS =
             new LandingProperties.Artemis(null, null, null, null);
+
+    /** No Event Hubs checkpoint store. */
+    static final LandingProperties.Eventhubs NO_EVENTHUBS =
+            new LandingProperties.Eventhubs(null, null, null);
 
     /** Thrown by the publisher of a node that is to crash. */
     static final class Crash extends Error
@@ -209,7 +246,7 @@ class QueueIntakeIT
                     new LandingProperties.Broker("kafka", "kafka:hl7?brokers="
                             + kafka.getBootstrapServers() + "&groupId=landing",
                             BATCH, Duration.ofHours(1), NO_RABBIT,
-                            NO_ARTEMIS));
+                            NO_ARTEMIS, NO_EVENTHUBS));
             crashThenRecover(settings, camel ->
             {
             });
@@ -257,7 +294,8 @@ class QueueIntakeIT
                             + "&accessKey={{sqs.key}}&secretKey={{sqs.key}}"
                             + "&autoCreateQueue=false&visibilityTimeout=2"
                             + "&waitTimeSeconds=1&delay=100", BATCH,
-                            Duration.ofHours(1), NO_RABBIT, NO_ARTEMIS));
+                            Duration.ofHours(1), NO_RABBIT, NO_ARTEMIS,
+                            NO_EVENTHUBS));
             crashThenRecover(settings, camel ->
             {
                 Properties placeholders = new Properties();
@@ -305,7 +343,7 @@ class QueueIntakeIT
                         new LandingProperties.Broker("rabbitmq",
                                 "spring-rabbitmq:default?queues=hl7", BATCH,
                                 Duration.ofHours(1), connection,
-                                NO_ARTEMIS));
+                                NO_ARTEMIS, NO_EVENTHUBS));
                 crashThenRecover(settings, camel -> camel.getRegistry().bind(
                         BrokerSettings.RABBITMQ_BEAN, factory));
             }
@@ -349,11 +387,216 @@ class QueueIntakeIT
             }
             BrokerSettings settings = BrokerSettings.of(
                     new LandingProperties.Broker("artemis", null, BATCH,
-                            Duration.ofHours(1), NO_RABBIT, connection));
+                            Duration.ofHours(1), NO_RABBIT, connection,
+                            NO_EVENTHUBS));
             crashThenRecover(settings, camel ->
             {
             });
         }
+    }
+
+    /**
+     * Pub/Sub: each message is acknowledged once its batch is landed, by
+     * the acknowledgement its exchange carries.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void pubsubLandsEveryMessageOnceAcrossACrash() throws Exception
+    {
+        try (PubSubEmulatorContainer emulator = new PubSubEmulatorContainer(
+                "gcr.io/google.com/cloudsdktool/google-cloud-cli:"
+                        + "590.0.0-emulators"))
+        {
+            emulator.start();
+            String endpoint = emulator.getEmulatorEndpoint();
+            ManagedChannel channel = ManagedChannelBuilder.forTarget(endpoint)
+                    .usePlaintext().build();
+            try
+            {
+                var transport = FixedTransportChannelProvider.create(
+                        GrpcTransportChannel.create(channel));
+                var none = NoCredentialsProvider.create();
+                TopicName topic = TopicName.of("sdh-it", "hl7");
+                SubscriptionName subscription =
+                        SubscriptionName.of("sdh-it", "hl7-landing");
+                try (TopicAdminClient topics = TopicAdminClient.create(
+                        TopicAdminSettings.newBuilder()
+                                .setTransportChannelProvider(transport)
+                                .setCredentialsProvider(none).build());
+                        SubscriptionAdminClient subscriptions =
+                                SubscriptionAdminClient.create(
+                                        SubscriptionAdminSettings.newBuilder()
+                                                .setTransportChannelProvider(
+                                                        transport)
+                                                .setCredentialsProvider(none)
+                                                .build()))
+                {
+                    topics.createTopic(topic);
+                    subscriptions.createSubscription(Subscription.newBuilder()
+                            .setName(subscription.toString())
+                            .setTopic(topic.toString())
+                            .setAckDeadlineSeconds(10).build());
+                }
+                Publisher publisher = Publisher.newBuilder(topic)
+                        .setChannelProvider(transport)
+                        .setCredentialsProvider(none).build();
+                for (int i = 0; i < MESSAGES; i++)
+                {
+                    publisher.publish(PubsubMessage.newBuilder()
+                            .setData(ByteString.copyFrom(body(i))).build())
+                            .get();
+                }
+                publisher.shutdown();
+            }
+            finally
+            {
+                channel.shutdownNow();
+            }
+            BrokerSettings settings = BrokerSettings.of(
+                    new LandingProperties.Broker("pubsub",
+                            "google-pubsub:sdh-it:hl7-landing", BATCH,
+                            Duration.ofHours(1), NO_RABBIT, NO_ARTEMIS,
+                            NO_EVENTHUBS));
+            // The subscriber takes its endpoint from the component only.
+            crashThenRecover(settings, camel ->
+            {
+                GooglePubsubComponent component = new GooglePubsubComponent();
+                component.setEndpoint(endpoint);
+                component.setAuthenticate(false);
+                camel.addComponent("google-pubsub", component);
+            });
+        }
+    }
+
+    /**
+     * Service Bus: messages are locked while held, and completed once their
+     * batch is landed; the sequence number is the ID.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void servicebusLandsEveryMessageOnceAcrossACrash() throws Exception
+    {
+        String config = """
+                {"UserConfig": {"Namespaces": [{"Name": "sbemulatorns",
+                  "Queues": [{"Name": "hl7", "Properties": {
+                    "DeadLetteringOnMessageExpiration": false,
+                    "DefaultMessageTimeToLive": "PT1H",
+                    "DuplicateDetectionHistoryTimeWindow": "PT20S",
+                    "ForwardDeadLetteredMessagesTo": "", "ForwardTo": "",
+                    "LockDuration": "PT1M", "MaxDeliveryCount": 10,
+                    "RequiresDuplicateDetection": false,
+                    "RequiresSession": false}}],
+                  "Topics": []}], "Logging": {"Type": "File"}}}""";
+        try (Network network = Network.newNetwork();
+                MSSQLServerContainer sql = new MSSQLServerContainer(
+                        "mcr.microsoft.com/mssql/server:2022-CU26-ubuntu-22.04")
+                        .acceptLicense().withNetwork(network);
+                ServiceBusEmulatorContainer servicebus =
+                        new ServiceBusEmulatorContainer("mcr.microsoft.com/"
+                                + "azure-messaging/servicebus-emulator:2.0.0")
+                                .acceptLicense()
+                                .withConfig(Transferable.of(config))
+                                .withMsSqlServerContainer(sql)
+                                .withNetwork(network))
+        {
+            servicebus.start();
+            String connection = servicebus.getConnectionString();
+            try (ServiceBusSenderClient sender = new ServiceBusClientBuilder()
+                    .connectionString(connection).sender().queueName("hl7")
+                    .buildClient())
+            {
+                for (int i = 0; i < MESSAGES; i++)
+                {
+                    sender.sendMessage(new ServiceBusMessage(body(i)));
+                }
+            }
+            BrokerSettings settings = BrokerSettings.of(
+                    new LandingProperties.Broker("servicebus",
+                            "azure-servicebus:hl7?serviceBusType=queue"
+                                    + "&connectionString=RAW({{sb.cs}})",
+                            BATCH, Duration.ofHours(1), NO_RABBIT,
+                            NO_ARTEMIS, NO_EVENTHUBS));
+            crashThenRecover(settings, camel -> placeholder(camel, "sb.cs",
+                    connection));
+        }
+    }
+
+    /**
+     * Event Hubs: the checkpoint moves only past landed batches, in the
+     * node's blob checkpoint store (on Azurite); a new consumer group
+     * starts from the earliest event.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void eventhubsLandsEveryMessageOnceAcrossACrash() throws Exception
+    {
+        String config = """
+                {"UserConfig": {"NamespaceConfig": [{"Type": "EventHub",
+                  "Name": "emulatorns1", "Entities": [{"Name": "hl7",
+                    "PartitionCount": "2",
+                    "ConsumerGroups": [{"Name": "landing"}]}]}],
+                  "LoggingConfig": {"Type": "File"}}}""";
+        try (Network network = Network.newNetwork();
+                AzuriteContainer azurite = new AzuriteContainer(
+                        "mcr.microsoft.com/azure-storage/azurite:3.35.0")
+                        .withNetwork(network);
+                EventHubsEmulatorContainer eventhubs =
+                        new EventHubsEmulatorContainer("mcr.microsoft.com/"
+                                + "azure-messaging/eventhubs-emulator:2.2.0")
+                                .acceptLicense()
+                                .withConfig(Transferable.of(config))
+                                .withAzuriteContainer(azurite)
+                                .withNetwork(network))
+        {
+            eventhubs.start();
+            String base = eventhubs.getConnectionString();
+            String connection = base + (base.endsWith(";") ? "" : ";")
+                    + "EntityPath=hl7";
+            try (EventHubProducerClient producer = new EventHubClientBuilder()
+                    .connectionString(connection).buildProducerClient())
+            {
+                EventDataBatch batch = producer.createBatch();
+                for (int i = 0; i < MESSAGES; i++)
+                {
+                    assertThat(batch.tryAdd(new EventData(body(i)))).isTrue();
+                }
+                producer.send(batch);
+            }
+            String storage = azurite.getConnectionString();
+            new BlobContainerClientBuilder().connectionString(storage)
+                    .containerName("checkpoints").buildClient().create();
+            LandingProperties.Eventhubs checkpoints =
+                    new LandingProperties.Eventhubs(storage, null,
+                            "checkpoints");
+            BrokerSettings settings = BrokerSettings.of(
+                    new LandingProperties.Broker("eventhubs",
+                            "azure-eventhubs:?consumerGroupName=landing"
+                                    + "&connectionString=RAW({{eh.cs}})",
+                            BATCH, Duration.ofHours(1), NO_RABBIT,
+                            NO_ARTEMIS, checkpoints));
+            crashThenRecover(settings, camel ->
+            {
+                placeholder(camel, "eh.cs", connection);
+                EventHubsSupport.bind(camel, checkpoints);
+            });
+        }
+    }
+
+    /**
+     * Gives a Camel context a property for a placeholder.
+     *
+     * @param camel the context
+     * @param name  the property
+     * @param value its value
+     */
+    static void placeholder(CamelContext camel, String name, String value)
+    {
+        Properties properties = new Properties();
+        properties.put(name, value);
+        camel.getPropertiesComponent().setInitialProperties(properties);
     }
 
     /**
@@ -420,7 +663,7 @@ class QueueIntakeIT
     }
 
     /**
-     * Waits up to a minute for a condition.
+     * Waits up to three minutes for a condition.
      *
      * @param condition the condition
      * @throws Exception if interrupted
@@ -428,7 +671,7 @@ class QueueIntakeIT
     static void awaitTrue(BooleanSupplier condition)
             throws Exception
     {
-        long deadline = System.nanoTime() + Duration.ofMinutes(1).toNanos();
+        long deadline = System.nanoTime() + Duration.ofMinutes(3).toNanos();
         while (!condition.getAsBoolean() && System.nanoTime() < deadline)
         {
             Thread.sleep(100);

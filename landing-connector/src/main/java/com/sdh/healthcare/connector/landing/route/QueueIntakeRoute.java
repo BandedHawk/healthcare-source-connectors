@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.landing.route;
 
+import com.azure.core.util.BinaryData;
 import com.rabbitmq.client.Channel;
 import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.intake.BatchService;
@@ -16,6 +17,10 @@ import java.util.ArrayList;
 import java.util.List;
 import org.apache.camel.Exchange;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.component.azure.eventhubs.EventHubsConstants;
+import org.apache.camel.component.azure.servicebus.ServiceBusConstants;
+import org.apache.camel.component.google.pubsub.GooglePubsubConstants;
+import org.apache.camel.component.google.pubsub.consumer.GooglePubsubAcknowledge;
 import org.apache.camel.component.kafka.KafkaConstants;
 import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 
@@ -27,15 +32,21 @@ import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
  *   <li><b>Kafka:</b> the consumer hands over each poll as one exchange
  *       ({@code batching}); it is landed, in batches of at most
  *       {@code max-messages} and {@code max-bytes}, then its offsets are
- *       committed by hand. A batch that can't be landed is tried again in
- *       place, with a growing pause, since Kafka has no way to deliver one
- *       message again.</li>
- *   <li><b>SQS and RabbitMQ:</b> exchanges are held open until their batch
- *       is landed ({@link HeldBatches}). SQS deletes a message when its
- *       exchange completes, and redelivers it after its visibility timeout
- *       if the exchange failed; RabbitMQ messages are acknowledged, or
- *       returned to the queue, on their channel.</li>
+ *       committed by hand.</li>
+ *   <li><b>SQS, Service Bus, Event Hubs and RabbitMQ:</b> exchanges are
+ *       held open until their batch is landed ({@link HeldBatches}). Then
+ *       SQS deletes each message, Service Bus completes it (renewing its
+ *       lock while it is held), Event Hubs moves its checkpoint, and
+ *       RabbitMQ messages are acknowledged on their channel.</li>
+ *   <li><b>Pub/Sub:</b> with {@code ackMode=NONE}, each exchange carries a
+ *       way to acknowledge its message later, and completes at once; the
+ *       message is acknowledged once its batch is landed. The client
+ *       extends its deadline meanwhile.</li>
  * </ul>
+ * A batch that can't be landed is tried again in place, with a growing
+ * pause, rather than handed back: that would raise its messages' delivery
+ * counts, and dead-letter them during a long outage on a broker with a
+ * delivery limit. Messages still held when the route stops are handed back.
  * The route starts after startup recovery. Messages are never logged.
  *
  * @author Jonas Barnett
@@ -97,6 +108,9 @@ public final class QueueIntakeRoute extends RouteBuilder
             case KAFKA -> route.process(this::kafka);
             case SQS -> route.process(held(new Sqs()));
             case RABBITMQ -> route.process(held(new Rabbitmq()));
+            case PUBSUB -> route.process(held(new Pubsub()));
+            case SERVICEBUS -> route.process(held(new Servicebus()));
+            case EVENTHUBS -> route.process(held(new Eventhubs()));
             default -> throw new IllegalStateException(
                     "Not a Camel broker: " + settings.kind());
         }
@@ -199,6 +213,103 @@ public final class QueueIntakeRoute extends RouteBuilder
                                     << Math.min(failures - 1, 20)));
                 }
             }
+        }
+    }
+
+    /**
+     * A message's body as bytes, whatever form the component gives it in.
+     *
+     * @param in the message
+     * @return the body; empty if none
+     */
+    static byte[] body(org.apache.camel.Message in)
+    {
+        Object body = in.getBody();
+        if (body instanceof BinaryData binary)
+        {
+            return binary.toBytes();
+        }
+        byte[] bytes = in.getBody(byte[].class);
+        return bytes == null ? new byte[0] : bytes;
+    }
+
+    /**
+     * Pub/Sub, acknowledging by hand: the broker's message ID, and an
+     * acknowledgement used once the batch is landed.
+     */
+    static final class Pubsub implements HeldBatches.Broker
+    {
+
+        @Override
+        public BatchService.Message message(Exchange exchange)
+        {
+            var in = exchange.getMessage();
+            return new BatchService.Message(body(in), in.getHeader(
+                    GooglePubsubConstants.MESSAGE_ID, String.class));
+        }
+
+        @Override
+        public void settle(Exchange exchange, boolean landed)
+        {
+            GooglePubsubAcknowledge acknowledge = exchange.getMessage()
+                    .getHeader(GooglePubsubConstants.GOOGLE_PUBSUB_ACKNOWLEDGE,
+                            GooglePubsubAcknowledge.class);
+            if (acknowledge == null)
+            {
+                throw new IllegalStateException(
+                        "Pub/Sub gave no acknowledgement");
+            }
+            if (landed)
+            {
+                acknowledge.ack(exchange);
+            }
+            else
+            {
+                acknowledge.nack(exchange);
+            }
+        }
+
+        @Override
+        public boolean holdsExchange()
+        {
+            return false;
+        }
+    }
+
+    /**
+     * Service Bus: the broker's sequence number is the ID, since it stays
+     * the same when a message is delivered again and a producer's
+     * {@code messageId} is optional.
+     */
+    static final class Servicebus implements HeldBatches.Broker
+    {
+
+        @Override
+        public BatchService.Message message(Exchange exchange)
+        {
+            var in = exchange.getMessage();
+            Long sequence = in.getHeader(ServiceBusConstants.SEQUENCE_NUMBER,
+                    Long.class);
+            return new BatchService.Message(body(in),
+                    sequence == null ? null : sequence.toString());
+        }
+    }
+
+    /** Event Hubs: the partition and sequence number are the ID. */
+    static final class Eventhubs implements HeldBatches.Broker
+    {
+
+        @Override
+        public BatchService.Message message(Exchange exchange)
+        {
+            var in = exchange.getMessage();
+            String partition = in.getHeader(EventHubsConstants.PARTITION_ID,
+                    String.class);
+            Long sequence = in.getHeader(EventHubsConstants.SEQUENCE_NUMBER,
+                    Long.class);
+            return new BatchService.Message(body(in),
+                    partition == null || sequence == null ? null
+                            : partition + "/" + sequence);
         }
     }
 

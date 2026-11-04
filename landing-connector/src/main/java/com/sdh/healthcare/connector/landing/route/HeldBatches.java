@@ -13,27 +13,42 @@ import java.util.List;
 import java.util.function.LongSupplier;
 import org.apache.camel.AsyncCallback;
 import org.apache.camel.Exchange;
+import org.apache.camel.spi.ShutdownPrepared;
 import org.apache.camel.support.AsyncProcessorSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Holds messages from a broker whose consumer acknowledges a message when
- * its exchange completes (SQS, and RabbitMQ in manual mode), until the batch
- * holding them is landed (design §5.3.16).
+ * Holds messages from a broker until the batch holding them is landed
+ * (design §5.3.16). For a broker whose consumer settles a message when its
+ * exchange completes (SQS, Service Bus, Event Hubs, and RabbitMQ in manual
+ * mode), each exchange is kept open, not completed, as it arrives. For one
+ * that gives the exchange a way to settle the message later (Pub/Sub), the
+ * exchange completes at once, and the message is settled when its batch is
+ * landed.
  * <p>
- * Each exchange is kept open, not completed, as it arrives. A batch closes
- * at {@code max-messages}, {@code max-bytes} or {@code max-wait} after its
- * first message, and a single thread lands it. Only then are its exchanges
- * completed: normally once landed, so the broker forgets the messages; with
- * an error if not, so the broker delivers them again. After a failure the
- * next batch waits, with a growing pause. While a closed batch waits to be
- * landed, a consumer offering more than another batch's worth is held back.
+ * A batch closes at {@code max-messages}, {@code max-bytes} or
+ * {@code max-wait} after its first message, and a single thread lands it.
+ * Only then are its messages settled, so the broker forgets them. A batch
+ * that can't be landed is tried again in place, with a growing pause,
+ * keeping its messages: handing them back would raise their delivery
+ * counts, and a broker with a delivery limit would dead-letter them during
+ * a long outage. Event Hubs needs this anyway, since its checkpoint would
+ * move past a batch handed back as soon as a later one completed. While a
+ * closed batch waits to be landed, a consumer offering more than another
+ * batch's worth is held back.
+ * <p>
+ * Messages are handed back, so the broker delivers them again, only when
+ * the route stops: as soon as Camel prepares it for shutdown, so that the
+ * shutdown doesn't wait for exchanges that are only being held. After a
+ * fatal error nothing more is taken: the consumer is held back, with what
+ * it offers unsettled, until the node stops.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
 final class HeldBatches extends AsyncProcessorSupport
+        implements ShutdownPrepared
 {
 
     /** Logs progress and errors, never content. */
@@ -54,7 +69,7 @@ final class HeldBatches extends AsyncProcessorSupport
 
         /**
          * Settles a message with the broker before its exchange completes,
-         * if the broker needs that (RabbitMQ in manual mode).
+         * if the broker needs that (RabbitMQ in manual mode, Pub/Sub).
          *
          * @param exchange the exchange
          * @param landed   true to acknowledge it, false to have it delivered
@@ -62,6 +77,18 @@ final class HeldBatches extends AsyncProcessorSupport
          */
         default void settle(Exchange exchange, boolean landed)
         {
+        }
+
+        /**
+         * Whether the exchange is held open until its batch is landed. If
+         * not, it completes at once, and {@link #settle} alone settles the
+         * message.
+         *
+         * @return true by default
+         */
+        default boolean holdsExchange()
+        {
+            return true;
         }
     }
 
@@ -137,6 +164,9 @@ final class HeldBatches extends AsyncProcessorSupport
     /** The exchanges waiting, oldest first. */
     private final List<Held> waiting = new ArrayList<>();
 
+    /** The batch being landed; empty when none is. */
+    private final List<Held> landing = new ArrayList<>();
+
     /** Their bytes. */
     private long waitingBytes;
 
@@ -145,6 +175,9 @@ final class HeldBatches extends AsyncProcessorSupport
 
     /** Whether the processor is running. */
     private boolean running;
+
+    /** Whether a fatal error stopped it taking messages. */
+    private boolean halted;
 
     /** The landing thread. */
     private Thread lander;
@@ -191,8 +224,9 @@ final class HeldBatches extends AsyncProcessorSupport
         }
         synchronized (lock)
         {
-            // Hold the consumer back while a whole further batch waits.
-            while (running && waiting.size() >= 2 * maxMessages)
+            // Hold the consumer back while a whole further batch waits, or
+            // for good after a fatal error.
+            while (running && (halted || waiting.size() >= 2 * maxMessages))
             {
                 try
                 {
@@ -206,8 +240,7 @@ final class HeldBatches extends AsyncProcessorSupport
             }
             if (!running)
             {
-                broker.settle(exchange, false);
-                exchange.setException(new NotLandedException());
+                refuse(exchange);
                 callback.done(true);
                 return true;
             }
@@ -219,6 +252,11 @@ final class HeldBatches extends AsyncProcessorSupport
             waitingBytes += message.body().length;
             lock.notifyAll();
         }
+        if (!broker.holdsExchange())
+        {
+            callback.done(true);
+            return true;
+        }
         return false;
     }
 
@@ -228,12 +266,37 @@ final class HeldBatches extends AsyncProcessorSupport
         synchronized (lock)
         {
             running = true;
+            halted = false;
         }
         lander = Thread.ofPlatform().name("sdh-batches").start(this::run);
     }
 
     @Override
+    public void prepareShutdown(boolean suspendOnly, boolean forced)
+    {
+        try
+        {
+            stopHolding();
+        }
+        catch (InterruptedException interrupted)
+        {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    @Override
     protected void doStop() throws InterruptedException
+    {
+        stopHolding();
+    }
+
+    /**
+     * Stops landing, and hands back every message still held. Waits for a
+     * batch being landed to finish first, so it is settled either way.
+     *
+     * @throws InterruptedException if interrupted while waiting
+     */
+    private void stopHolding() throws InterruptedException
     {
         Thread thread;
         synchronized (lock)
@@ -249,11 +312,13 @@ final class HeldBatches extends AsyncProcessorSupport
         List<Held> left;
         synchronized (lock)
         {
-            left = new ArrayList<>(waiting);
+            left = new ArrayList<>(landing);
+            left.addAll(waiting);
+            landing.clear();
             waiting.clear();
             waitingBytes = 0;
         }
-        complete(left, false);
+        release(left);
     }
 
     /** The landing thread's loop: lands batches until stopped. */
@@ -262,53 +327,65 @@ final class HeldBatches extends AsyncProcessorSupport
         int failures = 0;
         while (true)
         {
-            List<Held> batch;
+            List<BatchService.Message> messages;
             try
             {
-                batch = nextBatch();
+                messages = nextBatch();
             }
             catch (InterruptedException interrupted)
             {
                 return;
             }
-            if (batch == null)
+            if (messages == null)
             {
                 return;
             }
             BatchService.Result result;
             try
             {
-                result = service.land(batch.stream().map(Held::message)
-                        .toList());
+                result = service.land(messages);
             }
             catch (InterruptedException interrupted)
             {
-                complete(batch, false);
                 return;
             }
-            boolean landed = result.status() == BatchService.Status.LANDED
-                    || result.status() == BatchService.Status.SKIPPED;
-            complete(batch, landed);
-            if (result.status() == BatchService.Status.FATAL)
+            switch (result.status())
             {
-                stopTaking();
-                return;
-            }
-            failures = landed ? 0 : failures + 1;
-            if (failures > 0 && !pause(failures))
-            {
-                return;
+                case LANDED, SKIPPED ->
+                {
+                    failures = 0;
+                    acknowledge();
+                }
+                case FATAL ->
+                {
+                    synchronized (lock)
+                    {
+                        halted = true;
+                        lock.notifyAll();
+                    }
+                    return;
+                }
+                default ->
+                {
+                    // Keep the batch, and try it again after a pause.
+                    failures++;
+                    if (!pause(failures))
+                    {
+                        return;
+                    }
+                }
             }
         }
     }
 
     /**
-     * Waits for a batch to close, and takes it.
+     * The batch to land: the one being landed if it failed, or else the
+     * next once it closes.
      *
-     * @return the batch; null once stopped
+     * @return its messages; null once stopped
      * @throws InterruptedException if interrupted while waiting
      */
-    private List<Held> nextBatch() throws InterruptedException
+    private List<BatchService.Message> nextBatch() throws InterruptedException
     {
         synchronized (lock)
         {
@@ -318,6 +395,10 @@ final class HeldBatches extends AsyncProcessorSupport
                 {
                     return null;
                 }
+                if (!landing.isEmpty())
+                {
+                    return landing.stream().map(Held::message).toList();
+                }
                 if (!waiting.isEmpty())
                 {
                     long open = nanos.getAsLong() - firstAt;
@@ -325,7 +406,8 @@ final class HeldBatches extends AsyncProcessorSupport
                             || waitingBytes >= maxBytes
                             || open >= maxWaitNanos)
                     {
-                        return take();
+                        take();
+                        return landing.stream().map(Held::message).toList();
                     }
                     long left = Math.max(1,
                             (maxWaitNanos - open) / 1_000_000);
@@ -340,47 +422,43 @@ final class HeldBatches extends AsyncProcessorSupport
     }
 
     /**
-     * Takes the oldest exchanges, up to a batch's limits. A single message
-     * over {@code max-bytes} is a batch of its own. The caller holds the
-     * lock.
-     *
-     * @return the batch
+     * Moves the oldest exchanges, up to a batch's limits, to the batch being
+     * landed. A single message over {@code max-bytes} is a batch of its own.
+     * The caller holds the lock.
      */
-    private List<Held> take()
+    private void take()
     {
-        List<Held> batch = new ArrayList<>();
         long bytes = 0;
-        while (!waiting.isEmpty() && batch.size() < maxMessages)
+        while (!waiting.isEmpty() && landing.size() < maxMessages)
         {
             long next = waiting.getFirst().message().body().length;
-            if (!batch.isEmpty() && bytes + next > maxBytes)
+            if (!landing.isEmpty() && bytes + next > maxBytes)
             {
                 break;
             }
-            Held held = waiting.removeFirst();
-            batch.add(held);
+            landing.add(waiting.removeFirst());
             bytes += next;
             waitingBytes -= next;
         }
         firstAt = nanos.getAsLong();
         lock.notifyAll();
-        return batch;
     }
 
-    /**
-     * Completes a batch's exchanges.
-     *
-     * @param batch  the exchanges
-     * @param landed true if the batch was landed, so the broker can forget
-     *               them; false to have them delivered again
-     */
-    private void complete(List<Held> batch, boolean landed)
+    /** Settles the batch just landed, so the broker forgets it. */
+    private void acknowledge()
     {
+        List<Held> batch;
+        synchronized (lock)
+        {
+            batch = new ArrayList<>(landing);
+            landing.clear();
+            lock.notifyAll();
+        }
         for (Held held : batch)
         {
             try
             {
-                broker.settle(held.exchange(), landed);
+                broker.settle(held.exchange(), true);
             }
             catch (RuntimeException failure)
             {
@@ -388,27 +466,51 @@ final class HeldBatches extends AsyncProcessorSupport
                 LOG.warn("batch.settle_failed error={}",
                         failure.getClass().getSimpleName());
             }
-            if (!landed)
+            if (broker.holdsExchange())
             {
-                held.exchange().setException(new NotLandedException());
+                held.callback().done(false);
             }
-            held.callback().done(false);
         }
     }
 
-    /** Stops taking messages after a fatal error, releasing those held. */
-    private void stopTaking()
+    /**
+     * Hands messages back, so the broker delivers them again.
+     *
+     * @param batch the exchanges
+     */
+    private void release(List<Held> batch)
     {
-        List<Held> left;
-        synchronized (lock)
+        for (Held held : batch)
         {
-            running = false;
-            left = new ArrayList<>(waiting);
-            waiting.clear();
-            waitingBytes = 0;
-            lock.notifyAll();
+            refuse(held.exchange());
+            if (broker.holdsExchange())
+            {
+                held.callback().done(false);
+            }
         }
-        complete(left, false);
+    }
+
+    /**
+     * Hands one message back, without completing its exchange.
+     *
+     * @param exchange the exchange
+     */
+    private void refuse(Exchange exchange)
+    {
+        try
+        {
+            broker.settle(exchange, false);
+        }
+        catch (RuntimeException failure)
+        {
+            // Unsettled, it comes again once its lock or lease ends.
+            LOG.warn("batch.settle_failed error={}",
+                    failure.getClass().getSimpleName());
+        }
+        if (broker.holdsExchange())
+        {
+            exchange.setException(new NotLandedException());
+        }
     }
 
     /**

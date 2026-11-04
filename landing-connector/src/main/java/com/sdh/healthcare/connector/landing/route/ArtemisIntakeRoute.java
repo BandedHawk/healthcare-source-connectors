@@ -42,11 +42,14 @@ import org.slf4j.LoggerFactory;
  * A Camel timer runs one batch at a time. A session in
  * {@code CLIENT_ACKNOWLEDGE} mode receives up to {@code max-messages} and
  * {@code max-bytes}, for at most {@code max-wait} after the first; once the
- * batch is landed, acknowledging its last message acknowledges them all. If
- * it isn't landed, the session is recovered, so the broker delivers the
- * messages again. A connection that fails is dropped, which also returns
- * any unacknowledged messages, and opened again after a growing pause; the
- * outage is reported once as {@code intake.unreachable}.
+ * batch is landed, acknowledging its last message acknowledges them all. A
+ * batch that can't be landed is tried again in place, with a growing pause:
+ * handing it back would raise its messages' delivery counts, and Artemis
+ * moves a message to its dead-letter address after ten deliveries by
+ * default. A connection that fails is dropped, which returns any
+ * unacknowledged messages, and opened again after a growing pause; the
+ * outage is reported once as {@code intake.unreachable}. After a fatal
+ * error nothing more is received.
  * <p>
  * Text messages are landed as UTF-8, bytes messages as they are. Other
  * kinds have no byte form: they are landed empty and reported, and object
@@ -97,6 +100,12 @@ public final class ArtemisIntakeRoute extends RouteBuilder
 
     /** Whether the outage has been reported. */
     private boolean unreachable;
+
+    /** Whether the route is stopping, so a retry should give up. */
+    private volatile boolean stopping;
+
+    /** Whether a fatal error stopped the intake. */
+    private volatile boolean halted;
 
     /**
      * Creates the route.
@@ -149,8 +158,15 @@ public final class ArtemisIntakeRoute extends RouteBuilder
         getContext().addService(new ServiceSupport()
         {
             @Override
+            protected void doStart()
+            {
+                stopping = false;
+            }
+
+            @Override
             protected void doStop()
             {
+                stopping = true;
                 disconnect();
             }
         });
@@ -163,6 +179,10 @@ public final class ArtemisIntakeRoute extends RouteBuilder
      */
     synchronized void pollOnce() throws Exception
     {
+        if (halted || stopping)
+        {
+            return;
+        }
         try
         {
             connect();
@@ -176,23 +196,32 @@ public final class ArtemisIntakeRoute extends RouteBuilder
             {
                 batch.add(message(message));
             }
-            BatchService.Result result = service.land(batch);
-            switch (result.status())
+            while (true)
             {
-                case LANDED, SKIPPED ->
+                BatchService.Result result = service.land(batch);
+                switch (result.status())
                 {
-                    received.getLast().acknowledge();
-                    failures = 0;
-                }
-                case FATAL ->
-                {
-                    disconnect();
-                    throw new HeldBatches.NotLandedException();
-                }
-                default ->
-                {
-                    session.recover();
-                    pause();
+                    case LANDED, SKIPPED ->
+                    {
+                        received.getLast().acknowledge();
+                        failures = 0;
+                        return;
+                    }
+                    case FATAL ->
+                    {
+                        halted = true;
+                        disconnect();
+                        throw new HeldBatches.NotLandedException();
+                    }
+                    default ->
+                    {
+                        // Keep the batch, and try it again after a pause.
+                        pause();
+                        if (stopping)
+                        {
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -357,14 +386,21 @@ public final class ArtemisIntakeRoute extends RouteBuilder
     }
 
     /**
-     * Pauses after a failure, doubling up to the longest pause.
+     * Pauses after a failure, doubling up to the longest pause, and ending
+     * early if the route stops.
      *
      * @throws InterruptedException if interrupted while pausing
      */
     private void pause() throws InterruptedException
     {
         failures++;
-        Thread.sleep(Math.min(maxBackoff.toMillis(), initialBackoff.toMillis()
-                << Math.min(failures - 1, 20)));
+        long until = System.nanoTime() + 1_000_000L * Math.min(
+                maxBackoff.toMillis(), initialBackoff.toMillis()
+                        << Math.min(failures - 1, 20));
+        while (!stopping && System.nanoTime() < until)
+        {
+            Thread.sleep(Math.min(50,
+                    Math.max(1, (until - System.nanoTime()) / 1_000_000)));
+        }
     }
 }

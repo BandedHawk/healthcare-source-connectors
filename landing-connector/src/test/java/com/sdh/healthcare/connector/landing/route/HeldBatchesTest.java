@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import org.apache.camel.Exchange;
 import org.apache.camel.impl.DefaultCamelContext;
@@ -81,6 +82,23 @@ class HeldBatchesTest
     HeldBatches start(int maxMessages, long maxBytes, Duration maxWait,
             Function<List<String>, BatchService.Status> status)
     {
+        return start(maxMessages, maxBytes, maxWait, status, true);
+    }
+
+    /**
+     * Starts a processor for a broker of the given kind.
+     *
+     * @param maxMessages the most messages in a batch
+     * @param maxBytes    the most bytes in a batch
+     * @param maxWait     the longest a batch stays open
+     * @param status      what the lander says, for a batch
+     * @param holds       whether the broker holds exchanges open
+     * @return the processor
+     */
+    HeldBatches start(int maxMessages, long maxBytes, Duration maxWait,
+            Function<List<String>, BatchService.Status> status,
+            boolean holds)
+    {
         held = new HeldBatches(messages ->
         {
             List<String> bodies = new ArrayList<>();
@@ -106,6 +124,12 @@ class HeldBatchesTest
             public void settle(Exchange exchange, boolean ok)
             {
                 settled.put(exchange.getMessage().getBody(String.class), ok);
+            }
+
+            @Override
+            public boolean holdsExchange()
+            {
+                return holds;
             }
         }, maxMessages, maxBytes, maxWait, Duration.ofMillis(1),
                 Duration.ofMillis(5), System::nanoTime);
@@ -184,39 +208,89 @@ class HeldBatchesTest
     }
 
     /**
-     * A batch that isn't landed completes its exchanges with an error, so
-     * the broker delivers them again; the next one is still taken.
+     * A batch that isn't landed is tried again in place, keeping its
+     * messages, and its exchanges complete only once it lands.
      *
      * @throws Exception if the test fails
      */
     @Test
-    void failsTheExchangesOfABatchNotLanded() throws Exception
+    void triesAFailedBatchAgainInPlace() throws Exception
     {
-        start(1, 1000, LONG, bodies -> bodies.contains("bad")
+        AtomicInteger tries = new AtomicInteger();
+        start(1, 1000, LONG, bodies -> tries.incrementAndGet() < 3
                 ? BatchService.Status.FAILED : BatchService.Status.LANDED);
-        Exchange bad = offer("bad").getFirst();
-        assertThat(bad.getException())
-                .isInstanceOf(HeldBatches.NotLandedException.class);
-        assertThat(settled).containsEntry("bad", false);
-        assertThat(offer("good").getFirst().getException()).isNull();
+        Exchange exchange = offer("a").getFirst();
+        assertThat(exchange.getException()).isNull();
+        assertThat(landed).containsExactly(List.of("a"), List.of("a"),
+                List.of("a"));
+        assertThat(settled).containsOnly(Map.entry("a", true));
+        assertThat(offer("b").getFirst().getException()).isNull();
     }
 
     /**
-     * After a fatal error, nothing more is taken: later messages are
-     * refused at once, not landed.
+     * After a fatal error nothing more is taken or handed back: the batch
+     * stays held, and the consumer is held back, until the stop releases
+     * both.
      *
      * @throws Exception if the test fails
      */
     @Test
-    void takesNothingMoreAfterAFatalError() throws Exception
+    void holdsEverythingAfterAFatalErrorUntilStopped() throws Exception
     {
         start(1, 1000, LONG, bodies -> BatchService.Status.FATAL);
-        assertThat(offer("a").getFirst().getException())
-                .isInstanceOf(HeldBatches.NotLandedException.class);
-        assertThat(offer("b").getFirst().getException())
-                .isInstanceOf(HeldBatches.NotLandedException.class);
+        CountDownLatch done = new CountDownLatch(2);
+        Exchange first = new DefaultExchange(camel);
+        first.getMessage().setBody("a");
+        held.process(first, sync -> done.countDown());
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (landed.isEmpty() && System.nanoTime() < deadline)
+        {
+            Thread.sleep(10);
+        }
+        Exchange second = new DefaultExchange(camel);
+        second.getMessage().setBody("b");
+        Thread offering = Thread.ofPlatform().start(
+                () -> held.process(second, sync -> done.countDown()));
+        Thread.sleep(200);
+        assertThat(offering.isAlive()).isTrue();
+        assertThat(done.getCount()).isEqualTo(2);
+        assertThat(settled).isEmpty();
+
+        held.stop();
+        assertThat(done.await(10, TimeUnit.SECONDS)).isTrue();
+        offering.join();
         assertThat(landed).containsExactly(List.of("a"));
-        assertThat(settled).containsEntry("b", false);
+        assertThat(first.getException())
+                .isInstanceOf(HeldBatches.NotLandedException.class);
+        assertThat(second.getException())
+                .isInstanceOf(HeldBatches.NotLandedException.class);
+        assertThat(settled).containsOnly(Map.entry("a", false),
+                Map.entry("b", false));
+    }
+
+    /**
+     * For a broker that settles later, the exchange completes at once, and
+     * the message is settled once its batch is landed.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void settlesLaterWhenTheBrokerDoesntHoldExchanges() throws Exception
+    {
+        start(2, 1000, LONG, bodies -> BatchService.Status.LANDED, false);
+        List<Exchange> exchanges = offer("a");
+        assertThat(exchanges.getFirst().getException()).isNull();
+        assertThat(landed).isEmpty();
+        assertThat(settled).isEmpty();
+        offer("b");
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (settled.size() < 2 && System.nanoTime() < deadline)
+        {
+            Thread.sleep(10);
+        }
+        assertThat(landed).containsExactly(List.of("a", "b"));
+        assertThat(settled).containsOnly(Map.entry("a", true),
+                Map.entry("b", true));
     }
 
     /**

@@ -35,6 +35,10 @@ class BrokerSettingsTest
     static final LandingProperties.Artemis NO_ARTEMIS =
             new LandingProperties.Artemis(null, null, null, null);
 
+    /** No Event Hubs checkpoint store. */
+    static final LandingProperties.Eventhubs NO_EVENTHUBS =
+            new LandingProperties.Eventhubs(null, null, null);
+
     /**
      * Broker settings as configured.
      *
@@ -45,7 +49,7 @@ class BrokerSettingsTest
     static LandingProperties.Broker broker(String type, String uri)
     {
         return new LandingProperties.Broker(type, uri, BATCH,
-                Duration.ofHours(1), RABBIT, NO_ARTEMIS);
+                Duration.ofHours(1), RABBIT, NO_ARTEMIS, NO_EVENTHUBS);
     }
 
     /**
@@ -140,8 +144,95 @@ class BrokerSettingsTest
                         "spring-rabbitmq:ex?queues=q", BATCH,
                         Duration.ofHours(1),
                         new LandingProperties.Rabbitmq(null, "/", null, null,
-                                false), NO_ARTEMIS)))
+                                false), NO_ARTEMIS, NO_EVENTHUBS)))
                 .hasMessageContaining("addresses");
+    }
+
+    /**
+     * Pub/Sub acknowledges by hand, by streaming pull, and with no
+     * delivery limit of Camel's own.
+     */
+    @Test
+    void addsTheOptionsPubsubNeeds()
+    {
+        assertThat(BrokerSettings.of(broker("pubsub",
+                "google-pubsub:proj:sub")).uri())
+                .contains("ackMode=NONE", "synchronousPull=false",
+                        "maxDeliveryAttempts=0",
+                        "maxAckExtensionPeriod=3600");
+        assertThatThrownBy(() -> BrokerSettings.of(broker("pubsub",
+                "google-pubsub:proj:sub?ackMode=AUTO")))
+                .hasMessageContaining("ackMode");
+        assertThatThrownBy(() -> BrokerSettings.of(broker("pubsub",
+                "google-pubsub:proj:sub?synchronousPull=true")))
+                .hasMessageContaining("synchronousPull");
+    }
+
+    /**
+     * Service Bus locks messages, without dead-lettering or sessions, and
+     * keeps renewing their locks; the connection string is a placeholder.
+     */
+    @Test
+    void addsTheOptionsServicebusNeeds()
+    {
+        assertThat(BrokerSettings.of(broker("servicebus",
+                "azure-servicebus:hl7?connectionString=RAW({{env:SB}})"))
+                .uri()).contains("connectionString=RAW({{env:SB}})",
+                        "serviceBusReceiveMode=PEEK_LOCK",
+                        "enableDeadLettering=false", "sessionEnabled=false",
+                        "maxAutoLockRenewDuration=300000");
+        assertThatThrownBy(() -> BrokerSettings.of(broker("servicebus",
+                "azure-servicebus:hl7?connectionString=Endpoint=sb://x")))
+                .hasMessageContaining("placeholder");
+        assertThatThrownBy(() -> BrokerSettings.of(broker("servicebus",
+                "azure-servicebus:hl7?enableDeadLettering=true")))
+                .hasMessageContaining("enableDeadLettering");
+        assertThatThrownBy(() -> BrokerSettings.of(broker("servicebus",
+                "azure-servicebus:hl7?maxAutoLockRenewDuration=0")))
+                .hasMessageContaining("maxAutoLockRenewDuration");
+        assertThatThrownBy(() -> BrokerSettings.of(broker("servicebus",
+                "azure-servicebus:hl7?processorClient=#mine")))
+                .hasMessageContaining("processorClient");
+        assertThat(BrokerSettings.of(broker("servicebus",
+                "azure-servicebus:hl7?credentialType=AZURE_IDENTITY"
+                        + "&fullyQualifiedNamespace=ns.servicebus.windows.net"))
+                .uri()).contains("credentialType=AZURE_IDENTITY");
+    }
+
+    /**
+     * Event Hubs uses the node's checkpoint store and start positions, and
+     * needs a container and one way to reach it.
+     */
+    @Test
+    void addsTheOptionsEventhubsNeeds()
+    {
+        LandingProperties.Eventhubs checkpoints =
+                new LandingProperties.Eventhubs(null,
+                        "https://acct.blob.core.windows.net", "cp");
+        BrokerSettings settings = BrokerSettings.of(
+                new LandingProperties.Broker("eventhubs",
+                        "azure-eventhubs:ns/hl7", BATCH, Duration.ofHours(1),
+                        RABBIT, NO_ARTEMIS, checkpoints));
+        assertThat(settings.uri()).contains(
+                "checkpointStore=#" + BrokerSettings.CHECKPOINTS_BEAN,
+                "eventPosition=#" + BrokerSettings.POSITIONS_BEAN);
+        assertThatThrownBy(() -> BrokerSettings.of(
+                new LandingProperties.Broker("eventhubs",
+                        "azure-eventhubs:ns/hl7?blobAccountName=a", BATCH,
+                        Duration.ofHours(1), RABBIT, NO_ARTEMIS,
+                        checkpoints)))
+                .hasMessageContaining("blobAccountName");
+        assertThatThrownBy(() -> BrokerSettings.of(broker("eventhubs",
+                "azure-eventhubs:ns/hl7")))
+                .hasMessageContaining("checkpoint-container");
+        assertThatThrownBy(() -> BrokerSettings.of(
+                new LandingProperties.Broker("eventhubs",
+                        "azure-eventhubs:ns/hl7", BATCH, Duration.ofHours(1),
+                        RABBIT, NO_ARTEMIS, new LandingProperties.Eventhubs(
+                                "cs", "https://x", "cp"))))
+                .hasMessageContaining("one of");
+        assertThat(new LandingProperties.Eventhubs("AccountKey=s3cret",
+                null, "cp").toString()).doesNotContain("s3cret");
     }
 
     /** Artemis takes its connection, not a URI. */
@@ -152,13 +243,13 @@ class BrokerSettingsTest
                 "tcp://a:61616", "u", "p", "hl7");
         BrokerSettings settings = BrokerSettings.of(
                 new LandingProperties.Broker("artemis", null, BATCH,
-                        Duration.ofHours(1), RABBIT, artemis));
+                        Duration.ofHours(1), RABBIT, artemis, NO_EVENTHUBS));
         assertThat(settings.uri()).isNull();
         assertThat(settings.artemis().queue()).isEqualTo("hl7");
         assertThat(settings.artemis().toString()).doesNotContain("p,", "=p");
         assertThatThrownBy(() -> BrokerSettings.of(
                 new LandingProperties.Broker("artemis", "jms:q", BATCH,
-                        Duration.ofHours(1), RABBIT, artemis)))
+                        Duration.ofHours(1), RABBIT, artemis, NO_EVENTHUBS)))
                 .hasMessageContaining("isn't used");
         assertThatThrownBy(() -> BrokerSettings.of(broker("artemis", null)))
                 .hasMessageContaining("broker-url");

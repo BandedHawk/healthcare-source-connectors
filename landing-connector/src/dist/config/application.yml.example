@@ -57,12 +57,15 @@ sdh:
       retry-after: 30s            # the Retry-After sent with a 503
       read-timeout: 60s           # a stalled sender is dropped after this
     broker:                       # type: queue; messages are landed in batches, acknowledged only once landed
-      type: kafka                 # kafka | sqs | rabbitmq | artemis
+      type: kafka                 # kafka | sqs | rabbitmq | artemis | pubsub | servicebus | eventhubs
       # A Camel consumer URI (not for artemis). The options that hold a message until it is landed are added, and
       # any set otherwise refused. Secrets must be placeholders, such as {{env:KAFKA_JAAS}}, never values.
       uri: "kafka:hl7.adt?brokers=kafka:9093&groupId=sdh-landing-adt&securityProtocol=SSL"
       # uri: "aws2-sqs:hl7-adt?region=eu-west-1&useDefaultCredentialsProvider=true"
       # uri: "spring-rabbitmq:default?queues=hl7.adt"   # the queue must exist; it isn't declared
+      # uri: "google-pubsub:my-project:hl7-adt-landing"  # a subscription; default Google credentials
+      # uri: "azure-servicebus:hl7-adt?credentialType=AZURE_IDENTITY&fullyQualifiedNamespace=ns.servicebus.windows.net"
+      # uri: "azure-eventhubs:ns/hl7-adt?consumerGroupName=sdh-landing&connectionString=RAW({{env:EVENTHUBS_CS}})"
       batch:                      # a batch closes at whichever comes first; one batch is one landed item
         max-messages: 1000
         max-bytes: 64MB           # a single larger message is a batch of its own
@@ -77,6 +80,10 @@ sdh:
         broker-url: "tcp://artemis:61617?sslEnabled=true"
         username: sdh
         queue: hl7.adt
+      eventhubs:                  # type: eventhubs; where checkpoints are kept: an existing blob container
+        checkpoint-endpoint: "https://account.blob.core.windows.net"   # with the default Azure credential, or
+        # checkpoint-connection-string: SDH_LANDING_BROKER_EVENTHUBS_CHECKPOINT_CONNECTION_STRING (env)
+        checkpoint-container: sdh-landing-checkpoints
   storage:
     catalog-name: sdh             # also sent in item.landed messages
     namespace: sdh_landing

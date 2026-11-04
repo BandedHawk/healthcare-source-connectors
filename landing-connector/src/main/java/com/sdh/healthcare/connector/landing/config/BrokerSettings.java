@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.landing.config;
 import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -23,9 +24,10 @@ import org.apache.camel.util.URISupport;
  * Each broker's consumer is set up so that a message is acknowledged only
  * once the batch holding it is committed. The options that does needs are
  * added to the URI; one set to anything else is refused, since it would
- * acknowledge messages that could then be lost. So is a password, key or
- * secret written into the URI: it must be a property placeholder
- * ({@code {{...}}}), resolved from the environment.
+ * acknowledge messages that could then be lost. So is a password, key,
+ * secret or connection string written into the URI: it must be a property
+ * placeholder ({@code {{...}}}), resolved from the environment, or a bean
+ * reference ({@code #name}).
  *
  * @param kind        which broker
  * @param uri         the Camel consumer URI, with the intake's options; null
@@ -36,25 +38,44 @@ import org.apache.camel.util.URISupport;
  * @param dedupWindow how far back a message delivered again is recognised
  * @param rabbitmq    the RabbitMQ connection, for {@link Kind#RABBITMQ}
  * @param artemis     the Artemis connection, for {@link Kind#ARTEMIS}
+ * @param eventhubs   the checkpoint store, for {@link Kind#EVENTHUBS}
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record BrokerSettings(Kind kind, String uri, int maxMessages,
         long maxBytes, Duration maxWait, Duration dedupWindow,
         LandingProperties.Rabbitmq rabbitmq,
-        LandingProperties.Artemis artemis)
+        LandingProperties.Artemis artemis,
+        LandingProperties.Eventhubs eventhubs)
 {
 
     /** The bean name of the intake's RabbitMQ connection factory. */
     public static final String RABBITMQ_BEAN = "sdhIntakeRabbit";
 
+    /** The bean name of the intake's Event Hubs checkpoint store. */
+    public static final String CHECKPOINTS_BEAN = "sdhIntakeCheckpoints";
+
+    /**
+     * The bean name of the intake's Event Hubs start positions: the earliest
+     * event, for a partition with no checkpoint.
+     */
+    public static final String POSITIONS_BEAN = "sdhIntakeEventPositions";
+
+    /** The brokers' names, as {@code sdh.landing.broker.type} takes them. */
+    private static final String TYPES = "kafka, sqs, rabbitmq, artemis,"
+            + " pubsub, servicebus or eventhubs";
+
     /** Option names that hold secrets, in lower case. */
     private static final Set<String> SECRET_PARTS = Set.of("password",
-            "secret", "jaas", "accesskey", "sessiontoken", "token");
+            "secret", "jaas", "accesskey", "sessiontoken", "token",
+            "connectionstring");
 
-    /** A property placeholder, resolved when the route starts. */
-    private static final Pattern PLACEHOLDER =
-            Pattern.compile("(RAW\\()?\\{\\{[^{}]+\\}\\}\\)?");
+    /**
+     * A property placeholder, resolved when the route starts, or a bean
+     * reference.
+     */
+    private static final Pattern PLACEHOLDER = Pattern.compile(
+            "(RAW\\()?\\{\\{[^{}]+\\}\\}\\)?|#[A-Za-z0-9_.-]+");
 
     /** The brokers a queue intake can consume from. */
     public enum Kind
@@ -73,7 +94,19 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
          * Artemis, by the JMS client directly: Camel's JMS components
          * acknowledge a message as soon as it is handed over (§5.3.16).
          */
-        ARTEMIS(null);
+        ARTEMIS(null),
+
+        /**
+         * Google Pub/Sub, by Camel's {@code google-pubsub} component,
+         * acknowledging by hand.
+         */
+        PUBSUB("google-pubsub"),
+
+        /** Azure Service Bus, by Camel's {@code azure-servicebus}. */
+        SERVICEBUS("azure-servicebus"),
+
+        /** Azure Event Hubs, by Camel's {@code azure-eventhubs}. */
+        EVENTHUBS("azure-eventhubs");
 
         /** The Camel component's scheme; null if Camel isn't used. */
         private final String scheme;
@@ -113,7 +146,7 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
         if (broker.type() == null || broker.type().isBlank())
         {
             throw new IllegalArgumentException("sdh.landing.broker.type is"
-                    + " required: kafka, sqs, rabbitmq or artemis");
+                    + " required: " + TYPES);
         }
         Kind kind;
         try
@@ -123,7 +156,7 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
         catch (IllegalArgumentException unknown)
         {
             throw new IllegalArgumentException("sdh.landing.broker.type must"
-                    + " be kafka, sqs, rabbitmq or artemis");
+                    + " be " + TYPES);
         }
         LandingProperties.Batch batch = broker.batch();
         if (batch.maxMessages() < 1 || batch.maxBytes().toBytes() < 1
@@ -160,11 +193,25 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
                 throw new IllegalArgumentException("sdh.landing.broker"
                         + ".rabbitmq.addresses is required");
             }
+            if (kind == Kind.EVENTHUBS)
+            {
+                LandingProperties.Eventhubs eventhubs = broker.eventhubs();
+                if (blank(eventhubs.checkpointContainer())
+                        || blank(eventhubs.checkpointConnectionString())
+                                == blank(eventhubs.checkpointEndpoint()))
+                {
+                    throw new IllegalArgumentException("sdh.landing.broker"
+                            + ".eventhubs needs checkpoint-container, and"
+                            + " one of checkpoint-connection-string and"
+                            + " checkpoint-endpoint");
+                }
+            }
             uri = consumerUri(kind, broker.uri(), batch);
         }
         return new BrokerSettings(kind, uri, batch.maxMessages(),
                 batch.maxBytes().toBytes(), batch.maxWait(),
-                broker.dedupWindow(), broker.rabbitmq(), broker.artemis());
+                broker.dedupWindow(), broker.rabbitmq(), broker.artemis(),
+                broker.eventhubs());
     }
 
     /**
@@ -258,6 +305,39 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
                 options.putIfAbsent("prefetchCount",
                         Integer.toString(batch.maxMessages()));
             }
+            case PUBSUB ->
+            {
+                require(options, "ackMode", "NONE");
+                require(options, "synchronousPull", "false");
+                // Above 0, Camel nacks at the limit, logging the message ID.
+                require(options, "maxDeliveryAttempts", "0");
+                options.putIfAbsent("maxAckExtensionPeriod", "3600");
+            }
+            case SERVICEBUS ->
+            {
+                require(options, "serviceBusReceiveMode", "PEEK_LOCK");
+                require(options, "enableDeadLettering", "false");
+                require(options, "sessionEnabled", "false");
+                refuse(options, "processorClient");
+                options.putIfAbsent("maxAutoLockRenewDuration", "300000");
+                if (Long.parseLong(String.valueOf(options.get(
+                        "maxAutoLockRenewDuration"))) <= 0)
+                {
+                    throw new IllegalArgumentException("sdh.landing.broker"
+                            + ".uri option maxAutoLockRenewDuration must be"
+                            + " positive, so held messages keep their lock");
+                }
+            }
+            case EVENTHUBS ->
+            {
+                require(options, "checkpointStore", "#" + CHECKPOINTS_BEAN);
+                require(options, "eventPosition", "#" + POSITIONS_BEAN);
+                for (String blob : List.of("blobAccountName", "blobAccessKey",
+                        "blobContainerName", "blobStorageSharedKeyCredential"))
+                {
+                    refuse(options, blob);
+                }
+            }
             default -> throw new IllegalStateException(kind.name());
         }
         // Joined as written: encoding would hide {{...}} placeholders from
@@ -283,6 +363,21 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
             throw new IllegalArgumentException("sdh.landing.broker.uri option "
                     + name + " must be " + value + ": anything else could"
                     + " acknowledge messages before they are landed");
+        }
+    }
+
+    /**
+     * Refuses an option the node sets up itself.
+     *
+     * @param options the options
+     * @param name    the option
+     */
+    private static void refuse(Map<String, Object> options, String name)
+    {
+        if (options.containsKey(name))
+        {
+            throw new IllegalArgumentException("sdh.landing.broker.uri option "
+                    + name + " isn't allowed: the node sets it up");
         }
     }
 

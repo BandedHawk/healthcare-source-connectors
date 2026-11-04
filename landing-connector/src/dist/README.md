@@ -71,7 +71,8 @@ variables, never in the file:
 - `SDH_LANDING_SOURCE_SFTP_PASSWORD` or `SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE`, for an SFTP source
 - `SDH_LANDING_SOURCE_SMB_PASSWORD`, for an SMB source
 - `SDH_LANDING_HTTP_TLS_PRIVATE_KEY_PASSWORD`, for an HTTP push intake whose TLS key has a password
-- `SDH_LANDING_BROKER_RABBITMQ_PASSWORD` or `SDH_LANDING_BROKER_ARTEMIS_PASSWORD`, for a RabbitMQ or Artemis queue
+- `SDH_LANDING_BROKER_RABBITMQ_PASSWORD`, `SDH_LANDING_BROKER_ARTEMIS_PASSWORD` or
+  `SDH_LANDING_BROKER_EVENTHUBS_CHECKPOINT_CONNECTION_STRING`, for a RabbitMQ, Artemis or Event Hubs queue
   intake; other brokers' secrets go in the URI as placeholders, such as `{{env:KAFKA_JAAS}}`
 - catalog and storage credentials
 
@@ -102,14 +103,19 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   `max-wait` gets `503` with `Retry-After`, as does any push while storage or the broker is down. A body larger
   than `max-item-bytes` gets `413`, and one cut off gets `400`. The port opens only on the active node, so a
   standby isn't sent pushes; use a TCP probe on it.
-- **Queues:** Kafka, Amazon SQS, RabbitMQ or ActiveMQ Artemis (`sdh.landing.broker`). Messages are landed in
+- **Queues:** Kafka, Amazon SQS, RabbitMQ, ActiveMQ Artemis, Google Pub/Sub, Azure Service Bus or Azure Event Hubs
+  (`sdh.landing.broker`). Messages are landed in
   batches: a batch closes at `max-messages`, `max-bytes` or `max-wait`, and becomes one item that keeps where each
   message starts. A message is acknowledged (for Kafka, its offset committed) only once its batch is landed; if the
-  node stops first, the broker delivers it again. A message delivered again within `dedup-window` of the last batch
+  node stops first, the broker delivers it again. While storage or the broker for `item.landed` is down, a batch is
+  held and tried again, rather than handed back, so a broker's delivery limit doesn't dead-letter it. A message
+  delivered again within `dedup-window` of the last batch
   is recognised by its broker ID and not landed twice. RabbitMQ messages have an ID only if the producer sets
   `message_id`; without one, a message delivered again after a crash is landed again. Give the Kafka consumer
-  group to this intake alone. The file connector splits
-  a batch message by message, and a message it can't split fails alone.
+  group, Pub/Sub subscription or Event Hubs consumer group to this intake alone. Event Hubs keeps its place in a blob
+  container you create (`sdh.landing.broker.eventhubs`); a new consumer group starts from the oldest event the hub
+  holds. A Service Bus queue or subscription must not require sessions. The file connector splits a batch message
+  by message, and a message it can't split fails alone.
 
 Landed items are kept forever unless you set `sdh.maintenance.retention.landed-items` (at least `7d`, so the
 splitter has time to read each item). Retention removes whole days, and never part of an item. The ledger is always

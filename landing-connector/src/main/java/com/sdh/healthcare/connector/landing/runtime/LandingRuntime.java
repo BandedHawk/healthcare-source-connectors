@@ -36,6 +36,7 @@ import com.sdh.healthcare.connector.landing.intake.LocalDirectorySource;
 import com.sdh.healthcare.connector.landing.intake.Readiness;
 import com.sdh.healthcare.connector.landing.intake.SftpSource;
 import com.sdh.healthcare.connector.landing.intake.SmbSource;
+import com.sdh.healthcare.connector.landing.route.EventHubsSupport;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.web.PushController;
 import com.sdh.healthcare.connector.runtime.FatalExit;
@@ -305,6 +306,10 @@ public final class LandingRuntime implements AutoCloseable
                     rabbitmq = rabbitmq(broker.rabbitmq());
                     camel.getRegistry().bind(BrokerSettings.RABBITMQ_BEAN,
                             rabbitmq);
+                }
+                if (broker.kind() == BrokerSettings.Kind.EVENTHUBS)
+                {
+                    EventHubsSupport.bind(camel, broker.eventhubs());
                 }
                 queue = new QueueIntake(new BatchService(intake, storage,
                         items, announcer, fatal, clock, broker.dedupWindow()),

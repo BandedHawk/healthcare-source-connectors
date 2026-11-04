@@ -98,9 +98,10 @@ public record LandingProperties(
      * landed in batches, and acknowledged only once their batch is
      * committed. Secrets come from the environment, never the file.
      *
-     * @param type        {@code kafka}, {@code sqs} or {@code rabbitmq}
-     *                    (Camel consumers), or {@code artemis} (the JMS
-     *                    client)
+     * @param type        {@code kafka}, {@code sqs}, {@code rabbitmq},
+     *                    {@code pubsub}, {@code servicebus} or
+     *                    {@code eventhubs} (Camel consumers), or
+     *                    {@code artemis} (the JMS client)
      * @param uri         the Camel consumer URI, for every type but
      *                    {@code artemis}; the options the intake needs are
      *                    added, and any that would break it refused
@@ -110,13 +111,43 @@ public record LandingProperties(
      * @param rabbitmq    the RabbitMQ connection, for {@code rabbitmq}
      * @param artemis     the Artemis connection and queue, for
      *                    {@code artemis}
+     * @param eventhubs   the checkpoint store, for {@code eventhubs}
      */
     public record Broker(String type, String uri,
             @DefaultValue Batch batch,
             @DefaultValue("1h") Duration dedupWindow,
             @DefaultValue Rabbitmq rabbitmq,
-            @DefaultValue Artemis artemis)
+            @DefaultValue Artemis artemis,
+            @DefaultValue Eventhubs eventhubs)
     {
+    }
+
+    /**
+     * Where an Event Hubs intake keeps its checkpoints: a blob container,
+     * which must exist. Reached by a connection string, or by its endpoint
+     * with the default Azure credential (managed or workload identity).
+     *
+     * @param checkpointConnectionString the storage account's connection
+     *                                   string; from the environment
+     * @param checkpointEndpoint         the blob endpoint, such as
+     *                                   {@code https://a.blob.core.windows.net}
+     * @param checkpointContainer        the container's name
+     */
+    public record Eventhubs(String checkpointConnectionString,
+            String checkpointEndpoint, String checkpointContainer)
+    {
+
+        /**
+         * The settings without the connection string.
+         *
+         * @return the settings as text
+         */
+        @Override
+        public String toString()
+        {
+            return "Eventhubs[checkpointEndpoint=" + checkpointEndpoint
+                    + ", checkpointContainer=" + checkpointContainer + "]";
+        }
     }
 
     /**
