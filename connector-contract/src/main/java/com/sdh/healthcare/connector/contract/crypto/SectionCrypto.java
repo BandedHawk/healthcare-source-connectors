@@ -174,29 +174,8 @@ public final class SectionCrypto
             long seq, int chunkIndex, int chunkCount, int expectedLength,
             byte[] stored)
     {
-        if (stored.length < NONCE_BYTES + TAG_BITS / 8)
-        {
-            throw new ChunkIntegrityException("Chunk too short");
-        }
-        byte[] compressed;
-        try
-        {
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, sectionKey,
-                    new GCMParameterSpec(TAG_BITS, stored, 0, NONCE_BYTES));
-            cipher.updateAAD(aad(fileId, seq, chunkIndex, chunkCount));
-            compressed = cipher.doFinal(stored, NONCE_BYTES,
-                    stored.length - NONCE_BYTES);
-        }
-        catch (AEADBadTagException tampered)
-        {
-            throw new ChunkIntegrityException("Chunk authentication failed");
-        }
-        catch (GeneralSecurityException failure)
-        {
-            throw new IllegalStateException("Chunk decryption failed",
-                    failure);
-        }
+        byte[] compressed = decrypt(sectionKey, fileId, seq, chunkIndex,
+                chunkCount, stored);
         long size = Zstd.getFrameContentSize(compressed);
         if (size != expectedLength)
         {
@@ -225,18 +204,44 @@ public final class SectionCrypto
     public static byte[] decryptSmall(SecretKey key, UUID fileId, long seq,
             int chunkIndex, int chunkCount, int maxLength, byte[] stored)
     {
+        byte[] compressed = decrypt(key, fileId, seq, chunkIndex, chunkCount,
+                stored);
+        long size = Zstd.getFrameContentSize(compressed);
+        if (size < 0 || size > maxLength)
+        {
+            throw new ChunkIntegrityException("Chunk length out of range");
+        }
+        return Zstd.decompress(compressed, (int) size);
+    }
+
+    /**
+     * Checks and decrypts a stored chunk, leaving it compressed.
+     *
+     * @param key        the key
+     * @param fileId     the file's ID
+     * @param seq        the section's number in the file
+     * @param chunkIndex the chunk, from 0
+     * @param chunkCount the section's chunk count
+     * @param stored     nonce ‖ ciphertext ‖ tag
+     * @return the compressed chunk
+     * @throws ChunkIntegrityException if the chunk is too short, or was
+     *                                 altered or moved
+     * @throws IllegalStateException   if decryption fails otherwise
+     */
+    private static byte[] decrypt(SecretKey key, UUID fileId, long seq,
+            int chunkIndex, int chunkCount, byte[] stored)
+    {
         if (stored.length < NONCE_BYTES + TAG_BITS / 8)
         {
             throw new ChunkIntegrityException("Chunk too short");
         }
-        byte[] compressed;
         try
         {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, key,
                     new GCMParameterSpec(TAG_BITS, stored, 0, NONCE_BYTES));
             cipher.updateAAD(aad(fileId, seq, chunkIndex, chunkCount));
-            compressed = cipher.doFinal(stored, NONCE_BYTES,
+            return cipher.doFinal(stored, NONCE_BYTES,
                     stored.length - NONCE_BYTES);
         }
         catch (AEADBadTagException tampered)
@@ -248,12 +253,6 @@ public final class SectionCrypto
             throw new IllegalStateException("Chunk decryption failed",
                     failure);
         }
-        long size = Zstd.getFrameContentSize(compressed);
-        if (size < 0 || size > maxLength)
-        {
-            throw new ChunkIntegrityException("Chunk length out of range");
-        }
-        return Zstd.decompress(compressed, (int) size);
     }
 
     /**
