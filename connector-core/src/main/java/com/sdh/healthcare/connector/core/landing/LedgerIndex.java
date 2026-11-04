@@ -36,6 +36,13 @@ public final class LedgerIndex
     private final PairSet digests = new PairSet();
 
     /**
+     * Creates an empty index.
+     */
+    public LedgerIndex()
+    {
+    }
+
+    /**
      * A sighting's 128-bit key.
      *
      * @param high the first 64 bits

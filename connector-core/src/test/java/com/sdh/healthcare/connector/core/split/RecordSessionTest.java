@@ -37,10 +37,16 @@ class RecordSessionTest
      */
     static SplitConfig config()
     {
-        return SplitTesting.cfg(CSV.format()).withOption("csv.header", "true");
+        return SplitTesting.config(CSV.format())
+                .withOption("csv.header", "true");
     }
 
-    /** A batch: its bytes and where each message starts. */
+    /**
+     * A batch: its bytes and where each message starts.
+     *
+     * @param bytes the batch
+     * @param offsets where each message starts
+     */
     record Batch(byte[] bytes, List<Long> offsets)
     {
     }

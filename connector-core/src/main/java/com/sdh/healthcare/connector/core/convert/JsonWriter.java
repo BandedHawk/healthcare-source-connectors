@@ -352,15 +352,15 @@ final class JsonWriter
     {
         // Where the bytes not yet copied start.
         int run = from;
-        for (int i = from; i < to; i++)
+        for (int index = from; index < to; index++)
         {
             // The byte, as a number from 0 to 255.
-            int character = bytes[i] & 0xFF;
+            int character = bytes[index] & 0xFF;
             if (character < 0x20 || character == '"' || character == '\\')
             {
-                bytes(bytes, run, i - run);
+                bytes(bytes, run, index - run);
                 escape((char) character);
-                run = i + 1;
+                run = index + 1;
             }
         }
         bytes(bytes, run, to - run);
@@ -606,9 +606,9 @@ final class JsonWriter
     private void ascii(String text)
     {
         ensure(text.length());
-        for (int i = 0; i < text.length(); i++)
+        for (int index = 0; index < text.length(); index++)
         {
-            buffer[length++] = (byte) text.charAt(i);
+            buffer[length++] = (byte) text.charAt(index);
         }
     }
 
@@ -668,7 +668,8 @@ final class JsonWriter
             long needed = (long) length + size;
             if (needed > MAX_CAPACITY)
             {
-                throw new OutOfMemoryError("JSON larger than the largest array");
+                throw new OutOfMemoryError(
+                        "JSON larger than the largest array");
             }
             buffer = Arrays.copyOf(buffer, (int) Math.min(MAX_CAPACITY, Math.
                     max(needed, buffer.length + (long) (buffer.length >> 1))));

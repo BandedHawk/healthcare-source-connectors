@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.maintenance;
 
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
@@ -31,13 +30,17 @@ import java.util.function.UnaryOperator;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.ExpireSnapshots;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.ManifestContent;
 import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.ManifestFiles;
+import org.apache.iceberg.ManifestReader;
 import org.apache.iceberg.PartitionStatisticsFile;
 import org.apache.iceberg.ReachableFileUtil;
+import org.apache.iceberg.RewriteFiles;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.Table;
@@ -58,17 +61,17 @@ import org.slf4j.LoggerFactory;
 /**
  * Maintenance for one ingest table without Spark (design §8.4): retention,
  * bin-pack compaction, snapshot expiry and orphan-file cleanup. Runs on the
- * single writer, never at the same time as ingest (the caller guarantees that).
- *
+ * single writer, never at the same time as ingest (the caller guarantees
+ * that).
  * <p>
- * Every commit goes through the {@link FencedCommitter} except snapshot expiry,
- * which must use Iceberg's own commit path to delete files physically. Iceberg
- * deletes a removed file once the snapshot that removed it expires, so files
- * replaced by compaction disappear when the compaction snapshot ages out
- * ({@code snapshotRetention}); retention purges at once (see {@link #run}). It
- * runs straight after {@link FencedCommitter#verifyCurrent}; the worst a stale
- * instance could do with it is expire snapshots that are already past
- * retention.
+ * Every commit goes through the {@link FencedCommitter} except snapshot
+ * expiry, which must use Iceberg's own commit path to delete files
+ * physically. Iceberg deletes a removed file once the snapshot that removed
+ * it expires, so files replaced by compaction disappear when the compaction
+ * snapshot ages out ({@code snapshotRetention}); retention purges at once
+ * (see {@link #run}). It runs straight after
+ * {@link FencedCommitter#verifyCurrent}; the worst a stale instance could
+ * do with it is expire snapshots that are already past retention.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -76,20 +79,43 @@ import org.slf4j.LoggerFactory;
 public final class TableMaintenance
 {
 
+    /** Logs what each run did, without PHI. */
     private static final Logger LOG = LoggerFactory.getLogger(
             TableMaintenance.class);
 
     /**
      * What one run did, for logs and tests.
+     *
+     * @param table                 the table's name
+     * @param retentionDeletedFiles data files removed by retention
+     * @param compactedFiles        small files compacted
+     * @param compactedInto         files they were compacted into
+     * @param compactedBytes        bytes rewritten by compaction
+     * @param expiredSnapshots      snapshots expired
+     * @param orphansDeleted        unreferenced files deleted
      */
     public record Report(String table, int retentionDeletedFiles,
             int compactedFiles, int compactedInto,
-            long compactedBytes, int expiredSnapshots, int orphansDeleted) {}
+            long compactedBytes, int expiredSnapshots, int orphansDeleted)
+    {
+    }
 
+    /** Commits under the lease. */
     private final FencedCommitter committer;
+
+    /** The maintenance settings. */
     private final MaintenanceSettings settings;
+
+    /** Tells the time, for retention and ages. */
     private final Clock clock;
 
+    /**
+     * Creates the maintenance.
+     *
+     * @param committer commits under the lease
+     * @param settings  the maintenance settings
+     * @param clock     tells the time
+     */
     public TableMaintenance(FencedCommitter committer,
             MaintenanceSettings settings, Clock clock)
     {
@@ -101,12 +127,12 @@ public final class TableMaintenance
     /**
      * Runs maintenance on a table, with the retention cutoff as configured.
      *
-     * @param table the table
+     * @param table      the table
      * @param timeColumn the partition source column, used for retention
-     * ({@code ingested_at} or {@code landed_at})
-     * @param retention delete rows older than this (whole UTC days); empty =
-     * keep forever
-     * @param orphans also clean up unreferenced files this run
+     *                   ({@code ingested_at} or {@code landed_at})
+     * @param retention  delete rows older than this (whole UTC days); empty
+     *                   = keep forever
+     * @param orphans    also clean up unreferenced files this run
      * @return what it did
      */
     public Report run(Table table, String timeColumn,
@@ -122,37 +148,50 @@ public final class TableMaintenance
      * at different times, such as a landed item's chunks, so none is purged
      * in part.
      *
-     * @param table the table
+     * @param table      the table
      * @param timeColumn the partition source column, used for retention
-     * @param retention delete rows older than this (whole UTC days); empty =
-     * keep forever
-     * @param orphans also clean up unreferenced files this run
-     * @param keepFrom given the start of the first day retention keeps,
-     * returns the instant from which rows must be kept instead; an instant
-     * after the one given is ignored, and the result is taken back to the
-     * start of its UTC day
+     * @param retention  delete rows older than this (whole UTC days); empty
+     *                   = keep forever
+     * @param orphans    also clean up unreferenced files this run
+     * @param keepFrom   given the start of the first day retention keeps,
+     *                   returns the instant from which rows must be kept
+     *                   instead; an instant after the one given is ignored,
+     *                   and the result is taken back to the start of its
+     *                   UTC day
      * @return what it did
      */
     public Report run(Table table, String timeColumn,
             Optional<Duration> retention, boolean orphans,
             UnaryOperator<Instant> keepFrom)
     {
-        Span span = Telemetry.get().span("maintenance", Fields.of(Attr.TABLE,
-                table.name()));
+        Span span = Telemetry.get().span("maintenance",
+                Fields.of(Attr.TABLE, table.name()));
         try (Scope ignored = span.makeCurrent())
         {
             return runTraced(table, timeColumn, retention, orphans,
                     keepFrom);
-        } catch (RuntimeException | Error e)
+        }
+        catch (RuntimeException | Error failure)
         {
-            Telemetry.fail(span, e);
-            throw e;
-        } finally
+            Telemetry.fail(span, failure);
+            throw failure;
+        }
+        finally
         {
             span.end();
         }
     }
 
+    /**
+     * Runs maintenance inside the run's span.
+     *
+     * @param table      the table
+     * @param timeColumn the partition source column
+     * @param retention  how long rows are kept; empty = forever
+     * @param orphans    also clean up unreferenced files
+     * @param keepFrom   where rows must be kept from instead
+     * @return what it did
+     */
     private Report runTraced(Table table, String timeColumn,
             Optional<Duration> retention, boolean orphans,
             UnaryOperator<Instant> keepFrom)
@@ -164,40 +203,52 @@ public final class TableMaintenance
         Long purgeBefore = null;
         if (retention.isPresent())
         {
-            retentionDeleted = applyRetention(table, timeColumn, retention.get(),
-                    now, keepFrom);
+            retentionDeleted = applyRetention(table, timeColumn,
+                    retention.get(), now, keepFrom);
             if (retentionDeleted > 0)
             {
-                // Iceberg's expiry deletes a file only once the snapshot that removed it has expired, and the current
-                // snapshot never expires. A fenced marker commit makes the retention delete non-current, so it (and
-                // every snapshot before it) can be expired now and the PHI files deleted in this run.
-                committer.commit(table, tx ->
-                        {
+                // Iceberg's expiry deletes a file only once the snapshot
+                // that removed it has expired, and the current snapshot
+                // never expires. A fenced marker commit makes the retention
+                // delete non-current, so it (and every snapshot before it)
+                // can be expired now and the PHI files deleted in this run.
+                committer.commit(table, transaction ->
+                {
                 });
                 purgeBefore = table.currentSnapshot().timestampMillis() + 1;
             }
         }
 
-        long[] compaction = settings.compaction() ? compact(table) : new long[3];
+        long[] compaction = settings.compaction()
+                ? compact(table) : new long[3];
         int expired = expire(table, now, purgeBefore);
         int orphansDeleted = orphans ? deleteOrphans(table, now) : 0;
 
-        Report r = new Report(table.name(), retentionDeleted,
+        Report report = new Report(table.name(), retentionDeleted,
                 (int) compaction[0], (int) compaction[1], compaction[2],
                 expired, orphansDeleted);
-        LOG.info(
-                "maintenance.done table={} retentionDeletedFiles={} compactedFiles={} into={} expiredSnapshots={}"
-                + " orphansDeleted={}", table.name(), r.retentionDeletedFiles(),
-                r.compactedFiles(),
-                r.compactedInto(), r.expiredSnapshots(), r.orphansDeleted());
-        return r;
+        LOG.info("maintenance.done table={} retentionDeletedFiles={}"
+                + " compactedFiles={} into={} expiredSnapshots={}"
+                + " orphansDeleted={}", table.name(),
+                report.retentionDeletedFiles(), report.compactedFiles(),
+                report.compactedInto(), report.expiredSnapshots(),
+                report.orphansDeleted());
+        return report;
     }
 
     // ---- retention ----
+
     /**
      * Deletes whole UTC days older than {@code now - retention}, or than
-     * where {@code keepFrom} says rows must be kept from, if that is earlier.
-     * Returns the number of data files removed.
+     * where {@code keepFrom} says rows must be kept from, if that is
+     * earlier.
+     *
+     * @param table      the table
+     * @param timeColumn the partition source column
+     * @param retention  how long rows are kept
+     * @param now        the time now
+     * @param keepFrom   where rows must be kept from instead
+     * @return the number of data files removed
      */
     private int applyRetention(Table table, String timeColumn,
             Duration retention, Instant now, UnaryOperator<Instant> keepFrom)
@@ -209,35 +260,42 @@ public final class TableMaintenance
         Expression older = Expressions.lessThan(timeColumn,
                 TimeUnit.MILLISECONDS.toMicros(cutoff.toEpochMilli()));
         int matching = 0;
-        try (CloseableIterable<FileScanTask> tasks = table.newScan().filter(
-                older).planFiles())
+        try (CloseableIterable<FileScanTask> tasks =
+                table.newScan().filter(older).planFiles())
         {
             for (FileScanTask ignored : tasks)
             {
                 matching++;
             }
-        } catch (IOException e)
+        }
+        catch (IOException failure)
         {
-            throw new UncheckedIOException(e);
+            throw new UncheckedIOException(failure);
         }
         if (matching == 0)
         {
             return 0; // no empty snapshot
         }
-        committer.commit(table, tx -> tx.newDelete().deleteFromRowFilter(older).
-                commit());
-        // PHI deletion is audited: which table, how many files, and the first day kept.
-        Telemetry.get().audit("maintenance.retention", Fields.of(Attr.TABLE,
-                table.name())
-                .with(Attr.COUNT, matching).with(Attr.REASON,
-                "before " + cutoff.atOffset(ZoneOffset.UTC).toLocalDate()));
+        committer.commit(table, transaction -> transaction.newDelete()
+                .deleteFromRowFilter(older).commit());
+        // PHI deletion is audited: which table, how many files, and the
+        // first day kept.
+        Telemetry.get().audit("maintenance.retention",
+                Fields.of(Attr.TABLE, table.name())
+                        .with(Attr.COUNT, matching)
+                        .with(Attr.REASON, "before "
+                                + cutoff.atOffset(ZoneOffset.UTC)
+                                        .toLocalDate()));
         return matching;
     }
 
     // ---- compaction ----
+
     /**
-     * Bin-packs small files per partition. Returns {inputFiles, outputFiles,
-     * inputBytes}.
+     * Bin-packs small files per partition.
+     *
+     * @param table the table
+     * @return {inputFiles, outputFiles, inputBytes}
      */
     private long[] compact(Table table)
     {
@@ -252,25 +310,29 @@ public final class TableMaintenance
             return new long[3];
         }
         Map<String, List<DataFile>> byPartition = new LinkedHashMap<>();
-        try (CloseableIterable<FileScanTask> tasks = table.newScan().planFiles())
+        try (CloseableIterable<FileScanTask> tasks =
+                table.newScan().planFiles())
         {
-            for (FileScanTask t : tasks)
+            for (FileScanTask task : tasks)
             {
-                DataFile f = t.file();
-                if (f.fileSizeInBytes() < small && t.deletes().isEmpty())
+                DataFile file = task.file();
+                if (file.fileSizeInBytes() < small
+                        && task.deletes().isEmpty())
                 {
-                    byPartition.computeIfAbsent(table.spec().partitionToPath(f.
-                            partition()), k -> new ArrayList<>())
-                            .add(f);
+                    byPartition.computeIfAbsent(
+                            table.spec().partitionToPath(file.partition()),
+                            partition -> new ArrayList<>())
+                            .add(file);
                 }
             }
-        } catch (IOException e)
+        }
+        catch (IOException failure)
         {
-            throw new UncheckedIOException(e);
+            throw new UncheckedIOException(failure);
         }
 
-        long in = 0;
-        long out = 0;
+        long inputFiles = 0;
+        long outputFiles = 0;
         long bytes = 0;
         for (List<DataFile> files : byPartition.values())
         {
@@ -284,46 +346,53 @@ public final class TableMaintenance
                 {
                     continue;
                 }
-                long binBytes = bin.stream().
-                        mapToLong(DataFile::fileSizeInBytes).sum();
-                if (bytes > 0 && bytes + binBytes > settings.
-                        maxRewriteBytesPerRun())
+                long binBytes = bin.stream()
+                        .mapToLong(DataFile::fileSizeInBytes).sum();
+                if (bytes > 0 && bytes + binBytes
+                        > settings.maxRewriteBytesPerRun())
                 {
-                    LOG.info(
-                            "maintenance.compaction_budget_reached table={} bytes={}",
-                            table.name(), bytes);
+                    LOG.info("maintenance.compaction_budget_reached"
+                            + " table={} bytes={}", table.name(), bytes);
                     return new long[]
                     {
-                        in, out, bytes
+                        inputFiles, outputFiles, bytes
                     };
                 }
                 rewrite(table, start.snapshotId(), bin);
-                in += bin.size();
-                out++;
+                inputFiles += bin.size();
+                outputFiles++;
                 bytes += binBytes;
             }
         }
         return new long[]
         {
-            in, out, bytes
+            inputFiles, outputFiles, bytes
         };
     }
 
+    /**
+     * Packs files into bins of at most the target size, largest first, each
+     * into the first bin it fits.
+     *
+     * @param files  the files
+     * @param target the target size of a bin, in bytes
+     * @return the bins
+     */
     static List<List<DataFile>> binPack(List<DataFile> files, long target)
     {
         List<DataFile> sorted = new ArrayList<>(files);
-        sorted.sort((a, b) -> Long.compare(b.fileSizeInBytes(), a.
-                fileSizeInBytes()));
+        sorted.sort((left, right) -> Long.compare(right.fileSizeInBytes(),
+                left.fileSizeInBytes()));
         List<List<DataFile>> bins = new ArrayList<>();
         List<Long> sizes = new ArrayList<>();
-        for (DataFile f : sorted)
+        for (DataFile file : sorted)
         {
             int fit = -1;
-            for (int i = 0; i < bins.size(); i++)
+            for (int index = 0; index < bins.size(); index++)
             {
-                if (sizes.get(i) + f.fileSizeInBytes() <= target)
+                if (sizes.get(index) + file.fileSizeInBytes() <= target)
                 {
-                    fit = i;
+                    fit = index;
                     break;
                 }
             }
@@ -333,24 +402,30 @@ public final class TableMaintenance
                 sizes.add(0L);
                 fit = bins.size() - 1;
             }
-            bins.get(fit).add(f);
-            sizes.set(fit, sizes.get(fit) + f.fileSizeInBytes());
+            bins.get(fit).add(file);
+            sizes.set(fit, sizes.get(fit) + file.fileSizeInBytes());
         }
         return bins;
     }
 
     /**
-     * Copies the rows of {@code bin} unchanged (ciphertext included) into one
-     * new file and swaps it in with {@code RewriteFiles}, validated from
+     * Copies the rows of {@code bin} unchanged (ciphertext included) into
+     * one new file and swaps it in with {@code RewriteFiles}, validated from
      * {@code startSnapshot}. The new file is written unsorted: concatenating
      * sorted files doesn't keep the table's sort order.
+     *
+     * @param table         the table
+     * @param startSnapshot the snapshot the files were chosen from
+     * @param bin           the files to merge, all in one partition
+     * @throws IllegalStateException if the merged file's row count is wrong
      */
     private void rewrite(Table table, long startSnapshot, List<DataFile> bin)
     {
         DataFile first = bin.getFirst();
-        String location = table.locationProvider().newDataLocation(table.spec(),
-                first.partition(),
-                FileFormat.PARQUET.addExtension("compact-" + UUID.randomUUID()));
+        String location = table.locationProvider().newDataLocation(
+                table.spec(), first.partition(),
+                FileFormat.PARQUET.addExtension(
+                        "compact-" + UUID.randomUUID()));
         DataWriter<Record> writer;
         try
         {
@@ -363,32 +438,34 @@ public final class TableMaintenance
                     .createWriterFunc(GenericParquetWriter::create)
                     .overwrite()
                     .build();
-        } catch (IOException e)
+        }
+        catch (IOException failure)
         {
-            throw new UncheckedIOException(e);
+            throw new UncheckedIOException(failure);
         }
         long expectedRows = 0;
         try (writer)
         {
-            for (DataFile f : bin)
+            for (DataFile file : bin)
             {
-                expectedRows += f.recordCount();
-                try (CloseableIterable<Record> rows = Parquet.read(table.io().
-                        newInputFile(f.location()))
+                expectedRows += file.recordCount();
+                try (CloseableIterable<Record> rows = Parquet.read(
+                        table.io().newInputFile(file.location()))
                         .project(table.schema())
-                        .createReaderFunc(fs -> GenericParquetReaders.
-                                buildReader(table.schema(), fs))
+                        .createReaderFunc(fileSchema -> GenericParquetReaders
+                                .buildReader(table.schema(), fileSchema))
                         .build())
                 {
-                    for (Record r : rows)
+                    for (Record row : rows)
                     {
-                        writer.write(r);
+                        writer.write(row);
                     }
                 }
             }
-        } catch (IOException e)
+        }
+        catch (IOException failure)
         {
-            throw new UncheckedIOException(e);
+            throw new UncheckedIOException(failure);
         }
         DataFile merged = writer.toDataFile();
         if (merged.recordCount() != expectedRows)
@@ -397,65 +474,86 @@ public final class TableMaintenance
             throw new IllegalStateException(
                     "Compaction row count mismatch in " + table.name());
         }
-        committer.commit(table, tx ->
-                {
-                    var rw = tx.newRewrite().validateFromSnapshot(startSnapshot);
-                    bin.forEach(rw::deleteFile);
-                    rw.addFile(merged);
-                    rw.commit();
+        committer.commit(table, transaction ->
+        {
+            RewriteFiles rewriteFiles = transaction.newRewrite()
+                    .validateFromSnapshot(startSnapshot);
+            bin.forEach(rewriteFiles::deleteFile);
+            rewriteFiles.addFile(merged);
+            rewriteFiles.commit();
         });
     }
 
     // ---- expiry ----
+
     /**
      * Expires snapshots older than the retention window, keeping at least
      * {@code minSnapshots}. After a retention delete, every snapshot before
      * that delete is expired too, so the deleted PHI files are removed now.
+     *
+     * @param table       the table
+     * @param now         the time now
+     * @param purgeBefore expire every snapshot before this, in Unix
+     *                    milliseconds, keeping only the current one; null
+     *                    if retention deleted nothing
+     * @return how many snapshots were expired
      */
     private int expire(Table table, Instant now, Long purgeBefore)
     {
         committer.verifyCurrent(table);
         int before = size(table.snapshots());
-        long olderThan = now.minus(settings.snapshotRetention()).toEpochMilli();
-        var expire = table.expireSnapshots();
+        long olderThan = now.minus(settings.snapshotRetention())
+                .toEpochMilli();
+        ExpireSnapshots expire = table.expireSnapshots();
         if (purgeBefore != null)
         {
-            expire.expireOlderThan(Math.max(olderThan, purgeBefore)).retainLast(
-                    1);
-        } else
+            expire.expireOlderThan(Math.max(olderThan, purgeBefore))
+                    .retainLast(1);
+        }
+        else
         {
-            expire.expireOlderThan(olderThan).
-                    retainLast(settings.minSnapshots());
+            expire.expireOlderThan(olderThan)
+                    .retainLast(settings.minSnapshots());
         }
         expire.commit();
         table.refresh();
         return before - size(table.snapshots());
     }
 
-    private static int size(Iterable<?> it)
+    /**
+     * Counts what an iterable holds.
+     *
+     * @param items the iterable
+     * @return how many items it holds
+     */
+    private static int size(Iterable<?> items)
     {
-        int n = 0;
-        for (Object ignored : it)
+        int count = 0;
+        for (Object ignored : items)
         {
-            n++;
+            count++;
         }
-        return n;
+        return count;
     }
 
     // ---- orphans ----
+
     /**
-     * Deletes files under the table location that no snapshot or metadata file
-     * references and that are older than {@code orphanMinAge}: leftovers of
-     * crashed batches and abandoned compactions. Skipped if the FileIO can't
-     * list.
+     * Deletes files under the table location that no snapshot or metadata
+     * file references and that are older than {@code orphanMinAge}:
+     * leftovers of crashed batches and abandoned compactions. Skipped if the
+     * FileIO can't list.
+     *
+     * @param table the table
+     * @param now   the time now
+     * @return how many files were deleted
      */
     private int deleteOrphans(Table table, Instant now)
     {
         if (!(table.io() instanceof SupportsPrefixOperations io))
         {
-            LOG.info(
-                    "maintenance.orphans_skipped table={} reason=io_cannot_list",
-                    table.name());
+            LOG.info("maintenance.orphans_skipped table={}"
+                    + " reason=io_cannot_list", table.name());
             return 0;
         }
         table.refresh();
@@ -465,45 +563,48 @@ public final class TableMaintenance
             return 0;
         }
         long cutoff = now.minus(settings.orphanMinAge()).toEpochMilli();
-        String prefix = table.location().endsWith("/") ? table.location() : table.
-                location() + "/";
+        String prefix = table.location().endsWith("/")
+                ? table.location() : table.location() + "/";
         List<String> orphans = new ArrayList<>();
         int listed = 0;
-        for (FileInfo f : io.listPrefix(prefix))
+        for (FileInfo file : io.listPrefix(prefix))
         {
             listed++;
-            String location = qualify(prefix, f.location());
-            // A path form the table doesn't use (another scheme, a bucket alias) would make every file look
-            // orphaned, however small the table. Refuse the whole run rather than delete anything.
+            String location = qualify(prefix, file.location());
+            // A path form the table doesn't use (another scheme, a bucket
+            // alias) would make every file look orphaned, however small the
+            // table. Refuse the whole run rather than delete anything.
             if (!location.startsWith(prefix))
             {
-                LOG.error(
-                        "maintenance.orphans_refused table={} reason=listed_path_outside_table (do listed paths"
-                        + " match table paths?)", table.name());
+                LOG.error("maintenance.orphans_refused table={}"
+                        + " reason=listed_path_outside_table (do listed"
+                        + " paths match table paths?)", table.name());
                 return 0;
             }
-            if (!reachable.contains(location) && f.createdAtMillis() < cutoff)
+            if (!reachable.contains(location)
+                    && file.createdAtMillis() < cutoff)
             {
                 orphans.add(location);
             }
         }
-        // A second line of defence: most of a table looking orphaned means something is wrong, not a crash leftover.
+        // A second line of defence: most of a table looking orphaned means
+        // something is wrong, not a crash leftover.
         if (orphans.size() > 20 && orphans.size() * 2 > listed)
         {
-            LOG.error(
-                    "maintenance.orphans_refused table={} orphans={} listed={} (do listed paths match table paths?)",
+            LOG.error("maintenance.orphans_refused table={} orphans={}"
+                    + " listed={} (do listed paths match table paths?)",
                     table.name(), orphans.size(), listed);
             return 0;
         }
-        for (String o : orphans)
+        for (String orphan : orphans)
         {
-            io.deleteFile(o);
+            io.deleteFile(orphan);
         }
         if (!orphans.isEmpty())
         {
-            Telemetry.get().audit("maintenance.orphans_deleted", Fields.of(
-                    Attr.TABLE, table.name())
-                    .with(Attr.COUNT, orphans.size()));
+            Telemetry.get().audit("maintenance.orphans_deleted",
+                    Fields.of(Attr.TABLE, table.name())
+                            .with(Attr.COUNT, orphans.size()));
         }
         return orphans.size();
     }
@@ -511,11 +612,15 @@ public final class TableMaintenance
     /**
      * The full location of a listed file. {@code ADLSFileIO.listPrefix}
      * (Iceberg 1.12) returns paths relative to the container
-     * ({@code wh/t/data/x.parquet}), unlike the S3 and GCS FileIOs and unlike
-     * the table's own paths
-     * ({@code abfss://fs@account.dfs.core.windows.net/wh/t/data/x.parquet}). A
-     * relative path is resolved against the scheme and authority of the prefix
-     * it was listed under; anything else is returned unchanged.
+     * ({@code wh/t/data/x.parquet}), unlike the S3 and GCS FileIOs and
+     * unlike the table's own paths
+     * ({@code abfss://fs@account.dfs.core.windows.net/wh/t/data/x.parquet}).
+     * A relative path is resolved against the scheme and authority of the
+     * prefix it was listed under; anything else is returned unchanged.
+     *
+     * @param prefix the prefix it was listed under
+     * @param listed the path as listed
+     * @return the full location
      */
     static String qualify(String prefix, String listed)
     {
@@ -525,50 +630,64 @@ public final class TableMaintenance
             return listed;
         }
         int pathStart = prefix.indexOf('/', scheme + 3);
-        String root = pathStart < 0 ? prefix + "/" : prefix.substring(0,
-                pathStart + 1);
+        String root = pathStart < 0
+                ? prefix + "/" : prefix.substring(0, pathStart + 1);
         return root + (listed.startsWith("/") ? listed.substring(1) : listed);
     }
 
+    /**
+     * Every file the table's metadata references: metadata files, manifest
+     * lists, statistics, manifests, and the data and delete files of every
+     * snapshot.
+     *
+     * @param table the table
+     * @return their locations
+     * @throws UncheckedIOException if a manifest can't be read
+     */
     static Set<String> reachable(Table table)
     {
-        Set<String> paths = new HashSet<>(ReachableFileUtil.
-                metadataFileLocations(table, true));
+        Set<String> paths = new HashSet<>(
+                ReachableFileUtil.metadataFileLocations(table, true));
         paths.addAll(ReachableFileUtil.manifestListLocations(table));
         paths.addAll(ReachableFileUtil.statisticsFilesLocations(table));
-        for (PartitionStatisticsFile p : table.partitionStatisticsFiles())
+        for (PartitionStatisticsFile statistics
+                : table.partitionStatisticsFiles())
         {
-            paths.add(p.path());
+            paths.add(statistics.path());
         }
         Set<String> manifests = new HashSet<>();
-        for (Snapshot s : table.snapshots())
+        for (Snapshot snapshot : table.snapshots())
         {
-            for (ManifestFile m : s.allManifests(table.io()))
+            for (ManifestFile manifest : snapshot.allManifests(table.io()))
             {
-                if (manifests.add(m.path()))
+                if (manifests.add(manifest.path()))
                 {
-                    paths.add(m.path());
+                    paths.add(manifest.path());
                     try
                     {
-                        if (m.content() == ManifestContent.DATA)
+                        if (manifest.content() == ManifestContent.DATA)
                         {
-                            try (CloseableIterable<String> files = ManifestFiles.
-                                    readPaths(m, table.io(),
-                                            table.specs()))
+                            try (CloseableIterable<String> files =
+                                    ManifestFiles.readPaths(manifest,
+                                            table.io(), table.specs()))
                             {
                                 files.forEach(paths::add);
                             }
-                        } else
+                        }
+                        else
                         {
-                            try (var deletes = ManifestFiles.readDeleteManifest(m,
-                                    table.io(), table.specs()))
+                            try (ManifestReader<DeleteFile> deletes =
+                                    ManifestFiles.readDeleteManifest(manifest,
+                                            table.io(), table.specs()))
                             {
-                                deletes.forEach(d -> paths.add(d.location()));
+                                deletes.forEach(delete ->
+                                        paths.add(delete.location()));
                             }
                         }
-                    } catch (IOException e)
+                    }
+                    catch (IOException failure)
                     {
-                        throw new UncheckedIOException(e);
+                        throw new UncheckedIOException(failure);
                     }
                 }
             }

@@ -4,10 +4,10 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
+import com.sdh.healthcare.connector.core.convert.SectionConverter;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import java.time.Duration;
 import java.util.Objects;
@@ -15,23 +15,36 @@ import java.util.Objects;
 /**
  * Settings for {@link IngestPipeline} (design §8.3, §13, §14).
  *
- * @param connectorId       names the checkpoint property, e.g. {@code file-connector}
- * @param format            split format, e.g. {@code ccda}
- * @param catalogName       catalog name put in messages, so readers can check they look in the right place
- * @param kekRef            KEK for batch data keys of the sections table
- * @param commitMaxSections commit after this many sections (default 10,000)
- * @param commitMaxBytes    … or this many plaintext bytes (default 512 MiB)
- * @param commitMaxInterval … or when a batch has been open this long (default 30 s)
- * @param encryptWorkers    threads for hashing, compressing, encrypting and sealing (default: CPU cores)
- * @param converters        JSON converters by format (design §6.4); {@link ConverterRegistry#none()} stores every
- *                          section as split
- * @param convertMaxBytes   sections larger than this aren't converted (they'd need too much memory) and are stored
- *                          in their original form as failed, {@code CONVERT_TOO_LARGE} (default 64 MiB)
- * @param convertMemoryBytes heap that conversions running at once may use between them, by each converter's
- *                          {@link com.sdh.healthcare.connector.core.convert.SectionConverter#memoryFactor()}; a
- *                          conversion that doesn't fit waits for others to finish. 0 (the default) means
- *                          {@link #DEFAULT_CONVERT_MEMORY_SHARE} of the maximum heap
- *
+ * @param connectorId        names the checkpoint property, e.g.
+ *                           {@code file-connector}
+ * @param format             split format, e.g. {@code ccda}
+ * @param split              how the format is split
+ * @param catalogName        catalog name put in messages, so readers can
+ *                           check they look in the right place
+ * @param kekRef             KEK for batch data keys of the sections table
+ * @param commitMaxSections  commit after this many sections (default
+ *                           10,000)
+ * @param commitMaxBytes     … or this many plaintext bytes (default
+ *                           512 MiB)
+ * @param commitMaxInterval  … or when a batch has been open this long
+ *                           (default 30 s)
+ * @param encryptWorkers     threads for hashing, compressing, encrypting
+ *                           and sealing (default: CPU cores)
+ * @param retry              how transient errors are retried
+ * @param converters         JSON converters by format (design §6.4);
+ *                           {@link ConverterRegistry#none()} stores every
+ *                           section as split
+ * @param convertMaxBytes    sections larger than this aren't converted
+ *                           (they'd need too much memory) and are stored in
+ *                           their original form as failed,
+ *                           {@code CONVERT_TOO_LARGE} (default 64 MiB)
+ * @param convertMemoryBytes heap that conversions running at once may use
+ *                           between them, by each converter's
+ *                           {@link SectionConverter#memoryFactor()}; a
+ *                           conversion that doesn't fit waits for others to
+ *                           finish. 0 (the default) means
+ *                           {@link #DEFAULT_CONVERT_MEMORY_SHARE} of the
+ *                           maximum heap
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -48,12 +61,37 @@ public record PipelineSettings(
         RetryPolicy retry,
         ConverterRegistry converters,
         long convertMaxBytes,
-        long convertMemoryBytes) {
+        long convertMemoryBytes)
+{
 
-    /** The share of the maximum heap that conversions may use when {@code convertMemoryBytes} is 0. */
+    /**
+     * The share of the maximum heap that conversions may use when
+     * {@code convertMemoryBytes} is 0.
+     */
     public static final double DEFAULT_CONVERT_MEMORY_SHARE = 0.4;
 
-    public PipelineSettings {
+    /**
+     * Checks the settings.
+     *
+     * @param connectorId        names the checkpoint property
+     * @param format             split format
+     * @param split              how the format is split
+     * @param catalogName        catalog name put in messages
+     * @param kekRef             KEK for batch data keys
+     * @param commitMaxSections  sections per commit
+     * @param commitMaxBytes     plaintext bytes per commit
+     * @param commitMaxInterval  how long a batch may stay open
+     * @param encryptWorkers     worker threads
+     * @param retry              how transient errors are retried
+     * @param converters         JSON converters by format
+     * @param convertMaxBytes    largest section converted
+     * @param convertMemoryBytes heap for conversions; 0 for the default
+     * @throws NullPointerException     if a required setting is null
+     * @throws IllegalArgumentException if a threshold, the worker count or
+     *                                  a conversion limit isn't positive
+     */
+    public PipelineSettings
+    {
         Objects.requireNonNull(connectorId);
         Objects.requireNonNull(format);
         Objects.requireNonNull(split);
@@ -62,53 +100,131 @@ public record PipelineSettings(
         Objects.requireNonNull(commitMaxInterval);
         Objects.requireNonNull(retry);
         Objects.requireNonNull(converters);
-        if (commitMaxSections < 1 || commitMaxBytes < 1 || encryptWorkers < 1 || convertMaxBytes < 1
-                || convertMemoryBytes < 0) {
-            throw new IllegalArgumentException(
-                    "Commit thresholds, worker count and conversion limits must be positive");
+        if (commitMaxSections < 1 || commitMaxBytes < 1 || encryptWorkers < 1
+                || convertMaxBytes < 1 || convertMemoryBytes < 0)
+        {
+            throw new IllegalArgumentException("Commit thresholds, worker"
+                    + " count and conversion limits must be positive");
         }
     }
 
-    public static PipelineSettings defaults(String connectorId, String format, String catalogName, String kekRef) {
-        return new PipelineSettings(connectorId, format, SplitConfig.defaults(format), catalogName, kekRef, 10_000,
-                512L << 20, Duration.ofSeconds(30), Runtime.getRuntime().availableProcessors(), RetryPolicy.DEFAULT,
-                ConverterRegistry.load(), 64L << 20, 0);
+    /**
+     * The default settings, with the converters found on the class path.
+     *
+     * @param connectorId names the checkpoint property
+     * @param format      split format
+     * @param catalogName catalog name put in messages
+     * @param kekRef      KEK for batch data keys
+     * @return the settings
+     */
+    public static PipelineSettings defaults(String connectorId,
+            String format, String catalogName, String kekRef)
+    {
+        return new PipelineSettings(connectorId, format,
+                SplitConfig.defaults(format), catalogName, kekRef, 10_000,
+                512L << 20, Duration.ofSeconds(30),
+                Runtime.getRuntime().availableProcessors(),
+                RetryPolicy.DEFAULT, ConverterRegistry.load(), 64L << 20, 0);
     }
 
-    public PipelineSettings withSplit(SplitConfig s) {
-        return new PipelineSettings(connectorId, format, s, catalogName, kekRef, commitMaxSections, commitMaxBytes,
-                commitMaxInterval, encryptWorkers, retry, converters, convertMaxBytes, convertMemoryBytes);
+    /**
+     * A copy with other split settings.
+     *
+     * @param splitConfig how the format is split
+     * @return the copy
+     */
+    public PipelineSettings withSplit(SplitConfig splitConfig)
+    {
+        return new PipelineSettings(connectorId, format, splitConfig,
+                catalogName, kekRef, commitMaxSections, commitMaxBytes,
+                commitMaxInterval, encryptWorkers, retry, converters,
+                convertMaxBytes, convertMemoryBytes);
     }
 
-    public PipelineSettings withCommit(int maxSections, long maxBytes, Duration maxInterval) {
-        return new PipelineSettings(connectorId, format, split, catalogName, kekRef, maxSections, maxBytes,
-                maxInterval, encryptWorkers, retry, converters, convertMaxBytes, convertMemoryBytes);
+    /**
+     * A copy with other commit thresholds.
+     *
+     * @param maxSections sections per commit
+     * @param maxBytes    plaintext bytes per commit
+     * @param maxInterval how long a batch may stay open
+     * @return the copy
+     */
+    public PipelineSettings withCommit(int maxSections, long maxBytes,
+            Duration maxInterval)
+    {
+        return new PipelineSettings(connectorId, format, split, catalogName,
+                kekRef, maxSections, maxBytes, maxInterval, encryptWorkers,
+                retry, converters, convertMaxBytes, convertMemoryBytes);
     }
 
-    public PipelineSettings withWorkers(int n) {
-        return new PipelineSettings(connectorId, format, split, catalogName, kekRef, commitMaxSections,
-                commitMaxBytes, commitMaxInterval, n, retry, converters, convertMaxBytes, convertMemoryBytes);
+    /**
+     * A copy with another worker count.
+     *
+     * @param workers worker threads
+     * @return the copy
+     */
+    public PipelineSettings withWorkers(int workers)
+    {
+        return new PipelineSettings(connectorId, format, split, catalogName,
+                kekRef, commitMaxSections, commitMaxBytes, commitMaxInterval,
+                workers, retry, converters, convertMaxBytes,
+                convertMemoryBytes);
     }
 
-    public PipelineSettings withRetry(RetryPolicy r) {
-        return new PipelineSettings(connectorId, format, split, catalogName, kekRef, commitMaxSections,
-                commitMaxBytes, commitMaxInterval, encryptWorkers, r, converters, convertMaxBytes, convertMemoryBytes);
+    /**
+     * A copy with another retry policy.
+     *
+     * @param policy how transient errors are retried
+     * @return the copy
+     */
+    public PipelineSettings withRetry(RetryPolicy policy)
+    {
+        return new PipelineSettings(connectorId, format, split, catalogName,
+                kekRef, commitMaxSections, commitMaxBytes, commitMaxInterval,
+                encryptWorkers, policy, converters, convertMaxBytes,
+                convertMemoryBytes);
     }
 
-    public PipelineSettings withConversion(ConverterRegistry c, long maxBytes) {
-        return new PipelineSettings(connectorId, format, split, catalogName, kekRef, commitMaxSections,
-                commitMaxBytes, commitMaxInterval, encryptWorkers, retry, c, maxBytes, convertMemoryBytes);
+    /**
+     * A copy with other converters.
+     *
+     * @param registry JSON converters by format
+     * @param maxBytes largest section converted
+     * @return the copy
+     */
+    public PipelineSettings withConversion(ConverterRegistry registry,
+            long maxBytes)
+    {
+        return new PipelineSettings(connectorId, format, split, catalogName,
+                kekRef, commitMaxSections, commitMaxBytes, commitMaxInterval,
+                encryptWorkers, retry, registry, maxBytes,
+                convertMemoryBytes);
     }
 
-    /** @param bytes heap for conversions running at once; 0 for the default share of the heap */
-    public PipelineSettings withConvertMemory(long bytes) {
-        return new PipelineSettings(connectorId, format, split, catalogName, kekRef, commitMaxSections,
-                commitMaxBytes, commitMaxInterval, encryptWorkers, retry, converters, convertMaxBytes, bytes);
+    /**
+     * A copy with another conversion memory budget.
+     *
+     * @param bytes heap for conversions running at once; 0 for the default
+     *              share of the heap
+     * @return the copy
+     */
+    public PipelineSettings withConvertMemory(long bytes)
+    {
+        return new PipelineSettings(connectorId, format, split, catalogName,
+                kekRef, commitMaxSections, commitMaxBytes, commitMaxInterval,
+                encryptWorkers, retry, converters, convertMaxBytes, bytes);
     }
 
-    /** {@code convertMemoryBytes}, or the default share of the maximum heap when it is 0. */
-    public long effectiveConvertMemoryBytes() {
+    /**
+     * The conversion memory budget in force.
+     *
+     * @return {@code convertMemoryBytes}, or the default share of the
+     *         maximum heap when it is 0
+     */
+    public long effectiveConvertMemoryBytes()
+    {
         return convertMemoryBytes > 0 ? convertMemoryBytes
-                : (long) (Runtime.getRuntime().maxMemory() * DEFAULT_CONVERT_MEMORY_SHARE);
+                : (long) (Runtime.getRuntime().maxMemory()
+                        * DEFAULT_CONVERT_MEMORY_SHARE);
     }
 }

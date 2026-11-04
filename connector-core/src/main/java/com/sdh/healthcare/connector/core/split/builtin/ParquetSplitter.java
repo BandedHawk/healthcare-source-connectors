@@ -67,6 +67,13 @@ import org.apache.parquet.schema.MessageType;
 public final class ParquetSplitter implements SectionSplitter
 {
 
+    /**
+     * Creates the splitter; the service loader calls this.
+     */
+    public ParquetSplitter()
+    {
+    }
+
     @Override
     public String format()
     {
@@ -407,8 +414,13 @@ public final class ParquetSplitter implements SectionSplitter
         }
     }
 
-    /** The item, for Iceberg's reader. */
-    private record IcebergFile(SeekableByteSource src, long size)
+    /**
+     * The item, for Iceberg's reader.
+     *
+     * @param source the item
+     * @param size   its size, in bytes
+     */
+    private record IcebergFile(SeekableByteSource source, long size)
             implements InputFile
     {
 
@@ -421,7 +433,7 @@ public final class ParquetSplitter implements SectionSplitter
         @Override
         public org.apache.iceberg.io.SeekableInputStream newStream()
         {
-            return new Stream(src, size);
+            return new Stream(source, size);
         }
 
         @Override
@@ -437,8 +449,13 @@ public final class ParquetSplitter implements SectionSplitter
         }
     }
 
-    /** The item, for Parquet's footer reader. */
-    private record ParquetFile(SeekableByteSource src, long size)
+    /**
+     * The item, for Parquet's footer reader.
+     *
+     * @param source the item
+     * @param size   its size, in bytes
+     */
+    private record ParquetFile(SeekableByteSource source, long size)
             implements org.apache.parquet.io.InputFile
     {
 
@@ -451,7 +468,7 @@ public final class ParquetSplitter implements SectionSplitter
         @Override
         public org.apache.parquet.io.SeekableInputStream newStream()
         {
-            Stream stream = new Stream(src, size);
+            Stream stream = new Stream(source, size);
             return new DelegatingSeekableInputStream(stream)
             {
                 @Override

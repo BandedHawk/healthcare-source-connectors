@@ -13,6 +13,7 @@ import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -246,24 +247,24 @@ final class CdaModel
                             field[2].equals("1"), field[3].equals("1")
                         });
                     case "child" ->
-                        children.computeIfAbsent(field[1], k -> new HashMap<>())
-                                .put(field[2], new Child(field[3], field[4].
-                                        equals("1")));
+                        children.computeIfAbsent(field[1],
+                                type -> new HashMap<>())
+                                .put(field[2], new Child(field[3],
+                                        field[4].equals("1")));
                     case "attr" ->
-                        attributes.computeIfAbsent(field[1], k
-                                -> new HashMap<>())
-                                .put(field[2], Kind.valueOf(field[3].
-                                        toUpperCase(
-                                                java.util.Locale.ROOT)));
+                        attributes.computeIfAbsent(field[1],
+                                type -> new HashMap<>())
+                                .put(field[2], Kind.valueOf(
+                                        field[3].toUpperCase(Locale.ROOT)));
                     default ->
                         throw new IllegalStateException(
                                 "Unknown model line type " + field[0]);
                 }
             }
         }
-        catch (IOException e)
+        catch (IOException failure)
         {
-            throw new UncheckedIOException(e);
+            throw new UncheckedIOException(failure);
         }
         // Put each type's flags, children and attributes together, in maps
         // that can't be changed.

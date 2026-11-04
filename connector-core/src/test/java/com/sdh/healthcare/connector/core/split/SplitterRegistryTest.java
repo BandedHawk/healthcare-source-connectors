@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.split;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -24,73 +23,116 @@ import org.junit.jupiter.api.Test;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class SplitterRegistryTest {
+class SplitterRegistryTest
+{
 
+    /** The service loader finds every built-in splitter. */
     @Test
-    void serviceLoaderFindsBuiltIns() {
+    void serviceLoaderFindsBuiltIns()
+    {
         assertThat(SplitterRegistry.load().formats())
-                .containsExactlyInAnyOrder("ccda", "xml", "x12", "edifact", "fhir", "csv", "delimited",
-                        "parquet");
+                .containsExactlyInAnyOrder("ccda", "xml", "x12", "edifact",
+                        "fhir", "csv", "delimited", "parquet");
     }
 
+    /** An unknown format is rejected. */
     @Test
-    void unknownFormatIsRejected() {
-        assertThatThrownBy(() -> SplitterRegistry.load().get("hl7v2")).isInstanceOf(IllegalArgumentException.class);
+    void unknownFormatIsRejected()
+    {
+        assertThatThrownBy(() -> SplitterRegistry.load().get("hl7v2"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
+    /** A file over the size limit fails before any of it is split. */
     @Test
-    void fileSizeLimitRejectsBeforeSplitting() {
-        SplitConfig cfg = SplitTesting.cfg("csv").withLimits(new SplitLimits(10, 100, 100));
-        assertThatThrownBy(() -> SplitTesting.sections(new CsvSplitter(), "a\nb\nc\nd\ne\nf\n".getBytes(UTF_8), cfg,
+    void fileSizeLimitRejectsBeforeSplitting()
+    {
+        SplitConfig settings = SplitTesting.config("csv")
+                .withLimits(new SplitLimits(10, 100, 100));
+        assertThatThrownBy(() -> SplitTesting.sections(new CsvSplitter(),
+                "a\nb\nc\nd\ne\nf\n".getBytes(UTF_8), settings,
                 ResumePoint.START))
-                .isInstanceOfSatisfying(SplitException.class, e -> {
-                    assertThat(e.code()).isEqualTo(ErrorCode.LIMIT_FILE_SIZE);
-                    assertThat(e.getMessage()).doesNotContain("a\n");
+                .isInstanceOfSatisfying(SplitException.class, error ->
+                {
+                    assertThat(error.code())
+                            .isEqualTo(ErrorCode.LIMIT_FILE_SIZE);
+                    assertThat(error.getMessage()).doesNotContain("a\n");
                 });
     }
 
+    /**
+     * The section count includes the sections before the resume point.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void sectionCountLimitCountsFromResumedSeq() throws Exception {
-        SplitConfig cfg = SplitTesting.cfg("csv").withLimits(new SplitLimits(1000, 100, 3));
-        SeekableByteSource src = SeekableByteSource.of("a\nb\nc\n".getBytes(UTF_8));
-        try (SplitSession s = SplitterRegistry.of(new CsvSplitter()).open("csv", src, ResumePoint.at(2), 2, cfg)) {
-            assertThat(s.next()).isPresent();
-            assertThatThrownBy(s::next).isInstanceOfSatisfying(SplitException.class,
-                    e -> assertThat(e.code()).isEqualTo(ErrorCode.LIMIT_SECTION_COUNT));
+    void sectionCountLimitCountsFromResumedSeq() throws Exception
+    {
+        SplitConfig settings = SplitTesting.config("csv")
+                .withLimits(new SplitLimits(1000, 100, 3));
+        SeekableByteSource source =
+                SeekableByteSource.of("a\nb\nc\n".getBytes(UTF_8));
+        try (SplitSession session = SplitterRegistry.of(new CsvSplitter())
+                .open("csv", source, ResumePoint.at(2), 2, settings))
+        {
+            assertThat(session.next()).isPresent();
+            assertThatThrownBy(session::next)
+                    .isInstanceOfSatisfying(SplitException.class,
+                            error -> assertThat(error.code())
+                                    .isEqualTo(ErrorCode.LIMIT_SECTION_COUNT));
         }
     }
 
+    /** The section size limit counts bytes the splitter adds. */
     @Test
-    void sectionSizeLimitIncludesSynthesisedBytes() {
-        SplitConfig cfg = SplitTesting.cfg("csv").withOption("csv.header", "true")
+    void sectionSizeLimitIncludesSynthesisedBytes()
+    {
+        SplitConfig settings = SplitTesting.config("csv")
+                .withOption("csv.header", "true")
                 .withLimits(new SplitLimits(1000, 12, 100));
-        // "id,name\n" + "1,abc\n" = 14 bytes > 12, though the record alone is 6.
-        SplitException e = SplitTesting.splitError(new CsvSplitter(), "id,name\n1,abc\n", cfg);
-        assertThat(e.code()).isEqualTo(ErrorCode.LIMIT_SECTION_SIZE);
+        // "id,name\n" + "1,abc\n" = 14 bytes > 12, though the record alone
+        // is 6.
+        SplitException error = SplitTesting.splitError(new CsvSplitter(),
+                "id,name\n1,abc\n", settings);
+        assertThat(error.code()).isEqualTo(ErrorCode.LIMIT_SECTION_SIZE);
     }
 
+    /** A resume point's text form reads back. */
     @Test
-    void resumePointRoundTrips() {
+    void resumePointRoundTrips()
+    {
         assertThat(ResumePoint.parse("42").encode()).isEqualTo("42");
-        ResumePoint p = ResumePoint.at(123, 0, 77);
-        assertThat(ResumePoint.parse(p.encode())).isEqualTo(p);
+        ResumePoint point = ResumePoint.at(123, 0, 77);
+        assertThat(ResumePoint.parse(point.encode())).isEqualTo(point);
     }
 
+    /**
+     * A section streams its literal and range parts in order.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void sectionStreamsLiteralAndRangeParts() throws Exception {
-        SeekableByteSource src = SeekableByteSource.of("0123456789".getBytes(UTF_8));
-        Section s = new Section(2, 5, List.of(new Section.Literal("<".getBytes(UTF_8)),
-                new Section.SourceRange(2, 5), new Section.SourceRange(9, 0), new Section.Literal(">".getBytes(UTF_8))),
+    void sectionStreamsLiteralAndRangeParts() throws Exception
+    {
+        SeekableByteSource source =
+                SeekableByteSource.of("0123456789".getBytes(UTF_8));
+        Section section = new Section(2, 5, List.of(
+                new Section.Literal("<".getBytes(UTF_8)),
+                new Section.SourceRange(2, 5),
+                new Section.SourceRange(9, 0),
+                new Section.Literal(">".getBytes(UTF_8))),
                 ResumePoint.at(7));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (InputStream in = s.open(src)) {
-            byte[] buf = new byte[2];
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                out.write(buf, 0, n);
+        try (InputStream in = section.open(source))
+        {
+            byte[] buffer = new byte[2];
+            int count;
+            while ((count = in.read(buffer)) > 0)
+            {
+                out.write(buffer, 0, count);
             }
         }
         assertThat(out.toString(UTF_8)).isEqualTo("<23456>");
-        assertThat(s.plaintextLength()).isEqualTo(7);
+        assertThat(section.plaintextLength()).isEqualTo(7);
     }
 }

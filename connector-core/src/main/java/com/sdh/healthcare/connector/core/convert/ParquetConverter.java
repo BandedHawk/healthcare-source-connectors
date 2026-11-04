@@ -21,6 +21,13 @@ import com.sdh.healthcare.connector.core.split.SplitConfig;
 public final class ParquetConverter implements SectionConverter
 {
 
+    /**
+     * Creates the converter; the service loader calls this.
+     */
+    public ParquetConverter()
+    {
+    }
+
     @Override
     public String format()
     {

@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
@@ -13,25 +12,42 @@ import java.io.IOException;
 import javax.crypto.Mac;
 
 /**
- * Recognises the same file after a restart without reading all of it (design §5.1):
- * {@code size + ":" + base32(HMAC(idKey, "sdh-fingerprint" ‖ 0 ‖ first 1 MiB ‖ last 1 MiB))}. Keyed, so it
- * reveals nothing about the content.
+ * Recognises the same file after a restart without reading all of it
+ * (design §5.1): {@code size + ":" + base32(HMAC(idKey, "sdh-fingerprint"
+ * ‖ 0 ‖ first 1 MiB ‖ last 1 MiB))}. Keyed, so it reveals nothing about
+ * the content.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class SourceFingerprint {
+public final class SourceFingerprint
+{
+
+    /** How much of each end of the file is read. */
     static final int EDGE = 1 << 20;
 
-    private SourceFingerprint() {}
+    /** Not instantiable. */
+    private SourceFingerprint()
+    {
+    }
 
-    public static String of(SeekableByteSource src, SectionIds ids) throws IOException {
-        long size = src.size();
+    /**
+     * Fingerprints a file.
+     *
+     * @param source the file
+     * @param ids    makes the MAC with the ID key
+     * @return the fingerprint
+     * @throws IOException if the file can't be read
+     */
+    public static String of(SeekableByteSource source, SectionIds ids)
+            throws IOException
+    {
+        long size = source.size();
         Mac mac = ids.newLabelledMac("sdh-fingerprint");
         int head = (int) Math.min(EDGE, size);
-        mac.update(src.readFully(0, head));
+        mac.update(source.readFully(0, head));
         int tail = (int) Math.min(EDGE, size);
-        mac.update(src.readFully(size - tail, tail));
+        mac.update(source.readFully(size - tail, tail));
         return size + ":" + SectionIds.encode(mac.doFinal());
     }
 }

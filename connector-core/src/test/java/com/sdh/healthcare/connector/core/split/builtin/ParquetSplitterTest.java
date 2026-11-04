@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.split.builtin;
 
-import static com.sdh.healthcare.connector.core.split.SplitTesting.cfg;
+import static com.sdh.healthcare.connector.core.split.SplitTesting.config;
 import static com.sdh.healthcare.connector.core.split.SplitTesting.sections;
 import static com.sdh.healthcare.connector.core.split.SplitTesting.texts;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -46,6 +46,7 @@ import org.apache.iceberg.inmemory.InMemoryOutputFile;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.types.Types;
+import org.apache.parquet.example.data.Group;
 import org.apache.parquet.example.data.simple.SimpleGroupFactory;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.example.ExampleParquetWriter;
@@ -133,7 +134,7 @@ class ParquetSplitterTest
     void splitsRowByRowAndResumesAfterAnyRow() throws Exception
     {
         byte[] file = write(SIMPLE, simpleRows(25), false);
-        List<Section> all = sections(splitter, file, cfg("parquet"),
+        List<Section> all = sections(splitter, file, config("parquet"),
                 ResumePoint.START);
         List<String> texts = texts(file, all);
         assertThat(texts).hasSize(25);
@@ -148,7 +149,7 @@ class ParquetSplitterTest
         {
             ResumePoint resume = ResumePoint.parse(
                     all.get(i).resume().encode());
-            List<Section> rest = sections(splitter, file, cfg("parquet"),
+            List<Section> rest = sections(splitter, file, config("parquet"),
                     resume);
             assertThat(texts(file, rest)).as("after row %d", i + 1)
                     .isEqualTo(texts.subList(i + 1, texts.size()));
@@ -168,11 +169,11 @@ class ParquetSplitterTest
     void resumesWithinARowGroup() throws Exception
     {
         byte[] file = write(SIMPLE, simpleRows(5), true);
-        List<Section> all = sections(splitter, file, cfg("parquet"),
+        List<Section> all = sections(splitter, file, config("parquet"),
                 ResumePoint.START);
         assertThat(all).extracting(Section::sourceOffset).containsOnly(4L);
         assertThat(all.get(1).resume()).isEqualTo(ResumePoint.at(4, 2));
-        assertThat(texts(file, sections(splitter, file, cfg("parquet"),
+        assertThat(texts(file, sections(splitter, file, config("parquet"),
                 ResumePoint.at(4, 3)))).containsExactly(
                         "{\"id\":4,\"name\":\"n4\"}",
                         "{\"id\":5,\"name\":\"n5\"}");
@@ -240,7 +241,7 @@ class ParquetSplitterTest
         row.setField("codes", Map.of(5, "five"));
         row.setField("s", "quote \" and é");
         byte[] file = write(schema, List.of(row), true);
-        assertThat(texts(file, sections(splitter, file, cfg("parquet"),
+        assertThat(texts(file, sections(splitter, file, config("parquet"),
                 ResumePoint.START))).containsExactly("{\"b\":true,\"i\":7,"
                         + "\"f\":\"NaN\",\"d\":1.5,\"dec\":\"12.50\","
                         + "\"date\":\"2026-11-04\",\"time\":\"10:15:30.25\","
@@ -268,7 +269,7 @@ class ParquetSplitterTest
                 "message row { required int64 id; optional binary name"
                         + " (STRING); }");
         Path path = dir.resolve("plain.parquet");
-        try (ParquetWriter<org.apache.parquet.example.data.Group> writer =
+        try (ParquetWriter<Group> writer =
                 ExampleParquetWriter.builder(new LocalOutputFile(path))
                         .withType(type).build())
         {
@@ -277,7 +278,7 @@ class ParquetSplitterTest
                     .append("name", "plain"));
         }
         byte[] file = Files.readAllBytes(path);
-        assertThat(texts(file, sections(splitter, file, cfg("parquet"),
+        assertThat(texts(file, sections(splitter, file, config("parquet"),
                 ResumePoint.START)))
                 .containsExactly("{\"id\":1,\"name\":\"plain\"}");
     }
@@ -293,17 +294,17 @@ class ParquetSplitterTest
     {
         byte[] notParquet = "id,name\n1,x\n".getBytes(UTF_8);
         assertThatThrownBy(() -> sections(splitter, notParquet,
-                cfg("parquet"), ResumePoint.START))
+                config("parquet"), ResumePoint.START))
                 .isInstanceOfSatisfying(SplitException.class,
                         failure -> assertThat(failure.code()).isEqualTo(
                                 ErrorCode.PARSE_PARQUET_MALFORMED));
         byte[] file = write(SIMPLE, simpleRows(3), true);
-        assertThatThrownBy(() -> sections(splitter, file, cfg("parquet"),
+        assertThatThrownBy(() -> sections(splitter, file, config("parquet"),
                 ResumePoint.at(5)))
                 .isInstanceOfSatisfying(SplitException.class,
                         failure -> assertThat(failure.code())
                                 .isEqualTo(ErrorCode.RESUME_INVALID));
-        assertThatThrownBy(() -> sections(splitter, file, cfg("parquet"),
+        assertThatThrownBy(() -> sections(splitter, file, config("parquet"),
                 ResumePoint.at(4, 3)))
                 .isInstanceOf(SplitException.class);
         assertThat(ParquetRowJson.check(new Schema(Types.NestedField
@@ -342,20 +343,24 @@ class ParquetSplitterTest
         };
         assertThatThrownBy(() -> SplitterRegistry.of(splitter)
                 .open("parquet", failing, ResumePoint.START, 0,
-                        cfg("parquet")))
+                        config("parquet")))
                 .isInstanceOf(IOException.class)
                 .isNotInstanceOf(SplitException.class)
                 .hasMessage("storage down");
     }
 
-    /** The converter for the format passes the JSON on, labelled. */
+    /**
+     * The converter for the format passes the JSON on, labelled.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void labelsTheSectionsAsParquetRows() throws Exception
     {
         var converter = ConverterRegistry.load().get("parquet").orElseThrow();
         assertThat(converter.mapping()).isEqualTo("parquet-row/1");
         byte[] json = "{\"id\":1}".getBytes(UTF_8);
-        byte[] out = converter.convert(json, cfg("parquet"));
+        byte[] out = converter.convert(json, config("parquet"));
         assertThat(out).isEqualTo(json).isNotSameAs(json);
     }
 

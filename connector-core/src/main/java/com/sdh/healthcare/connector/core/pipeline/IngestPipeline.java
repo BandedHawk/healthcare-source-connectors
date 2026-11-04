@@ -42,10 +42,12 @@ import java.time.Clock;
 import java.time.LocalDate;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -792,7 +794,7 @@ public final class IngestPipeline implements AutoCloseable
          * @throws Exception if waiting is interrupted, or the work fails
          */
         private Prepared converting(long length,
-                java.util.concurrent.Callable<Prepared> work) throws Exception
+                Callable<Prepared> work) throws Exception
         {
             int taken = budget.acquire(
                     (long) Math.ceil(length * converter.memoryFactor()));
@@ -881,7 +883,7 @@ public final class IngestPipeline implements AutoCloseable
             {
                 stored = converter.convert(raw, settings.split());
                 representation = Representation.json(converter.mapping());
-                java.util.Arrays.fill(raw, (byte) 0);
+                Arrays.fill(raw, (byte) 0);
             }
             catch (ConversionException failure)
             {

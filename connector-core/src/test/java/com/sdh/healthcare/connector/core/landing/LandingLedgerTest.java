@@ -131,6 +131,8 @@ class LandingLedgerTest
     /**
      * Entries load back into an index that knows each sighting, and finds
      * items with the same content.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void recordsLoadsAndFindsDuplicateContent() throws Exception
@@ -158,7 +160,11 @@ class LandingLedgerTest
         assertThat(ledger.load("another-intake").size()).isZero();
     }
 
-    /** An item without a source reference is recorded by its digest only. */
+    /**
+     * An item without a source reference is recorded by its digest only.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void recordsItemsWithoutASource() throws Exception
     {
@@ -176,6 +182,8 @@ class LandingLedgerTest
     /**
      * A crash between an item's commit and its ledger entry is repaired at
      * startup, once.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void repairsTheEntryOfTheLastLandedItem() throws Exception
@@ -202,6 +210,8 @@ class LandingLedgerTest
     /**
      * An entry is found by its source reference, with the item's size and
      * SHA-256, as an HTTP push's receipt needs.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void findsAnEntryByItsSourceReference() throws Exception

@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.crypto;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -14,6 +13,7 @@ import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.ECPublicKey;
@@ -30,57 +30,109 @@ import org.junit.jupiter.api.Test;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-class RecoveryEnvelopeTest {
-    static KeyPair ec() throws Exception {
-        KeyPairGenerator g = KeyPairGenerator.getInstance("EC");
-        g.initialize(new ECGenParameterSpec("secp256r1"));
-        return g.generateKeyPair();
+class RecoveryEnvelopeTest
+{
+
+    /**
+     * Makes a P-256 key pair.
+     *
+     * @return the pair
+     * @throws Exception if it can't be made
+     */
+    static KeyPair ec() throws Exception
+    {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+        generator.initialize(new ECGenParameterSpec("secp256r1"));
+        return generator.generateKeyPair();
     }
 
-    static byte[] seal(byte[] data, UUID id, KeyPair k) throws Exception {
+    /**
+     * Seals data in an envelope, with a fixed original name.
+     *
+     * @param data   the data
+     * @param fileId the file's ID
+     * @param keys   the recipient's key pair
+     * @return the envelope
+     * @throws Exception if it can't be sealed
+     */
+    static byte[] seal(byte[] data, UUID fileId, KeyPair keys)
+            throws Exception
+    {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        RecoveryEnvelope.encrypt(SeekableByteSource.of(data), id, Optional.of("smith-ccd.xml"),
-                (ECPublicKey) k.getPublic(), out);
+        RecoveryEnvelope.encrypt(SeekableByteSource.of(data), fileId,
+                Optional.of("smith-ccd.xml"), (ECPublicKey) keys.getPublic(),
+                out);
         return out.toByteArray();
     }
 
+    /**
+     * Data over several records and the original name come back, and the
+     * name isn't readable in the envelope.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void roundTripsMultipleRecordsAndTheName() throws Exception {
-        KeyPair k = ec();
+    void roundTripsMultipleRecordsAndTheName() throws Exception
+    {
+        KeyPair keys = ec();
         byte[] data = new byte[(8 << 20) + 777];
         new Random(3).nextBytes(data);
-        UUID id = UUID.randomUUID();
-        byte[] sealed = seal(data, id, k);
+        UUID fileId = UUID.randomUUID();
+        byte[] sealed = seal(data, fileId, keys);
         ByteArrayOutputStream plain = new ByteArrayOutputStream();
-        RecoveryEnvelope.Metadata meta = RecoveryEnvelope.decrypt(new ByteArrayInputStream(sealed), k.getPrivate(), plain);
+        RecoveryEnvelope.Metadata metadata = RecoveryEnvelope.decrypt(
+                new ByteArrayInputStream(sealed), keys.getPrivate(), plain);
         assertThat(plain.toByteArray()).isEqualTo(data);
-        assertThat(meta.fileId()).isEqualTo(id);
-        assertThat(meta.originalName()).contains("smith-ccd.xml");
-        assertThat(new String(sealed, java.nio.charset.StandardCharsets.ISO_8859_1)).doesNotContain("smith");
+        assertThat(metadata.fileId()).isEqualTo(fileId);
+        assertThat(metadata.originalName()).contains("smith-ccd.xml");
+        assertThat(new String(sealed, StandardCharsets.ISO_8859_1))
+                .doesNotContain("smith");
     }
 
+    /**
+     * An empty file seals and opens.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void emptyFile() throws Exception {
-        KeyPair k = ec();
+    void emptyFile() throws Exception
+    {
+        KeyPair keys = ec();
         ByteArrayOutputStream plain = new ByteArrayOutputStream();
-        RecoveryEnvelope.decrypt(new ByteArrayInputStream(seal(new byte[0], UUID.randomUUID(), k)), k.getPrivate(), plain);
+        RecoveryEnvelope.decrypt(new ByteArrayInputStream(
+                seal(new byte[0], UUID.randomUUID(), keys)),
+                keys.getPrivate(), plain);
         assertThat(plain.size()).isZero();
     }
 
+    /**
+     * Opening fails with the wrong key, a missing last record, or a changed
+     * byte.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
-    void wrongKeyTruncationAndTamperingAreDetected() throws Exception {
-        KeyPair k = ec();
+    void wrongKeyTruncationAndTamperingAreDetected() throws Exception
+    {
+        KeyPair keys = ec();
         byte[] data = new byte[(8 << 20) + 10];
-        byte[] sealed = seal(data, UUID.randomUUID(), k);
-        assertThatThrownBy(() -> RecoveryEnvelope.decrypt(new ByteArrayInputStream(sealed), ec().getPrivate(),
-                new ByteArrayOutputStream())).isInstanceOf(IOException.class);
-        // Drop the last record: the one before it isn't flagged last, so this is caught.
+        byte[] sealed = seal(data, UUID.randomUUID(), keys);
+        assertThatThrownBy(() -> RecoveryEnvelope.decrypt(
+                new ByteArrayInputStream(sealed), ec().getPrivate(),
+                new ByteArrayOutputStream()))
+                .isInstanceOf(IOException.class);
+        // Drop the last record: the one before it isn't flagged last, so
+        // this is caught.
         byte[] truncated = Arrays.copyOf(sealed, sealed.length - 40);
-        assertThatThrownBy(() -> RecoveryEnvelope.decrypt(new ByteArrayInputStream(truncated), k.getPrivate(),
-                new ByteArrayOutputStream())).isInstanceOf(IOException.class);
+        assertThatThrownBy(() -> RecoveryEnvelope.decrypt(
+                new ByteArrayInputStream(truncated), keys.getPrivate(),
+                new ByteArrayOutputStream()))
+                .isInstanceOf(IOException.class);
         byte[] flipped = sealed.clone();
         flipped[flipped.length / 2] ^= 1;
-        assertThatThrownBy(() -> RecoveryEnvelope.decrypt(new ByteArrayInputStream(flipped), k.getPrivate(),
-                new ByteArrayOutputStream())).isInstanceOf(IOException.class);
+        assertThatThrownBy(() -> RecoveryEnvelope.decrypt(
+                new ByteArrayInputStream(flipped), keys.getPrivate(),
+                new ByteArrayOutputStream()))
+                .isInstanceOf(IOException.class);
     }
 }

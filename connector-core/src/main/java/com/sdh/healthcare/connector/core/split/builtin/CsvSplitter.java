@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
@@ -21,14 +20,13 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * One section per CSV record (RFC 4180; design §6.2). Newlines inside quoted
- * fields are respected, and content is otherwise not interpreted.
- *
+ * One section per CSV record (RFC 4180; design §6.2). Newlines inside
+ * quoted fields are respected, and content is otherwise not interpreted.
  * <p>
  * Options: {@code csv.header} (default false) prepends the first record to
- * every section; {@code csv.delimiter} (default {@code ,}) is needed to know
- * where a quoted field may start. Empty lines are skipped. A quote that doesn't
- * open a field is kept as an ordinary character.
+ * every section; {@code csv.delimiter} (default {@code ,}) is needed to
+ * know where a quoted field may start. Empty lines are skipped. A quote
+ * that doesn't open a field is kept as an ordinary character.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -36,89 +34,125 @@ import java.util.Optional;
 public final class CsvSplitter implements SectionSplitter
 {
 
+    /** The format's name. */
     public static final String FORMAT = "csv";
 
+    /**
+     * Creates the splitter; the service loader calls this.
+     */
+    public CsvSplitter()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     @Override
     public String format()
     {
         return FORMAT;
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalArgumentException if the delimiter is invalid
+     */
     @Override
-    public void validate(SplitConfig cfg)
+    public void validate(SplitConfig config)
     {
-        delimiter(cfg);
+        delimiter(config);
     }
 
     /**
      * The configured delimiter; also used by the CSV converter.
+     *
+     * @param config the split settings
+     * @return the delimiter; {@code \t} is read as a tab
+     * @throws IllegalArgumentException unless it is one ASCII character
+     *                                  other than a quote or newline
      */
-    public static char delimiter(SplitConfig cfg)
+    public static char delimiter(SplitConfig config)
     {
-        String d = cfg.option("csv.delimiter", ",");
-        if (d.equals("\\t"))
+        String delimiter = config.option("csv.delimiter", ",");
+        if (delimiter.equals("\\t"))
         {
-            d = "\t";
+            delimiter = "\t";
         }
-        if (d.length() != 1 || d.charAt(0) > 0x7f || d.charAt(0) == '"' || d.
-                charAt(0) == '\n')
+        if (delimiter.length() != 1 || delimiter.charAt(0) > 0x7f
+                || delimiter.charAt(0) == '"' || delimiter.charAt(0) == '\n')
         {
-            throw new IllegalArgumentException(
-                    "csv.delimiter must be one ASCII character other than quote or newline");
+            throw new IllegalArgumentException("csv.delimiter must be one"
+                    + " ASCII character other than quote or newline");
         }
-        return d.charAt(0);
+        return delimiter.charAt(0);
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public SplitSession open(SeekableByteSource src, ResumePoint from,
-            SplitConfig cfg)
+    public SplitSession open(SeekableByteSource source, ResumePoint from,
+            SplitConfig config)
             throws IOException, SplitException
     {
-        byte delim = (byte) delimiter(cfg);
-        long max = cfg.limits().maxSectionBytes();
+        byte delimiter = (byte) delimiter(config);
+        long max = config.limits().maxSectionBytes();
         byte[] header = null;
         long start = from.offset();
-        if (cfg.booleanOption("csv.header", false))
+        if (config.booleanOption("csv.header", false))
         {
-            long[] h = nextRecord(new ByteScanner(src, 0, Math.min(cfg.
-                    readBufferBytes(), 64 << 10)), delim, max);
-            if (h == null)
+            long[] headerRecord = nextRecord(new ByteScanner(source, 0,
+                    Math.min(config.readBufferBytes(), 64 << 10)),
+                    delimiter, max);
+            if (headerRecord == null)
             {
                 return Optional::empty;
             }
-            header = src.readFully(h[0], (int) (h[1] - h[0]));
-            start = Math.max(start, h[1]);
+            header = source.readFully(headerRecord[0],
+                    (int) (headerRecord[1] - headerRecord[0]));
+            start = Math.max(start, headerRecord[1]);
         }
-        ByteScanner sc = new ByteScanner(src, start, cfg.readBufferBytes());
-        byte[] hdr = header;
+        ByteScanner scanner = new ByteScanner(source, start,
+                config.readBufferBytes());
+        byte[] headerBytes = header;
         return () ->
-                {
-                    long[] r = nextRecord(sc, delim, max);
-                    if (r == null)
-                    {
-                        return Optional.empty();
-                    }
-                    Section.SourceRange range = new Section.SourceRange(r[0],
-                            r[1] - r[0]);
-                    List<Section.Part> parts = hdr == null ? List.of(range) : List.
-                            of(new Section.Literal(hdr), range);
-                    return Optional.of(new Section(r[0], r[1] - r[0], parts,
-                            ResumePoint.at(r[1])));
+        {
+            long[] record = nextRecord(scanner, delimiter, max);
+            if (record == null)
+            {
+                return Optional.empty();
+            }
+            Section.SourceRange range = new Section.SourceRange(record[0],
+                    record[1] - record[0]);
+            List<Section.Part> parts = headerBytes == null
+                    ? List.of(range)
+                    : List.of(new Section.Literal(headerBytes), range);
+            return Optional.of(new Section(record[0], record[1] - record[0],
+                    parts, ResumePoint.at(record[1])));
         };
     }
 
     /**
-     * The next non-empty record as {start, end}, end being after its line
-     * terminator; null at the end.
+     * The next non-empty record.
+     *
+     * @param scanner   reads the file
+     * @param delimiter the field delimiter
+     * @param max       the largest record allowed, in bytes
+     * @return {start, end}, end being after its line terminator; null at
+     *         the end
+     * @throws IOException    if the file can't be read
+     * @throws SplitException if a record is too large, or a quote is never
+     *                        closed
      */
-    static long[] nextRecord(ByteScanner sc, byte delim, long max) throws
-            IOException, SplitException
+    static long[] nextRecord(ByteScanner scanner, byte delimiter, long max)
+            throws IOException, SplitException
     {
         while (true)
         {
-            long start = sc.position();
-            int c = sc.read();
-            if (c < 0)
+            long start = scanner.position();
+            int next = scanner.read();
+            if (next < 0)
             {
                 return null;
             }
@@ -129,42 +163,47 @@ public final class CsvSplitter implements SectionSplitter
             {
                 if (inQuotes)
                 {
-                    if (c == '"')
+                    if (next == '"')
                     {
-                        if (sc.peek() == '"')
+                        if (scanner.peek() == '"')
                         {
-                            sc.read();
-                        } else
+                            scanner.read();
+                        }
+                        else
                         {
                             inQuotes = false;
                         }
                     }
                     empty = false;
-                } else if (c == '\n')
+                }
+                else if (next == '\n')
                 {
                     break;
-                } else if (c == delim)
+                }
+                else if (next == delimiter)
                 {
                     fieldStart = true;
                     empty = false;
-                } else
+                }
+                else
                 {
-                    if (c == '"' && fieldStart)
+                    if (next == '"' && fieldStart)
                     {
                         inQuotes = true;
                     }
-                    if (c != '\r')
+                    if (next != '\r')
                     {
                         empty = false;
                     }
                     fieldStart = false;
                 }
-                if (sc.position() - start > max)
+                if (scanner.position() - start > max)
                 {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE, start);
+                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
+                            start);
                 }
-                c = sc.read();
-                if (c < 0)
+                next = scanner.read();
+                if (next < 0)
                 {
                     if (inQuotes)
                     {
@@ -178,7 +217,7 @@ public final class CsvSplitter implements SectionSplitter
             {
                 return new long[]
                 {
-                    start, sc.position()
+                    start, scanner.position()
                 };
             }
         }

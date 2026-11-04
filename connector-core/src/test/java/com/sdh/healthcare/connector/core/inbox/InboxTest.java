@@ -105,6 +105,8 @@ class InboxTest
     /**
      * Items come out in the order they went in, once each, and the
      * position survives a restart.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void keepsOrderDropsRepeatsAndRemembersThePosition() throws Exception
@@ -138,7 +140,11 @@ class InboxTest
                 .isEqualTo(3);
     }
 
-    /** A waiting reader wakes when an item arrives. */
+    /**
+     * A waiting reader wakes when an item arrives.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void wakesAWaitingReader() throws Exception
     {
@@ -163,7 +169,11 @@ class InboxTest
                 .isLessThan(Duration.ofSeconds(5).toNanos());
     }
 
-    /** A position that was changed outside the splitter is refused. */
+    /**
+     * A position that was changed outside the splitter is refused.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void refusesATamperedPosition() throws Exception
     {

@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import javax.xml.XMLConstants;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
@@ -646,7 +647,7 @@ public final class CcdaConverter implements SectionConverter
         // line for its \n). A large document is written twice, first only to
         // count, so the JSON is held once, in an array of exactly its size.
         return JsonWriter.build(section.length + (section.length >> 4) + 64,
-                w -> write(model, root, w));
+                writer -> write(model, root, writer));
     }
 
     /**
@@ -961,11 +962,11 @@ public final class CcdaConverter implements SectionConverter
         int size = 0;
         Set<String> used = new HashSet<>();
         List<String[]> foreignList = new ArrayList<>();
-        for (int i = 0; i < count; i++)
+        for (int index = 0; index < count; index++)
         {
-            String nameSpace = reader.getAttributeNamespace(i);
-            String local = reader.getAttributeLocalName(i);
-            String value = reading.value(reader.getAttributeValue(i));
+            String nameSpace = reader.getAttributeNamespace(index);
+            String local = reader.getAttributeLocalName(index);
+            String value = reading.value(reader.getAttributeValue(index));
             String key;
             if (XSI.equals(nameSpace))
             {
@@ -999,7 +1000,7 @@ public final class CcdaConverter implements SectionConverter
                 // (resolved below, after the plain attributes).
                 foreignList.add(new String[]
                 {
-                    local, reader.getAttributePrefix(i) + ":" + local, value
+                    local, reader.getAttributePrefix(index) + ":" + local, value
                 });
                 continue;
             }
@@ -1251,15 +1252,15 @@ public final class CcdaConverter implements SectionConverter
                 : groups(node);
         Set<String> used = new HashSet<>();
         String[] attributes = node.attributes;
-        for (int i = 0; i < attributes.length; i += 2)
+        for (int index = 0; index < attributes.length; index += 2)
         {
-            String name = attributes[i];
+            String name = attributes[index];
             String key = children.containsKey(name) || used.contains(name)
                     ? "@" + name : name;
             used.add(key);
             writer.key(key);
             attributeValue(type == null ? null : type.attributes().get(name),
-                    attributes[i + 1], writer);
+                    attributes[index + 1], writer);
         }
         for (Map.Entry<String, List<Node>> entry : children.entrySet())
         {
@@ -1332,8 +1333,8 @@ public final class CcdaConverter implements SectionConverter
      * ({@code "3.5"}, {@code "1e3"}, {@code "five"}, an empty value) is written
      * as a string, so an invalid value is kept rather than lost.
      */
-    private static final java.util.regex.Pattern INTEGER =
-            java.util.regex.Pattern.compile("[+-]?[0-9]{1,18}");
+    private static final Pattern INTEGER =
+            Pattern.compile("[+-]?[0-9]{1,18}");
 
     /**
      * Writes one attribute's value as JSON, as a JSON Boolean or number when

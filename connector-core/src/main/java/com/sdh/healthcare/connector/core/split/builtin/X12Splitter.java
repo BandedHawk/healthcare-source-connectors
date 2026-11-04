@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -27,22 +26,22 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * X12 splitter (design §6.2). Delimiters are read from each ISA segment, and
- * every section is a valid standalone interchange.
- *
+ * X12 splitter (design §6.2). Delimiters are read from each ISA segment,
+ * and every section is a valid standalone interchange.
  * <p>
  * Boundary:
  * <ul>
  * <li>{@code ST} (default): one transaction set per section, as
- * {@code ISA + GS + ST…SE + GE + IEA}, with GE01 and IEA01 rewritten to 1</li>
+ * {@code ISA + GS + ST…SE + GE + IEA}, with GE01 and IEA01 rewritten to
+ * 1</li>
  * <li>{@code GS}: one functional group per section, as
  * {@code ISA + GS…GE + IEA}, with IEA01 rewritten to 1</li>
  * <li>{@code ISA}: one whole interchange per section, unchanged</li>
  * </ul>
  * A TA1 acknowledgement between ISA and GS becomes its own section,
  * {@code ISA + TA1 + IEA} with IEA01 = 0. Control numbers are checked
- * (ST02/SE02, GS06/GE02, ISA13/IEA02) to catch truncated or spliced input. BIN
- * segments carrying raw binary are not supported.
+ * (ST02/SE02, GS06/GE02, ISA13/IEA02) to catch truncated or spliced input.
+ * BIN segments carrying raw binary are not supported.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -50,67 +49,121 @@ import java.util.Set;
 public final class X12Splitter implements SectionSplitter
 {
 
+    /** The format's name. */
     public static final String FORMAT = "x12";
 
+    /** The start of an interchange. */
     private static final byte[] ISA = "ISA".getBytes(ISO_8859_1);
-    private static final Set<String> ENVELOPE = Set.of("ISA", "IEA", "GS", "GE",
-            "ST", "SE", "TA1");
+
+    /** The envelope segments, whose content is kept. */
+    private static final Set<String> ENVELOPE = Set.of("ISA", "IEA", "GS",
+            "GE", "ST", "SE", "TA1");
+
+    /** The longest envelope segment allowed, in bytes. */
     private static final int MAX_ENVELOPE_SEGMENT = 1024;
 
-    enum Level
+    /**
+     * Creates the splitter; the service loader calls this.
+     */
+    public X12Splitter()
     {
-        ST, GS, ISA
     }
 
+    /** What one section holds. */
+    enum Level
+    {
+        /** One transaction set. */
+        ST,
+
+        /** One functional group. */
+        GS,
+
+        /** One interchange. */
+        ISA
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     @Override
     public String format()
     {
         return FORMAT;
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalArgumentException if the boundary isn't ST, GS or ISA
+     */
     @Override
-    public void validate(SplitConfig cfg)
+    public void validate(SplitConfig config)
     {
-        level(cfg);
-    }
-
-    private static Level level(SplitConfig cfg)
-    {
-        return Level.valueOf(cfg.boundaryOr("ST").toUpperCase(Locale.ROOT));
-    }
-
-    @Override
-    public SplitSession open(SeekableByteSource src, ResumePoint from,
-            SplitConfig cfg)
-            throws IOException, SplitException
-    {
-        Session s = new Session(src, level(cfg), cfg);
-        s.resume(from);
-        return s;
+        level(config);
     }
 
     /**
-     * One segment. {@code end} is after the terminator and any CR/LF following
-     * it.
+     * The configured boundary.
+     *
+     * @param config the split settings
+     * @return the level; ST by default
+     * @throws IllegalArgumentException if it isn't ST, GS or ISA
+     */
+    private static Level level(SplitConfig config)
+    {
+        return Level.valueOf(
+                config.boundaryOr("ST").toUpperCase(Locale.ROOT));
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public SplitSession open(SeekableByteSource source, ResumePoint from,
+            SplitConfig config)
+            throws IOException, SplitException
+    {
+        Session session = new Session(source, level(config), config);
+        session.resume(from);
+        return session;
+    }
+
+    /**
+     * One segment.
+     *
+     * @param id      the segment ID, e.g. {@code ST}
+     * @param start   its source offset
+     * @param end     the offset after the terminator and any CR/LF
+     *                following it
+     * @param content its bytes, without the terminator, for envelope
+     *                segments; null for others
      */
     private record Segment(String id, long start, long end, byte[] content)
     {
 
-        String element(int i, byte es)
+        /**
+         * One element of an envelope segment.
+         *
+         * @param index     the element's index; 0 is the segment ID
+         * @param separator the element separator
+         * @return the element, trimmed; empty if there is no such element
+         */
+        String element(int index, byte separator)
         {
             int field = 0;
             int from = 0;
-            for (int p = 0; p <= content.length; p++)
+            for (int position = 0; position <= content.length; position++)
             {
-                if (p == content.length || content[p] == es)
+                if (position == content.length
+                        || content[position] == separator)
                 {
-                    if (field == i)
+                    if (field == index)
                     {
-                        return new String(content, from, p - from, ISO_8859_1).
-                                trim();
+                        return new String(content, from, position - from,
+                                ISO_8859_1).trim();
                     }
                     field++;
-                    from = p + 1;
+                    from = position + 1;
                 }
             }
             return "";
@@ -118,35 +171,76 @@ public final class X12Splitter implements SectionSplitter
     }
 
     /**
-     * An open ISA or GS: its raw bytes (for the prefix) and its control number.
+     * An open ISA or GS.
+     *
+     * @param start   its source offset
+     * @param raw     its bytes, for the prefix of a section
+     * @param control its control number
      */
-    private record Envelope(long start, byte[] raw, String control) {}
+    private record Envelope(long start, byte[] raw, String control)
+    {
+    }
 
+    /** Splits one file. */
     private static final class Session implements SplitSession
     {
 
-        private final SeekableByteSource src;
+        /** The file. */
+        private final SeekableByteSource source;
+
+        /** What one section holds. */
         private final Level level;
-        private final SplitConfig cfg;
+
+        /** The split settings. */
+        private final SplitConfig config;
+
+        /** The largest section allowed, in bytes. */
         private final long max;
-        private ByteScanner sc;
-        private byte es;
-        private byte term;
+
+        /** Reads the file. */
+        private ByteScanner scanner;
+
+        /** The element separator, from the ISA. */
+        private byte elementSeparator;
+
+        /** The segment terminator, from the ISA; 0 before the first ISA. */
+        private byte terminator;
+
+        /** The line break after the ISA's terminator, if any. */
         private byte[] eol = new byte[0];
+
+        /** The open interchange; null between interchanges. */
         private Envelope isa;
+
+        /** The open functional group; null between groups. */
         private Envelope gs;
 
-        Session(SeekableByteSource src, Level level, SplitConfig cfg)
+        /**
+         * Creates a session.
+         *
+         * @param source the file
+         * @param level  what one section holds
+         * @param config the split settings
+         */
+        Session(SeekableByteSource source, Level level, SplitConfig config)
         {
-            this.src = src;
+            this.source = source;
             this.level = level;
-            this.cfg = cfg;
-            this.max = cfg.limits().maxSectionBytes();
+            this.config = config;
+            this.max = config.limits().maxSectionBytes();
         }
 
+        /**
+         * Positions the session at a resume point, reading its open
+         * envelopes again.
+         *
+         * @param from where to resume
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if the point doesn't fit the file
+         */
         void resume(ResumePoint from) throws IOException, SplitException
         {
-            List<Long> ctx = from.context();
+            List<Long> context = from.context();
             int expected = switch (level)
             {
                 case ISA ->
@@ -156,251 +250,307 @@ public final class X12Splitter implements SectionSplitter
                 case ST ->
                     2;
             };
-            if (ctx.size() > expected)
+            if (context.size() > expected)
             {
-                throw new SplitException(ErrorCode.RESUME_INVALID, from.offset());
+                throw new SplitException(ErrorCode.RESUME_INVALID,
+                        from.offset());
             }
-            if (!ctx.isEmpty())
+            if (!context.isEmpty())
             {
-                sc = new ByteScanner(src, ctx.get(0), 4096);
-                Segment s = nextSegment();
-                if (s == null || !s.id().equals("ISA") || s.start() != ctx.
-                        get(0))
+                scanner = new ByteScanner(source, context.get(0), 4096);
+                Segment interchange = nextSegment();
+                if (interchange == null || !interchange.id().equals("ISA")
+                        || interchange.start() != context.get(0))
                 {
-                    throw new SplitException(ErrorCode.RESUME_INVALID, from.
-                            offset());
+                    throw new SplitException(ErrorCode.RESUME_INVALID,
+                            from.offset());
                 }
-                isa = envelope(s, 13);
-                if (ctx.size() == 2)
+                isa = envelope(interchange, 13);
+                if (context.size() == 2)
                 {
-                    sc = new ByteScanner(src, ctx.get(1), 4096);
-                    Segment g = nextSegment();
-                    if (g == null || !g.id().equals("GS") || g.start() != ctx.
-                            get(1))
+                    scanner = new ByteScanner(source, context.get(1), 4096);
+                    Segment group = nextSegment();
+                    if (group == null || !group.id().equals("GS")
+                            || group.start() != context.get(1))
                     {
-                        throw new SplitException(ErrorCode.RESUME_INVALID, from.
-                                offset());
+                        throw new SplitException(ErrorCode.RESUME_INVALID,
+                                from.offset());
                     }
-                    gs = envelope(g, 6);
+                    gs = envelope(group, 6);
                 }
             }
-            sc = new ByteScanner(src, from.offset(), cfg.readBufferBytes());
+            scanner = new ByteScanner(source, from.offset(),
+                    config.readBufferBytes());
         }
 
-        private Envelope envelope(Segment s, int controlElement) throws
-                IOException
+        /**
+         * Reads an envelope segment's bytes.
+         *
+         * @param segment        the segment
+         * @param controlElement the index of its control number
+         * @return the envelope
+         * @throws IOException if the file can't be read
+         */
+        private Envelope envelope(Segment segment, int controlElement)
+                throws IOException
         {
-            byte[] raw = src.readFully(s.start(), (int) (s.end() - s.start()));
-            return new Envelope(s.start(), raw, s.element(controlElement, es));
+            byte[] raw = source.readFully(segment.start(),
+                    (int) (segment.end() - segment.start()));
+            return new Envelope(segment.start(), raw,
+                    segment.element(controlElement, elementSeparator));
         }
 
         // ---- segment reading ----
+
+        /**
+         * Skips any CR and LF bytes.
+         *
+         * @throws IOException if the file can't be read
+         */
         private void skipLineBreaks() throws IOException
         {
-            int c;
-            while ((c = sc.peek()) == '\r' || c == '\n')
+            int next;
+            while ((next = scanner.peek()) == '\r' || next == '\n')
             {
-                sc.read();
+                scanner.read();
             }
         }
 
+        /**
+         * Reads the next segment.
+         *
+         * @return the segment, or null at the end
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if the segment is malformed or unended
+         */
         private Segment nextSegment() throws IOException, SplitException
         {
             skipLineBreaks();
-            long start = sc.position();
-            if (sc.peek() < 0)
+            long start = scanner.position();
+            if (scanner.peek() < 0)
             {
                 return null;
             }
-            if (sc.lookingAt(ISA) && !Character.isLetterOrDigit(sc.peek(3)))
+            if (scanner.lookingAt(ISA)
+                    && !Character.isLetterOrDigit(scanner.peek(3)))
             {
                 return readIsa(start);
             }
-            if (term == 0)
+            if (terminator == 0)
             {
                 throw new SplitException(ErrorCode.PARSE_X12_INVALID_ENVELOPE,
                         start);
             }
             StringBuilder id = new StringBuilder(3);
-            int c;
-            while ((c = sc.peek()) >= 0 && c != (es & 0xff) && c != (term & 0xff))
+            int next;
+            while ((next = scanner.peek()) >= 0
+                    && next != (elementSeparator & 0xff)
+                    && next != (terminator & 0xff))
             {
                 if (id.length() == 3)
                 {
                     throw new SplitException(
                             ErrorCode.PARSE_X12_UNEXPECTED_SEGMENT, start);
                 }
-                id.append((char) sc.read());
+                id.append((char) scanner.read());
             }
-            String sid = id.toString();
+            String segmentId = id.toString();
             byte[] content = null;
-            if (ENVELOPE.contains(sid))
+            if (ENVELOPE.contains(segmentId))
             {
-                ByteArrayOutputStream b = new ByteArrayOutputStream(64);
-                b.writeBytes(sid.getBytes(ISO_8859_1));
-                while ((c = sc.read()) >= 0 && c != (term & 0xff))
+                ByteArrayOutputStream bytes = new ByteArrayOutputStream(64);
+                bytes.writeBytes(segmentId.getBytes(ISO_8859_1));
+                while ((next = scanner.read()) >= 0
+                        && next != (terminator & 0xff))
                 {
-                    if (b.size() >= MAX_ENVELOPE_SEGMENT)
+                    if (bytes.size() >= MAX_ENVELOPE_SEGMENT)
                     {
                         throw new SplitException(
                                 ErrorCode.PARSE_X12_INVALID_ENVELOPE, start);
                     }
-                    b.write(c);
+                    bytes.write(next);
                 }
-                content = b.toByteArray();
-            } else if (sc.skipTo(term))
-            {
-                c = sc.read();
-            } else
-            {
-                c = -1;
+                content = bytes.toByteArray();
             }
-            if (c < 0)
+            else if (scanner.skipTo(terminator))
             {
-                throw new SplitException(ErrorCode.PARSE_X12_UNBALANCED, start);
+                next = scanner.read();
+            }
+            else
+            {
+                next = -1;
+            }
+            if (next < 0)
+            {
+                throw new SplitException(ErrorCode.PARSE_X12_UNBALANCED,
+                        start);
             }
             skipLineBreaks();
-            return new Segment(sid, start, sc.position(), content);
+            return new Segment(segmentId, start, scanner.position(), content);
         }
 
         /**
-         * ISA is fixed-format: element separator at byte 3, terminator right
-         * after ISA16.
+         * Reads an ISA, which is fixed-format: element separator at byte 3,
+         * terminator right after ISA16. Sets the delimiters.
+         *
+         * @param start its source offset
+         * @return the segment
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if it is malformed
          */
-        private Segment readIsa(long start) throws IOException, SplitException
+        private Segment readIsa(long start)
+                throws IOException, SplitException
         {
-            ByteArrayOutputStream b = new ByteArrayOutputStream(110);
-            for (int i = 0; i < 3; i++)
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream(110);
+            for (int index = 0; index < 3; index++)
             {
-                b.write(sc.read());
+                bytes.write(scanner.read());
             }
-            int sep = sc.read();
-            b.write(sep);
-            int seps = 1;
-            while (seps < 16)
+            int separator = scanner.read();
+            bytes.write(separator);
+            int separators = 1;
+            while (separators < 16)
             {
-                int c = sc.read();
-                if (c < 0 || b.size() > 200)
+                int next = scanner.read();
+                if (next < 0 || bytes.size() > 200)
                 {
                     throw new SplitException(
                             ErrorCode.PARSE_X12_INVALID_ENVELOPE, start);
                 }
-                b.write(c);
-                if (c == sep)
+                bytes.write(next);
+                if (next == separator)
                 {
-                    seps++;
+                    separators++;
                 }
             }
-            int component = sc.read();
-            int terminator = sc.read();
-            if (component < 0 || terminator < 0 || terminator == sep || Character.
-                    isLetterOrDigit(terminator))
+            int component = scanner.read();
+            int segmentEnd = scanner.read();
+            if (component < 0 || segmentEnd < 0 || segmentEnd == separator
+                    || Character.isLetterOrDigit(segmentEnd))
             {
                 throw new SplitException(ErrorCode.PARSE_X12_INVALID_ENVELOPE,
                         start);
             }
-            b.write(component);
-            es = (byte) sep;
-            term = (byte) terminator;
-            long afterTerm = sc.position();
+            bytes.write(component);
+            elementSeparator = (byte) separator;
+            terminator = (byte) segmentEnd;
+            long afterTerminator = scanner.position();
             skipLineBreaks();
-            eol = src.readFully(afterTerm, (int) Math.min(2,
-                    sc.position() - afterTerm));
-            return new Segment("ISA", start, sc.position(), b.toByteArray());
+            eol = source.readFully(afterTerminator, (int) Math.min(2,
+                    scanner.position() - afterTerminator));
+            return new Segment("ISA", start, scanner.position(),
+                    bytes.toByteArray());
         }
 
         // ---- structure ----
+
+        /**
+         * {@inheritDoc}
+         *
+         * @throws SplitException if the envelopes don't balance, a control
+         *                        number doesn't match, or a section is too
+         *                        large
+         */
         @Override
         public Optional<Section> next() throws IOException, SplitException
         {
             while (true)
             {
-                Segment s = nextSegment();
-                if (s == null)
+                Segment segment = nextSegment();
+                if (segment == null)
                 {
                     if (isa != null)
                     {
-                        throw new SplitException(ErrorCode.PARSE_X12_UNBALANCED,
-                                sc.position());
+                        throw new SplitException(
+                                ErrorCode.PARSE_X12_UNBALANCED,
+                                scanner.position());
                     }
                     return Optional.empty();
                 }
                 if (isa == null)
                 {
-                    if (!s.id().equals("ISA"))
+                    if (!segment.id().equals("ISA"))
                     {
                         throw new SplitException(
-                                ErrorCode.PARSE_X12_INVALID_ENVELOPE, s.start());
+                                ErrorCode.PARSE_X12_INVALID_ENVELOPE,
+                                segment.start());
                     }
                     if (level == Level.ISA)
                     {
-                        Segment iea = scanUntil(s, "IEA", Set.of("ISA"));
-                        checkControl(iea, 2, s.element(13, es));
-                        return Optional.of(Section.ofRange(s.start(),
-                                iea.end() - s.start(),
+                        Segment iea = scanUntil(segment, "IEA",
+                                Set.of("ISA"));
+                        checkControl(iea, 2,
+                                segment.element(13, elementSeparator));
+                        return Optional.of(Section.ofRange(segment.start(),
+                                iea.end() - segment.start(),
                                 ResumePoint.at(iea.end())));
                     }
-                    isa = envelope(s, 13);
+                    isa = envelope(segment, 13);
                     continue;
                 }
                 if (gs == null)
                 {
-                    switch (s.id())
+                    switch (segment.id())
                     {
                         case "IEA" ->
                         {
-                            checkControl(s, 2, isa.control());
+                            checkControl(segment, 2, isa.control());
                             isa = null;
                         }
                         case "TA1" ->
                         {
-                            return Optional.of(section(s.start(), s.end(),
-                                    concat(isa.raw()), concat(iea(0)),
-                                    ResumePoint.at(s.end(), isa.start())));
+                            return Optional.of(section(segment.start(),
+                                    segment.end(), concat(isa.raw()),
+                                    concat(iea(0)),
+                                    ResumePoint.at(segment.end(),
+                                            isa.start())));
                         }
                         case "GS" ->
                         {
                             if (level == Level.GS)
                             {
-                                Segment ge = scanUntil(s, "GE", Set.of("ISA",
-                                        "IEA", "GS"));
-                                checkControl(ge, 2, s.element(6, es));
-                                return Optional.of(section(s.start(), ge.end(),
-                                        concat(isa.raw()),
-                                        concat(iea(1)), ResumePoint.at(ge.end(),
-                                        isa.start())));
+                                Segment ge = scanUntil(segment, "GE",
+                                        Set.of("ISA", "IEA", "GS"));
+                                checkControl(ge, 2,
+                                        segment.element(6, elementSeparator));
+                                return Optional.of(section(segment.start(),
+                                        ge.end(), concat(isa.raw()),
+                                        concat(iea(1)),
+                                        ResumePoint.at(ge.end(),
+                                                isa.start())));
                             }
-                            gs = envelope(s, 6);
+                            gs = envelope(segment, 6);
                         }
                         default ->
                             throw new SplitException(
-                                    ErrorCode.PARSE_X12_UNEXPECTED_SEGMENT, s.
-                                            start());
+                                    ErrorCode.PARSE_X12_UNEXPECTED_SEGMENT,
+                                    segment.start());
                     }
                     continue;
                 }
-                switch (s.id())
+                switch (segment.id())
                 {
                     case "GE" ->
                     {
-                        checkControl(s, 2, gs.control());
+                        checkControl(segment, 2, gs.control());
                         gs = null;
                     }
                     case "ST" ->
                     {
-                        Segment se = scanUntil(s, "SE", Set.of("ISA", "IEA",
-                                "GS", "GE", "ST"));
-                        checkControl(se, 2, s.element(2, es));
+                        Segment se = scanUntil(segment, "SE", Set.of("ISA",
+                                "IEA", "GS", "GE", "ST"));
+                        checkControl(se, 2,
+                                segment.element(2, elementSeparator));
                         byte[] ge = segment("GE", "1", gs.control());
-                        return Optional.of(section(s.start(), se.end(), concat(
-                                isa.raw(), gs.raw()),
+                        return Optional.of(section(segment.start(), se.end(),
+                                concat(isa.raw(), gs.raw()),
                                 concat(ge, iea(1)), ResumePoint.at(se.end(),
-                                isa.start(), gs.start())));
+                                        isa.start(), gs.start())));
                     }
                     default ->
                         throw new SplitException(
-                                ErrorCode.PARSE_X12_UNEXPECTED_SEGMENT, s.
-                                        start());
+                                ErrorCode.PARSE_X12_UNEXPECTED_SEGMENT,
+                                segment.start());
                 }
             }
         }
@@ -408,6 +558,13 @@ public final class X12Splitter implements SectionSplitter
         /**
          * Reads segments after {@code first} until {@code endId}; any of
          * {@code forbidden} first means unbalanced.
+         *
+         * @param first     the opening segment
+         * @param endId     the closing segment's ID
+         * @param forbidden IDs that may not come before it
+         * @return the closing segment
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if it is unbalanced or too large
          */
         private Segment scanUntil(Segment first, String endId,
                 Set<String> forbidden)
@@ -415,55 +572,85 @@ public final class X12Splitter implements SectionSplitter
         {
             while (true)
             {
-                Segment s = nextSegment();
-                if (s == null || forbidden.contains(s.id()))
+                Segment segment = nextSegment();
+                if (segment == null || forbidden.contains(segment.id()))
                 {
                     throw new SplitException(ErrorCode.PARSE_X12_UNBALANCED,
                             first.start());
                 }
-                if (s.end() - first.start() > max)
+                if (segment.end() - first.start() > max)
                 {
                     throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
                             first.start());
                 }
-                if (s.id().equals(endId))
+                if (segment.id().equals(endId))
                 {
-                    return s;
+                    return segment;
                 }
             }
         }
 
-        private void checkControl(Segment s, int element, String expected)
-                throws SplitException
+        /**
+         * Checks a closing segment's control number.
+         *
+         * @param segment  the closing segment
+         * @param element  the index of its control number
+         * @param expected the opening segment's control number
+         * @throws SplitException if they differ
+         */
+        private void checkControl(Segment segment, int element,
+                String expected) throws SplitException
         {
-            if (!s.element(element, es).equals(expected))
+            if (!segment.element(element, elementSeparator).equals(expected))
             {
                 throw new SplitException(ErrorCode.PARSE_X12_CONTROL_MISMATCH,
-                        s.start());
+                        segment.start());
             }
         }
 
+        /**
+         * An IEA closing the open interchange.
+         *
+         * @param groups the group count to give
+         * @return the segment's bytes
+         */
         private byte[] iea(int groups)
         {
             return segment("IEA", Integer.toString(groups), isa.control());
         }
 
+        /**
+         * A segment made of elements, with this file's delimiters.
+         *
+         * @param elements the elements, the segment ID first
+         * @return the segment's bytes, with the terminator and line break
+         */
         private byte[] segment(String... elements)
         {
-            ByteArrayOutputStream b = new ByteArrayOutputStream(32);
-            for (int i = 0; i < elements.length; i++)
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream(32);
+            for (int index = 0; index < elements.length; index++)
             {
-                if (i > 0)
+                if (index > 0)
                 {
-                    b.write(es);
+                    bytes.write(elementSeparator);
                 }
-                b.writeBytes(elements[i].getBytes(ISO_8859_1));
+                bytes.writeBytes(elements[index].getBytes(ISO_8859_1));
             }
-            b.write(term);
-            b.writeBytes(eol);
-            return b.toByteArray();
+            bytes.write(terminator);
+            bytes.writeBytes(eol);
+            return bytes.toByteArray();
         }
 
+        /**
+         * A section of a source range between a prefix and a suffix.
+         *
+         * @param start  the range's source offset
+         * @param end    the offset after it
+         * @param prefix bytes before it
+         * @param suffix bytes after it
+         * @param resume where splitting continues
+         * @return the section
+         */
         private static Section section(long start, long end, byte[] prefix,
                 byte[] suffix, ResumePoint resume)
         {
@@ -474,14 +661,20 @@ public final class X12Splitter implements SectionSplitter
             return new Section(start, end - start, parts, resume);
         }
 
+        /**
+         * Joins byte arrays.
+         *
+         * @param parts the arrays
+         * @return them joined
+         */
         private static byte[] concat(byte[]... parts)
         {
-            ByteArrayOutputStream b = new ByteArrayOutputStream();
-            for (byte[] p : parts)
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            for (byte[] part : parts)
             {
-                b.writeBytes(p);
+                bytes.writeBytes(part);
             }
-            return b.toByteArray();
+            return bytes.toByteArray();
         }
     }
 }

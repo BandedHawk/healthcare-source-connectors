@@ -49,9 +49,9 @@ public record RecordIndex(List<Long> offsets, List<String> keys)
                     "A record index needs an offset and key for each message,"
                             + " from offset 0");
         }
-        for (int i = 1; i < offsets.size(); i++)
+        for (int index = 1; index < offsets.size(); index++)
         {
-            if (offsets.get(i) < offsets.get(i - 1))
+            if (offsets.get(index) < offsets.get(index - 1))
             {
                 throw new IllegalArgumentException(
                         "Record offsets must not go back");

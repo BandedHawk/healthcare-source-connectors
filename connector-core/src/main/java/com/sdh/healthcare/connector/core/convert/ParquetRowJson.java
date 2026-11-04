@@ -127,10 +127,10 @@ public final class ParquetRowJson
     {
         writer.beginObject();
         List<Types.NestedField> fields = row.struct().fields();
-        for (int i = 0; i < fields.size(); i++)
+        for (int index = 0; index < fields.size(); index++)
         {
-            writer.key(fields.get(i).name());
-            value(writer, row.get(i));
+            writer.key(fields.get(index).name());
+            value(writer, row.get(index));
         }
         writer.endObject();
     }

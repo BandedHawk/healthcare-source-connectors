@@ -19,6 +19,7 @@ import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
@@ -234,6 +235,8 @@ class ItemLanderTest
      * An item spanning several blocks is stored with its summary row, and
      * reads back whole, with its name, and the same digest as the archive
      * of the same bytes.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void landsAndReadsBackWithSummaryNameAndDigest() throws Exception
@@ -331,7 +334,7 @@ class ItemLanderTest
         assertThat(LandedItems.messageRefs(summary, keys)).contains(refs);
         assertThat(new String(LandedItems.bytes(
                 summary.getField(LandingTables.RECORD_REFS_ENC)),
-                java.nio.charset.StandardCharsets.ISO_8859_1))
+                StandardCharsets.ISO_8859_1))
                 .doesNotContain("smith");
         assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
                 ItemKind.MESSAGE_BATCH, null, null, null,
@@ -351,6 +354,11 @@ class ItemLanderTest
                 last -> assertThat(last.replaces()).isEqualTo(earlier));
     }
 
+    /**
+     * The item's name appears in no column in clear, only encrypted.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void theNameIsStoredOnlyEncrypted() throws Exception
     {
@@ -368,7 +376,7 @@ class ItemLanderTest
                     Object value = row.get(field);
                     String text = value instanceof ByteBuffer buffer
                             ? new String(LandedItems.bytes(buffer),
-                                    java.nio.charset.StandardCharsets.UTF_8)
+                                    StandardCharsets.UTF_8)
                             : String.valueOf(value);
                     assertThat(text).doesNotContain("smith");
                 }
@@ -376,7 +384,11 @@ class ItemLanderTest
         }
     }
 
-    /** Empty items and items of exactly whole chunks land and read back. */
+    /**
+     * Empty items and items of exactly whole chunks land and read back.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void landsEmptyAndWholeChunkItems() throws Exception
     {
@@ -392,7 +404,11 @@ class ItemLanderTest
         }
     }
 
-    /** A push has no source reference and no known size. */
+    /**
+     * A push has no source reference and no known size.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void landsAStreamOfUnknownSize() throws Exception
     {
@@ -416,6 +432,8 @@ class ItemLanderTest
      * After a crash part-way, landing the same item resumes at the next
      * block: no chunk is written twice, and the digest is the same as
      * landing it in one go.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void resumesAfterACrashWithTheSameDigest() throws Exception
@@ -453,7 +471,11 @@ class ItemLanderTest
         assertThat(landed.sha256()).isNull();
     }
 
-    /** Landing a finished item again changes nothing. */
+    /**
+     * Landing a finished item again changes nothing.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void landingAFinishedItemAgainReturnsIt() throws Exception
     {
@@ -475,7 +497,11 @@ class ItemLanderTest
                 last -> assertThat(last.itemId()).isEqualTo(item.itemId()));
     }
 
-    /** A source whose size or version changed can't be resumed. */
+    /**
+     * A source whose size or version changed can't be resumed.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void refusesToResumeAChangedSource() throws Exception
     {
@@ -507,6 +533,8 @@ class ItemLanderTest
     /**
      * Bytes that don't match the size the source gave mean the file was
      * changed while it was read: nothing is finished.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void refusesBytesThatDoNotMatchTheSourceSize() throws Exception
@@ -528,7 +556,11 @@ class ItemLanderTest
         assertThat(LandedItems.summary(table, longer.itemId())).isEmpty();
     }
 
-    /** An item that isn't fully landed can't be read. */
+    /**
+     * An item that isn't fully landed can't be read.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void anUnfinishedItemCannotBeRead() throws Exception
     {
@@ -546,7 +578,11 @@ class ItemLanderTest
                 .hasMessageContaining("isn't fully landed");
     }
 
-    /** A checkpoint changed outside the connector stops it. */
+    /**
+     * A checkpoint changed outside the connector stops it.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void aTamperedCheckpointIsRefused() throws Exception
     {
@@ -561,7 +597,11 @@ class ItemLanderTest
                 .isInstanceOf(CheckpointTamperedException.class);
     }
 
-    /** The item.landed message says where the item is. */
+    /**
+     * The item.landed message says where the item is.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void theMessageNamesTheItemAndWhereItIs() throws Exception
     {

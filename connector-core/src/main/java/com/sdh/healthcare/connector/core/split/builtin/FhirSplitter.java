@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -24,21 +23,19 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * FHIR JSON splitter (design §6.2). Accepts a single resource, a JSON array of
- * resources, or a stream of resources separated by whitespace (NDJSON). Each
- * top-level resource is one section, and its {@code resourceType} must match
- * the boundary (default {@code Bundle}; {@code *} accepts any).
- *
+ * FHIR JSON splitter (design §6.2). Accepts a single resource, a JSON array
+ * of resources, or a stream of resources separated by whitespace (NDJSON).
+ * Each top-level resource is one section, and its {@code resourceType} must
+ * match the boundary (default {@code Bundle}; {@code *} accepts any).
  * <p>
- * {@code fhir.ndjson-group-size} = N &gt; 0 groups N resources per section, for
- * bulk-export NDJSON. The boundary then defaults to {@code *}. Grouped sections
- * from an array are wrapped in {@code [ ]}.
- *
+ * {@code fhir.ndjson-group-size} = N &gt; 0 groups N resources per section,
+ * for bulk-export NDJSON. The boundary then defaults to {@code *}. Grouped
+ * sections from an array are wrapped in {@code [ ]}.
  * <p>
  * Uses a byte-level structural scanner rather than a full JSON parser: it
- * checks strings, escapes and bracket nesting, which is enough to find exact
- * byte boundaries and to restart mid-array. Full JSON validation is left to
- * downstream.
+ * checks strings, escapes and bracket nesting, which is enough to find
+ * exact byte boundaries and to restart mid-array. Full JSON validation is
+ * left to downstream.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -46,41 +43,68 @@ import java.util.Optional;
 public final class FhirSplitter implements SectionSplitter
 {
 
+    /** The format's name. */
     public static final String FORMAT = "fhir";
-    private static final byte[] RESOURCE_TYPE = "resourceType".getBytes(UTF_8);
+
+    /** The key that names a resource's type. */
+    private static final byte[] RESOURCE_TYPE =
+            "resourceType".getBytes(UTF_8);
+
+    /** The deepest nesting allowed. */
     private static final int MAX_DEPTH = 4096;
 
+    /**
+     * Creates the splitter; the service loader calls this.
+     */
+    public FhirSplitter()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     @Override
     public String format()
     {
         return FORMAT;
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalArgumentException if the group size is negative
+     */
     @Override
-    public void validate(SplitConfig cfg)
+    public void validate(SplitConfig config)
     {
-        if (cfg.intOption("fhir.ndjson-group-size", 0) < 0)
+        if (config.intOption("fhir.ndjson-group-size", 0) < 0)
         {
             throw new IllegalArgumentException(
                     "fhir.ndjson-group-size must be 0 or more");
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalArgumentException if the group size is negative
+     */
     @Override
-    public SplitSession open(SeekableByteSource src, ResumePoint from,
-            SplitConfig cfg)
+    public SplitSession open(SeekableByteSource source, ResumePoint from,
+            SplitConfig config)
             throws IOException, SplitException
     {
-        validate(cfg);
-        int group = cfg.intOption("fhir.ndjson-group-size", 0);
-        String boundary = cfg.boundaryOr(group > 0 ? "*" : "Bundle");
+        validate(config);
+        int group = config.intOption("fhir.ndjson-group-size", 0);
+        String boundary = config.boundaryOr(group > 0 ? "*" : "Bundle");
 
-        ByteScanner head = new ByteScanner(src, 0, 64);
-        if (head.peek() == 0xEF && head.peek(1) == 0xBB && head.peek(2) == 0xBF)
+        ByteScanner head = new ByteScanner(source, 0, 64);
+        if (head.peek() == 0xEF && head.peek(1) == 0xBB
+                && head.peek(2) == 0xBF)
         {
             head.skip(3);
         }
-        skipWs(head);
+        skipWhitespace(head);
         int first = head.peek();
         if (first < 0)
         {
@@ -88,54 +112,96 @@ public final class FhirSplitter implements SectionSplitter
         }
         if (first != '[' && first != '{')
         {
-            throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED, head.
-                    position());
+            throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED,
+                    head.position());
         }
         boolean array = first == '[';
-        ByteScanner sc;
+        ByteScanner scanner;
         State state;
         if (from.offset() == 0)
         {
-            sc = new ByteScanner(src, head.position() + (array ? 1 : 0), cfg.
-                    readBufferBytes());
+            scanner = new ByteScanner(source,
+                    head.position() + (array ? 1 : 0),
+                    config.readBufferBytes());
             state = array ? State.ARRAY_FIRST : State.STREAM;
-        } else
+        }
+        else
         {
-            sc = new ByteScanner(src, from.offset(), cfg.readBufferBytes());
+            scanner = new ByteScanner(source, from.offset(),
+                    config.readBufferBytes());
             state = array ? State.ARRAY_NEXT : State.STREAM;
         }
-        return new Session(sc, state, Math.max(1, group), boundary,
-                cfg.limits().maxSectionBytes());
+        return new Session(scanner, state, Math.max(1, group), boundary,
+                config.limits().maxSectionBytes());
     }
 
+    /** Where a session is in the file. */
     enum State
     {
-        ARRAY_FIRST, ARRAY_NEXT, STREAM, DONE
+        /** Inside an array, before its first value. */
+        ARRAY_FIRST,
+
+        /** Inside an array, after a value. */
+        ARRAY_NEXT,
+
+        /** In a whitespace-separated stream of values. */
+        STREAM,
+
+        /** After the array; only whitespace may follow. */
+        DONE
     }
 
-    static void skipWs(ByteScanner sc) throws IOException
+    /**
+     * Skips JSON whitespace.
+     *
+     * @param scanner reads the file
+     * @throws IOException if the file can't be read
+     */
+    static void skipWhitespace(ByteScanner scanner) throws IOException
     {
-        int c;
-        while ((c = sc.peek()) == ' ' || c == '\n' || c == '\r' || c == '\t')
+        int next;
+        while ((next = scanner.peek()) == ' ' || next == '\n'
+                || next == '\r' || next == '\t')
         {
-            sc.read();
+            scanner.read();
         }
     }
 
+    /** Splits one file. */
     private static final class Session implements SplitSession
     {
 
-        private final ByteScanner sc;
+        /** Reads the file. */
+        private final ByteScanner scanner;
+
+        /** How many resources go in one section. */
         private final int group;
+
+        /** The resource type required; {@code *} for any. */
         private final String boundary;
+
+        /** The largest section allowed, in bytes. */
         private final long max;
+
+        /** Where the session is in the file. */
         private State state;
+
+        /** The closing bracket expected at each nesting depth. */
         private byte[] stack = new byte[64];
 
-        Session(ByteScanner sc, State state, int group, String boundary,
+        /**
+         * Creates a session.
+         *
+         * @param scanner  reads the file
+         * @param state    where it starts
+         * @param group    how many resources go in one section
+         * @param boundary the resource type required; {@code *} for any
+         * @param max      the largest section allowed
+         */
+        Session(ByteScanner scanner, State state, int group, String boundary,
                 long max)
         {
-            this.sc = sc;
+            this.scanner = scanner;
             this.state = state;
             this.group = group;
             this.boundary = boundary;
@@ -143,19 +209,23 @@ public final class FhirSplitter implements SectionSplitter
         }
 
         /**
-         * Moves to the start of the next value, or returns false if there is
-         * none.
+         * Moves to the start of the next value.
+         *
+         * @return false if there is none
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if the array is malformed, or something
+         *                        follows it
          */
         private boolean toNextValue() throws IOException, SplitException
         {
-            skipWs(sc);
+            skipWhitespace(scanner);
             switch (state)
             {
                 case ARRAY_FIRST ->
                 {
-                    if (sc.peek() == ']')
+                    if (scanner.peek() == ']')
                     {
-                        sc.read();
+                        scanner.read();
                         state = State.DONE;
                         return toNextValue();
                     }
@@ -164,30 +234,32 @@ public final class FhirSplitter implements SectionSplitter
                 }
                 case ARRAY_NEXT ->
                 {
-                    int c = sc.read();
-                    if (c == ']')
+                    int next = scanner.read();
+                    if (next == ']')
                     {
                         state = State.DONE;
                         return toNextValue();
                     }
-                    if (c != ',')
+                    if (next != ',')
                     {
-                        throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED,
-                                sc.position() - 1);
+                        throw new SplitException(
+                                ErrorCode.PARSE_JSON_MALFORMED,
+                                scanner.position() - 1);
                     }
-                    skipWs(sc);
+                    skipWhitespace(scanner);
                     return true;
                 }
                 case STREAM ->
                 {
-                    return sc.peek() >= 0;
+                    return scanner.peek() >= 0;
                 }
                 case DONE ->
                 {
-                    if (sc.peek() >= 0)
+                    if (scanner.peek() >= 0)
                     {
-                        throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED,
-                                sc.position());
+                        throw new SplitException(
+                                ErrorCode.PARSE_JSON_MALFORMED,
+                                scanner.position());
                     }
                     return false;
                 }
@@ -196,26 +268,35 @@ public final class FhirSplitter implements SectionSplitter
         }
 
         /**
-         * Peeks whether another value follows within the current group, without
-         * consuming the closing bracket.
+         * Tells whether another value follows within the current group,
+         * without consuming the closing bracket.
+         *
+         * @return true if one follows
+         * @throws IOException if the file can't be read
          */
-        private boolean moreInGroup() throws IOException, SplitException
+        private boolean moreInGroup() throws IOException
         {
-            skipWs(sc);
-            int c = sc.peek();
+            skipWhitespace(scanner);
+            int next = scanner.peek();
             if (state == State.STREAM)
             {
-                return c >= 0;
+                return next >= 0;
             }
-            if (c == ',')
+            if (next == ',')
             {
-                sc.read();
-                skipWs(sc);
+                scanner.read();
+                skipWhitespace(scanner);
                 return true;
             }
             return false;
         }
 
+        /**
+         * {@inheritDoc}
+         *
+         * @throws SplitException if the JSON is malformed, a resource has
+         *                        the wrong type, or a section is too large
+         */
         @Override
         public Optional<Section> next() throws IOException, SplitException
         {
@@ -223,9 +304,9 @@ public final class FhirSplitter implements SectionSplitter
             {
                 return Optional.empty();
             }
-            long start = sc.position();
+            long start = scanner.position();
             long end = scanResource(start);
-            for (int n = 1; n < group && moreInGroup(); n++)
+            for (int count = 1; count < group && moreInGroup(); count++)
             {
                 end = scanResource(start);
             }
@@ -233,28 +314,27 @@ public final class FhirSplitter implements SectionSplitter
             if (group > 1 && state != State.STREAM)
             {
                 return Optional.of(new Section(start, end - start, List.of(
-                        new Section.Literal(new byte[]
-                        {
-                            '['
-                }),
+                        new Section.Literal(new byte[] {'['}),
                         new Section.SourceRange(start, end - start),
-                        new Section.Literal(new byte[]
-                        {
-                            ']'
-                })), resume));
+                        new Section.Literal(new byte[] {']'})), resume));
             }
             return Optional.of(Section.ofRange(start, end - start, resume));
         }
 
         /**
-         * Scans one top-level object, checks its resourceType, and returns the
-         * offset just after it.
+         * Scans one top-level object and checks its resourceType.
+         *
+         * @param sectionStart where the section began, for the size limit
+         * @return the offset just after it
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if it is malformed, has the wrong type, or
+         *                        makes the section too large
          */
-        private long scanResource(long sectionStart) throws IOException,
-                SplitException
+        private long scanResource(long sectionStart)
+                throws IOException, SplitException
         {
-            long start = sc.position();
-            if (sc.read() != '{')
+            long start = scanner.position();
+            if (scanner.read() != '{')
             {
                 throw new SplitException(
                         ErrorCode.PARSE_FHIR_UNEXPECTED_RESOURCE, start);
@@ -267,13 +347,13 @@ public final class FhirSplitter implements SectionSplitter
             byte[] resourceType = null;
             while (true)
             {
-                int c = sc.read();
-                if (c < 0)
+                int next = scanner.read();
+                if (next < 0)
                 {
                     throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED,
                             start);
                 }
-                switch (c)
+                switch (next)
                 {
                     case '"' ->
                     {
@@ -281,11 +361,13 @@ public final class FhirSplitter implements SectionSplitter
                         {
                             keyIsType = Arrays.equals(readString(start, 32),
                                     RESOURCE_TYPE);
-                        } else if (depth == 1 && valueIsType)
+                        }
+                        else if (depth == 1 && valueIsType)
                         {
                             resourceType = readString(start, 256);
                             valueIsType = false;
-                        } else
+                        }
+                        else
                         {
                             skipString(start);
                         }
@@ -301,27 +383,28 @@ public final class FhirSplitter implements SectionSplitter
                         {
                             stack = Arrays.copyOf(stack, depth * 2);
                         }
-                        stack[depth++] = (byte) (c == '{' ? '}' : ']');
+                        stack[depth++] = (byte) (next == '{' ? '}' : ']');
                         valueIsType = false;
                     }
                     case '}', ']' ->
                     {
-                        if (stack[--depth] != c)
+                        if (stack[--depth] != next)
                         {
                             throw new SplitException(
                                     ErrorCode.PARSE_JSON_MALFORMED, start);
                         }
                         if (depth == 0)
                         {
-                            String type = resourceType == null ? null : new String(
-                                    resourceType, UTF_8);
-                            if (!boundary.equals("*") && !boundary.equals(type))
+                            String type = resourceType == null
+                                    ? null : new String(resourceType, UTF_8);
+                            if (!boundary.equals("*")
+                                    && !boundary.equals(type))
                             {
-                                throw new SplitException(
-                                        ErrorCode.PARSE_FHIR_UNEXPECTED_RESOURCE,
+                                throw new SplitException(ErrorCode
+                                        .PARSE_FHIR_UNEXPECTED_RESOURCE,
                                         start);
                             }
-                            return sc.position();
+                            return scanner.position();
                         }
                     }
                     case ',' ->
@@ -346,7 +429,7 @@ public final class FhirSplitter implements SectionSplitter
                     default ->
                         valueIsType = false;
                 }
-                if (sc.position() - sectionStart > max)
+                if (scanner.position() - sectionStart > max)
                 {
                     throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
                             sectionStart);
@@ -356,23 +439,28 @@ public final class FhirSplitter implements SectionSplitter
 
         /**
          * After an opening quote: skips to just past the closing quote.
+         *
+         * @param start the resource's offset, for errors
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if the string is never closed
          */
-        private void skipString(long start) throws IOException, SplitException
+        private void skipString(long start)
+                throws IOException, SplitException
         {
             while (true)
             {
-                int c = sc.skipToAny((byte) '"', (byte) '\\');
-                if (c < 0)
+                int found = scanner.skipToAny((byte) '"', (byte) '\\');
+                if (found < 0)
                 {
                     throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED,
                             start);
                 }
-                sc.read();
-                if (c == '"')
+                scanner.read();
+                if (found == '"')
                 {
                     return;
                 }
-                if (sc.read() < 0)
+                if (scanner.read() < 0)
                 {
                     throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED,
                             start);
@@ -381,43 +469,50 @@ public final class FhirSplitter implements SectionSplitter
         }
 
         /**
-         * After an opening quote: reads a string's raw bytes, keeping at most
-         * {@code cap} (null if longer).
+         * After an opening quote: reads a string's raw bytes.
+         *
+         * @param start the resource's offset, for errors
+         * @param cap   the most bytes kept
+         * @return the bytes; null if longer than {@code cap} or escaped
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if the string is never closed
          */
-        private byte[] readString(long start, int cap) throws IOException,
-                SplitException
+        private byte[] readString(long start, int cap)
+                throws IOException, SplitException
         {
-            byte[] b = new byte[cap];
-            int n = 0;
+            byte[] bytes = new byte[cap];
+            int count = 0;
             boolean overflow = false;
             while (true)
             {
-                int c = sc.read();
-                if (c < 0)
+                int next = scanner.read();
+                if (next < 0)
                 {
                     throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED,
                             start);
                 }
-                if (c == '"')
+                if (next == '"')
                 {
-                    return overflow ? null : Arrays.copyOf(b, n);
+                    return overflow ? null : Arrays.copyOf(bytes, count);
                 }
-                if (c == '\\')
+                if (next == '\\')
                 {
-                    overflow = true; // escaped names never match; keep scanning correctly
-                    if (sc.read() < 0)
+                    // Escaped names never match; keep scanning correctly.
+                    overflow = true;
+                    if (scanner.read() < 0)
                     {
-                        throw new SplitException(ErrorCode.PARSE_JSON_MALFORMED,
-                                start);
+                        throw new SplitException(
+                                ErrorCode.PARSE_JSON_MALFORMED, start);
                     }
                     continue;
                 }
-                if (n == cap)
+                if (count == cap)
                 {
                     overflow = true;
-                } else
+                }
+                else
                 {
-                    b[n++] = (byte) c;
+                    bytes[count++] = (byte) next;
                 }
             }
         }

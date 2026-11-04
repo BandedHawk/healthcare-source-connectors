@@ -258,6 +258,8 @@ class ItemProcessorTest
     /**
      * An item is split under its item ID, and file.completed reports its
      * landed digest. Processing it again changes nothing.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void completesAnItemUnderItsId() throws Exception
@@ -340,7 +342,11 @@ class ItemProcessorTest
                         completed.failedSectionCount()).isEqualTo(1));
     }
 
-    /** An item that can't be split fails, and stays failed. */
+    /**
+     * An item that can't be split fails, and stays failed.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void failsAnItemThatCantBeSplit() throws Exception
     {
@@ -354,7 +360,11 @@ class ItemProcessorTest
         assertThat(processor().inProgress()).isEmpty();
     }
 
-    /** An item that isn't in landing fails at the landing stage. */
+    /**
+     * An item that isn't in landing fails at the landing stage.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void failsAnItemThatIsntLanded() throws Exception
     {
@@ -370,6 +380,8 @@ class ItemProcessorTest
     /**
      * A broker outage doesn't fail the item: it is thrown, and the item
      * resumes from its checkpoint later.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void retriesABrokerOutageInsteadOfFailing() throws Exception
@@ -392,6 +404,8 @@ class ItemProcessorTest
 
     /**
      * An item split before a crash is finished without reading it again.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void finishesASplitItemWithoutReadingIt() throws Exception
@@ -411,7 +425,11 @@ class ItemProcessorTest
         }).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
     }
 
-    /** An item in progress can be given up, so another can start. */
+    /**
+     * An item in progress can be given up, so another can start.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void abandonsAnItemInProgress() throws Exception
     {

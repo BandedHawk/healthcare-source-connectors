@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.split.builtin;
 
 /**
@@ -17,20 +16,41 @@ package com.sdh.healthcare.connector.core.split.builtin;
 public final class CcdaSplitter extends XmlSplitter
 {
 
+    /** The format's name. */
     public static final String FORMAT = "ccda";
 
+    /**
+     * Creates the splitter; the service loader calls this.
+     */
+    public CcdaSplitter()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     @Override
     public String format()
     {
         return FORMAT;
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @return {@code ClinicalDocument}
+     */
     @Override
     protected String defaultBoundary()
     {
         return "ClinicalDocument";
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @return {@code urn:hl7-org:v3}
+     */
     @Override
     protected String defaultNamespace()
     {

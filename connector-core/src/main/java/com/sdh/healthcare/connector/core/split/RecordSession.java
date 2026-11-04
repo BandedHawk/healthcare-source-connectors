@@ -199,11 +199,11 @@ final class RecordSession implements SplitSession
      */
     private int recordAt(long offset)
     {
-        for (int i = 0; i < offsets.size(); i++)
+        for (int index = 0; index < offsets.size(); index++)
         {
-            if (offset < end(i))
+            if (offset < end(index))
             {
-                return i;
+                return index;
             }
         }
         return offsets.size();

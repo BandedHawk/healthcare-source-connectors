@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.sdh.healthcare.connector.core.telemetry.Attr;
@@ -23,150 +22,251 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Commits to Iceberg tables only while this instance holds the lease, checked with a fencing token
- * (the lease epoch) stored in the table property {@value #EPOCH_PROPERTY}.
- *
- * <p>Iceberg's own {@code Transaction.commitTransaction()} cannot do this. Before committing, it
- * refreshes the table and re-applies our changes onto whatever metadata is newest, so a stale
- * instance's changes would be laid over a successor's. This class instead commits with a strict
+ * Commits to Iceberg tables only while this instance holds the lease,
+ * checked with a fencing token (the lease epoch) stored in the table
+ * property {@value #EPOCH_PROPERTY}.
+ * <p>
+ * Iceberg's own {@code Transaction.commitTransaction()} can't do this.
+ * Before committing, it refreshes the table and applies our changes again
+ * onto whatever metadata is newest, so a stale instance's changes would be
+ * laid over a successor's. This class instead commits with a strict
  * compare-and-swap through the table's {@code TableOperations}:
- *
  * <ol>
- *   <li>Refresh, and require the table's epoch to equal ours (equal or lower when establishing).
- *   <li>Build the change as a transaction on that exact metadata.
- *   <li>Make sure the change adds a snapshot to {@code main}. If the caller's change doesn't (for example
- *       a properties-only checkpoint update), an empty marker append is added. With a REST catalog the
- *       commit then carries an {@code assert-ref-snapshot-id} requirement, so the server rejects it if
- *       anyone else committed in between. A properties-only change would carry no such check.
- *       JDBC and Hive catalogs already compare the whole metadata location.
- *   <li>Commit start → new metadata with {@code TableOperations.commit}, which fails if the table moved.
- *       On failure, go back to step 1. If the epoch has changed, this instance has been fenced out.
+ * <li>Refresh, and require the table's epoch to equal ours (equal or lower
+ * when establishing).</li>
+ * <li>Build the change as a transaction on that exact metadata.</li>
+ * <li>Make sure the change adds a snapshot to {@code main}. If the caller's
+ * change doesn't (a checkpoint update that only sets properties, say), an
+ * empty marker append is added. With a REST catalog the commit then
+ * carries an {@code assert-ref-snapshot-id} requirement, so the server
+ * rejects it if anyone else committed in between; a change to properties
+ * alone would carry no such check. JDBC and Hive catalogs already compare
+ * the whole metadata location.</li>
+ * <li>Commit from the start metadata to the new metadata with
+ * {@code TableOperations.commit}, which fails if the table moved. On
+ * failure, go back to step 1. If the epoch has changed, this instance has
+ * been fenced out.</li>
  * </ol>
- *
- * <p>Every writer of these tables, maintenance included, must commit through this class.
+ * <p>
+ * Every writer of these tables, maintenance included, must commit through
+ * this class.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class FencedCommitter {
-    private static final Logger LOG = LoggerFactory.getLogger(FencedCommitter.class);
+public final class FencedCommitter
+{
 
+    /** The table property that holds the epoch. */
     public static final String EPOCH_PROPERTY = "sdh.lease.epoch";
-    /** Snapshot summary key set on marker snapshots, for audit. */
+
+    /** The snapshot summary key set on marker snapshots, for audit. */
     public static final String MARKER_SUMMARY = "sdh.fence-marker";
 
+    /** How many times a commit is tried by default. */
+    private static final int DEFAULT_ATTEMPTS = 5;
+
+    /** Logs commit conflicts, without PHI. */
+    private static final Logger LOG =
+            LoggerFactory.getLogger(FencedCommitter.class);
+
+    /** The lease commits are made under. */
     private final LeaseToken lease;
+
+    /** How many times a commit is tried before giving up. */
     private final int maxAttempts;
 
-    public FencedCommitter(LeaseToken lease, int maxAttempts) {
+    /**
+     * Creates a committer.
+     *
+     * @param lease       the lease commits are made under
+     * @param maxAttempts how many times a commit is tried
+     * @throws IllegalArgumentException if {@code maxAttempts} is below 1
+     */
+    public FencedCommitter(LeaseToken lease, int maxAttempts)
+    {
         this.lease = Objects.requireNonNull(lease);
-        if (maxAttempts < 1) {
+        if (maxAttempts < 1)
+        {
             throw new IllegalArgumentException("maxAttempts must be >= 1");
         }
         this.maxAttempts = maxAttempts;
     }
 
-    public FencedCommitter(LeaseToken lease) {
-        this(lease, 5);
+    /**
+     * Creates a committer that tries each commit five times.
+     *
+     * @param lease the lease commits are made under
+     */
+    public FencedCommitter(LeaseToken lease)
+    {
+        this(lease, DEFAULT_ATTEMPTS);
     }
 
     /**
-     * Records our epoch in the table, fencing out every earlier holder. Call once per table straight
-     * after acquiring the lease, before any other commit. Idempotent.
+     * Records our epoch in the table, fencing out every earlier holder.
+     * Call it once per table straight after taking the lease, before any
+     * other commit. Running it again changes nothing.
+     *
+     * @param table the table
+     * @throws LeaseLostException    if a later holder has fenced this one
+     *                               out
+     * @throws CommitFailedException if the commit keeps conflicting
      */
-    public void establish(Table table) {
-        for (int attempt = 1; ; attempt++) {
+    public void establish(Table table)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
             lease.checkHeld();
             table.refresh();
             long current = epochOf(table.properties());
-            if (current == lease.epoch()) {
+            if (current == lease.epoch())
+            {
                 return;
             }
-            if (current > lease.epoch()) {
+            if (current > lease.epoch())
+            {
                 throw new LeaseLostException(LeaseLostException.Reason.FENCED);
             }
-            Transaction tx = table.newTransaction();
-            tx.updateProperties().set(EPOCH_PROPERTY, Long.toString(lease.epoch())).commit();
-            addMarker(tx, lease.epoch());
-            try {
-                compareAndSwap(tx, current);
-                Telemetry.get().audit("lease.fenced_table", Fields.of(Attr.EPOCH, lease.epoch())
-                        .with(Attr.TABLE, table.name()));
+            Transaction transaction = table.newTransaction();
+            transaction.updateProperties()
+                    .set(EPOCH_PROPERTY, Long.toString(lease.epoch()))
+                    .commit();
+            addMarker(transaction, lease.epoch());
+            try
+            {
+                compareAndSwap(transaction, current);
+                Telemetry.get().audit("lease.fenced_table",
+                        Fields.of(Attr.EPOCH, lease.epoch())
+                                .with(Attr.TABLE, table.name()));
                 return;
-            } catch (CommitFailedException e) {
-                if (attempt >= maxAttempts) {
-                    throw e;
+            }
+            catch (CommitFailedException conflict)
+            {
+                if (attempt >= maxAttempts)
+                {
+                    throw conflict;
                 }
             }
         }
     }
 
     /**
-     * Applies {@code changes} to a fresh transaction and commits it only if our epoch is still current.
-     * The callback may run more than once (once per attempt). It must not have side effects outside the
+     * Applies changes to a fresh transaction, and commits it only if our
+     * epoch is still current. The callback may run more than once (once
+     * per attempt), so it must have no side effects outside the
      * transaction.
      *
+     * @param table   the table
+     * @param changes makes the changes on the transaction
      * @return the new current snapshot
-     * @throws LeaseLostException if the lease was lost or a successor fenced this instance out
+     * @throws LeaseLostException    if the lease was lost, or a successor
+     *                               fenced this instance out
+     * @throws CommitFailedException if the commit keeps conflicting
      */
-    public Snapshot commit(Table table, Consumer<Transaction> changes) {
-        for (int attempt = 1; ; attempt++) {
+    public Snapshot commit(Table table, Consumer<Transaction> changes)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
             lease.checkHeld();
             table.refresh();
             long current = epochOf(table.properties());
-            if (current != lease.epoch()) {
+            if (current != lease.epoch())
+            {
                 throw new LeaseLostException(LeaseLostException.Reason.FENCED);
             }
             Snapshot before = table.currentSnapshot();
-            Transaction tx = table.newTransaction();
-            changes.accept(tx);
-            Snapshot after = tx.table().currentSnapshot();
-            if (after == null || (before != null && before.snapshotId() == after.snapshotId())) {
-                addMarker(tx, lease.epoch());
+            Transaction transaction = table.newTransaction();
+            changes.accept(transaction);
+            Snapshot after = transaction.table().currentSnapshot();
+            if (after == null || (before != null
+                    && before.snapshotId() == after.snapshotId()))
+            {
+                addMarker(transaction, lease.epoch());
             }
-            try {
+            try
+            {
                 lease.checkHeld();
-                compareAndSwap(tx, lease.epoch());
+                compareAndSwap(transaction, lease.epoch());
                 table.refresh();
                 return table.currentSnapshot();
-            } catch (CommitFailedException e) {
-                LOG.warn("commit.conflict attempt={} epoch={}", attempt, lease.epoch());
-                if (attempt >= maxAttempts) {
-                    throw e;
+            }
+            catch (CommitFailedException conflict)
+            {
+                LOG.warn("commit.conflict attempt={} epoch={}", attempt,
+                        lease.epoch());
+                if (attempt >= maxAttempts)
+                {
+                    throw conflict;
                 }
             }
         }
     }
 
     /**
-     * Checks that this instance still holds the lease and that the table carries our epoch, without committing.
-     * Used right before operations that commit through Iceberg's own path (snapshot expiry, design §8.4).
+     * Checks, without committing, that this instance still holds the lease
+     * and the table carries our epoch. Used right before operations that
+     * commit through Iceberg's own path (snapshot expiry, design §8.4).
+     *
+     * @param table the table
+     * @throws LeaseLostException if the lease was lost or fenced
      */
-    public void verifyCurrent(Table table) {
+    public void verifyCurrent(Table table)
+    {
         lease.checkHeld();
         table.refresh();
-        if (epochOf(table.properties()) != lease.epoch()) {
+        if (epochOf(table.properties()) != lease.epoch())
+        {
             throw new LeaseLostException(LeaseLostException.Reason.FENCED);
         }
     }
 
-    public static long epochOf(Map<String, String> properties) {
-        String v = properties.get(EPOCH_PROPERTY);
-        return v == null ? 0L : Long.parseLong(v);
+    /**
+     * The epoch a table records.
+     *
+     * @param properties the table's properties
+     * @return the epoch; 0 if none is recorded
+     */
+    public static long epochOf(Map<String, String> properties)
+    {
+        String value = properties.get(EPOCH_PROPERTY);
+        return value == null ? 0L : Long.parseLong(value);
     }
 
-    private static void addMarker(Transaction tx, long epoch) {
-        tx.newFastAppend().set(MARKER_SUMMARY, Long.toString(epoch)).commit();
+    /**
+     * Adds an empty append, marked with the epoch, so the commit adds a
+     * snapshot.
+     *
+     * @param transaction the transaction
+     * @param epoch       the epoch to mark it with
+     */
+    private static void addMarker(Transaction transaction, long epoch)
+    {
+        transaction.newFastAppend().set(MARKER_SUMMARY, Long.toString(epoch))
+                .commit();
     }
 
-    private static void compareAndSwap(Transaction tx, long expectedEpoch) {
-        if (!(tx instanceof BaseTransaction bt)) {
-            throw new IllegalStateException("Unsupported transaction type " + tx.getClass().getName());
+    /**
+     * Commits a transaction from exactly the metadata it started on.
+     *
+     * @param transaction   the transaction
+     * @param expectedEpoch the epoch its start metadata must record
+     * @throws LeaseLostException    if it records another
+     * @throws CommitFailedException if the table moved since
+     */
+    private static void compareAndSwap(Transaction transaction,
+            long expectedEpoch)
+    {
+        if (!(transaction instanceof BaseTransaction base))
+        {
+            throw new IllegalStateException("Unsupported transaction type "
+                    + transaction.getClass().getName());
         }
-        TableMetadata start = bt.startMetadata();
-        if (epochOf(start.properties()) != expectedEpoch) {
+        TableMetadata start = base.startMetadata();
+        if (epochOf(start.properties()) != expectedEpoch)
+        {
             throw new LeaseLostException(LeaseLostException.Reason.FENCED);
         }
-        bt.underlyingOps().commit(start, bt.currentMetadata());
+        base.underlyingOps().commit(start, base.currentMetadata());
     }
 }

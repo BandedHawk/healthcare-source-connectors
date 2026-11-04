@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
@@ -24,27 +23,25 @@ import java.util.regex.Pattern;
 
 /**
  * Generic line-based splitter for proprietary formats (design §6.2).
- *
  * <p>
- * Each line (up to its LF) is tested against a regex with {@code find()}. Only
- * the first {@code delimited.match-window} bytes (default 4096) of a line are
- * tested, so very long lines stay cheap.
- *
+ * Each line (up to its LF) is tested against a regex with {@code find()}.
+ * Only the first {@code delimited.match-window} bytes (default 4096) of a
+ * line are tested, so very long lines stay cheap.
  * <ul>
  * <li>{@code delimited.pattern}: the regex; falls back to the boundary
  * setting</li>
  * <li>{@code delimited.literal}: treat the pattern as plain text (default
  * false)</li>
- * <li>{@code delimited.mode}: {@code START} a matching line begins a section;
- * {@code END} it ends one (inclusive); {@code SEPARATOR} it sits between
- * sections and is dropped</li>
- * <li>{@code delimited.charset}: used to decode lines for matching (default
- * UTF-8)</li>
+ * <li>{@code delimited.mode}: {@code START} a matching line begins a
+ * section; {@code END} it ends one (inclusive); {@code SEPARATOR} it sits
+ * between sections and is dropped</li>
+ * <li>{@code delimited.charset}: used to decode lines for matching
+ * (default UTF-8)</li>
  * </ul>
- *
- * Lines that are empty or whitespace only never start a section. In START mode,
- * any lines before the first match become a section of their own, so nothing is
- * dropped.
+ * <p>
+ * Lines that are empty or whitespace only never start a section. In START
+ * mode, any lines before the first match become a section of their own, so
+ * nothing is dropped.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -52,120 +49,209 @@ import java.util.regex.Pattern;
 public final class DelimitedSplitter implements SectionSplitter
 {
 
+    /** The format's name. */
     public static final String FORMAT = "delimited";
 
-    enum Mode
+    /**
+     * Creates the splitter; the service loader calls this.
+     */
+    public DelimitedSplitter()
     {
-        START, END, SEPARATOR
     }
 
-    private record Settings(Pattern pattern, Mode mode, Charset charset,
-            int window) {}
+    /** What a matching line does. */
+    enum Mode
+    {
+        /** It begins a section. */
+        START,
 
+        /** It ends a section, and belongs to it. */
+        END,
+
+        /** It sits between sections, and is dropped. */
+        SEPARATOR
+    }
+
+    /**
+     * The settings, read from the configuration.
+     *
+     * @param pattern what a matching line contains
+     * @param mode    what a matching line does
+     * @param charset decodes lines for matching
+     * @param window  how many bytes of each line are tested
+     */
+    private record Settings(Pattern pattern, Mode mode, Charset charset,
+            int window)
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     @Override
     public String format()
     {
         return FORMAT;
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalArgumentException if a setting is missing or invalid
+     */
     @Override
-    public void validate(SplitConfig cfg)
+    public void validate(SplitConfig config)
     {
-        settings(cfg);
+        settings(config);
     }
 
-    private static Settings settings(SplitConfig cfg)
+    /**
+     * Reads the settings.
+     *
+     * @param config the split settings
+     * @return the settings
+     * @throws IllegalArgumentException if a setting is missing or invalid
+     */
+    private static Settings settings(SplitConfig config)
     {
-        String p = cfg.option("delimited.pattern", cfg.boundaryOr(null));
-        if (p == null)
+        String regex = config.option("delimited.pattern",
+                config.boundaryOr(null));
+        if (regex == null)
         {
-            throw new IllegalArgumentException("delimited.pattern is required");
+            throw new IllegalArgumentException(
+                    "delimited.pattern is required");
         }
-        Pattern pattern = Pattern.compile(cfg.booleanOption("delimited.literal",
-                false) ? Pattern.quote(p) : p);
-        Mode mode = Mode.valueOf(cfg.option("delimited.mode", "START").
-                toUpperCase(Locale.ROOT));
-        Charset cs = Charset.forName(cfg.option("delimited.charset", "UTF-8"));
-        int window = cfg.intOption("delimited.match-window", 4096);
+        Pattern pattern = Pattern.compile(
+                config.booleanOption("delimited.literal", false)
+                        ? Pattern.quote(regex) : regex);
+        Mode mode = Mode.valueOf(config.option("delimited.mode", "START")
+                .toUpperCase(Locale.ROOT));
+        Charset charset = Charset.forName(
+                config.option("delimited.charset", "UTF-8"));
+        int window = config.intOption("delimited.match-window", 4096);
         if (window < 1)
         {
             throw new IllegalArgumentException(
                     "delimited.match-window must be positive");
         }
-        return new Settings(pattern, mode, cs, window);
+        return new Settings(pattern, mode, charset, window);
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public SplitSession open(SeekableByteSource src, ResumePoint from,
-            SplitConfig cfg)
+    public SplitSession open(SeekableByteSource source, ResumePoint from,
+            SplitConfig config)
     {
-        return new Session(new ByteScanner(src, from.offset(), cfg.
-                readBufferBytes()), settings(cfg),
-                cfg.limits().maxSectionBytes());
+        return new Session(new ByteScanner(source, from.offset(),
+                config.readBufferBytes()), settings(config),
+                config.limits().maxSectionBytes());
     }
 
-    private record Line(long start, long end, boolean blank, boolean match) {}
+    /**
+     * One line.
+     *
+     * @param start its source offset
+     * @param end   the offset after its LF
+     * @param blank whether it is empty or whitespace only
+     * @param match whether it matches the pattern
+     */
+    private record Line(long start, long end, boolean blank, boolean match)
+    {
+    }
 
+    /** Splits one file. */
     private static final class Session implements SplitSession
     {
 
-        private final ByteScanner sc;
-        private final Settings s;
+        /** Reads the file. */
+        private final ByteScanner scanner;
+
+        /** The settings. */
+        private final Settings settings;
+
+        /** The largest section allowed, in bytes. */
         private final long max;
+
+        /** The start of the current line, for matching. */
         private final byte[] window;
+
+        /** A line read but not yet used: the start of the next section. */
         private Line pending;
 
-        Session(ByteScanner sc, Settings s, long max)
+        /**
+         * Creates a session.
+         *
+         * @param scanner  reads the file
+         * @param settings the settings
+         * @param max      the largest section allowed
+         */
+        Session(ByteScanner scanner, Settings settings, long max)
         {
-            this.sc = sc;
-            this.s = s;
+            this.scanner = scanner;
+            this.settings = settings;
             this.max = max;
-            this.window = new byte[s.window()];
+            this.window = new byte[settings.window()];
         }
 
+        /**
+         * Reads the next line.
+         *
+         * @return the line, or null at the end
+         * @throws IOException if the file can't be read
+         */
         private Line readLine() throws IOException
         {
-            long start = sc.position();
-            int n = 0;
-            int c;
-            while (n < window.length && (c = sc.read()) >= 0)
+            long start = scanner.position();
+            int count = 0;
+            int next;
+            while (count < window.length && (next = scanner.read()) >= 0)
             {
-                window[n++] = (byte) c;
-                if (c == '\n')
+                window[count++] = (byte) next;
+                if (next == '\n')
                 {
                     break;
                 }
             }
-            if (n == 0)
+            if (count == 0)
             {
                 return null;
             }
-            boolean ended = window[n - 1] == '\n';
-            if (!ended && n == window.length && sc.skipTo((byte) '\n'))
+            boolean ended = window[count - 1] == '\n';
+            if (!ended && count == window.length
+                    && scanner.skipTo((byte) '\n'))
             {
-                sc.skip(1);
+                scanner.skip(1);
             }
-            boolean fullLine = sc.position() - start == n;
-            int content = n;
-            while (content > 0 && (window[content - 1] == '\n' || window[content - 1] == '\r'))
+            boolean fullLine = scanner.position() - start == count;
+            int content = count;
+            while (content > 0 && (window[content - 1] == '\n'
+                    || window[content - 1] == '\r'))
             {
                 content--;
             }
             boolean blank = fullLine;
-            for (int i = 0; i < content && blank; i++)
+            for (int index = 0; index < content && blank; index++)
             {
-                blank = window[i] == ' ' || window[i] == '\t';
+                blank = window[index] == ' ' || window[index] == '\t';
             }
-            boolean match = s.pattern().matcher(new String(window, 0, content,
-                    s.charset())).find();
-            return new Line(start, sc.position(), blank, match);
+            boolean match = settings.pattern().matcher(
+                    new String(window, 0, content, settings.charset()))
+                    .find();
+            return new Line(start, scanner.position(), blank, match);
         }
 
+        /**
+         * {@inheritDoc}
+         *
+         * @throws SplitException if a section is too large
+         */
         @Override
         public Optional<Section> next() throws IOException, SplitException
         {
-            long secStart = -1;
-            long secEnd = -1;
+            long sectionStart = -1;
+            long sectionEnd = -1;
             boolean content = false;
             while (true)
             {
@@ -173,18 +259,21 @@ public final class DelimitedSplitter implements SectionSplitter
                 pending = null;
                 if (line == null)
                 {
-                    return content ? Optional.of(Section.ofRange(secStart,
-                            secEnd - secStart,
-                            ResumePoint.at(sc.position()))) : Optional.empty();
+                    return content
+                            ? Optional.of(Section.ofRange(sectionStart,
+                                    sectionEnd - sectionStart,
+                                    ResumePoint.at(scanner.position())))
+                            : Optional.empty();
                 }
-                switch (s.mode())
+                switch (settings.mode())
                 {
                     case START ->
                     {
                         if (line.match() && content)
                         {
                             pending = line;
-                            return emit(secStart, secEnd, line.start());
+                            return emit(sectionStart, sectionEnd,
+                                    line.start());
                         }
                     }
                     case SEPARATOR ->
@@ -193,9 +282,10 @@ public final class DelimitedSplitter implements SectionSplitter
                         {
                             if (content)
                             {
-                                return emit(secStart, secEnd, line.end());
+                                return emit(sectionStart, sectionEnd,
+                                        line.end());
                             }
-                            secStart = -1;
+                            sectionStart = -1;
                             continue;
                         }
                     }
@@ -203,33 +293,41 @@ public final class DelimitedSplitter implements SectionSplitter
                     {
                     }
                 }
-                if (secStart < 0 || !content)
+                if (sectionStart < 0 || !content)
                 {
                     if (line.blank())
                     {
                         continue;
                     }
-                    secStart = line.start();
+                    sectionStart = line.start();
                 }
-                secEnd = line.end();
+                sectionEnd = line.end();
                 content = true;
-                if (secEnd - secStart > max)
+                if (sectionEnd - sectionStart > max)
                 {
                     throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
-                            secStart);
+                            sectionStart);
                 }
-                if (s.mode() == Mode.END && line.match())
+                if (settings.mode() == Mode.END && line.match())
                 {
-                    return emit(secStart, secEnd, secEnd);
+                    return emit(sectionStart, sectionEnd, sectionEnd);
                 }
             }
         }
 
-        private static Optional<Section> emit(long start, long end, long resume)
+        /**
+         * A section.
+         *
+         * @param start  its source offset
+         * @param end    the offset after it
+         * @param resume where splitting continues
+         * @return the section
+         */
+        private static Optional<Section> emit(long start, long end,
+                long resume)
         {
-            return Optional.of(Section.ofRange(start, end - start, ResumePoint.
-                    at(resume)));
+            return Optional.of(Section.ofRange(start, end - start,
+                    ResumePoint.at(resume)));
         }
     }
-
 }

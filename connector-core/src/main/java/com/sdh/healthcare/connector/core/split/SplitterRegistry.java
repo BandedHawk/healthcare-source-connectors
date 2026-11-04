@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.split;
 
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -18,138 +17,276 @@ import java.util.Set;
 import java.util.TreeMap;
 
 /**
- * Splitters by format name, loaded with {@link ServiceLoader}. Also the place where {@link SplitLimits} are enforced.
+ * Splitters by format name, loaded with {@link ServiceLoader}. Also the
+ * place where {@link SplitLimits} are enforced.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class SplitterRegistry {
+public final class SplitterRegistry
+{
+
+    /** The splitters, by format name. */
     private final Map<String, SectionSplitter> byFormat;
 
-    private SplitterRegistry(Map<String, SectionSplitter> byFormat) {
+    /**
+     * Creates a registry.
+     *
+     * @param byFormat the splitters, by format name
+     */
+    private SplitterRegistry(Map<String, SectionSplitter> byFormat)
+    {
         this.byFormat = Collections.unmodifiableMap(byFormat);
     }
 
-    public static SplitterRegistry load() {
+    /**
+     * Loads the splitters on this class's class path.
+     *
+     * @return the registry
+     * @throws IllegalStateException if two splitters share a format
+     */
+    public static SplitterRegistry load()
+    {
         return load(SplitterRegistry.class.getClassLoader());
     }
 
-    public static SplitterRegistry load(ClassLoader cl) {
-        Map<String, SectionSplitter> m = new TreeMap<>();
-        for (SectionSplitter s : ServiceLoader.load(SectionSplitter.class, cl)) {
-            add(m, s);
+    /**
+     * Loads the splitters a class loader can see.
+     *
+     * @param classLoader the class loader
+     * @return the registry
+     * @throws IllegalStateException if two splitters share a format
+     */
+    public static SplitterRegistry load(ClassLoader classLoader)
+    {
+        Map<String, SectionSplitter> splitters = new TreeMap<>();
+        for (SectionSplitter splitter
+                : ServiceLoader.load(SectionSplitter.class, classLoader))
+        {
+            add(splitters, splitter);
         }
-        return new SplitterRegistry(m);
+        return new SplitterRegistry(splitters);
     }
 
-    public static SplitterRegistry of(SectionSplitter... splitters) {
-        Map<String, SectionSplitter> m = new TreeMap<>();
-        for (SectionSplitter s : splitters) {
-            add(m, s);
+    /**
+     * A registry of the splitters given.
+     *
+     * @param splitters the splitters
+     * @return the registry
+     * @throws IllegalStateException if two splitters share a format
+     */
+    public static SplitterRegistry of(SectionSplitter... splitters)
+    {
+        Map<String, SectionSplitter> byName = new TreeMap<>();
+        for (SectionSplitter splitter : splitters)
+        {
+            add(byName, splitter);
         }
-        return new SplitterRegistry(m);
+        return new SplitterRegistry(byName);
     }
 
-    private static void add(Map<String, SectionSplitter> m, SectionSplitter s) {
-        SectionSplitter prev = m.putIfAbsent(s.format(), s);
-        if (prev != null) {
-            throw new IllegalStateException("Two splitters for format '" + s.format() + "': "
-                    + prev.getClass().getName() + " and " + s.getClass().getName());
+    /**
+     * Adds a splitter under its format.
+     *
+     * @param splitters the splitters so far
+     * @param splitter  the splitter to add
+     * @throws IllegalStateException if its format already has one
+     */
+    private static void add(Map<String, SectionSplitter> splitters,
+            SectionSplitter splitter)
+    {
+        SectionSplitter previous =
+                splitters.putIfAbsent(splitter.format(), splitter);
+        if (previous != null)
+        {
+            throw new IllegalStateException("Two splitters for format '"
+                    + splitter.format() + "': "
+                    + previous.getClass().getName() + " and "
+                    + splitter.getClass().getName());
         }
     }
 
-    public Set<String> formats() {
+    /**
+     * The formats there are splitters for.
+     *
+     * @return the format names
+     */
+    public Set<String> formats()
+    {
         return byFormat.keySet();
     }
 
-    public SectionSplitter get(String format) {
-        SectionSplitter s = byFormat.get(format);
-        if (s == null) {
-            throw new IllegalArgumentException("Unknown split format '" + format + "'; known: " + formats());
+    /**
+     * The splitter for a format.
+     *
+     * @param format the format's name
+     * @return the splitter
+     * @throws IllegalArgumentException if there is none
+     */
+    public SectionSplitter get(String format)
+    {
+        SectionSplitter splitter = byFormat.get(format);
+        if (splitter == null)
+        {
+            throw new IllegalArgumentException("Unknown split format '"
+                    + format + "'; known: " + formats());
         }
-        return s;
+        return splitter;
     }
 
     /**
-     * Opens a session that also enforces {@link SplitLimits} (design §6.3).
+     * Opens a session that also enforces {@link SplitLimits} (design
+     * §6.3).
      *
-     * @param nextSeq the seq the next section will get; used for the per-file section count
+     * @param format  the format's name
+     * @param source  the file
+     * @param from    where to start
+     * @param nextSeq the seq the next section will get; used for the
+     *                per-file section count
+     * @param config  the split settings
+     * @return the session
+     * @throws IOException    if the file can't be read
+     * @throws SplitException if the file is too large, or can't be split
+     *                        from there
      */
-    public SplitSession open(String format, SeekableByteSource src, ResumePoint from, long nextSeq, SplitConfig cfg)
-            throws IOException, SplitException {
-        SplitLimits limits = cfg.limits();
-        if (src.size() > limits.maxFileBytes()) {
+    public SplitSession open(String format, SeekableByteSource source,
+            ResumePoint from, long nextSeq, SplitConfig config)
+            throws IOException, SplitException
+    {
+        SplitLimits limits = config.limits();
+        if (source.size() > limits.maxFileBytes())
+        {
             throw new SplitException(ErrorCode.LIMIT_FILE_SIZE, 0);
         }
-        return new LimitedSession(get(format).open(src, from, cfg), limits, nextSeq, from);
+        return new LimitedSession(get(format).open(source, from, config),
+                limits, nextSeq, from);
     }
 
     /**
-     * Opens a session over a message batch that splits each message on its own (design §5.3.16), and enforces
-     * {@link SplitLimits} on the whole: a message that can't be split, or holds a section over the size limit, fails
-     * alone.
+     * Opens a session over a message batch that splits each message on its
+     * own (design §5.3.16), and enforces {@link SplitLimits} on the whole:
+     * a message that can't be split, or holds a section over the size
+     * limit, fails alone.
      *
+     * @param format  the format's name
+     * @param source  the item
      * @param offsets where each message starts in the item
-     * @param nextSeq the seq the next section will get; used for the per-file section count
+     * @param from    where to start
+     * @param nextSeq the seq the next section will get; used for the
+     *                per-file section count
+     * @param config  the split settings
+     * @return the session
+     * @throws IOException    if the item can't be read
+     * @throws SplitException if the item is too large
      */
-    public SplitSession openRecords(String format, SeekableByteSource src, List<Long> offsets, ResumePoint from,
-            long nextSeq, SplitConfig cfg) throws IOException, SplitException {
-        SplitLimits limits = cfg.limits();
-        if (src.size() > limits.maxFileBytes()) {
+    public SplitSession openRecords(String format, SeekableByteSource source,
+            List<Long> offsets, ResumePoint from, long nextSeq,
+            SplitConfig config) throws IOException, SplitException
+    {
+        SplitLimits limits = config.limits();
+        if (source.size() > limits.maxFileBytes())
+        {
             throw new SplitException(ErrorCode.LIMIT_FILE_SIZE, 0);
         }
-        return new LimitedSession(new RecordSession(get(format), src, offsets, from, cfg), limits, nextSeq,
-                from);
+        return new LimitedSession(new RecordSession(get(format), source,
+                offsets, from, config), limits, nextSeq, from);
     }
 
-    private static final class LimitedSession implements SplitSession {
+    /**
+     * A session that enforces the section limits, and checks the splitter
+     * makes progress.
+     */
+    private static final class LimitedSession implements SplitSession
+    {
+
+        /** The splitter's session. */
         private final SplitSession inner;
+
+        /** The limits. */
         private final SplitLimits limits;
+
+        /** The seq the next section will get. */
         private long seq;
+
+        /** The furthest resume point so far. */
         private ResumePoint lastResume;
 
-        LimitedSession(SplitSession inner, SplitLimits limits, long nextSeq, ResumePoint from) {
+        /**
+         * Wraps a session.
+         *
+         * @param inner   the splitter's session
+         * @param limits  the limits
+         * @param nextSeq the seq the next section will get
+         * @param from    where the session starts
+         */
+        LimitedSession(SplitSession inner, SplitLimits limits, long nextSeq,
+                ResumePoint from)
+        {
             this.inner = inner;
             this.limits = limits;
             this.seq = nextSeq;
             this.lastResume = from;
         }
 
+        /**
+         * {@inheritDoc}
+         *
+         * @throws SplitException also if a section is too large or there
+         *                        are too many
+         */
         @Override
-        public Optional<Section> next() throws IOException, SplitException {
-            Optional<Section> s = inner.next();
-            if (s.isEmpty()) {
-                return s;
+        public Optional<Section> next() throws IOException, SplitException
+        {
+            Optional<Section> next = inner.next();
+            if (next.isEmpty())
+            {
+                return next;
             }
-            Section section = s.get();
-            if (section.failure() != null) {
-                // The rest of a message that couldn't be split: kept as it is, so not size-checked, and may be
-                // empty when the error came at the message's very end.
-                if (seq >= limits.maxSectionsPerFile()) {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_COUNT, section.sourceOffset());
+            Section section = next.get();
+            if (section.failure() != null)
+            {
+                // The rest of a message that couldn't be split: kept as it
+                // is, so not size-checked, and may be empty when the error
+                // came at the message's very end.
+                if (seq >= limits.maxSectionsPerFile())
+                {
+                    throw new SplitException(ErrorCode.LIMIT_SECTION_COUNT,
+                            section.sourceOffset());
                 }
-                if (section.resume().isAfter(lastResume)) {
+                if (section.resume().isAfter(lastResume))
+                {
                     lastResume = section.resume();
                 }
                 seq++;
-                return s;
+                return next;
             }
-            if (section.plaintextLength() > limits.maxSectionBytes()) {
-                throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE, section.sourceOffset());
+            if (section.plaintextLength() > limits.maxSectionBytes())
+            {
+                throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
+                        section.sourceOffset());
             }
-            if (seq >= limits.maxSectionsPerFile()) {
-                throw new SplitException(ErrorCode.LIMIT_SECTION_COUNT, section.sourceOffset());
+            if (seq >= limits.maxSectionsPerFile())
+            {
+                throw new SplitException(ErrorCode.LIMIT_SECTION_COUNT,
+                        section.sourceOffset());
             }
-            if (!section.resume().isAfter(lastResume)) {
-                throw new IllegalStateException("Splitter made no progress at offset " + lastResume.offset());
+            if (!section.resume().isAfter(lastResume))
+            {
+                throw new IllegalStateException(
+                        "Splitter made no progress at offset "
+                                + lastResume.offset());
             }
             lastResume = section.resume();
             seq++;
-            return s;
+            return next;
         }
 
+        /**
+         * Closes the splitter's session.
+         */
         @Override
-        public void close() {
+        public void close()
+        {
             inner.close();
         }
     }

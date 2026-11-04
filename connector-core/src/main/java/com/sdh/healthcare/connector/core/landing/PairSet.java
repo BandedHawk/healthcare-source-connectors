@@ -34,6 +34,13 @@ public final class PairSet
     private boolean hasZero;
 
     /**
+     * Creates an empty set.
+     */
+    public PairSet()
+    {
+    }
+
+    /**
      * Adds a pair.
      *
      * @param high the first half

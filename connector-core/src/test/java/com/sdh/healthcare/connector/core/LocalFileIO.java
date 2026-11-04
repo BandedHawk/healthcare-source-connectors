@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core;
 
 import java.io.IOException;
@@ -22,62 +21,109 @@ import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.SupportsPrefixOperations;
 
 /**
- * Local-disk FileIO that can list, for tests that need real files (orphan cleanup, physical deletion).
+ * Local-disk FileIO that can list, for tests that need real files (orphan
+ * cleanup, physical deletion).
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public class LocalFileIO implements FileIO, SupportsPrefixOperations {
+public class LocalFileIO implements FileIO, SupportsPrefixOperations
+{
 
+    /**
+     * Creates the FileIO.
+     */
+    public LocalFileIO()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public InputFile newInputFile(String path) {
+    public InputFile newInputFile(String path)
+    {
         return org.apache.iceberg.Files.localInput(path);
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Creates the file's directory first.
+     */
     @Override
-    public OutputFile newOutputFile(String path) {
-        try {
+    public OutputFile newOutputFile(String path)
+    {
+        try
+        {
             Files.createDirectories(Path.of(path).getParent());
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+        }
+        catch (IOException failure)
+        {
+            throw new UncheckedIOException(failure);
         }
         return org.apache.iceberg.Files.localOutput(path);
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public void deleteFile(String path) {
-        try {
+    public void deleteFile(String path)
+    {
+        try
+        {
             Files.deleteIfExists(Path.of(path));
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+        }
+        catch (IOException failure)
+        {
+            throw new UncheckedIOException(failure);
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public Iterable<FileInfo> listPrefix(String prefix) {
+    public Iterable<FileInfo> listPrefix(String prefix)
+    {
         Path root = Path.of(prefix);
         List<FileInfo> out = new ArrayList<>();
-        if (!Files.isDirectory(root)) {
+        if (!Files.isDirectory(root))
+        {
             return out;
         }
-        try (Stream<Path> s = Files.walk(root)) {
-            for (Path p : s.filter(Files::isRegularFile).toList()) {
-                out.add(new FileInfo(p.toString(), Files.size(p), Files.getLastModifiedTime(p).toMillis()));
+        try (Stream<Path> paths = Files.walk(root))
+        {
+            for (Path path : paths.filter(Files::isRegularFile).toList())
+            {
+                out.add(new FileInfo(path.toString(), Files.size(path),
+                        Files.getLastModifiedTime(path).toMillis()));
             }
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+        }
+        catch (IOException failure)
+        {
+            throw new UncheckedIOException(failure);
         }
         return out;
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public void deletePrefix(String prefix) {
-        try (Stream<Path> s = Files.walk(Path.of(prefix))) {
-            for (Path p : s.sorted(Comparator.reverseOrder()).toList()) {
-                Files.deleteIfExists(p);
+    public void deletePrefix(String prefix)
+    {
+        try (Stream<Path> paths = Files.walk(Path.of(prefix)))
+        {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList())
+            {
+                Files.deleteIfExists(path);
             }
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+        }
+        catch (IOException failure)
+        {
+            throw new UncheckedIOException(failure);
         }
     }
 }

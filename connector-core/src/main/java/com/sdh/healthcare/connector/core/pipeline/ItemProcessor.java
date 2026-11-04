@@ -113,7 +113,8 @@ public final class ItemProcessor
      */
     public Optional<Checkpoint> inProgress()
     {
-        return pipeline.checkpoint().filter(c -> c.state().inProgress());
+        return pipeline.checkpoint()
+                .filter(current -> current.state().inProgress());
     }
 
     /**
@@ -227,7 +228,7 @@ public final class ItemProcessor
             throws Exception
     {
         Optional<Checkpoint> stored = pipeline.checkpoint()
-                .filter(c -> c.fileId().equals(itemId));
+                .filter(current -> current.fileId().equals(itemId));
         if (stored.isPresent())
         {
             Checkpoint checkpoint = stored.get();
@@ -335,8 +336,8 @@ public final class ItemProcessor
     {
         Instant now = pipeline.clock().instant();
         Checkpoint base = pipeline.checkpoint()
-                .filter(c -> c.fileId().equals(itemId)
-                        && c.state().inProgress())
+                .filter(current -> current.fileId().equals(itemId)
+                        && current.state().inProgress())
                 .orElseGet(() -> Checkpoint.start(itemId,
                         IngestPipeline.itemFingerprint(itemId),
                         pipeline.settings().format(), size, now));

@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -340,7 +341,7 @@ public final class LandedItems
             {
                 refs.add(ref == null ? null : ref.toString());
             }
-            return Optional.of(java.util.Collections.unmodifiableList(refs));
+            return Optional.of(Collections.unmodifiableList(refs));
         }
         catch (ParseException malformed)
         {

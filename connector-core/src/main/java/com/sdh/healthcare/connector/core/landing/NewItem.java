@@ -6,6 +6,8 @@
  */
 package com.sdh.healthcare.connector.core.landing;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -70,8 +72,8 @@ public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
                     "A batch's broker IDs must match its record index");
         }
         messageRefs = messageRefs == null ? null
-                : java.util.Collections.unmodifiableList(
-                        new java.util.ArrayList<>(messageRefs));
+                : Collections.unmodifiableList(
+                        new ArrayList<>(messageRefs));
     }
 
     /**

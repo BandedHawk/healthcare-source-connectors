@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -34,17 +33,16 @@ import java.util.Optional;
  * instructions and DOCTYPE are skipped, so a boundary name inside them is
  * ignored. A boundary element nested inside another belongs to the outer
  * section.
- *
  * <p>
  * Every section is a standalone document: the file's XML declaration is
- * prepended, and namespace declarations in scope from ancestor elements are
- * copied onto the section's root start tag.
- *
+ * prepended, and namespace declarations in scope from ancestor elements
+ * are copied onto the section's root start tag.
  * <p>
- * Settings: boundary = element local name (required); option {@code namespace}
- * = the element's namespace URI, or {@code *} (default) for any. Input must be
- * in an ASCII-compatible encoding such as UTF-8; UTF-16 is rejected. Entities
- * declared in a DOCTYPE internal subset are not carried into sections.
+ * Settings: boundary = element local name (required); option
+ * {@code namespace} = the element's namespace URI, or {@code *} (default)
+ * for any. Input must be in an ASCII-compatible encoding such as UTF-8;
+ * UTF-16 is rejected. Entities declared in a DOCTYPE internal subset are
+ * not carried into sections.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -52,197 +50,319 @@ import java.util.Optional;
 public class XmlSplitter implements SectionSplitter
 {
 
+    /** The format's name. */
     public static final String FORMAT = "xml";
 
+    /** The start of a comment. */
     private static final byte[] COMMENT = "<!--".getBytes(UTF_8);
+
+    /** The end of a comment. */
     private static final byte[] COMMENT_END = "-->".getBytes(UTF_8);
+
+    /** The start of a CDATA section. */
     private static final byte[] CDATA = "<![CDATA[".getBytes(UTF_8);
+
+    /** The end of a CDATA section. */
     private static final byte[] CDATA_END = "]]>".getBytes(UTF_8);
+
+    /** The end of a processing instruction. */
     private static final byte[] PI_END = "?>".getBytes(UTF_8);
+
+    /** The start of the XML declaration. */
     private static final byte[] XML_DECL = "<?xml".getBytes(UTF_8);
+
+    /** The largest ancestor start tag kept, in bytes. */
     private static final int MAX_CONTEXT_TAG = 1 << 20;
+
     /**
      * The most elements a boundary element may be nested in. Every open
      * ancestor is held in memory (its start tag, for the namespaces it
-     * declares) and its offset goes into each section's resume point, which is
-     * saved in the checkpoint, so without a limit a file of nested wrappers
-     * could exhaust memory or make the checkpoint huge. Real documents nest
-     * their boundary one to three deep. Deeper nesting fails the file with
-     * {@code PARSE_XML_MALFORMED}, as the FHIR splitter does for JSON.
+     * declares) and its offset goes into each section's resume point, which
+     * is saved in the checkpoint, so without a limit a file of nested
+     * wrappers could exhaust memory or make the checkpoint huge. Real
+     * documents nest their boundary one to three deep. Deeper nesting fails
+     * the file with {@code PARSE_XML_MALFORMED}, as the FHIR splitter does
+     * for JSON.
      */
     static final int MAX_DEPTH = 128;
 
+    /**
+     * Creates the splitter; the service loader calls this.
+     */
+    public XmlSplitter()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     @Override
     public String format()
     {
         return FORMAT;
     }
 
+    /**
+     * The boundary used when none is configured.
+     *
+     * @return the element's local name; null, so one must be configured
+     */
     protected String defaultBoundary()
     {
         return null;
     }
 
+    /**
+     * The namespace used when none is configured.
+     *
+     * @return the namespace URI; {@code *} for any
+     */
     protected String defaultNamespace()
     {
         return "*";
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalArgumentException if there is no boundary
+     */
     @Override
-    public void validate(SplitConfig cfg)
+    public void validate(SplitConfig config)
     {
-        if (cfg.boundaryOr(defaultBoundary()) == null)
+        if (config.boundaryOr(defaultBoundary()) == null)
         {
-            throw new IllegalArgumentException(
-                    "An element name boundary is required for format " + format());
+            throw new IllegalArgumentException("An element name boundary is"
+                    + " required for format " + format());
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @throws IllegalArgumentException if there is no boundary
+     */
     @Override
-    public SplitSession open(SeekableByteSource src, ResumePoint from,
-            SplitConfig cfg)
+    public SplitSession open(SeekableByteSource source, ResumePoint from,
+            SplitConfig config)
             throws IOException, SplitException
     {
-        validate(cfg);
-        Session s = new Session(src, cfg.boundaryOr(defaultBoundary()), cfg.
-                option("namespace", defaultNamespace()),
-                cfg);
-        s.start(from);
-        return s;
+        validate(config);
+        Session session = new Session(source,
+                config.boundaryOr(defaultBoundary()),
+                config.option("namespace", defaultNamespace()), config);
+        session.start(from);
+        return session;
     }
 
     /**
-     * {@code raw} is the attribute exactly as written, e.g.
-     * {@code xmlns:v3="urn:hl7-org:v3"}.
+     * A namespace declaration.
+     *
+     * @param prefix the prefix; empty for the default namespace
+     * @param uri    the namespace URI
+     * @param raw    the attribute exactly as written, e.g.
+     *               {@code xmlns:v3="urn:hl7-org:v3"}
      */
-    record NsDecl(String prefix, String uri, byte[] raw) {}
+    record NsDecl(String prefix, String uri, byte[] raw)
+    {
+    }
 
     /**
-     * A parsed start tag; {@code bytes} is the whole tag from {@code <} to
-     * {@code >}.
+     * A parsed start tag.
+     *
+     * @param offset      its source offset
+     * @param bytes       the whole tag, from {@code <} to {@code >}
+     * @param nameLength  the length of its name, in bytes
+     * @param selfClosing whether it ends with {@code />}
+     * @param decls       the namespaces it declares
      */
     record StartTag(long offset, byte[] bytes, int nameLength,
             boolean selfClosing, List<NsDecl> decls)
     {
 
+        /**
+         * The element's qualified name.
+         *
+         * @return the name, with any prefix
+         */
         String qname()
         {
             return new String(bytes, 1, nameLength, UTF_8);
         }
 
+        /**
+         * The element's qualified name, as bytes.
+         *
+         * @return a copy of the name's bytes
+         */
         byte[] name()
         {
             return Arrays.copyOfRange(bytes, 1, 1 + nameLength);
         }
     }
 
+    /** Splits one file. */
     private static final class Session implements SplitSession
     {
 
-        private final SeekableByteSource src;
-        private final String boundary;
-        private final String namespace;
-        private final SplitConfig cfg;
-        private final long max;
-        private final List<StartTag> outer = new ArrayList<>();
-        private byte[] decl = new byte[0];
-        private ByteScanner sc;
+        /** The file. */
+        private final SeekableByteSource source;
 
-        Session(SeekableByteSource src, String boundary, String namespace,
-                SplitConfig cfg)
+        /** The boundary element's local name. */
+        private final String boundary;
+
+        /** The boundary element's namespace; {@code *} for any. */
+        private final String namespace;
+
+        /** The split settings. */
+        private final SplitConfig config;
+
+        /** The largest section allowed, in bytes. */
+        private final long max;
+
+        /** The open ancestors of the current position, outermost first. */
+        private final List<StartTag> outer = new ArrayList<>();
+
+        /** The file's XML declaration and a newline; empty if none. */
+        private byte[] decl = new byte[0];
+
+        /** Reads the file. */
+        private ByteScanner scanner;
+
+        /**
+         * Creates a session.
+         *
+         * @param source    the file
+         * @param boundary  the boundary element's local name
+         * @param namespace its namespace; {@code *} for any
+         * @param config    the split settings
+         */
+        Session(SeekableByteSource source, String boundary, String namespace,
+                SplitConfig config)
         {
-            this.src = src;
+            this.source = source;
             this.boundary = boundary;
             this.namespace = namespace;
-            this.cfg = cfg;
-            this.max = cfg.limits().maxSectionBytes();
+            this.config = config;
+            this.max = config.limits().maxSectionBytes();
         }
 
+        /**
+         * Reads the XML declaration and, when resuming, the open ancestors,
+         * then positions the session.
+         *
+         * @param from where to start
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if the encoding is unsupported, the
+         *                        declaration is malformed, or the point
+         *                        doesn't fit the file
+         */
         void start(ResumePoint from) throws IOException, SplitException
         {
-            sc = new ByteScanner(src, 0, Math.min(cfg.readBufferBytes(),
-                    64 << 10));
-            int b0 = sc.peek(), b1 = sc.peek(1);
-            if ((b0 == 0xFE && b1 == 0xFF) || (b0 == 0xFF && b1 == 0xFE) || (b0 == 0 || b1 == 0) && b0 >= 0)
+            scanner = new ByteScanner(source, 0,
+                    Math.min(config.readBufferBytes(), 64 << 10));
+            int first = scanner.peek();
+            int second = scanner.peek(1);
+            if ((first == 0xFE && second == 0xFF)
+                    || (first == 0xFF && second == 0xFE)
+                    || ((first == 0 || second == 0) && first >= 0))
             {
                 throw new SplitException(
                         ErrorCode.PARSE_XML_UNSUPPORTED_ENCODING, 0);
             }
-            if (b0 == 0xEF && b1 == 0xBB && sc.peek(2) == 0xBF)
+            if (first == 0xEF && second == 0xBB && scanner.peek(2) == 0xBF)
             {
-                sc.skip(3);
+                scanner.skip(3);
             }
-            if (sc.lookingAt(XML_DECL) && isSpace(sc.peek(XML_DECL.length)))
+            if (scanner.lookingAt(XML_DECL)
+                    && isSpace(scanner.peek(XML_DECL.length)))
             {
-                long s = sc.position();
-                if (!sc.skipPast(PI_END) || sc.position() - s > 4096)
+                long declStart = scanner.position();
+                if (!scanner.skipPast(PI_END)
+                        || scanner.position() - declStart > 4096)
                 {
-                    throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, s);
+                    throw new SplitException(ErrorCode.PARSE_XML_MALFORMED,
+                            declStart);
                 }
-                byte[] raw = src.readFully(s, (int) (sc.position() - s));
+                byte[] raw = source.readFully(declStart,
+                        (int) (scanner.position() - declStart));
                 decl = Arrays.copyOf(raw, raw.length + 1);
                 decl[raw.length] = '\n';
             }
-            long startAt = sc.position();
+            long startAt = scanner.position();
             if (from.offset() > 0)
             {
                 for (long tagOffset : from.context())
                 {
-                    ByteScanner t = new ByteScanner(src, tagOffset, 4096);
-                    if (t.read() != '<' || isNameEnd(t.peek()) || t.peek() == '/' || t.
-                            peek() == '!'
-                            || t.peek() == '?')
+                    ByteScanner tagScanner =
+                            new ByteScanner(source, tagOffset, 4096);
+                    if (tagScanner.read() != '<'
+                            || isNameEnd(tagScanner.peek())
+                            || tagScanner.peek() == '/'
+                            || tagScanner.peek() == '!'
+                            || tagScanner.peek() == '?')
                     {
-                        throw new SplitException(ErrorCode.RESUME_INVALID, from.
-                                offset());
+                        throw new SplitException(ErrorCode.RESUME_INVALID,
+                                from.offset());
                     }
-                    StartTag tag = readStartTag(t, tagOffset, MAX_CONTEXT_TAG);
+                    StartTag tag = readStartTag(tagScanner, tagOffset,
+                            MAX_CONTEXT_TAG);
                     if (tag.selfClosing())
                     {
-                        throw new SplitException(ErrorCode.RESUME_INVALID, from.
-                                offset());
+                        throw new SplitException(ErrorCode.RESUME_INVALID,
+                                from.offset());
                     }
                     outer.add(tag);
                 }
                 startAt = from.offset();
-            } else if (!from.context().isEmpty())
+            }
+            else if (!from.context().isEmpty())
             {
                 throw new SplitException(ErrorCode.RESUME_INVALID, 0);
             }
             if (from.context().size() > MAX_DEPTH)
             {
-                throw new SplitException(ErrorCode.RESUME_INVALID, from.offset());
+                throw new SplitException(ErrorCode.RESUME_INVALID,
+                        from.offset());
             }
-            sc = new ByteScanner(src, startAt, cfg.readBufferBytes());
+            scanner = new ByteScanner(source, startAt,
+                    config.readBufferBytes());
         }
 
+        /**
+         * {@inheritDoc}
+         *
+         * @throws SplitException if the XML is malformed or unbalanced,
+         *                        nested too deeply, or a section is too
+         *                        large
+         */
         @Override
         public Optional<Section> next() throws IOException, SplitException
         {
             while (true)
             {
-                if (!sc.skipTo((byte) '<'))
+                if (!scanner.skipTo((byte) '<'))
                 {
                     if (!outer.isEmpty())
                     {
                         throw new SplitException(
-                                ErrorCode.PARSE_UNBALANCED_ELEMENT, sc.
-                                        position());
+                                ErrorCode.PARSE_UNBALANCED_ELEMENT,
+                                scanner.position());
                     }
                     return Optional.empty();
                 }
-                long at = sc.position();
+                long at = scanner.position();
                 if (skipMarkup(at))
                 {
                     continue;
                 }
-                sc.read();
-                if (sc.peek() == '/')
+                scanner.read();
+                if (scanner.peek() == '/')
                 {
-                    sc.read();
+                    scanner.read();
                     byte[] name = readEndTag(at);
-                    if (outer.isEmpty() || !Arrays.
-                            equals(outer.getLast().name(), name))
+                    if (outer.isEmpty()
+                            || !Arrays.equals(outer.getLast().name(), name))
                     {
                         throw new SplitException(
                                 ErrorCode.PARSE_UNBALANCED_ELEMENT, at);
@@ -250,8 +370,8 @@ public class XmlSplitter implements SectionSplitter
                     outer.removeLast();
                     continue;
                 }
-                StartTag tag = readStartTag(sc, at, (int) Math.min(max,
-                        MAX_CONTEXT_TAG * 64L));
+                StartTag tag = readStartTag(scanner, at,
+                        (int) Math.min(max, MAX_CONTEXT_TAG * 64L));
                 if (isBoundary(tag))
                 {
                     return Optional.of(section(tag));
@@ -260,15 +380,15 @@ public class XmlSplitter implements SectionSplitter
                 {
                     if (outer.size() >= MAX_DEPTH)
                     {
-                        throw new SplitException(ErrorCode.PARSE_XML_MALFORMED,
-                                at);
+                        throw new SplitException(
+                                ErrorCode.PARSE_XML_MALFORMED, at);
                     }
                     if (tag.bytes().length > MAX_CONTEXT_TAG)
                     {
-                        // A resume re-reads ancestors only up to this size, so
-                        // a larger one would fail every restart instead.
-                        throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
-                                at);
+                        // A resume re-reads ancestors only up to this size,
+                        // so a larger one would fail every restart instead.
+                        throw new SplitException(
+                                ErrorCode.LIMIT_SECTION_SIZE, at);
                     }
                     outer.add(tag);
                 }
@@ -276,31 +396,40 @@ public class XmlSplitter implements SectionSplitter
         }
 
         /**
-         * Skips a comment, CDATA, PI or DOCTYPE at {@code at}. Returns false if
-         * it's an element tag.
+         * Skips a comment, CDATA, PI or DOCTYPE.
+         *
+         * @param at the offset of its {@code <}
+         * @return false if it's an element tag, and nothing was skipped
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if it is never closed
          */
-        private boolean skipMarkup(long at) throws IOException, SplitException
+        private boolean skipMarkup(long at)
+                throws IOException, SplitException
         {
             byte[] end;
-            if (sc.lookingAt(COMMENT))
+            if (scanner.lookingAt(COMMENT))
             {
                 end = COMMENT_END;
-            } else if (sc.lookingAt(CDATA))
+            }
+            else if (scanner.lookingAt(CDATA))
             {
                 end = CDATA_END;
-            } else if (sc.peek(1) == '?')
+            }
+            else if (scanner.peek(1) == '?')
             {
                 end = PI_END;
-            } else if (sc.peek(1) == '!')
+            }
+            else if (scanner.peek(1) == '!')
             {
                 skipDeclaration(at);
                 return true;
-            } else
+            }
+            else
             {
                 return false;
             }
-            sc.skip(2);
-            if (!sc.skipPast(end))
+            scanner.skip(2);
+            if (!scanner.skipPast(end))
             {
                 throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, at);
             }
@@ -308,36 +437,47 @@ public class XmlSplitter implements SectionSplitter
         }
 
         /**
-         * {@code <!DOCTYPE ...>} including an internal subset in brackets.
+         * Skips {@code <!DOCTYPE ...>}, including an internal subset in
+         * brackets.
+         *
+         * @param at the offset of its {@code <}
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if it is never closed
          */
-        private void skipDeclaration(long at) throws IOException, SplitException
+        private void skipDeclaration(long at)
+                throws IOException, SplitException
         {
-            sc.skip(2);
+            scanner.skip(2);
             int brackets = 0;
             int quote = 0;
             while (true)
             {
-                int c = sc.read();
-                if (c < 0)
+                int next = scanner.read();
+                if (next < 0)
                 {
-                    throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, at);
+                    throw new SplitException(ErrorCode.PARSE_XML_MALFORMED,
+                            at);
                 }
                 if (quote != 0)
                 {
-                    if (c == quote)
+                    if (next == quote)
                     {
                         quote = 0;
                     }
-                } else if (c == '"' || c == '\'')
+                }
+                else if (next == '"' || next == '\'')
                 {
-                    quote = c;
-                } else if (c == '[')
+                    quote = next;
+                }
+                else if (next == '[')
                 {
                     brackets++;
-                } else if (c == ']')
+                }
+                else if (next == ']')
                 {
                     brackets--;
-                } else if (c == '>' && brackets <= 0)
+                }
+                else if (next == '>' && brackets <= 0)
                 {
                     return;
                 }
@@ -346,30 +486,43 @@ public class XmlSplitter implements SectionSplitter
 
         /**
          * After {@code </}: reads the name and the closing {@code >}.
+         *
+         * @param at the offset of its {@code <}
+         * @return the name's bytes
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if it is malformed
          */
         private byte[] readEndTag(long at) throws IOException, SplitException
         {
             ByteArrayOutputStream name = new ByteArrayOutputStream(32);
-            int c;
-            while (!isNameEnd(c = sc.peek()))
+            while (!isNameEnd(scanner.peek()))
             {
-                name.write(sc.read());
+                name.write(scanner.read());
                 if (name.size() > 4096)
                 {
-                    throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, at);
+                    throw new SplitException(ErrorCode.PARSE_XML_MALFORMED,
+                            at);
                 }
             }
-            while (isSpace(sc.peek()))
+            while (isSpace(scanner.peek()))
             {
-                sc.read();
+                scanner.read();
             }
-            if (sc.read() != '>' || name.size() == 0)
+            if (scanner.read() != '>' || name.size() == 0)
             {
                 throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, at);
             }
             return name.toByteArray();
         }
 
+        /**
+         * Tells whether a start tag opens a boundary element.
+         *
+         * @param tag the start tag
+         * @return true if its local name, and namespace if one is required,
+         *         match
+         * @throws SplitException if its prefix isn't declared
+         */
         private boolean isBoundary(StartTag tag) throws SplitException
         {
             String qname = tag.qname();
@@ -387,57 +540,76 @@ public class XmlSplitter implements SectionSplitter
             String uri = resolve(prefix, tag);
             if (uri == null && !prefix.isEmpty())
             {
-                throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, tag.
-                        offset());
+                throw new SplitException(ErrorCode.PARSE_XML_MALFORMED,
+                        tag.offset());
             }
             return namespace.equals(uri == null ? "" : uri);
         }
 
+        /**
+         * The namespace a prefix stands for at a start tag.
+         *
+         * @param prefix the prefix; empty for the default namespace
+         * @param tag    the start tag
+         * @return the namespace URI; null if it isn't declared
+         */
         private String resolve(String prefix, StartTag tag)
         {
-            for (NsDecl d : tag.decls())
+            for (NsDecl declaration : tag.decls())
             {
-                if (d.prefix().equals(prefix))
+                if (declaration.prefix().equals(prefix))
                 {
-                    return d.uri();
+                    return declaration.uri();
                 }
             }
-            for (int i = outer.size() - 1; i >= 0; i--)
+            for (int index = outer.size() - 1; index >= 0; index--)
             {
-                for (NsDecl d : outer.get(i).decls())
+                for (NsDecl declaration : outer.get(index).decls())
                 {
-                    if (d.prefix().equals(prefix))
+                    if (declaration.prefix().equals(prefix))
                     {
-                        return d.uri();
+                        return declaration.uri();
                     }
                 }
             }
             return null;
         }
 
-        private Section section(StartTag tag) throws IOException, SplitException
+        /**
+         * Makes the section a boundary start tag opens: the XML declaration,
+         * then the element, with the namespaces in scope from its ancestors
+         * added to its start tag.
+         *
+         * @param tag the boundary start tag
+         * @return the section
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if the element is malformed, unbalanced or
+         *                        too large
+         */
+        private Section section(StartTag tag)
+                throws IOException, SplitException
         {
             long start = tag.offset();
-            long end = tag.selfClosing() ? sc.position() : scanToEnd(tag);
-            long[] ctx = new long[outer.size()];
-            for (int i = 0; i < ctx.length; i++)
+            long end = tag.selfClosing() ? scanner.position() : scanToEnd(tag);
+            long[] context = new long[outer.size()];
+            for (int index = 0; index < context.length; index++)
             {
-                ctx[i] = outer.get(i).offset();
+                context[index] = outer.get(index).offset();
             }
-            ResumePoint resume = ResumePoint.at(end, ctx);
+            ResumePoint resume = ResumePoint.at(end, context);
 
             Map<String, NsDecl> inScope = new LinkedHashMap<>();
-            for (StartTag t : outer)
+            for (StartTag ancestor : outer)
             {
-                for (NsDecl d : t.decls())
+                for (NsDecl declaration : ancestor.decls())
                 {
-                    inScope.remove(d.prefix());
-                    inScope.put(d.prefix(), d);
+                    inScope.remove(declaration.prefix());
+                    inScope.put(declaration.prefix(), declaration);
                 }
             }
-            for (NsDecl d : tag.decls())
+            for (NsDecl declaration : tag.decls())
             {
-                inScope.remove(d.prefix());
+                inScope.remove(declaration.prefix());
             }
             List<Section.Part> parts = new ArrayList<>(3);
             if (decl.length > 0)
@@ -447,60 +619,68 @@ public class XmlSplitter implements SectionSplitter
             if (inScope.isEmpty())
             {
                 parts.add(new Section.SourceRange(start, end - start));
-            } else
+            }
+            else
             {
-                byte[] t = tag.bytes();
-                ByteArrayOutputStream b = new ByteArrayOutputStream(
-                        t.length + 64 * inScope.size());
-                b.write(t, 0, 1 + tag.nameLength());
-                for (NsDecl d : inScope.values())
+                byte[] tagBytes = tag.bytes();
+                ByteArrayOutputStream rewritten = new ByteArrayOutputStream(
+                        tagBytes.length + 64 * inScope.size());
+                rewritten.write(tagBytes, 0, 1 + tag.nameLength());
+                for (NsDecl declaration : inScope.values())
                 {
-                    b.write(' ');
-                    b.writeBytes(d.raw());
+                    rewritten.write(' ');
+                    rewritten.writeBytes(declaration.raw());
                 }
-                b.
-                        write(t, 1 + tag.nameLength(), t.length - 1 - tag.
-                                nameLength());
-                parts.add(new Section.Literal(b.toByteArray()));
-                long bodyStart = start + t.length;
+                rewritten.write(tagBytes, 1 + tag.nameLength(),
+                        tagBytes.length - 1 - tag.nameLength());
+                parts.add(new Section.Literal(rewritten.toByteArray()));
+                long bodyStart = start + tagBytes.length;
                 if (end > bodyStart)
                 {
-                    parts.add(
-                            new Section.SourceRange(bodyStart, end - bodyStart));
+                    parts.add(new Section.SourceRange(bodyStart,
+                            end - bodyStart));
                 }
             }
             return new Section(start, end - start, parts, resume);
         }
 
         /**
-         * Scans from after the boundary start tag to just after its matching
-         * end tag.
+         * Scans from after the boundary start tag to just after its
+         * matching end tag.
+         *
+         * @param root the boundary start tag
+         * @return the offset after its end tag
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if the element is malformed, unbalanced or
+         *                        too large
          */
-        private long scanToEnd(StartTag root) throws IOException, SplitException
+        private long scanToEnd(StartTag root)
+                throws IOException, SplitException
         {
             long start = root.offset();
             ArrayDeque<byte[]> names = new ArrayDeque<>();
             names.push(root.name());
             while (true)
             {
-                if (!sc.skipTo((byte) '<'))
+                if (!scanner.skipTo((byte) '<'))
                 {
-                    throw new SplitException(ErrorCode.PARSE_UNBALANCED_ELEMENT,
-                            start);
+                    throw new SplitException(
+                            ErrorCode.PARSE_UNBALANCED_ELEMENT, start);
                 }
-                long at = sc.position();
+                long at = scanner.position();
                 if (at - start > max)
                 {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE, start);
+                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
+                            start);
                 }
                 if (skipMarkup(at))
                 {
                     continue;
                 }
-                sc.read();
-                if (sc.peek() == '/')
+                scanner.read();
+                if (scanner.peek() == '/')
                 {
-                    sc.read();
+                    scanner.read();
                     if (!Arrays.equals(names.pop(), readEndTag(at)))
                     {
                         throw new SplitException(
@@ -508,9 +688,10 @@ public class XmlSplitter implements SectionSplitter
                     }
                     if (names.isEmpty())
                     {
-                        return sc.position();
+                        return scanner.position();
                     }
-                } else
+                }
+                else
                 {
                     byte[] name = skipStartTag(at);
                     if (name != null)
@@ -522,18 +703,24 @@ public class XmlSplitter implements SectionSplitter
         }
 
         /**
-         * After {@code <} inside a section: skips the tag; returns its name, or
-         * null if self-closing.
+         * After {@code <} inside a section: skips the tag.
+         *
+         * @param at the offset of its {@code <}
+         * @return its name, or null if self-closing
+         * @throws IOException    if the file can't be read
+         * @throws SplitException if it is malformed or never closed
          */
-        private byte[] skipStartTag(long at) throws IOException, SplitException
+        private byte[] skipStartTag(long at)
+                throws IOException, SplitException
         {
             ByteArrayOutputStream name = new ByteArrayOutputStream(32);
-            while (!isNameEnd(sc.peek()))
+            while (!isNameEnd(scanner.peek()))
             {
-                name.write(sc.read());
+                name.write(scanner.read());
                 if (name.size() > 4096)
                 {
-                    throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, at);
+                    throw new SplitException(ErrorCode.PARSE_XML_MALFORMED,
+                            at);
                 }
             }
             if (name.size() == 0)
@@ -544,27 +731,30 @@ public class XmlSplitter implements SectionSplitter
             int last = 0;
             while (true)
             {
-                int c = sc.read();
-                if (c < 0)
+                int next = scanner.read();
+                if (next < 0)
                 {
-                    throw new SplitException(ErrorCode.PARSE_UNBALANCED_ELEMENT,
-                            at);
+                    throw new SplitException(
+                            ErrorCode.PARSE_UNBALANCED_ELEMENT, at);
                 }
                 if (quote != 0)
                 {
-                    if (c == quote)
+                    if (next == quote)
                     {
                         quote = 0;
                     }
-                } else if (c == '"' || c == '\'')
+                }
+                else if (next == '"' || next == '\'')
                 {
-                    quote = c;
-                } else if (c == '>')
+                    quote = next;
+                }
+                else if (next == '>')
                 {
                     return last == '/' ? null : name.toByteArray();
-                } else if (!isSpace(c))
+                }
+                else if (!isSpace(next))
                 {
-                    last = c;
+                    last = next;
                 }
             }
         }
@@ -573,50 +763,68 @@ public class XmlSplitter implements SectionSplitter
     /**
      * After {@code <}: reads a whole start tag into memory and parses its
      * namespace declarations.
+     *
+     * @param scanner reads the file
+     * @param at      the offset of its {@code <}
+     * @param cap     the largest tag allowed, in bytes
+     * @return the tag
+     * @throws IOException    if the file can't be read
+     * @throws SplitException if it is malformed, never closed or too large
      */
-    static StartTag readStartTag(ByteScanner sc, long at, int cap) throws
-            IOException, SplitException
+    static StartTag readStartTag(ByteScanner scanner, long at, int cap)
+            throws IOException, SplitException
     {
-        ByteArrayOutputStream b = new ByteArrayOutputStream(128);
-        b.write('<');
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(128);
+        bytes.write('<');
         int quote = 0;
         while (true)
         {
-            int c = sc.read();
-            if (c < 0)
+            int next = scanner.read();
+            if (next < 0)
             {
-                throw new SplitException(ErrorCode.PARSE_UNBALANCED_ELEMENT, at);
+                throw new SplitException(ErrorCode.PARSE_UNBALANCED_ELEMENT,
+                        at);
             }
-            b.write(c);
-            if (b.size() > cap)
+            bytes.write(next);
+            if (bytes.size() > cap)
             {
                 throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE, at);
             }
             if (quote != 0)
             {
-                if (c == quote)
+                if (next == quote)
                 {
                     quote = 0;
                 }
-            } else if (c == '"' || c == '\'')
+            }
+            else if (next == '"' || next == '\'')
             {
-                quote = c;
-            } else if (c == '>')
+                quote = next;
+            }
+            else if (next == '>')
             {
                 break;
             }
         }
-        return parseStartTag(b.toByteArray(), at);
+        return parseStartTag(bytes.toByteArray(), at);
     }
 
-    static StartTag parseStartTag(byte[] t, long at) throws SplitException
+    /**
+     * Parses a start tag's name and namespace declarations.
+     *
+     * @param tag the whole tag, from {@code <} to {@code >}
+     * @param at  its source offset
+     * @return the tag
+     * @throws SplitException if it is malformed
+     */
+    static StartTag parseStartTag(byte[] tag, long at) throws SplitException
     {
-        int p = 1;
-        while (p < t.length && !isNameEnd(t[p] & 0xff))
+        int position = 1;
+        while (position < tag.length && !isNameEnd(tag[position] & 0xff))
         {
-            p++;
+            position++;
         }
-        int nameLength = p - 1;
+        int nameLength = position - 1;
         if (nameLength == 0)
         {
             throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, at);
@@ -625,67 +833,86 @@ public class XmlSplitter implements SectionSplitter
         boolean selfClosing = false;
         while (true)
         {
-            while (isSpace(t[p] & 0xff))
+            while (isSpace(tag[position] & 0xff))
             {
-                p++;
+                position++;
             }
-            if (t[p] == '>')
+            if (tag[position] == '>')
             {
                 break;
             }
-            if (t[p] == '/' && t[p + 1] == '>')
+            if (tag[position] == '/' && tag[position + 1] == '>')
             {
                 selfClosing = true;
                 break;
             }
-            int attrStart = p;
-            while (!isNameEnd(t[p] & 0xff) && t[p] != '=')
+            int attributeStart = position;
+            while (!isNameEnd(tag[position] & 0xff) && tag[position] != '=')
             {
-                p++;
+                position++;
             }
-            String attr = new String(t, attrStart, p - attrStart, UTF_8);
-            while (isSpace(t[p] & 0xff))
+            String attribute = new String(tag, attributeStart,
+                    position - attributeStart, UTF_8);
+            while (isSpace(tag[position] & 0xff))
             {
-                p++;
+                position++;
             }
-            if (attr.isEmpty() || t[p] != '=')
+            if (attribute.isEmpty() || tag[position] != '=')
             {
                 throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, at);
             }
-            p++;
-            while (isSpace(t[p] & 0xff))
+            position++;
+            while (isSpace(tag[position] & 0xff))
             {
-                p++;
+                position++;
             }
-            byte q = t[p];
-            if (q != '"' && q != '\'')
+            byte quote = tag[position];
+            if (quote != '"' && quote != '\'')
             {
                 throw new SplitException(ErrorCode.PARSE_XML_MALFORMED, at);
             }
-            int valueStart = ++p;
-            while (t[p] != q)
+            int valueStart = ++position;
+            while (tag[position] != quote)
             {
-                p++;
+                position++;
             }
-            p++;
-            if (attr.equals("xmlns") || attr.startsWith("xmlns:"))
+            position++;
+            if (attribute.equals("xmlns") || attribute.startsWith("xmlns:"))
             {
-                String prefix = attr.equals("xmlns") ? "" : attr.substring(6);
-                String uri = new String(t, valueStart, p - 1 - valueStart, UTF_8);
-                byte[] raw = Arrays.copyOfRange(t, attrStart, p);
+                String prefix = attribute.equals("xmlns")
+                        ? "" : attribute.substring(6);
+                String uri = new String(tag, valueStart,
+                        position - 1 - valueStart, UTF_8);
+                byte[] raw = Arrays.copyOfRange(tag, attributeStart,
+                        position);
                 decls.add(new NsDecl(prefix, uri, raw));
             }
         }
-        return new StartTag(at, t, nameLength, selfClosing, List.copyOf(decls));
+        return new StartTag(at, tag, nameLength, selfClosing,
+                List.copyOf(decls));
     }
 
-    static boolean isSpace(int c)
+    /**
+     * Tells whether a byte is XML whitespace.
+     *
+     * @param value the byte, or -1
+     * @return true for space, tab, LF and CR
+     */
+    static boolean isSpace(int value)
     {
-        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+        return value == ' ' || value == '\t' || value == '\n'
+                || value == '\r';
     }
 
-    static boolean isNameEnd(int c)
+    /**
+     * Tells whether a byte ends a name.
+     *
+     * @param value the byte, or -1 at the end
+     * @return true at the end, on whitespace, or on {@code > / =}
+     */
+    static boolean isNameEnd(int value)
     {
-        return c < 0 || isSpace(c) || c == '>' || c == '/' || c == '=';
+        return value < 0 || isSpace(value) || value == '>' || value == '/'
+                || value == '=';
     }
 }

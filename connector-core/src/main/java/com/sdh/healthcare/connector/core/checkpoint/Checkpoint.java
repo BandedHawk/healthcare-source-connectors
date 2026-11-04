@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.sdh.healthcare.connector.core.split.ResumePoint;
@@ -14,21 +13,33 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Progress of the file a connector is working on (design §4.1, §9.1). Stored, MAC'd, in a table property of the
- * {@code sections} table and written in the same atomic commit as the data it describes.
+ * The progress of the file a connector is working on (design §4.1, §9.1).
+ * It is stored, MAC'd, in a table property of the {@code sections} table,
+ * and written in the same atomic commit as the data it describes.
+ * <p>
+ * It holds no PHI: IDs, a keyed fingerprint, offsets, counts and error
+ * codes only.
  *
- * <p>Contains no PHI: IDs, a keyed fingerprint, offsets, counts and error codes only.
- *
+ * @param fileId       the file's ID
+ * @param fingerprint  the file's keyed fingerprint
+ * @param format       the name of the file's format
+ * @param fileSize     the file's size, in bytes
+ * @param state        where the file is in its life
  * @param resumeAt     where splitting continues after a restart
- * @param nextSeq      seq of the next section to be produced
- * @param committedSeq last seq whose data is committed; -1 if none
- * @param publishedSeq last seq whose message the broker acknowledged, as known at this commit; -1 if none
- * @param failure      why the file is being failed; set in {@code FAILING} and {@code FAILED}, else null
- * @param restarts     how many times splitting has been resumed from this checkpoint without committing a batch
- *                     since (design §9.2); 0 for a new file and after every batch commit. It rises only when the
- *                     connector stops part-way through a batch, so a section that stops it every time (by running
- *                     it out of memory, say) is noticed instead of crashing the connector forever
- *
+ * @param nextSeq      the seq of the next section to be produced
+ * @param committedSeq the last seq whose data is committed; -1 if none
+ * @param publishedSeq the last seq whose message the broker acknowledged,
+ *                     as known at this commit; -1 if none
+ * @param startedAt    when the file was started
+ * @param failure      why the file is being failed; set in {@code FAILING}
+ *                     and {@code FAILED}, otherwise null
+ * @param restarts     how many times splitting has been resumed from this
+ *                     checkpoint without committing a batch since (design
+ *                     §9.2); 0 for a new file and after every batch commit.
+ *                     It rises only when the connector stops part-way
+ *                     through a batch, so a section that stops it every
+ *                     time (by running it out of memory, say) is noticed
+ *                     instead of crashing the connector forever
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -44,96 +55,247 @@ public record Checkpoint(
         long publishedSeq,
         Instant startedAt,
         Failure failure,
-        int restarts) {
+        int restarts)
+{
 
-    public enum State {
-        SPLITTING, ARCHIVING, COMPLETED, FAILING, FAILED, ABANDONED;
+    /** The prefix of the table property that holds a checkpoint. */
+    public static final String PROPERTY_PREFIX = "sdh.checkpoint.";
 
-        /** States that must be finished (or abandoned) before another file can start. */
-        public boolean inProgress() {
+    /** Where a file is in its life. */
+    public enum State
+    {
+        /** Sections are being split, stored and published. */
+        SPLITTING,
+
+        /** Every section is stored; the completion is being written. */
+        ARCHIVING,
+
+        /** Finished: every section stored and published. */
+        COMPLETED,
+
+        /** The decision to fail the file is durable; finishing that. */
+        FAILING,
+
+        /** Finished: the file couldn't be split. */
+        FAILED,
+
+        /** Given up without finishing. */
+        ABANDONED;
+
+        /**
+         * Tells whether this state must be finished (or abandoned) before
+         * another file can start.
+         *
+         * @return true for {@code SPLITTING}, {@code ARCHIVING} and
+         *         {@code FAILING}
+         */
+        public boolean inProgress()
+        {
             return this == SPLITTING || this == ARCHIVING || this == FAILING;
         }
     }
 
     /**
-     * @param stage    where it failed: {@code intake}, {@code split}, {@code publish} or {@code archive}
-     * @param offset   source byte offset of the failure, or where splitting had reached
+     * Why a file failed.
+     *
+     * @param stage    where it failed: {@code intake}, {@code split},
+     *                 {@code publish} or {@code archive}
+     * @param code     the error code
+     * @param offset   the source byte offset of the failure, or where
+     *                 splitting had reached
+     * @param failedAt when it failed
      */
-    public record Failure(String stage, ErrorCode code, long offset, Instant failedAt) {
-        public Failure {
+    public record Failure(String stage, ErrorCode code, long offset,
+            Instant failedAt)
+    {
+
+        /**
+         * Checks the fields.
+         *
+         * @param stage    where it failed
+         * @param code     the error code
+         * @param offset   where in the file
+         * @param failedAt when
+         * @throws NullPointerException if the stage, code or time is null
+         */
+        public Failure
+        {
             Objects.requireNonNull(stage);
             Objects.requireNonNull(code);
             Objects.requireNonNull(failedAt);
         }
     }
 
-    public static final String PROPERTY_PREFIX = "sdh.checkpoint.";
-
-    public Checkpoint {
+    /**
+     * Checks that the fields fit together.
+     *
+     * @param fileId       the file's ID
+     * @param fingerprint  the file's keyed fingerprint
+     * @param format       the file's format
+     * @param fileSize     the file's size
+     * @param state        where the file is in its life
+     * @param resumeAt     where splitting continues
+     * @param nextSeq      the next section's seq
+     * @param committedSeq the last committed seq
+     * @param publishedSeq the last acknowledged seq
+     * @param startedAt    when the file was started
+     * @param failure      why it is failing; null otherwise
+     * @param restarts     restarts without progress
+     * @throws NullPointerException     if a required field is null
+     * @throws IllegalArgumentException if the sequence numbers don't fit,
+     *                                  failure details are set in the wrong
+     *                                  state, or restarts is negative
+     */
+    public Checkpoint
+    {
         Objects.requireNonNull(fileId);
         Objects.requireNonNull(fingerprint);
         Objects.requireNonNull(format);
         Objects.requireNonNull(state);
         Objects.requireNonNull(resumeAt);
         Objects.requireNonNull(startedAt);
-        if (committedSeq != nextSeq - 1 || publishedSeq > committedSeq || publishedSeq < -1) {
-            throw new IllegalArgumentException("Inconsistent checkpoint sequence numbers");
+        if (committedSeq != nextSeq - 1 || publishedSeq > committedSeq
+                || publishedSeq < -1)
+        {
+            throw new IllegalArgumentException(
+                    "Inconsistent checkpoint sequence numbers");
         }
-        if ((failure != null) != (state == State.FAILING || state == State.FAILED)) {
-            throw new IllegalArgumentException("Failure details belong to FAILING and FAILED only");
+        if ((failure != null) != (state == State.FAILING
+                || state == State.FAILED))
+        {
+            throw new IllegalArgumentException(
+                    "Failure details belong to FAILING and FAILED only");
         }
-        if (restarts < 0) {
+        if (restarts < 0)
+        {
             throw new IllegalArgumentException("Negative restart count");
         }
     }
 
-    /** A new file, nothing split yet. */
-    public static Checkpoint start(UUID fileId, String fingerprint, String format, long fileSize, Instant startedAt) {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, State.SPLITTING, ResumePoint.START, 0, -1, -1,
-                startedAt, null, 0);
+    /**
+     * A new file, with nothing split yet.
+     *
+     * @param fileId      the file's ID
+     * @param fingerprint its keyed fingerprint
+     * @param format      its format
+     * @param fileSize    its size
+     * @param startedAt   when it was started
+     * @return the checkpoint, {@code SPLITTING} from the start
+     */
+    public static Checkpoint start(UUID fileId, String fingerprint,
+            String format, long fileSize, Instant startedAt)
+    {
+        return new Checkpoint(fileId, fingerprint, format, fileSize,
+                State.SPLITTING, ResumePoint.START, 0, -1, -1, startedAt,
+                null, 0);
     }
 
-    public static String propertyKey(String connectorId) {
+    /**
+     * The table property a connector's checkpoint is kept in.
+     *
+     * @param connectorId the connector's ID
+     * @return the property's name
+     */
+    public static String propertyKey(String connectorId)
+    {
         return PROPERTY_PREFIX + connectorId;
     }
 
-    /** After committing a batch whose last section is {@code lastSeq}. Progress, so the restart count is reset. */
-    public Checkpoint committed(ResumePoint resume, long lastSeq, long published) {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, state, resume, lastSeq + 1, lastSeq,
+    /**
+     * After committing a batch. That is progress, so the restart count is
+     * reset.
+     *
+     * @param resume    where splitting continues
+     * @param lastSeq   the batch's last section
+     * @param published the last seq acknowledged so far
+     * @return the new checkpoint
+     */
+    public Checkpoint committed(ResumePoint resume, long lastSeq,
+            long published)
+    {
+        return new Checkpoint(fileId, fingerprint, format, fileSize, state,
+                resume, lastSeq + 1, lastSeq,
                 Math.max(publishedSeq, published), startedAt, failure, 0);
     }
 
-    /** Splitting is resuming from this checkpoint: one more restart without progress. */
-    public Checkpoint resumed() {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, state, resumeAt, nextSeq, committedSeq,
-                publishedSeq, startedAt, failure, restarts + 1);
+    /**
+     * Splitting is resuming from this checkpoint: one more restart without
+     * progress.
+     *
+     * @return the new checkpoint
+     */
+    public Checkpoint resumed()
+    {
+        return new Checkpoint(fileId, fingerprint, format, fileSize, state,
+                resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
+                failure, restarts + 1);
     }
 
-    public Checkpoint published(long published) {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, state, resumeAt, nextSeq, committedSeq,
-                Math.max(publishedSeq, published), startedAt, failure, restarts);
+    /**
+     * Records acknowledgements. The published seq never goes back.
+     *
+     * @param published the last seq acknowledged
+     * @return the new checkpoint
+     */
+    public Checkpoint published(long published)
+    {
+        return new Checkpoint(fileId, fingerprint, format, fileSize, state,
+                resumeAt, nextSeq, committedSeq,
+                Math.max(publishedSeq, published), startedAt, failure,
+                restarts);
     }
 
-    /** Moves to a state without failure details (SPLITTING, ARCHIVING, COMPLETED, ABANDONED). */
-    public Checkpoint withState(State s) {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, s, resumeAt, nextSeq, committedSeq,
-                publishedSeq, startedAt, null, restarts);
+    /**
+     * Moves to a state without failure details.
+     *
+     * @param next {@code SPLITTING}, {@code ARCHIVING}, {@code COMPLETED}
+     *             or {@code ABANDONED}
+     * @return the new checkpoint
+     */
+    public Checkpoint withState(State next)
+    {
+        return new Checkpoint(fileId, fingerprint, format, fileSize, next,
+                resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
+                null, restarts);
     }
 
-    public Checkpoint failing(Failure f) {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, State.FAILING, resumeAt, nextSeq, committedSeq,
-                publishedSeq, startedAt, f, restarts);
+    /**
+     * Starts failing the file.
+     *
+     * @param why why it fails
+     * @return the new checkpoint, {@code FAILING}
+     */
+    public Checkpoint failing(Failure why)
+    {
+        return new Checkpoint(fileId, fingerprint, format, fileSize,
+                State.FAILING, resumeAt, nextSeq, committedSeq, publishedSeq,
+                startedAt, why, restarts);
     }
 
-    public Checkpoint failed() {
-        if (failure == null) {
+    /**
+     * Finishes failing the file.
+     *
+     * @return the new checkpoint, {@code FAILED}
+     * @throws IllegalStateException if it isn't failing
+     */
+    public Checkpoint failed()
+    {
+        if (failure == null)
+        {
             throw new IllegalStateException("Not failing");
         }
-        return new Checkpoint(fileId, fingerprint, format, fileSize, State.FAILED, resumeAt, nextSeq, committedSeq,
-                publishedSeq, startedAt, failure, restarts);
+        return new Checkpoint(fileId, fingerprint, format, fileSize,
+                State.FAILED, resumeAt, nextSeq, committedSeq, publishedSeq,
+                startedAt, failure, restarts);
     }
 
-    public long sectionCount() {
+    /**
+     * How many sections are committed.
+     *
+     * @return the count
+     */
+    public long sectionCount()
+    {
         return committedSeq + 1;
     }
 }

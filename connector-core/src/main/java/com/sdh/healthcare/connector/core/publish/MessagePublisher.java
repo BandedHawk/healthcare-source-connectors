@@ -4,7 +4,6 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-
 package com.sdh.healthcare.connector.core.publish;
 
 import java.util.concurrent.CompletableFuture;
@@ -12,7 +11,6 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Sends messages to the configured broker (design §10.3). Implemented by broker
  * adapters.
- *
  * <p>
  * The pipeline calls {@link #publish} in seq order and waits for every future.
  * A future completes only when the broker has acknowledged the message durably
@@ -27,5 +25,12 @@ import java.util.concurrent.CompletableFuture;
 public interface MessagePublisher
 {
 
+    /**
+     * Sends a message.
+     *
+     * @param message the message
+     * @return completes once the broker has acknowledged it durably, or
+     *         completes exceptionally if it couldn't be sent
+     */
     CompletableFuture<Void> publish(OutboundMessage message);
 }

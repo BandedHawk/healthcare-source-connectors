@@ -94,7 +94,11 @@ class LandedItemSourceTest
                                 (int) offset, bytes.length));
     }
 
-    /** Reads at any position, across chunks and windows, in any order. */
+    /**
+     * Reads at any position, across chunks and windows, in any order.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void readsAnywhereInTheItem() throws Exception
     {
@@ -122,7 +126,11 @@ class LandedItemSourceTest
         }
     }
 
-    /** An empty item has no chunks to read. */
+    /**
+     * An empty item has no chunks to read.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void readsAnEmptyItem() throws Exception
     {

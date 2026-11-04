@@ -26,8 +26,9 @@ import java.util.ServiceLoader;
  * converters.
  * <p>
  * Converters are found the same way as splitters, with Java's
- * {@link ServiceLoader}: each jar lists its converters in
- * {@code META-INF/services/com.sdh.healthcare.connector.core.convert.SectionConverter}.
+ * {@link ServiceLoader}: each jar lists its converters in the
+ * {@code META-INF/services} file named after {@link SectionConverter}'s
+ * full class name.
  * So a plugin jar can add a converter for a new format just by being on the
  * class path, without any change here. The connector's own jar lists four:
  * {@code csv}, {@code ccda}, {@code x12} and {@code edifact}.
