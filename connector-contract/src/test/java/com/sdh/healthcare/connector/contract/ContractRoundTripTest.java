@@ -136,7 +136,30 @@ class ContractRoundTripTest
                 new ConnectorMessage.ItemLanded(fileId, "claims-sftp", "file",
                         999, "digest", java.time.Instant.EPOCH,
                         new StorageRef("cat", "sdh_landing", "landed_items",
-                                LocalDate.of(2026, 11, 3), 43L, "kek-2"))))
+                                LocalDate.of(2026, 11, 3), 43L, "kek-2")),
+                new ConnectorMessage.ItemLanded(fileId, "claims-sftp", "file",
+                        999, "digest", java.time.Instant.EPOCH,
+                        new StorageRef("cat", "sdh_landing", "landed_items",
+                                LocalDate.of(2026, 11, 3), 43L, "kek-2"),
+                        UUID.randomUUID()),
+                new ConnectorMessage.ItemReceived(fileId, "claims", "file",
+                        999, "ab12", java.time.Instant.EPOCH,
+                        "/out/claims.csv", UUID.randomUUID(), null),
+                new ConnectorMessage.ItemReceived(fileId, "adt",
+                        "message-batch", 99, null, java.time.Instant.EPOCH,
+                        null, null, java.util.Arrays.asList("m-1", null)),
+                new ConnectorMessage.ItemResult(fileId, "claims",
+                        ConnectorMessage.ItemResult.COMPLETED, 3, 1, null, 1,
+                        1, 1, java.util.List.of(new ConnectorMessage.Problem(
+                                "CONVERT_CSV_FIELD_COUNT", "convert", 2, 50,
+                                new SourcePosition(4, 1), -1, null)),
+                        "/out/claims.csv", null, java.time.Instant.EPOCH),
+                new ConnectorMessage.ItemResult(fileId, "adt",
+                        ConnectorMessage.ItemResult.FAILED, 0, 0,
+                        new ConnectorMessage.Problem("PARSE_JSON_MALFORMED",
+                                "split", -1, 7, null, 2, "m-3"),
+                        3, 2, 2, java.util.List.of(), null,
+                        UUID.randomUUID(), java.time.Instant.EPOCH)))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
                     .isEqualTo(message);
@@ -144,6 +167,11 @@ class ContractRoundTripTest
         assertThat(PayloadCodec.toJson(new SectionStored("ID2", fileId, 1, 30,
                 20, "fhir", "application/fhir+json", null, 20, 1, ref)))
                 .doesNotContainKey("mapping");
+        assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemReceived(
+                fileId, "claims", "push", 1, null, java.time.Instant.EPOCH,
+                null, null, null)))
+                .doesNotContainKeys("sha256", "producerRef", "replaces",
+                        "messageIds");
     }
 
     /**

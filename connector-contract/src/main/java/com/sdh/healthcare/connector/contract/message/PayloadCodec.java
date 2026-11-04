@@ -6,19 +6,26 @@
  */
 package com.sdh.healthcare.connector.contract.message;
 
+import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReceived;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.position.SectionOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -112,6 +119,42 @@ public final class PayloadCodec
                 payload.put("itemDigest", landed.itemDigest());
                 payload.put("landedAt", landed.landedAt().toString());
                 payload.put("storage", storageFields(landed.storage()));
+                putIfSet(payload, "replaces", landed.replaces());
+            }
+            case ItemReceived received ->
+            {
+                payload.put("intake", received.intake());
+                payload.put("kind", received.kind());
+                payload.put("size", received.size());
+                putIfSet(payload, "sha256", received.sha256());
+                payload.put("landedAt", received.landedAt().toString());
+                putIfSet(payload, "producerRef", received.producerRef());
+                putIfSet(payload, "replaces", received.replaces());
+                putIfSet(payload, "messageIds", received.messageIds());
+            }
+            case ItemResult result ->
+            {
+                payload.put("intake", result.intake());
+                payload.put("status", result.status());
+                payload.put("sectionCount", result.sectionCount());
+                payload.put("failedSectionCount",
+                        result.failedSectionCount());
+                if (result.failure() != null)
+                {
+                    payload.put("failure", problemFields(result.failure()));
+                }
+                payload.put("problemCount", result.problemCount());
+                payload.put("part", result.part());
+                payload.put("partCount", result.partCount());
+                List<Map<String, Object>> problems = new ArrayList<>();
+                for (Problem problem : result.problems())
+                {
+                    problems.add(problemFields(problem));
+                }
+                payload.put("problems", problems);
+                putIfSet(payload, "producerRef", result.producerRef());
+                putIfSet(payload, "replaces", result.replaces());
+                payload.put("finishedAt", result.finishedAt().toString());
             }
         }
         return payload;
@@ -190,7 +233,34 @@ public final class PayloadCodec
                             number(payload, "size"),
                             text(payload, "itemDigest"),
                             Instant.parse(text(payload, "landedAt")),
-                            storage(payload));
+                            storage(payload),
+                            uuid(payload, "replaces"));
+                    case ITEM_RECEIVED -> new ItemReceived(
+                            fileId,
+                            text(payload, "intake"),
+                            text(payload, "kind"),
+                            number(payload, "size"),
+                            (String) payload.get("sha256"),
+                            Instant.parse(text(payload, "landedAt")),
+                            (String) payload.get("producerRef"),
+                            uuid(payload, "replaces"),
+                            texts(payload, "messageIds"));
+                    case ITEM_RESULT -> new ItemResult(
+                            fileId,
+                            text(payload, "intake"),
+                            text(payload, "status"),
+                            number(payload, "sectionCount"),
+                            number(payload, "failedSectionCount"),
+                            payload.get("failure") instanceof Map<?, ?> failure
+                                    ? problem((Map<String, Object>) failure)
+                                    : null,
+                            number(payload, "problemCount"),
+                            Math.toIntExact(number(payload, "part")),
+                            Math.toIntExact(number(payload, "partCount")),
+                            problems(payload),
+                            (String) payload.get("producerRef"),
+                            uuid(payload, "replaces"),
+                            Instant.parse(text(payload, "finishedAt")));
                 };
         if (!message.messageId().equals(payload.get("messageId")))
         {
@@ -198,6 +268,123 @@ public final class PayloadCodec
                     "messageId does not match payload");
         }
         return message;
+    }
+
+    /**
+     * Puts a field only if it has a value, so a field left out isn't
+     * written as null.
+     *
+     * @param payload the payload
+     * @param key     the field's name
+     * @param value   its value; a UUID is written as text
+     */
+    private static void putIfSet(Map<String, Object> payload, String key,
+            Object value)
+    {
+        if (value != null)
+        {
+            payload.put(key, value instanceof UUID id ? id.toString()
+                    : value);
+        }
+    }
+
+    /**
+     * How many bytes a problem takes in a payload's JSON, so a sender can
+     * keep messages within a broker's size limit.
+     *
+     * @param problem the problem
+     * @return its encoded size, in bytes of UTF-8
+     */
+    public static int encodedSize(Problem problem)
+    {
+        return JSONObjectUtils.toJSONString(problemFields(problem))
+                .getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    /**
+     * The JSON fields of a problem.
+     *
+     * @param problem the problem
+     * @return its fields
+     */
+    private static Map<String, Object> problemFields(Problem problem)
+    {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("code", problem.code());
+        fields.put("stage", problem.stage());
+        fields.put("seq", problem.seq());
+        fields.put("offset", problem.offset());
+        if (problem.at() != null)
+        {
+            fields.put("line", problem.at().line());
+            fields.put("column", problem.at().column());
+        }
+        if (problem.message() >= 0)
+        {
+            fields.put("message", problem.message());
+            putIfSet(fields, "messageRef", problem.messageRef());
+        }
+        return fields;
+    }
+
+    /**
+     * Reads a problem.
+     *
+     * @param fields its fields
+     * @return the problem
+     */
+    private static Problem problem(Map<String, Object> fields)
+    {
+        return new Problem(text(fields, "code"), text(fields, "stage"),
+                number(fields, "seq"), number(fields, "offset"),
+                position(fields, "line", "column"),
+                fields.get("message") instanceof Number message
+                        ? Math.toIntExact(message.longValue()) : -1,
+                (String) fields.get("messageRef"));
+    }
+
+    /**
+     * Reads the payload's list of problems.
+     *
+     * @param payload the payload's fields
+     * @return the problems
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Problem> problems(Map<String, Object> payload)
+    {
+        List<Problem> problems = new ArrayList<>();
+        for (Object entry : (List<Object>) required(payload, "problems"))
+        {
+            problems.add(problem((Map<String, Object>) entry));
+        }
+        return problems;
+    }
+
+    /**
+     * Reads an optional UUID field.
+     *
+     * @param fields the fields
+     * @param key    the field's name
+     * @return the UUID; null if the field is missing
+     */
+    private static UUID uuid(Map<String, Object> fields, String key)
+    {
+        Object value = fields.get(key);
+        return value == null ? null : UUID.fromString((String) value);
+    }
+
+    /**
+     * Reads an optional list of texts, which may hold nulls.
+     *
+     * @param fields the fields
+     * @param key    the field's name
+     * @return the texts; null if the field is missing
+     */
+    @SuppressWarnings("unchecked")
+    private static List<String> texts(Map<String, Object> fields, String key)
+    {
+        Object value = fields.get(key);
+        return value == null ? null : (List<String>) value;
     }
 
     /**

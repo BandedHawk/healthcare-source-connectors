@@ -132,6 +132,20 @@ public final class LandingTables
      */
     public static final String RECORD_KEYS = "record_keys";
 
+    /**
+     * The broker ID of each message of a message batch, in order, as a JSON
+     * array encrypted with the item's data key (seq -2); null for other
+     * items. They are the producer's own references, so they go back to
+     * the producer in its results (design §5.3.8), and may be PHI.
+     */
+    public static final String RECORD_REFS_ENC = "record_refs_enc";
+
+    /**
+     * The seq the broker IDs of {@value #RECORD_REFS_ENC} are encrypted as;
+     * the original name is -1, and chunks count up from 0.
+     */
+    public static final long RECORD_REFS_SEQ = -2;
+
     /** The columns of {@value #LANDED_ITEMS}. */
     public static final Schema LANDED_ITEMS_SCHEMA = new Schema(
             required(1, ITEM_ID, Types.UUIDType.get()),
@@ -164,7 +178,9 @@ public final class LandingTables
                     "where each message of a batch starts"),
             optional(26, RECORD_KEYS,
                     Types.ListType.ofOptional(27, Types.StringType.get()),
-                    "keyed hashes of the messages' broker IDs"));
+                    "keyed hashes of the messages' broker IDs"),
+            optional(28, RECORD_REFS_ENC, Types.BinaryType.get(),
+                    "encrypted broker IDs of the messages of a batch"));
 
     /** The columns of {@value #LEDGER}. */
     public static final Schema LEDGER_SCHEMA = new Schema(

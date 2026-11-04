@@ -43,6 +43,7 @@ import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
+import com.sdh.healthcare.connector.core.storage.CommittedSections;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.ByteArrayOutputStream;
@@ -299,6 +300,14 @@ class IngestPipelineTest
         assertThat(dataRows(table, result.fileId()))
                 .extracting(row -> row.getField(ERROR_LINE))
                 .containsExactly(null, 4L, 5L, null);
+
+        // The failed sections, as the producer's result lists them.
+        assertThat(pipeline.failedSections(result.fileId())).containsExactly(
+                new CommittedSections.Failed(1, mismatch.sourceOffset(),
+                        "CONVERT_CSV_FIELD_COUNT", mismatch.errorAt()),
+                new CommittedSections.Failed(2, latinAt,
+                        "CONVERT_INVALID_ENCODING",
+                        new SourcePosition(5, 6)));
     }
 
     /**

@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.landing.runtime.LandingRuntime;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.http.CacheControl;
@@ -63,6 +64,18 @@ public class PushController
 
     /** The header carrying the sender's key for a push. */
     public static final String IDEMPOTENCY_KEY = "Idempotency-Key";
+
+    /**
+     * The header carrying the producer's own reference for a push, sent
+     * back in its receipt and result (design §5.3.8).
+     */
+    public static final String CORRELATION_ID = "X-Correlation-Id";
+
+    /**
+     * The header naming the earlier item a push replaces, by its item ID.
+     * It is recorded as a link only: both items are kept in full.
+     */
+    public static final String REPLACES = "Replaces";
 
     /** What an intake's name may hold, so its path needs no escaping. */
     private static final Pattern INTAKE_NAME =
@@ -144,19 +157,37 @@ public class PushController
             return answer(HttpStatus.UNSUPPORTED_MEDIA_TYPE, null);
         }
         String key = request.getHeader(IDEMPOTENCY_KEY);
-        if (key != null && !KEY.matcher(key).matches())
+        String correlationId = request.getHeader(CORRELATION_ID);
+        if ((key != null && !KEY.matcher(key).matches())
+                || (correlationId != null
+                        && !KEY.matcher(correlationId).matches()))
         {
             return answer(HttpStatus.BAD_REQUEST, null);
         }
+        UUID replaces = null;
+        if (request.getHeader(REPLACES) != null)
+        {
+            try
+            {
+                replaces = UUID.fromString(request.getHeader(REPLACES)
+                        .trim());
+            }
+            catch (IllegalArgumentException notAnId)
+            {
+                return answer(HttpStatus.BAD_REQUEST, null);
+            }
+        }
         PushService.Result result = service.receive(new PushService.Push(
-                sender, key, request.getContentLengthLong()),
-                request.getInputStream());
+                sender, key, request.getContentLengthLong(), correlationId,
+                replaces), request.getInputStream());
         return switch (result.status())
         {
             case LANDED, REPLAYED -> answer(HttpStatus.ACCEPTED,
                     result.receipt().toJson());
             case TOO_LARGE -> answer(HttpStatus.CONTENT_TOO_LARGE, null);
             case BROKEN -> answer(HttpStatus.BAD_REQUEST, null);
+            case UNKNOWN_REPLACES -> answer(HttpStatus.BAD_REQUEST,
+                    "{\"error\":\"unknown-replaces\"}");
             case BUSY, UNAVAILABLE -> ResponseEntity
                     .status(HttpStatus.SERVICE_UNAVAILABLE)
                     .cacheControl(CacheControl.noStore())

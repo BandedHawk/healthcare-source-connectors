@@ -55,6 +55,13 @@ public record SourceSettings(Path path, Access access, After after,
     /** What a marker file's name adds to its item's name. */
     public static final String MARKER_SUFFIX = ".done";
 
+    /**
+     * What a replaces marker's name adds to its item's name: a file
+     * holding the ID of the earlier item the item replaces, which is
+     * recorded as a link only (design §5.3.8). It is never an item.
+     */
+    public static final String REPLACES_SUFFIX = ".sdh-replaces";
+
     /** What kind of source it is. */
     public enum Type
     {

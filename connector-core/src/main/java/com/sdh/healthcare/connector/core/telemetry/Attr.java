@@ -99,7 +99,10 @@ public enum Attr
      * An Iceberg snapshot's ID, a number: of a table an intake reads
      * (design §5.3.18), never its data or file paths.
      */
-    SNAPSHOT_ID("sdh.snapshot_id");
+    SNAPSHOT_ID("sdh.snapshot_id"),
+
+    /** A message's type, such as {@code item.result}. */
+    MESSAGE_TYPE("sdh.message_type");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

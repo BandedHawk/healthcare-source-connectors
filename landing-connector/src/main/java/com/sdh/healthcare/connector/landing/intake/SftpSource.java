@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -220,11 +221,22 @@ public final class SftpSource implements RemoteSource
                     sftp.rm(marker);
                 }
             }
+            String replaces = path + SourceSettings.REPLACES_SUFFIX;
+            if (attributes(sftp, replaces) != null)
+            {
+                sftp.rm(replaces);
+            }
         }
         catch (SftpException failure)
         {
             throw failed(failure);
         }
+    }
+
+    @Override
+    public Optional<ListedItem> replacesMarker(ListedItem item)
+    {
+        return listing.replacesMarker(item.ref());
     }
 
     @Override

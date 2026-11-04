@@ -68,6 +68,15 @@ sdh:
     type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
     uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"
     artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
+  results:                        # final results for the producer; off by default
+    enabled: false
+    queue:                        # the producer's own queue, never the downstream one
+      type: kafka
+      uri: "kafka:sdh.results.claims?brokers=kafka:9093&securityProtocol=SSL"
+    recipient:                    # the producer's public key; results are sealed to it
+      kid: claims-producer-2026
+      pem: /run/secrets/claims-producer.pub.pem
+      sha256: "<hex SHA-256 of the key's DER form>"
   retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
   telemetry:                      # unset endpoint = no export
     otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env

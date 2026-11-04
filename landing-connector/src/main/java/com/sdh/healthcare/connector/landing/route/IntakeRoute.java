@@ -82,6 +82,7 @@ public final class IntakeRoute extends RouteBuilder
                 .append("&exclude=^\\..*")
                 .append("&antInclude=").append(settings.include());
         List<String> excluded = new ArrayList<>();
+        excluded.add("**/*" + SourceSettings.REPLACES_SUFFIX);
         if (settings.marker())
         {
             uri.append("&doneFileName=${file:name}")

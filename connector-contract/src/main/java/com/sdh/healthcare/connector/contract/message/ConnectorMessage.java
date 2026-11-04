@@ -9,20 +9,24 @@ package com.sdh.healthcare.connector.contract.message;
 import com.sdh.healthcare.connector.contract.position.SectionOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /**
  * A message a connector publishes (design §10.1): a file was started, a
  * section is in storage, or a file was completed. A landing node publishes
- * one more, to its splitter only: an item was landed (design §5.3.6). The
- * payload is always sealed: signed, then encrypted.
+ * one more, to its splitter only: an item was landed (design §5.3.6). Two
+ * go to an intake's producer only, on its results queue (design §5.3.8):
+ * an item was received, and what came of it. The payload is always
+ * sealed: signed, then encrypted.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         ConnectorMessage.SectionInStorage, ConnectorMessage.FileCompleted,
-        ConnectorMessage.ItemLanded
+        ConnectorMessage.ItemLanded, ConnectorMessage.ItemReceived,
+        ConnectorMessage.ItemResult
 {
 
     /**
@@ -409,11 +413,33 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * @param landedAt   when its landing was committed
      * @param storage    where it is stored; the date is the day it was
      *                   landed, the table's partition
+     * @param replaces   the earlier item its producer said it replaces, a
+     *                   link only: both are kept in full (design §5.3.8);
+     *                   null if none, or before contract 2.3
      */
     record ItemLanded(UUID fileId, String intake, String kind, long size,
-            String itemDigest, Instant landedAt, StorageRef storage)
+            String itemDigest, Instant landedAt, StorageRef storage,
+            UUID replaces)
             implements ConnectorMessage
     {
+
+        /**
+         * An item that replaces nothing.
+         *
+         * @param fileId     the item's id
+         * @param intake     the intake it came in through
+         * @param kind       what it is
+         * @param size       its size, in bytes
+         * @param itemDigest its keyed digest
+         * @param landedAt   when its landing was committed
+         * @param storage    where it is stored
+         */
+        public ItemLanded(UUID fileId, String intake, String kind, long size,
+                String itemDigest, Instant landedAt, StorageRef storage)
+        {
+            this(fileId, intake, kind, size, itemDigest, landedAt, storage,
+                    null);
+        }
 
         /**
          * {@inheritDoc}
@@ -436,6 +462,185 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         {
             return "il-" + fileId;
         }
+    }
+
+    /**
+     * An item was received and landed: the receipt a producer gets on its
+     * results queue (design §5.3.8). It is sealed to the producer's key, as
+     * it carries the producer's own reference, which can be PHI.
+     *
+     * @param fileId      the item's id, which every later message about
+     *                    it carries
+     * @param intake      the intake it came in through
+     * @param kind        what it is, such as {@code file} or
+     *                    {@code message-batch}
+     * @param size        its size, in bytes
+     * @param sha256      the SHA-256 of its bytes as received, in
+     *                    lower-case hex; null if it was resumed part-way
+     *                    after a restart
+     * @param landedAt    when its landing was committed
+     * @param producerRef the producer's own reference: the path or key
+     *                    for a file or object, the data file's location
+     *                    for a table, the {@code X-Correlation-Id} of a
+     *                    push; null if there is none
+     * @param replaces    the earlier item the producer said this one
+     *                    replaces, recorded as a link; null if none
+     * @param messageIds  for a message batch, each message's broker ID in
+     *                    order (null for a message without one); otherwise
+     *                    null
+     */
+    record ItemReceived(UUID fileId, String intake, String kind, long size,
+            String sha256, Instant landedAt, String producerRef,
+            UUID replaces, List<String> messageIds)
+            implements ConnectorMessage
+    {
+
+        /**
+         * Copies the message IDs, which may hold nulls.
+         *
+         * @param fileId      the item's id
+         * @param intake      the intake
+         * @param kind        what it is
+         * @param size        its size
+         * @param sha256      its SHA-256, or null
+         * @param landedAt    when it was landed
+         * @param producerRef the producer's reference, or null
+         * @param replaces    the item it replaces, or null
+         * @param messageIds  the message IDs, or null
+         */
+        public ItemReceived
+        {
+            messageIds = messageIds == null ? null
+                    : java.util.Collections.unmodifiableList(
+                            new java.util.ArrayList<>(messageIds));
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#ITEM_RECEIVED}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.ITEM_RECEIVED;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "rc-" and the item id
+         */
+        @Override
+        public String messageId()
+        {
+            return "rc-" + fileId;
+        }
+    }
+
+    /**
+     * What came of an item: the producer's final result, on its results
+     * queue (design §5.3.8). A long list of problems is sent in parts; each
+     * part carries everything but its share of the problems, so any one of
+     * them says how the item ended.
+     *
+     * @param fileId             the item's id
+     * @param intake             the intake it came in through
+     * @param status             {@code completed} (every section stored,
+     *                           some perhaps failed) or {@code failed} (the
+     *                           item couldn't be split)
+     * @param sectionCount       the sections stored, failed ones included
+     * @param failedSectionCount the sections that failed conversion
+     * @param failure            why the item failed; null if it completed
+     * @param problemCount       how many problems there are in all, across
+     *                           every part
+     * @param part               this part's number, from 1
+     * @param partCount          how many parts there are
+     * @param problems           this part's problems, in section order
+     * @param producerRef        the producer's own reference, as in
+     *                           {@link ItemReceived}; null if none
+     * @param replaces           the item it replaces; null if none
+     * @param finishedAt         when the item was finished
+     */
+    record ItemResult(UUID fileId, String intake, String status,
+            long sectionCount, long failedSectionCount, Problem failure,
+            long problemCount, int part, int partCount,
+            List<Problem> problems, String producerRef, UUID replaces,
+            Instant finishedAt)
+            implements ConnectorMessage
+    {
+
+        /** The status of an item whose sections were all stored. */
+        public static final String COMPLETED = "completed";
+
+        /** The status of an item that couldn't be split. */
+        public static final String FAILED = "failed";
+
+        /**
+         * Copies the problems.
+         *
+         * @param fileId             the item's id
+         * @param intake             the intake
+         * @param status             completed or failed
+         * @param sectionCount       the sections stored
+         * @param failedSectionCount the sections that failed
+         * @param failure            why it failed, or null
+         * @param problemCount       the problems in all
+         * @param part               this part, from 1
+         * @param partCount          the parts
+         * @param problems           this part's problems
+         * @param producerRef        the producer's reference, or null
+         * @param replaces           the item it replaces, or null
+         * @param finishedAt         when it was finished
+         */
+        public ItemResult
+        {
+            problems = List.copyOf(problems);
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#ITEM_RESULT}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.ITEM_RESULT;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "rs-", the item id, "-" and the part
+         */
+        @Override
+        public String messageId()
+        {
+            return "rs-" + fileId + "-" + part;
+        }
+    }
+
+    /**
+     * A problem found in an item, with where it is, so the producer can
+     * find it in their own data. It holds no content.
+     *
+     * @param code       the error code, such as
+     *                   {@code CONVERT_CSV_FIELD_COUNT}
+     * @param stage      where it was found: {@code split} or
+     *                   {@code convert} for the splitter, {@code landing}
+     *                   if the item couldn't be read
+     * @param seq        the section's number in the item, from 0; -1 for a
+     *                   problem with the item as a whole
+     * @param offset     the byte offset in the item where it is
+     * @param at         the line and column in the item; null if unknown
+     * @param message    for a message batch, the message's index in the
+     *                   batch, from 0; otherwise -1
+     * @param messageRef that message's broker ID; null if none
+     */
+    record Problem(String code, String stage, long seq, long offset,
+            SourcePosition at, int message, String messageRef)
+    {
     }
 
     /**

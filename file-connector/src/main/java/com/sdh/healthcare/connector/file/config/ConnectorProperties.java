@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings.Compaction;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Crypto;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Lease;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Queue;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings.Results;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Retry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Telemetry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Orphans;
@@ -44,6 +45,8 @@ import org.springframework.util.unit.DataSize;
  * @param telemetry      the telemetry export
  * @param encryptWorkers hash, encrypt and seal threads; 0 for one per CPU
  *                       core
+ * @param results        final results for the intake's producer (design
+ *                       §5.3.8)
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -59,7 +62,8 @@ public record ConnectorProperties(
         @DefaultValue Retry retry,
         @DefaultValue Maintenance maintenance,
         @DefaultValue Telemetry telemetry,
-        @DefaultValue("0") int encryptWorkers)
+        @DefaultValue("0") int encryptWorkers,
+        @DefaultValue Results results)
         implements ConnectorSettings
 {
 

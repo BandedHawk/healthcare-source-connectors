@@ -76,6 +76,12 @@ public final class PushService implements LandingIntake
         /** Another push held the intake for longer than the wait. */
         BUSY,
 
+        /**
+         * It named, in {@code Replaces}, an item this intake didn't land;
+         * nothing was landed, and the producer can send it again.
+         */
+        UNKNOWN_REPLACES,
+
         /** Its body was larger than the limit. */
         TOO_LARGE,
 
@@ -114,10 +120,30 @@ public final class PushService implements LandingIntake
      * @param sender         who sent it, from their authentication
      * @param idempotencyKey the sender's key for it; null if none
      * @param contentLength  the stated length of its body; -1 if not stated
+     * @param correlationId  the producer's own reference for it, from
+     *                       {@code X-Correlation-Id}, kept encrypted and
+     *                       sent back in its receipt and result; null if
+     *                       none
+     * @param replaces       the earlier item it replaces, from
+     *                       {@code Replaces}, recorded as a link; null if
+     *                       none
      */
     public record Push(String sender, String idempotencyKey,
-            long contentLength)
+            long contentLength, String correlationId, UUID replaces)
     {
+
+        /**
+         * A push without a correlation ID or a replaced item.
+         *
+         * @param sender         who sent it
+         * @param idempotencyKey the sender's key for it; null if none
+         * @param contentLength  the stated length of its body; -1 if not
+         *                       stated
+         */
+        public Push(String sender, String idempotencyKey, long contentLength)
+        {
+            this(sender, idempotencyKey, contentLength, null, null);
+        }
     }
 
     /** The intake's name. */
@@ -279,6 +305,13 @@ public final class PushService implements LandingIntake
                 ref = SourceRef.of(storage.ids(), intake,
                         "push\u0000item\u0000" + itemId, -1, "");
             }
+            if (push.replaces() != null
+                    && !storage.ledger().contains(intake, push.replaces()))
+            {
+                Telemetry.get().auditWarn("push.unknown_replaces",
+                        Fields.of(Attr.INTAKE, intake));
+                return Result.of(Status.UNKNOWN_REPLACES);
+            }
         }
         catch (Throwable failure)
         {
@@ -291,7 +324,8 @@ public final class PushService implements LandingIntake
         try
         {
             landed = storage.lander().land(
-                    new NewItem(itemId, ItemKind.PUSH, ref, null, null),
+                    new NewItem(itemId, ItemKind.PUSH, ref,
+                            push.correlationId(), push.replaces()),
                     offset ->
                     {
                         if (offset != 0)

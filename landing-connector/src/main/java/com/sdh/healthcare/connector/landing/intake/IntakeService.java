@@ -23,6 +23,9 @@ import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
@@ -63,6 +66,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class IntakeService implements LandingIntake
 {
+
+    /** The most a replaces marker is read: an item ID and some spaces. */
+    private static final int MAX_REPLACES_BYTES = 256;
 
     /** The longest wait after repeated errors. */
     private static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
@@ -243,7 +249,7 @@ public final class IntakeService implements LandingIntake
             {
                 unfinishedListed = true;
                 land(new NewItem(unfinished.itemId(), unfinished.kind(),
-                        ref, item.ref(), null), item);
+                        ref, item.ref(), replaces(item)), item);
             }
             return;
         }
@@ -256,8 +262,59 @@ public final class IntakeService implements LandingIntake
         if (readiness.ready(item))
         {
             land(new NewItem(UuidV7.next(clock.millis()), source.kind(),
-                    ref, item.ref(), null), item);
+                    ref, item.ref(), replaces(item)), item);
         }
+    }
+
+    /**
+     * The earlier item an item's replaces marker names, if it is one this
+     * intake landed (design §5.3.8). The link is only recorded; nothing is
+     * replaced. A marker that is malformed or names another item is
+     * reported and left out, and the item is landed all the same, so
+     * nothing is lost; a marker that can't be read is tried again.
+     *
+     * @param item the item about to be landed
+     * @return the earlier item; null if none
+     * @throws IOException if the source can't be read
+     */
+    private UUID replaces(ListedItem item) throws IOException
+    {
+        Optional<ListedItem> marker = source.replacesMarker(item);
+        if (marker.isEmpty())
+        {
+            return null;
+        }
+        byte[] text;
+        try (InputStream input = source.open(marker.get(), 0))
+        {
+            text = input.readNBytes(MAX_REPLACES_BYTES + 1);
+        }
+        catch (ItemLander.ItemChangedException gone)
+        {
+            return null;
+        }
+        String reason;
+        try
+        {
+            if (text.length > MAX_REPLACES_BYTES)
+            {
+                throw new IllegalArgumentException("Marker too long");
+            }
+            UUID earlier = UUID.fromString(new String(text,
+                    StandardCharsets.US_ASCII).strip());
+            if (storage.ledger().contains(intake, earlier))
+            {
+                return earlier;
+            }
+            reason = "UNKNOWN";
+        }
+        catch (IllegalArgumentException malformed)
+        {
+            reason = "MALFORMED";
+        }
+        Telemetry.get().auditWarn("item.replaces_ignored",
+                Fields.of(Attr.INTAKE, intake).with(Attr.REASON, reason));
+        return null;
     }
 
     /**

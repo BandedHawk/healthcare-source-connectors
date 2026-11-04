@@ -79,6 +79,13 @@ variables, never in the file:
 
 Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` becomes `SDH_LEASE_JDBC_URL`) or as an argument (`--sdh.lease.jdbc.url=…`).
 
+**Producer feedback** (`sdh.results`, off by default). With the same settings as the intake's landing node, the
+connector sends each item's final result to the producer's own queue, sealed to the producer's public key: whether
+it completed or failed, and for each problem its error code, section, byte offset, line and column, and for a queue
+batch the message and its broker ID. No content is sent. Long lists of problems come in numbered parts, each with
+the totals. A result is sent before the connector moves on, so after a crash it may be sent again, with the same
+message ID, but is never lost.
+
 ## Run on a host
 
 ```sh

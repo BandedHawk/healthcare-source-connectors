@@ -65,6 +65,20 @@ public final class CommittedSections
     {
     }
 
+    /**
+     * A committed section that failed conversion, with where it failed.
+     *
+     * @param seq          its number in the file, from 0
+     * @param sourceOffset where it starts in the file, in bytes
+     * @param errorCode    why conversion failed (design §6.4)
+     * @param errorAt      where in the file conversion failed; null if
+     *                     unknown
+     */
+    public record Failed(long seq, long sourceOffset, String errorCode,
+            SourcePosition errorAt)
+    {
+    }
+
     /** Not instantiated: this class only has static methods. */
     private CommittedSections()
     {
@@ -200,5 +214,41 @@ public final class CommittedSections
             throw new UncheckedIOException(error);
         }
         return count;
+    }
+
+    /**
+     * Reads a file's committed sections that failed conversion.
+     *
+     * @param table  the {@code sections} table
+     * @param fileId the file's id
+     * @return them, in sequence order
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static List<Failed> failed(Table table, UUID fileId)
+    {
+        List<Failed> found = new ArrayList<>();
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(FILE_ID, fileId),
+                        Expressions.equal(CHUNK_INDEX, 0),
+                        Expressions.notNull(ERROR_CODE)))
+                .select(SEQ, SOURCE_OFFSET, ERROR_CODE, ERROR_LINE,
+                        ERROR_COLUMN)
+                .build())
+        {
+            for (Record row : rows)
+            {
+                found.add(new Failed((Long) row.getField(SEQ),
+                        (Long) row.getField(SOURCE_OFFSET),
+                        (String) row.getField(ERROR_CODE),
+                        position(row, ERROR_LINE, ERROR_COLUMN)));
+            }
+        }
+        catch (IOException error)
+        {
+            throw new UncheckedIOException(error);
+        }
+        found.sort(Comparator.comparingLong(Failed::seq));
+        return found;
     }
 }

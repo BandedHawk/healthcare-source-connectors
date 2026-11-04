@@ -16,6 +16,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
@@ -68,6 +69,12 @@ class FileConnectorApplicationTest
 
     /** Where the splitter's messages go. */
     static final String OUT_QUEUE = "seda:sdh-out?size=100000";
+
+    /** Where results for the producer go. */
+    static final String RESULTS_QUEUE = "seda:results?size=1000";
+
+    /** The producer's key ID; the test reuses the recipient's key. */
+    static final String PRODUCER_KID = "producer-2026";
 
     /** The test's key files. */
     static final TestKeys KEYS;
@@ -160,6 +167,13 @@ class FileConnectorApplicationTest
                 KEYS.landingSignerPem::toString);
         registry.add("sdh.queue.type", () -> "camel");
         registry.add("sdh.queue.uri", () -> OUT_QUEUE);
+        registry.add("sdh.results.enabled", () -> "true");
+        registry.add("sdh.results.queue.type", () -> "camel");
+        registry.add("sdh.results.queue.uri", () -> RESULTS_QUEUE);
+        registry.add("sdh.results.recipient.kid", () -> PRODUCER_KID);
+        registry.add("sdh.results.recipient.pem",
+                KEYS.recipientPem::toString);
+        registry.add("sdh.results.recipient.sha256", () -> pin);
         registry.add("sdh.retry.max-attempts", () -> "2");
         registry.add("sdh.retry.initial-backoff", () -> "10ms");
     }
@@ -294,6 +308,29 @@ class FileConnectorApplicationTest
         assertThat(completed).extracting(FileCompleted::fileDigest)
                 .containsExactly(first.digest(), second.digest());
 
+        // Each item's result goes to the producer, with its own reference.
+        List<ItemResult> results = results();
+        assertThat(results).extracting(ItemResult::fileId).containsExactly(
+                first.itemId(), second.itemId(), third.itemId());
+        assertThat(results).extracting(ItemResult::status).containsExactly(
+                ItemResult.COMPLETED, ItemResult.COMPLETED, ItemResult.FAILED);
+        assertThat(results).extracting(ItemResult::producerRef)
+                .containsExactly("b-smith.csv", "a-jones.csv", null);
+        assertThat(results.subList(0, 2))
+                .extracting(ItemResult::sectionCount)
+                .containsExactly(12L, 3L);
+        assertThat(results).allSatisfy(result ->
+        {
+            assertThat(result.intake()).isEqualTo(INTAKE);
+            assertThat(result.part()).isEqualTo(1);
+            assertThat(result.partCount()).isEqualTo(1);
+        });
+        ItemResult failed = results.get(2);
+        assertThat(failed.failure().stage()).isEqualTo("split");
+        assertThat(failed.failure().seq()).isEqualTo(-1);
+        assertThat(failed.failure().code())
+                .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+
         // Maintenance between items compacts the small batch files.
         writerLock.lock();
         try
@@ -344,6 +381,29 @@ class FileConnectorApplicationTest
         {
             messages.add(opener.open(body.getBytes(UTF_8)));
         }
+    }
+
+    /**
+     * Opens the results sent to the producer so far.
+     *
+     * @return them, in the order sent
+     * @throws Exception if one can't be opened
+     */
+    List<ItemResult> results() throws Exception
+    {
+        MessageOpener opener = new MessageOpener(
+                Map.of(PRODUCER_KID, KEYS.recipient.getPrivate()),
+                Map.of("connector-2026",
+                        (ECPublicKey) KEYS.signing.getPublic()));
+        ConsumerTemplate consumer = camel.createConsumerTemplate();
+        List<ItemResult> results = new ArrayList<>();
+        String body;
+        while ((body = consumer.receiveBody(RESULTS_QUEUE, 200,
+                String.class)) != null)
+        {
+            results.add((ItemResult) opener.open(body.getBytes(UTF_8)));
+        }
+        return results;
     }
 
     /**

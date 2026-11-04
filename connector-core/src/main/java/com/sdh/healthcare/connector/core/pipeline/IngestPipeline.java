@@ -1230,6 +1230,18 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
+     * Reads a file's stored sections that failed conversion.
+     *
+     * @param fileId the file
+     * @return them, in sequence order
+     */
+    public List<CommittedSections.Failed> failedSections(UUID fileId)
+    {
+        table.refresh();
+        return CommittedSections.failed(table, fileId);
+    }
+
+    /**
      * Rebuilds and publishes again the messages of sections committed but
      * not acknowledged before a restart.
      *

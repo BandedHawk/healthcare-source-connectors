@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.core.landing;
 
 import static com.sdh.healthcare.connector.core.landing.LandingTables.*;
 
+import com.nimbusds.jose.util.JSONArrayUtils;
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
@@ -17,6 +18,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.text.ParseException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
@@ -51,6 +53,9 @@ public final class LandedItems
 
     /** The longest original name that is decrypted: 64 KiB. */
     private static final int MAX_NAME_BYTES = 64 << 10;
+
+    /** The most the broker IDs of a batch may decrypt to: 64 MiB. */
+    private static final int MAX_REFS_BYTES = 64 << 20;
 
     /** How long the digest chain's links are: 32 bytes. */
     private static final int CHAIN_BYTES = 32;
@@ -300,6 +305,58 @@ public final class LandedItems
         return Optional.of(new String(SectionCrypto.decryptSmall(
                 SectionCrypto.sectionKey(dataKey, itemId, -1), itemId, -1, 0,
                 1, MAX_NAME_BYTES, bytes(encrypted)), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Decrypts the broker IDs of a message batch's messages. They are the
+     * producer's own references and may be PHI: never log them.
+     *
+     * @param summary the item's summary row
+     * @param keys    unwraps the row's data key
+     * @return each message's ID, in order, null for one without; empty if
+     *         none were recorded
+     * @throws ChunkIntegrityException if they don't decrypt or parse
+     */
+    public static Optional<List<String>> messageRefs(Record summary,
+            KeyProvider keys)
+    {
+        Object encrypted = summary.getField(RECORD_REFS_ENC);
+        if (encrypted == null)
+        {
+            return Optional.empty();
+        }
+        UUID itemId = (UUID) summary.getField(ITEM_ID);
+        byte[] dataKey = keys.unwrap(new WrappedKey(
+                (String) summary.getField(KEK_REF),
+                bytes(summary.getField(BDK_WRAPPED))));
+        String json = new String(SectionCrypto.decryptSmall(
+                SectionCrypto.sectionKey(dataKey, itemId, RECORD_REFS_SEQ),
+                itemId, RECORD_REFS_SEQ, 0, 1, MAX_REFS_BYTES,
+                bytes(encrypted)), StandardCharsets.UTF_8);
+        try
+        {
+            List<String> refs = new ArrayList<>();
+            for (Object ref : JSONArrayUtils.parse(json))
+            {
+                refs.add(ref == null ? null : ref.toString());
+            }
+            return Optional.of(java.util.Collections.unmodifiableList(refs));
+        }
+        catch (ParseException malformed)
+        {
+            throw new ChunkIntegrityException("Malformed broker IDs");
+        }
+    }
+
+    /**
+     * The item a summary row says this one replaces.
+     *
+     * @param summary the item's summary row
+     * @return the earlier item; empty if none
+     */
+    public static Optional<UUID> replaces(Record summary)
+    {
+        return Optional.ofNullable((UUID) summary.getField(REPLACES_ITEM_ID));
     }
 
     /**

@@ -301,6 +301,45 @@ class IntakeServiceTest
     }
 
     /**
+     * A replaces marker beside an item links it to an earlier item of this
+     * intake, and goes with it from a read-write source; one naming an
+     * unknown item, or holding something else, is left out, and the item
+     * is landed all the same. A marker is never listed as an item.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void linksAnItemToTheOneItsMarkerNames() throws Exception
+    {
+        IntakeService service = service(
+                new LocalDirectorySource(settings("read-write")),
+                Duration.ZERO);
+        service.recoverAtStartup();
+        service.onListed(write("a.csv", "1,first\n"));
+        UUID earlier = landed().getFirst().fileId();
+
+        Files.writeString(root.resolve("in/b.csv.sdh-replaces"),
+                " " + earlier + "\n");
+        service.onListed(write("b.csv", "1,second\n"));
+        Files.writeString(root.resolve("in/c.csv.sdh-replaces"),
+                UUID.randomUUID().toString());
+        service.onListed(write("c.csv", "1,third\n"));
+        Files.writeString(root.resolve("in/d.csv.sdh-replaces"), "a.csv");
+        service.onListed(write("d.csv", "1,fourth\n"));
+
+        List<ConnectorMessage.ItemLanded> messages = landed();
+        assertThat(messages).hasSize(4);
+        assertThat(messages.get(1).replaces()).isEqualTo(earlier);
+        assertThat(messages.get(2).replaces()).isNull();
+        assertThat(messages.get(3).replaces()).isNull();
+        assertThat(root.resolve("in")).isEmptyDirectory();
+        assertThat(new com.sdh.healthcare.connector.landing.route.IntakeRoute(
+                settings("read-only"), service).uri())
+                .contains("antExclude=**/*.sdh-replaces");
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
      * A settled file is landed, announced and deleted from a read-write
      * source.
      */

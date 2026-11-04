@@ -122,7 +122,9 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   `Idempotency-Key` header and gets the same receipt. Pushes are landed one at a time; one that waits longer than
   `max-wait` gets `503` with `Retry-After`, as does any push while storage or the broker is down. A body larger
   than `max-item-bytes` gets `413`, and one cut off gets `400`. The port opens only on the active node, so a
-  standby isn't sent pushes; use a TCP probe on it.
+  standby isn't sent pushes; use a TCP probe on it. An `X-Correlation-Id` header (up to 255 visible ASCII
+  characters) is kept, encrypted, as the producer's reference, and a `Replaces` header naming an item this intake
+  landed records that the new item replaces it (an unknown item gets `400`).
 - **Queues:** Kafka, Amazon SQS, RabbitMQ, ActiveMQ Artemis, Google Pub/Sub, Azure Service Bus or Azure Event Hubs
   (`sdh.landing.broker`). Messages are landed in
   batches: a batch closes at `max-messages`, `max-bytes` or `max-wait`, and becomes one item that keeps where each
@@ -136,6 +138,20 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   container you create (`sdh.landing.broker.eventhubs`); a new consumer group starts from the oldest event the hub
   holds. A Service Bus queue or subscription must not require sessions. The file connector splits a batch message
   by message, and a message it can't split fails alone.
+
+**Producer feedback** (`sdh.results`, off by default). The node sends each item's receipt to the producer's own
+queue, sealed to the producer's public key (`sdh.results.recipient`, pinned by SHA-256): the item ID, size, SHA-256,
+landing time, the producer's reference (the file's path, or the push's `X-Correlation-Id`), and for a queue
+batch each message's broker ID. The file connector of the same intake sends the final result there too (see its
+README). If the results queue is down, landing waits; nothing is lost. An HTTP push intake with results must admit
+just one sender: set `sdh.landing.http.oauth2.subject`, or list one `mtls.subjects` entry.
+
+**Resubmissions.** A producer that sends a corrected file can say which item it replaces: a `Replaces` header on a
+push, or, on a directory, SFTP, SMB or bucket intake, a file `<name>.sdh-replaces` beside `<name>` holding the
+earlier item's ID, put there before `<name>` is ready. Both items are kept in full; only the link is recorded. A
+marker that isn't a valid ID of an item this intake landed is ignored and reported as `item.replaces_ignored`, and
+the file is landed without the link. Marker files are never landed, and on a read-write intake are deleted once
+the file has landed.
 
 Landed items are kept forever unless you set `sdh.maintenance.retention.landed-items` (at least `7d`, so the
 splitter has time to read each item). Retention removes whole days, and never part of an item. The ledger is always

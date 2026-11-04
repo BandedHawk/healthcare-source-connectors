@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings.Compaction;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Crypto;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Lease;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Queue;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings.Results;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Retry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Telemetry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Orphans;
@@ -42,6 +43,7 @@ import org.springframework.util.unit.DataSize;
  * @param retry       how transient failures are retried
  * @param telemetry   the telemetry export
  * @param maintenance table maintenance and retention
+ * @param results     receipts for the intake's producer (design §5.3.8)
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -55,7 +57,8 @@ public record LandingProperties(
         @DefaultValue Queue queue,
         @DefaultValue Retry retry,
         @DefaultValue Telemetry telemetry,
-        @DefaultValue Maintenance maintenance)
+        @DefaultValue Maintenance maintenance,
+        @DefaultValue Results results)
         implements ConnectorSettings
 {
 
@@ -271,9 +274,13 @@ public record LandingProperties(
      *                  document
      * @param audience  the audience the tokens must name
      * @param scope     the scope the tokens must carry
+     * @param subject   the one sender accepted, as in the tokens'
+     *                  {@code sub} claim; null to accept any subject.
+     *                  Required with results on (design §5.3.8), so an
+     *                  intake's results go to one producer only
      */
     public record OAuth2(String issuer, String jwkSetUri, String audience,
-            String scope)
+            String scope, String subject)
     {
     }
 

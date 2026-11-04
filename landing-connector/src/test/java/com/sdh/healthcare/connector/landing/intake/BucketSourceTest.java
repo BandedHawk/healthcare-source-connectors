@@ -149,7 +149,8 @@ class BucketSourceTest
 
     /**
      * {@code rename} adds the suffix, and {@code delete} deletes; renamed
-     * items aren't listed again.
+     * items aren't listed again. A replaces marker is never an item, is
+     * found beside its item, and is deleted with it.
      *
      * @throws Exception if the test fails
      */
@@ -167,7 +168,19 @@ class BucketSourceTest
         Memory deleting = new Memory(settings("read-write", "delete",
                 "settled", false));
         deleting.put("in/a.csv", "a", 1);
-        deleting.afterLanding(deleting.list().getFirst());
+        deleting.put("in/a.csv.sdh-replaces", "an item ID", 2);
+        ListedItem item = deleting.list().getFirst();
+        assertThat(deleting.list()).extracting(ListedItem::ref)
+                .containsExactly("a.csv");
+        ListedItem marker = deleting.replacesMarker(item).orElseThrow();
+        try (var input = deleting.open(marker, 0))
+        {
+            assertThat(new String(input.readAllBytes()))
+                    .isEqualTo("an item ID");
+        }
+        assertThat(deleting.replacesMarker(new ListedItem("b.csv", 1,
+                1))).isEmpty();
+        deleting.afterLanding(item);
         assertThat(deleting.objects).isEmpty();
     }
 

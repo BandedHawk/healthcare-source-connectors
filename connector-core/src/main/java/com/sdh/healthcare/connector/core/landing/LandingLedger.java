@@ -200,6 +200,21 @@ public final class LandingLedger
     }
 
     /**
+     * Tells whether an intake landed an item: so a producer can only link
+     * a new item to one of its own (design §5.3.8).
+     *
+     * @param intake the intake's name
+     * @param itemId the item
+     * @return true if the intake's ledger has it
+     * @throws IOException if the table can't be read
+     */
+    public boolean contains(String intake, UUID itemId) throws IOException
+    {
+        return !itemIds(Expressions.and(Expressions.equal(INTAKE, intake),
+                Expressions.equal(ITEM_ID, itemId))).isEmpty();
+    }
+
+    /**
      * Finds the entry of an intake's item by its source reference: for an
      * HTTP push, the first item sent with an idempotency key, so the same
      * receipt can be given again.

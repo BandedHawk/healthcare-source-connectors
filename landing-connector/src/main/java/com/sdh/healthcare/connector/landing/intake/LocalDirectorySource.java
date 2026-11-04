@@ -14,11 +14,13 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -109,6 +111,23 @@ public final class LocalDirectorySource implements IntakeSource
             Files.deleteIfExists(file.resolveSibling(
                     file.getFileName() + SourceSettings.MARKER_SUFFIX));
         }
+        Files.deleteIfExists(file.resolveSibling(
+                file.getFileName() + SourceSettings.REPLACES_SUFFIX));
+    }
+
+    @Override
+    public Optional<ListedItem> replacesMarker(ListedItem item)
+            throws IOException
+    {
+        String ref = item.ref() + SourceSettings.REPLACES_SUFFIX;
+        Path marker = resolve(new ListedItem(ref, 0, 0));
+        if (!Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS))
+        {
+            return Optional.empty();
+        }
+        return Optional.of(new ListedItem(ref, Files.size(marker),
+                Files.getLastModifiedTime(marker,
+                        LinkOption.NOFOLLOW_LINKS).toMillis()));
     }
 
     @Override

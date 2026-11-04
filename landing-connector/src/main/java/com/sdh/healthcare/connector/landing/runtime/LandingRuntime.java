@@ -51,6 +51,7 @@ import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
 import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.zaxxer.hikari.HikariDataSource;
 import java.io.IOException;
 import java.time.Clock;
@@ -100,6 +101,9 @@ public final class LandingRuntime implements AutoCloseable
     /** Sends messages. */
     private final ClosablePublisher publisher;
 
+    /** Sends receipts to the producer; null when results are off. */
+    private final ResultsChannel results;
+
     /** The keys, closed with the runtime. */
     private final KeyMaterial keys;
 
@@ -148,6 +152,7 @@ public final class LandingRuntime implements AutoCloseable
      * @param catalog    the landing catalog
      * @param lease      the intake's lease
      * @param publisher  sends messages
+     * @param results    sends receipts; null when results are off
      * @param keys       the keys
      * @param source     the source's settings
      * @param intakeSource where items come from
@@ -159,15 +164,16 @@ public final class LandingRuntime implements AutoCloseable
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
-            KeyMaterial keys, SourceSettings source, IntakeSource intakeSource,
-            IntakeService service, PushService pushService, QueueIntake queue,
-            Tables tables)
+            ResultsChannel results, KeyMaterial keys, SourceSettings source,
+            IntakeSource intakeSource, IntakeService service,
+            PushService pushService, QueueIntake queue, Tables tables)
     {
         this.camel = camel;
         this.dataSource = dataSource;
         this.catalog = catalog;
         this.lease = lease;
         this.publisher = publisher;
+        this.results = results;
         this.keys = keys;
         this.source = source;
         this.intakeSource = intakeSource;
@@ -215,6 +221,14 @@ public final class LandingRuntime implements AutoCloseable
             PushController.path(intake);
             http = HttpSettings.of(properties.landing().http());
         }
+        if (properties.results().enabled() && http != null
+                && !http.oneSender())
+        {
+            throw new IllegalArgumentException("sdh.results needs an HTTP"
+                    + " intake with one sender: set"
+                    + " sdh.landing.http.oauth2.subject, or list one"
+                    + " sdh.landing.http.mtls.subjects");
+        }
         BrokerSettings broker = null;
         if (source.type() == SourceSettings.Type.QUEUE)
         {
@@ -232,6 +246,7 @@ public final class LandingRuntime implements AutoCloseable
         LeaseKeeper lease = null;
         Catalog catalog = null;
         ClosablePublisher publisher = null;
+        ResultsChannel results = null;
         IntakeSource intakeSource = null;
         CachingConnectionFactory rabbitmq = null;
         try
@@ -299,11 +314,21 @@ public final class LandingRuntime implements AutoCloseable
 
             Publishers.configureBroker(camel, queueType, properties.queue());
             publisher = Publishers.create(camel, queueType, queueUri);
+            Announcer.Receipts receipts = null;
+            if (properties.results().enabled())
+            {
+                results = ResultsChannel.open(properties.results(),
+                        properties.queue(), camel, keys.signer(),
+                        keys.signerKid(), retry, ACK_TIMEOUT);
+                receipts = new Announcer.Receipts(results, items,
+                        keys.wrap());
+            }
             Announcer announcer = new Announcer(
                     new MessageSealer(keys.signer(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
                     publisher, storageSettings.catalogName(),
-                    storageSettings.namespace(), retry, ACK_TIMEOUT);
+                    storageSettings.namespace(), retry, ACK_TIMEOUT,
+                    receipts);
             IntakeService.Storage storage =
                     new IntakeService.Storage(lander, ledger, index, ids);
             IntakeService service = null;
@@ -341,7 +366,7 @@ public final class LandingRuntime implements AutoCloseable
                     Fields.of(Attr.INTAKE, intake)
                             .with(Attr.EPOCH, lease.epoch()));
             return new LandingRuntime(camel, dataSource, catalog, lease,
-                    publisher, keys, source, intakeSource, service,
+                    publisher, results, keys, source, intakeSource, service,
                     pushService, queue,
                     new Tables(committer, items, ledgerTable, lander));
         }
@@ -353,6 +378,7 @@ public final class LandingRuntime implements AutoCloseable
                 rabbitmq.destroy();
             }
             closeQuietly(publisher);
+            closeQuietly(results);
             closeQuietly(catalog);
             closeQuietly(lease);
             closeQuietly(dataSource);
@@ -555,6 +581,7 @@ public final class LandingRuntime implements AutoCloseable
             rabbitmq.destroy();
         }
         closeQuietly(publisher);
+        closeQuietly(results);
         keys.close();
         closeQuietly(lease);
         closeQuietly(catalog);

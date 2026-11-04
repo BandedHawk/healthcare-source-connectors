@@ -11,7 +11,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
+import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
@@ -24,12 +26,14 @@ import com.sdh.healthcare.connector.core.landing.NewItem;
 import com.sdh.healthcare.connector.core.landing.SourceRef;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.ECPrivateKey;
+import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Clock;
 import java.time.Duration;
@@ -99,6 +103,12 @@ class PushServiceTest
     /** What the publisher was sent. */
     final List<OutboundMessage> sent = new CopyOnWriteArrayList<>();
 
+    /** What the producer's results queue was sent. */
+    final List<OutboundMessage> results = new CopyOnWriteArrayList<>();
+
+    /** The producer's key pair. */
+    KeyPair producer;
+
     /** How many sends should fail before they start working. */
     final AtomicInteger failSends = new AtomicInteger();
 
@@ -130,6 +140,7 @@ class PushServiceTest
         ec.initialize(new ECGenParameterSpec("secp256r1"));
         signing = ec.generateKeyPair();
         recipient = ec.generateKeyPair();
+        producer = ec.generateKeyPair();
     }
 
     /**
@@ -198,7 +209,19 @@ class PushServiceTest
                     sent.add(message);
                     return CompletableFuture.completedFuture(null);
                 }, "sdh", LandingTables.DEFAULT_NAMESPACE, RETRY,
-                Duration.ofSeconds(5));
+                Duration.ofSeconds(5), new Announcer.Receipts(
+                        new ResultsChannel(new MessageSealer(
+                                new ECDSASigner((ECPrivateKey)
+                                        signing.getPrivate()),
+                                "connector", producer.getPublic(),
+                                "producer"),
+                                message ->
+                                {
+                                    results.add(message);
+                                    return CompletableFuture
+                                            .completedFuture(null);
+                                }, null, RETRY, Duration.ofSeconds(5)),
+                        items, keys));
         return new PushService(INTAKE, new IntakeService.Storage(lander,
                 ledger, ledger.load(INTAKE), ids), announcer, fatal::add,
                 Clock.systemUTC(), maxItemBytes, Duration.ofMillis(100));
@@ -403,6 +426,52 @@ class PushServiceTest
         assertThat(push(service, "a", null, "fresh").status())
                 .isEqualTo(PushService.Status.LANDED);
         assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * A push's receipt goes to its producer, sealed to the producer's key,
+     * with its correlation ID and the item it replaces; a push naming an
+     * item this intake didn't land is refused, and nothing is landed.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void sendsAReceiptWithTheProducersReferences() throws Exception
+    {
+        PushService service = service(0);
+        PushService.Result first = push(service, "sender", null, "one");
+        UUID earlier = first.receipt().itemId();
+        PushService.Result second = service.receive(new PushService.Push(
+                "sender", null, 3, "corr-42", earlier),
+                new ByteArrayInputStream("two".getBytes()));
+        assertThat(second.status()).isEqualTo(PushService.Status.LANDED);
+
+        MessageOpener opener = new MessageOpener(
+                Map.of("producer", producer.getPrivate()),
+                Map.of("connector", (ECPublicKey) signing.getPublic()));
+        assertThat(results).hasSize(2);
+        ConnectorMessage.ItemReceived receipt = (ConnectorMessage.ItemReceived)
+                opener.open(results.get(1).body());
+        assertThat(receipt.fileId()).isEqualTo(second.receipt().itemId());
+        assertThat(receipt.producerRef()).isEqualTo("corr-42");
+        assertThat(receipt.replaces()).isEqualTo(earlier);
+        assertThat(receipt.sha256()).isEqualTo(second.receipt().sha256());
+        assertThat(receipt.kind()).isEqualTo("push");
+        assertThat(results.get(1).messageId())
+                .isEqualTo("rc-" + receipt.fileId());
+        assertThat(((ConnectorMessage.ItemLanded) new MessageOpener(
+                Map.of("downstream", recipient.getPrivate()),
+                Map.of("connector", (ECPublicKey) signing.getPublic()))
+                .open(sent.get(1).body())).replaces()).isEqualTo(earlier);
+
+        int landed = sent.size();
+        PushService.Result unknown = service.receive(new PushService.Push(
+                "sender", null, 5, null, UUID.randomUUID()),
+                new ByteArrayInputStream("three".getBytes()));
+        assertThat(unknown.status())
+                .isEqualTo(PushService.Status.UNKNOWN_REPLACES);
+        assertThat(sent).hasSize(landed);
+        assertThat(results).hasSize(2);
     }
 
     /**

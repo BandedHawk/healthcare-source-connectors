@@ -23,8 +23,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Splits the inbox's items one at a time, in order (design §5.3.6). Each
- * item is read from landing, split, stored and published; then the inbox's
- * position moves past it. A checkpoint left in progress by an item that
+ * item is read from landing, split, stored and published; its result is
+ * sent to the producer, if results are on (design §5.3.8); then the
+ * inbox's position moves past it. A checkpoint left in progress by an item that
  * isn't next in the inbox, such as a file from before landing, is
  * abandoned first.
  * <p>
@@ -74,6 +75,9 @@ public final class InboxWorker implements AutoCloseable
     /** Held while an item is processed. */
     private final ReentrantLock writer;
 
+    /** Sends results to the producer; null if they are off. */
+    private final ResultReporter results;
+
     /** False once closing has begun. */
     private volatile boolean running = true;
 
@@ -100,6 +104,31 @@ public final class InboxWorker implements AutoCloseable
             LandedItemsTable landedItems, KeyProvider keys, Duration idleWait,
             Duration initialBackoff, FatalExit fatal, ReentrantLock writer)
     {
+        this(processor, inbox, landedItems, keys, idleWait, initialBackoff,
+                fatal, writer, null);
+    }
+
+    /**
+     * Creates a worker that sends each item's result.
+     *
+     * @param processor      splits, stores and publishes items
+     * @param inbox          where items wait
+     * @param landedItems    the {@code landed_items} table
+     * @param keys           unwraps the landed items' data keys
+     * @param idleWait       how long to wait for an item before looking
+     *                       again
+     * @param initialBackoff the first pause after an error
+     * @param fatal          stops the process on a fatal error
+     * @param writer         held while an item is processed
+     * @param results        sends results to the producer; null if they
+     *                       are off
+     */
+    @SuppressWarnings("checkstyle:ParameterNumber")
+    public InboxWorker(ItemProcessor processor, Inbox inbox,
+            LandedItemsTable landedItems, KeyProvider keys, Duration idleWait,
+            Duration initialBackoff, FatalExit fatal, ReentrantLock writer,
+            ResultReporter results)
+    {
         this.processor = processor;
         this.inbox = inbox;
         this.landedItems = landedItems;
@@ -108,6 +137,7 @@ public final class InboxWorker implements AutoCloseable
         this.initialBackoff = initialBackoff;
         this.fatal = fatal;
         this.writer = writer;
+        this.results = results;
     }
 
     /** Starts the worker's thread. */
@@ -147,7 +177,8 @@ public final class InboxWorker implements AutoCloseable
     }
 
     /**
-     * Takes an item through the splitter, then moves the position past it.
+     * Takes an item through the splitter, sends its result, then moves the
+     * position past it.
      *
      * @param entry the item
      * @throws Exception if storage or the broker fails
@@ -163,6 +194,10 @@ public final class InboxWorker implements AutoCloseable
         ItemProcessor.Outcome outcome = processor.process(entry.itemId(),
                 entry.digest(), () -> LandedItemSource.open(
                         landedItems.get(), entry.itemId(), keys));
+        if (results != null)
+        {
+            results.report(outcome);
+        }
         inbox.done(entry.seq());
         LOG.info("inbox.done itemId={} seq={} result={} sections={}",
                 entry.itemId(), entry.seq(), outcome.result(),

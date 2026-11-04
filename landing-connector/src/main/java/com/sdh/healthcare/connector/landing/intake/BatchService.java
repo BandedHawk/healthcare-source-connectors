@@ -247,6 +247,7 @@ public final class BatchService implements LandingIntake
         List<byte[]> bodies = new ArrayList<>();
         List<Long> offsets = new ArrayList<>();
         List<String> keys = new ArrayList<>();
+        List<String> refs = new ArrayList<>();
         int skipped = 0;
         long size = 0;
         try
@@ -269,6 +270,7 @@ public final class BatchService implements LandingIntake
                 }
                 offsets.add(size);
                 keys.add(key);
+                refs.add(message.messageId());
                 bodies.add(message.body());
                 size += message.body().length;
             }
@@ -291,7 +293,7 @@ public final class BatchService implements LandingIntake
                     "batch\u0000" + itemId, -1, "");
             landed = storage.lander().land(new NewItem(itemId,
                     ItemKind.MESSAGE_BATCH, ref, null, null,
-                    new RecordIndex(offsets, keys)), offset ->
+                    new RecordIndex(offsets, keys), refs), offset ->
                     {
                         if (offset != 0)
                         {

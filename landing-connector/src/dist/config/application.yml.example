@@ -75,9 +75,10 @@ sdh:
         # jwk-set-uri: https://idp.example.org/realms/producers/certs   # default: from the issuer's metadata
         audience: sdh-landing
         scope: sdh.push
+        # subject: claims-producer   # the one sender; required with sdh.results
       # mtls:                     # a client certificate from a trusted CA, with a listed subject
       #   trusted-cas: /run/secrets/producer-ca.pem
-      #   subjects: ["CN=claims-producer,O=Example"]
+      #   subjects: ["CN=claims-producer,O=Example"]   # just one with sdh.results
       max-item-bytes: 0           # 0 = no limit; larger pushes get 413
       max-wait: 30s               # a push waits this long for the one before it, then gets 503
       retry-after: 30s            # the Retry-After sent with a 503
@@ -146,6 +147,15 @@ sdh:
     type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
     uri: "kafka:sdh.landing.claims?brokers=kafka:9093&securityProtocol=SSL"
     artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
+  results:                        # receipts and results for the producer; off by default
+    enabled: false
+    queue:                        # the producer's own queue, never the downstream one
+      type: kafka
+      uri: "kafka:sdh.results.claims?brokers=kafka:9093&securityProtocol=SSL"
+    recipient:                    # the producer's public key; results are sealed to it
+      kid: claims-producer-2026
+      pem: /run/secrets/claims-producer.pub.pem
+      sha256: "<hex SHA-256 of the key's DER form>"
   retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
   telemetry:                      # unset endpoint = no export
     otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env

@@ -9,10 +9,20 @@ package com.sdh.healthcare.connector.landing;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.sdh.healthcare.connector.contract.jose.MessageOpener;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import java.io.IOException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyPair;
+import java.security.interfaces.ECPublicKey;
 import java.time.Duration;
+import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -41,12 +51,22 @@ class PushMtlsApplicationTest extends PushTestSupport
     /** A CA the node doesn't trust. */
     static final PushTestPki STRANGER_CA;
 
+    /** The producer's key pair, for its results. */
+    static final KeyPair PRODUCER;
+
+    /** The producer's public key file. */
+    static final Path PRODUCER_PEM;
+
     static
     {
         try
         {
             STRANGER_CA = new PushTestPki(ROOT.resolve("stranger"),
                     "stranger-ca");
+            PRODUCER = LandingTestKeys.ec();
+            PRODUCER_PEM = Files.writeString(ROOT.resolve("producer.pem"),
+                    LandingTestKeys.pem("PUBLIC KEY",
+                            PRODUCER.getPublic().getEncoded()));
         }
         catch (Exception failure)
         {
@@ -68,6 +88,43 @@ class PushMtlsApplicationTest extends PushTestSupport
         registry.add("sdh.landing.http.mtls.trusted-cas",
                 PKI.caCertificate::toString);
         registry.add("sdh.landing.http.mtls.subjects[0]", () -> LISTED);
+        registry.add("sdh.results.enabled", () -> "true");
+        registry.add("sdh.results.queue.type", () -> "camel");
+        registry.add("sdh.results.queue.uri",
+                () -> "seda:" + INTAKE + "-results?size=100");
+        registry.add("sdh.results.recipient.kid", () -> "producer-2026");
+        registry.add("sdh.results.recipient.pem", PRODUCER_PEM::toString);
+        String pin = KeyMaterial.fingerprint(PRODUCER.getPublic());
+        registry.add("sdh.results.recipient.sha256", () -> pin);
+    }
+
+    /**
+     * Waits for an item's receipt on the producer's results queue, passing
+     * over other tests' receipts.
+     *
+     * @param itemId the item
+     * @return the receipt, opened with the producer's key
+     * @throws Exception if none comes, or one can't be opened
+     */
+    ConnectorMessage.ItemReceived receipt(String itemId) throws Exception
+    {
+        MessageOpener opener = new MessageOpener(
+                Map.of("producer-2026", PRODUCER.getPrivate()),
+                Map.of("landing-2026",
+                        (ECPublicKey) KEYS.signing.getPublic()));
+        while (true)
+        {
+            String body = camel.createConsumerTemplate().receiveBody(
+                    "seda:" + INTAKE + "-results", 15_000, String.class);
+            assertThat(body).as("a receipt").isNotNull();
+            ConnectorMessage.ItemReceived receipt =
+                    (ConnectorMessage.ItemReceived) opener.open(
+                            body.getBytes(StandardCharsets.UTF_8));
+            if (receipt.fileId().toString().equals(itemId))
+            {
+                return receipt;
+            }
+        }
     }
 
     /** The server's port. */
@@ -97,6 +154,56 @@ class PushMtlsApplicationTest extends PushTestSupport
                 HttpResponse.BodyHandlers.ofString()).body())
                 .isEqualTo(response.body());
         assertThat(receive(INTAKE, 2, Duration.ofSeconds(5))).hasSize(1);
+        assertThat(FATAL).isEmpty();
+    }
+
+    /**
+     * With results on, the producer gets each push's receipt on its own
+     * queue, sealed to its key, with its correlation ID; a push may name
+     * an earlier item it replaces, which is linked, never replaced, and
+     * one naming an item this intake didn't land is refused.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void sendsReceiptsToTheProducer() throws Exception
+    {
+        PushTestPki.Issued client = PKI.issue(LISTED, false);
+        HttpResponse<String> first = client(PKI.clientContext(client)).send(
+                push(port, INTAKE).header("X-Correlation-Id", "order-1")
+                        .POST(HttpRequest.BodyPublishers.ofString("one"))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(first.statusCode()).isEqualTo(202);
+        ConnectorMessage.ItemReceived receipt =
+                receipt(field(first.body(), "itemId"));
+        assertThat(receipt.producerRef()).isEqualTo("order-1");
+        assertThat(receipt.intake()).isEqualTo(INTAKE);
+        assertThat(receipt.sha256()).isEqualTo(field(first.body(), "sha256"));
+
+        HttpResponse<String> unknown = client(PKI.clientContext(client))
+                .send(push(port, INTAKE)
+                        .header("Replaces", UUID.randomUUID().toString())
+                        .POST(HttpRequest.BodyPublishers.ofString("two"))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(unknown.statusCode()).isEqualTo(400);
+        assertThat(unknown.body()).contains("unknown-replaces");
+        assertThat(client(PKI.clientContext(client)).send(push(port, INTAKE)
+                .header("Replaces", "not-an-id")
+                .POST(HttpRequest.BodyPublishers.ofString("two")).build(),
+                HttpResponse.BodyHandlers.ofString()).statusCode())
+                .isEqualTo(400);
+
+        HttpResponse<String> second = client(PKI.clientContext(client)).send(
+                push(port, INTAKE)
+                        .header("Replaces", receipt.fileId().toString())
+                        .POST(HttpRequest.BodyPublishers.ofString("two"))
+                        .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(second.statusCode()).isEqualTo(202);
+        assertThat(receipt(field(second.body(), "itemId")).replaces())
+                .isEqualTo(receipt.fileId());
+        assertThat(receive(INTAKE, 3, Duration.ofSeconds(5)))
+                .extracting(ConnectorMessage.ItemLanded::replaces)
+                .endsWith(null, receipt.fileId());
         assertThat(FATAL).isEmpty();
     }
 

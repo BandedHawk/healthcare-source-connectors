@@ -37,6 +37,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import javax.net.SocketFactory;
@@ -257,11 +258,22 @@ public final class SmbSource implements RemoteSource
                     disk.rm(marker);
                 }
             }
+            String replaces = path + SourceSettings.REPLACES_SUFFIX;
+            if (disk.fileExists(replaces))
+            {
+                disk.rm(replaces);
+            }
         }
         catch (SMBRuntimeException failure)
         {
             throw failed(failure);
         }
+    }
+
+    @Override
+    public Optional<ListedItem> replacesMarker(ListedItem item)
+    {
+        return listing.replacesMarker(item.ref());
     }
 
     @Override

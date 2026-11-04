@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.core.landing;
 
 import static com.sdh.healthcare.connector.core.landing.LandingTables.*;
 
+import com.nimbusds.jose.util.JSONArrayUtils;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
@@ -508,7 +509,7 @@ public final class ItemLander
                     return new LandedItem(item.itemId(), settings.intake(),
                             item.kind(), item.source(), bytesRead, digest,
                             landedAt, snapshotId(snapshot),
-                            settings.kekRef(), plainHash);
+                            settings.kekRef(), plainHash, item.replaces());
                 }
                 if (blockEnds && batch.bytes >= settings.commitBytes())
                 {
@@ -554,7 +555,8 @@ public final class ItemLander
                 checkpoint.digest(), checkpoint.landedAt(),
                 snapshotId(table.currentSnapshot()),
                 (String) summary.getField(KEK_REF),
-                (String) summary.getField(ITEM_SHA256));
+                (String) summary.getField(ITEM_SHA256),
+                (UUID) summary.getField(REPLACES_ITEM_ID));
     }
 
     /**
@@ -781,6 +783,16 @@ public final class ItemLander
                 }
                 row.setField(RECORD_OFFSETS, records.offsets());
                 row.setField(RECORD_KEYS, records.keys());
+            }
+            if (item.messageRefs() != null)
+            {
+                row.setField(RECORD_REFS_ENC, ByteBuffer.wrap(
+                        SectionCrypto.encryptChunk(SectionCrypto.sectionKey(
+                                dataKey, item.itemId(), RECORD_REFS_SEQ),
+                                item.itemId(), RECORD_REFS_SEQ, 0, 1,
+                                JSONArrayUtils.toJSONString(
+                                        item.messageRefs()).getBytes(
+                                                StandardCharsets.UTF_8))));
             }
             writer.write(row);
         }

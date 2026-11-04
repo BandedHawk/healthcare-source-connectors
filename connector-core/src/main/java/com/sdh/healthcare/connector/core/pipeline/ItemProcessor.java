@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
+import com.sdh.healthcare.connector.core.storage.CommittedSections;
 import com.sdh.healthcare.connector.core.split.SplitException;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -135,6 +136,18 @@ public final class ItemProcessor
     public long failedSectionCount(UUID itemId)
     {
         return pipeline.failedSectionCount(itemId);
+    }
+
+    /**
+     * Reads an item's stored sections that failed conversion, with where
+     * each failed.
+     *
+     * @param itemId the item
+     * @return them, in sequence order
+     */
+    public List<CommittedSections.Failed> failedSections(UUID itemId)
+    {
+        return pipeline.failedSections(itemId);
     }
 
     /**

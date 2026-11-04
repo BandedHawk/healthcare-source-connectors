@@ -136,7 +136,8 @@ public class PushWebConfiguration
     }
 
     /**
-     * The checks a token must pass.
+     * The checks a token must pass. With a subject set, a token for any
+     * other subject is refused, so the intake has one sender.
      *
      * @param settings the endpoint's settings
      * @return the validator
@@ -144,12 +145,14 @@ public class PushWebConfiguration
     static OAuth2TokenValidator<Jwt> validator(HttpSettings settings)
     {
         String audience = settings.audience();
+        String only = settings.tokenSubject();
         return new DelegatingOAuth2TokenValidator<>(
                 JwtValidators.createDefaultWithIssuer(settings.issuer()),
                 new JwtClaimValidator<List<String>>(JwtClaimNames.AUD,
                         named -> named != null && named.contains(audience)),
                 new JwtClaimValidator<String>(JwtClaimNames.SUB,
-                        subject -> subject != null && !subject.isBlank()));
+                        subject -> subject != null && !subject.isBlank()
+                                && (only == null || only.equals(subject))));
     }
 
     /**

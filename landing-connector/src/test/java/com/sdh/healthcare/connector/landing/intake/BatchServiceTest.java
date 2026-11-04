@@ -258,7 +258,8 @@ class BatchServiceTest
     /**
      * A batch becomes one item: the bodies one after another, with a record
      * index giving where each starts and its keyed ID; a message without
-     * an ID has a null key.
+     * an ID has a null key. The IDs themselves are kept encrypted, for the
+     * producer's receipt.
      *
      * @throws Exception if the test fails
      */
@@ -287,6 +288,9 @@ class BatchServiceTest
         assertThat(records.keys().get(2)).isNotNull()
                 .doesNotContain("three");
         assertThat(service.recentKeys()).isEqualTo(2);
+        assertThat(LandedItems.messageRefs(LandedItems.summary(items,
+                item.itemId()).orElseThrow(), keys))
+                .contains(Arrays.asList("one", null, "three"));
         assertThat(fatal).isEmpty();
     }
 

@@ -26,12 +26,14 @@ import java.util.UUID;
  * @param kekRef     the KEK that wrapped its summary row's data key
  * @param sha256     the plain SHA-256 of its bytes, in lower-case hex; null
  *                   if it was resumed part-way
+ * @param replaces   the earlier item its producer said it replaces, a link
+ *                   only; null if none
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record LandedItem(UUID itemId, String intake, ItemKind kind,
         SourceRef source, long size, String digest, Instant landedAt,
-        long snapshotId, String kekRef, String sha256)
+        long snapshotId, String kekRef, String sha256, UUID replaces)
 {
 
     /**
@@ -49,6 +51,7 @@ public record LandedItem(UUID itemId, String intake, ItemKind kind,
                 new ConnectorMessage.StorageRef(catalog, namespace,
                         LandingTables.LANDED_ITEMS,
                         landedAt.atOffset(ZoneOffset.UTC).toLocalDate(),
-                        snapshotId, kekRef));
+                        snapshotId, kekRef),
+                replaces);
     }
 }

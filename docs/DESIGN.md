@@ -57,6 +57,8 @@ Revision 2026-11-04 (az): built step 7a of landing, bucket intakes for S3 (and S
 
 Revision 2026-11-04 (ba): built step 7b of landing, Iceberg table intakes (§5.3.18), and a `parquet` splitter (§6.2). `sdh.landing.source.type: iceberg` follows a table through its own catalog, read-only: each Parquet data file an `append` snapshot adds is landed as one item of kind `table-file`, its bytes as they are; a `replace` (compaction) is passed over; an `overwrite` or `delete` raises `intake.table_rewrite` and nothing is landed for it. Decided 2026-11-04: the splitter's `parquet` format makes one JSON section per row (mapping `parquet-row/1`), resuming by row group and row; the landed copy stays the original file. Decided the same day: on the first start the intake lands every data file of the current snapshot, then each later append (`start: earliest`, the default), or only later appends (`start: latest`). Progress is a snapshot ID kept, MAC'd, in a property of the ledger table and committed under the lease's fence, so a restart carries on and a compaction after snapshot expiry can't land rows again. Changed in `connector-core`: a resume point is now ordered by its offset, then its context (`ResumePoint.isAfter`), so several sections can share an offset; and a splitter may set a section's origin itself, which `SectionOrigins` then keeps. New error codes `PARSE_PARQUET_MALFORMED` and `PARSE_PARQUET_UNSUPPORTED_TYPE`. No new dependencies: `parquet-hadoop`, already there through Iceberg, is now declared by `connector-core`.
 
+Revision 2026-11-04 (bb): built step 8 of landing, producer feedback (§5.3.8). Decided 2026-11-04 with the user: producers are outside organisations, each seeing only its own items; results go to a results queue per intake, sealed to the producer's own key; a resubmission is recorded as a link only, and both items are kept in full, because landed data is PHI and nothing may be lost or replaced automatically. The landing node sends `item.received` when an item lands; the splitter sends `item.result` when it finishes one, completed or failed, with each problem's error code, section, byte offset, line, column and, for a message batch, the message and its broker ID, in parts. Both are sent before the step that follows is committed, so a crash means a resend with the same message ID, never a loss. Contract 2.3 (§10.1). An HTTP intake with results must admit one sender (`oauth2.subject`, or one `mtls.subjects` entry). Push takes `X-Correlation-Id` and `Replaces` headers; directory, SFTP, SMB and bucket intakes take a `<name>.sdh-replaces` marker. Queue and table intakes can't name an item they replace yet.
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -356,9 +358,9 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Landing: two-stage ingestion (steps 1 to 7 built)
+### 5.3 Landing: two-stage ingestion (steps 1 to 8 built)
 
-Decided 2026-11-03. Steps 1 to 7 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14). Step 5: HTTP push (§5.3.15). Step 6: queue intakes for the seven brokers (§5.3.16). Step 7a: bucket intakes for S3, Azure Blob and GCS (§5.3.17). Step 7b: Iceberg tables (§5.3.18). Producer feedback is next, once its questions are settled. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14; buckets, §5.3.17) or Camel has no component (Iceberg tables, §5.3.18).
+Decided 2026-11-03. Steps 1 to 8 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14). Step 5: HTTP push (§5.3.15). Step 6: queue intakes for the seven brokers (§5.3.16). Step 7a: bucket intakes for S3, Azure Blob and GCS (§5.3.17). Step 7b: Iceberg tables (§5.3.18). Step 8: producer feedback (§5.3.8). Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14; buckets, §5.3.17) or Camel has no component (Iceberg tables, §5.3.18).
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
@@ -432,7 +434,7 @@ Namespace `sdh_landing` (configurable), with its own catalog properties, so it c
 - **`item_digest`** is the keyed chained digest of §5.1, with the same label and blocks, so a file's item digest equals the file digest the splitter reports for it. Tested.
 - **Size check:** when the source gave a size, the bytes read must match it exactly, or the landing stops with `ItemChangedException` and nothing is finished.
 - **Record index** (step 6a): a message batch's summary row also has `record_offsets` (where each message starts) and `record_keys` (the keyed hash of each message's broker ID, null for a message without one). `LandedItems.records` reads them, and `LandedItems.recordKeys` the keys landed since a time.
-- **Not yet:** the producer's reference comes with the step that needs it (§5.3.8). `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
+- **The producer's references** (step 8, §5.3.8): the producer's own reference is `original_name_enc` (a file's path, a push's `X-Correlation-Id`); a message batch's broker message IDs are `record_refs_enc`, a JSON array in message order (null for a message without one), encrypted like the original name but at seq −2, read by `LandedItems.messageRefs`. `replaces_item_id` is set from a push's `Replaces` header or a `.sdh-replaces` marker. `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
 
 Chunks committed without a summary row belong to an item that wasn't finished (a push that broke off, an item that changed while being read). Nothing reads them. For now they are removed only by retention, with the rest of their day (§5.3.13); removing them sooner needs their files rewritten, and isn't built.
 
@@ -506,23 +508,51 @@ Everything goes through `Telemetry` and the allow-list (§12). No path, filename
 - **Audit events:** `item.discovered`, `item.landed` (bytes), `item.skipped` (already landed; counted, not logged one by one), `item.changed`, `item.duplicate_content`, `item.resumed`, `item.restarted`, `item.vanished`, `item.after_failed`, `intake.unreachable` (with a reason, built) and `intake.reachable` (built), `intake.table_rewrite`, `intake.table_history_lost`, `intake.table_file_skipped` and `intake.table_file_missing` (built, §5.3.18), plus the lease events of §12.
 - **Metrics:** `sdh.landing.items` and `sdh.landing.bytes` (by intake and kind), `sdh.landing.duplicates`, `sdh.landing.backlog` (items seen but not yet landed) and `sdh.landing.oldest_waiting_age`, `sdh.landing.ledger_items`, `sdh.landing.batch_size` for queues, and the intake health metrics of §5.3.4.
 
-#### 5.3.8 Helping producers find the source of a problem (open)
+#### 5.3.8 Producer feedback as built (step 8)
 
-When the splitter flags a problem, the producer has to find it in their own data and send a fix. Telemetry can't tell them: it carries no names, and it goes to our operators, not to them. To be decided:
+When the splitter flags a problem, the producer has to find it in their own data and send a fix. Telemetry can't tell them: it carries no names, and it goes to our operators, not to them. So each intake can send its producer messages of its own, on a results queue.
 
-**What we can give back:**
-- **At landing, a receipt:** item ID, size, the SHA-256 of the content as we received it, and `landed_at`. With the SHA-256 a producer can find the exact file or message on their side, without our sending a name.
-- **The producer's own reference:** an `X-Correlation-Id` header on a push, the broker message ID on a queue, or the path for a file. It is stored encrypted with the item, because a path can hold PHI.
-- **When a problem is found:** item ID, the producer's reference, the error code, and where it is: byte offset, line and column (the splitter already records these, §6.1 and §6.4), and for a message batch, which message.
-- **Resubmission:** a producer says an item replaces an earlier one (a `Replaces` header, or a marker file next to the new file), and we record `replaces_item_id`. This is the `replaces_file_id` left unbuilt in §11.4.
+**Decided 2026-11-04:**
+- **Producers are outside organisations,** and each sees only its own items. Results are sealed (§10.1) to the producer's own public key, `sdh.results.recipient`, pinned by SHA-256 like the downstream recipient, and signed with the node's key. They go to a queue of their own, `sdh.results.queue`, never the downstream queue.
+- **One channel: the results queue.** A status endpoint, result files and a report are left for later (§17).
+- **Two messages per item:** `item.received` when it lands, and one `item.result` when the splitter has finished it, completed or failed. An abandoned item (§9.1) has no result: it wasn't finished.
+- **Resubmission is a link only.** A producer can say an item replaces an earlier one; we record the link (`replaces_item_id`) and keep both items in full. Nothing is suppressed, merged or overwritten: landed data is PHI, and nothing may be lost or replaced automatically. What to do with the link is for downstream. This is the `replaces_file_id` of §11.4.
+- **One sender per HTTP intake** when results are on, so a producer only gets results for its own pushes: `oauth2.subject` (tokens for any other subject are refused) or exactly one `mtls.subjects` entry. The node won't start otherwise.
 
-**How it could reach them** (one or more):
-1. **HTTP intakes:** a status endpoint, `GET /intakes/<intake>/items/<itemId>`, using the same authentication as the push, and showing only that producer's items.
-2. **Read-write file intakes:** a result file the producer can read, such as `<name>.sdh-result.json`, or one in a `results/` directory. A read-only intake can't do this.
-3. **A results queue** the producer subscribes to, with sealed messages like ours.
-4. **A report or console,** with the pipeline management and remediation work (§17).
+**`item.received`** (`Announcer`, landing node) carries the item ID, intake, kind, size, SHA-256 of the content as received, `landedAt`, the producer's reference, the item it replaces, and for a message batch the broker message IDs, in order. With the SHA-256 the producer can find the exact file or message on their side. It is sent after `item.landed`, in the same retry and recovery path: if the results broker is down, landing waits, and the receipt is sent again after a restart (the last landed item is announced again, §5.3.11). Message ID `rc-<itemId>`.
 
-**Questions for that discussion:** are producers our customers' own teams, or outside organisations, and must a producer only ever see its own items? Which of the channels above do producers need? Is a human-readable report needed, or is a machine-readable result enough?
+**`item.result`** (`ResultReporter`, splitter) carries the item ID, intake, `status` (`completed` or `failed`), the section and failed-section counts, the failure for a failed item (code, stage, byte offset), the problem count, and the problems: one per section that failed conversion, with its error code, stage `convert`, section number, byte offset, line and column (§6.1, §6.4), and for a message batch the message's index and broker ID. It also repeats the producer's reference and the item it replaces, and `finishedAt`. It is sent after the item is finished and before the inbox moves past it (§5.3.12), so a crash means it is sent again. Message IDs `rs-<itemId>-<part>`.
+- **Parts:** problems are sent in parts of at most 1,000, and at most 96 KiB of them, so a sealed part stays under 256 KB (SQS and Service Bus) even with long broker IDs. Every part carries the totals and `part` and `partCount`, so any one of them says how the item ended.
+- **Which message:** the last message of the batch that starts at or before the problem's byte offset, from the record index (§5.3.16).
+
+**The producer's reference:**
+- **Files and objects:** the path or key, as listed.
+- **Push:** the `X-Correlation-Id` header, 1 to 255 visible ASCII characters (`400` otherwise).
+- **Queues:** the broker message IDs, in `record_refs_enc`.
+- **Tables:** none.
+
+It is stored encrypted (§5.3.2), because a path can hold PHI, and only ever leaves the node sealed to the producer.
+
+**Naming the item replaced:**
+- **Push:** a `Replaces: <itemId>` header. A malformed ID is `400`; an item this intake never landed is `400` with `{"error":"unknown-replaces"}` and `push.unknown_replaces`, and nothing is landed, so the producer can correct it and resend.
+- **Directory, SFTP, SMB and buckets:** a marker file `<name>.sdh-replaces` beside the item, holding the earlier item's ID. It is never landed itself, and must be in place before the item is ready. A marker that is malformed, too long (over 256 bytes) or names an item this intake never landed is ignored with `item.replaces_ignored` (`reason` `MALFORMED` or `UNKNOWN`), and the item is landed without the link: a file can't be refused back to its producer. A marker written after its item landed is ignored. On a read-write intake the marker is deleted after the item is landed, whatever `after` does to the item.
+- **Queues and tables:** not yet.
+
+**Configuration** (`sdh.results`, both nodes): `enabled` (false), `queue` (`type`, `uri`, and `artemis` for an Artemis queue, which shares the node's JMS connection when `sdh.queue` is also Artemis on the same broker; a different broker is refused), and `recipient` (`kid`, `pem`, `sha256`). The landing node and the splitter of an intake use the same results queue and producer key.
+
+**No PHI in logs:** `results.sent` has the item ID and message type only.
+
+**Not built:** a status endpoint, result files, a report; naming the item replaced for queues and tables; results for an item restored from the fallback (§11.2).
+
+**Tests:**
+- `ContractRoundTripTest`: both messages, with optional fields left out.
+- `ItemLanderTest`: broker IDs kept encrypted, and the item replaced.
+- `PushServiceTest`: a receipt with the producer's references; an unknown `Replaces`.
+- `IntakeServiceTest`: a marker's link; `BucketSourceTest`: markers not listed, and deleted after landing.
+- `PushMtlsApplicationTest`: receipts through the whole node; `PushWebConfigurationTest`: one sender.
+- `ResultReporterTest`: parts by count and bytes, each sealed part under 256 KB, problems placed in their messages, a failed item.
+- `FileConnectorApplicationTest`: results for two completed items and a failed one through the whole splitter, with the producer's references.
+- `IngestPipelineTest`: the failed sections, with their places.
 
 #### 5.3.9 Configuration
 
@@ -554,9 +584,13 @@ sdh:
       port: 8443
       tls: { certificate: /run/secrets/tls.crt, private-key: /run/secrets/tls.key }
       auth: oauth2                         # oauth2 | mtls
-      oauth2: { issuer: "https://idp.example.org", audience: sdh-landing, scope: sdh.push }
+      oauth2: { issuer: "https://idp.example.org", audience: sdh-landing, scope: sdh.push, subject: claims-producer }   # subject: the one sender, needed with results
       # mtls: { trusted-cas: /run/secrets/producer-ca.pem, subjects: ["CN=claims-producer"] }
     queue: { type: kafka, uri: "kafka:sdh.landing.claims?brokers=kafka:9093&securityProtocol=SSL" }   # where item.landed goes
+  results:                                 # receipts and results for the producer (§5.3.8); the splitter has the same
+    enabled: true
+    queue: { type: kafka, uri: "kafka:sdh.results.claims?brokers=kafka:9093&securityProtocol=SSL" }
+    recipient: { kid: claims-producer-2026, pem: /run/secrets/producer.pub.pem, sha256: "<hex>" }
   storage:                                 # as §14, for the landing namespace
     namespace: sdh_landing
   crypto:
@@ -576,10 +610,10 @@ sdh:
 2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). Left for later: the listing metrics of §5.3.3. The image and kit came in step 3b, retention and maintenance after it (§5.3.13).
 3. **The splitter reads from landing.** 3a (built, §5.3.12): an `item.landed` consumer and inbox, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. 3b: an image for the landing node, the build and Kubernetes scripts, and the `-Pit` suite, the Kubernetes run (§15.2) and the demo rewritten for two stages, with failover of both stages.
 4. **SFTP and SMB (built),** with the failure cases of §5.3.4 tested against containers that are cut off, stalled, restarted and given wrong keys (§5.3.14). Left for later: Kerberos for SMB, the intake metrics and the planned events of §5.3.4, and claims on remote sources.
-5. **HTTP push (built),** with OAuth2 and mTLS (§5.3.15). Left for later: the status endpoint and correlation IDs of §5.3.8, and an HTTP readiness probe.
+5. **HTTP push (built),** with OAuth2 and mTLS (§5.3.15). Correlation IDs came in step 8. Left for later: the status endpoint of §5.3.8, and an HTTP readiness probe.
 6. **Queue intakes (built, §5.3.16),** batched. 6a: Kafka, SQS, RabbitMQ and Artemis, the record index, and the splitter splitting a batch message by message. 6b: Pub/Sub, Service Bus and Event Hubs. Left for later: queue metrics, and reporting a Camel consumer that has given up (§5.3.16).
 7. **Buckets and Iceberg tables.** 7a, buckets (built, §5.3.17): S3 and S3-compatible stores, Azure Blob and GCS, tested against SeaweedFS, Azurite and fake-gcs-server. Left for later: event notifications in place of listing, and conditional deletes on S3. 7b, Iceberg tables (built, §5.3.18), with the splitter's `parquet` format. Left for later: landing files that have row-level deletes, and rows from an overwrite.
-8. **Producer feedback** (§5.3.8), once its open questions are settled.
+8. **Producer feedback (built, §5.3.8):** receipts and results on a results queue per intake, the producer's references, and links to the item replaced. Left for later: a status endpoint, and naming the item replaced for queues and tables.
 
 **Still to check before building:**
 - **Several formats in one intake:** a splitter handles one format (§6). If one intake can carry several, the landing node or the splitter has to tell them apart.
@@ -762,10 +796,12 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 - `Content-Length` is checked if sent: a body shorter or longer than stated is `400`. Chunked bodies are fine.
 - `max-item-bytes` (0 = no limit) is checked as the body arrives: `413`.
 - `Idempotency-Key`, if sent, is 1 to 255 visible ASCII characters, or `400`.
+- `X-Correlation-Id`, if sent, is the producer's own reference (§5.3.8), stored encrypted as the item's original name: 1 to 255 visible ASCII characters, or `400`.
+- `Replaces`, if sent, is the ID of an item this intake landed (§5.3.8): `400` if it isn't a UUID, or names an item the ledger doesn't have.
 - Every answer has `Cache-Control: no-store`. Any other path or method is refused.
 
 **Authentication** (`PushWebConfiguration`), one of:
-- **`oauth2`:** a bearer JWT. Its keys come from `jwk-set-uri`, or from the issuer's metadata if that isn't set, fetched on the first push. Signatures: RS, PS and ES at 256, 384 and 512; never HS or unsigned. The issuer, the audience, a non-blank `sub` and the scope are all required. No token is `401`; a valid token without the scope is `403`.
+- **`oauth2`:** a bearer JWT. Its keys come from `jwk-set-uri`, or from the issuer's metadata if that isn't set, fetched on the first push. Signatures: RS, PS and ES at 256, 384 and 512; never HS or unsigned. The issuer, the audience, a non-blank `sub` and the scope are all required, and with `subject` set (step 8), `sub` must be it. No token is `401`; a valid token without the scope is `403`.
 - **`mtls`:** TLS requires a client certificate from `trusted-cas`; a certificate from another CA, or none, fails the handshake. Its subject must be in `subjects`, compared in RFC 2253 canonical form, so case and spacing don't matter; an unlisted subject is `403`. TLS must end at the pod for this (the ingress passes TLS through).
 
 **The sender** is the token's issuer and subject, or the certificate's canonical subject. It is used only to scope the idempotency key, and is hashed with it; it is never stored in plain or logged.
@@ -786,13 +822,13 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 **Settings** (`sdh.landing.http`, checked by `HttpSettings`, whose `toString` hides the key's password):
 - `port` (8443), `auth` (`oauth2` or `mtls`), `max-item-bytes` (0), `max-wait` (30s), `retry-after` (30s), `read-timeout` (60s; also the connection timeout).
 - `tls`: `certificate` (PEM, with its chain), `private-key` (PEM) and `private-key-password`. Required.
-- `oauth2`: `issuer` and `jwk-set-uri` (both `https`), `audience` and `scope`, all but `jwk-set-uri` required.
+- `oauth2`: `issuer` and `jwk-set-uri` (both `https`), `audience` and `scope`, all but `jwk-set-uri` required; `subject`, the one sender, required with `sdh.results` (§5.3.8).
 - `mtls`: `trusted-cas` (PEM) and `subjects` (at least one).
 - Secret from the environment: `SDH_LANDING_HTTP_TLS_PRIVATE_KEY_PASSWORD`.
 
 **No PHI in logs:** no body, sender, key or header is logged; events carry the item ID, the intake and byte counts only.
 
-**Not built:** the status endpoint and correlation IDs of §5.3.8, a health endpoint, and push metrics.
+**Not built:** the status endpoint of §5.3.8, a health endpoint, and push metrics.
 
 **Tests:**
 - `PushServiceTest`: a landed push and its replays, scoped by sender and across a restart; a body that breaks off after chunks were committed; bodies too large, short or long; a broker outage, during which nothing more lands; an unfinished push cleared at startup; a fatal error.
@@ -1452,17 +1488,22 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 | `section.stored` | after batch commit | messageId, fileId, sectionId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef), origin (sectionLine, sectionColumn, sourceLine, sourceColumn) |
 | `section.failed` | after batch commit, in seq order with the others | as `section.stored`, with errorCode instead of mapping, and errorLine and errorColumn when the failure has a place; the section is stored in its original form (§6.4) |
 | `file.completed` | after archive commit | fileId, sectionCount (failed included), failedSectionCount, fileSize, fileDigest, startedAt, completedAt |
+| `item.landed` | landing node to its splitter, after the item's commit (§5.3.6) | fileId, intake, kind, size, itemDigest, landedAt, storage, replaces (if set) |
+| `item.received` | landing node to the producer, after `item.landed` (§5.3.8) | fileId, intake, kind, size, sha256, landedAt, producerRef, replaces and messageIds (each if set) |
+| `item.result` | splitter to the producer, when an item is finished (§5.3.8) | fileId, intake, status, sectionCount, failedSectionCount, failure, problemCount, part, partCount, problems (code, stage, seq, offset, line, column, message, messageRef), producerRef, replaces, finishedAt |
 
 - **No `file.failed` message:** failure is reported through OpenTelemetry only, as agreed. Downstream can detect an unfinished file as a `file.started` with no matching `file.completed`.
 - **Change from earlier discussion:** the "duplicates skipped" count is **not** included in `file.completed`. Counting it would require checking every section against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
 - **Unencrypted broker metadata** is limited to: `messageId`, `type`, `fileId` (used for ordering), and the content type `application/jose`.
 - **Message IDs:**
   - `section.stored` and `section.failed`: `messageId = sectionId`.
+  - `file.started`: `fs-<fileId>`.
+  - `file.completed`: `fc-<fileId>`.
+  - `item.landed`: `il-<itemId>`; `item.received`: `rc-<itemId>`; `item.result`: `rs-<itemId>-<part>`.
 - **Contract 2.0** (from 1.0): added `contentType`, `mapping`, `section.failed` and `failedSectionCount`. It's a major version because a 1.x reader can't handle the new message type.
 - **Contract 2.1:** added `origin`, `errorLine` and `errorColumn`, all optional, so 2.0 readers ignore them. A reader turns a position in the section (such as one a mapping reports from `ccda/2`) into one in the file with `SectionOrigin.toFile`.
 - **Contract 2.2:** added `item.landed`, which a landing node sends to its splitter (§5.3.6). Downstream readers never receive it, so it is a minor version; a 2.1 reader given one would reject it as an unknown type.
-  - `file.started`: `fs-<fileId>`.
-  - `file.completed`: `fc-<fileId>`.
+- **Contract 2.3:** added `item.received` and `item.result`, which go to an intake's producer (§5.3.8), and `replaces` on `item.landed`. Downstream readers never receive them, so it is a minor version.
 
 ### 10.2 Consuming messages: `connector-queue-reader`
 
@@ -1614,7 +1655,7 @@ These never fail a file. They stop the process, which then restarts from the che
 
 **Exit status:** 0 done, 1 failed, 2 usage error (an unknown option is an error, so a typo can't change what is restored).
 
-**Not built yet:** recording `replaces_file_id` when a repaired file is resubmitted. The connector gives a resubmitted file a new fileId like any other, and nothing yet carries the link from the operator to the intake. One option is a marker file next to the resubmitted file, read at intake. Until then, the operator records the link in the ticket and in the restore's audit event.
+**Resubmission** (built in step 8 of landing, §5.3.8): a repaired file dropped on a file or bucket intake with a `<name>.sdh-replaces` marker holding the earlier item's ID is landed as a new item with `replaces_item_id` set, and both are kept. A push names it with a `Replaces` header. The operator still records the link in the ticket and in the restore's audit event. `failed_files.replaces_file_id` is from before landing and stays empty.
 
 ## 12. Observability and audit (OpenTelemetry, built)
 

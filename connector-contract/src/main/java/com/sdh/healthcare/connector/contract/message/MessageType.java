@@ -10,9 +10,10 @@ package com.sdh.healthcare.connector.contract.message;
 import java.util.Arrays;
 
 /**
- * The four kinds of message the connector publishes about a file, in the order they happen: the
- * file started, a section was stored or failed, and the file completed. Each has a fixed name used
- * on the queue ({@link #wireName()}).
+ * The kinds of message the connectors publish. About a file, in the order they happen: the file
+ * started, a section was stored or failed, and the file completed. From a landing node to its
+ * splitter: an item was landed. To an intake's producer: an item was received, and its result.
+ * Each has a fixed name used on the queue ({@link #wireName()}).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -22,7 +23,9 @@ public enum MessageType {
     SECTION_STORED("section.stored"),
     SECTION_FAILED("section.failed"),
     FILE_COMPLETED("file.completed"),
-    ITEM_LANDED("item.landed");
+    ITEM_LANDED("item.landed"),
+    ITEM_RECEIVED("item.received"),
+    ITEM_RESULT("item.result");
 
     private final String wireName;
 

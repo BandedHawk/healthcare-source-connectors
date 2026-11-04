@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -266,11 +267,22 @@ public abstract class BucketSource implements RemoteSource
                     delete(marker, null);
                 }
             }
+            String replaces = key + SourceSettings.REPLACES_SUFFIX;
+            if (stat(replaces) != null)
+            {
+                delete(replaces, null);
+            }
         }
         catch (IOException | RuntimeException failure)
         {
             throw failed(failure);
         }
+    }
+
+    @Override
+    public Optional<ListedItem> replacesMarker(ListedItem item)
+    {
+        return listing.replacesMarker(item.ref());
     }
 
     @Override

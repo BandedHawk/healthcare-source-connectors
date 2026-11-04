@@ -38,6 +38,8 @@ import javax.security.auth.x500.X500Principal;
  *                     {@link Auth#OAUTH2}
  * @param scope        the scope tokens must carry, for
  *                     {@link Auth#OAUTH2}
+ * @param tokenSubject the one {@code sub} tokens must carry, for
+ *                     {@link Auth#OAUTH2}; null for any
  * @param trustedCas   the client CAs, a PEM file, for {@link Auth#MTLS}
  * @param subjects     the accepted client subjects, in canonical form, for
  *                     {@link Auth#MTLS}
@@ -50,7 +52,8 @@ import javax.security.auth.x500.X500Principal;
  */
 public record HttpSettings(int port, Auth auth, Path certificate,
         Path privateKey, String privateKeyPassword, String issuer,
-        String jwkSetUri, String audience, String scope, Path trustedCas,
+        String jwkSetUri, String audience, String scope,
+        String tokenSubject, Path trustedCas,
         Set<String> subjects, long maxItemBytes, Duration maxWait,
         Duration retryAfter, Duration readTimeout)
 {
@@ -100,6 +103,7 @@ public record HttpSettings(int port, Auth auth, Path certificate,
         String jwkSetUri = null;
         String audience = null;
         String scope = null;
+        String tokenSubject = null;
         Path trustedCas = null;
         Set<String> subjects = Set.of();
         if (auth == Auth.OAUTH2)
@@ -115,6 +119,7 @@ public record HttpSettings(int port, Auth auth, Path certificate,
             audience = required(oauth2.audience(),
                     PREFIX + "oauth2.audience");
             scope = required(oauth2.scope(), PREFIX + "oauth2.scope");
+            tokenSubject = blankToNull(oauth2.subject());
         }
         else
         {
@@ -133,9 +138,22 @@ public record HttpSettings(int port, Auth auth, Path certificate,
         checkPositive(http.readTimeout(), PREFIX + "read-timeout");
         return new HttpSettings(http.port(), auth, certificate, privateKey,
                 blankToNull(tls.privateKeyPassword()), issuer, jwkSetUri,
-                audience, scope, trustedCas, subjects,
+                audience, scope, tokenSubject, trustedCas, subjects,
                 http.maxItemBytes().toBytes(), http.maxWait(),
                 http.retryAfter(), http.readTimeout());
+    }
+
+    /**
+     * Tells whether only one sender is accepted: one token subject, or one
+     * certificate subject. An intake's results go to one producer, so
+     * results need it (design §5.3.8).
+     *
+     * @return true if there is one sender
+     */
+    public boolean oneSender()
+    {
+        return auth == Auth.OAUTH2 ? tokenSubject != null
+                : subjects.size() == 1;
     }
 
     /**

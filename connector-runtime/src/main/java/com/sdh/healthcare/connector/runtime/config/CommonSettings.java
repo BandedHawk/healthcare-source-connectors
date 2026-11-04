@@ -220,6 +220,21 @@ public final class CommonSettings
     }
 
     /**
+     * The producer's results queue (design §5.3.8): receipts from the
+     * landing node and final results from the splitter, sealed to the
+     * producer's own key. An intake has one producer, so both nodes of an
+     * intake send to the same queue and key.
+     *
+     * @param enabled   whether results are sent
+     * @param queue     where they go
+     * @param recipient the producer's public key, pinned by fingerprint
+     */
+    public record Results(@DefaultValue("false") boolean enabled,
+            @DefaultValue Queue queue, @DefaultValue Recipient recipient)
+    {
+    }
+
+    /**
      * An Artemis broker connection.
      *
      * @param brokerUrl the broker's URL

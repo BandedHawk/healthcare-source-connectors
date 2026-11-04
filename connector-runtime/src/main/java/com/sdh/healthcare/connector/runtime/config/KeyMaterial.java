@@ -193,13 +193,7 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer, String signerKid, 
                         c.signProvider(), k.signing().kid(), fingerprint(signingPublic));
             }
 
-            Path recipientPem = require(k.recipient().pem(), "sdh.crypto.keys.recipient.pem");
-            PublicKey recipient = Pem.publicKey(recipientPem);
-            String pinned = require(k.recipient().sha256(), "sdh.crypto.keys.recipient.sha256")
-                    .replace(":", "").toLowerCase(Locale.ROOT);
-            if (!fingerprint(recipient).equals(pinned)) {
-                throw new GeneralSecurityException("Recipient key does not match its pinned SHA-256 fingerprint");
-            }
+            PublicKey recipient = pinnedKey(k.recipient(), "sdh.crypto.keys.recipient");
             MessageOpener opener = inbox ? inboxOpener(k) : null;
             return new KeyMaterial(wrap, signer, k.signing().kid(), recipient,
                     require(k.recipient().kid(), "sdh.crypto.keys.recipient.kid"), opener, List.copyOf(resources));
@@ -207,6 +201,25 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer, String signerKid, 
             closeAll(resources);
             throw e;
         }
+    }
+
+    /**
+     * Loads a recipient's public key and checks it against its pinned fingerprint.
+     *
+     * @param recipient the key's settings
+     * @param prefix    the settings' name, for errors
+     * @return the key
+     * @throws IOException              if the PEM can't be read
+     * @throws GeneralSecurityException if the key isn't the one pinned
+     */
+    public static PublicKey pinnedKey(CommonSettings.Recipient recipient, String prefix)
+            throws IOException, GeneralSecurityException {
+        PublicKey key = Pem.publicKey(require(recipient.pem(), prefix + ".pem"));
+        String pinned = require(recipient.sha256(), prefix + ".sha256").replace(":", "").toLowerCase(Locale.ROOT);
+        if (!fingerprint(key).equals(pinned)) {
+            throw new GeneralSecurityException("Key " + prefix + " does not match its pinned SHA-256 fingerprint");
+        }
+        return key;
     }
 
     /** Opens {@code item.landed}: the splitter's own private key, and the landing node's signing public key. */

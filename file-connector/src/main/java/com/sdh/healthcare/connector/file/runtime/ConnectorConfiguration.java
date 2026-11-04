@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.inbox.InboxRoute;
 import com.sdh.healthcare.connector.file.inbox.InboxWorker;
+import com.sdh.healthcare.connector.file.inbox.ResultReporter;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
@@ -110,10 +111,17 @@ public class ConnectorConfiguration
             ConnectorProperties properties, FatalExit fatal,
             ReentrantLock writerLock)
     {
+        ResultReporter results = runtime.results()
+                .map(channel -> new ResultReporter(channel,
+                        runtime.processor(), runtime.tables().landedItems(),
+                        runtime.keys().wrap(), properties.landing().intake(),
+                        Clock.systemUTC()))
+                .orElse(null);
         return new InboxWorker(runtime.processor(), runtime.inbox(),
                 runtime.tables().landedItems(), runtime.keys().wrap(),
                 properties.landing().idleWait(),
-                properties.retry().initialBackoff(), fatal, writerLock);
+                properties.retry().initialBackoff(), fatal, writerLock,
+                results);
     }
 
     /**

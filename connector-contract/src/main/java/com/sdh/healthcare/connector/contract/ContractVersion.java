@@ -33,9 +33,11 @@ public final class ContractVersion
      * failed sections where in the file they failed. 2: the
      * {@code item.landed} message, which a landing node sends to its
      * splitter. Downstream readers never receive it, so it doesn't need a
-     * new major version.
+     * new major version. 3: {@code item.landed} may name the item it
+     * replaces, and the {@code item.received} and {@code item.result}
+     * messages, which only an intake's producer receives.
      */
-    public static final int MINOR = 2;
+    public static final int MINOR = 3;
 
     /** The version this build writes, as "major.minor", such as "2.1". */
     public static final String CURRENT = MAJOR + "." + MINOR;

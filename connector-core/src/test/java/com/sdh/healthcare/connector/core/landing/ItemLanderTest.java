@@ -306,6 +306,49 @@ class ItemLanderTest
         assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
                 ItemKind.MESSAGE_BATCH, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThat(LandedItems.messageRefs(summary, keys)).isEmpty();
+    }
+
+    /**
+     * A batch's broker IDs are kept encrypted and read back in order, nulls
+     * included; the item a push replaces is kept and comes back with it
+     * after a restart.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void keepsBrokerIdsEncryptedAndTheReplacedItem() throws Exception
+    {
+        byte[] bytes = data(30);
+        List<String> refs = Arrays.asList("smith-1", null, "smith-\"\u00e9");
+        NewItem batch = new NewItem(UUID.randomUUID(),
+                ItemKind.MESSAGE_BATCH, null, null, null,
+                new RecordIndex(List.of(0L, 10L, 25L),
+                        Arrays.asList("k-0", null, "k-2")), refs);
+        lander().land(batch, opener(bytes));
+        Record summary =
+                LandedItems.summary(table, batch.itemId()).orElseThrow();
+        assertThat(LandedItems.messageRefs(summary, keys)).contains(refs);
+        assertThat(new String(LandedItems.bytes(
+                summary.getField(LandingTables.RECORD_REFS_ENC)),
+                java.nio.charset.StandardCharsets.ISO_8859_1))
+                .doesNotContain("smith");
+        assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
+                ItemKind.MESSAGE_BATCH, null, null, null,
+                new RecordIndex(List.of(0L), Arrays.asList("k")),
+                List.of("a", "b"))).isInstanceOf(
+                        IllegalArgumentException.class);
+
+        UUID earlier = UUID.randomUUID();
+        NewItem push = new NewItem(UUID.randomUUID(), ItemKind.PUSH, null,
+                "corr-1", earlier);
+        LandedItem landed = lander().land(push, opener(bytes));
+        assertThat(landed.replaces()).isEqualTo(earlier);
+        assertThat(landed.message("cat", "ns").replaces()).isEqualTo(earlier);
+        assertThat(LandedItems.replaces(LandedItems.summary(table,
+                push.itemId()).orElseThrow())).contains(earlier);
+        assertThat(lander().lastLanded()).hasValueSatisfying(
+                last -> assertThat(last.replaces()).isEqualTo(earlier));
     }
 
     @Test

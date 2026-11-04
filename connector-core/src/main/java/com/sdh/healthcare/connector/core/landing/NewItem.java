@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.landing;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -25,11 +26,15 @@ import java.util.UUID;
  *                     so; null otherwise
  * @param records      where each message starts, for a message batch; null
  *                     for other items
+ * @param messageRefs  each message's broker ID, for a message batch (null
+ *                     for a message without one), kept only encrypted;
+ *                     null if not recorded, and for other items
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
-        String originalName, UUID replaces, RecordIndex records)
+        String originalName, UUID replaces, RecordIndex records,
+        List<String> messageRefs)
 {
 
     /**
@@ -42,9 +47,12 @@ public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
      * @param replaces     the item it replaces; null if none
      * @param records      where each message starts, for a message batch;
      *                     null for other items
+     * @param messageRefs  each message's broker ID; null if not recorded
      * @throws NullPointerException     if the ID or kind is null
      * @throws IllegalArgumentException if a message batch has no record
-     *                                  index, or another item has one
+     *                                  index, or another item has one, or
+     *                                  there are broker IDs without an
+     *                                  index or of another count
      */
     public NewItem
     {
@@ -55,6 +63,32 @@ public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
             throw new IllegalArgumentException(
                     "A message batch, and only one, has a record index");
         }
+        if (messageRefs != null && (records == null
+                || messageRefs.size() != records.count()))
+        {
+            throw new IllegalArgumentException(
+                    "A batch's broker IDs must match its record index");
+        }
+        messageRefs = messageRefs == null ? null
+                : java.util.Collections.unmodifiableList(
+                        new java.util.ArrayList<>(messageRefs));
+    }
+
+    /**
+     * Creates an item without broker IDs.
+     *
+     * @param itemId       the item's ID
+     * @param kind         what kind of item it is
+     * @param source       where it came from; null if not known
+     * @param originalName its name or path; null if it has none
+     * @param replaces     the item it replaces; null if none
+     * @param records      where each message starts, for a message batch;
+     *                     null for other items
+     */
+    public NewItem(UUID itemId, ItemKind kind, SourceRef source,
+            String originalName, UUID replaces, RecordIndex records)
+    {
+        this(itemId, kind, source, originalName, replaces, records, null);
     }
 
     /**
@@ -69,6 +103,6 @@ public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
     public NewItem(UUID itemId, ItemKind kind, SourceRef source,
             String originalName, UUID replaces)
     {
-        this(itemId, kind, source, originalName, replaces, null);
+        this(itemId, kind, source, originalName, replaces, null, null);
     }
 }

@@ -36,10 +36,12 @@ import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
 import com.sdh.healthcare.connector.runtime.publish.Publishers;
 import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.zaxxer.hikari.HikariDataSource;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 import org.apache.camel.CamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
@@ -62,6 +64,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class ConnectorRuntime implements AutoCloseable
 {
+
+    /** How long to wait for the broker to acknowledge a result. */
+    static final Duration ACK_TIMEOUT = Duration.ofSeconds(30);
 
     /** Logs start and stop. */
     private static final Logger LOG =
@@ -112,6 +117,9 @@ public final class ConnectorRuntime implements AutoCloseable
     /** How transient failures are retried. */
     private final RetryPolicy retry;
 
+    /** Sends final results to the producer; null if they are off. */
+    private final ResultsChannel results;
+
     /**
      * The tables the runtime uses.
      *
@@ -142,6 +150,7 @@ public final class ConnectorRuntime implements AutoCloseable
      * @param ids            makes IDs and MACs
      * @param committer      makes fenced commits
      * @param retry          how transient failures are retried
+     * @param results        sends final results; null if they are off
      */
     @SuppressWarnings("checkstyle:ParameterNumber")
     private ConnectorRuntime(CamelContext camel, HikariDataSource dataSource,
@@ -149,7 +158,8 @@ public final class ConnectorRuntime implements AutoCloseable
             ClosablePublisher publisher, IngestPipeline pipeline,
             ItemProcessor processor, Inbox inbox, InboxReceiver receiver,
             Tables tables, KeyMaterial keys, SectionIds ids,
-            FencedCommitter committer, RetryPolicy retry)
+            FencedCommitter committer, RetryPolicy retry,
+            ResultsChannel results)
     {
         this.camel = camel;
         this.dataSource = dataSource;
@@ -166,6 +176,7 @@ public final class ConnectorRuntime implements AutoCloseable
         this.ids = ids;
         this.committer = committer;
         this.retry = retry;
+        this.results = results;
     }
 
     /**
@@ -205,6 +216,7 @@ public final class ConnectorRuntime implements AutoCloseable
         Catalog landingCatalog = null;
         ClosablePublisher publisher = null;
         IngestPipeline pipeline = null;
+        ResultsChannel results = null;
         try
         {
             dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
@@ -243,6 +255,12 @@ public final class ConnectorRuntime implements AutoCloseable
                     new MessageSealer(keys.signer(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
                     publisher, clock);
+            if (properties.results().enabled())
+            {
+                results = ResultsChannel.open(properties.results(),
+                        properties.queue(), camel, keys.signer(),
+                        keys.signerKid(), retry, ACK_TIMEOUT);
+            }
             ItemProcessor processor = new ItemProcessor(pipeline);
             Inbox inbox = new Inbox(inboxTable, committer, ids,
                     properties.connectorId(), retry, clock);
@@ -257,7 +275,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     landingCatalog, lease, publisher, pipeline, processor,
                     inbox, receiver,
                     new Tables(sections, inboxTable, landedItems), keys, ids,
-                    committer, retry);
+                    committer, retry, results);
         }
         catch (Exception | Error failure)
         {
@@ -265,6 +283,7 @@ public final class ConnectorRuntime implements AutoCloseable
             {
                 pipeline.close();
             }
+            closeQuietly(results);
             closeQuietly(publisher);
             if (landingCatalog != catalog)
             {
@@ -450,6 +469,16 @@ public final class ConnectorRuntime implements AutoCloseable
         return retry;
     }
 
+    /**
+     * Sends final results to the intake's producer.
+     *
+     * @return the channel; empty if results are off
+     */
+    public Optional<ResultsChannel> results()
+    {
+        return Optional.ofNullable(results);
+    }
+
     /** Stops the route, then closes everything in reverse order. */
     @Override
     public void close()
@@ -464,6 +493,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     failure.getClass().getSimpleName());
         }
         pipeline.close();
+        closeQuietly(results);
         closeQuietly(publisher);
         keys.close();
         closeQuietly(lease);

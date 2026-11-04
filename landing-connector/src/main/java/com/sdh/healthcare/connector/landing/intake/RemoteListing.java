@@ -11,8 +11,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.springframework.util.AntPathMatcher;
 
@@ -57,6 +60,12 @@ final class RemoteListing
 
     /** The source's settings. */
     private final SourceSettings settings;
+
+    /**
+     * The replaces markers the last listing found, by the item they sit
+     * beside.
+     */
+    private Map<String, ListedItem> replacesMarkers = Map.of();
 
     /** Matches the include pattern. */
     private final AntPathMatcher matcher = new AntPathMatcher("/");
@@ -144,6 +153,18 @@ final class RemoteListing
      */
     List<ListedItem> select(List<Entry> files)
     {
+        Map<String, ListedItem> replacing = new HashMap<>();
+        for (Entry file : files)
+        {
+            if (file.ref().endsWith(SourceSettings.REPLACES_SUFFIX))
+            {
+                replacing.put(file.ref().substring(0, file.ref().length()
+                        - SourceSettings.REPLACES_SUFFIX.length()),
+                        new ListedItem(file.ref(), file.size(),
+                                file.modified(), file.tag()));
+            }
+        }
+        replacesMarkers = replacing;
         Set<String> markers = new HashSet<>();
         if (settings.marker())
         {
@@ -172,6 +193,17 @@ final class RemoteListing
     }
 
     /**
+     * The replaces marker the last listing found beside an item.
+     *
+     * @param itemRef the item's path relative to the source
+     * @return the marker; empty if there was none
+     */
+    Optional<ListedItem> replacesMarker(String itemRef)
+    {
+        return Optional.ofNullable(replacesMarkers.get(itemRef));
+    }
+
+    /**
      * Tells whether a file is an item to pick up.
      *
      * @param ref its path relative to the source
@@ -180,6 +212,10 @@ final class RemoteListing
      */
     private boolean wanted(String ref)
     {
+        if (ref.endsWith(SourceSettings.REPLACES_SUFFIX))
+        {
+            return false;
+        }
         if (settings.marker() && ref.endsWith(SourceSettings.MARKER_SUFFIX))
         {
             return false;

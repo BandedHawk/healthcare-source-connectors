@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Optional;
 
 /**
  * Where an intake's items come from (design §5.3.4): reads them, says
@@ -45,6 +46,21 @@ public interface IntakeSource
      * @throws IOException                     if the item can't be read
      */
     InputStream open(ListedItem item, long offset) throws IOException;
+
+    /**
+     * The item's replaces marker, {@code <name>.sdh-replaces}, if the
+     * producer left one beside it (design §5.3.8); {@link #open} reads it.
+     *
+     * @param item the item
+     * @return the marker; empty if there is none, or the source can't
+     *         have one
+     * @throws IOException if the source can't be read
+     */
+    default Optional<ListedItem> replacesMarker(ListedItem item)
+            throws IOException
+    {
+        return Optional.empty();
+    }
 
     /**
      * Deletes, moves or renames a landed item, as configured; does nothing
