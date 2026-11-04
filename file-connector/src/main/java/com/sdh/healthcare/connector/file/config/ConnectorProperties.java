@@ -7,12 +7,16 @@
 package com.sdh.healthcare.connector.file.config;
 
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings.Compaction;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Crypto;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Lease;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Queue;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Retry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Telemetry;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings.Orphans;
 import com.sdh.healthcare.connector.runtime.config.ConnectorSettings;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import java.time.Duration;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -179,36 +183,28 @@ public record ConnectorProperties(
             @DefaultValue Orphans orphans,
             @DefaultValue Retention retention)
     {
-    }
 
-    /**
-     * Compaction of small files.
-     *
-     * @param enabled           whether it runs
-     * @param smallFileFraction files smaller than this fraction of the
-     *                          target size are compacted
-     * @param minInputFiles     the fewest files worth compacting together
-     * @param maxBytesPerRun    the most bytes rewritten in one run
-     */
-    public record Compaction(@DefaultValue("true") boolean enabled,
-            @DefaultValue("0.75") double smallFileFraction,
-            @DefaultValue("5") int minInputFiles,
-            @DefaultValue("8GB") DataSize maxBytesPerRun)
-    {
-    }
+        /**
+         * What each run does.
+         *
+         * @return the settings
+         */
+        public MaintenanceSettings toSettings()
+        {
+            return MaintenanceScheduler.settings(snapshotRetention,
+                    minSnapshots, compaction, orphans);
+        }
 
-    /**
-     * Removal of files no snapshot refers to.
-     *
-     * @param enabled  whether it runs
-     * @param interval how often
-     * @param minAge   never delete an unreferenced file younger than this
-     *                 (at least 1 hour)
-     */
-    public record Orphans(@DefaultValue("true") boolean enabled,
-            @DefaultValue("24h") Duration interval,
-            @DefaultValue("3d") Duration minAge)
-    {
+        /**
+         * When it runs.
+         *
+         * @return the schedule
+         */
+        public MaintenanceScheduler.Schedule toSchedule()
+        {
+            return new MaintenanceScheduler.Schedule(enabled, interval,
+                    orphans.enabled(), orphans.interval());
+        }
     }
 
     /**

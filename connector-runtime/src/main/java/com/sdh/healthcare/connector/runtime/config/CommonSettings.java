@@ -11,10 +11,12 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import org.springframework.boot.context.properties.bind.DefaultValue;
+import org.springframework.util.unit.DataSize;
 
 /**
  * The {@code sdh.*} settings both connector applications have (design §14):
- * the lease, keys, queue, retries and telemetry export. Each application's
+ * the lease, keys, queue, retries, telemetry export and the parts of table
+ * maintenance that don't depend on the tables. Each application's
  * own settings record holds these, under the same names, beside the settings
  * only it has. Secrets (passwords, passphrases) normally come from
  * environment variables or a Spring {@code configtree:} mount.
@@ -266,6 +268,36 @@ public final class CommonSettings
     public record Retry(@DefaultValue("8") int maxAttempts,
             @DefaultValue("200ms") Duration initialBackoff,
             @DefaultValue("30s") Duration maxBackoff)
+    {
+    }
+
+    /**
+     * Compaction of small files (design §8.4).
+     *
+     * @param enabled           whether it runs
+     * @param smallFileFraction files smaller than this fraction of the
+     *                          target size are compacted
+     * @param minInputFiles     the fewest files worth compacting together
+     * @param maxBytesPerRun    the most bytes rewritten in one run
+     */
+    public record Compaction(@DefaultValue("true") boolean enabled,
+            @DefaultValue("0.75") double smallFileFraction,
+            @DefaultValue("5") int minInputFiles,
+            @DefaultValue("8GB") DataSize maxBytesPerRun)
+    {
+    }
+
+    /**
+     * Removal of files no snapshot refers to (design §8.4).
+     *
+     * @param enabled  whether it runs
+     * @param interval how often
+     * @param minAge   never delete an unreferenced file younger than this
+     *                 (at least 1 hour)
+     */
+    public record Orphans(@DefaultValue("true") boolean enabled,
+            @DefaultValue("24h") Duration interval,
+            @DefaultValue("3d") Duration minAge)
     {
     }
 }

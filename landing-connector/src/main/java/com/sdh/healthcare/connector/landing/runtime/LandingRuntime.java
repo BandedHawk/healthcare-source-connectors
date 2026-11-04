@@ -92,6 +92,22 @@ public final class LandingRuntime implements AutoCloseable
     /** Lands the intake's items. */
     private final IntakeService service;
 
+    /** The landing tables, for maintenance. */
+    private final Tables tables;
+
+    /**
+     * The landing tables and what writes them, for table maintenance.
+     *
+     * @param committer   fences commits with the lease
+     * @param landedItems the {@value LandingTables#LANDED_ITEMS} table
+     * @param ledger      the {@value LandingTables#LEDGER} table
+     * @param lander      lands items; holds the intake's checkpoint
+     */
+    public record Tables(FencedCommitter committer, Table landedItems,
+            Table ledger, ItemLander lander)
+    {
+    }
+
     /**
      * Holds what has been started.
      *
@@ -103,10 +119,12 @@ public final class LandingRuntime implements AutoCloseable
      * @param keys       the keys
      * @param source     the source's settings
      * @param service    lands the intake's items
+     * @param tables     the landing tables
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
-            KeyMaterial keys, SourceSettings source, IntakeService service)
+            KeyMaterial keys, SourceSettings source, IntakeService service,
+            Tables tables)
     {
         this.camel = camel;
         this.dataSource = dataSource;
@@ -116,6 +134,7 @@ public final class LandingRuntime implements AutoCloseable
         this.keys = keys;
         this.source = source;
         this.service = service;
+        this.tables = tables;
     }
 
     /**
@@ -207,7 +226,8 @@ public final class LandingRuntime implements AutoCloseable
                     Fields.of(Attr.INTAKE, intake)
                             .with(Attr.EPOCH, lease.epoch()));
             return new LandingRuntime(camel, dataSource, catalog, lease,
-                    publisher, keys, source, service);
+                    publisher, keys, source, service,
+                    new Tables(committer, items, ledgerTable, lander));
         }
         catch (Exception | Error failure)
         {
@@ -283,6 +303,16 @@ public final class LandingRuntime implements AutoCloseable
     public IntakeService service()
     {
         return service;
+    }
+
+    /**
+     * The landing tables, for maintenance.
+     *
+     * @return the tables
+     */
+    public Tables tables()
+    {
+        return tables;
     }
 
     /**

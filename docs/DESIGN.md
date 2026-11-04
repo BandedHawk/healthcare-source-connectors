@@ -45,6 +45,8 @@ FHIR, generic XML and delimited sections are stored as split. A section that fai
 - contract version 2.0 (§10.1);
 - three new `sections` columns (§8.2).
 
+Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
+
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
 
 Revision 2026-11-03 (as): built step 3a of landing (§5.3.10, §5.3.12): the splitter now reads only from landing. It takes `item.landed` messages into a durable inbox table, acknowledges each once it is committed, and splits the inbox's items in order, reading each from `landed_items` by chunk. Directory pickup, fingerprints, `InProgressLocator`, archiving to `source_files` and `failed_files`, the local fallback and the `completed/` and `failed/` records are gone from the splitter (§5, §8.2, §11). `restore` reads the landed item. The splitter has its own key pair for `item.landed`, and trusts the landing node's signing key (§7.4). New error code `MESSAGE_REJECTED`. The `-Pit` suite, the Kubernetes run, the images and the demo are rewritten for two stages in step 3b.
@@ -228,6 +230,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │   └── com.sdh.healthcare.connector.runtime
 │       ├── config/       CommonSettings (shared sdh.* records), ConnectorSettings, KeyMaterial, PEM reading
 │       ├── publish/      QueueType (broker adapters), Publishers, CamelMessagePublisher, ServiceBusPublisher
+│       ├── maintenance/  MaintenanceScheduler (§8.4, §5.3.13)
 │       ├── telemetry/    OTLP exporters, AllowListSpanExporter, AuditOnlyLogRecordExporter
 │       └── FatalExit, InboundDirectoryClaim (§9.5), LeaseDatabase
 ├── landing-connector/                   Spring Boot application: the landing node (§5.3)
@@ -243,8 +246,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
     └── com.sdh.healthcare.connector.file
         ├── FileConnectorApplication
         ├── config/       ConnectorProperties (sdh.*; the shared records are in connector-runtime)
-        ├── runtime/      ConnectorRuntime (startup order), ConnectorConfiguration (Spring wiring),
-        │                 MaintenanceScheduler
+        ├── runtime/      ConnectorRuntime (startup order), ConnectorConfiguration (Spring wiring)
         ├── route/        InboundRoute (directory discovery)
         ├── ingest/       InboundService (per-file handling, in-progress recovery, backoff)
         ├── telemetry/    InboundGauge (inbound age gauge)
@@ -419,7 +421,7 @@ Namespace `sdh_landing` (configurable), with its own catalog properties, so it c
 - **Size check:** when the source gave a size, the bytes read must match it exactly, or the landing stops with `ItemChangedException` and nothing is finished.
 - **Not yet:** the producer's reference, the content's SHA-256 and the record index for message batches come with the steps that need them (§5.3.8, step 6). `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
 
-Chunks committed without a summary row belong to an item that wasn't finished (a push that broke off, an item that changed while being read). Maintenance removes them once they are older than a day and no checkpoint refers to them.
+Chunks committed without a summary row belong to an item that wasn't finished (a push that broke off, an item that changed while being read). Nothing reads them. For now they are removed only by retention, with the rest of their day (§5.3.13); removing them sooner needs their files rewritten, and isn't built.
 
 **`landing_ledger`** records what has been landed, with no PHI: hashes, sizes and times only.
 - **Key:** `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ path or key)`, plus size and modification time (or version ID or ETag; or the message ID's hash for queues), and the item's content digest.
@@ -430,7 +432,7 @@ Chunks committed without a summary row belong to an item that wasn't finished (a
 
 **Checkpoint.** `sdh.landing.<intake>` on `landed_items` (`LandingCheckpoint`), MAC'd like §9.1: the item in progress, its kind, its source reference (the keyed hash, size and version: no PHI, and the intake finds the item again by hashing what it lists), the next block and the chain hash; once done, the size, digest and landing time. Resuming checks that the source reference is unchanged, or fails with `ItemChangedException`. An unfinished item must be finished or cleared (`ItemLander.clear`) before another starts. Large items are committed every `commit-bytes`, as archives are today, so a 1 TB file isn't read again from the start after a restart.
 
-**Retention:** `maintenance.retention.landed-items`, set by the customer (unset keeps items forever). An item still referred to by a splitter checkpoint is never purged. Purging uses the existing retention run (§8.4).
+**Retention:** `maintenance.retention.landed-items`, set by the customer (unset keeps items forever), at least 7 days. Purging uses the existing retention run (§8.4), and never takes part of an item (§5.3.13). The landing node can't see the splitter's progress, so the retention must be longer than the splitter can fall behind; an item purged before it is read fails in the splitter with `SOURCE_READ_FAILED`.
 
 #### 5.3.3 Already landed, and duplicates
 
@@ -537,7 +539,7 @@ sdh:
     keys: { landed-items-kek: landed-items-kek/1 }
   lease: { name: landing-claims-sftp, standby: true }
   maintenance:
-    retention: { landed-items: 3650d, ledger: forever }
+    retention: { landed-items: 3650d }   # the ledger is always kept
 ```
 
 - **The URI is checked** against the fixed list of components and against options that must be set or must not be. For example, `strictHostKeyChecking=no` is refused, and so is a password written in the URI. Credentials come from mounted secrets or the environment, never from the URI itself.
@@ -546,7 +548,7 @@ sdh:
 #### 5.3.10 Order of work
 
 1. **Landing storage (built):** `landed_items` and `landing_ledger`, the landing checkpoint, `item.landed` in `connector-contract`, and the lease's standby mode.
-2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). Left for later: retention and maintenance of the landing tables, the listing metrics of §5.3.3, and an image and distribution kit for the node.
+2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). Left for later: the listing metrics of §5.3.3. The image and kit came in step 3b, retention and maintenance after it (§5.3.13).
 3. **The splitter reads from landing.** 3a (built, §5.3.12): an `item.landed` consumer and inbox, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. 3b: an image for the landing node, the build and Kubernetes scripts, and the `-Pit` suite, the Kubernetes run (§15.2) and the demo rewritten for two stages, with failover of both stages.
 4. **SFTP and SMB,** with the failure cases of §5.3.4 tested against containers that are cut off, restarted and given wrong keys.
 5. **HTTP push,** with OAuth2 and mTLS.
@@ -659,6 +661,28 @@ flowchart LR
 **Telemetry:** the `sdh.inbox.backlog` gauge, and the `inbox.added`, `inbox.repeat` and `inbox.rejected` audit events. The `ingest.item` span replaces `ingest.file`.
 
 **Tests:** `ItemProcessorTest`, `LandedItemSourceTest`, `InboxTest`, and the Spring tests `FileConnectorApplicationTest` and `AdminCommandsTest`. In those, `TestLanding` plays the landing node: it lands items in the same catalog and sends sealed `item.landed` messages over SEDA. The splitter takes items in order, records a repeat once, refuses another intake, another catalog and an unknown signer, and fails a bad item. The integration tests that drive the splitter (`FullStackIT`, `PolarisIT`, the object-store tests) use `TestLanding` too. The image tests and the demo still assume directory pickup until step 3b.
+
+#### 5.3.13 Landing maintenance and retention (built)
+
+The landing node runs the maintenance of §8.4 on `landed_items` and `landing_ledger`, through the shared `MaintenanceScheduler` (`connector-runtime` `maintenance/`). The splitter uses the same scheduler on `sections` and `inbox`.
+
+- **Between items:** `IntakeService` holds its writer lock while it recovers, while it handles each listed item and at the end of each listing, so a tick runs only between items. A busy tick is skipped.
+- **Errors,** fencing and the steps of each run are as §8.4: lease loss, an unknown commit outcome and a tampered checkpoint stop the process (status 70).
+- **The ledger** has compaction, snapshot expiry and orphan cleanup, but no retention: a read-only source keeps its files, and without their entries they would be landed again.
+
+**Retention of `landed_items`** (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days so the splitter has time to read each item) deletes whole UTC days by `landed_at`. An item's batches each carry their own `landed_at`, so an item landed across midnight has rows on both sides of a day boundary, and a plain day cutoff would purge its first chunks and leave the rest. `LandedItems.keepFrom` moves the cutoff back to the earliest `started_at` of:
+- any finished item whose summary row is at or after the cutoff but which started before it;
+- the item still being landed, from the checkpoint.
+
+The cutoff is then rounded down to a whole day, so the delete still matches whole partitions. The cost is keeping a little more: at most the day an item started, for items that span the cutoff. The scan reads only files from the cutoff on, and only their summary rows.
+
+After a purge, recovery still works: the last landed item is rebuilt from the checkpoint alone, and the splitter sees its `item.landed` again as a repeat.
+
+**Not built:** removing the chunks of an item that was given up (§5.3.2) before retention reaches them.
+
+**Settings:** as §14's `sdh.maintenance`, with `retention.landed-items` in place of `retention.sections`.
+
+**Tests:** `LandingRetentionTest` lands an item a minute before midnight in 40-second batches. Retention keeps all of it and reads it back whole, and purges an older item completely. Without the guard, the same purge takes the item's first day. A checkpoint of an unfinished item keeps rows from its start. `MaintenanceSchedulerTest` checks the minimum. `LandingConnectorApplicationTest` runs a pass over both tables with retention set.
 
 ## 6. Splitting
 
@@ -975,16 +999,16 @@ The fenced committer checks the lease epoch and commits with a strict compare-an
 
 ### 8.4 Maintenance (built)
 
-Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintains one table without it, and `MaintenanceScheduler` (`file-connector`) runs it on all three tables every `maintenance.interval` (1 h).
+Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintains one table without it, and `MaintenanceScheduler` (`connector-runtime` `maintenance/`) runs it every `maintenance.interval` (1 h): in the splitter on `sections` and `inbox`, in the landing node on `landed_items` and `landing_ledger` (§5.3.13).
 
 **Scheduling:**
-- **Between files only:** the scheduler runs only if it can take the writer lock without waiting. The inbound service holds that lock for each file, so maintenance never overlaps with ingest; a busy tick is skipped.
+- **Between items only:** the scheduler runs only if it can take the writer lock without waiting. The splitter's worker holds that lock for each item, and the landing node's intake for each listed item, so maintenance never overlaps with writing; a busy tick is skipped.
 - **Bounded runs:** the compaction budget limits how long intake can be held up.
 - **Errors:** a lease loss, unknown commit outcome or tampered checkpoint exits the process (status 70); anything else is logged and retried next interval.
 - **Fencing:** every run starts with `FencedCommitter.verifyCurrent` (lease held, table epoch ours). Every maintenance commit goes through the fenced committer except snapshot expiry.
 
 **Each run, per table:**
-1. **Retention** (per table, off by default, at least 1 day). It deletes whole UTC days older than `now − retention`, using `deleteFromRowFilter` on the partition source column (`ingested_at`, or `archived_at` for the archive tables). That is metadata-only, because whole partitions match. Nothing to delete means no commit, so there are no empty snapshots. The PHI is then purged in the same run: Iceberg deletes a removed file only once the snapshot that removed it has expired, and the current snapshot never expires. So a fenced marker commit follows the delete, and every snapshot before the marker is expired, which deletes the files. Trade-off: no time travel to before a retention delete.
+1. **Retention** (per table, off by default, at least 1 day; 7 for `landed_items`). It deletes whole UTC days older than `now − retention`, using `deleteFromRowFilter` on the partition source column (`ingested_at` for `sections`, `landed_at` for `landed_items`). A table can move the cutoff back to keep rows that belong together (`landed_items`, §5.3.13). That is metadata-only, because whole partitions match. Nothing to delete means no commit, so there are no empty snapshots. The PHI is then purged in the same run: Iceberg deletes a removed file only once the snapshot that removed it has expired, and the current snapshot never expires. So a fenced marker commit follows the delete, and every snapshot before the marker is expired, which deletes the files. Trade-off: no time travel to before a retention delete.
 2. **Compaction (bin-pack):**
    - **What counts as small:** data files below `small-file-fraction` (0.75) of the table's target size (512 MiB), grouped by partition; a partition needs at least `min-input-files` (5) of them.
    - **Packing:** first-fit decreasing into bins of at most the target size.
@@ -1651,7 +1675,7 @@ sdh:
   telemetry:                      # §12.1; unset endpoint = no export
     otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env
     metric-interval: 60s
-  maintenance:                    # §8.4; runs between files
+  maintenance:                    # §8.4; runs between items
     enabled: true
     interval: 1h
     snapshot-retention: 7d
@@ -1896,7 +1920,7 @@ An SBOM lists licenses as each project declares them; the elections for dual-lic
 cosign, syft and the registry run as pinned containers in the `sdh-it` VM, so nothing is installed on the host. Files reach them through a Docker volume, because the VM doesn't mount host directories.
 
 **Runs:**
-- 2026-11-03, both applications, throwaway key and registry: all 14 checks pass (both tarballs with cosign and openssl, a tampered tarball rejected, all four images' signatures and SBOM attestations, another key rejected). The scan passes. The base image pins were stale, so it ran with `SDH_ALLOW_STALE_BASE=1`; they need updating before a release.
+- 2026-11-03, both applications, throwaway key and registry: all 14 checks pass (both tarballs with cosign and openssl, a tampered tarball rejected, all four images' signatures and SBOM attestations, another key rejected). The scan passes. The first run stopped on stale base image pins; after `base-images.sh update` and the image tests, it passes without `SDH_ALLOW_STALE_BASE`.
 
 2026-10-29, the splitter only:
 - With a throwaway key and registry, all eight checks pass.

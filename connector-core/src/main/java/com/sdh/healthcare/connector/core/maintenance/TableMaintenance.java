@@ -27,6 +27,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.function.UnaryOperator;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
 import org.apache.iceberg.DataFile;
@@ -98,20 +99,50 @@ public final class TableMaintenance
     }
 
     /**
+     * Runs maintenance on a table, with the retention cutoff as configured.
+     *
+     * @param table the table
      * @param timeColumn the partition source column, used for retention
-     * ({@code ingested_at} or {@code archived_at})
+     * ({@code ingested_at} or {@code landed_at})
      * @param retention delete rows older than this (whole UTC days); empty =
      * keep forever
      * @param orphans also clean up unreferenced files this run
+     * @return what it did
      */
     public Report run(Table table, String timeColumn,
             Optional<Duration> retention, boolean orphans)
+    {
+        return run(table, timeColumn, retention, orphans,
+                UnaryOperator.identity());
+    }
+
+    /**
+     * Runs maintenance on a table, letting the caller keep more than the
+     * retention would: for a table whose records span several rows written
+     * at different times, such as a landed item's chunks, so none is purged
+     * in part.
+     *
+     * @param table the table
+     * @param timeColumn the partition source column, used for retention
+     * @param retention delete rows older than this (whole UTC days); empty =
+     * keep forever
+     * @param orphans also clean up unreferenced files this run
+     * @param keepFrom given the start of the first day retention keeps,
+     * returns the instant from which rows must be kept instead; an instant
+     * after the one given is ignored, and the result is taken back to the
+     * start of its UTC day
+     * @return what it did
+     */
+    public Report run(Table table, String timeColumn,
+            Optional<Duration> retention, boolean orphans,
+            UnaryOperator<Instant> keepFrom)
     {
         Span span = Telemetry.get().span("maintenance", Fields.of(Attr.TABLE,
                 table.name()));
         try (Scope ignored = span.makeCurrent())
         {
-            return runTraced(table, timeColumn, retention, orphans);
+            return runTraced(table, timeColumn, retention, orphans,
+                    keepFrom);
         } catch (RuntimeException | Error e)
         {
             Telemetry.fail(span, e);
@@ -123,7 +154,8 @@ public final class TableMaintenance
     }
 
     private Report runTraced(Table table, String timeColumn,
-            Optional<Duration> retention, boolean orphans)
+            Optional<Duration> retention, boolean orphans,
+            UnaryOperator<Instant> keepFrom)
     {
         committer.verifyCurrent(table);
         Instant now = clock.instant();
@@ -133,7 +165,7 @@ public final class TableMaintenance
         if (retention.isPresent())
         {
             retentionDeleted = applyRetention(table, timeColumn, retention.get(),
-                    now);
+                    now, keepFrom);
             if (retentionDeleted > 0)
             {
                 // Iceberg's expiry deletes a file only once the snapshot that removed it has expired, and the current
@@ -163,14 +195,17 @@ public final class TableMaintenance
 
     // ---- retention ----
     /**
-     * Deletes whole UTC days older than {@code now - retention}. Returns the
-     * number of data files removed.
+     * Deletes whole UTC days older than {@code now - retention}, or than
+     * where {@code keepFrom} says rows must be kept from, if that is earlier.
+     * Returns the number of data files removed.
      */
     private int applyRetention(Table table, String timeColumn,
-            Duration retention, Instant now)
+            Duration retention, Instant now, UnaryOperator<Instant> keepFrom)
     {
-        Instant cutoff = now.minus(retention).truncatedTo(ChronoUnit.DAYS).
-                atOffset(ZoneOffset.UTC).toInstant();
+        Instant byAge = now.minus(retention).truncatedTo(ChronoUnit.DAYS);
+        Instant held = keepFrom.apply(byAge);
+        Instant cutoff = held.isBefore(byAge)
+                ? held.truncatedTo(ChronoUnit.DAYS) : byAge;
         Expression older = Expressions.lessThan(timeColumn,
                 TimeUnit.MILLISECONDS.toMicros(cutoff.toEpochMilli()));
         int matching = 0;

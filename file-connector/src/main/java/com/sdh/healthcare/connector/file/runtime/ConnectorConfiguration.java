@@ -6,13 +6,19 @@
  */
 package com.sdh.healthcare.connector.file.runtime;
 
+import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.core.inbox.InboxTables;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.inbox.InboxRoute;
 import com.sdh.healthcare.connector.file.inbox.InboxWorker;
 import com.sdh.healthcare.connector.runtime.FatalExit;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
 import java.time.Clock;
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.camel.CamelContext;
 import org.slf4j.Logger;
@@ -124,7 +130,21 @@ public class ConnectorConfiguration
             ConnectorProperties properties, ReentrantLock writerLock,
             FatalExit fatal)
     {
-        return new MaintenanceScheduler(runtime, properties.maintenance(),
+        ConnectorProperties.Maintenance settings = properties.maintenance();
+        // Only sections has retention: the inbox keeps every row, to
+        // recognise items delivered again.
+        Optional<Duration> sections = MaintenanceScheduler.retention(
+                "sdh.maintenance.retention.sections",
+                settings.retention().sections(), Duration.ofDays(1));
+        return new MaintenanceScheduler(runtime.committer(),
+                settings.toSettings(), settings.toSchedule(),
+                () -> List.of(
+                        MaintenanceScheduler.Target.of(
+                                runtime.tables().sections(),
+                                SectionsTable.INGESTED_AT, sections),
+                        MaintenanceScheduler.Target.of(
+                                runtime.tables().inbox(),
+                                InboxTables.RECEIVED_AT, Optional.empty())),
                 writerLock, fatal, Clock.systemUTC());
     }
 

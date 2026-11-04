@@ -59,3 +59,11 @@ sdh:
   telemetry:                      # unset endpoint = no export
     otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env
     metric-interval: 60s
+  maintenance:                    # runs between items, on landed_items and landing_ledger
+    enabled: true
+    interval: 1h
+    snapshot-retention: 7d
+    min-snapshots: 10
+    compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
+    orphans: { enabled: true, interval: 24h, min-age: 3d }
+    retention: { landed-items: 3650d }   # unset = keep forever (default); at least 7d; the ledger is always kept

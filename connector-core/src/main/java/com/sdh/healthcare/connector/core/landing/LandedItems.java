@@ -17,6 +17,9 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -156,6 +159,58 @@ public final class LandedItems
                 Expressions.equal(ITEM_ID, itemId),
                 Expressions.equal(CHUNK_INDEX, SUMMARY_ROW)))
                 .stream().findFirst();
+    }
+
+    /**
+     * Where retention must keep rows from so that no item is purged in part
+     * (design §5.3.13). An item's chunks are committed in batches, each
+     * stamped with its own {@value LandingTables#LANDED_AT}, so an item
+     * landed across midnight has rows on both sides of a day boundary. The
+     * cutoff moves back to the start of the earliest item that began before
+     * it and finished at or after it, and of the item still being landed, if
+     * there is one.
+     *
+     * @param table      the {@value LandingTables#LANDED_ITEMS} table
+     * @param cutoff     the first instant retention would keep
+     * @param checkpoint the intake's checkpoint, if it has one
+     * @return the instant to keep rows from: {@code cutoff} or earlier
+     * @throws IOException if the table can't be read
+     */
+    public static Instant keepFrom(Table table, Instant cutoff,
+            Optional<LandingCheckpoint> checkpoint) throws IOException
+    {
+        Instant keep = cutoff;
+        if (checkpoint.isPresent() && !checkpoint.get().done()
+                && checkpoint.get().startedAt().isBefore(keep))
+        {
+            keep = checkpoint.get().startedAt();
+        }
+        long cutoffMicros = ChronoUnit.MICROS.between(Instant.EPOCH, cutoff);
+        table.refresh();
+        if (table.currentSnapshot() == null)
+        {
+            return keep;
+        }
+        try (CloseableIterable<Record> straddling = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(CHUNK_INDEX, SUMMARY_ROW),
+                        Expressions.greaterThanOrEqual(LANDED_AT,
+                                cutoffMicros),
+                        Expressions.lessThan(STARTED_AT, cutoffMicros)))
+                .select(STARTED_AT)
+                .build())
+        {
+            for (Record row : straddling)
+            {
+                Object started = row.getField(STARTED_AT);
+                if (started instanceof OffsetDateTime time
+                        && time.toInstant().isBefore(keep))
+                {
+                    keep = time.toInstant();
+                }
+            }
+        }
+        return keep;
     }
 
     /**

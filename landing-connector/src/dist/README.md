@@ -76,6 +76,11 @@ The source is read-only by default: files are left where they are, and a ledger 
 With `access: read-write`, each file is deleted, moved or renamed once it has landed and been announced; the node
 checks at startup that it can do so.
 
+Landed items are kept forever unless you set `sdh.maintenance.retention.landed-items` (at least `7d`, so the
+splitter has time to read each item). Retention removes whole days, and never part of an item. The ledger is always
+kept, because a read-only source would otherwise land its files again. Set the retention longer than the splitter
+can ever fall behind: an item purged before the splitter reads it is reported there as failed.
+
 ## Run on a host
 
 ```sh

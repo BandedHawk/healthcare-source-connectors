@@ -21,7 +21,7 @@ import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.file.inbox.InboxReceiver;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
-import com.sdh.healthcare.connector.file.runtime.MaintenanceScheduler;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;

@@ -29,6 +29,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -111,6 +112,12 @@ public final class IntakeService
     /** The wait after the first error in a row. */
     private final Duration initialBackoff;
 
+    /**
+     * Held while the intake writes to landing storage, so table maintenance
+     * runs only between items.
+     */
+    private final ReentrantLock writer = new ReentrantLock();
+
     /** Whether startup recovery has finished. */
     private boolean recovered;
 
@@ -160,8 +167,9 @@ public final class IntakeService
      * Recovers from a crash, before the route starts. If storage or the
      * broker is down, recovery is tried again before each item.
      */
-    public synchronized void recoverAtStartup()
+    public void recoverAtStartup()
     {
+        writer.lock();
         try
         {
             ensureRecovered();
@@ -170,6 +178,10 @@ public final class IntakeService
         {
             onError(failure);
         }
+        finally
+        {
+            writer.unlock();
+        }
     }
 
     /**
@@ -177,8 +189,9 @@ public final class IntakeService
      *
      * @param item the item
      */
-    public synchronized void onListed(ListedItem item)
+    public void onListed(ListedItem item)
     {
+        writer.lock();
         try
         {
             handle(item);
@@ -187,6 +200,10 @@ public final class IntakeService
         catch (Throwable failure)
         {
             onError(failure);
+        }
+        finally
+        {
+            writer.unlock();
         }
     }
 
@@ -234,8 +251,9 @@ public final class IntakeService
      * otherwise forgets items that have gone, and gives up an unfinished
      * item the listing didn't find.
      */
-    public synchronized void onListingDone()
+    public void onListingDone()
     {
+        writer.lock();
         try
         {
             ensureRecovered();
@@ -266,6 +284,21 @@ public final class IntakeService
         {
             onError(failure);
         }
+        finally
+        {
+            writer.unlock();
+        }
+    }
+
+    /**
+     * The lock held while the intake writes to landing storage: table
+     * maintenance takes it only when it is free.
+     *
+     * @return the lock
+     */
+    public ReentrantLock writerLock()
+    {
+        return writer;
     }
 
     /**

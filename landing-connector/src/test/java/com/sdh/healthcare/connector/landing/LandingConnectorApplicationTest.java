@@ -13,7 +13,9 @@ import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
+import com.sdh.healthcare.connector.landing.runtime.LandingRuntime;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -140,11 +142,20 @@ class LandingConnectorApplicationTest
         registry.add("sdh.queue.uri", () -> "seda:sdh-out?size=1000");
         registry.add("sdh.retry.max-attempts", () -> "2");
         registry.add("sdh.retry.initial-backoff", () -> "10ms");
+        registry.add("sdh.maintenance.retention.landed-items", () -> "3650d");
     }
 
     /** The application's Camel context. */
     @Autowired
     CamelContext camel;
+
+    /** The node's tables and services. */
+    @Autowired
+    LandingRuntime runtime;
+
+    /** Maintenance of the landing tables. */
+    @Autowired
+    MaintenanceScheduler maintenance;
 
     /**
      * Files dropped in the source are landed, announced with
@@ -191,6 +202,24 @@ class LandingConnectorApplicationTest
         }
         assertThat(SOURCE.resolve("one.csv")).doesNotExist();
         assertThat(SOURCE.resolve("two.csv")).doesNotExist();
+
+        // Maintenance between items, with retention set, purges nothing new.
+        var writer = runtime.service().writerLock();
+        writer.lock();
+        try
+        {
+            var reports = maintenance.runOnce();
+            assertThat(reports).extracting(report -> report.table()
+                    .substring(report.table().indexOf('.') + 1))
+                    .containsExactly("sdh_landing.landed_items",
+                            "sdh_landing.landing_ledger");
+            assertThat(reports).allSatisfy(report -> assertThat(
+                    report.retentionDeletedFiles()).isZero());
+        }
+        finally
+        {
+            writer.unlock();
+        }
         assertThat(FATAL).isEmpty();
     }
 }

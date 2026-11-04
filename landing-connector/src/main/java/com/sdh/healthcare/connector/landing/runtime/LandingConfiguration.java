@@ -6,11 +6,22 @@
  */
 package com.sdh.healthcare.connector.landing.runtime;
 
+import com.sdh.healthcare.connector.core.landing.LandedItems;
+import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.runtime.FatalExit;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.UnaryOperator;
 import org.apache.camel.CamelContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,6 +86,49 @@ public class LandingConfiguration
                 "Items listed and waiting to settle",
                 () -> runtime.service().waiting());
         return runtime;
+    }
+
+    /**
+     * Runs table maintenance on the landing tables between items (design
+     * §5.3.13). Retention purges whole days of {@code landed_items}, never
+     * part of an item; the ledger is kept forever.
+     *
+     * @param runtime    the runtime
+     * @param properties the node's settings
+     * @param fatal      the exit hook
+     * @return the scheduler
+     */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    MaintenanceScheduler maintenanceScheduler(LandingRuntime runtime,
+            LandingProperties properties, FatalExit fatal)
+    {
+        LandingProperties.Maintenance settings = properties.maintenance();
+        Optional<Duration> retention = MaintenanceScheduler.retention(
+                "sdh.maintenance.retention.landed-items",
+                settings.retention().landedItems(),
+                LandingProperties.Maintenance.MIN_RETENTION);
+        LandingRuntime.Tables tables = runtime.tables();
+        UnaryOperator<Instant> wholeItems = cutoff ->
+        {
+            try
+            {
+                return LandedItems.keepFrom(tables.landedItems(), cutoff,
+                        tables.lander().checkpoint());
+            }
+            catch (IOException failure)
+            {
+                throw new UncheckedIOException(failure);
+            }
+        };
+        return new MaintenanceScheduler(tables.committer(),
+                settings.toSettings(), settings.toSchedule(),
+                () -> List.of(
+                        new MaintenanceScheduler.Target(tables.landedItems(),
+                                LandingTables.LANDED_AT, retention,
+                                wholeItems),
+                        MaintenanceScheduler.Target.of(tables.ledger(),
+                                LandingTables.LANDED_AT, Optional.empty())),
+                runtime.service().writerLock(), fatal, Clock.systemUTC());
     }
 
     /**
