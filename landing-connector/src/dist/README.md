@@ -70,6 +70,8 @@ variables, never in the file:
 - `SDH_LEASE_JDBC_PASSWORD`
 - `SDH_LANDING_SOURCE_SFTP_PASSWORD` or `SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE`, for an SFTP source
 - `SDH_LANDING_SOURCE_SMB_PASSWORD`, for an SMB source
+- `SDH_LANDING_SOURCE_BUCKET_SECRET_ACCESS_KEY` or `SDH_LANDING_SOURCE_BUCKET_CONNECTION_STRING`, for an S3 or Azure
+  Blob source with a key; otherwise the cloud's default credentials are used
 - `SDH_LANDING_HTTP_TLS_PRIVATE_KEY_PASSWORD`, for an HTTP push intake whose TLS key has a password
 - `SDH_LANDING_BROKER_RABBITMQ_PASSWORD`, `SDH_LANDING_BROKER_ARTEMIS_PASSWORD` or
   `SDH_LANDING_BROKER_EVENTHUBS_CHECKPOINT_CONNECTION_STRING`, for a RabbitMQ, Artemis or Event Hubs queue
@@ -84,15 +86,24 @@ With `access: read-write`, each file is deleted, moved or renamed once it has la
 checks at startup that it can do so.
 
 The source is a local or mounted directory (`type: directory`), an SFTP server (`type: sftp`), an SMB share
-(`type: smb`), HTTP push (`type: http`), or a message queue (`type: queue`):
+(`type: smb`), a bucket (`type: s3`, `azure-blob` or `gcs`), HTTP push (`type: http`), or a message queue
+(`type: queue`):
 - **SFTP:** the server's host key must be pinned in a known-hosts file; an unknown or changed key is never
   accepted. Log in with a private key in OpenSSH format, or a password.
 - **SMB:** SMB 3 with encryption only, NTLMv2 with a user and password; guest and anonymous logins are refused, and
   so is a share that doesn't encrypt.
-- **Paths** on a remote source are absolute paths on the server (`path`, `move-to`).
+- **Buckets:** an S3 bucket (or one on an S3-compatible store, with `endpoint` and usually `path-style-access`), an
+  Azure Blob container, or a GCS bucket (`sdh.landing.source.bucket`). The bucket is listed every `poll-interval`.
+  Credentials are an S3 access key or Azure connection string from the environment, or the cloud's default
+  credentials (AWS default chain, Azure default credential with `endpoint`, Google application default
+  credentials). Objects appear whole, so `settle: 0s` is usually enough. An object written again is a new version
+  and is landed again. `move` and `rename` copy, then delete; the copy and delete happen only if the object hasn't
+  changed since it was listed.
+- **Paths** on a remote source are absolute paths on the server (`path`, `move-to`); on a bucket they are key
+  prefixes, `/` being the bucket's root, so `path: /inbound` reads keys under `inbound/`.
 - **Outages:** a dropped or stalled connection is noticed within `read-timeout` and retried at each poll; an item
-  cut off part way resumes where it stopped. Refused credentials, a missing share or a changed host key are retried
-  only every `auth-retry-interval`, so an account isn't locked. Each is reported once, by reason, as
+  cut off part way resumes where it stopped. Refused credentials, a missing share or bucket, or a changed host key
+  are retried only every `auth-retry-interval`, so an account isn't locked. Each is reported once, by reason, as
   `intake.unreachable`, and `intake.reachable` when it is back. No names or paths are logged.
 - **HTTP push:** producers send each item as the body of `POST https://<host>:8443/intakes/<intake>/items`, over
   TLS (`sdh.landing.http.tls`). They authenticate with an OAuth2 bearer token (checked for the issuer, audience and

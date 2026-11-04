@@ -39,7 +39,7 @@ class SourceSettingsTest
         return new LandingProperties.Source(Path.of("/data/in"), access,
                 after, moveTo, ".landed", ready, Duration.ofMinutes(2), "*",
                 false, Duration.ofSeconds(10), "directory",
-                Duration.ofMinutes(5), null, null);
+                Duration.ofMinutes(5), null, null, null);
     }
 
     /** Each access mode has a sensible default after-action. */
@@ -102,7 +102,7 @@ class SourceSettingsTest
         return new LandingProperties.Source(path, "read-only", null, null,
                 ".landed", "settled", Duration.ofMinutes(2), "*", false,
                 Duration.ofSeconds(10), type, Duration.ofMinutes(5), sftp,
-                smb);
+                smb, null);
     }
 
     /**

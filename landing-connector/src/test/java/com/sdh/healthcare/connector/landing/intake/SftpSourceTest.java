@@ -199,7 +199,7 @@ class SftpSourceTest
         return SourceSettings.of(new LandingProperties.Source(Path.of("/in"),
                 access, after, Path.of("/done"), ".landed", ready,
                 Duration.ZERO, "**/*", true, Duration.ofSeconds(1), "sftp",
-                Duration.ofMinutes(5), sftp, null));
+                Duration.ofMinutes(5), sftp, null, null));
     }
 
     /**

@@ -31,13 +31,11 @@ public final class Readiness
     /**
      * What was seen of an item.
      *
-     * @param size       its size
-     * @param version    its version
+     * @param item       the item as seen
      * @param sinceNanos when this size and version were first seen
      * @param listing    the listing it was last seen in
      */
-    private record Sighting(long size, long version, long sinceNanos,
-            long listing)
+    private record Sighting(ListedItem item, long sinceNanos, long listing)
     {
     }
 
@@ -76,10 +74,9 @@ public final class Readiness
     {
         long now = nanoClock.getAsLong();
         Sighting last = seen.get(item.ref());
-        long since = last != null && last.size() == item.size()
-                && last.version() == item.version() ? last.sinceNanos() : now;
-        seen.put(item.ref(),
-                new Sighting(item.size(), item.version(), since, listing));
+        long since = last != null && last.item().sameVersion(item)
+                ? last.sinceNanos() : now;
+        seen.put(item.ref(), new Sighting(item, since, listing));
         return now - since >= settleNanos;
     }
 

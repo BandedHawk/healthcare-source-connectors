@@ -53,6 +53,8 @@ Revision 2026-11-04 (ax): built step 6a of landing, queue intakes for Kafka, SQS
 
 Revision 2026-11-04 (ay): built step 6b of landing, queue intakes for Pub/Sub, Service Bus and Event Hubs (§5.3.16), all by Camel consumers. Pub/Sub uses `ackMode=NONE`: each exchange completes at once and carries an acknowledgement that is used once the batch is landed. Service Bus holds each exchange open in peek-lock mode, with Camel renewing the lock. Event Hubs holds each exchange open, with a blob checkpoint store and start positions the node supplies (`sdh.landing.broker.eventhubs`). Changed for every broker (decided 2026-11-04): a batch that can't be landed is now tried again in place, keeping its messages, instead of being handed back. Handing it back raised each message's delivery count, so on a broker with a delivery limit (Service Bus and Artemis, 10 by default; RabbitMQ 4 quorum queues, 20) a long storage outage would have dead-lettered messages. Messages are handed back only when the route stops, as soon as Camel prepares it for shutdown. After a fatal error the consumer is held back, rather than its messages handed back repeatedly until the node exits. Service Bus messages are identified by sequence number, Event Hubs events by partition and sequence number, and Pub/Sub messages by message ID.
 
+Revision 2026-11-04 (az): built step 7a of landing, bucket intakes for S3 (and S3-compatible stores), Azure Blob Storage and Google Cloud Storage (§5.3.17). Decided 2026-11-04: each store's SDK directly, polled by a Camel timer, as for SFTP and SMB, not Camel's `aws2-s3`, `azure-storage-blob` and `google-storage` consumers, so that a broken read resumes with a ranged read, every timeout is set, and no key is logged. Decided the same day: a bucket is found by listing its prefix every `poll-interval`; event notifications may be added later as an option. `path` and `move-to` are key prefixes. An object's version is its time and its ETag (S3, Azure) or generation (GCS), recorded as `<millis>:<tag>`, so an object written again with the same bytes is a new version, as a file would be. Reads, copies and deletes are conditional on the tag where the store allows. Bucket items are landed as kind `object`. Iceberg tables are step 7b. No new dependencies: the SDKs were already on the class path for Iceberg's file IO and the key providers.
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -352,9 +354,9 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Landing: two-stage ingestion (steps 1 to 6 built)
+### 5.3 Landing: two-stage ingestion (steps 1 to 7a built)
 
-Decided 2026-11-03. Steps 1 to 6 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14). Step 5: HTTP push (§5.3.15). Step 6: queue intakes for the seven brokers (§5.3.16); buckets are next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14).
+Decided 2026-11-03. Steps 1 to 7a of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14). Step 5: HTTP push (§5.3.15). Step 6: queue intakes for the seven brokers (§5.3.16). Step 7a: bucket intakes for S3, Azure Blob and GCS (§5.3.17); Iceberg tables are next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14; buckets, §5.3.17).
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
@@ -382,7 +384,7 @@ flowchart LR
 - **Landed items never change.** If a producer's data has a problem, the producer fixes it at their end and sends it again; we never edit landed data.
 - **Retention of landed data is set by the customer,** possibly up to the legal limit for keeping records, which can be many years.
 - **No guarantees about producers:** sizes, rates, naming, clean-up and timing are all unknown. Files may stay on a source indefinitely. Producers never append to a file they have dropped.
-- **Camel components from a fixed list.** SFTP, SMB and HTTP push are the exceptions. SFTP and SMB (decided 2026-11-03, §5.3.14) use JSch and smbj directly, polled by a Camel timer, so that timeouts, encryption, host keys and logging are under our control and the settings are explicit rather than a URI. HTTP push (decided 2026-11-04, §5.3.15) is a Spring MVC controller, because Camel's `platform-http` can't stream a request body. Artemis (decided 2026-11-04, §5.3.16) uses the JMS client, polled by a Camel timer, because Camel's JMS components acknowledge a message before it can be landed. More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
+- **Camel components from a fixed list.** SFTP, SMB, buckets, HTTP push and Artemis are the exceptions. SFTP and SMB (decided 2026-11-03, §5.3.14) use JSch and smbj directly, polled by a Camel timer, so that timeouts, encryption, host keys and logging are under our control and the settings are explicit rather than a URI. HTTP push (decided 2026-11-04, §5.3.15) is a Spring MVC controller, because Camel's `platform-http` can't stream a request body. Artemis (decided 2026-11-04, §5.3.16) uses the JMS client, polled by a Camel timer, because Camel's JMS components acknowledge a message before it can be landed. Buckets (decided 2026-11-04, §5.3.17) use each store's SDK, polled by a Camel timer, for the same reasons as SFTP and SMB. More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
 - **Dropped:** FHIR push (the end of the pipeline is a FHIR repository, so pushing FHIR through this ingestion adds little beyond MDM) and NFS (Camel has no NFS component, and a mount moves failure handling outside the application).
 
 #### 5.3.1 Intakes
@@ -392,7 +394,7 @@ flowchart LR
 | Local or mounted directory | `file` | unchanged for `settle` | ledger: path, size, mtime | yes |
 | SFTP | JSch, polled by a Camel timer (built) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
 | SMB share | smbj, SMB 3 with encryption required, polled by a Camel timer (built) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
-| Object bucket | `aws2-s3`, `azure-storage-blob`, `google-storage` | present (objects appear whole); `settle` optional | ledger: bucket, key, version ID or ETag | yes, ranged reads |
+| Object bucket | the S3, Azure Blob and GCS SDKs, polled by a Camel timer (built, §5.3.17) | present (objects appear whole); `settle` optional | ledger: key, size, time and ETag (GCS: generation) | yes, by ranged reads |
 | HTTP push | Spring MVC and Spring Security, not `platform-http` (built, §5.3.15) | the whole request body received | `Idempotency-Key` header, if sent | no: the sender retries |
 | Queue | `kafka`, `aws2-sqs`, `spring-rabbitmq`, `google-pubsub`, `azure-servicebus`, `azure-eventhubs`; the JMS client for Artemis (built, §5.3.16) | a batch is full or its time is up | broker message ID, within `dedup-window` | no: unacknowledged messages are redelivered |
 | Iceberg table | Iceberg API (no Camel component) | a committed snapshot | table UUID, data file path | yes, by row group |
@@ -530,9 +532,10 @@ sdh:
   landing:
     intake: claims-sftp                    # names the lease, checkpoint, ledger keys and metrics
     source:
-      type: sftp                           # directory | sftp | smb | http | queue built; later s3 | azure-blob | gcs | iceberg
+      type: sftp                           # directory | sftp | smb | s3 | azure-blob | gcs | http | queue built; later iceberg
       path: /outbound/claims
       sftp: { host: dropzone.example.org, user: sdh, private-key: /run/secrets/sftp_key, known-hosts: /run/secrets/known_hosts }
+      # bucket: { name: claims-drop, region: eu-west-1 }   # s3 | azure-blob | gcs (§5.3.17); path is then a key prefix
       access: read-only                    # read-only | read-write
       after: { mode: move, to: processed/ }   # read-write only: delete | move | rename
       ready: { mode: stable, settle: 2m }     # stable | marker
@@ -560,7 +563,7 @@ sdh:
     retention: { landed-items: 3650d }   # the ledger is always kept
 ```
 
-- **SFTP and SMB have explicit settings,** not a URI (§5.3.14). Their passwords and key passphrase come from the environment.
+- **SFTP, SMB and buckets have explicit settings,** not a URI (§5.3.14, §5.3.17). Their passwords, key passphrase, secret keys and connection strings come from the environment.
 - **A URI is checked** against the fixed list of components and against options that must be set or must not be. For a queue intake (built, §5.3.16), the options that hold a message until it is landed are added, a different value for one is refused, and so is a password, key or secret written in the URI rather than as a `{{...}}` placeholder. Credentials come from mounted secrets or the environment, never from the URI itself.
 - **The splitter's configuration** loses `sdh.file.*` and gains the landing queue it reads from and the landing catalog it reads items from (read access only, with unwrap rights on `landed-items-kek`).
 
@@ -572,7 +575,7 @@ sdh:
 4. **SFTP and SMB (built),** with the failure cases of §5.3.4 tested against containers that are cut off, stalled, restarted and given wrong keys (§5.3.14). Left for later: Kerberos for SMB, the intake metrics and the planned events of §5.3.4, and claims on remote sources.
 5. **HTTP push (built),** with OAuth2 and mTLS (§5.3.15). Left for later: the status endpoint and correlation IDs of §5.3.8, and an HTTP readiness probe.
 6. **Queue intakes (built, §5.3.16),** batched. 6a: Kafka, SQS, RabbitMQ and Artemis, the record index, and the splitter splitting a batch message by message. 6b: Pub/Sub, Service Bus and Event Hubs. Left for later: queue metrics, and reporting a Camel consumer that has given up (§5.3.16).
-7. **Buckets,** then **Iceberg tables.**
+7. **Buckets and Iceberg tables.** 7a, buckets (built, §5.3.17): S3 and S3-compatible stores, Azure Blob and GCS, tested against SeaweedFS, Azurite and fake-gcs-server. Left for later: event notifications in place of listing, and conditional deletes on S3. 7b: Iceberg tables.
 8. **Producer feedback** (§5.3.8), once its open questions are settled.
 
 **Still to check before building:**
@@ -853,6 +856,46 @@ Artemis is the exception: both of Camel's JMS components acknowledge a message a
 - `RecordSessionTest`, `ItemLanderTest` and `ItemProcessorTest` (`connector-core`): splitting by message, a resume inside a message, the record index stored and read, and a batch in which one message fails alone.
 - `QueueIntakeIT` (`-Pit`; Kafka, ElasticMQ for SQS, RabbitMQ, Artemis, and the Pub/Sub, Service Bus (with SQL Server) and Event Hubs (with Azurite) emulators): a node lands a batch and crashes before acknowledging it; a new node lands all 30 messages exactly once, recognising the redelivered batch. For Event Hubs, two partitions and the node's blob checkpoint store on Azurite.
 - `RabbitLandingApplicationIT` (`-Pit`): the whole node on RabbitMQ, from settings to `item.landed`, leaving the queue empty.
+
+#### 5.3.17 Buckets as built (step 7a)
+
+`sdh.landing.source.type` `s3`, `azure-blob` or `gcs` makes the node a bucket intake. `S3Source`, `AzureBlobSource` and `GcsSource` share `BucketSource`, which implements `RemoteSource` (§5.3.14), so the node polls a bucket as it does an SFTP server: `RemoteIntakeRoute` on a Camel timer, `RemoteListing`'s rules, the same reasons in `intake.unreachable`, and the same wait after a slow-retry reason.
+
+**Decided 2026-11-04: the SDKs directly, not Camel's components.** Camel's `aws2-s3`, `azure-storage-blob` and `google-storage` consumers download each object whole, can't resume one at an offset, and move or delete it as soon as the exchange completes. Calling the SDKs lets the node resume with a ranged read, set every timeout, make reads and moves conditional on the version listed, and keep keys out of the log. **Decided the same day: listing, not notifications.** The prefix is listed every `poll-interval`. Event notifications (S3 events, Event Grid, Pub/Sub notifications) need more infrastructure on the customer's side and a listing anyway to catch up after an outage; they may be added later as an option.
+
+**Keys and the listing rules.** `path` and `move-to` are absolute and are key prefixes, `/` being the bucket's root: `path: /inbound` reads keys under `inbound/`. `/` in a key separates the names the listing rules see. Without `recursive`, a delimiter listing returns only the keys directly under the prefix. With it, every key under the prefix is listed, and those under a hidden name or the `move-to` prefix are left out, as a walk would leave them. Keys ending in `/` (folder placeholders) are skipped. Markers, the rename suffix and `include` apply as for files (§5.3.14).
+
+**Versions.** An item's version is its modification time in milliseconds and its tag, recorded in the ledger as `<millis>:<tag>` (`ListedItem.versionText`). The tag is the ETag for S3 and Azure, and the generation for GCS. S3 times are kept to the second, because some S3-compatible stores give milliseconds in a listing but seconds in a `HEAD`; Azure gives seconds. The GCS time is when the generation was written, so a change to an object's metadata alone isn't a new version. The tag makes an object written again with the same size in the same second a new version; the time makes one written again with the same bytes (the same ETag) a new version, as a file would be. `Readiness` compares the tag too.
+
+**Ready.** Objects appear whole, so `settle: 0s` is enough unless the producer writes several objects that belong together; `ready: marker` works as for files.
+
+**Reads** are ranged and conditional: S3 `GetObject` with `If-Match` and `Range`, Azure `openInputStream` with a range and `If-Match`, GCS a reader on the generation listed, seeked to the offset. GCS looks the object up first, since its reader fails only once read. A missing or changed object is `ItemChangedException`; a read that fails part way is `NETWORK`, and the item resumes from its checkpoint at the next poll. At an offset equal to the size, nothing is read; the object is only checked. An S3 read closed before its end is aborted, rather than read to the end to keep the connection.
+
+**`after`** (read-write only; the object is checked against the version listed first, and left if it has gone or changed):
+- `delete`: S3 deletes unconditionally, because not every S3-compatible store takes a conditional delete; Azure deletes with `If-Match` (and the blob's snapshots); GCS with the generation.
+- `move` and `rename`: a copy, then the delete. The copy is conditional on the tag, and goes to the target key or the first of `.1`, `.2` … that is free. S3 copies objects over 5 GiB in 512 MiB parts, aborting the upload on failure. Azure copies within the account (`beginCopy`, `If-None-Match: *` on the target) and waits up to an hour. GCS copies the generation, with `doesNotExist` on the target.
+- Markers are deleted with their item. The write probe puts and deletes an empty hidden object under `path`, and under `move-to` for `move`.
+
+**Credentials:**
+- **S3:** `access-key-id` with `secret-access-key`, or the SDK's default chain (environment, profile, web identity, container and instance roles), or none with `anonymous`. `region` defaults to the environment's, or `us-east-1` with an `endpoint`. `path-style-access` for most S3-compatible stores. With an `endpoint`, the SDK's request checksums are sent only when required, since some S3-compatible stores refuse them.
+- **Azure:** `connection-string`, or `endpoint` (the account's blob endpoint) with the default Azure credential (environment, workload identity, managed identity, Azure CLI), or `endpoint` with `anonymous` for a public container.
+- **GCS:** Google's application default credentials, or none with `anonymous`; `project-id` and `endpoint` (for an emulator) are optional.
+
+**Timeouts:** `connect-timeout` (15s) and `read-timeout` (60s): the Apache client's connection and socket timeouts for S3, the JDK client's connect, response, read and write timeouts for Azure, and the HTTP transport's connect and read timeouts for GCS.
+
+**Errors** map to reasons: HTTP 401, and S3 codes such as `InvalidAccessKeyId` and `SignatureDoesNotMatch`, and Azure `AuthenticationFailed` and credential failures, are `AUTH`; other 403s are `PERMISSION`; 404 (no bucket or container) is `NOT_FOUND`; anything else is `NETWORK`. Azurite answers a wrong key with `AuthorizationFailure`, which on Azure itself means a firewall or network rule, so it is `PERMISSION`.
+
+**No PHI in logs:** keys are never logged or put in a message. Azure's HTTP logging is set to `NONE` in code, so `AZURE_HTTP_LOG_DETAIL_LEVEL` can't turn it on. `IntakeUnavailableException` keeps only the cause's class name.
+
+**Settings** (`sdh.landing.source.bucket`, checked by `BucketSettings`, whose `toString` hides secrets): `name` (the bucket or container), `endpoint`, `region` (S3 only), `path-style-access` (false), `access-key-id` and `secret-access-key` (S3 only), `connection-string` (Azure only), `project-id` (GCS only), `anonymous` (false), `connect-timeout` (15s), `read-timeout` (60s). A setting for another store is refused. Secrets from the environment: `SDH_LANDING_SOURCE_BUCKET_SECRET_ACCESS_KEY`, `SDH_LANDING_SOURCE_BUCKET_CONNECTION_STRING`, or the SDKs' own variables.
+
+**Not built:** event notifications; conditional deletes on S3; S3 object versions (a versioned bucket is read at its latest versions, and a delete leaves a delete marker); Azure copies between accounts; the intake metrics of §5.3.4.
+
+**Tests:**
+- `BucketSourceTest` (a bucket in memory): the listing rules flat and deep; reads from an offset and at the end; a changed object refused; `move` to a free key with its marker, and left alone if changed; `rename` and `delete`; the probe, refused and unreachable; failures and broken reads.
+- `BucketSettingsTest`: each type, a relative path, a missing name, S3 key pairs, `anonymous` with a key, Azure's one-of rule, settings for another store refused, the endpoint checked, secrets hidden. `ReadinessTest`: a new tag starts the wait again.
+- `BucketIntakeIT` (`-Pit`; SeaweedFS behind Toxiproxy, Azurite and fake-gcs-server): on each store, list, read from an offset and move, with the probe leaving nothing; rename to a free key; a changed object refused and left; a missing bucket `NOT_FOUND`; wrong credentials (S3 and Azure). On S3, a cut connection then a resume, and a stall that fails within 20 s.
+- `BucketLandingApplicationIT` (`-Pit`): the whole node on SeaweedFS: objects landed as kind `object`, announced and deleted, keys outside the prefix left; the store paused, reported unreachable, and resumed; no key in the log.
 
 ## 6. Splitting
 

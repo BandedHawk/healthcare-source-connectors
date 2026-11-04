@@ -313,13 +313,16 @@ public record LandingProperties(
      * @param recursive    whether to look in subdirectories
      * @param pollInterval how often the source is listed
      * @param type         {@code directory} (the default), {@code sftp},
-     *                     {@code smb} or {@code http}
+     *                     {@code smb}, {@code s3}, {@code azure-blob},
+     *                     {@code gcs}, {@code http} or {@code queue}
      * @param authRetryInterval how long to wait before trying a remote
      *                     source again after its credentials, permissions,
      *                     host key or share were refused, so an account
      *                     isn't locked by retries
      * @param sftp         the SFTP server, for {@code sftp}
      * @param smb          the SMB share, for {@code smb}
+     * @param bucket       the bucket or container, for {@code s3},
+     *                     {@code azure-blob} and {@code gcs}
      */
     public record Source(Path path,
             @DefaultValue("read-only") String access,
@@ -334,7 +337,8 @@ public record LandingProperties(
             @DefaultValue("directory") String type,
             @DefaultValue("5m") Duration authRetryInterval,
             @DefaultValue Sftp sftp,
-            @DefaultValue Smb smb)
+            @DefaultValue Smb smb,
+            @DefaultValue Bucket bucket)
     {
     }
 
@@ -393,6 +397,58 @@ public record LandingProperties(
             @DefaultValue("15s") Duration connectTimeout,
             @DefaultValue("60s") Duration readTimeout)
     {
+    }
+
+    /**
+     * An object store bucket (design §5.3.17): an S3 bucket (or one on an
+     * S3-compatible store), an Azure Blob container, or a GCS bucket. The
+     * source's {@code path} and {@code move-to} are key prefixes, {@code /}
+     * being the bucket's root. Secrets come from the environment, never the
+     * file; without them, each cloud's default credentials are used.
+     *
+     * @param name             the bucket, or the Azure container
+     * @param endpoint         the service's address: required for Azure
+     *                         without a connection string (the account's
+     *                         blob endpoint); for S3, an S3-compatible
+     *                         store; for GCS, an emulator
+     * @param region           the S3 region; default from the environment,
+     *                         or {@code us-east-1} with an endpoint
+     * @param pathStyleAccess  whether S3 requests put the bucket in the
+     *                         path, as most S3-compatible stores need
+     * @param accessKeyId      an S3 access key, with
+     *                         {@code secret-access-key}
+     * @param secretAccessKey  its secret
+     * @param connectionString an Azure storage connection string
+     * @param projectId        the GCS project; default from the environment
+     * @param anonymous        whether to send no credentials, for an
+     *                         emulator or a public bucket
+     * @param connectTimeout   how long to wait for a connection
+     * @param readTimeout      how long a request or read may stall before
+     *                         it fails
+     */
+    public record Bucket(String name,
+            String endpoint,
+            String region,
+            @DefaultValue("false") boolean pathStyleAccess,
+            String accessKeyId,
+            String secretAccessKey,
+            String connectionString,
+            String projectId,
+            @DefaultValue("false") boolean anonymous,
+            @DefaultValue("15s") Duration connectTimeout,
+            @DefaultValue("60s") Duration readTimeout)
+    {
+
+        /**
+         * Shows the settings without the secret or the connection string.
+         *
+         * @return the settings, secrets hidden
+         */
+        @Override
+        public String toString()
+        {
+            return "Bucket[" + name + ", endpoint=" + endpoint + "]";
+        }
     }
 
     /**

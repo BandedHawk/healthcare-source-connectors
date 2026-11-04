@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.landing.intake;
 
+import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import java.io.IOException;
 import java.io.InputStream;
@@ -21,6 +22,17 @@ import java.io.InputStream;
  */
 public interface IntakeSource
 {
+
+    /**
+     * What the source's items are, as {@code landed_items} and
+     * {@code item.landed} record it.
+     *
+     * @return {@link ItemKind#FILE}, unless the source says otherwise
+     */
+    default ItemKind kind()
+    {
+        return ItemKind.FILE;
+    }
 
     /**
      * Opens an item's bytes from a position.

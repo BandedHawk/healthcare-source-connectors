@@ -230,7 +230,7 @@ class SmbIntakeIT
                 "smb", Duration.ofMinutes(5), null, new LandingProperties.Smb(
                         toxiproxy.getHost(), toxiproxy.getMappedPort(port),
                         share, "", USER, password, Duration.ofSeconds(5),
-                        Duration.ofSeconds(4))));
+                        Duration.ofSeconds(4)), null));
     }
 
     /**

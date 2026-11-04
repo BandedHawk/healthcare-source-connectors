@@ -9,7 +9,6 @@ package com.sdh.healthcare.connector.landing.intake;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
-import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandingCheckpoint;
@@ -256,7 +255,7 @@ public final class IntakeService implements LandingIntake
         }
         if (readiness.ready(item))
         {
-            land(new NewItem(UuidV7.next(clock.millis()), ItemKind.FILE,
+            land(new NewItem(UuidV7.next(clock.millis()), source.kind(),
                     ref, item.ref(), null), item);
         }
     }

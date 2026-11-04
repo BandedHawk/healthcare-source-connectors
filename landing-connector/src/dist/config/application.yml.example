@@ -19,8 +19,10 @@ sdh:
       include: "*"                # Ant-style
       recursive: false
       poll-interval: 10s
-      type: directory             # directory | sftp | smb | http | queue; for sftp and smb, path and move-to are absolute
-      auth-retry-interval: 5m     # sftp and smb: wait after refused credentials, a missing share or a new host key
+      type: directory             # directory | sftp | smb | s3 | azure-blob | gcs | http | queue; for sftp, smb and
+                                  # buckets, path and move-to are absolute (in a bucket, key prefixes: / is its root)
+      auth-retry-interval: 5m     # remote sources: wait after refused credentials, a missing share or bucket, or a
+                                  # new host key
       sftp:                       # type: sftp
         host: dropzone.example.org
         port: 22
@@ -36,6 +38,19 @@ sdh:
         share: outbound           # the share name alone; path and move-to are within it, / being its root
         domain: EXAMPLE
         user: sdh                 # password: SDH_LANDING_SOURCE_SMB_PASSWORD
+        connect-timeout: 15s
+        read-timeout: 60s
+      bucket:                     # type: s3 | azure-blob | gcs; objects appear whole, so settle: 0s is usually enough
+        name: claims-drop         # the bucket, or the Azure container
+        # region: eu-west-1       # s3; default from the environment
+        # endpoint: "https://seaweedfs:8333"   # s3: an S3-compatible store (with path-style-access: true);
+        #                                      # azure-blob: https://<account>.blob.core.windows.net; gcs: an emulator
+        # path-style-access: false
+        # access-key-id: AKIA...  # s3; secret: SDH_LANDING_SOURCE_BUCKET_SECRET_ACCESS_KEY; else the default chain
+        # connection-string: SDH_LANDING_SOURCE_BUCKET_CONNECTION_STRING (env)   # azure-blob; else endpoint + default
+        #                                                                         # Azure credential
+        # project-id: my-project  # gcs; credentials: Google application default credentials
+        # anonymous: false        # send no credentials (a public bucket, or an emulator)
         connect-timeout: 15s
         read-timeout: 60s
     http:                         # type: http; producers POST to https://<host>:<port>/intakes/<intake>/items

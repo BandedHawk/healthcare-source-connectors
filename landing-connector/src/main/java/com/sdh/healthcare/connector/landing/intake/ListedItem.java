@@ -16,12 +16,13 @@ import java.util.Objects;
  * @param ref     the item's path within the source, with {@code /}
  *                between names
  * @param size    its size in bytes
- * @param version its version: for a file, its modification time in
- *                milliseconds
+ * @param version its modification time in milliseconds
+ * @param tag     what else tells versions apart: an object's ETag or
+ *                generation; null for a file
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public record ListedItem(String ref, long size, long version)
+public record ListedItem(String ref, long size, long version, String tag)
 {
 
     /**
@@ -29,7 +30,8 @@ public record ListedItem(String ref, long size, long version)
      *
      * @param ref     the item's path within the source
      * @param size    its size in bytes
-     * @param version its version
+     * @param version its modification time
+     * @param tag     its ETag or generation, if it has one
      * @throws NullPointerException if the reference is null
      */
     public ListedItem
@@ -38,12 +40,39 @@ public record ListedItem(String ref, long size, long version)
     }
 
     /**
-     * The version as the ledger records it.
+     * Creates a file's item, which has no tag.
      *
-     * @return the version, in decimal
+     * @param ref     the item's path within the source
+     * @param size    its size in bytes
+     * @param version its modification time
+     */
+    public ListedItem(String ref, long size, long version)
+    {
+        this(ref, size, version, null);
+    }
+
+    /**
+     * The version as the ledger records it: the time in decimal, then
+     * {@code :} and the tag if there is one. An object written again with
+     * the same bytes has a new time, so it is a new version, as a file
+     * would be.
+     *
+     * @return the version
      */
     public String versionText()
     {
-        return Long.toString(version);
+        return tag == null ? Long.toString(version) : version + ":" + tag;
+    }
+
+    /**
+     * Tells whether another sighting is the same version of this item.
+     *
+     * @param other the other sighting
+     * @return true if the size, time and tag are the same
+     */
+    public boolean sameVersion(ListedItem other)
+    {
+        return size == other.size && version == other.version
+                && Objects.equals(tag, other.tag);
     }
 }

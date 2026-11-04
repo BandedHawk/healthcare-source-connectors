@@ -30,9 +30,29 @@ import org.springframework.util.AntPathMatcher;
 final class RemoteListing
 {
 
-    /** A file found on the server. */
-    record Entry(String ref, long size, long modified)
+    /**
+     * A file found on the server.
+     *
+     * @param ref      its path relative to the source
+     * @param size     its size in bytes
+     * @param modified its modification time in milliseconds
+     * @param tag      its ETag or generation, on an object store; null
+     *                 otherwise
+     */
+    record Entry(String ref, long size, long modified, String tag)
     {
+
+        /**
+         * A file with no tag.
+         *
+         * @param ref      its path relative to the source
+         * @param size     its size in bytes
+         * @param modified its modification time in milliseconds
+         */
+        Entry(String ref, long size, long modified)
+        {
+            this(ref, size, modified, null);
+        }
     }
 
     /** The source's settings. */
@@ -83,6 +103,40 @@ final class RemoteListing
     }
 
     /**
+     * Tells whether a key from a flat listing of an object store is a file
+     * a walk of the source would find: no name on its path is empty or
+     * hidden, and each directory on it is one the walk would look in.
+     *
+     * @param ref the key relative to the source
+     * @return true if the source looks at it
+     */
+    boolean inScope(String ref)
+    {
+        String[] names = ref.split("/", -1);
+        StringBuilder directory = new StringBuilder();
+        for (int i = 0; i < names.length; i++)
+        {
+            if (names[i].isEmpty() || hidden(names[i]))
+            {
+                return false;
+            }
+            if (i < names.length - 1)
+            {
+                if (i > 0)
+                {
+                    directory.append('/');
+                }
+                directory.append(names[i]);
+                if (!descend(directory.toString()))
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
      * Picks the items from the files found.
      *
      * @param files every regular file found, with hidden ones left out
@@ -114,7 +168,7 @@ final class RemoteListing
         picked.sort(Comparator.comparingLong(Entry::modified)
                 .thenComparing(Entry::ref));
         return picked.stream().map(file -> new ListedItem(file.ref(),
-                file.size(), file.modified())).toList();
+                file.size(), file.modified(), file.tag())).toList();
     }
 
     /**

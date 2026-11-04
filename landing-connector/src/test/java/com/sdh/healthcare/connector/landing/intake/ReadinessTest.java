@@ -67,6 +67,26 @@ class ReadinessTest
                 .isTrue();
     }
 
+    /**
+     * An object written again with the same size and time, but a new tag,
+     * starts the wait again.
+     */
+    @Test
+    void aNewTagStartsTheWaitAgain()
+    {
+        assertThat(readiness.ready(new ListedItem("a.csv", 10, 1000, "e1")))
+                .isFalse();
+        advance(50);
+        assertThat(readiness.ready(new ListedItem("a.csv", 10, 1000, "e2")))
+                .isFalse();
+        advance(59);
+        assertThat(readiness.ready(new ListedItem("a.csv", 10, 1000, "e2")))
+                .isFalse();
+        advance(1);
+        assertThat(readiness.ready(new ListedItem("a.csv", 10, 1000, "e2")))
+                .isTrue();
+    }
+
     /** Items missing from a listing are forgotten when it ends. */
     @Test
     void forgetsItemsThatLeaveTheListing()

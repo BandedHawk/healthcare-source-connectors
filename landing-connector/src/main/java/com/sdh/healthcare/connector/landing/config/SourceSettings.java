@@ -12,9 +12,10 @@ import java.util.Locale;
 
 /**
  * A source's settings, checked and turned into types (design §5.3.1,
- * §5.3.4). Bad settings stop the node at startup, with a message that names
- * the setting. For a remote source, paths are on the server (within the
- * share, for SMB) and must be absolute.
+ * §5.3.4, §5.3.17). Bad settings stop the node at startup, with a message
+ * that names the setting. For a remote source, paths are on the server
+ * (within the share, for SMB; key prefixes in the bucket, for an object
+ * store) and must be absolute.
  *
  * @param path         the directory, made absolute; null for
  *                     {@link Type#HTTP} and {@link Type#QUEUE}
@@ -36,6 +37,9 @@ import java.util.Locale;
  *                     refused
  * @param sftp         the server, for {@link Type#SFTP}; null otherwise
  * @param smb          the share, for {@link Type#SMB}; null otherwise
+ * @param bucket       the bucket, for {@link Type#S3},
+ *                     {@link Type#AZURE_BLOB} and {@link Type#GCS}; null
+ *                     otherwise
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -43,7 +47,7 @@ public record SourceSettings(Path path, Access access, After after,
         Path moveTo, String renameSuffix, boolean marker, Duration settle,
         String include, boolean recursive, Duration pollInterval,
         Type type, Duration authRetryInterval, SftpSettings sftp,
-        SmbSettings smb)
+        SmbSettings smb, BucketSettings bucket)
 {
 
     /** What a marker file's name adds to its item's name. */
@@ -62,6 +66,15 @@ public record SourceSettings(Path path, Access access, After after,
         /** A directory on an SMB share. */
         SMB,
 
+        /** A prefix in an S3 bucket, or one on an S3-compatible store. */
+        S3,
+
+        /** A prefix in an Azure Blob Storage container. */
+        AZURE_BLOB,
+
+        /** A prefix in a Google Cloud Storage bucket. */
+        GCS,
+
         /**
          * Items pushed to the node over HTTP; its endpoint has its own
          * settings ({@link HttpSettings}), and none of the listing ones
@@ -74,7 +87,17 @@ public record SourceSettings(Path path, Access access, After after,
          * own settings ({@link BrokerSettings}), and none of the listing
          * ones apply.
          */
-        QUEUE
+        QUEUE;
+
+        /**
+         * Whether this is an object store.
+         *
+         * @return true for S3, Azure Blob and GCS
+         */
+        public boolean bucket()
+        {
+            return this == S3 || this == AZURE_BLOB || this == GCS;
+        }
     }
 
     /** Whether the node may change the source. */
@@ -119,7 +142,7 @@ public record SourceSettings(Path path, Access access, After after,
         {
             return new SourceSettings(null, Access.READ_ONLY, After.NONE,
                     null, null, false, Duration.ZERO, null, false,
-                    source.pollInterval(), type, null, null, null);
+                    source.pollInterval(), type, null, null, null, null);
         }
         if (source.path() == null)
         {
@@ -198,18 +221,20 @@ public record SourceSettings(Path path, Access access, After after,
                 source.recursive(), source.pollInterval(), type,
                 source.authRetryInterval(),
                 type == Type.SFTP ? SftpSettings.of(source.sftp()) : null,
-                type == Type.SMB ? SmbSettings.of(source.smb()) : null);
+                type == Type.SMB ? SmbSettings.of(source.smb()) : null,
+                type.bucket() ? BucketSettings.of(type, source.bucket())
+                        : null);
     }
 
     /**
      * Whether the source is on a server rather than a local or mounted
      * directory.
      *
-     * @return true for SFTP and SMB
+     * @return true for SFTP, SMB and the object stores
      */
     public boolean remote()
     {
-        return type == Type.SFTP || type == Type.SMB;
+        return type == Type.SFTP || type == Type.SMB || type.bucket();
     }
 
     /**
@@ -232,7 +257,8 @@ public record SourceSettings(Path path, Access access, After after,
         if (!value.isAbsolute())
         {
             throw new IllegalArgumentException(setting + " must be absolute"
-                    + " on a remote source (/ is the share's root on SMB)");
+                    + " on a remote source (/ is the share's root on SMB,"
+                    + " the bucket's on an object store)");
         }
         return value.normalize();
     }
