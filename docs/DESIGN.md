@@ -1895,7 +1895,10 @@ An SBOM lists licenses as each project declares them; the elections for dual-lic
 
 cosign, syft and the registry run as pinned containers in the `sdh-it` VM, so nothing is installed on the host. Files reach them through a Docker volume, because the VM doesn't mount host directories.
 
-**Runs** (2026-10-29, before the landing node was added; not yet run with it):
+**Runs:**
+- 2026-11-03, both applications, throwaway key and registry: all 14 checks pass (both tarballs with cosign and openssl, a tampered tarball rejected, all four images' signatures and SBOM attestations, another key rejected). The scan passes. The base image pins were stale, so it ran with `SDH_ALLOW_STALE_BASE=1`; they need updating before a release.
+
+2026-10-29, the splitter only:
 - With a throwaway key and registry, all eight checks pass.
 - With the Key Vault key, all eight checks pass too. The key is `sdh-release` (EC P-256) in vault `sdh-ingestion-1`, used by the service principal `sdh-release-signer` with Key Vault Crypto User on the vault; the images went to the throwaway registry. The vault uses Azure role-based access; a principal without the role gets 403 `ForbiddenByRbac` on the first call (reading the public key), before anything is signed. The client secret expires, which stops signing until it is replaced; the key, `cosign.pub` and existing signatures are unaffected.
 
