@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.Record;
@@ -94,6 +95,9 @@ public final class LandedItemSource implements SeekableByteSource
     /** The item's digest, from its summary row. */
     private final String digest;
 
+    /** Where each message starts, for a message batch; or null. */
+    private final RecordIndex records;
+
     /** Unwrapped data keys, by batch. */
     private final Map<UUID, byte[]> dataKeys = new HashMap<>();
 
@@ -129,6 +133,7 @@ public final class LandedItemSource implements SeekableByteSource
         this.chunkCount = (Integer) summary.getField(CHUNK_COUNT);
         this.chunkSize = (Integer) summary.getField(CHUNK_SIZE);
         this.digest = (String) summary.getField(ITEM_DIGEST);
+        this.records = LandedItems.records(summary).orElse(null);
     }
 
     /**
@@ -165,6 +170,16 @@ public final class LandedItemSource implements SeekableByteSource
     public String digest()
     {
         return digest;
+    }
+
+    /**
+     * Where each message starts, if the item is a message batch.
+     *
+     * @return the record index; empty for other items
+     */
+    public Optional<RecordIndex> records()
+    {
+        return Optional.ofNullable(records);
     }
 
     @Override

@@ -24,6 +24,7 @@ import com.sdh.healthcare.connector.core.convert.ConversionException;
 import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.convert.SectionConverter;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.split.Section;
@@ -455,8 +456,7 @@ public final class IngestPipeline implements AutoCloseable
         Future<Long> inFlightPublish = null;
         // Lines and columns, so failures and mapping issues can be found in
         // the file (SectionOrigin).
-        try (SplitSession session = splitters.open(current.format(), source,
-                current.resumeAt(), current.nextSeq(), settings.split());
+        try (SplitSession session = open(current, source);
                 SectionOrigins origins = new SectionOrigins(source))
         {
             long seq = current.nextSeq();
@@ -527,6 +527,31 @@ public final class IngestPipeline implements AutoCloseable
                 }
             }
         }
+    }
+
+    /**
+     * Opens the splitter at the checkpoint's resume point: message by
+     * message for a message batch (design §5.3.16), otherwise over the
+     * whole file.
+     *
+     * @param current the checkpoint
+     * @param source  the file or item
+     * @return the session
+     * @throws IOException    if the source can't be read
+     * @throws SplitException if it can't be split from there
+     */
+    private SplitSession open(Checkpoint current, SeekableByteSource source)
+            throws IOException, SplitException
+    {
+        if (source instanceof LandedItemSource item
+                && item.records().isPresent())
+        {
+            return splitters.openRecords(current.format(), source,
+                    item.records().get().offsets(), current.resumeAt(),
+                    current.nextSeq(), settings.split());
+        }
+        return splitters.open(current.format(), source, current.resumeAt(),
+                current.nextSeq(), settings.split());
     }
 
     // ---- batches ----
@@ -657,7 +682,11 @@ public final class IngestPipeline implements AutoCloseable
                 throws Exception
         {
             long length = section.plaintextLength();
-            if (SectionCrypto.chunkCount(length) == 1)
+            if (section.failure() != null)
+            {
+                addUnsplit(seq, section, source);
+            }
+            else if (SectionCrypto.chunkCount(length) == 1)
             {
                 // Read, convert (if any) and encrypt on the worker pool.
                 pending.add(workers.submit(() ->
@@ -708,6 +737,47 @@ public final class IngestPipeline implements AutoCloseable
             bytes += length;
             count++;
             Telemetry.get().bytesRead(section.sourceLength(), "split");
+        }
+
+        /**
+         * Adds the rest of a message that couldn't be split (design
+         * §5.3.16): stored as it is, never converted, marked with the
+         * splitter's error and where it was found, so it is announced with
+         * {@code section.failed} like a section that couldn't be converted.
+         *
+         * @param seq     its number in the file, from 0
+         * @param section the section, with its failure and origin
+         * @param source  the file it is read from
+         * @throws Exception if it can't be read, prepared or written
+         */
+        private void addUnsplit(long seq, Section section,
+                SeekableByteSource source) throws Exception
+        {
+            long length = section.plaintextLength();
+            long position = Math.max(0, Math.min(length,
+                    section.failure().offset() - section.sourceOffset()));
+            ErrorCode code = section.failure().code();
+            if (SectionCrypto.chunkCount(length) == 1)
+            {
+                pending.add(workers.submit(() ->
+                {
+                    byte[] raw = section.readAll(source);
+                    return new Ready(writer.encrypt(fileId, seq, format,
+                            section, raw, Representation.raw(format), code,
+                            position, fileLineAndColumn(section, raw,
+                                    position)));
+                }));
+                while (pending.size() > maxPending)
+                {
+                    store(get(pending.poll()));
+                }
+            }
+            else
+            {
+                drain();
+                writer.add(fileId, seq, format, section, source,
+                        Representation.raw(format), code, position, null);
+            }
         }
 
         /**

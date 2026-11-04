@@ -771,6 +771,17 @@ public final class ItemLander
                                         StandardCharsets.UTF_8))));
             }
             row.setField(REPLACES_ITEM_ID, item.replaces());
+            if (item.records() != null)
+            {
+                RecordIndex records = item.records();
+                if (records.offsets().get(records.count() - 1) > size)
+                {
+                    throw new IllegalArgumentException(
+                            "A record starts after the end of the item");
+                }
+                row.setField(RECORD_OFFSETS, records.offsets());
+                row.setField(RECORD_KEYS, records.keys());
+            }
             writer.write(row);
         }
 

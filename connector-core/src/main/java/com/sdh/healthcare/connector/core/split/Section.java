@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.core.split;
 
 import com.sdh.healthcare.connector.contract.position.SectionOrigin;
+import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -28,13 +29,27 @@ import java.util.List;
  *                     lines and columns; null until the pipeline works it out
  *                     ({@code SectionOrigins}), as splitters don't count
  *                     lines
+ * @param failure      for the rest of a message in a batch that couldn't be
+ *                     split, why; it is stored as split, unconverted, and
+ *                     the next message carries on (design §5.3.16); null
+ *                     for every other section
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record Section(long sourceOffset, long sourceLength, List<Part> parts,
-        ResumePoint resume, SectionOrigin origin)
+        ResumePoint resume, SectionOrigin origin, Failure failure)
 {
+
+    /**
+     * Why part of a message couldn't be split.
+     *
+     * @param code   the splitter's error code
+     * @param offset where in the item the error was found
+     */
+    public record Failure(ErrorCode code, long offset)
+    {
+    }
 
     /** A piece of a section's plaintext. */
     public sealed interface Part permits Literal, SourceRange
@@ -99,7 +114,23 @@ public record Section(long sourceOffset, long sourceLength, List<Part> parts,
     public Section(long sourceOffset, long sourceLength, List<Part> parts,
             ResumePoint resume)
     {
-        this(sourceOffset, sourceLength, parts, resume, null);
+        this(sourceOffset, sourceLength, parts, resume, null, null);
+    }
+
+    /**
+     * A section with its origin and no failure.
+     *
+     * @param sourceOffset where the section starts in the source file
+     * @param sourceLength how many source bytes it spans
+     * @param parts        the section's plaintext, in order
+     * @param resume       where a new session starts to produce the sections
+     *                     after this one
+     * @param origin       where the section's text came from in the file
+     */
+    public Section(long sourceOffset, long sourceLength, List<Part> parts,
+            ResumePoint resume, SectionOrigin origin)
+    {
+        this(sourceOffset, sourceLength, parts, resume, origin, null);
     }
 
     /**
@@ -110,7 +141,8 @@ public record Section(long sourceOffset, long sourceLength, List<Part> parts,
      */
     public Section withOrigin(SectionOrigin origin)
     {
-        return new Section(sourceOffset, sourceLength, parts, resume, origin);
+        return new Section(sourceOffset, sourceLength, parts, resume, origin,
+                failure);
     }
 
     /**

@@ -214,6 +214,70 @@ public final class LandedItems
     }
 
     /**
+     * The record index kept on a message batch's summary row.
+     *
+     * @param summary the item's summary row
+     * @return the index; empty if the item isn't a message batch
+     */
+    @SuppressWarnings("unchecked")
+    public static Optional<RecordIndex> records(Record summary)
+    {
+        Object offsets = summary.getField(RECORD_OFFSETS);
+        if (offsets == null)
+        {
+            return Optional.empty();
+        }
+        return Optional.of(new RecordIndex((List<Long>) offsets,
+                (List<String>) summary.getField(RECORD_KEYS)));
+    }
+
+    /**
+     * The keys of the messages an intake landed from a time on, to
+     * recognise any the broker delivers again (design §5.3.16). Only summary
+     * rows are read, which hold no ciphertext, and only from the days at or
+     * after {@code since}. (Iceberg can't project a list column alone.)
+     *
+     * @param table  the {@value LandingTables#LANDED_ITEMS} table
+     * @param intake the intake
+     * @param since  the earliest landing time to read
+     * @return the keys, in no particular order
+     * @throws IOException if the table can't be read
+     */
+    @SuppressWarnings("unchecked")
+    public static List<String> recordKeys(Table table, String intake,
+            Instant since) throws IOException
+    {
+        List<String> keys = new ArrayList<>();
+        table.refresh();
+        if (table.currentSnapshot() == null)
+        {
+            return keys;
+        }
+        long sinceMicros = ChronoUnit.MICROS.between(Instant.EPOCH, since);
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(CHUNK_INDEX, SUMMARY_ROW),
+                        Expressions.equal(INTAKE, intake),
+                        Expressions.greaterThanOrEqual(LANDED_AT,
+                                sinceMicros),
+                        Expressions.notNull(RECORD_KEYS)))
+                .build())
+        {
+            for (Record row : rows)
+            {
+                for (String key : (List<String>) row.getField(RECORD_KEYS))
+                {
+                    if (key != null)
+                    {
+                        keys.add(key);
+                    }
+                }
+            }
+        }
+        return keys;
+    }
+
+    /**
      * Decrypts the original name or path kept on a summary row. It is PHI:
      * never log it.
      *

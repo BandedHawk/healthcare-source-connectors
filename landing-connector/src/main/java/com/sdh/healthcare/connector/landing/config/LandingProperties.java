@@ -82,12 +82,109 @@ public record LandingProperties(
      *                it is held
      * @param source  where items are picked up
      * @param http    the push endpoint, for a source of type {@code http}
+     * @param broker  the broker messages are consumed from, for a source of
+     *                type {@code queue}
      */
     public record Landing(String intake,
             @DefaultValue("false") boolean standby,
             @DefaultValue Source source,
-            @DefaultValue Http http)
+            @DefaultValue Http http,
+            @DefaultValue Broker broker)
     {
+    }
+
+    /**
+     * The broker a queue intake consumes from (design §5.3.16). Messages are
+     * landed in batches, and acknowledged only once their batch is
+     * committed. Secrets come from the environment, never the file.
+     *
+     * @param type        {@code kafka}, {@code sqs} or {@code rabbitmq}
+     *                    (Camel consumers), or {@code artemis} (the JMS
+     *                    client)
+     * @param uri         the Camel consumer URI, for every type but
+     *                    {@code artemis}; the options the intake needs are
+     *                    added, and any that would break it refused
+     * @param batch       when a batch is closed and landed
+     * @param dedupWindow how far back, from the last landed batch, a message
+     *                    delivered again is recognised by its ID
+     * @param rabbitmq    the RabbitMQ connection, for {@code rabbitmq}
+     * @param artemis     the Artemis connection and queue, for
+     *                    {@code artemis}
+     */
+    public record Broker(String type, String uri,
+            @DefaultValue Batch batch,
+            @DefaultValue("1h") Duration dedupWindow,
+            @DefaultValue Rabbitmq rabbitmq,
+            @DefaultValue Artemis artemis)
+    {
+    }
+
+    /**
+     * When a batch of messages is closed: whichever limit comes first.
+     *
+     * @param maxMessages the most messages in a batch
+     * @param maxBytes    the most bytes in a batch; a single larger message
+     *                    is a batch of its own
+     * @param maxWait     the longest a batch stays open after its first
+     *                    message
+     */
+    public record Batch(@DefaultValue("1000") int maxMessages,
+            @DefaultValue("64MB") DataSize maxBytes,
+            @DefaultValue("5s") Duration maxWait)
+    {
+    }
+
+    /**
+     * A RabbitMQ connection.
+     *
+     * @param addresses   {@code host:port}, comma-separated
+     * @param virtualHost the virtual host
+     * @param username    the user
+     * @param password    the password; from the environment
+     * @param ssl         whether to connect over TLS
+     */
+    public record Rabbitmq(String addresses,
+            @DefaultValue("/") String virtualHost, String username,
+            String password, @DefaultValue("false") boolean ssl)
+    {
+
+        /**
+         * The connection without its password.
+         *
+         * @return the settings as text
+         */
+        @Override
+        public String toString()
+        {
+            return "Rabbitmq[addresses=" + addresses + ", virtualHost="
+                    + virtualHost + ", username=" + username + ", ssl=" + ssl
+                    + "]";
+        }
+    }
+
+    /**
+     * An Artemis connection and the queue to consume.
+     *
+     * @param brokerUrl the broker URL, such as {@code tcp://host:61616}
+     * @param username  the user
+     * @param password  the password; from the environment
+     * @param queue     the queue's name
+     */
+    public record Artemis(String brokerUrl, String username, String password,
+            String queue)
+    {
+
+        /**
+         * The connection without its password.
+         *
+         * @return the settings as text
+         */
+        @Override
+        public String toString()
+        {
+            return "Artemis[brokerUrl=" + brokerUrl + ", username=" + username
+                    + ", queue=" + queue + "]";
+        }
     }
 
     /**

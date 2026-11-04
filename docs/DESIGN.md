@@ -49,6 +49,8 @@ Revision 2026-11-03 (av): built step 4 of landing, SFTP and SMB intakes (§5.3.1
 
 Revision 2026-11-04 (aw): built step 5 of landing, HTTP push (§5.3.15). `sdh.landing.source.type: http` starts a web server, and only then; the other intakes still run without one. Decided 2026-11-04: the endpoint is a Spring MVC controller on Spring Boot's Tomcat with Spring Security, not Camel's `platform-http`, because `platform-http` reads the whole request body before the route runs, into memory or a plaintext temporary file. A push is authenticated by OAuth2 (a JWT checked against the issuer's keys, audience and scope) or mTLS (a client certificate from a trusted CA, with a listed subject), streamed straight into landing, and answered `202` with a receipt that carries the SHA-256 of the body. An `Idempotency-Key` is scoped to its sender. A push waits up to `max-wait` for the one before it, then gets `503` with `Retry-After`. The ledger gained `item_size` and `item_sha256`, and `landed_items` gained `item_sha256` (§5.3.2). New dependencies: Spring Web MVC, Spring Security with the OAuth2 resource server, Tomcat and Nimbus JOSE + JWT (§14.2).
 
+Revision 2026-11-04 (ax): built step 6a of landing, queue intakes for Kafka, SQS, RabbitMQ and Artemis (§5.3.16), and the splitter's handling of message batches. `sdh.landing.source.type: queue` consumes `sdh.landing.broker`, and lands messages in batches, one item per batch, with a record index (each message's offset and the keyed hash of its broker ID) on the summary row (§5.3.2). A message is acknowledged only once its batch is committed. Decided 2026-11-04: Camel consumers, as for the other intakes, except Artemis, which uses the JMS client directly because both of Camel's JMS components acknowledge a message as soon as their listener returns. A message delivered again is recognised by its ID within `dedup-window` (1 hour) of the last landed batch, not 7 days as first said. The splitter splits a batch message by message; a message that can't be split, or holds a section over the limit, is stored raw as one `section.failed`, and the rest of the batch carries on. Pub/Sub, Service Bus and Event Hubs are step 6b. No new dependencies.
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -348,9 +350,9 @@ Shutdown runs in reverse. The route is stopped first, so no file is in flight wh
 
 Nothing in this path logs a path or filename.
 
-### 5.3 Landing: two-stage ingestion (steps 1 to 5 built)
+### 5.3 Landing: two-stage ingestion (steps 1 to 6a built)
 
-Decided 2026-11-03. Steps 1 to 5 of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14). Step 5: HTTP push (§5.3.15); queue intakes are next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14).
+Decided 2026-11-03. Steps 1 to 5 and 6a of §5.3.10 are built. Step 1: the landing tables, the item writer and reader, the ledger, the landing checkpoint, `item.landed` and the lease's standby mode, in `connector-core` `landing/`. Step 2: the landing node, `landing-connector`, with a local directory intake (§5.3.11). Step 3a: the splitter reads only from landing (§5.3.12); step 3b: the deployment and integration tests for two stages. Step 4: SFTP and SMB intakes (§5.3.14). Step 5: HTTP push (§5.3.15). Step 6a: queue intakes for Kafka, SQS, RabbitMQ and Artemis (§5.3.16); 6b, the other three brokers, is next. Decided this replaces the 2026-11-01 plan of a `SourceEndpoint` plugin for each kind of endpoint. We can't predict how customers will send data, so intake is built on Apache Camel's components instead of adapters of our own, except where a library gives us more control (SFTP and SMB, §5.3.14).
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
@@ -378,7 +380,7 @@ flowchart LR
 - **Landed items never change.** If a producer's data has a problem, the producer fixes it at their end and sends it again; we never edit landed data.
 - **Retention of landed data is set by the customer,** possibly up to the legal limit for keeping records, which can be many years.
 - **No guarantees about producers:** sizes, rates, naming, clean-up and timing are all unknown. Files may stay on a source indefinitely. Producers never append to a file they have dropped.
-- **Camel components from a fixed list.** SFTP, SMB and HTTP push are the exceptions. SFTP and SMB (decided 2026-11-03, §5.3.14) use JSch and smbj directly, polled by a Camel timer, so that timeouts, encryption, host keys and logging are under our control and the settings are explicit rather than a URI. HTTP push (decided 2026-11-04, §5.3.15) is a Spring MVC controller, because Camel's `platform-http` can't stream a request body. More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
+- **Camel components from a fixed list.** SFTP, SMB and HTTP push are the exceptions. SFTP and SMB (decided 2026-11-03, §5.3.14) use JSch and smbj directly, polled by a Camel timer, so that timeouts, encryption, host keys and logging are under our control and the settings are explicit rather than a URI. HTTP push (decided 2026-11-04, §5.3.15) is a Spring MVC controller, because Camel's `platform-http` can't stream a request body. Artemis (decided 2026-11-04, §5.3.16) uses the JMS client, polled by a Camel timer, because Camel's JMS components acknowledge a message before it can be landed. More are added at a customer's request, after a security review: TLS and authentication options, what the component logs (paths, filenames and URIs can hold PHI), and how it behaves when the network fails.
 - **Dropped:** FHIR push (the end of the pipeline is a FHIR repository, so pushing FHIR through this ingestion adds little beyond MDM) and NFS (Camel has no NFS component, and a mount moves failure handling outside the application).
 
 #### 5.3.1 Intakes
@@ -390,7 +392,7 @@ flowchart LR
 | SMB share | smbj, SMB 3 with encryption required, polled by a Camel timer (built) | unchanged for `settle` | ledger: path, size, mtime | yes, by offset |
 | Object bucket | `aws2-s3`, `azure-storage-blob`, `google-storage` | present (objects appear whole); `settle` optional | ledger: bucket, key, version ID or ETag | yes, ranged reads |
 | HTTP push | Spring MVC and Spring Security, not `platform-http` (built, §5.3.15) | the whole request body received | `Idempotency-Key` header, if sent | no: the sender retries |
-| Queue | the seven brokers of §10.3, as consumers | a batch is full or its time is up | broker message ID | no: unacknowledged messages are redelivered |
+| Queue | `kafka`, `aws2-sqs`, `spring-rabbitmq`; the JMS client for Artemis (built, §5.3.16); Pub/Sub, Service Bus and Event Hubs next | a batch is full or its time is up | broker message ID, within `dedup-window` | no: unacknowledged messages are redelivered |
 | Iceberg table | Iceberg API (no Camel component) | a committed snapshot | table UUID, data file path | yes, by row group |
 
 **Readiness (`settle`).** A file or object is ready once its size and modification time have stayed the same for `settle` (configurable per intake; default 2 minutes). The time is measured by the landing node's own observations across polls, not by comparing the file's timestamp with our clock, because a share's or server's clock may be wrong. An intake whose producer writes a `<name>.done` marker can wait for the marker instead (`ready: marker`).
@@ -408,8 +410,8 @@ flowchart LR
 
 **Queues.**
 - Messages are landed in batches, so a stream of small messages doesn't become a stream of commits and `item.landed` messages. A batch closes at `batch.max-messages`, `batch.max-bytes` or `batch.max-wait`, whichever comes first (defaults 1,000, 64 MiB, 5 s).
-- A batch is one item. It keeps each message's offset and length, and its broker message ID, in a record index, so the splitter can treat every message as its own unit, whatever the format.
-- Messages are acknowledged (or, for Kafka and Event Hubs, their offsets committed) only after the batch's commit. A crash before then means redelivery; redelivered messages already landed are recognised by message ID and acknowledged without landing them again.
+- A batch is one item. It keeps each message's offset, and the keyed hash of its broker message ID, in a record index, so the splitter can treat every message as its own unit, whatever the format.
+- Messages are acknowledged (or, for Kafka and Event Hubs, their offsets committed) only after the batch's commit. A crash before then means redelivery; redelivered messages already landed are recognised by message ID, if they come within `dedup-window` (1 hour) of the last landed batch, and acknowledged without landing them again.
 
 **Iceberg tables.** For each new snapshot that only adds data, each added data file becomes one item: its Parquet bytes, landed as they are. Data files never change, so the table UUID and file path identify them for good. A snapshot that deletes or overwrites rows can't be expressed as new items: it raises `intake.table_rewrite` and nothing is landed for it. Plain Parquet files in a bucket are bucket items.
 
@@ -423,12 +425,13 @@ Namespace `sdh_landing` (configurable), with its own catalog properties, so it c
 - **The summary row** holds `intake`, `kind` (`file`, `object`, `push`, `message-batch`, `table-file`), `item_size`, `chunk_count`, `chunk_size`, `item_digest` with `digest_block_size`, `started_at`, the source reference (`source_ref_hash`, `source_size`, `source_version`), the encrypted original name or path (`original_name_enc`, seq −1 as for archives), `replaces_item_id`, and `item_sha256`, the SHA-256 of the content (built in step 5; none for an item resumed after a restart, §5.3.15).
 - **`item_digest`** is the keyed chained digest of §5.1, with the same label and blocks, so a file's item digest equals the file digest the splitter reports for it. Tested.
 - **Size check:** when the source gave a size, the bytes read must match it exactly, or the landing stops with `ItemChangedException` and nothing is finished.
-- **Not yet:** the producer's reference and the record index for message batches come with the steps that need them (§5.3.8, step 6). `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
+- **Record index** (step 6a): a message batch's summary row also has `record_offsets` (where each message starts) and `record_keys` (the keyed hash of each message's broker ID, null for a message without one). `LandedItems.records` reads them, and `LandedItems.recordKeys` the keys landed since a time.
+- **Not yet:** the producer's reference comes with the step that needs it (§5.3.8). `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
 
 Chunks committed without a summary row belong to an item that wasn't finished (a push that broke off, an item that changed while being read). Nothing reads them. For now they are removed only by retention, with the rest of their day (§5.3.13); removing them sooner needs their files rewritten, and isn't built.
 
 **`landing_ledger`** records what has been landed, with no PHI: hashes, sizes and times only.
-- **Key:** `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ path or key)`, plus size and modification time (or version ID or ETag; or the message ID's hash for queues), and the item's content digest.
+- **Key:** `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ path or key)`, plus size and modification time (or version ID or ETag; for a queue, one entry per batch, keyed by its item ID, with the message IDs' hashes in the record index), and the item's content digest.
 - **Size and SHA-256:** each entry also has `item_size` and `item_sha256` (step 5), so a push's receipt can be given again from the ledger alone.
 - **Kept longer than the data.** Retention purges `landed_items`, but a file that stays on a read-only source would then be landed again. The ledger has its own retention, by default forever.
 - **Written straight after the item's commit.** Iceberg has no multi-table commit (§8.2), so a crash in between leaves the last item without a ledger row. Items are landed one at a time, so only the last can be missing: at startup `LandingLedger.repair` adds it from the done checkpoint. An item is never landed twice for that reason. Tested.
@@ -477,7 +480,7 @@ Each reason is reported once, until the source is reachable again or the reason 
 
 #### 5.3.6 Signalling the splitter, and what changes in it
 
-**`item.landed`** (`ConnectorMessage.ItemLanded`, built) goes on the intake's landing queue, read only by its splitter, never by downstream consumers. It is sealed like every other message (§10.1). Payload: the item ID (in `fileId`), intake, kind, size, item digest, `landedAt`, and the storage reference (catalog, namespace, table, the day of the summary row, a snapshot that holds the item, KEK ref). Message ID `il-<itemId>`. `replaces_item_id` and the record index will be added as optional fields when their steps need them.
+**`item.landed`** (`ConnectorMessage.ItemLanded`, built) goes on the intake's landing queue, read only by its splitter, never by downstream consumers. It is sealed like every other message (§10.1). Payload: the item ID (in `fileId`), intake, kind, size, item digest, `landedAt`, and the storage reference (catalog, namespace, table, the day of the summary row, a snapshot that holds the item, KEK ref). Message ID `il-<itemId>`. `replaces_item_id` will be added as an optional field when its step needs it. The record index isn't in the message: the splitter reads it from the summary row (§5.3.16).
 
 **The item ID is the file ID.** The splitter processes an item under its item ID, so every section, `section.stored` and `file.completed` from it carries the item ID as its `fileId`, and downstream can go from any section back to the landed original with no extra field.
 
@@ -525,7 +528,7 @@ sdh:
   landing:
     intake: claims-sftp                    # names the lease, checkpoint, ledger keys and metrics
     source:
-      type: sftp                           # directory | sftp | smb | http built; later s3 | azure-blob | gcs | queue | iceberg
+      type: sftp                           # directory | sftp | smb | http | queue built; later s3 | azure-blob | gcs | iceberg
       path: /outbound/claims
       sftp: { host: dropzone.example.org, user: sdh, private-key: /run/secrets/sftp_key, known-hosts: /run/secrets/known_hosts }
       access: read-only                    # read-only | read-write
@@ -534,7 +537,11 @@ sdh:
       recursive: false
       max-item-bytes: 0                    # 0 = no limit
       auth-retry-interval: 5m
-    batch: { max-messages: 1000, max-bytes: 64MB, max-wait: 5s }   # queue intakes
+    broker:                                # queue intakes (§5.3.16)
+      type: kafka                          # kafka | sqs | rabbitmq | artemis built
+      uri: "kafka:hl7.adt?brokers=kafka:9093&groupId=sdh-landing-adt&securityProtocol=SSL"
+      batch: { max-messages: 1000, max-bytes: 64MB, max-wait: 5s }
+      dedup-window: 1h
     http:                                  # http intakes (§5.3.15)
       port: 8443
       tls: { certificate: /run/secrets/tls.crt, private-key: /run/secrets/tls.key }
@@ -552,7 +559,7 @@ sdh:
 ```
 
 - **SFTP and SMB have explicit settings,** not a URI (§5.3.14). Their passwords and key passphrase come from the environment.
-- **A URI, for the Camel intakes still to come, is checked** against the fixed list of components and against options that must be set or must not be. For example, `strictHostKeyChecking=no` is refused, and so is a password written in the URI. Credentials come from mounted secrets or the environment, never from the URI itself.
+- **A URI is checked** against the fixed list of components and against options that must be set or must not be. For a queue intake (built, §5.3.16), the options that hold a message until it is landed are added, a different value for one is refused, and so is a password, key or secret written in the URI rather than as a `{{...}}` placeholder. Credentials come from mounted secrets or the environment, never from the URI itself.
 - **The splitter's configuration** loses `sdh.file.*` and gains the landing queue it reads from and the landing catalog it reads items from (read access only, with unwrap rights on `landed-items-kek`).
 
 #### 5.3.10 Order of work
@@ -562,7 +569,7 @@ sdh:
 3. **The splitter reads from landing.** 3a (built, §5.3.12): an `item.landed` consumer and inbox, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. 3b: an image for the landing node, the build and Kubernetes scripts, and the `-Pit` suite, the Kubernetes run (§15.2) and the demo rewritten for two stages, with failover of both stages.
 4. **SFTP and SMB (built),** with the failure cases of §5.3.4 tested against containers that are cut off, stalled, restarted and given wrong keys (§5.3.14). Left for later: Kerberos for SMB, the intake metrics and the planned events of §5.3.4, and claims on remote sources.
 5. **HTTP push (built),** with OAuth2 and mTLS (§5.3.15). Left for later: the status endpoint and correlation IDs of §5.3.8, and an HTTP readiness probe.
-6. **Queue intakes,** batched, for the seven brokers.
+6. **Queue intakes,** batched. 6a (built, §5.3.16): Kafka, SQS, RabbitMQ and Artemis, the record index, and the splitter splitting a batch message by message. 6b: Pub/Sub, Service Bus and Event Hubs.
 7. **Buckets,** then **Iceberg tables.**
 8. **Producer feedback** (§5.3.8), once its open questions are settled.
 
@@ -784,6 +791,58 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 - `PushOAuth2ApplicationTest` (the whole node, with a JWKS served by the test): a 1.5 MB body streamed in chunks, with its receipt, its `item.landed` and no PHI in the logs; replays scoped by sender; no token, and tokens signed by another key, from another issuer, for another audience, expired or without the scope; too large, cut off, form and bad-key requests; a busy intake.
 - `PushMtlsApplicationTest`: a listed client whose subject is written differently, and its replay; an unlisted subject; a certificate from another CA; no certificate.
 - `ItemLanderTest` and `LandingLedgerTest`: the SHA-256 (none after a resume) and `find`.
+
+#### 5.3.16 Queue intakes as built (step 6a)
+
+`sdh.landing.source.type: queue` makes the node a queue intake, consuming one queue or topic, set in `sdh.landing.broker`. Like a push intake it has no listing and no `path`; the rest of the node is as in §5.3.11. Step 6a covers Kafka, Amazon SQS, RabbitMQ and ActiveMQ Artemis; 6b adds Pub/Sub, Service Bus and Event Hubs.
+
+**Decided 2026-11-04: Camel consumers, with one exception.** Camel is how the other intakes are routed and how the intake type is chosen at run time, so queues use it too, as long as a message can be held until its batch is committed. A throwaway spike against each broker settled how:
+
+| Broker | Consumer | How a message is held until its batch is landed |
+|---|---|---|
+| Kafka | `kafka`, with `batching=true`, `allowManualCommit=true`, `autoCommitEnable=false` | each poll is one exchange; it is landed, in batches, and then its offsets are committed with `KafkaManualCommit` |
+| SQS | `aws2-sqs`, with `deleteAfterRead=true`, `extendMessageVisibility=true` | each exchange is held open, and completes only when its batch is landed: the message is deleted then, or comes back after its visibility timeout if the exchange fails |
+| RabbitMQ | `spring-rabbitmq`, with `acknowledgeMode=MANUAL`, `asyncConsumer=true` | each exchange is held open; once its batch is landed, `basicAck` on the message's channel, or `basicNack` with requeue if not |
+| Artemis | the JMS client, `CLIENT_ACKNOWLEDGE`, polled by a Camel timer | once a batch is landed, acknowledging its last message acknowledges them all; if not, the session is recovered |
+
+Artemis is the exception: both of Camel's JMS components acknowledge a message as soon as their listener returns, before it could be landed. `camel-jms` runs on Spring's listener container, which (in Spring 7) treats any acknowledge mode but auto, transacted and dups-ok as client acknowledge, and acknowledges when the listener returns; `camel-sjms` does the same, and has no other mode. Holding the exchange open doesn't help with either. The plain JMS client does what is needed.
+
+**Batches** (`HeldBatches` for SQS and RabbitMQ, the Kafka processor in `QueueIntakeRoute`, `ArtemisIntakeRoute`):
+- A batch closes at `max-messages` (1,000), `max-bytes` (64 MB) or `max-wait` (5 s) after its first message, whichever comes first. A single message larger than `max-bytes` is a batch of its own. Artemis learns a message's size only once it has received it, so its batches can pass `max-bytes` by one message.
+- Batches are landed one at a time. While one is landed, a consumer offering more than another batch's worth is held back.
+- **A batch that can't be landed** (storage or the landing queue down) isn't acknowledged, so the broker delivers its messages again; the next batch waits, with the backoff of `sdh.retry`. Kafka can't deliver one batch again without seeking, so a Kafka batch is tried again in place, and the poll's offsets are committed only once all of it is landed.
+- **A fatal error** (§5.3.11) stops the node: nothing more is taken or acknowledged.
+
+**Landing a batch** (`BatchService`, under the writer lock that maintenance also takes):
+- The batch is one item of kind `message-batch`: the message bodies one after another, with the record index (§5.3.2) on its summary row. A batch can't resume: a batch that fails part-way has its checkpoint cleared (`item.abandoned`), and its messages come again.
+- **One ledger entry per batch,** keyed by `"batch" ‖ 0 ‖ itemId`. A message's ID isn't stored: only its keyed hash, `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ "message" ‖ 0 ‖ messageId)`, in the record index.
+- **Duplicates.** A message whose ID is already in the batch, or was landed within `dedup-window` (1 hour) of the last landed batch, is skipped. The window is measured from the last batch, not from the clock, so a node that was down for a day still recognises what it landed just before. At startup the keys are read back from the summary rows landed in the window before the last batch (`LandedItems.recordKeys`), and are then held in memory, dropping those that fall out of the window. A batch of nothing but duplicates is acknowledged and lands nothing (`batch.skipped`). A redelivery later than the window is landed again.
+- **Message IDs:** Kafka, `topic/partition/offset`; SQS, the message ID; RabbitMQ, the producer's `message_id`, if set (without one, a message can't be recognised, and is landed again if it comes again); Artemis, `JMSMessageID`.
+- **After the commit,** the ledger entry and `item.landed` are written. If either fails, the batch is still acknowledged (it is committed), and they are finished before the next batch lands (`batch.finish_deferred` in the log), so no item is announced behind a newer one. Startup repairs the ledger, clears an unfinished batch and announces the last landed item again, as for the other intakes.
+- **Artemis message types:** text is landed as UTF-8, bytes as they are. Other types have no byte form: they are landed empty and reported (`message.unsupported_type`); object messages are never deserialised.
+- **Broker outages:** Camel's consumers reconnect on their own. The Artemis route reports a lost or refused connection once, as `intake.unreachable` (`NETWORK` or `AUTH`), drops it, which returns any unacknowledged messages, and reconnects with backoff, then reports `intake.reachable`.
+
+**Splitting a batch** (in `connector-core`). `LandedItemSource` carries the record index, and `IngestPipeline` opens such an item with `SplitterRegistry.openRecords`: a `RecordSession` runs the format's splitter over each message on its own, with offsets, resume points and line numbers moved to the message's place in the item. Empty messages are skipped. A message the splitter can't parse, or that holds a section over the size limit, becomes one failed section from that point to the message's end (`Section.Failure`, with the error code and its offset), stored raw and announced with `section.failed`; the rest of the batch is split as usual and the item completes. So one bad message fails only itself.
+
+**Settings** (`sdh.landing.broker`, checked by `BrokerSettings`):
+- `type`: `kafka`, `sqs`, `rabbitmq` or `artemis`.
+- `uri`: the Camel consumer URI, for all but Artemis. It must use the broker's component. The options above are added, and one set to anything else is refused, since it could acknowledge a message before it is landed. Also added if absent: Kafka `maxPollRecords` and `batchingIntervalMs` from the batch limits, `valueDeserializer` for bytes, and `autoOffsetReset=earliest`; SQS `visibilityTimeout=60`, `maxMessagesPerPoll=10`, `waitTimeSeconds=20`; RabbitMQ `autoDeclare=false`, `prefetchCount` from `max-messages`, and the node's own connection factory. Kafka needs a `groupId`, and RabbitMQ `queues`. An option holding a password, key, secret, token or JAAS configuration must be a `{{...}}` placeholder; a value is refused. The URI is rebuilt without encoding, so placeholders reach Camel intact.
+- `batch.max-messages`, `batch.max-bytes`, `batch.max-wait`, and `dedup-window` (1h).
+- `rabbitmq`: `addresses`, `virtual-host` (`/`), `username`, `password`, `ssl` (false; when on, the JVM's trust store and host name checking).
+- `artemis`: `broker-url`, `username`, `password`, `queue`.
+- Secrets from the environment: `SDH_LANDING_BROKER_RABBITMQ_PASSWORD`, `SDH_LANDING_BROKER_ARTEMIS_PASSWORD`, and the variables the URI's placeholders name. The `toString` of each connection hides its password.
+
+**No PHI in logs:** no body, message ID or key is logged. Events carry the item ID, the intake and counts; Camel's own warning for an exchange that wasn't landed names only Camel's exchange ID.
+
+**Not built:** Pub/Sub, Service Bus and Event Hubs (step 6b); `sdh.landing.batch_size` and the other queue metrics.
+
+**Tests:**
+- `BatchServiceTest`: a batch landed as one item with its record index and content; duplicates within a batch, across batches and after a restart; keys forgotten outside the window; a landing queue outage; an unfinished batch cleared at startup; a fatal error.
+- `HeldBatchesTest`: batches closed by count, bytes and time; exchanges failed when not landed; nothing taken after a fatal error; held exchanges released on stop.
+- `BrokerSettingsTest`: the options added for each broker; options that would acknowledge early, secrets written in the URI, and missing settings, refused; placeholders kept.
+- `RecordSessionTest`, `ItemLanderTest` and `ItemProcessorTest` (`connector-core`): splitting by message, a resume inside a message, the record index stored and read, and a batch in which one message fails alone.
+- `QueueIntakeIT` (`-Pit`; Kafka, ElasticMQ for SQS, RabbitMQ and Artemis containers): a node lands a batch and crashes before acknowledging it; a new node lands all 30 messages exactly once, recognising the redelivered batch.
+- `RabbitLandingApplicationIT` (`-Pit`): the whole node on RabbitMQ, from settings to `item.landed`, leaving the queue empty.
 
 ## 6. Splitting
 

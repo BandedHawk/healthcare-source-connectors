@@ -21,10 +21,12 @@ import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.config.HttpSettings;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
 import com.sdh.healthcare.connector.landing.intake.Announcer;
+import com.sdh.healthcare.connector.landing.intake.BatchService;
 import com.sdh.healthcare.connector.landing.intake.IntakeNotWritableException;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.intake.LandingIntake;
@@ -54,6 +56,7 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 
 /**
  * Everything a landing node runs on, started in a fixed order (design
@@ -106,6 +109,15 @@ public final class LandingRuntime implements AutoCloseable
     /** Lands an HTTP intake's pushes; null for a listing intake. */
     private final PushService pushService;
 
+    /** Lands a queue intake's batches; null for other intakes. */
+    private final BatchService batchService;
+
+    /** A queue intake's broker settings; null for other intakes. */
+    private final BrokerSettings broker;
+
+    /** A RabbitMQ intake's connection factory; null for other intakes. */
+    private final CachingConnectionFactory rabbitmq;
+
     /** The landing tables, for maintenance. */
     private final Tables tables;
 
@@ -135,12 +147,15 @@ public final class LandingRuntime implements AutoCloseable
      * @param intakeSource where items come from
      * @param service    lands a listing intake's items; null for HTTP
      * @param pushService lands an HTTP intake's pushes; null otherwise
+     * @param queue      a queue intake's service, broker and connection;
+     *                   null otherwise
      * @param tables     the landing tables
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
             KeyMaterial keys, SourceSettings source, IntakeSource intakeSource,
-            IntakeService service, PushService pushService, Tables tables)
+            IntakeService service, PushService pushService, QueueIntake queue,
+            Tables tables)
     {
         this.camel = camel;
         this.dataSource = dataSource;
@@ -152,7 +167,23 @@ public final class LandingRuntime implements AutoCloseable
         this.intakeSource = intakeSource;
         this.service = service;
         this.pushService = pushService;
+        this.batchService = queue == null ? null : queue.service();
+        this.broker = queue == null ? null : queue.broker();
+        this.rabbitmq = queue == null ? null : queue.rabbitmq();
         this.tables = tables;
+    }
+
+    /**
+     * A queue intake's parts.
+     *
+     * @param service  lands its batches
+     * @param broker   its broker's settings
+     * @param rabbitmq its RabbitMQ connection factory; null for other
+     *                 brokers
+     */
+    private record QueueIntake(BatchService service, BrokerSettings broker,
+            CachingConnectionFactory rabbitmq)
+    {
     }
 
     /**
@@ -178,6 +209,11 @@ public final class LandingRuntime implements AutoCloseable
             PushController.path(intake);
             http = HttpSettings.of(properties.landing().http());
         }
+        BrokerSettings broker = null;
+        if (source.type() == SourceSettings.Type.QUEUE)
+        {
+            broker = BrokerSettings.of(properties.landing().broker());
+        }
         LandingProperties.Storage storageSettings = properties.storage();
         Map<String, String> catalogProperties = require(
                 storageSettings.catalog(), "sdh.storage.catalog");
@@ -191,6 +227,7 @@ public final class LandingRuntime implements AutoCloseable
         Catalog catalog = null;
         ClosablePublisher publisher = null;
         IntakeSource intakeSource = null;
+        CachingConnectionFactory rabbitmq = null;
         try
         {
             dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
@@ -200,7 +237,7 @@ public final class LandingRuntime implements AutoCloseable
                 case DIRECTORY -> new LocalDirectorySource(source);
                 case SFTP -> new SftpSource(source);
                 case SMB -> new SmbSource(source);
-                case HTTP -> null;
+                case HTTP, QUEUE -> null;
             };
             InboundDirectoryClaim claim = null;
             if (source.writable() && !source.remote())
@@ -255,10 +292,23 @@ public final class LandingRuntime implements AutoCloseable
                     new IntakeService.Storage(lander, ledger, index, ids);
             IntakeService service = null;
             PushService pushService = null;
+            QueueIntake queue = null;
             if (http != null)
             {
                 pushService = new PushService(intake, storage, announcer,
                         fatal, clock, http.maxItemBytes(), http.maxWait());
+            }
+            else if (broker != null)
+            {
+                if (broker.kind() == BrokerSettings.Kind.RABBITMQ)
+                {
+                    rabbitmq = rabbitmq(broker.rabbitmq());
+                    camel.getRegistry().bind(BrokerSettings.RABBITMQ_BEAN,
+                            rabbitmq);
+                }
+                queue = new QueueIntake(new BatchService(intake, storage,
+                        items, announcer, fatal, clock, broker.dedupWindow()),
+                        broker, rabbitmq);
             }
             else
             {
@@ -272,12 +322,16 @@ public final class LandingRuntime implements AutoCloseable
                             .with(Attr.EPOCH, lease.epoch()));
             return new LandingRuntime(camel, dataSource, catalog, lease,
                     publisher, keys, source, intakeSource, service,
-                    pushService,
+                    pushService, queue,
                     new Tables(committer, items, ledgerTable, lander));
         }
         catch (Exception | Error failure)
         {
             closeQuietly(intakeSource);
+            if (rabbitmq != null)
+            {
+                rabbitmq.destroy();
+            }
             closeQuietly(publisher);
             closeQuietly(catalog);
             closeQuietly(lease);
@@ -367,13 +421,66 @@ public final class LandingRuntime implements AutoCloseable
     }
 
     /**
+     * A queue intake's service, for the route.
+     *
+     * @return the service; null for other intakes
+     */
+    public BatchService batchService()
+    {
+        return batchService;
+    }
+
+    /**
+     * A queue intake's broker settings, for the route.
+     *
+     * @return the settings; null for other intakes
+     */
+    public BrokerSettings broker()
+    {
+        return broker;
+    }
+
+    /**
+     * Makes a queue intake's RabbitMQ connection factory.
+     *
+     * @param settings the connection settings
+     * @return the factory
+     * @throws Exception if TLS can't be set up
+     */
+    private static CachingConnectionFactory rabbitmq(
+            LandingProperties.Rabbitmq settings) throws Exception
+    {
+        com.rabbitmq.client.ConnectionFactory client =
+                new com.rabbitmq.client.ConnectionFactory();
+        if (settings.ssl())
+        {
+            client.useSslProtocol(javax.net.ssl.SSLContext.getDefault());
+            client.enableHostnameVerification();
+        }
+        CachingConnectionFactory factory =
+                new CachingConnectionFactory(client);
+        factory.setAddresses(settings.addresses());
+        factory.setVirtualHost(settings.virtualHost());
+        if (settings.username() != null)
+        {
+            factory.setUsername(settings.username());
+        }
+        if (settings.password() != null)
+        {
+            factory.setPassword(settings.password());
+        }
+        return factory;
+    }
+
+    /**
      * The intake, whichever kind it is: for recovery and maintenance.
      *
      * @return the intake
      */
     public LandingIntake intake()
     {
-        return service != null ? service : pushService;
+        return service != null ? service
+                : pushService != null ? pushService : batchService;
     }
 
     /**
@@ -410,7 +517,7 @@ public final class LandingRuntime implements AutoCloseable
     @Override
     public void close()
     {
-        if (service != null)
+        if (service != null || batchService != null)
         {
             try
             {
@@ -423,6 +530,10 @@ public final class LandingRuntime implements AutoCloseable
             }
         }
         closeQuietly(intakeSource);
+        if (rabbitmq != null)
+        {
+            rabbitmq.destroy();
+        }
         closeQuietly(publisher);
         keys.close();
         closeQuietly(lease);

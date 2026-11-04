@@ -19,7 +19,7 @@ sdh:
       include: "*"                # Ant-style
       recursive: false
       poll-interval: 10s
-      type: directory             # directory | sftp | smb | http; for sftp and smb, path and move-to are absolute
+      type: directory             # directory | sftp | smb | http | queue; for sftp and smb, path and move-to are absolute
       auth-retry-interval: 5m     # sftp and smb: wait after refused credentials, a missing share or a new host key
       sftp:                       # type: sftp
         host: dropzone.example.org
@@ -56,6 +56,27 @@ sdh:
       max-wait: 30s               # a push waits this long for the one before it, then gets 503
       retry-after: 30s            # the Retry-After sent with a 503
       read-timeout: 60s           # a stalled sender is dropped after this
+    broker:                       # type: queue; messages are landed in batches, acknowledged only once landed
+      type: kafka                 # kafka | sqs | rabbitmq | artemis
+      # A Camel consumer URI (not for artemis). The options that hold a message until it is landed are added, and
+      # any set otherwise refused. Secrets must be placeholders, such as {{env:KAFKA_JAAS}}, never values.
+      uri: "kafka:hl7.adt?brokers=kafka:9093&groupId=sdh-landing-adt&securityProtocol=SSL"
+      # uri: "aws2-sqs:hl7-adt?region=eu-west-1&useDefaultCredentialsProvider=true"
+      # uri: "spring-rabbitmq:default?queues=hl7.adt"   # the queue must exist; it isn't declared
+      batch:                      # a batch closes at whichever comes first; one batch is one landed item
+        max-messages: 1000
+        max-bytes: 64MB           # a single larger message is a batch of its own
+        max-wait: 5s
+      dedup-window: 1h            # a message delivered again within this of the last batch is recognised by its ID
+      rabbitmq:                   # type: rabbitmq; password: SDH_LANDING_BROKER_RABBITMQ_PASSWORD
+        addresses: "rabbitmq:5671"
+        virtual-host: /
+        username: sdh
+        ssl: true
+      artemis:                    # type: artemis; password: SDH_LANDING_BROKER_ARTEMIS_PASSWORD
+        broker-url: "tcp://artemis:61617?sslEnabled=true"
+        username: sdh
+        queue: hl7.adt
   storage:
     catalog-name: sdh             # also sent in item.landed messages
     namespace: sdh_landing

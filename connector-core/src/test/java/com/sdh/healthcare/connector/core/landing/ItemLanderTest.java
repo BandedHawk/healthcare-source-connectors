@@ -22,7 +22,9 @@ import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -266,6 +268,46 @@ class ItemLanderTest
     }
 
     /** No name or path appears in the table's clear columns. */
+    /**
+     * A message batch keeps its record index on the summary row; the keys
+     * landed from a time on can be read back for the intake, and an index
+     * that doesn't fit the item is refused.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void keepsAMessageBatchsRecordIndex() throws Exception
+    {
+        byte[] bytes = data(30);
+        RecordIndex records = new RecordIndex(List.of(0L, 10L, 25L),
+                Arrays.asList("k-0", null, "k-2"));
+        NewItem item = new NewItem(UUID.randomUUID(), ItemKind.MESSAGE_BATCH,
+                null, null, null, records);
+        Instant before = Instant.now().minusSeconds(1);
+        lander().land(item, opener(bytes));
+
+        Record summary =
+                LandedItems.summary(table, item.itemId()).orElseThrow();
+        assertThat(LandedItems.records(summary)).contains(records);
+        assertThat(LandedItems.recordKeys(table, INTAKE, before))
+                .containsExactlyInAnyOrder("k-0", "k-2");
+        assertThat(LandedItems.recordKeys(table, INTAKE,
+                Instant.now().plusSeconds(86_400))).isEmpty();
+        assertThat(LandedItems.recordKeys(table, "other", before)).isEmpty();
+        assertThat(LandedItems.records(LandedItems.summary(table,
+                lander().land(fileItem(bytes, "f"), opener(bytes)).itemId())
+                .orElseThrow())).isEmpty();
+
+        NewItem tooShort = new NewItem(UUID.randomUUID(),
+                ItemKind.MESSAGE_BATCH, null, null, null,
+                new RecordIndex(List.of(0L, 40L), Arrays.asList(null, null)));
+        assertThatThrownBy(() -> lander().land(tooShort, opener(bytes)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
+                ItemKind.MESSAGE_BATCH, null, null, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     @Test
     void theNameIsStoredOnlyEncrypted() throws Exception
     {

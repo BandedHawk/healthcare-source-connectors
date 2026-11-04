@@ -9,9 +9,12 @@ package com.sdh.healthcare.connector.landing.runtime;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.intake.RemoteSource;
+import com.sdh.healthcare.connector.landing.route.ArtemisIntakeRoute;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
+import com.sdh.healthcare.connector.landing.route.QueueIntakeRoute;
 import com.sdh.healthcare.connector.landing.route.RemoteIntakeRoute;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
@@ -147,8 +150,20 @@ public class LandingConfiguration
      * @return the route; one with nothing in it for HTTP
      */
     @Bean
-    RouteBuilder intakeRoute(LandingRuntime runtime)
+    RouteBuilder intakeRoute(LandingRuntime runtime,
+            LandingProperties properties)
     {
+        if (runtime.batchService() != null)
+        {
+            Duration backoff = properties.retry().initialBackoff();
+            Duration longest = properties.retry().maxBackoff();
+            return runtime.broker().kind() == BrokerSettings.Kind.ARTEMIS
+                    ? new ArtemisIntakeRoute(properties.landing().intake(),
+                            runtime.broker(), runtime.batchService(), backoff,
+                            longest)
+                    : new QueueIntakeRoute(runtime.broker(),
+                            runtime.batchService(), backoff, longest);
+        }
         if (runtime.pushService() != null)
         {
             return new RouteBuilder()
@@ -182,7 +197,7 @@ public class LandingConfiguration
         return arguments ->
         {
             runtime.intake().recoverAtStartup();
-            if (runtime.service() != null)
+            if (runtime.service() != null || runtime.batchService() != null)
             {
                 camel.getRouteController().startRoute(IntakeRoute.ROUTE_ID);
             }

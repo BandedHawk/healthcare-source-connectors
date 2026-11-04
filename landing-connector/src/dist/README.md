@@ -2,7 +2,8 @@
 
 Copyright (c) 2026 Smile Digital Health Inc. All rights reserved. See `legal/LICENSE`.
 
-A landing node picks up healthcare data from one intake (a directory), stores each item exactly as received,
+A landing node picks up healthcare data from one intake (a directory, a remote share, HTTP push or a message
+queue), stores each item exactly as received,
 encrypted, in Apache Iceberg tables, and announces it to the file connector on a message queue with a signed,
 encrypted `item.landed` message. The file connector then splits it. Landed items are never changed.
 
@@ -70,6 +71,8 @@ variables, never in the file:
 - `SDH_LANDING_SOURCE_SFTP_PASSWORD` or `SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE`, for an SFTP source
 - `SDH_LANDING_SOURCE_SMB_PASSWORD`, for an SMB source
 - `SDH_LANDING_HTTP_TLS_PRIVATE_KEY_PASSWORD`, for an HTTP push intake whose TLS key has a password
+- `SDH_LANDING_BROKER_RABBITMQ_PASSWORD` or `SDH_LANDING_BROKER_ARTEMIS_PASSWORD`, for a RabbitMQ or Artemis queue
+  intake; other brokers' secrets go in the URI as placeholders, such as `{{env:KAFKA_JAAS}}`
 - catalog and storage credentials
 
 Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` becomes `SDH_LEASE_JDBC_URL`) or as
@@ -80,7 +83,7 @@ With `access: read-write`, each file is deleted, moved or renamed once it has la
 checks at startup that it can do so.
 
 The source is a local or mounted directory (`type: directory`), an SFTP server (`type: sftp`), an SMB share
-(`type: smb`), or HTTP push (`type: http`):
+(`type: smb`), HTTP push (`type: http`), or a message queue (`type: queue`):
 - **SFTP:** the server's host key must be pinned in a known-hosts file; an unknown or changed key is never
   accepted. Log in with a private key in OpenSSH format, or a password.
 - **SMB:** SMB 3 with encryption only, NTLMv2 with a user and password; guest and anonymous logins are refused, and
@@ -99,6 +102,14 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   `max-wait` gets `503` with `Retry-After`, as does any push while storage or the broker is down. A body larger
   than `max-item-bytes` gets `413`, and one cut off gets `400`. The port opens only on the active node, so a
   standby isn't sent pushes; use a TCP probe on it.
+- **Queues:** Kafka, Amazon SQS, RabbitMQ or ActiveMQ Artemis (`sdh.landing.broker`). Messages are landed in
+  batches: a batch closes at `max-messages`, `max-bytes` or `max-wait`, and becomes one item that keeps where each
+  message starts. A message is acknowledged (for Kafka, its offset committed) only once its batch is landed; if the
+  node stops first, the broker delivers it again. A message delivered again within `dedup-window` of the last batch
+  is recognised by its broker ID and not landed twice. RabbitMQ messages have an ID only if the producer sets
+  `message_id`; without one, a message delivered again after a crash is landed again. Give the Kafka consumer
+  group to this intake alone. The file connector splits
+  a batch message by message, and a message it can't split fails alone.
 
 Landed items are kept forever unless you set `sdh.maintenance.retention.landed-items` (at least `7d`, so the
 splitter has time to read each item). Retention removes whole days, and never part of an item. The ledger is always
@@ -142,6 +153,8 @@ The node needs:
 - **`/run/secrets`:** the keys, as a read-only secret volume (local key mode only).
 - **Configuration:** a ConfigMap mounted as `application.yml`, with `SPRING_CONFIG_ADDITIONAL_LOCATION` pointing at it.
 - **Secrets:** a Secret whose keys are environment variable names, passed whole with `envFrom`.
+- **Queue intakes:** no volume for the intake; the broker's TLS trust store, if it isn't public, in the secret
+  volume.
 - **HTTP push only:** a Service for the push port, the TLS certificate and key in the secret volume, and a TCP
   readiness probe on the port, so only the active node receives pushes. For mTLS, the ingress or load balancer
   must pass TLS through to the pod, so that the node sees the client's own certificate.

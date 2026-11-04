@@ -10,6 +10,7 @@ package com.sdh.healthcare.connector.core.split;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.IOException;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.ServiceLoader;
@@ -83,6 +84,24 @@ public final class SplitterRegistry {
         return new LimitedSession(get(format).open(src, from, cfg), limits, nextSeq, from.offset());
     }
 
+    /**
+     * Opens a session over a message batch that splits each message on its own (design §5.3.16), and enforces
+     * {@link SplitLimits} on the whole: a message that can't be split, or holds a section over the size limit, fails
+     * alone.
+     *
+     * @param offsets where each message starts in the item
+     * @param nextSeq the seq the next section will get; used for the per-file section count
+     */
+    public SplitSession openRecords(String format, SeekableByteSource src, List<Long> offsets, ResumePoint from,
+            long nextSeq, SplitConfig cfg) throws IOException, SplitException {
+        SplitLimits limits = cfg.limits();
+        if (src.size() > limits.maxFileBytes()) {
+            throw new SplitException(ErrorCode.LIMIT_FILE_SIZE, 0);
+        }
+        return new LimitedSession(new RecordSession(get(format), src, offsets, from, cfg), limits, nextSeq,
+                from.offset());
+    }
+
     private static final class LimitedSession implements SplitSession {
         private final SplitSession inner;
         private final SplitLimits limits;
@@ -103,6 +122,16 @@ public final class SplitterRegistry {
                 return s;
             }
             Section section = s.get();
+            if (section.failure() != null) {
+                // The rest of a message that couldn't be split: kept as it is, so not size-checked, and may be
+                // empty when the error came at the message's very end.
+                if (seq >= limits.maxSectionsPerFile()) {
+                    throw new SplitException(ErrorCode.LIMIT_SECTION_COUNT, section.sourceOffset());
+                }
+                lastResume = Math.max(lastResume, section.resume().offset());
+                seq++;
+                return s;
+            }
             if (section.plaintextLength() > limits.maxSectionBytes()) {
                 throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE, section.sourceOffset());
             }

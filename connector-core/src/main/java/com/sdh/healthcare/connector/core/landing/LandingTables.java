@@ -120,6 +120,18 @@ public final class LandingTables
      */
     public static final String ITEM_SHA256 = "item_sha256";
 
+    /**
+     * Where each message of a message batch starts ({@link RecordIndex});
+     * null for other items.
+     */
+    public static final String RECORD_OFFSETS = "record_offsets";
+
+    /**
+     * The keyed hash of each message's broker ID ({@link RecordIndex}), to
+     * recognise one delivered again; null for other items.
+     */
+    public static final String RECORD_KEYS = "record_keys";
+
     /** The columns of {@value #LANDED_ITEMS}. */
     public static final Schema LANDED_ITEMS_SCHEMA = new Schema(
             required(1, ITEM_ID, Types.UUIDType.get()),
@@ -146,7 +158,13 @@ public final class LandingTables
                     "encrypted original name or path"),
             optional(22, REPLACES_ITEM_ID, Types.UUIDType.get()),
             optional(23, ITEM_SHA256, Types.StringType.get(),
-                    "SHA-256 of the item, in hex"));
+                    "SHA-256 of the item, in hex"),
+            optional(24, RECORD_OFFSETS,
+                    Types.ListType.ofRequired(25, Types.LongType.get()),
+                    "where each message of a batch starts"),
+            optional(26, RECORD_KEYS,
+                    Types.ListType.ofOptional(27, Types.StringType.get()),
+                    "keyed hashes of the messages' broker IDs"));
 
     /** The columns of {@value #LEDGER}. */
     public static final Schema LEDGER_SCHEMA = new Schema(

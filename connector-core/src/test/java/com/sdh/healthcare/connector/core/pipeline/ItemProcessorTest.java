@@ -17,6 +17,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
@@ -29,6 +30,7 @@ import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.landing.NewItem;
+import com.sdh.healthcare.connector.core.landing.RecordIndex;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipelineTest.RecordingPublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
@@ -41,6 +43,7 @@ import java.security.interfaces.ECPublicKey;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -286,6 +289,55 @@ class ItemProcessorTest
             throw new AssertionError("a finished item isn't read");
         }).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
         assertThat(publisher.sent).hasSize(sent);
+    }
+
+    /**
+     * A message batch is split message by message: a message that can't be
+     * split is announced as a failed section with the splitter's error, and
+     * the item still completes, with the messages either side of it.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void failsOnlyTheMessageOfABatchThatCantBeSplit() throws Exception
+    {
+        String[] messages = {"1,ok\n", "2,\"never closed\n", "3,ok\n"};
+        StringBuilder joined = new StringBuilder();
+        List<Long> offsets = new ArrayList<>();
+        for (String message : messages)
+        {
+            offsets.add((long) joined.length());
+            joined.append(message);
+        }
+        byte[] bytes = joined.toString().getBytes(UTF_8);
+        LandedItem item = lander.land(new NewItem(
+                UuidV7.next(System.currentTimeMillis()),
+                ItemKind.MESSAGE_BATCH, null, null, null,
+                new RecordIndex(offsets, Arrays.asList(null, null, null))),
+                offset -> new ByteArrayInputStream(bytes, (int) offset,
+                        bytes.length));
+
+        ItemProcessor.Outcome outcome = process(processor(), item);
+        assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.COMPLETED);
+        assertThat(outcome.sectionCount()).isEqualTo(3);
+        List<ConnectorMessage> published = messages();
+        assertThat(published.stream().filter(SectionStored.class::isInstance)
+                .map(m -> ((SectionStored) m).sourceOffset()))
+                .containsExactly(offsets.get(0), offsets.get(2));
+        assertThat(published.stream().filter(SectionFailed.class::isInstance))
+                .singleElement().isInstanceOfSatisfying(SectionFailed.class,
+                        failed ->
+                        {
+                            assertThat(failed.errorCode()).isEqualTo(
+                                    "PARSE_UNTERMINATED_QUOTE");
+                            assertThat(failed.sourceOffset())
+                                    .isEqualTo(offsets.get(1));
+                            assertThat(failed.sourceLength()).isEqualTo(
+                                    messages[1].length());
+                        });
+        assertThat(published.getLast()).isInstanceOfSatisfying(
+                FileCompleted.class, completed -> assertThat(
+                        completed.failedSectionCount()).isEqualTo(1));
     }
 
     /** An item that can't be split fails, and stays failed. */

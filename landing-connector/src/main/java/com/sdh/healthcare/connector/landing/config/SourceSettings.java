@@ -17,7 +17,7 @@ import java.util.Locale;
  * share, for SMB) and must be absolute.
  *
  * @param path         the directory, made absolute; null for
- *                     {@link Type#HTTP}
+ *                     {@link Type#HTTP} and {@link Type#QUEUE}
  * @param access       whether the node may change the directory
  * @param after        what happens to an item after landing
  * @param moveTo       where {@link After#MOVE} puts items, made absolute;
@@ -67,7 +67,14 @@ public record SourceSettings(Path path, Access access, After after,
          * settings ({@link HttpSettings}), and none of the listing ones
          * apply.
          */
-        HTTP
+        HTTP,
+
+        /**
+         * Messages consumed from a broker in batches; its broker has its
+         * own settings ({@link BrokerSettings}), and none of the listing
+         * ones apply.
+         */
+        QUEUE
     }
 
     /** Whether the node may change the source. */
@@ -108,7 +115,7 @@ public record SourceSettings(Path path, Access access, After after,
     {
         Type type = parse(Type.class, source.type(),
                 "sdh.landing.source.type");
-        if (type == Type.HTTP)
+        if (type == Type.HTTP || type == Type.QUEUE)
         {
             return new SourceSettings(null, Access.READ_ONLY, After.NONE,
                     null, null, false, Duration.ZERO, null, false,
