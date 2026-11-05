@@ -347,7 +347,9 @@ public final class ArtemisIntakeRoute extends RouteBuilder
             Telemetry.get().auditWarn("message.unsupported_type",
                     Fields.of(Attr.INTAKE, intake));
         }
-        return new BatchService.Message(body, message.getJMSMessageID());
+        return new BatchService.Message(body, message.getJMSMessageID(),
+                QueueIntakeRoute.text(message.getObjectProperty(
+                        BatchService.REPLACES_HEADER)));
     }
 
     /** Closes the connection; unacknowledged messages go back. */

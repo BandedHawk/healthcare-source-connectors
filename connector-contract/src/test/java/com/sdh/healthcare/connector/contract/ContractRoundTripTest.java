@@ -144,20 +144,22 @@ class ContractRoundTripTest
                         UUID.randomUUID()),
                 new ConnectorMessage.ItemReceived(fileId, "claims", "file",
                         999, "ab12", java.time.Instant.EPOCH,
-                        "/out/claims.csv", UUID.randomUUID(), null),
+                        "/out/claims.csv", UUID.randomUUID(), null, null),
                 new ConnectorMessage.ItemReceived(fileId, "adt",
                         "message-batch", 99, null, java.time.Instant.EPOCH,
-                        null, null, java.util.Arrays.asList("m-1", null)),
+                        null, null, java.util.Arrays.asList("m-1", null),
+                        java.util.Arrays.asList(null, fileId + "/m-0")),
                 new ConnectorMessage.ItemResult(fileId, "claims",
                         ConnectorMessage.ItemResult.COMPLETED, 3, 1, null, 1,
                         1, 1, java.util.List.of(new ConnectorMessage.Problem(
                                 "CONVERT_CSV_FIELD_COUNT", "convert", 2, 50,
-                                new SourcePosition(4, 1), -1, null)),
+                                new SourcePosition(4, 1), -1, null, null)),
                         "/out/claims.csv", null, java.time.Instant.EPOCH),
                 new ConnectorMessage.ItemResult(fileId, "adt",
                         ConnectorMessage.ItemResult.FAILED, 0, 0,
                         new ConnectorMessage.Problem("PARSE_JSON_MALFORMED",
-                                "split", -1, 7, null, 2, "m-3"),
+                                "split", -1, 7, null, 2, "m-3",
+                                fileId + "/m-1"),
                         3, 2, 2, java.util.List.of(), null,
                         UUID.randomUUID(), java.time.Instant.EPOCH)))
         {
@@ -169,9 +171,9 @@ class ContractRoundTripTest
                 .doesNotContainKey("mapping");
         assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemReceived(
                 fileId, "claims", "push", 1, null, java.time.Instant.EPOCH,
-                null, null, null)))
+                null, null, null, null)))
                 .doesNotContainKeys("sha256", "producerRef", "replaces",
-                        "messageIds");
+                        "messageIds", "messageReplaces");
     }
 
     /**

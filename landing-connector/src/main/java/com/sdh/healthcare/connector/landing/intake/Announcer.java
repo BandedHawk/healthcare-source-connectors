@@ -163,7 +163,8 @@ public final class Announcer
 
     /**
      * The receipt for an item, from its summary row: the producer's
-     * reference and, for a batch, the messages' broker IDs.
+     * reference and, for a batch, the messages' broker IDs and the
+     * earlier messages they replace.
      *
      * @param item the landed item
      * @return the receipt
@@ -184,6 +185,8 @@ public final class Announcer
                             .orElse(null),
                     item.replaces(),
                     LandedItems.messageRefs(summary, receipts.keys())
+                            .orElse(null),
+                    LandedItems.messageReplaces(summary, receipts.keys())
                             .orElse(null));
         }
         catch (IOException | RuntimeException unreadable)

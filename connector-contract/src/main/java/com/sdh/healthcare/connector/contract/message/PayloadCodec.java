@@ -131,6 +131,8 @@ public final class PayloadCodec
                 putIfSet(payload, "producerRef", received.producerRef());
                 putIfSet(payload, "replaces", received.replaces());
                 putIfSet(payload, "messageIds", received.messageIds());
+                putIfSet(payload, "messageReplaces",
+                        received.messageReplaces());
             }
             case ItemResult result ->
             {
@@ -244,7 +246,8 @@ public final class PayloadCodec
                             Instant.parse(text(payload, "landedAt")),
                             (String) payload.get("producerRef"),
                             uuid(payload, "replaces"),
-                            texts(payload, "messageIds"));
+                            texts(payload, "messageIds"),
+                            texts(payload, "messageReplaces"));
                     case ITEM_RESULT -> new ItemResult(
                             fileId,
                             text(payload, "intake"),
@@ -323,6 +326,7 @@ public final class PayloadCodec
         {
             fields.put("message", problem.message());
             putIfSet(fields, "messageRef", problem.messageRef());
+            putIfSet(fields, "messageReplaces", problem.messageReplaces());
         }
         return fields;
     }
@@ -340,7 +344,8 @@ public final class PayloadCodec
                 position(fields, "line", "column"),
                 fields.get("message") instanceof Number message
                         ? Math.toIntExact(message.longValue()) : -1,
-                (String) fields.get("messageRef"));
+                (String) fields.get("messageRef"),
+                (String) fields.get("messageReplaces"));
     }
 
     /**

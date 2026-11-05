@@ -306,6 +306,8 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
                 options.putIfAbsent("visibilityTimeout", "60");
                 options.putIfAbsent("maxMessagesPerPoll", "10");
                 options.putIfAbsent("waitTimeSeconds", "20");
+                // BatchService.REPLACES_HEADER: config uses no intake class.
+                withAttribute(options, "sdh_replaces");
             }
             case RABBITMQ ->
             {
@@ -379,6 +381,30 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
             throw new IllegalArgumentException("sdh.landing.broker.uri option "
                     + name + " must be " + value + ": anything else could"
                     + " acknowledge messages before they are landed");
+        }
+    }
+
+    /**
+     * Asks SQS for a message attribute as well as any configured, unless
+     * all are asked for.
+     *
+     * @param options the options
+     * @param name    the attribute
+     */
+    private static void withAttribute(Map<String, Object> options,
+            String name)
+    {
+        Object set = options.get("messageAttributeNames");
+        String names = set == null ? "" : String.valueOf(set).strip();
+        if (names.isEmpty())
+        {
+            options.put("messageAttributeNames", name);
+        }
+        else if (!List.of(names.split("\\s*,\\s*")).contains(name)
+                && !names.equalsIgnoreCase("All")
+                && !names.equals(".*"))
+        {
+            options.put("messageAttributeNames", names + "," + name);
         }
     }
 

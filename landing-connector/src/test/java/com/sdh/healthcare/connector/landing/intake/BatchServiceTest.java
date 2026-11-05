@@ -303,6 +303,58 @@ class BatchServiceTest
     }
 
     /**
+     * A message may name the earlier message it replaces; the link is kept
+     * if its item is one this intake landed and it is well formed, and is
+     * otherwise reported and left out, the message landed all the same. A
+     * batch with no links keeps none.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void keepsTheMessagesEachMessageReplaces() throws Exception
+    {
+        BatchService service = service();
+        service.land(messages("a", "b"));
+        UUID earlier = last().itemId();
+        assertThat(LandedItems.messageReplaces(LandedItems.summary(items,
+                earlier).orElseThrow(), keys)).isEmpty();
+
+        String kept = earlier + "/topic/0/7";
+        List<BatchService.Message> batch = List.of(
+                new BatchService.Message(bytes("c"), "c", kept),
+                new BatchService.Message(bytes("d"), "d", null),
+                new BatchService.Message(bytes("e"), "e",
+                        UUID.randomUUID() + "/a"),
+                new BatchService.Message(bytes("f"), "f", "not-an-id/a"),
+                new BatchService.Message(bytes("g"), "g", earlier + "/"),
+                new BatchService.Message(bytes("h"), "h", earlier + "/a b"),
+                new BatchService.Message(bytes("i"), "i",
+                        earlier + "/" + "x".repeat(256)),
+                new BatchService.Message(bytes("j"), "j", earlier.toString()));
+        assertThat(service.land(batch).landed()).isEqualTo(8);
+        assertThat(LandedItems.messageReplaces(LandedItems.summary(items,
+                last().itemId()).orElseThrow(), keys)).contains(Arrays.asList(
+                        kept, null, null, null, null, null, null, null));
+        assertThat(telemetry.attributesOf("item.replaces_ignored"))
+                .extracting(attributes -> attributes.get(
+                        AttributeKey.stringKey("sdh.reason")))
+                .containsExactly("UNKNOWN", "MALFORMED", "MALFORMED",
+                        "MALFORMED", "MALFORMED", "MALFORMED");
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * A body in UTF-8.
+     *
+     * @param text the body
+     * @return its bytes
+     */
+    static byte[] bytes(String text)
+    {
+        return text.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
      * A message delivered again is skipped, within a batch or across them;
      * a batch of nothing but those lands nothing; messages without an ID
      * are always landed.

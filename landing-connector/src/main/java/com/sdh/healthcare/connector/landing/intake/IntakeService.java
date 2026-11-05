@@ -270,8 +270,9 @@ public final class IntakeService implements LandingIntake
     }
 
     /**
-     * The earlier item an item's replaces marker names, if it is one this
-     * intake landed (design §5.3.8). The link is only recorded; nothing is
+     * The earlier item an item names, by a value its source gives or by
+     * its replaces marker, if it is one this intake landed (design
+     * §5.3.8). The link is only recorded; nothing is
      * replaced. A marker that is malformed or names another item is
      * reported and left out, and the item is landed all the same, so
      * nothing is lost; a marker that can't be read is tried again.
@@ -282,6 +283,16 @@ public final class IntakeService implements LandingIntake
      */
     private UUID replaces(ListedItem item) throws IOException
     {
+        Optional<String> given = source.replacesValue(item);
+        if (given.isPresent())
+        {
+            if (given.get().length() > MAX_REPLACES_BYTES)
+            {
+                ignoredLink(intake, "MALFORMED");
+                return null;
+            }
+            return linkedItem(given.get());
+        }
         Optional<ListedItem> marker = source.replacesMarker(item);
         if (marker.isEmpty())
         {
@@ -296,15 +307,28 @@ public final class IntakeService implements LandingIntake
         {
             return null;
         }
+        if (text.length > MAX_REPLACES_BYTES)
+        {
+            ignoredLink(intake, "MALFORMED");
+            return null;
+        }
+        return linkedItem(new String(text, StandardCharsets.US_ASCII));
+    }
+
+    /**
+     * The earlier item a producer named, if it is one this intake landed;
+     * if not, reports it and gives null.
+     *
+     * @param text the item ID as the producer gave it
+     * @return the earlier item; null if it isn't one
+     * @throws IOException if the ledger can't be read
+     */
+    private UUID linkedItem(String text) throws IOException
+    {
         String reason;
         try
         {
-            if (text.length > MAX_REPLACES_BYTES)
-            {
-                throw new IllegalArgumentException("Marker too long");
-            }
-            UUID earlier = UUID.fromString(new String(text,
-                    StandardCharsets.US_ASCII).strip());
+            UUID earlier = UUID.fromString(text.strip());
             if (storage.ledger().contains(intake, earlier))
             {
                 return earlier;
@@ -315,9 +339,21 @@ public final class IntakeService implements LandingIntake
         {
             reason = "MALFORMED";
         }
+        ignoredLink(intake, reason);
+        return null;
+    }
+
+    /**
+     * Reports a link to an earlier item, or message, that was left out.
+     *
+     * @param intake the intake
+     * @param reason {@code MALFORMED}, or {@code UNKNOWN} for an item this
+     *               intake didn't land
+     */
+    static void ignoredLink(String intake, String reason)
+    {
         Telemetry.get().auditWarn("item.replaces_ignored",
                 Fields.of(Attr.INTAKE, intake).with(Attr.REASON, reason));
-        return null;
     }
 
     /**

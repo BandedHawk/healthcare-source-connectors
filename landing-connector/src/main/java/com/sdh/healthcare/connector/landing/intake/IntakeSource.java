@@ -63,6 +63,20 @@ public interface IntakeSource
     }
 
     /**
+     * The earlier item an item replaces, as its source gives it, such as a
+     * table snapshot's {@code sdh.replaces} property (design §5.3.8). It
+     * is checked as a marker's is; a source that gives one has no
+     * markers.
+     *
+     * @param item the item
+     * @return the item ID as given; empty if none
+     */
+    default Optional<String> replacesValue(ListedItem item)
+    {
+        return Optional.empty();
+    }
+
+    /**
      * Deletes, moves or renames a landed item, as configured; does nothing
      * on a read-only source. An item that has gone, or changed since it
      * was listed, is left alone: a changed item is a new version, to be

@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.DataFile;
@@ -92,12 +93,21 @@ public final class IcebergTableSource implements RemoteSource
 {
 
     /**
-     * A file to land, and which step of the plan it belongs to.
-     *
-     * @param item the item
-     * @param step its step's index in the plan
+     * The snapshot summary property in which a producer names the item an
+     * append's files replace (design §5.3.8).
      */
-    private record Planned(ListedItem item, int step)
+    static final String REPLACES_PROPERTY = "sdh.replaces";
+
+    /**
+     * A file to land, which step of the plan it belongs to, and the item
+     * it replaces.
+     *
+     * @param item     the item
+     * @param step     its step's index in the plan
+     * @param replaces its snapshot's {@link #REPLACES_PROPERTY}; null if
+     *                 none
+     */
+    private record Planned(ListedItem item, int step, String replaces)
     {
     }
 
@@ -298,7 +308,7 @@ public final class IcebergTableSource implements RemoteSource
         }
         steps = List.of(new TableProgress.Mark(snapshot.snapshotId(),
                 false));
-        return items(loaded, snapshot.snapshotId(), backfillFiles, 0);
+        return items(loaded, snapshot.snapshotId(), backfillFiles, 0, null);
     }
 
     /**
@@ -355,7 +365,8 @@ public final class IcebergTableSource implements RemoteSource
                 plan.addAll(items(loaded, step.snapshotId(),
                         added.computeIfAbsent(step.snapshotId(),
                                 id -> addedFiles(loaded, step)),
-                        planSteps.size() - 1));
+                        planSteps.size() - 1, step.summary() == null ? null
+                                : step.summary().get(REPLACES_PROPERTY)));
             }
             else if (!DataOperations.REPLACE.equals(operation))
             {
@@ -392,10 +403,12 @@ public final class IcebergTableSource implements RemoteSource
      * @param snapshotId the snapshot they come from, for events
      * @param files      the files
      * @param step       their step in the plan
+     * @param replaces   the item they replace, as the snapshot names it;
+     *                   null if none
      * @return the items
      */
     private List<Planned> items(Table loaded, long snapshotId,
-            List<DataFile> files, int step)
+            List<DataFile> files, int step, String replaces)
     {
         String uuid = loaded.uuid().toString();
         List<Planned> items = new ArrayList<>();
@@ -412,7 +425,7 @@ public final class IcebergTableSource implements RemoteSource
             else
             {
                 items.add(new Planned(new ListedItem(file.location(),
-                        file.fileSizeInBytes(), 0, uuid), step));
+                        file.fileSizeInBytes(), 0, uuid), step, replaces));
             }
         }
         return items;
@@ -497,6 +510,22 @@ public final class IcebergTableSource implements RemoteSource
                 mark == null ? 0 : mark.snapshotId(), null);
         advance();
         return new ItemLander.ItemChangedException();
+    }
+
+    /**
+     * The item a data file replaces, as the snapshot that added it names
+     * it in {@link #REPLACES_PROPERTY}. A backfill names none: the files
+     * of the snapshot it lands were added by many.
+     *
+     * @param item the item
+     * @return the item ID as given; empty if none
+     */
+    @Override
+    public synchronized Optional<String> replacesValue(ListedItem item)
+    {
+        Planned planned = outstanding.get(item.ref());
+        return Optional.ofNullable(planned == null ? null
+                : planned.replaces());
     }
 
     /**

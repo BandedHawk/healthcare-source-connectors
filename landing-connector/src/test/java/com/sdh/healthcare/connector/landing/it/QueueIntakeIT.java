@@ -58,6 +58,7 @@ import io.grpc.ManagedChannelBuilder;
 import jakarta.jms.Connection;
 import jakarta.jms.MessageProducer;
 import jakarta.jms.Session;
+import jakarta.jms.TextMessage;
 import java.net.URI;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -66,6 +67,7 @@ import java.security.spec.ECGenParameterSpec;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -83,10 +85,14 @@ import org.apache.camel.component.google.pubsub.GooglePubsubComponent;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.data.IcebergGenerics;
+import org.apache.iceberg.data.Record;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.BeforeEach;
@@ -113,6 +119,7 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 
 /**
@@ -201,6 +208,9 @@ class QueueIntakeIT
     /** The reasons given to the exit hook. */
     final List<String> fatal = new CopyOnWriteArrayList<>();
 
+    /** An item the ledger has, which every message names as replaced. */
+    final UUID earlier = UUID.randomUUID();
+
     /**
      * Creates the catalog, tables and keys.
      *
@@ -223,6 +233,20 @@ class QueueIntakeIT
         ec.initialize(new ECGenParameterSpec("secp256r1"));
         signing = ec.generateKeyPair();
         recipient = ec.generateKeyPair();
+        new LandingLedger(ledgerTable, committer(), RETRY).record(List.of(
+                new LandingLedger.Entry(INTAKE, null, earlier, "a".repeat(52),
+                        Instant.now(), 0, null)));
+    }
+
+    /**
+     * The link a message carries to the one it replaces.
+     *
+     * @param index its number
+     * @return the link
+     */
+    String link(int index)
+    {
+        return earlier + "/prior-" + index;
     }
 
     /**
@@ -244,7 +268,10 @@ class QueueIntakeIT
             {
                 for (int i = 0; i < MESSAGES; i++)
                 {
-                    producer.send(new ProducerRecord<>("hl7", body(i))).get();
+                    producer.send(new ProducerRecord<String, byte[]>("hl7",
+                            null, null, body(i), List.of(new RecordHeader(
+                                    BatchService.REPLACES_HEADER,
+                                    link(i).getBytes(UTF_8))))).get();
                 }
             }
             BrokerSettings settings = BrokerSettings.of(
@@ -288,8 +315,12 @@ class QueueIntakeIT
                 for (int i = 0; i < MESSAGES; i++)
                 {
                     String text = new String(body(i), UTF_8);
+                    MessageAttributeValue value = MessageAttributeValue
+                            .builder().dataType("String")
+                            .stringValue(link(i)).build();
                     sqs.sendMessage(request -> request.queueUrl(queue)
-                            .messageBody(text));
+                            .messageBody(text).messageAttributes(Map.of(
+                                    BatchService.REPLACES_HEADER, value)));
                 }
             }
             BrokerSettings settings = BrokerSettings.of(
@@ -341,6 +372,8 @@ class QueueIntakeIT
                 {
                     MessageProperties properties = new MessageProperties();
                     properties.setMessageId("m-" + i);
+                    properties.setHeader(BatchService.REPLACES_HEADER,
+                            link(i));
                     template.send("", "hl7", new Message(body(i),
                             properties));
                 }
@@ -386,8 +419,11 @@ class QueueIntakeIT
                         session.createProducer(session.createQueue("hl7"));
                 for (int i = 0; i < MESSAGES; i++)
                 {
-                    producer.send(session.createTextMessage(
-                            new String(body(i), UTF_8)));
+                    TextMessage message = session.createTextMessage(
+                            new String(body(i), UTF_8));
+                    message.setStringProperty(BatchService.REPLACES_HEADER,
+                            link(i));
+                    producer.send(message);
                 }
             }
             BrokerSettings settings = BrokerSettings.of(
@@ -449,7 +485,9 @@ class QueueIntakeIT
                 for (int i = 0; i < MESSAGES; i++)
                 {
                     publisher.publish(PubsubMessage.newBuilder()
-                            .setData(ByteString.copyFrom(body(i))).build())
+                            .setData(ByteString.copyFrom(body(i)))
+                            .putAttributes(BatchService.REPLACES_HEADER,
+                                    link(i)).build())
                             .get();
                 }
                 publisher.shutdown();
@@ -514,7 +552,10 @@ class QueueIntakeIT
             {
                 for (int i = 0; i < MESSAGES; i++)
                 {
-                    sender.sendMessage(new ServiceBusMessage(body(i)));
+                    ServiceBusMessage message = new ServiceBusMessage(body(i));
+                    message.getApplicationProperties().put(
+                            BatchService.REPLACES_HEADER, link(i));
+                    sender.sendMessage(message);
                 }
             }
             BrokerSettings settings = BrokerSettings.of(
@@ -566,7 +607,10 @@ class QueueIntakeIT
                 EventDataBatch batch = producer.createBatch();
                 for (int i = 0; i < MESSAGES; i++)
                 {
-                    assertThat(batch.tryAdd(new EventData(body(i)))).isTrue();
+                    EventData event = new EventData(body(i));
+                    event.getProperties().put(BatchService.REPLACES_HEADER,
+                            link(i));
+                    assertThat(batch.tryAdd(event)).isTrue();
                 }
                 producer.send(batch);
             }
@@ -644,6 +688,13 @@ class QueueIntakeIT
             assertThat(landed).hasSize(MESSAGES);
             assertThat(new HashSet<>(landed)).hasSize(MESSAGES);
             assertThat(recovered.service.recentKeys()).isEqualTo(MESSAGES);
+            List<String> expected = new ArrayList<>();
+            for (int i = 0; i < MESSAGES; i++)
+            {
+                expected.add(link(i));
+            }
+            assertThat(landedLinks()).containsExactlyInAnyOrderElementsOf(
+                    expected);
         }
         assertThat(fatal).isEmpty();
         assertThat(sent).isNotEmpty();
@@ -665,6 +716,32 @@ class QueueIntakeIT
         {
             throw new IllegalStateException(failure);
         }
+    }
+
+    /**
+     * The links to replaced messages kept for every message landed so
+     * far.
+     *
+     * @return the links, one per landed message, nulls included
+     * @throws Exception if the table can't be read
+     */
+    List<String> landedLinks() throws Exception
+    {
+        items.refresh();
+        List<String> links = new ArrayList<>();
+        try (CloseableIterable<Record> rows =
+                IcebergGenerics.read(items).build())
+        {
+            for (Record row : rows)
+            {
+                if (LandedItems.records(row).isPresent())
+                {
+                    links.addAll(LandedItems.messageReplaces(row, keys)
+                            .orElseThrow());
+                }
+            }
+        }
+        return links;
     }
 
     /**

@@ -42,7 +42,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -342,6 +344,82 @@ class IntakeServiceTest
         assertThat(new com.sdh.healthcare.connector.landing.route.IntakeRoute(
                 settings("read-only"), service).uri())
                 .contains("antExclude=**/*.sdh-replaces");
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * A source that gives each item's replaced item itself, as a table
+     * does, from a map by name.
+     *
+     * @param directory the source it reads through
+     * @param values    the value given for each item's reference
+     */
+    record GivingSource(IntakeSource directory, Map<String, String> values)
+            implements IntakeSource
+    {
+
+        @Override
+        public InputStream open(ListedItem item, long offset)
+                throws IOException
+        {
+            return directory.open(item, offset);
+        }
+
+        @Override
+        public Optional<String> replacesValue(ListedItem item)
+        {
+            return values.keySet().stream()
+                    .filter(name -> item.ref().endsWith(name))
+                    .findFirst().map(values::get);
+        }
+
+        @Override
+        public void afterLanding(ListedItem item) throws IOException
+        {
+            directory.afterLanding(item);
+        }
+
+        @Override
+        public boolean reachable()
+        {
+            return directory.reachable();
+        }
+
+        @Override
+        public void checkWritable() throws IOException
+        {
+            directory.checkWritable();
+        }
+    }
+
+    /**
+     * A value the source gives links an item as a marker does, and is
+     * checked the same way.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void linksAnItemToTheOneItsSourceNames() throws Exception
+    {
+        Map<String, String> values = new HashMap<>();
+        IntakeService service = service(new GivingSource(
+                new LocalDirectorySource(settings("read-only")), values),
+                Duration.ZERO);
+        service.recoverAtStartup();
+        service.onListed(write("a.csv", "1,first\n"));
+        UUID earlier = landed().getFirst().fileId();
+        values.put("b.csv", earlier.toString());
+        values.put("c.csv", UUID.randomUUID().toString());
+        values.put("d.csv", "x".repeat(300));
+        service.onListed(write("b.csv", "1,second\n"));
+        service.onListed(write("c.csv", "1,third\n"));
+        service.onListed(write("d.csv", "1,fourth\n"));
+
+        List<ConnectorMessage.ItemLanded> messages = landed();
+        assertThat(messages).hasSize(4);
+        assertThat(messages.get(1).replaces()).isEqualTo(earlier);
+        assertThat(messages.get(2).replaces()).isNull();
+        assertThat(messages.get(3).replaces()).isNull();
         assertThat(fatal).isEmpty();
     }
 

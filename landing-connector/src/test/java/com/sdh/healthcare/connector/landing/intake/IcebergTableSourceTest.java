@@ -293,6 +293,37 @@ class IcebergTableSourceTest
     }
 
     /**
+     * An append's {@code sdh.replaces} property is given for each file it
+     * added; a backfill and other appends give none.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void givesTheItemAnAppendNamesAsReplaced() throws Exception
+    {
+        DataFile a = file(1);
+        table.newAppend().appendFile(a).set(
+                IcebergTableSource.REPLACES_PROPERTY, "backfilled").commit();
+        IcebergTableSource source = source("earliest", identifier);
+        ListedItem first = source.list().getFirst();
+        assertThat(source.replacesValue(first)).isEmpty();
+        source.afterLanding(first);
+
+        String earlier = UUID.randomUUID().toString();
+        DataFile b = file(2);
+        DataFile c = file(3);
+        table.newAppend().appendFile(b).appendFile(c).set(
+                IcebergTableSource.REPLACES_PROPERTY, earlier).commit();
+        DataFile d = file(4);
+        append(d);
+        List<ListedItem> items = source.list();
+        assertThat(items).extracting(source::replacesValue).containsExactly(
+                Optional.of(earlier), Optional.of(earlier), Optional.empty());
+        items.forEach(source::afterLanding);
+        assertThat(source.replacesValue(items.getFirst())).isEmpty();
+    }
+
+    /**
      * With {@code latest}, what the table holds at the first start isn't
      * landed; later appends are.
      *

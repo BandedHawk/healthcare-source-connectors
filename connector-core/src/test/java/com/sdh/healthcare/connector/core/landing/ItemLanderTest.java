@@ -310,12 +310,13 @@ class ItemLanderTest
                 ItemKind.MESSAGE_BATCH, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(LandedItems.messageRefs(summary, keys)).isEmpty();
+        assertThat(LandedItems.messageReplaces(summary, keys)).isEmpty();
     }
 
     /**
-     * A batch's broker IDs are kept encrypted and read back in order, nulls
-     * included; the item a push replaces is kept and comes back with it
-     * after a restart.
+     * A batch's broker IDs, and the messages they replace, are kept
+     * encrypted and read back in order, nulls included; the item a push
+     * replaces is kept and comes back with it after a restart.
      *
      * @throws Exception if the test fails
      */
@@ -324,10 +325,12 @@ class ItemLanderTest
     {
         byte[] bytes = data(30);
         List<String> refs = Arrays.asList("smith-1", null, "smith-\"\u00e9");
+        List<String> links = Arrays.asList(null, null,
+                UUID.randomUUID() + "/smith-0");
         NewItem batch = new NewItem(UUID.randomUUID(),
                 ItemKind.MESSAGE_BATCH, null, null, null,
                 new RecordIndex(List.of(0L, 10L, 25L),
-                        Arrays.asList("k-0", null, "k-2")), refs);
+                        Arrays.asList("k-0", null, "k-2")), refs, links);
         lander().land(batch, opener(bytes));
         Record summary =
                 LandedItems.summary(table, batch.itemId()).orElseThrow();
@@ -336,10 +339,21 @@ class ItemLanderTest
                 summary.getField(LandingTables.RECORD_REFS_ENC)),
                 StandardCharsets.ISO_8859_1))
                 .doesNotContain("smith");
+        assertThat(LandedItems.messageReplaces(summary, keys))
+                .contains(links);
+        assertThat(new String(LandedItems.bytes(
+                summary.getField(LandingTables.RECORD_REPLACES_ENC)),
+                StandardCharsets.ISO_8859_1))
+                .doesNotContain("smith");
         assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
                 ItemKind.MESSAGE_BATCH, null, null, null,
                 new RecordIndex(List.of(0L), Arrays.asList("k")),
                 List.of("a", "b"))).isInstanceOf(
+                        IllegalArgumentException.class);
+        assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
+                ItemKind.MESSAGE_BATCH, null, null, null,
+                new RecordIndex(List.of(0L), Arrays.asList("k")),
+                List.of("a"), List.of("x", "y"))).isInstanceOf(
                         IllegalArgumentException.class);
 
         UUID earlier = UUID.randomUUID();

@@ -98,7 +98,10 @@ class BrokerSettingsTest
                 .hasMessageContaining("acknowledgeMode");
     }
 
-    /** SQS and RabbitMQ get their options; RabbitMQ the node's factory. */
+    /**
+     * SQS and RabbitMQ get their options, SQS the link attribute, and
+     * RabbitMQ the node's factory.
+     */
     @Test
     void addsTheOptionsSqsAndRabbitmqNeed()
     {
@@ -107,7 +110,15 @@ class BrokerSettingsTest
                 .contains("region=eu-west-1", "deleteAfterRead=true",
                         "extendMessageVisibility=true",
                         "visibilityTimeout=60", "waitTimeSeconds=20",
-                        "pollStrategy=#" + BrokerSettings.POLL_STRATEGY_BEAN);
+                        "pollStrategy=#" + BrokerSettings.POLL_STRATEGY_BEAN,
+                        "messageAttributeNames=sdh_replaces");
+        assertThat(BrokerSettings.of(broker("sqs",
+                "aws2-sqs:q?messageAttributeNames=trace")).uri())
+                .contains("messageAttributeNames=trace,sdh_replaces");
+        assertThat(BrokerSettings.of(broker("sqs",
+                "aws2-sqs:q?messageAttributeNames=All")).uri())
+                .contains("messageAttributeNames=All")
+                .doesNotContain("sdh_replaces");
         assertThat(BrokerSettings.of(broker("RabbitMQ",
                 "spring-rabbitmq:ex?queues=q")).uri())
                 .contains("queues=q", "acknowledgeMode=MANUAL",

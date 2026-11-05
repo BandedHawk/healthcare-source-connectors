@@ -45,6 +45,9 @@ class ResultReporterTest
     /** When it finished. */
     static final Instant AT = Instant.parse("2026-11-04T12:00:00Z");
 
+    /** An earlier item that one message replaces part of. */
+    static final UUID EARLIER = UUID.randomUUID();
+
     /** A batch of four messages; the third is empty. */
     static final RecordIndex BATCH = new RecordIndex(
             List.of(0L, 100L, 250L, 250L), Arrays.asList("k0", "k1", null,
@@ -65,7 +68,8 @@ class ResultReporterTest
 
     /**
      * Problems are split into parts, each carrying the totals, and placed
-     * in their messages with the broker IDs.
+     * in their messages with the broker IDs and the messages they
+     * replace.
      */
     @Test
     void splitsProblemsIntoPartsWithTheTotals()
@@ -75,7 +79,8 @@ class ResultReporterTest
                 new Failed(2, 120, "CONVERT_B", null),
                 new Failed(5, 300, "CONVERT_C", new SourcePosition(9, 1)));
         ResultReporter.Landed landed = new ResultReporter.Landed("ref-1",
-                null, BATCH, Arrays.asList("m0", "m1", "m2", null));
+                null, BATCH, Arrays.asList("m0", "m1", "m2", null),
+                Arrays.asList(null, EARLIER + "/m9", null, null));
         List<ItemResult> parts = ResultReporter.parts(
                 new Outcome(ITEM, ItemProcessor.Result.COMPLETED, 6, null),
                 "claims", failed, landed, AT, 2, Integer.MAX_VALUE);
@@ -95,11 +100,12 @@ class ResultReporterTest
         });
         assertThat(parts.get(0).problems()).containsExactly(
                 new Problem("CONVERT_A", "convert", 0, 10,
-                        new SourcePosition(1, 5), 0, "m0"),
-                new Problem("CONVERT_B", "convert", 2, 120, null, 1, "m1"));
+                        new SourcePosition(1, 5), 0, "m0", null),
+                new Problem("CONVERT_B", "convert", 2, 120, null, 1, "m1",
+                        EARLIER + "/m9"));
         assertThat(parts.get(1).problems()).containsExactly(
                 new Problem("CONVERT_C", "convert", 5, 300,
-                        new SourcePosition(9, 1), 3, null));
+                        new SourcePosition(9, 1), 3, null, null));
         assertThat(parts.get(1).messageId())
                 .isEqualTo("rs-" + ITEM + "-2");
     }
@@ -114,7 +120,7 @@ class ResultReporterTest
         List<ItemResult> parts = ResultReporter.parts(
                 new Outcome(ITEM, ItemProcessor.Result.FAILED, 0, failure),
                 "claims", List.of(),
-                new ResultReporter.Landed(null, earlier, null, null), AT,
+                new ResultReporter.Landed(null, earlier, null, null, null), AT,
                 ResultReporter.PART_SIZE, ResultReporter.PART_BYTES);
 
         assertThat(parts).singleElement().satisfies(part ->
@@ -126,13 +132,14 @@ class ResultReporterTest
             assertThat(part.replaces()).isEqualTo(earlier);
             assertThat(part.failure()).isEqualTo(new Problem(
                     ErrorCode.values()[0].name(), "split", -1, 42, null, -1,
-                    null));
+                    null, null));
         });
     }
 
     /**
-     * Even with the longest broker IDs, each sealed part fits the smallest
-     * broker limit, 256 KB; parts are cut by bytes as well as by count.
+     * Even with the longest broker IDs and links, each sealed part fits
+     * the smallest broker limit, 256 KB; parts are cut by bytes as well as
+     * by count.
      *
      * @throws Exception if a key can't be made
      */
@@ -151,19 +158,21 @@ class ResultReporterTest
         List<Long> offsets = new ArrayList<>();
         List<String> keys = new ArrayList<>();
         List<String> refs = new ArrayList<>();
+        List<String> links = new ArrayList<>();
         List<Failed> failed = new ArrayList<>();
         for (int index = 0; index < count; index++)
         {
             offsets.add(index * 1_000_000_000L);
             keys.add(null);
             refs.add("\"".repeat(255));
+            links.add(UUID.randomUUID() + "/" + "\"".repeat(255));
             failed.add(new Failed(index, index * 1_000_000_000L + 7,
                     "CONVERT_CSV_FIELD_COUNT",
                     new SourcePosition(Long.MAX_VALUE, Integer.MAX_VALUE)));
         }
         ResultReporter.Landed landed = new ResultReporter.Landed("x".repeat(
                 1_000), UUID.randomUUID(), new RecordIndex(offsets, keys),
-                refs);
+                refs, links);
         List<ItemResult> parts = ResultReporter.parts(
                 new Outcome(ITEM, ItemProcessor.Result.COMPLETED, count, null),
                 "claims", failed, landed, AT, ResultReporter.PART_SIZE,

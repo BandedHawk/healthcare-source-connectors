@@ -12,9 +12,11 @@ import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.intake.BatchService;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.apache.camel.Exchange;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.component.azure.eventhubs.EventHubsConstants;
@@ -182,7 +184,37 @@ public final class QueueIntakeRoute extends RouteBuilder
                 + in.getHeader(KafkaConstants.PARTITION, Integer.class) + "/"
                 + in.getHeader(KafkaConstants.OFFSET, Long.class);
         return new BatchService.Message(body == null ? new byte[0] : body,
-                id);
+                id, text(in.getHeader(BatchService.REPLACES_HEADER)));
+    }
+
+    /**
+     * A header's value as text: bytes, as Kafka gives them, as UTF-8.
+     *
+     * @param value the value; null if not set
+     * @return the text; null if not set
+     */
+    static String text(Object value)
+    {
+        if (value instanceof byte[] bytes)
+        {
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+        return value == null ? null : value.toString();
+    }
+
+    /**
+     * One entry of a map header, such as Pub/Sub's attributes, as text.
+     *
+     * @param in     the message
+     * @param header the map header
+     * @return the entry for {@link BatchService#REPLACES_HEADER}; null if
+     *         not set
+     */
+    static String replaces(org.apache.camel.Message in, String header)
+    {
+        Map<?, ?> entries = in.getHeader(header, Map.class);
+        return entries == null ? null
+                : text(entries.get(BatchService.REPLACES_HEADER));
     }
 
     /**
@@ -245,7 +277,8 @@ public final class QueueIntakeRoute extends RouteBuilder
         {
             var in = exchange.getMessage();
             return new BatchService.Message(body(in), in.getHeader(
-                    GooglePubsubConstants.MESSAGE_ID, String.class));
+                    GooglePubsubConstants.MESSAGE_ID, String.class),
+                    replaces(in, GooglePubsubConstants.ATTRIBUTES));
         }
 
         @Override
@@ -291,7 +324,8 @@ public final class QueueIntakeRoute extends RouteBuilder
             Long sequence = in.getHeader(ServiceBusConstants.SEQUENCE_NUMBER,
                     Long.class);
             return new BatchService.Message(body(in),
-                    sequence == null ? null : sequence.toString());
+                    sequence == null ? null : sequence.toString(),
+                    replaces(in, ServiceBusConstants.APPLICATION_PROPERTIES));
         }
     }
 
@@ -309,7 +343,8 @@ public final class QueueIntakeRoute extends RouteBuilder
                     Long.class);
             return new BatchService.Message(body(in),
                     partition == null || sequence == null ? null
-                            : partition + "/" + sequence);
+                            : partition + "/" + sequence,
+                    replaces(in, EventHubsConstants.METADATA));
         }
     }
 
@@ -323,7 +358,8 @@ public final class QueueIntakeRoute extends RouteBuilder
             var in = exchange.getMessage();
             byte[] body = in.getBody(byte[].class);
             return new BatchService.Message(body == null ? new byte[0] : body,
-                    in.getHeader(SQS_MESSAGE_ID, String.class));
+                    in.getHeader(SQS_MESSAGE_ID, String.class),
+                    text(in.getHeader(BatchService.REPLACES_HEADER)));
         }
     }
 
@@ -341,7 +377,8 @@ public final class QueueIntakeRoute extends RouteBuilder
             var in = exchange.getMessage();
             byte[] body = in.getBody(byte[].class);
             return new BatchService.Message(body == null ? new byte[0] : body,
-                    in.getHeader(RABBITMQ_MESSAGE_ID, String.class));
+                    in.getHeader(RABBITMQ_MESSAGE_ID, String.class),
+                    text(in.getHeader(BatchService.REPLACES_HEADER)));
         }
 
         @Override

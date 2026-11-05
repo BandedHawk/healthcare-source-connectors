@@ -35,9 +35,11 @@ public final class ContractVersion
      * splitter. Downstream readers never receive it, so it doesn't need a
      * new major version. 3: {@code item.landed} may name the item it
      * replaces, and the {@code item.received} and {@code item.result}
-     * messages, which only an intake's producer receives.
+     * messages, which only an intake's producer receives. 4: a message in
+     * {@code item.received}, or a problem's message in {@code item.result},
+     * may name the earlier message it replaces.
      */
-    public static final int MINOR = 3;
+    public static final int MINOR = 4;
 
     /** The version this build writes, as "major.minor", such as "2.1". */
     public static final String CURRENT = MAJOR + "." + MINOR;

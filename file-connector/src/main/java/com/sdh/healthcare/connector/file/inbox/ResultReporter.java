@@ -123,6 +123,8 @@ public final class ResultReporter
                         LandedItems.replaces(summary.get()).orElse(null),
                         LandedItems.records(summary.get()).orElse(null),
                         LandedItems.messageRefs(summary.get(), keys)
+                                .orElse(null),
+                        LandedItems.messageReplaces(summary.get(), keys)
                                 .orElse(null));
         Instant finishedAt = outcome.failure() != null
                 ? outcome.failure().failedAt() : clock.instant();
@@ -143,13 +145,15 @@ public final class ResultReporter
      *                    the item isn't a batch
      * @param messageRefs each message's broker ID, or null; null if not
      *                    kept
+     * @param messageReplaces the earlier message each message replaces, or
+     *                    null; null if none does
      */
     record Landed(String producerRef, UUID replaces, RecordIndex records,
-            List<String> messageRefs)
+            List<String> messageRefs, List<String> messageReplaces)
     {
 
         /** An item whose summary is gone. */
-        static final Landed NONE = new Landed(null, null, null, null);
+        static final Landed NONE = new Landed(null, null, null, null, null);
     }
 
     /**
@@ -224,10 +228,22 @@ public final class ResultReporter
             long offset, SourcePosition at, Landed landed)
     {
         int message = message(landed.records(), offset);
-        String ref = message < 0 || landed.messageRefs() == null
-                || message >= landed.messageRefs().size()
-                ? null : landed.messageRefs().get(message);
-        return new Problem(code, stage, seq, offset, at, message, ref);
+        return new Problem(code, stage, seq, offset, at, message,
+                at(landed.messageRefs(), message),
+                at(landed.messageReplaces(), message));
+    }
+
+    /**
+     * One message's entry in a per-message list.
+     *
+     * @param list    the list, one entry per message; null if not kept
+     * @param message the message's index; -1 if not a batch
+     * @return the entry; null if there is none
+     */
+    private static String at(List<String> list, int message)
+    {
+        return message < 0 || list == null || message >= list.size()
+                ? null : list.get(message);
     }
 
     /**

@@ -55,7 +55,7 @@ public final class LandedItems
     /** The longest original name that is decrypted: 64 KiB. */
     private static final int MAX_NAME_BYTES = 64 << 10;
 
-    /** The most the broker IDs of a batch may decrypt to: 64 MiB. */
+    /** The most the broker IDs or links of a batch may decrypt to: 64 MiB. */
     private static final int MAX_REFS_BYTES = 64 << 20;
 
     /** How long the digest chain's links are: 32 bytes. */
@@ -321,7 +321,44 @@ public final class LandedItems
     public static Optional<List<String>> messageRefs(Record summary,
             KeyProvider keys)
     {
-        Object encrypted = summary.getField(RECORD_REFS_ENC);
+        return encryptedList(summary, keys, RECORD_REFS_ENC, RECORD_REFS_SEQ,
+                "broker IDs");
+    }
+
+    /**
+     * Decrypts the earlier message each message of a batch replaces, as its
+     * producer said. They name the producer's own messages and may be PHI:
+     * never log them.
+     *
+     * @param summary the item's summary row
+     * @param keys    unwraps the row's data key
+     * @return each message's link, {@code <itemId>/<messageId>}, in order,
+     *         null for one without; empty if no message has one
+     * @throws ChunkIntegrityException if they don't decrypt or parse
+     */
+    public static Optional<List<String>> messageReplaces(Record summary,
+            KeyProvider keys)
+    {
+        return encryptedList(summary, keys, RECORD_REPLACES_ENC,
+                RECORD_REPLACES_SEQ, "links");
+    }
+
+    /**
+     * Decrypts a JSON array of strings kept in a summary row's column.
+     *
+     * @param summary the item's summary row
+     * @param keys    unwraps the row's data key
+     * @param column  the column
+     * @param seq     the seq it is encrypted as
+     * @param what    what it holds, for the error
+     * @return the strings, in order, with nulls kept; empty if the column
+     *         is null
+     * @throws ChunkIntegrityException if they don't decrypt or parse
+     */
+    private static Optional<List<String>> encryptedList(Record summary,
+            KeyProvider keys, String column, long seq, String what)
+    {
+        Object encrypted = summary.getField(column);
         if (encrypted == null)
         {
             return Optional.empty();
@@ -331,21 +368,21 @@ public final class LandedItems
                 (String) summary.getField(KEK_REF),
                 bytes(summary.getField(BDK_WRAPPED))));
         String json = new String(SectionCrypto.decryptSmall(
-                SectionCrypto.sectionKey(dataKey, itemId, RECORD_REFS_SEQ),
-                itemId, RECORD_REFS_SEQ, 0, 1, MAX_REFS_BYTES,
-                bytes(encrypted)), StandardCharsets.UTF_8);
+                SectionCrypto.sectionKey(dataKey, itemId, seq), itemId, seq,
+                0, 1, MAX_REFS_BYTES, bytes(encrypted)),
+                StandardCharsets.UTF_8);
         try
         {
-            List<String> refs = new ArrayList<>();
-            for (Object ref : JSONArrayUtils.parse(json))
+            List<String> values = new ArrayList<>();
+            for (Object value : JSONArrayUtils.parse(json))
             {
-                refs.add(ref == null ? null : ref.toString());
+                values.add(value == null ? null : value.toString());
             }
-            return Optional.of(Collections.unmodifiableList(refs));
+            return Optional.of(Collections.unmodifiableList(values));
         }
         catch (ParseException malformed)
         {
-            throw new ChunkIntegrityException("Malformed broker IDs");
+            throw new ChunkIntegrityException("Malformed " + what);
         }
     }
 

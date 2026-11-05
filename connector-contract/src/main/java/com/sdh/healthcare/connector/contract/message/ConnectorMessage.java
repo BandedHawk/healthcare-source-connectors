@@ -469,50 +469,60 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * results queue (design §5.3.8). It is sealed to the producer's key, as
      * it carries the producer's own reference, which can be PHI.
      *
-     * @param fileId      the item's id, which every later message about
-     *                    it carries
-     * @param intake      the intake it came in through
-     * @param kind        what it is, such as {@code file} or
-     *                    {@code message-batch}
-     * @param size        its size, in bytes
-     * @param sha256      the SHA-256 of its bytes as received, in
-     *                    lower-case hex; null if it was resumed part-way
-     *                    after a restart
-     * @param landedAt    when its landing was committed
-     * @param producerRef the producer's own reference: the path or key
-     *                    for a file or object, the data file's location
-     *                    for a table, the {@code X-Correlation-Id} of a
-     *                    push; null if there is none
-     * @param replaces    the earlier item the producer said this one
-     *                    replaces, recorded as a link; null if none
-     * @param messageIds  for a message batch, each message's broker ID in
-     *                    order (null for a message without one); otherwise
-     *                    null
+     * @param fileId          the item's id, which every later message about it
+     *                        carries
+     * @param intake          the intake it came in through
+     * @param kind            what it is, such as {@code file} or
+     *                        {@code message-batch}
+     * @param size            its size, in bytes
+     * @param sha256          the SHA-256 of its bytes as received, in
+     *                        lower-case hex; null if it was resumed part-way
+     *                        after a restart
+     * @param landedAt        when its landing was committed
+     * @param producerRef     the producer's own reference: the path or key for
+     *                        a file or object, the data file's location for a
+     *                        table, the {@code X-Correlation-Id} of a push;
+     *                        null if there is none
+     * @param replaces        the earlier item the producer said this one
+     *                        replaces, recorded as a link; null if none
+     * @param messageIds      for a message batch, each message's broker ID in
+     *                        order (null for a message without one); otherwise
+     *                        null
+     * @param messageReplaces for a message batch, the earlier message each
+     *                        message replaces, as its producer said, as
+     *                        {@code <itemId>/<messageId>} (null for one that
+     *                        replaces none), from contract 2.4; null if none
+     *                        does, and for other items
      */
     record ItemReceived(UUID fileId, String intake, String kind, long size,
             String sha256, Instant landedAt, String producerRef,
-            UUID replaces, List<String> messageIds)
+            UUID replaces, List<String> messageIds,
+            List<String> messageReplaces)
             implements ConnectorMessage
     {
 
         /**
          * Copies the message IDs, which may hold nulls.
          *
-         * @param fileId      the item's id
-         * @param intake      the intake
-         * @param kind        what it is
-         * @param size        its size
-         * @param sha256      its SHA-256, or null
-         * @param landedAt    when it was landed
-         * @param producerRef the producer's reference, or null
-         * @param replaces    the item it replaces, or null
-         * @param messageIds  the message IDs, or null
+         * @param fileId          the item's id
+         * @param intake          the intake
+         * @param kind            what it is
+         * @param size            its size
+         * @param sha256          its SHA-256, or null
+         * @param landedAt        when it was landed
+         * @param producerRef     the producer's reference, or null
+         * @param replaces        the item it replaces, or null
+         * @param messageIds      the message IDs, or null
+         * @param messageReplaces the messages' links, or null
          */
         public ItemReceived
         {
             messageIds = messageIds == null ? null
                     : java.util.Collections.unmodifiableList(
                             new java.util.ArrayList<>(messageIds));
+            messageReplaces = messageReplaces == null ? null
+                    : java.util.Collections.unmodifiableList(
+                            new java.util.ArrayList<>(messageReplaces));
         }
 
         /**
@@ -625,21 +635,25 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * A problem found in an item, with where it is, so the producer can
      * find it in their own data. It holds no content.
      *
-     * @param code       the error code, such as
-     *                   {@code CONVERT_CSV_FIELD_COUNT}
-     * @param stage      where it was found: {@code split} or
-     *                   {@code convert} for the splitter, {@code landing}
-     *                   if the item couldn't be read
-     * @param seq        the section's number in the item, from 0; -1 for a
-     *                   problem with the item as a whole
-     * @param offset     the byte offset in the item where it is
-     * @param at         the line and column in the item; null if unknown
-     * @param message    for a message batch, the message's index in the
-     *                   batch, from 0; otherwise -1
-     * @param messageRef that message's broker ID; null if none
+     * @param code            the error code, such as
+     *                        {@code CONVERT_CSV_FIELD_COUNT}
+     * @param stage           where it was found: {@code split} or
+     *                        {@code convert} for the splitter, {@code landing}
+     *                        if the item couldn't be read
+     * @param seq             the section's number in the item, from 0; -1 for a
+     *                        problem with the item as a whole
+     * @param offset          the byte offset in the item where it is
+     * @param at              the line and column in the item; null if unknown
+     * @param message         for a message batch, the message's index in the
+     *                        batch, from 0; otherwise -1
+     * @param messageRef      that message's broker ID; null if none
+     * @param messageReplaces the earlier message that message replaces, as its
+     *                        producer said, as {@code <itemId>/<messageId>},
+     *                        from contract 2.4; null if none
      */
     record Problem(String code, String stage, long seq, long offset,
-            SourcePosition at, int message, String messageRef)
+            SourcePosition at, int message, String messageRef,
+            String messageReplaces)
     {
     }
 

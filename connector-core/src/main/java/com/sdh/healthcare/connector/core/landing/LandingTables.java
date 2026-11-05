@@ -146,6 +146,18 @@ public final class LandingTables
      */
     public static final long RECORD_REFS_SEQ = -2;
 
+    /**
+     * The earlier message each message of a message batch replaces, as its
+     * producer said, in order: a JSON array of {@code <itemId>/<messageId>}
+     * strings, null for a message without one, encrypted with the item's
+     * data key (seq -3); null for an item none of whose messages replaces
+     * one. Links only: both messages are kept (design §5.3.8).
+     */
+    public static final String RECORD_REPLACES_ENC = "record_replaces_enc";
+
+    /** The seq the links of {@value #RECORD_REPLACES_ENC} are encrypted as. */
+    public static final long RECORD_REPLACES_SEQ = -3;
+
     /** The columns of {@value #LANDED_ITEMS}. */
     public static final Schema LANDED_ITEMS_SCHEMA = new Schema(
             required(1, ITEM_ID, Types.UUIDType.get()),
@@ -180,7 +192,9 @@ public final class LandingTables
                     Types.ListType.ofOptional(27, Types.StringType.get()),
                     "keyed hashes of the messages' broker IDs"),
             optional(28, RECORD_REFS_ENC, Types.BinaryType.get(),
-                    "encrypted broker IDs of the messages of a batch"));
+                    "encrypted broker IDs of the messages of a batch"),
+            optional(29, RECORD_REPLACES_ENC, Types.BinaryType.get(),
+                    "encrypted links to the messages its messages replace"));
 
     /** The columns of {@value #LEDGER}. */
     public static final Schema LEDGER_SCHEMA = new Schema(

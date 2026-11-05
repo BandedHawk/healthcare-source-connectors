@@ -794,6 +794,16 @@ public final class ItemLander
                                         item.messageRefs()).getBytes(
                                                 StandardCharsets.UTF_8))));
             }
+            if (item.messageReplaces() != null)
+            {
+                row.setField(RECORD_REPLACES_ENC, ByteBuffer.wrap(
+                        SectionCrypto.encryptChunk(SectionCrypto.sectionKey(
+                                dataKey, item.itemId(), RECORD_REPLACES_SEQ),
+                                item.itemId(), RECORD_REPLACES_SEQ, 0, 1,
+                                JSONArrayUtils.toJSONString(
+                                        item.messageReplaces()).getBytes(
+                                                StandardCharsets.UTF_8))));
+            }
             writer.write(row);
         }
 

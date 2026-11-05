@@ -32,8 +32,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -73,13 +75,36 @@ public final class BatchService implements LandingIntake
             LoggerFactory.getLogger(BatchService.class);
 
     /**
+     * The header, attribute or property in which a producer names the
+     * earlier message a message replaces, as {@code <itemId>/<messageId>}
+     * (design §5.3.8). It has no hyphen, since a JMS property name can't.
+     */
+    public static final String REPLACES_HEADER = "sdh_replaces";
+
+    /** The longest broker message ID a link may name. */
+    private static final int MAX_LINKED_ID = 255;
+
+    /**
      * A message as the broker delivered it.
      *
      * @param body      its body
      * @param messageId the broker's ID for it; null if it has none
+     * @param replaces  its {@link #REPLACES_HEADER} as the producer set it;
+     *                  null if not set
      */
-    public record Message(byte[] body, String messageId)
+    public record Message(byte[] body, String messageId, String replaces)
     {
+
+        /**
+         * A message that names no earlier one.
+         *
+         * @param body      its body
+         * @param messageId the broker's ID for it; null if it has none
+         */
+        public Message(byte[] body, String messageId)
+        {
+            this(body, messageId, null);
+        }
     }
 
     /** What happened to a batch. */
@@ -257,12 +282,15 @@ public final class BatchService implements LandingIntake
         List<Long> offsets = new ArrayList<>();
         List<String> keys = new ArrayList<>();
         List<String> refs = new ArrayList<>();
+        List<String> links = new ArrayList<>();
+        boolean linked = false;
         int skipped = 0;
         long size = 0;
         try
         {
             prepare();
             Set<LedgerIndex.Key> seen = new HashSet<>();
+            Map<UUID, Boolean> known = new HashMap<>();
             for (Message message : messages)
             {
                 String key = null;
@@ -280,6 +308,9 @@ public final class BatchService implements LandingIntake
                 offsets.add(size);
                 keys.add(key);
                 refs.add(message.messageId());
+                String link = link(message.replaces(), known);
+                links.add(link);
+                linked |= link != null;
                 bodies.add(message.body());
                 size += message.body().length;
             }
@@ -303,7 +334,8 @@ public final class BatchService implements LandingIntake
                     "batch\u0000" + itemId, -1, "");
             landed = storage.lander().land(new NewItem(itemId,
                     ItemKind.MESSAGE_BATCH, ref, null, null,
-                    new RecordIndex(offsets, keys), refs), offset ->
+                    new RecordIndex(offsets, keys), refs,
+                    linked ? links : null), offset ->
                     {
                         if (offset != 0)
                         {
@@ -342,6 +374,81 @@ public final class BatchService implements LandingIntake
                     failure.getClass().getSimpleName());
         }
         return new Result(Status.LANDED, bodies.size(), skipped);
+    }
+
+    /**
+     * The earlier message a message names as the one it replaces, if it
+     * is well formed and its item one this intake landed. The link is only
+     * recorded; nothing is replaced. One that isn't is reported and left
+     * out, and the message is landed all the same, so nothing is lost.
+     *
+     * @param text  the message's {@link #REPLACES_HEADER}; null if not set
+     * @param known whether each item named so far in the batch was landed
+     *              by this intake
+     * @return the link, {@code <itemId>/<messageId>}; null if none
+     * @throws IOException if the ledger can't be read
+     */
+    private String link(String text, Map<UUID, Boolean> known)
+            throws IOException
+    {
+        if (text == null)
+        {
+            return null;
+        }
+        int slash = text.indexOf('/');
+        String reason = "MALFORMED";
+        if (slash > 0 && linkable(text.substring(slash + 1)))
+        {
+            UUID earlier = null;
+            try
+            {
+                earlier = UUID.fromString(text.substring(0, slash));
+            }
+            catch (IllegalArgumentException malformed)
+            {
+                // Reported below.
+            }
+            if (earlier != null)
+            {
+                Boolean landed = known.get(earlier);
+                if (landed == null)
+                {
+                    landed = storage.ledger().contains(intake, earlier);
+                    known.put(earlier, landed);
+                }
+                if (landed)
+                {
+                    return earlier + text.substring(slash);
+                }
+                reason = "UNKNOWN";
+            }
+        }
+        IntakeService.ignoredLink(intake, reason);
+        return null;
+    }
+
+    /**
+     * Whether a link may name a broker message ID: 1 to 255 visible ASCII
+     * characters.
+     *
+     * @param messageId the ID
+     * @return true if it may
+     */
+    private static boolean linkable(String messageId)
+    {
+        if (messageId.isEmpty() || messageId.length() > MAX_LINKED_ID)
+        {
+            return false;
+        }
+        for (int index = 0; index < messageId.length(); index++)
+        {
+            char c = messageId.charAt(index);
+            if (c < '!' || c > '~')
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
