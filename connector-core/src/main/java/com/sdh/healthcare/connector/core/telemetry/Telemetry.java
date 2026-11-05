@@ -7,13 +7,16 @@
 package com.sdh.healthcare.connector.core.telemetry;
 
 import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.logs.Severity;
 import io.opentelemetry.api.metrics.DoubleHistogram;
 import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.LongHistogram;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 import org.slf4j.Logger;
@@ -52,6 +55,18 @@ public final class Telemetry
     /** How many nanoseconds there are in a second. */
     private static final double NANOS_PER_SECOND = 1e9;
 
+    /**
+     * Bucket boundaries, in seconds, for waits and listings: from a few
+     * milliseconds to the five-minute backoff.
+     */
+    private static final List<Double> SECONDS_BUCKETS = List.of(0.005, 0.01,
+            0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+            120.0, 300.0);
+
+    /** Bucket boundaries for messages per batch, up to the 1,000 limit. */
+    private static final List<Long> BATCH_BUCKETS = List.of(1L, 2L, 5L, 10L,
+            25L, 50L, 100L, 250L, 500L, 750L, 1000L);
+
     /** The installed instance; one that does nothing until then. */
     private static volatile Telemetry current =
             new Telemetry(OpenTelemetry.noop());
@@ -80,8 +95,29 @@ public final class Telemetry
     /** Files processed to the end. */
     private final LongCounter filesCompleted;
 
-    /** Items landed and announced, by intake. */
+    /** Items landed and announced, by intake and kind. */
     private final LongCounter itemsLanded;
+
+    /** Bytes of the items landed and announced, by intake and kind. */
+    private final LongCounter bytesLanded;
+
+    /**
+     * Messages and pushes sent again and recognised as already landed, by
+     * intake.
+     */
+    private final LongCounter duplicatesSkipped;
+
+    /** Messages landed per batch, by intake. */
+    private final LongHistogram batchSize;
+
+    /** How long listing a source takes, in seconds, by intake. */
+    private final DoubleHistogram listDuration;
+
+    /** HTTP pushes, by intake and result. */
+    private final LongCounter pushRequests;
+
+    /** How long a push waits for the intake, in seconds, by intake. */
+    private final DoubleHistogram pushWait;
 
     /** Files that failed, by error code and stage. */
     private final LongCounter filesFailed;
@@ -128,9 +164,35 @@ public final class Telemetry
                         "section.stored messages acknowledged by the broker")
                 .build();
         filesCompleted = meter.counterBuilder("sdh.files.completed").build();
-        itemsLanded = meter.counterBuilder("sdh.items.landed")
-                .setDescription("Items landed and announced, by intake")
+        itemsLanded = meter.counterBuilder("sdh.landing.items")
+                .setUnit("{item}")
+                .setDescription("Items landed and announced, by intake and"
+                        + " kind")
                 .build();
+        bytesLanded = meter.counterBuilder("sdh.landing.bytes").setUnit("By")
+                .setDescription("Bytes of the items landed and announced, by"
+                        + " intake and kind")
+                .build();
+        duplicatesSkipped = meter.counterBuilder("sdh.landing.duplicates")
+                .setDescription("Messages and pushes sent again and"
+                        + " recognised as already landed, by intake")
+                .build();
+        batchSize = meter.histogramBuilder("sdh.landing.batch_size").ofLongs()
+                .setUnit("{message}")
+                .setDescription("Messages landed per batch, by intake")
+                .setExplicitBucketBoundariesAdvice(BATCH_BUCKETS).build();
+        listDuration = meter.histogramBuilder("sdh.intake.list_duration")
+                .setUnit("s")
+                .setDescription("How long listing the source takes, by intake")
+                .setExplicitBucketBoundariesAdvice(SECONDS_BUCKETS).build();
+        pushRequests = meter.counterBuilder("sdh.push.requests")
+                .setUnit("{request}")
+                .setDescription("HTTP pushes, by intake and result").build();
+        pushWait = meter.histogramBuilder("sdh.push.wait_duration")
+                .setUnit("s")
+                .setDescription("How long a push waits for the intake, by"
+                        + " intake")
+                .setExplicitBucketBoundariesAdvice(SECONDS_BUCKETS).build();
         filesFailed = meter.counterBuilder("sdh.files.failed")
                 .setDescription("By error code and stage").build();
         sectionsFailed = meter.counterBuilder("sdh.sections.failed")
@@ -339,13 +401,75 @@ public final class Telemetry
     }
 
     /**
-     * Counts an item landed and announced with {@code item.landed}.
+     * Counts an item landed and announced with {@code item.landed}, and its
+     * bytes.
      *
      * @param intake the intake it came in through
+     * @param kind   its kind, as on the wire
+     * @param bytes  its size
      */
-    public void itemLanded(String intake)
+    public void itemLanded(String intake, String kind, long bytes)
     {
-        itemsLanded.add(1, Fields.of(Attr.INTAKE, intake).toAttributes());
+        Attributes attributes =
+                Fields.of(Attr.INTAKE, intake).with(Attr.KIND, kind)
+                        .toAttributes();
+        itemsLanded.add(1, attributes);
+        bytesLanded.add(bytes, attributes);
+    }
+
+    /**
+     * Counts messages or pushes sent again and recognised as already
+     * landed, so not landed again.
+     *
+     * @param intake the intake they came in through
+     * @param count  how many
+     */
+    public void duplicatesSkipped(String intake, long count)
+    {
+        if (count > 0)
+        {
+            duplicatesSkipped.add(count,
+                    Fields.of(Attr.INTAKE, intake).toAttributes());
+        }
+    }
+
+    /**
+     * Records how many messages a landed batch held.
+     *
+     * @param intake   the intake
+     * @param messages the messages landed in it
+     */
+    public void batchLanded(String intake, long messages)
+    {
+        batchSize.record(messages,
+                Fields.of(Attr.INTAKE, intake).toAttributes());
+    }
+
+    /**
+     * Records how long listing the source took.
+     *
+     * @param intake the intake
+     * @param nanos  how long, in nanoseconds
+     */
+    public void listed(String intake, long nanos)
+    {
+        listDuration.record(nanos / NANOS_PER_SECOND,
+                Fields.of(Attr.INTAKE, intake).toAttributes());
+    }
+
+    /**
+     * Counts an HTTP push by its result, and records how long it waited for
+     * the intake.
+     *
+     * @param intake     the intake
+     * @param result     what happened to it, such as {@code landed}
+     * @param waitNanos  how long it waited for the intake, in nanoseconds
+     */
+    public void pushed(String intake, String result, long waitNanos)
+    {
+        Fields fields = Fields.of(Attr.INTAKE, intake);
+        pushRequests.add(1, fields.with(Attr.RESULT, result).toAttributes());
+        pushWait.record(waitNanos / NANOS_PER_SECOND, fields.toAttributes());
     }
 
     /** Counts a file processed to the end. */
@@ -432,5 +556,25 @@ public final class Telemetry
                 .setDescription(description)
                 .buildWithCallback(measurement ->
                         measurement.record(value.getAsLong()));
+    }
+
+    /**
+     * Adds a gauge whose value comes from the application, with
+     * attributes, such as the intake it describes.
+     *
+     * @param name        the gauge's name
+     * @param unit        its unit, such as {@code s}
+     * @param description what it measures
+     * @param fields      its attributes
+     * @param value       gives its value each time it is read
+     */
+    public void gauge(String name, String unit, String description,
+            Fields fields, LongSupplier value)
+    {
+        Attributes attributes = fields.toAttributes();
+        meter.gaugeBuilder(name).ofLongs().setUnit(unit)
+                .setDescription(description)
+                .buildWithCallback(measurement ->
+                        measurement.record(value.getAsLong(), attributes));
     }
 }

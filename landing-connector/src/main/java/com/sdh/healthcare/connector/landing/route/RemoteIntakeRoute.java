@@ -93,6 +93,7 @@ public final class RemoteIntakeRoute extends RouteBuilder
         }
         quiet = false;
         List<ListedItem> items;
+        long listingFrom = nanoTime.getAsLong();
         try
         {
             items = source.list();
@@ -114,6 +115,7 @@ public final class RemoteIntakeRoute extends RouteBuilder
                     failure.getClass().getSimpleName());
             return;
         }
+        service.listingTook(nanoTime.getAsLong() - listingFrom, items.size());
         for (ListedItem item : items)
         {
             service.onListed(item);

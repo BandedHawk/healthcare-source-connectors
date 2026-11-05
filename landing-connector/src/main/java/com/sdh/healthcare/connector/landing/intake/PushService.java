@@ -25,6 +25,7 @@ import java.io.InputStream;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -237,6 +238,15 @@ public final class PushService implements LandingIntake
     }
 
     /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long ledgerItems()
+    {
+        return storage.index().size();
+    }
+
+    /**
      * Lands a push, or gives back the receipt of the first push with the
      * same idempotency key.
      *
@@ -246,30 +256,56 @@ public final class PushService implements LandingIntake
      */
     public Result receive(Push push, InputStream body)
     {
-        boolean locked;
+        long waitFrom = System.nanoTime();
+        long waited = 0;
+        Result result;
         try
         {
-            locked = writer.tryLock(maxWait.toNanos(), TimeUnit.NANOSECONDS);
+            boolean locked = writer.tryLock(maxWait.toNanos(),
+                    TimeUnit.NANOSECONDS);
+            waited = System.nanoTime() - waitFrom;
+            if (locked)
+            {
+                try
+                {
+                    result = receiveLocked(push, body);
+                }
+                finally
+                {
+                    writer.unlock();
+                }
+            }
+            else
+            {
+                Telemetry.get().auditWarn("push.busy",
+                        Fields.of(Attr.INTAKE, intake));
+                result = Result.of(Status.BUSY);
+            }
         }
         catch (InterruptedException interrupted)
         {
             Thread.currentThread().interrupt();
-            return Result.of(Status.UNAVAILABLE);
+            waited = System.nanoTime() - waitFrom;
+            result = Result.of(Status.UNAVAILABLE);
         }
-        if (!locked)
+        Telemetry.get().pushed(intake,
+                result.status().name().toLowerCase(Locale.ROOT), waited);
+        if (result.status() == Status.REPLAYED)
         {
-            Telemetry.get().auditWarn("push.busy",
-                    Fields.of(Attr.INTAKE, intake));
-            return Result.of(Status.BUSY);
+            Telemetry.get().duplicatesSkipped(intake, 1);
         }
-        try
-        {
-            return receiveLocked(push, body);
-        }
-        finally
-        {
-            writer.unlock();
-        }
+        return result;
+    }
+
+    /**
+     * How many pushes are waiting for the intake, for the
+     * {@code sdh.landing.backlog} gauge. An estimate, as the lock gives it.
+     *
+     * @return the number of pushes waiting
+     */
+    public int waiting()
+    {
+        return writer.getQueueLength();
     }
 
     /**

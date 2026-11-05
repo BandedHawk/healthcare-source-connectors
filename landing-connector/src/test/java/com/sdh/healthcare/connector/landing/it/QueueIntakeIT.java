@@ -46,6 +46,7 @@ import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.intake.Announcer;
 import com.sdh.healthcare.connector.landing.intake.BatchService;
+import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.route.ArtemisIntakeRoute;
 import com.sdh.healthcare.connector.landing.route.EventHubsSupport;
@@ -754,6 +755,7 @@ class QueueIntakeIT
             RouteBuilder route = settings.kind()
                     == BrokerSettings.Kind.ARTEMIS
                     ? new ArtemisIntakeRoute(INTAKE, settings, service,
+                            new IntakeHealth(INTAKE, System::nanoTime),
                             Duration.ofMillis(50), Duration.ofMillis(200))
                     : new QueueIntakeRoute(settings, service,
                             Duration.ofMillis(50), Duration.ofMillis(200));

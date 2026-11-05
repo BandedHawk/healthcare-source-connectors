@@ -154,7 +154,8 @@ public final class Announcer
         {
             receipts.channel().send(receipt(item));
         }
-        Telemetry.get().itemLanded(item.intake());
+        Telemetry.get().itemLanded(item.intake(), item.kind().wireName(),
+                item.size());
         Telemetry.get().audit("item.announced",
                 Fields.of(Attr.ITEM_ID, item.itemId())
                         .with(Attr.INTAKE, item.intake()));

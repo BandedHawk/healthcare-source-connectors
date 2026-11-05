@@ -31,4 +31,12 @@ public interface LandingIntake
      * @return the lock
      */
     ReentrantLock writerLock();
+
+    /**
+     * How many items the intake's ledger holds, for the
+     * {@code sdh.landing.ledger_items} gauge.
+     *
+     * @return the number of ledger entries
+     */
+    long ledgerItems();
 }

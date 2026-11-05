@@ -59,6 +59,8 @@ Revision 2026-11-04 (ba): built step 7b of landing, Iceberg table intakes (§5.3
 
 Revision 2026-11-04 (bb): built step 8 of landing, producer feedback (§5.3.8). Decided 2026-11-04 with the user: producers are outside organisations, each seeing only its own items; results go to a results queue per intake, sealed to the producer's own key; a resubmission is recorded as a link only, and both items are kept in full, because landed data is PHI and nothing may be lost or replaced automatically. The landing node sends `item.received` when an item lands; the splitter sends `item.result` when it finishes one, completed or failed, with each problem's error code, section, byte offset, line, column and, for a message batch, the message and its broker ID, in parts. Both are sent before the step that follows is committed, so a crash means a resend with the same message ID, never a loss. Contract 2.3 (§10.1). An HTTP intake with results must admit one sender (`oauth2.subject`, or one `mtls.subjects` entry). Push takes `X-Correlation-Id` and `Replaces` headers; directory, SFTP, SMB and bucket intakes take a `<name>.sdh-replaces` marker. Queue and table intakes can't name an item they replace yet.
 
+Revision 2026-11-04 (bc): built the landing metrics (§5.3.7). Decided 2026-11-04 with the user: the first metrics are renamed to the planned names (`sdh.items.landed` is now `sdh.landing.items`; `sdh.landing.source_reachable` is now `sdh.intake.up`; `sdh.landing.items_waiting` is now `sdh.landing.backlog`), and the rest are added: bytes, duplicates, ledger size, batch size, listing time and size, oldest wait, push requests and lock wait, and the intake health gauges of §5.3.4 for listing intakes and Artemis. `IntakeHealth` now holds an intake's reachability for both; the Artemis route reports again when the reason changes, as §5.3.4 says. Directory polls are timed by a Camel poll strategy, which also replaces Camel's log of a failed poll. Left for a spike: how each Camel broker's consumer reports giving up, or losing and regaining its broker, so the health gauges can cover them.
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -472,7 +474,7 @@ SFTP, SMB, buckets and queues fail in ways a local disk doesn't. The landing nod
 | Share, directory or bucket no longer exists | as for credentials | `intake.unreachable` (reason `NOT_FOUND`) |
 | `after` action fails on a read-write intake | the item is already landed and in the ledger, so it isn't landed again; the action is retried each poll | `intake.retry`; *planned:* `item.after_failed` |
 
-Each reason is reported once, until the source is reachable again or the reason changes; the event carries `ERROR_CODE INTAKE_UNREACHABLE` and no names or paths. *Planned:* the metrics `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age` and `sdh.intake.outage_seconds`, alongside the landing metrics (§5.3.7). JSch's and smbj's own logging is switched off, because their messages hold paths; their exceptions are classified and dropped, never kept as a cause (§5.3.14).
+Each reason is reported once, until the source is reachable again or the reason changes; the event carries `ERROR_CODE INTAKE_UNREACHABLE` and no names or paths. The gauges `sdh.intake.up` (1 or 0), `sdh.intake.last_poll_age` (seconds since the source last answered) and `sdh.intake.outage_seconds` (0 when up) are built for listing intakes and Artemis (`IntakeHealth`), alongside the landing metrics (§5.3.7). JSch's and smbj's own logging is switched off, because their messages hold paths; their exceptions are classified and dropped, never kept as a cause (§5.3.14).
 
 #### 5.3.5 One node per intake, and a standby
 
@@ -506,7 +508,7 @@ Each reason is reported once, until the source is reachable again or the reason 
 Everything goes through `Telemetry` and the allow-list (§12). No path, filename, object key or producer reference appears in telemetry; `Attr` gains `sdh.intake`, `sdh.item_id` and `sdh.kind`.
 - **Traces:** `land.item` (root, one per item) contains `read` blocks, `storage.commit` and `publish.batch`.
 - **Audit events:** `item.discovered`, `item.landed` (bytes), `item.skipped` (already landed; counted, not logged one by one), `item.changed`, `item.duplicate_content`, `item.resumed`, `item.restarted`, `item.vanished`, `item.after_failed`, `intake.unreachable` (with a reason, built) and `intake.reachable` (built), `intake.table_rewrite`, `intake.table_history_lost`, `intake.table_file_skipped` and `intake.table_file_missing` (built, §5.3.18), plus the lease events of §12.
-- **Metrics:** `sdh.landing.items` and `sdh.landing.bytes` (by intake and kind), `sdh.landing.duplicates`, `sdh.landing.backlog` (items seen but not yet landed) and `sdh.landing.oldest_waiting_age`, `sdh.landing.ledger_items`, `sdh.landing.batch_size` for queues, and the intake health metrics of §5.3.4.
+- **Metrics:** `sdh.landing.items` and `sdh.landing.bytes` (by intake and kind), `sdh.landing.duplicates`, `sdh.landing.backlog` (items seen but not yet landed) and `sdh.landing.oldest_waiting_age`, `sdh.landing.ledger_items`, `sdh.landing.batch_size` for queues, `sdh.intake.list_duration` and `sdh.intake.listed_items` for listings (§5.3.3), `sdh.push.requests` (by result) and `sdh.push.wait_duration` for push, and the intake health metrics of §5.3.4. All built (revision (bc)), each by `sdh.intake`. `sdh.landing.duplicates` counts queue messages and pushes already landed; a listing's ledger hits aren't counted, since every poll would count them again. A push intake's backlog is the requests waiting for the writer lock; a queue intake has no backlog or oldest-wait gauge, since the broker reports its own depth.
 
 #### 5.3.8 Producer feedback as built (step 8)
 
@@ -607,11 +609,11 @@ sdh:
 #### 5.3.10 Order of work
 
 1. **Landing storage (built):** `landed_items` and `landing_ledger`, the landing checkpoint, `item.landed` in `connector-contract`, and the lease's standby mode.
-2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). Left for later: the listing metrics of §5.3.3. The image and kit came in step 3b, retention and maintenance after it (§5.3.13).
+2. **The landing node (built)** (`landing-connector`, a new Spring Boot module) with a local directory intake: readiness, both access modes, the ledger, recovery and telemetry (§5.3.11). The listing metrics of §5.3.3 came later (revision (bc)). The image and kit came in step 3b, retention and maintenance after it (§5.3.13).
 3. **The splitter reads from landing.** 3a (built, §5.3.12): an `item.landed` consumer and inbox, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. 3b: an image for the landing node, the build and Kubernetes scripts, and the `-Pit` suite, the Kubernetes run (§15.2) and the demo rewritten for two stages, with failover of both stages.
-4. **SFTP and SMB (built),** with the failure cases of §5.3.4 tested against containers that are cut off, stalled, restarted and given wrong keys (§5.3.14). Left for later: Kerberos for SMB, the intake metrics and the planned events of §5.3.4, and claims on remote sources.
+4. **SFTP and SMB (built),** with the failure cases of §5.3.4 tested against containers that are cut off, stalled, restarted and given wrong keys (§5.3.14). Left for later: Kerberos for SMB, the planned events of §5.3.4, and claims on remote sources. The intake metrics of §5.3.4 came later (revision (bc)).
 5. **HTTP push (built),** with OAuth2 and mTLS (§5.3.15). Correlation IDs came in step 8. Left for later: the status endpoint of §5.3.8, and an HTTP readiness probe.
-6. **Queue intakes (built, §5.3.16),** batched. 6a: Kafka, SQS, RabbitMQ and Artemis, the record index, and the splitter splitting a batch message by message. 6b: Pub/Sub, Service Bus and Event Hubs. Left for later: queue metrics, and reporting a Camel consumer that has given up (§5.3.16).
+6. **Queue intakes (built, §5.3.16),** batched. 6a: Kafka, SQS, RabbitMQ and Artemis, the record index, and the splitter splitting a batch message by message. 6b: Pub/Sub, Service Bus and Event Hubs. Queue metrics came later (revision (bc)). Left for later: reporting a Camel consumer that has given up, or can't reach its broker (§5.3.16).
 7. **Buckets and Iceberg tables.** 7a, buckets (built, §5.3.17): S3 and S3-compatible stores, Azure Blob and GCS, tested against SeaweedFS, Azurite and fake-gcs-server. Left for later: event notifications in place of listing, and conditional deletes on S3. 7b, Iceberg tables (built, §5.3.18), with the splitter's `parquet` format. Left for later: landing files that have row-level deletes, and rows from an overwrite.
 8. **Producer feedback (built, §5.3.8):** receipts and results on a results queue per intake, the producer's references, and links to the item replaced. Left for later: a status endpoint, and naming the item replaced for queues and tables.
 
@@ -645,7 +647,7 @@ A crash between any two steps is safe: between 3 and 4 the ledger is repaired; b
 
 **Errors.** Lease loss, an unknown commit outcome, a tampered checkpoint, a broken invariant and a lost claim stop the process (status 70). Anything else (storage or broker down, an unreadable file, a failed after-action) is retried at the next listing, after a backoff that doubles up to 5 minutes. A source that can't be listed (missing, unmounted, no permission) is reported once with `intake.unreachable` (`INTAKE_UNREACHABLE`), and again with `intake.reachable` when it's back.
 
-**Telemetry.** Audit events: `connector.started`, `item.landed`, `item.announced`, `item.resumed`, `item.changed`, `item.abandoned`, `item.cleared`, `item.duplicate_content`, `ledger.repaired`, `intake.unreachable`, `intake.reachable`, `intake.not_writable`, and the lease events. Metrics: `sdh.items.landed` (by intake), `sdh.bytes.read` with stage `land`, and gauges `sdh.landing.source_reachable` and `sdh.landing.items_waiting`. No path or filename is logged; Camel logs the configured directory when the route starts, as the file connector does.
+**Telemetry.** Audit events: `connector.started`, `item.landed`, `item.announced`, `item.resumed`, `item.changed`, `item.abandoned`, `item.cleared`, `item.duplicate_content`, `ledger.repaired`, `intake.unreachable`, `intake.reachable`, `intake.not_writable`, and the lease events. Metrics: those of §5.3.7. Camel's own message on a failed directory poll is replaced by `intake.list_failed` with the exception's class, since the message can name a path. No path or filename is logged; Camel logs the configured directory when the route starts, as the file connector does.
 
 **Settings** for a directory intake:
 
@@ -776,7 +778,7 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 - `smb`: `host`, `port` (445), `share` (a name, no slashes), `domain`, `user`, `password`, `connect-timeout` (15s), `read-timeout` (60s).
 - Secrets from the environment: `SDH_LANDING_SOURCE_SFTP_PASSWORD`, `SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE`, `SDH_LANDING_SOURCE_SMB_PASSWORD`.
 
-**Not built:** claims on remote sources (§5.3.5; the claim is only for local read-write directories), Kerberos, and the intake metrics and planned events of §5.3.4.
+**Not built:** claims on remote sources (§5.3.5; the claim is only for local read-write directories), Kerberos, and the planned events of §5.3.4.
 
 **Tests:**
 - `SftpSourceTest` (embedded Apache SSHD): ordering and offset reads, password login, an unpinned host key, rejected credentials, a missing or unreadable directory, a server that drops part way, an item that changed, moves with markers, rename and delete, and the probe on a directory it can't write.
@@ -828,7 +830,7 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 
 **No PHI in logs:** no body, sender, key or header is logged; events carry the item ID, the intake and byte counts only.
 
-**Not built:** the status endpoint of §5.3.8, a health endpoint, and push metrics.
+**Not built:** the status endpoint of §5.3.8, and a health endpoint (the TCP probe is enough, since the port opens only on the lease holder).
 
 **Tests:**
 - `PushServiceTest`: a landed push and its replays, scoped by sender and across a restart; a body that breaks off after chunks were committed; bodies too large, short or long; a broker outage, during which nothing more lands; an unfinished push cleared at startup; a fatal error.
@@ -886,7 +888,7 @@ Artemis is the exception: both of Camel's JMS components acknowledge a message a
 
 **No PHI in logs:** no body, message ID or key is logged. Events carry the item ID, the intake and counts; Camel's own warning for an exchange that wasn't landed names only Camel's exchange ID.
 
-**Not built:** `sdh.landing.batch_size` and the other queue metrics; reporting a Camel consumer that has given up, or can't reach its broker, as `intake.unreachable` (only the Artemis route does).
+**Not built:** the intake health gauges for the Camel brokers, and reporting a Camel consumer that has given up, or can't reach its broker, as `intake.unreachable` (only the Artemis route does).
 
 **Tests:**
 - `BatchServiceTest`: a batch landed as one item with its record index and content; duplicates within a batch, across batches and after a restart; keys forgotten outside the window; a landing queue outage; an unfinished batch cleared at startup; a fatal error.
@@ -928,7 +930,7 @@ Artemis is the exception: both of Camel's JMS components acknowledge a message a
 
 **Settings** (`sdh.landing.source.bucket`, checked by `BucketSettings`, whose `toString` hides secrets): `name` (the bucket or container), `endpoint`, `region` (S3 only), `path-style-access` (false), `access-key-id` and `secret-access-key` (S3 only), `connection-string` (Azure only), `project-id` (GCS only), `anonymous` (false), `connect-timeout` (15s), `read-timeout` (60s). A setting for another store is refused. Secrets from the environment: `SDH_LANDING_SOURCE_BUCKET_SECRET_ACCESS_KEY`, `SDH_LANDING_SOURCE_BUCKET_CONNECTION_STRING`, or the SDKs' own variables.
 
-**Not built:** event notifications; conditional deletes on S3; S3 object versions (a versioned bucket is read at its latest versions, and a delete leaves a delete marker); Azure copies between accounts; the intake metrics of §5.3.4.
+**Not built:** event notifications; conditional deletes on S3; S3 object versions (a versioned bucket is read at its latest versions, and a delete leaves a delete marker); Azure copies between accounts.
 
 **Tests:**
 - `BucketSourceTest` (a bucket in memory): the listing rules flat and deep; reads from an offset and at the end; a changed object refused; `move` to a free key with its marker, and left alone if changed; `rename` and `delete`; the probe, refused and unreachable; failures and broken reads.
@@ -962,7 +964,7 @@ The mark moves past a step once all its items are landed (`afterLanding`, which 
 
 **Settings** (`sdh.landing.source.table`, checked by `TableSettings`, whose `toString` hides the catalog): `catalog` (required, with `type` or `catalog-impl`), `catalog-name` (`source`), `identifier` (required, `namespace.table`), `start` (`earliest` or `latest`). `access` must be `read-only`.
 
-**Not built:** landing a file that has row-level deletes, and the rows an overwrite adds (both would need rows rather than files); branches other than `main`; Avro and ORC data files; the intake metrics of §5.3.4.
+**Not built:** landing a file that has row-level deletes, and the rows an overwrite adds (both would need rows rather than files); branches other than `main`; Avro and ORC data files.
 
 **Tests:**
 - `IcebergTableSourceTest` (a JDBC catalog on embedded Postgres, files in memory): a backfill then appends, with the mark moving only once a snapshot's files are landed, and a compaction passed over; `latest`; an empty table followed from its first append; an overwrite reported and passed over; a restart carrying on from the mark; a rollback; a read from an offset; a missing file passed over; an Avro file skipped; a missing table `NOT_FOUND`.

@@ -8,9 +8,13 @@ package com.sdh.healthcare.connector.landing.runtime;
 
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
+import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
+import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.intake.RemoteSource;
 import com.sdh.healthcare.connector.landing.route.ArtemisIntakeRoute;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
@@ -85,17 +89,64 @@ public class LandingConfiguration
     {
         LandingRuntime runtime =
                 LandingRuntime.start(properties, camel, fatal);
-        if (runtime.service() == null)
-        {
-            return runtime;
-        }
-        telemetry.gauge("sdh.landing.source_reachable", "1",
-                "1 if the intake's source could be listed last time",
-                () -> runtime.service().reachable() ? 1 : 0);
-        telemetry.gauge("sdh.landing.items_waiting", "{item}",
-                "Items listed and waiting to settle",
-                () -> runtime.service().waiting());
+        registerGauges(telemetry, runtime, properties);
         return runtime;
+    }
+
+    /**
+     * Adds the landing and intake health gauges (design §5.3.4, §5.3.7),
+     * each by intake. The health gauges are for intakes that poll a
+     * source: a listing, or Artemis. Camel's queue consumers get them once
+     * their outages are reported; an HTTP intake polls nothing.
+     *
+     * @param telemetry  the installed telemetry
+     * @param runtime    the runtime
+     * @param properties the node's settings
+     */
+    private static void registerGauges(Telemetry telemetry,
+            LandingRuntime runtime, LandingProperties properties)
+    {
+        Fields intake = Fields.of(Attr.INTAKE, properties.landing().intake());
+        telemetry.gauge("sdh.landing.ledger_items", "{item}",
+                "Entries in the intake's ledger", intake,
+                () -> runtime.intake().ledgerItems());
+        IntakeHealth health = runtime.health();
+        boolean polls = runtime.service() != null
+                || runtime.broker() != null
+                && runtime.broker().kind() == BrokerSettings.Kind.ARTEMIS;
+        if (health != null && polls)
+        {
+            telemetry.gauge("sdh.intake.up", "1",
+                    "1 while the source answers, 0 during an outage", intake,
+                    () -> health.reachable() ? 1 : 0);
+            telemetry.gauge("sdh.intake.last_poll_age", "s",
+                    "Seconds since the source last answered a listing or"
+                            + " poll",
+                    intake, health::secondsSinceAnswered);
+            telemetry.gauge("sdh.intake.outage_seconds", "s",
+                    "Seconds since the current outage began; 0 when there"
+                            + " is none",
+                    intake, health::outageSeconds);
+        }
+        IntakeService service = runtime.service();
+        if (service != null)
+        {
+            telemetry.gauge("sdh.intake.listed_items", "{item}",
+                    "Items the last listing found", intake,
+                    service::listedItems);
+            telemetry.gauge("sdh.landing.backlog", "{item}",
+                    "Items listed and not yet landed", intake,
+                    service::waiting);
+            telemetry.gauge("sdh.landing.oldest_waiting_age", "s",
+                    "Seconds the longest-waiting listed item has waited",
+                    intake, service::oldestWaitingSeconds);
+        }
+        if (runtime.pushService() != null)
+        {
+            telemetry.gauge("sdh.landing.backlog", "{item}",
+                    "Pushes waiting for the intake", intake,
+                    runtime.pushService()::waiting);
+        }
     }
 
     /**
@@ -147,6 +198,7 @@ public class LandingConfiguration
      * has no route: its endpoint is {@code PushController}.
      *
      * @param runtime the runtime
+     * @param properties the settings, for the retry backoff
      * @return the route; one with nothing in it for HTTP
      */
     @Bean
@@ -159,8 +211,8 @@ public class LandingConfiguration
             Duration longest = properties.retry().maxBackoff();
             return runtime.broker().kind() == BrokerSettings.Kind.ARTEMIS
                     ? new ArtemisIntakeRoute(properties.landing().intake(),
-                            runtime.broker(), runtime.batchService(), backoff,
-                            longest)
+                            runtime.broker(), runtime.batchService(),
+                            runtime.health(), backoff, longest)
                     : new QueueIntakeRoute(runtime.broker(),
                             runtime.batchService(), backoff, longest);
         }

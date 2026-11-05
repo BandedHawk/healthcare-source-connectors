@@ -114,4 +114,27 @@ class ReadinessTest
         Readiness immediate = new Readiness(Duration.ZERO, now::get);
         assertThat(immediate.ready(new ListedItem("a.csv", 1, 1))).isTrue();
     }
+
+    /**
+     * The oldest wait is that of the item seen longest ago unchanged; a
+     * change restarts it, and nothing waiting is 0.
+     */
+    @Test
+    void reportsTheOldestWait()
+    {
+        assertThat(readiness.oldestWaitingNanos()).isZero();
+        ListedItem first = new ListedItem("a.csv", 10, 1000);
+        readiness.ready(first);
+        advance(20);
+        readiness.ready(new ListedItem("b.csv", 10, 1000));
+        advance(10);
+        assertThat(readiness.oldestWaitingNanos())
+                .isEqualTo(Duration.ofSeconds(30).toNanos());
+        readiness.ready(new ListedItem("a.csv", 11, 1001));
+        assertThat(readiness.oldestWaitingNanos())
+                .isEqualTo(Duration.ofSeconds(10).toNanos());
+        readiness.forget("a.csv");
+        readiness.forget("b.csv");
+        assertThat(readiness.oldestWaitingNanos()).isZero();
+    }
 }

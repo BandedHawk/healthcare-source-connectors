@@ -31,6 +31,7 @@ import com.sdh.healthcare.connector.landing.intake.BatchService;
 import com.sdh.healthcare.connector.landing.intake.GcsSource;
 import com.sdh.healthcare.connector.landing.intake.IcebergTableSource;
 import com.sdh.healthcare.connector.landing.intake.IntakeNotWritableException;
+import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.intake.LandingIntake;
 import com.sdh.healthcare.connector.landing.intake.PushService;
@@ -128,6 +129,12 @@ public final class LandingRuntime implements AutoCloseable
     /** A RabbitMQ intake's connection factory; null for other intakes. */
     private final CachingConnectionFactory rabbitmq;
 
+    /**
+     * Whether the source or broker is answering; null for an HTTP intake,
+     * which polls nothing.
+     */
+    private final IntakeHealth health;
+
     /** The landing tables, for maintenance. */
     private final Tables tables;
 
@@ -182,6 +189,8 @@ public final class LandingRuntime implements AutoCloseable
         this.batchService = queue == null ? null : queue.service();
         this.broker = queue == null ? null : queue.broker();
         this.rabbitmq = queue == null ? null : queue.rabbitmq();
+        this.health = service != null ? service.health()
+                : queue == null ? null : queue.health();
         this.tables = tables;
     }
 
@@ -192,9 +201,10 @@ public final class LandingRuntime implements AutoCloseable
      * @param broker   its broker's settings
      * @param rabbitmq its RabbitMQ connection factory; null for other
      *                 brokers
+     * @param health   whether its broker is answering
      */
     private record QueueIntake(BatchService service, BrokerSettings broker,
-            CachingConnectionFactory rabbitmq)
+            CachingConnectionFactory rabbitmq, IntakeHealth health)
     {
     }
 
@@ -353,14 +363,16 @@ public final class LandingRuntime implements AutoCloseable
                 }
                 queue = new QueueIntake(new BatchService(intake, storage,
                         items, announcer, fatal, clock, broker.dedupWindow()),
-                        broker, rabbitmq);
+                        broker, rabbitmq,
+                        new IntakeHealth(intake, System::nanoTime));
             }
             else
             {
                 service = new IntakeService(intake, intakeSource,
                         new Readiness(source.settle(), System::nanoTime),
                         storage, announcer, claim, fatal, clock,
-                        properties.retry().initialBackoff());
+                        properties.retry().initialBackoff(),
+                        new IntakeHealth(intake, System::nanoTime));
             }
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.INTAKE, intake)
@@ -527,6 +539,17 @@ public final class LandingRuntime implements AutoCloseable
     {
         return service != null ? service
                 : pushService != null ? pushService : batchService;
+    }
+
+    /**
+     * Whether the intake's source or broker is answering, for the outage
+     * events and the intake health gauges.
+     *
+     * @return the health; null for an HTTP intake
+     */
+    public IntakeHealth health()
+    {
+        return health;
     }
 
     /**

@@ -25,6 +25,7 @@ import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
+import com.sdh.healthcare.connector.landing.TelemetryCapture;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -53,6 +54,7 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -64,6 +66,10 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class IntakeServiceTest
 {
+
+    /** Captures the metrics recorded. */
+    @RegisterExtension
+    final TelemetryCapture telemetry = new TelemetryCapture();
 
     /** The intake under test. */
     static final String INTAKE = "claims";
@@ -232,7 +238,7 @@ class IntakeServiceTest
                 new IntakeService.Storage(lander, ledger,
                         ledger.load(INTAKE), ids),
                 announcer, null, fatal::add, Clock.systemUTC(),
-                Duration.ofMillis(1));
+                Duration.ofMillis(1), new IntakeHealth(INTAKE, now::get));
     }
 
     /**
@@ -620,6 +626,10 @@ class IntakeServiceTest
         assertThat(service.reachable()).isFalse();
         service.onListingDone();
         assertThat(service.reachable()).isTrue();
+        assertThat(telemetry.events()).containsSubsequence(
+                "intake.unreachable", "intake.reachable");
+        assertThat(telemetry.events())
+                .filteredOn("intake.unreachable"::equals).hasSize(1);
     }
 
     /**

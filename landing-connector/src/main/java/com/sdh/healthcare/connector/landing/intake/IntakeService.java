@@ -31,6 +31,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.slf4j.Logger;
@@ -141,11 +142,11 @@ public final class IntakeService implements LandingIntake
     /** A landed item whose message isn't acknowledged yet; or null. */
     private LandedItem unannounced;
 
-    /** Whether the source was unreachable at the last listing. */
-    private volatile boolean unreachable;
+    /** Whether the source is answering, for events and gauges. */
+    private final IntakeHealth health;
 
-    /** Why, while it is unreachable; null for a directory. */
-    private IntakeProblem lastProblem;
+    /** How many items the last full listing found. */
+    private volatile long listedItems;
 
     /** Errors in a row, for the backoff. */
     private int consecutiveErrors;
@@ -163,11 +164,12 @@ public final class IntakeService implements LandingIntake
      * @param fatal          stops the process
      * @param clock          gives the times item IDs are made from
      * @param initialBackoff the wait after the first error in a row
+     * @param health         whether the source is answering
      */
     public IntakeService(String intake, IntakeSource source,
             Readiness readiness, Storage storage, Announcer announcer,
             InboundDirectoryClaim claim, FatalExit fatal, Clock clock,
-            Duration initialBackoff)
+            Duration initialBackoff, IntakeHealth health)
     {
         this.intake = intake;
         this.source = source;
@@ -178,6 +180,7 @@ public final class IntakeService implements LandingIntake
         this.fatal = fatal;
         this.clock = clock;
         this.initialBackoff = initialBackoff;
+        this.health = health;
     }
 
     /**
@@ -240,7 +243,7 @@ public final class IntakeService implements LandingIntake
             claim.verify();
         }
         announcePending();
-        nowReachable();
+        health.answered();
         SourceRef ref = SourceRef.of(storage.ids(), intake, item.ref(),
                 item.size(), item.versionText());
         if (unfinished != null)
@@ -330,10 +333,10 @@ public final class IntakeService implements LandingIntake
             ensureRecovered();
             if (!source.reachable())
             {
-                markUnreachable(null);
+                health.unreachable(null);
                 return;
             }
-            nowReachable();
+            health.answered();
             readiness.listingDone();
             reloadUnfinished();
             boolean listed = unfinishedListed;
@@ -370,35 +373,12 @@ public final class IntakeService implements LandingIntake
         try
         {
             unfinishedListed = false;
-            markUnreachable(problem);
+            health.unreachable(problem);
         }
         finally
         {
             writer.unlock();
         }
-    }
-
-    /**
-     * Reports the source unreachable, unless it already is for the same
-     * reason.
-     *
-     * @param problem why, for a remote source; null for a directory
-     */
-    private void markUnreachable(IntakeProblem problem)
-    {
-        if (unreachable && problem == lastProblem)
-        {
-            return;
-        }
-        unreachable = true;
-        lastProblem = problem;
-        Fields fields = Fields.of(Attr.INTAKE, intake)
-                .with(Attr.ERROR_CODE, ErrorCode.INTAKE_UNREACHABLE);
-        if (problem != null)
-        {
-            fields = fields.with(Attr.REASON, problem.name());
-        }
-        Telemetry.get().auditError("intake.unreachable", fields);
     }
 
     /**
@@ -414,25 +394,78 @@ public final class IntakeService implements LandingIntake
     }
 
     /**
-     * Tells whether the source could be listed last time, for the
-     * {@code sdh.landing.source_reachable} gauge.
+     * Tells whether the source could be listed last time.
      *
      * @return true if it could
      */
     public boolean reachable()
     {
-        return !unreachable;
+        return health.reachable();
+    }
+
+    /**
+     * Whether the source is answering, for the intake health gauges.
+     *
+     * @return the intake's health
+     */
+    public IntakeHealth health()
+    {
+        return health;
+    }
+
+    /**
+     * Records how long a listing took and how many items it found, for
+     * {@code sdh.intake.list_duration} and {@code sdh.intake.listed_items}.
+     *
+     * @param nanos how long the listing took, in nanoseconds
+     * @param items how many items it found
+     */
+    public void listingTook(long nanos, int items)
+    {
+        listedItems = items;
+        Telemetry.get().listed(intake, nanos);
+    }
+
+    /**
+     * How many items the last listing found, for the
+     * {@code sdh.intake.listed_items} gauge.
+     *
+     * @return the number of items
+     */
+    public long listedItems()
+    {
+        return listedItems;
     }
 
     /**
      * How many listed items are waiting to settle, for the
-     * {@code sdh.landing.items_waiting} gauge.
+     * {@code sdh.landing.backlog} gauge.
      *
      * @return the number of items seen and not yet landed
      */
     public int waiting()
     {
         return readiness.waiting();
+    }
+
+    /**
+     * How long the item that has waited longest has been waiting, for the
+     * {@code sdh.landing.oldest_waiting_age} gauge.
+     *
+     * @return whole seconds; 0 if none is waiting
+     */
+    public long oldestWaitingSeconds()
+    {
+        return TimeUnit.NANOSECONDS.toSeconds(readiness.oldestWaitingNanos());
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long ledgerItems()
+    {
+        return storage.index().size();
     }
 
     /**
@@ -610,18 +643,6 @@ public final class IntakeService implements LandingIntake
                 && stored.get().itemId().equals(itemId))
         {
             storage.lander().clear(itemId);
-        }
-    }
-
-    /** Reports that an unreachable source is back. */
-    private void nowReachable()
-    {
-        if (unreachable)
-        {
-            unreachable = false;
-            lastProblem = null;
-            Telemetry.get().audit("intake.reachable",
-                    Fields.of(Attr.INTAKE, intake));
         }
     }
 

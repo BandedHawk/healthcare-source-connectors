@@ -205,6 +205,15 @@ public final class BatchService implements LandingIntake
     }
 
     /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long ledgerItems()
+    {
+        return storage.index().size();
+    }
+
+    /**
      * How many message keys are held to recognise messages delivered again.
      *
      * @return the count
@@ -283,6 +292,7 @@ public final class BatchService implements LandingIntake
         {
             Telemetry.get().audit("batch.skipped", Fields.of(Attr.INTAKE,
                     intake).with(Attr.COUNT, skipped));
+            Telemetry.get().duplicatesSkipped(intake, skipped);
             return new Result(Status.SKIPPED, 0, skipped);
         }
 
@@ -313,6 +323,8 @@ public final class BatchService implements LandingIntake
         unrecorded = landed;
         Telemetry.get().audit("batch.landed", Fields.of(Attr.ITEM_ID, itemId)
                 .with(Attr.INTAKE, intake).with(Attr.COUNT, bodies.size()));
+        Telemetry.get().batchLanded(intake, bodies.size());
+        Telemetry.get().duplicatesSkipped(intake, skipped);
         try
         {
             finishLast();

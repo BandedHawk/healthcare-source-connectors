@@ -7,11 +7,11 @@
 package com.sdh.healthcare.connector.landing.route;
 
 import com.sdh.healthcare.connector.core.telemetry.Attr;
-import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.intake.BatchService;
+import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
 import com.sdh.healthcare.connector.landing.intake.IntakeProblem;
 import jakarta.jms.BytesMessage;
 import jakarta.jms.Connection;
@@ -48,7 +48,8 @@ import org.slf4j.LoggerFactory;
  * moves a message to its dead-letter address after ten deliveries by
  * default. A connection that fails is dropped, which returns any
  * unacknowledged messages, and opened again after a growing pause; the
- * outage is reported once as {@code intake.unreachable}. After a fatal
+ * outage is reported once as {@code intake.unreachable}, and its end as
+ * {@code intake.reachable} once a receive works again. After a fatal
  * error nothing more is received.
  * <p>
  * Text messages are landed as UTF-8, bytes messages as they are. Other
@@ -77,6 +78,9 @@ public final class ArtemisIntakeRoute extends RouteBuilder
     /** Lands batches. */
     private final BatchService service;
 
+    /** Whether the broker is answering, for events and gauges. */
+    private final IntakeHealth health;
+
     /** Makes connections. */
     private final Supplier<ConnectionFactory> factory;
 
@@ -98,9 +102,6 @@ public final class ArtemisIntakeRoute extends RouteBuilder
     /** Failures in a row, for the pause. */
     private int failures;
 
-    /** Whether the outage has been reported. */
-    private boolean unreachable;
-
     /** Whether the route is stopping, so a retry should give up. */
     private volatile boolean stopping;
 
@@ -113,16 +114,20 @@ public final class ArtemisIntakeRoute extends RouteBuilder
      * @param intake         the intake's name
      * @param settings       the broker's settings
      * @param service        lands batches
+     * @param health         whether the broker is answering
      * @param initialBackoff the first pause after a failure
      * @param maxBackoff     the longest pause after failures
      */
     public ArtemisIntakeRoute(String intake, BrokerSettings settings,
-            BatchService service, Duration initialBackoff,
-            Duration maxBackoff)
+            BatchService service, IntakeHealth health,
+            Duration initialBackoff, Duration maxBackoff)
     {
-        this(intake, settings, service, () -> new ActiveMQConnectionFactory(
-                settings.artemis().brokerUrl(), settings.artemis().username(),
-                settings.artemis().password()), initialBackoff, maxBackoff);
+        this(intake, settings, service, health,
+                () -> new ActiveMQConnectionFactory(
+                        settings.artemis().brokerUrl(),
+                        settings.artemis().username(),
+                        settings.artemis().password()),
+                initialBackoff, maxBackoff);
     }
 
     /**
@@ -131,17 +136,20 @@ public final class ArtemisIntakeRoute extends RouteBuilder
      * @param intake         the intake's name
      * @param settings       the broker's settings
      * @param service        lands batches
+     * @param health         whether the broker is answering
      * @param factory        makes connections
      * @param initialBackoff the first pause after a failure
      * @param maxBackoff     the longest pause after failures
      */
     ArtemisIntakeRoute(String intake, BrokerSettings settings,
-            BatchService service, Supplier<ConnectionFactory> factory,
-            Duration initialBackoff, Duration maxBackoff)
+            BatchService service, IntakeHealth health,
+            Supplier<ConnectionFactory> factory, Duration initialBackoff,
+            Duration maxBackoff)
     {
         this.intake = intake;
         this.settings = settings;
         this.service = service;
+        this.health = health;
         this.factory = factory;
         this.initialBackoff = initialBackoff;
         this.maxBackoff = maxBackoff;
@@ -187,6 +195,7 @@ public final class ArtemisIntakeRoute extends RouteBuilder
         {
             connect();
             List<Message> received = receive();
+            health.answered();
             if (received.isEmpty())
             {
                 return;
@@ -227,7 +236,7 @@ public final class ArtemisIntakeRoute extends RouteBuilder
         }
         catch (JMSException failure)
         {
-            markUnreachable(failure instanceof JMSSecurityException
+            health.unreachable(failure instanceof JMSSecurityException
                     ? IntakeProblem.AUTH : IntakeProblem.NETWORK);
             disconnect();
             pause();
@@ -253,12 +262,6 @@ public final class ArtemisIntakeRoute extends RouteBuilder
         consumer = session.createConsumer(
                 session.createQueue(settings.artemis().queue()));
         connection.start();
-        if (unreachable)
-        {
-            unreachable = false;
-            Telemetry.get().audit("intake.reachable",
-                    Fields.of(Attr.INTAKE, intake));
-        }
     }
 
     /**
@@ -345,24 +348,6 @@ public final class ArtemisIntakeRoute extends RouteBuilder
                     Fields.of(Attr.INTAKE, intake));
         }
         return new BatchService.Message(body, message.getJMSMessageID());
-    }
-
-    /**
-     * Reports the broker unreachable, once per outage.
-     *
-     * @param problem why
-     */
-    private void markUnreachable(IntakeProblem problem)
-    {
-        if (unreachable)
-        {
-            return;
-        }
-        unreachable = true;
-        Telemetry.get().auditError("intake.unreachable",
-                Fields.of(Attr.INTAKE, intake)
-                        .with(Attr.ERROR_CODE, ErrorCode.INTAKE_UNREACHABLE)
-                        .with(Attr.REASON, problem.name()));
     }
 
     /** Closes the connection; unacknowledged messages go back. */

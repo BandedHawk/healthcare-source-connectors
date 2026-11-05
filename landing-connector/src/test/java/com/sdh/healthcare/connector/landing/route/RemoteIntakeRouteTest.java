@@ -8,6 +8,8 @@ package com.sdh.healthcare.connector.landing.route;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -121,13 +123,17 @@ class RemoteIntakeRouteTest
         route = new RemoteIntakeRoute(settings, source, service, now::get);
     }
 
-    /** A whole listing offers each item, then reports the end. */
+    /**
+     * A whole listing records its time and size, offers each item, then
+     * reports the end.
+     */
     @Test
     void offersEachItemThenTheEnd()
     {
         listings.add(ITEMS);
         route.poll();
         InOrder order = inOrder(service);
+        order.verify(service).listingTook(0, 2);
         order.verify(service).onListed(ITEMS.get(0));
         order.verify(service).onListed(ITEMS.get(1));
         order.verify(service).onListingDone();
@@ -163,6 +169,7 @@ class RemoteIntakeRouteTest
         listings.add(ITEMS);
         route.poll();
         verify(service).onListingFailed(IntakeProblem.AUTH);
+        verify(service, never()).listingTook(anyLong(), anyInt());
         now.addAndGet(Duration.ofMinutes(4).toNanos());
         route.poll();
         assertThat(listed).isEqualTo(1);

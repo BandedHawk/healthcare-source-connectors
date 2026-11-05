@@ -27,6 +27,9 @@ import com.sdh.healthcare.connector.core.landing.SourceRef;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
+import com.sdh.healthcare.connector.landing.TelemetryCapture;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -50,6 +53,7 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 /**
  * Tests for {@link PushService} on a real lander and ledger, an in-memory
@@ -60,6 +64,10 @@ import org.junit.jupiter.api.Test;
  */
 class PushServiceTest
 {
+
+    /** Captures the metrics recorded. */
+    @RegisterExtension
+    final TelemetryCapture telemetry = new TelemetryCapture();
 
     /** The intake under test. */
     static final String INTAKE = "push";
@@ -493,5 +501,38 @@ class PushServiceTest
         assertThat(push(service, "a", null, "0123456789abcdef").status())
                 .isEqualTo(PushService.Status.UNAVAILABLE);
         assertThat(fatal).singleElement().isEqualTo("Crash");
+    }
+
+    /**
+     * Every push counts by its result, with how long it waited; a replay is
+     * a duplicate; a landed push counts with its bytes.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void countsPushesByResult() throws Exception
+    {
+        PushService service = service(0);
+        push(service, "a", "k-1", "0123456789ab");
+        push(service, "a", "k-1", "other");
+        Attributes intake = Attributes.of(
+                AttributeKey.stringKey("sdh.intake"), INTAKE);
+        AttributeKey<String> result = AttributeKey.stringKey("sdh.result");
+        assertThat(telemetry.value("sdh.push.requests",
+                intake.toBuilder().put(result, "landed").build()))
+                .isEqualTo(1);
+        assertThat(telemetry.value("sdh.push.requests",
+                intake.toBuilder().put(result, "replayed").build()))
+                .isEqualTo(1);
+        assertThat(telemetry.count("sdh.push.wait_duration", intake))
+                .isEqualTo(2);
+        assertThat(telemetry.value("sdh.landing.duplicates", intake))
+                .isEqualTo(1);
+        Attributes pushes = intake.toBuilder().put("sdh.kind", "push")
+                .build();
+        assertThat(telemetry.value("sdh.landing.items", pushes)).isEqualTo(1);
+        assertThat(telemetry.value("sdh.landing.bytes", pushes))
+                .isEqualTo(12);
+        assertThat(service.waiting()).isZero();
     }
 }

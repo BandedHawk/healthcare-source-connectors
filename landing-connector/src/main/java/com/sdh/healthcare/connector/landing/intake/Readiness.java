@@ -102,12 +102,29 @@ public final class Readiness
 
     /**
      * How many items are waiting to settle, for the
-     * {@code sdh.landing.items_waiting} gauge.
+     * {@code sdh.landing.backlog} gauge.
      *
      * @return the number of items seen and not yet landed
      */
     public synchronized int waiting()
     {
         return seen.size();
+    }
+
+    /**
+     * How long the item seen longest ago, unchanged since, has been
+     * waiting, for the {@code sdh.landing.oldest_waiting_age} gauge.
+     *
+     * @return nanoseconds; 0 if none is waiting
+     */
+    public synchronized long oldestWaitingNanos()
+    {
+        long now = nanoClock.getAsLong();
+        long oldest = 0;
+        for (Sighting sighting : seen.values())
+        {
+            oldest = Math.max(oldest, now - sighting.sinceNanos());
+        }
+        return oldest;
     }
 }

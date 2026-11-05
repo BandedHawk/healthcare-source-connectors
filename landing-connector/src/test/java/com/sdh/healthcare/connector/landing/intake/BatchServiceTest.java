@@ -27,6 +27,9 @@ import com.sdh.healthcare.connector.core.landing.RecordIndex;
 import com.sdh.healthcare.connector.core.landing.SourceRef;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.landing.TelemetryCapture;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -53,6 +56,7 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 /**
  * Tests for {@link BatchService} on a real lander and ledger, an in-memory
@@ -63,6 +67,10 @@ import org.junit.jupiter.api.Test;
  */
 class BatchServiceTest
 {
+
+    /** Captures the metrics recorded. */
+    @RegisterExtension
+    final TelemetryCapture telemetry = new TelemetryCapture();
 
     /** The intake under test. */
     static final String INTAKE = "queue";
@@ -440,5 +448,34 @@ class BatchServiceTest
         assertThat(service.land(messages("0123456789abcdef")).status())
                 .isEqualTo(BatchService.Status.FATAL);
         assertThat(fatal).singleElement().isEqualTo("Crash");
+    }
+
+    /**
+     * Each landed batch records its size, every message delivered again
+     * counts as a duplicate, and the landed item counts with its bytes.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void recordsBatchSizesAndDuplicates() throws Exception
+    {
+        BatchService service = service();
+        service.land(messages("a", "bb", "a"));
+        service.land(messages("a", "bb"));
+        Attributes intake = Attributes.of(
+                AttributeKey.stringKey("sdh.intake"), INTAKE);
+        assertThat(telemetry.count("sdh.landing.batch_size", intake))
+                .isEqualTo(1);
+        assertThat(telemetry.sum("sdh.landing.batch_size", intake))
+                .isEqualTo(2);
+        assertThat(telemetry.value("sdh.landing.duplicates", intake))
+                .isEqualTo(3);
+        Attributes batches = intake.toBuilder()
+                .put("sdh.kind", "message-batch").build();
+        assertThat(telemetry.value("sdh.landing.items", batches))
+                .isEqualTo(1);
+        assertThat(telemetry.value("sdh.landing.bytes", batches))
+                .isEqualTo(3);
+        assertThat(service.ledgerItems()).isEqualTo(1);
     }
 }
