@@ -32,6 +32,10 @@
   </modules>
 
   <properties>
+    <!-- Fail on a license text that can't be fetched (design §14.2); true in -Pdist and -Pimages. -->
+    <license.strict>false</license.strict>
+    <!-- -Pimages: stop the sdh-it VM once the images are built (true), or keep it running (false). -->
+    <images.stop-vm>true</images.stop-vm>
     <maven.compiler.release>25</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
@@ -479,6 +483,12 @@
           <artifactId>maven-enforcer-plugin</artifactId>
           <version>3.6.3</version>
         </plugin>
+        <!-- -Pimages: runs scripts/build-image.sh after packaging (design §14.1). -->
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>exec-maven-plugin</artifactId>
+          <version>3.6.4</version>
+        </plugin>
         <plugin>
           <groupId>org.springframework.boot</groupId>
           <artifactId>spring-boot-maven-plugin</artifactId>
@@ -495,8 +505,8 @@
           <version>3.8.0</version>
         </plugin>
         <!-- Third-party attribution (design §14.2), adapted from healthcare-data-harmonization. Enabled in modules
-             whose artifact bundles dependencies (file-connector, from which the image and any distribution archive are
-             built). At prepare-package: download-licenses fetches the license texts named in dependency POMs, add-third-party writes
+             whose artifact bundles dependencies (file-connector and landing-connector, from which the images and the
+             distribution archives are built). At prepare-package: download-licenses fetches the license texts named in dependency POMs, add-third-party writes
              META-INF/THIRD-PARTY.txt from src/license/third-party.ftl, and the gmavenplus step below replaces each license
              with its canonical text and fills in each component's own NOTICE. Runtime dependencies only; our own modules
              are excluded. Needs network access when packaging; offline, a placeholder is written and a warning logged. -->
@@ -614,6 +624,12 @@
                     <name>rootDir</name>
                     <value>${maven.multiModuleProjectDirectory}</value>
                   </property>
+                  <!-- true (-Pdist, -Pimages, the release script): a license text that can't be fetched fails the
+                       build instead of leaving a placeholder sentence in the artifact. -->
+                  <property>
+                    <name>licenseStrict</name>
+                    <value>${license.strict}</value>
+                  </property>
                 </properties>
                 <scripts>
                   <script><![CDATA[
@@ -665,6 +681,7 @@
                     def downloaded = (licensesDir.listFiles() ?: []).findAll { it.isFile() }
                     def referenced = (content =~ /META-INF\/licenses\/([^\s,]+)\.txt/).collect { it[1] }.unique()
                     def written = [] as Set
+                    def textProblems = []
                     referenced.each { String lic ->
                         def target = new File(licensesDir, lic + ".txt")
                         def urls = canonical[lic]
@@ -672,6 +689,7 @@
                             try {
                                 target.text = urls.collect { fetch(it) }.join("\n\n")
                             } catch (Exception e) {
+                                textProblems << "${lic} (could not fetch: ${e.message})"
                                 log.warn("Could not fetch the ${lic} text: ${e.message}")
                                 target.text = "(Standard ${lic} text unavailable during build; see ${urls.join(', ')})"
                             }
@@ -680,6 +698,7 @@
                             if (fallback) {
                                 target.text = stripHtml(fallback.text)
                             } else {
+                                textProblems << "${lic} (no text)"
                                 log.warn("No text for license '${lic}': add it to the canonical list or src/license/licenses.xml.")
                                 target.text = "(License text not provided by the dependency POM)"
                             }
@@ -688,8 +707,12 @@
                     }
                     downloaded.each { if (!written.contains(it.name)) it.delete() }
 
-                    // Each component's own NOTICE and, unless it is solely Apache-2.0 (whose NOTICE is the
-                    // attribution), the license file it ships, which carries its copyright line.
+                    // Each component's own NOTICE, then every other license, notice or copyright file it ships,
+                    // wherever it is in the jar: a component often bundles code under other licenses (JSch has
+                    // jBCrypt and JZlib, the PostgreSQL driver the SCRAM libraries, grpc-netty-shaded BoringSSL),
+                    // and those files carry the copyright lines MIT, BSD and ISC require. An Apache-2.0 text is
+                    // named rather than repeated, but anything a LICENSE file adds after it (bundled code, often)
+                    // is kept. ThirdPartyAttributionIT checks every such file is here.
                     def readEntry = { File jar, String pattern ->
                         if (jar == null || !jar.isFile() || !jar.name.endsWith(".jar")) {
                             return null
@@ -698,17 +721,65 @@
                             new ZipFile(jar).withCloseable { zip ->
                                 def entry = zip.entries().toList().findAll { e -> !e.isDirectory() && e.name.toUpperCase().matches(pattern) }
                                         .min { it.name.length() }
-                                entry == null ? null : zip.getInputStream(entry).getText("UTF-8").trim()
+                                entry == null ? null : [entry.name, zip.getInputStream(entry).getText("UTF-8").trim()]
                             }
                         } catch (Exception e) {
                             log.warn("Could not read the jar ${jar.name}: ${e.message}")
                             null
                         }
                     }
+                    // The same rule as ThirdPartyAttributionIT.LEGAL_FILE.
+                    def legalFile = ~/(?i)(.*\/)?(LICEN[CS]E|NOTICE|COPYING|COPYRIGHT)([._-][^\/]*)?/
+                    def sourceFile = ~/(?i).*\.(class|java|kt|groovy|scala)/
+                    def legalEntries = { File jar ->
+                        if (jar == null || !jar.isFile() || !jar.name.endsWith(".jar")) {
+                            return []
+                        }
+                        new ZipFile(jar).withCloseable { zip ->
+                            zip.entries().toList().findAll { e -> !e.isDirectory() && e.name ==~ legalFile && !(e.name ==~ sourceFile) }
+                                    .sort { it.name }
+                                    .collect { e -> [e.name, stripHtml(zip.getInputStream(e).getText("UTF-8")).trim()] }
+                        }
+                    }
+                    def apacheMarker = "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"
+                    def apacheEnd = "limitations under the License."
+                    def beyondApache = { String text ->
+                        if (!text.contains(apacheMarker)) {
+                            return null
+                        }
+                        int end = text.lastIndexOf(apacheEnd)
+                        end < 0 ? "" : text.substring(end + apacheEnd.length()).trim()
+                    }
                     def copyrights = new Properties()
                     new File(rootDir, "src/license/copyrights.properties").withReader("UTF-8") { copyrights.load(it) }
+                    def together = new Properties()
+                    new File(rootDir, "src/license/licenses-apply-together.properties").withReader("UTF-8") { together.load(it) }
                     def missingCopyright = []
-                    project.artifacts.each { artifact ->
+                    // Components that packaging adds without their being dependencies (Spring Boot's jar mode
+                    // tools), from src/license/bundled-by-packaging.properties, copied to target/packaging-extras.
+                    def components = project.artifacts.collect { a ->
+                        [groupId: a.groupId, artifactId: a.artifactId, version: a.version, file: a.file]
+                    }
+                    def extras = new Properties()
+                    new File(rootDir, "src/license/bundled-by-packaging.properties").withReader("UTF-8") { extras.load(it) }
+                    def extrasDir = new File(project.build.directory, "packaging-extras")
+                    extras.stringPropertyNames().sort().each { String ga ->
+                        def (String extraGroup, String extraArtifact) = ga.split(":")
+                        def (String extraTitle, String extraUrl, String extraLicense) = extras.getProperty(ga).split("\\|")*.trim()
+                        def jar = (extrasDir.listFiles() ?: []).find { it.name ==~ /${java.util.regex.Pattern.quote(extraArtifact)}-[0-9].*\.jar/ }
+                        if (jar == null) {
+                            throw new IllegalStateException("${ga} is in bundled-by-packaging.properties but not in ${extrasDir}")
+                        }
+                        def extraVersion = jar.name.substring(extraArtifact.length() + 1, jar.name.length() - 4)
+                        def gav = "${extraGroup}:${extraArtifact}:${extraVersion}"
+                        content += "========================================================================\n" +
+                                "Component: ${extraTitle}\nCoordinates: ${gav}\nProject: ${extraUrl}\nLicenses: ${extraLicense}\n" +
+                                "License Reference: META-INF/licenses/${extraLicense.toLowerCase()}.txt\n\n--- NOTICE ---\n" +
+                                "[NOTICE_PLACEHOLDER_${gav}]\n[COMPONENT_LICENSE_PLACEHOLDER_${gav}]\n" +
+                                "========================================================================\n\n"
+                        components << [groupId: extraGroup, artifactId: extraArtifact, version: extraVersion, file: jar]
+                    }
+                    components.each { artifact ->
                         def gav = "${artifact.groupId}:${artifact.artifactId}:${artifact.version}"
                         def noticePlaceholder = "[NOTICE_PLACEHOLDER_${gav}]"
                         def licensePlaceholder = "[COMPONENT_LICENSE_PLACEHOLDER_${gav}]"
@@ -716,31 +787,70 @@
                             return
                         }
                         def notice = readEntry(artifact.file, "(META-INF/)?NOTICE(\\.TXT|\\.MD)?")
-                        content = content.replace(noticePlaceholder, notice ?: "(No NOTICE file provided by this component)")
+                        content = content.replace(noticePlaceholder, notice?.getAt(1) ?: "(No NOTICE file provided by this component)")
 
-                        // Offered under Apache-2.0 (alone or as a choice): its NOTICE is the attribution.
                         def licensesLine = (content =~ /Coordinates: ${java.util.regex.Pattern.quote(gav)}\R+(?:Project: .*\R+)?Licenses: (.*)/)
                         def apache = licensesLine.find() && licensesLine.group(1).split(",")*.trim().contains("Apache-2.0")
-                        String shipped = ""
-                        if (!apache) {
-                            def text = readEntry(artifact.file, "(META-INF/)?(LICENSE|LICENCE|COPYING)(\\.TXT|\\.MD)?")
-                            if (text) {
-                                shipped = "\n--- LICENSE (as shipped by the component) ---\n" + text
-                            } else {
-                                def line = copyrights.getProperty("${artifact.groupId}:${artifact.artifactId}") ?: copyrights.getProperty(artifact.groupId)
-                                if (line == null) {
-                                    missingCopyright << gav
+                        def sections = []
+                        def seen = [:]
+                        def shipsLicense = false
+                        try {
+                            legalEntries(artifact.file).each { entry ->
+                                def (String entryPath, String text) = entry
+                                if (notice != null && entryPath == notice[0]) {
+                                    return
+                                }
+                                if (!(entryPath ==~ /(?i)(.*\/)?NOTICE[^\/]*/)) {
+                                    shipsLicense = true
+                                }
+                                def header = "\n--- ${entryPath} (as shipped by the component) ---\n"
+                                if (seen.containsKey(text)) {
+                                    sections << header + "(The same text as ${seen[text]}.)"
+                                    return
+                                }
+                                seen[text] = entryPath
+                                def extra = beyondApache(text)
+                                if (extra == null) {
+                                    sections << header + (text ?: "(Empty file.)")
+                                } else if (extra.length() < 40) {
+                                    sections << header + "(The Apache License 2.0: META-INF/licenses/apache-2.0.txt.)"
                                 } else {
-                                    shipped = "\n--- COPYRIGHT (from the component's published license) ---\n" + line
+                                    sections << header + "(The Apache License 2.0: META-INF/licenses/apache-2.0.txt; then:)\n" + extra
                                 }
                             }
+                        } catch (Exception e) {
+                            throw new IllegalStateException("Could not read the license files of ${gav}: ${e.message}", e)
                         }
-                        content = content.replace(licensePlaceholder + "\n", shipped ? shipped + "\n" : "")
+                        if (!apache && !shipsLicense) {
+                            // MIT and BSD require the copyright line, and the canonical texts only have placeholders.
+                            def line = copyrights.getProperty("${artifact.groupId}:${artifact.artifactId}") ?: copyrights.getProperty(artifact.groupId)
+                            if (line == null) {
+                                missingCopyright << gav
+                            } else {
+                                sections << "\n--- COPYRIGHT (from the component's published license) ---\n" + line
+                            }
+                        }
+                        content = content.replace(licensePlaceholder + "\n", sections ? sections.join("\n") + "\n" : "")
+
+                        // A component whose licenses each cover part of it: all apply, so none is elected.
+                        def allApply = together.getProperty("${artifact.groupId}:${artifact.artifactId}")
+                        if (allApply != null) {
+                            def block = ~/(Coordinates: ${java.util.regex.Pattern.quote(gav)}\R(?:(?!Coordinates: ).*\R)*?)Elected license: .*/
+                            def replaced = content.replaceFirst(block, { all, head -> head + "All apply: " + allApply })
+                            if (replaced == content) {
+                                throw new IllegalStateException("${gav} is in licenses-apply-together.properties but has no Elected license line")
+                            }
+                            content = replaced
+                        }
                     }
                     thirdPartyFile.text = content
                     if (missingCopyright) {
                         throw new IllegalStateException("No license file in the jar and no copyright line in "
                                 + "src/license/copyrights.properties for: " + missingCopyright.join(", "))
+                    }
+                    if (textProblems && licenseStrict == "true") {
+                        throw new IllegalStateException("License texts missing, so this build can't be distributed: "
+                                + textProblems.join("; ") + ". Build with network access, or fix the source.")
                     }
                     log.info("THIRD-PARTY.txt: ${referenced.size()} license texts, notices merged.")
                   ]]></script>

@@ -185,6 +185,24 @@
         <artifactId>maven-dependency-plugin</artifactId>
         <executions>
           <execution>
+            <id>packaging-extras</id>
+            <phase>generate-resources</phase>
+            <goals><goal>copy</goal></goals>
+            <configuration>
+              <!-- What repackaging adds that isn't a dependency: Spring Boot's jar mode tools (the service image's
+                   Dockerfile extracts its layers with them). Copied here only so the attribution step can read
+                   their license files (design §14.2); src/license/bundled-by-packaging.properties names them. -->
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.springframework.boot</groupId>
+                  <artifactId>spring-boot-jarmode-tools</artifactId>
+                  <version>${spring-boot.version}</version>
+                </artifactItem>
+              </artifactItems>
+              <outputDirectory>${project.build.directory}/packaging-extras</outputDirectory>
+            </configuration>
+          </execution>
+          <execution>
             <id>dist-native-libraries</id>
             <phase>prepare-package</phase>
             <goals><goal>unpack-dependencies</goal></goals>
@@ -223,6 +241,10 @@
     <!-- The customer distribution tarball: target/landing-connector-<version>-dist.tar.gz (design §14.3). -->
     <profile>
       <id>dist</id>
+      <properties>
+        <!-- A license text that couldn't be fetched fails the build (design §14.2). -->
+        <license.strict>true</license.strict>
+      </properties>
       <build>
         <plugins>
           <plugin>
@@ -237,6 +259,58 @@
                   <descriptors><descriptor>src/assembly/dist.xml</descriptor></descriptors>
                   <attach>false</attach>
                   <tarLongFileMode>posix</tarLongFileMode>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <!-- The service and customer images, built into the sdh-it VM's Docker by scripts/build-image.sh from what this
+         build packaged (design §14.1, §14.3): ./mvnw -Pimages -pl landing-connector,file-connector -am verify
+         -DskipTests. The VM is stopped afterwards unless -Dimages.stop-vm=false. For a release, scripts/sign-release.sh
+         builds, signs and pushes them (§14.4). -->
+    <profile>
+      <id>images</id>
+      <properties>
+        <license.strict>true</license.strict>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>customer-image</id>
+                <phase>verify</phase>
+                <goals><goal>exec</goal></goals>
+                <configuration>
+                  <executable>${maven.multiModuleProjectDirectory}/scripts/build-image.sh</executable>
+                  <arguments>
+                    <argument>${project.artifactId}</argument>
+                    <argument>customer</argument>
+                  </arguments>
+                  <environmentVariables>
+                    <SDH_SKIP_MAVEN>1</SDH_SKIP_MAVEN>
+                    <SDH_IT_STOP>false</SDH_IT_STOP>
+                  </environmentVariables>
+                </configuration>
+              </execution>
+              <execution>
+                <id>service-image</id>
+                <phase>verify</phase>
+                <goals><goal>exec</goal></goals>
+                <configuration>
+                  <executable>${maven.multiModuleProjectDirectory}/scripts/build-image.sh</executable>
+                  <arguments>
+                    <argument>${project.artifactId}</argument>
+                    <argument>service</argument>
+                  </arguments>
+                  <environmentVariables>
+                    <SDH_SKIP_MAVEN>1</SDH_SKIP_MAVEN>
+                    <SDH_IT_STOP>${images.stop-vm}</SDH_IT_STOP>
+                  </environmentVariables>
                 </configuration>
               </execution>
             </executions>

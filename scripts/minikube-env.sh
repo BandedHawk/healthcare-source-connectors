@@ -37,7 +37,7 @@ if command -v docker >/dev/null; then
 fi
 
 stop_vm_if_asked() {
-  if [[ "${SDH_IT_STOP:-0}" == "1" ]]; then
+  if [[ "${SDH_IT_STOP:-0}" == "1" || "${SDH_IT_STOP:-}" == "true" ]]; then
     echo ">> Stopping minikube profile '$PROFILE'"
     minikube stop -p "$PROFILE"
   fi

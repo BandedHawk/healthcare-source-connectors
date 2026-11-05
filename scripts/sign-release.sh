@@ -51,7 +51,7 @@ if ! "$ROOT/scripts/base-images.sh"; then
 fi
 
 if [[ "${SDH_SKIP_BUILD:-0}" != "1" ]]; then
-  (cd "$ROOT" && ./mvnw -q -pl file-connector,landing-connector -am -Pdist package -DskipTests)
+  (cd "$ROOT" && ./mvnw -q -pl landing-connector,file-connector -am -Pdist verify -DskipTests)
 fi
 VERSION="$(cd "$ROOT" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
 for app in "${APPS[@]}"; do

@@ -18,7 +18,9 @@
      Demo (design §15.3): the landing node and the splitter as separate processes, joined by a broker, with C-CDA
      files through a watched directory and pushes over HTTPS; both apps' logs and OpenTelemetry output in the Output
      window, kept in file-connector/target/demo/ (logs/, telemetry/ with report.md, output/). Without Docker, or
-     against containers in the minikube VM. Only these actions or -Pdemo run it. -->
+     against containers in the minikube VM. Only these actions or -Pdemo run it.
+     Distribution (design §14): both apps' customer tarballs (-Pdist), or their service and customer images built into
+     the minikube VM (-Pimages, the VM stopped afterwards). Both fail if third-party attribution is incomplete. -->
 <actions>
     <action>
         <actionName>CUSTOM-performance-test</actionName>
@@ -219,19 +221,42 @@
     </action>
     <action>
         <actionName>CUSTOM-distribution-tarball</actionName>
-        <displayName>Build distribution tarball</displayName>
-        <!-- file-connector/target/file-connector-<version>-dist.tar.gz, for customers (design §14.3). -->
+        <displayName>Build distribution tarballs (both apps)</displayName>
+        <!-- <app>/target/<app>-<version>-dist.tar.gz for the landing node and the splitter, for customers (design
+             §14.3). Fails if a license text can't be fetched, or THIRD-PARTY.txt misses anything the jars bundle
+             (ThirdPartyAttributionIT, §14.2). -->
         <goals>
             <goal>-pl</goal>
-            <goal>file-connector</goal>
+            <goal>landing-connector,file-connector</goal>
             <goal>-am</goal>
-            <goal>package</goal>
+            <goal>verify</goal>
         </goals>
         <activatedProfiles>
             <activatedProfile>dist</activatedProfile>
         </activatedProfiles>
         <properties>
             <skipTests>true</skipTests>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-images</actionName>
+        <displayName>Build container images (both apps, into the VM)</displayName>
+        <!-- The service and customer images of the landing node and the splitter, built by scripts/build-image.sh
+             into the sdh-it VM's Docker from what this build packaged (design §14.1, §14.3), after the same
+             attribution checks as the tarballs. The VM is stopped afterwards. Signing and pushing a release is
+             scripts/sign-release.sh (§14.4). -->
+        <goals>
+            <goal>-pl</goal>
+            <goal>landing-connector,file-connector</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>images</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <skipTests>true</skipTests>
+            <images.stop-vm>true</images.stop-vm>
         </properties>
     </action>
 </actions>

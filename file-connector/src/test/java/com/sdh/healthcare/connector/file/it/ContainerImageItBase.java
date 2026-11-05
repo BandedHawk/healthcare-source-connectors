@@ -1051,7 +1051,9 @@ abstract class ContainerImageItBase
                 .doesNotContain("PLACEHOLDER");
         // Every component offered under a choice of licenses names the one
         // we distribute it under, and none is a GNU license where something
-        // else was offered (design §14.2).
+        // else was offered; or, where each license covers part of it, says
+        // all apply (design §14.2). ThirdPartyAttributionIT checks the rest
+        // against the jar.
         List<String> lines = thirdParty.lines().toList();
         for (int index = 0; index < lines.size(); index++)
         {
@@ -1060,8 +1062,11 @@ abstract class ContainerImageItBase
             {
                 String elected = lines.get(index + 1);
                 assertThat(elected).as("election for " + lines.get(index))
-                        .startsWith("Elected license: ")
-                        .doesNotContain("NONE").doesNotContain("GPL");
+                        .matches("(Elected license|All apply): .*")
+                        .doesNotContain("NONE")
+                        .doesNotContain("Elected license: GPL")
+                        .doesNotContain("Elected license: LGPL")
+                        .doesNotContain("Elected license: AGPL");
             }
         }
         assertThat(thirdParty).contains("Elected license: Apache-2.0")
