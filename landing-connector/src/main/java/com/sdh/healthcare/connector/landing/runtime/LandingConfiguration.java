@@ -95,9 +95,8 @@ public class LandingConfiguration
 
     /**
      * Adds the landing and intake health gauges (design §5.3.4, §5.3.7),
-     * each by intake. The health gauges are for intakes that poll a
-     * source: a listing, or Artemis. Camel's queue consumers get them once
-     * their outages are reported; an HTTP intake polls nothing.
+     * each by intake. The health gauges are for intakes that read a
+     * source: a listing, or a queue; an HTTP intake reads nothing.
      *
      * @param telemetry  the installed telemetry
      * @param runtime    the runtime
@@ -111,10 +110,7 @@ public class LandingConfiguration
                 "Entries in the intake's ledger", intake,
                 () -> runtime.intake().ledgerItems());
         IntakeHealth health = runtime.health();
-        boolean polls = runtime.service() != null
-                || runtime.broker() != null
-                && runtime.broker().kind() == BrokerSettings.Kind.ARTEMIS;
-        if (health != null && polls)
+        if (health != null)
         {
             telemetry.gauge("sdh.intake.up", "1",
                     "1 while the source answers, 0 during an outage", intake,
@@ -252,6 +248,10 @@ public class LandingConfiguration
             if (runtime.service() != null || runtime.batchService() != null)
             {
                 camel.getRouteController().startRoute(IntakeRoute.ROUTE_ID);
+            }
+            if (runtime.brokerWatch() != null)
+            {
+                runtime.brokerWatch().start();
             }
             LOG.info("intake.started");
         };

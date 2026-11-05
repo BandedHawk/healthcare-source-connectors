@@ -42,6 +42,7 @@ import com.sdh.healthcare.connector.landing.intake.S3Source;
 import com.sdh.healthcare.connector.landing.intake.SftpSource;
 import com.sdh.healthcare.connector.landing.intake.SmbSource;
 import com.sdh.healthcare.connector.landing.intake.TableProgress;
+import com.sdh.healthcare.connector.landing.route.BrokerWatch;
 import com.sdh.healthcare.connector.landing.route.EventHubsSupport;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.web.PushController;
@@ -130,6 +131,12 @@ public final class LandingRuntime implements AutoCloseable
     private final CachingConnectionFactory rabbitmq;
 
     /**
+     * Watches a Camel queue intake's broker; null for Artemis and the other
+     * intakes.
+     */
+    private final BrokerWatch brokerWatch;
+
+    /**
      * Whether the source or broker is answering; null for an HTTP intake,
      * which polls nothing.
      */
@@ -189,6 +196,7 @@ public final class LandingRuntime implements AutoCloseable
         this.batchService = queue == null ? null : queue.service();
         this.broker = queue == null ? null : queue.broker();
         this.rabbitmq = queue == null ? null : queue.rabbitmq();
+        this.brokerWatch = queue == null ? null : queue.watch();
         this.health = service != null ? service.health()
                 : queue == null ? null : queue.health();
         this.tables = tables;
@@ -202,9 +210,11 @@ public final class LandingRuntime implements AutoCloseable
      * @param rabbitmq its RabbitMQ connection factory; null for other
      *                 brokers
      * @param health   whether its broker is answering
+     * @param watch    watches a Camel consumer's broker; null for Artemis
      */
     private record QueueIntake(BatchService service, BrokerSettings broker,
-            CachingConnectionFactory rabbitmq, IntakeHealth health)
+            CachingConnectionFactory rabbitmq, IntakeHealth health,
+            BrokerWatch watch)
     {
     }
 
@@ -361,10 +371,17 @@ public final class LandingRuntime implements AutoCloseable
                 {
                     EventHubsSupport.bind(camel, broker.eventhubs());
                 }
+                IntakeHealth health = new IntakeHealth(intake,
+                        System::nanoTime);
+                BrokerWatch watch = null;
+                if (broker.kind() != BrokerSettings.Kind.ARTEMIS)
+                {
+                    watch = new BrokerWatch(broker, health, camel);
+                    watch.bind(rabbitmq);
+                }
                 queue = new QueueIntake(new BatchService(intake, storage,
                         items, announcer, fatal, clock, broker.dedupWindow()),
-                        broker, rabbitmq,
-                        new IntakeHealth(intake, System::nanoTime));
+                        broker, rabbitmq, health, watch);
             }
             else
             {
@@ -489,6 +506,17 @@ public final class LandingRuntime implements AutoCloseable
     }
 
     /**
+     * What watches a Camel queue intake's broker, to start once the route
+     * has.
+     *
+     * @return the watch; null for Artemis and the other intakes
+     */
+    public BrokerWatch brokerWatch()
+    {
+        return brokerWatch;
+    }
+
+    /**
      * A queue intake's broker settings, for the route.
      *
      * @return the settings; null for other intakes
@@ -586,6 +614,10 @@ public final class LandingRuntime implements AutoCloseable
     @Override
     public void close()
     {
+        if (brokerWatch != null)
+        {
+            brokerWatch.close();
+        }
         if (service != null || batchService != null)
         {
             try

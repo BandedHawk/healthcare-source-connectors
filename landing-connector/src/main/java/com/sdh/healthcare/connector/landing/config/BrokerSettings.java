@@ -29,28 +29,36 @@ import org.apache.camel.util.URISupport;
  * placeholder ({@code {{...}}}), resolved from the environment, or a bean
  * reference ({@code #name}).
  *
- * @param kind        which broker
- * @param uri         the Camel consumer URI, with the intake's options; null
- *                    for {@link Kind#ARTEMIS}
- * @param maxMessages the most messages in a batch
- * @param maxBytes    the most bytes in a batch
- * @param maxWait     the longest a batch stays open
- * @param dedupWindow how far back a message delivered again is recognised
- * @param rabbitmq    the RabbitMQ connection, for {@link Kind#RABBITMQ}
- * @param artemis     the Artemis connection, for {@link Kind#ARTEMIS}
- * @param eventhubs   the checkpoint store, for {@link Kind#EVENTHUBS}
+ * @param kind          which broker
+ * @param uri           the Camel consumer URI, with the intake's options;
+ *                      null for {@link Kind#ARTEMIS}
+ * @param maxMessages   the most messages in a batch
+ * @param maxBytes      the most bytes in a batch
+ * @param maxWait       the longest a batch stays open
+ * @param dedupWindow   how far back a message delivered again is recognised
+ * @param checkInterval how often a broker whose consumer doesn't report an
+ *                      outage is checked
+ * @param rabbitmq      the RabbitMQ connection, for {@link Kind#RABBITMQ}
+ * @param artemis       the Artemis connection, for {@link Kind#ARTEMIS}
+ * @param eventhubs     the checkpoint store, for {@link Kind#EVENTHUBS}
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record BrokerSettings(Kind kind, String uri, int maxMessages,
         long maxBytes, Duration maxWait, Duration dedupWindow,
-        LandingProperties.Rabbitmq rabbitmq,
+        Duration checkInterval, LandingProperties.Rabbitmq rabbitmq,
         LandingProperties.Artemis artemis,
         LandingProperties.Eventhubs eventhubs)
 {
 
     /** The bean name of the intake's RabbitMQ connection factory. */
     public static final String RABBITMQ_BEAN = "sdhIntakeRabbit";
+
+    /**
+     * The bean name of the SQS poll strategy, which tells the intake's
+     * health of each poll.
+     */
+    public static final String POLL_STRATEGY_BEAN = "sdhIntakePolls";
 
     /** The bean name of the intake's Event Hubs checkpoint store. */
     public static final String CHECKPOINTS_BEAN = "sdhIntakeCheckpoints";
@@ -170,6 +178,13 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
             throw new IllegalArgumentException(
                     "sdh.landing.broker.dedup-window must not be negative");
         }
+        if (broker.checkInterval() == null
+                || broker.checkInterval().isNegative()
+                || broker.checkInterval().isZero())
+        {
+            throw new IllegalArgumentException(
+                    "sdh.landing.broker.check-interval must be positive");
+        }
         String uri = null;
         if (kind == Kind.ARTEMIS)
         {
@@ -210,8 +225,8 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
         }
         return new BrokerSettings(kind, uri, batch.maxMessages(),
                 batch.maxBytes().toBytes(), batch.maxWait(),
-                broker.dedupWindow(), broker.rabbitmq(), broker.artemis(),
-                broker.eventhubs());
+                broker.dedupWindow(), broker.checkInterval(),
+                broker.rabbitmq(), broker.artemis(), broker.eventhubs());
     }
 
     /**
@@ -286,6 +301,7 @@ public record BrokerSettings(Kind kind, String uri, int maxMessages,
             case SQS ->
             {
                 require(options, "deleteAfterRead", "true");
+                require(options, "pollStrategy", "#" + POLL_STRATEGY_BEAN);
                 require(options, "extendMessageVisibility", "true");
                 options.putIfAbsent("visibilityTimeout", "60");
                 options.putIfAbsent("maxMessagesPerPoll", "10");

@@ -114,6 +114,16 @@ public final class IntakeHealth
     }
 
     /**
+     * Why the source can't be reached now.
+     *
+     * @return the reason; null while it answers, or for a directory
+     */
+    public synchronized IntakeProblem problem()
+    {
+        return unreachable ? problem : null;
+    }
+
+    /**
      * Whether the source is reachable, as far as is known: until it is
      * first tried, it is taken to be.
      *

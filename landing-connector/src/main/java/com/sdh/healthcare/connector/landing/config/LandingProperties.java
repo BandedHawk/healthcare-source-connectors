@@ -101,24 +101,27 @@ public record LandingProperties(
      * landed in batches, and acknowledged only once their batch is
      * committed. Secrets come from the environment, never the file.
      *
-     * @param type        {@code kafka}, {@code sqs}, {@code rabbitmq},
-     *                    {@code pubsub}, {@code servicebus} or
-     *                    {@code eventhubs} (Camel consumers), or
-     *                    {@code artemis} (the JMS client)
-     * @param uri         the Camel consumer URI, for every type but
-     *                    {@code artemis}; the options the intake needs are
-     *                    added, and any that would break it refused
-     * @param batch       when a batch is closed and landed
-     * @param dedupWindow how far back, from the last landed batch, a message
-     *                    delivered again is recognised by its ID
-     * @param rabbitmq    the RabbitMQ connection, for {@code rabbitmq}
-     * @param artemis     the Artemis connection and queue, for
-     *                    {@code artemis}
-     * @param eventhubs   the checkpoint store, for {@code eventhubs}
+     * @param type          {@code kafka}, {@code sqs}, {@code rabbitmq},
+     *                      {@code pubsub}, {@code servicebus} or
+     *                      {@code eventhubs} (Camel consumers), or
+     *                      {@code artemis} (the JMS client)
+     * @param uri           the Camel consumer URI, for every type but
+     *                      {@code artemis}; the options the intake needs
+     *                      are added, and any that would break it refused
+     * @param batch         when a batch is closed and landed
+     * @param dedupWindow   how far back, from the last landed batch, a
+     *                      message delivered again is recognised by its ID
+     * @param checkInterval how often the broker is checked, for a broker
+     *                      whose consumer doesn't report an outage itself
+     * @param rabbitmq      the RabbitMQ connection, for {@code rabbitmq}
+     * @param artemis       the Artemis connection and queue, for
+     *                      {@code artemis}
+     * @param eventhubs     the checkpoint store, for {@code eventhubs}
      */
     public record Broker(String type, String uri,
             @DefaultValue Batch batch,
             @DefaultValue("1h") Duration dedupWindow,
+            @DefaultValue("30s") Duration checkInterval,
             @DefaultValue Rabbitmq rabbitmq,
             @DefaultValue Artemis artemis,
             @DefaultValue Eventhubs eventhubs)

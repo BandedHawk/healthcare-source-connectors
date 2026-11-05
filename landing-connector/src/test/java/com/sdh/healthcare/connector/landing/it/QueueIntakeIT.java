@@ -49,6 +49,7 @@ import com.sdh.healthcare.connector.landing.intake.BatchService;
 import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.route.ArtemisIntakeRoute;
+import com.sdh.healthcare.connector.landing.route.BrokerWatch;
 import com.sdh.healthcare.connector.landing.route.EventHubsSupport;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.route.QueueIntakeRoute;
@@ -154,6 +155,9 @@ class QueueIntakeIT
     static final LandingProperties.Rabbitmq NO_RABBIT =
             new LandingProperties.Rabbitmq(null, "/", null, null, false);
 
+    /** How often the broker is checked. */
+    static final Duration CHECK = Duration.ofSeconds(30);
+
     /** No Artemis connection. */
     static final LandingProperties.Artemis NO_ARTEMIS =
             new LandingProperties.Artemis(null, null, null, null);
@@ -246,7 +250,7 @@ class QueueIntakeIT
             BrokerSettings settings = BrokerSettings.of(
                     new LandingProperties.Broker("kafka", "kafka:hl7?brokers="
                             + kafka.getBootstrapServers() + "&groupId=landing",
-                            BATCH, Duration.ofHours(1), NO_RABBIT,
+                            BATCH, Duration.ofHours(1), CHECK, NO_RABBIT,
                             NO_ARTEMIS, NO_EVENTHUBS));
             crashThenRecover(settings, camel ->
             {
@@ -295,7 +299,7 @@ class QueueIntakeIT
                             + "&accessKey={{sqs.key}}&secretKey={{sqs.key}}"
                             + "&autoCreateQueue=false&visibilityTimeout=2"
                             + "&waitTimeSeconds=1&delay=100", BATCH,
-                            Duration.ofHours(1), NO_RABBIT, NO_ARTEMIS,
+                            Duration.ofHours(1), CHECK, NO_RABBIT, NO_ARTEMIS,
                             NO_EVENTHUBS));
             crashThenRecover(settings, camel ->
             {
@@ -343,7 +347,7 @@ class QueueIntakeIT
                 BrokerSettings settings = BrokerSettings.of(
                         new LandingProperties.Broker("rabbitmq",
                                 "spring-rabbitmq:default?queues=hl7", BATCH,
-                                Duration.ofHours(1), connection,
+                                Duration.ofHours(1), CHECK, connection,
                                 NO_ARTEMIS, NO_EVENTHUBS));
                 crashThenRecover(settings, camel -> camel.getRegistry().bind(
                         BrokerSettings.RABBITMQ_BEAN, factory));
@@ -388,7 +392,7 @@ class QueueIntakeIT
             }
             BrokerSettings settings = BrokerSettings.of(
                     new LandingProperties.Broker("artemis", null, BATCH,
-                            Duration.ofHours(1), NO_RABBIT, connection,
+                            Duration.ofHours(1), CHECK, NO_RABBIT, connection,
                             NO_EVENTHUBS));
             crashThenRecover(settings, camel ->
             {
@@ -457,7 +461,7 @@ class QueueIntakeIT
             BrokerSettings settings = BrokerSettings.of(
                     new LandingProperties.Broker("pubsub",
                             "google-pubsub:sdh-it:hl7-landing", BATCH,
-                            Duration.ofHours(1), NO_RABBIT, NO_ARTEMIS,
+                            Duration.ofHours(1), CHECK, NO_RABBIT, NO_ARTEMIS,
                             NO_EVENTHUBS));
             // The subscriber takes its endpoint from the component only.
             crashThenRecover(settings, camel ->
@@ -517,7 +521,7 @@ class QueueIntakeIT
                     new LandingProperties.Broker("servicebus",
                             "azure-servicebus:hl7?serviceBusType=queue"
                                     + "&connectionString=RAW({{sb.cs}})",
-                            BATCH, Duration.ofHours(1), NO_RABBIT,
+                            BATCH, Duration.ofHours(1), CHECK, NO_RABBIT,
                             NO_ARTEMIS, NO_EVENTHUBS));
             crashThenRecover(settings, camel -> placeholder(camel, "sb.cs",
                     connection));
@@ -576,7 +580,7 @@ class QueueIntakeIT
                     new LandingProperties.Broker("eventhubs",
                             "azure-eventhubs:?consumerGroupName=landing"
                                     + "&connectionString=RAW({{eh.cs}})",
-                            BATCH, Duration.ofHours(1), NO_RABBIT,
+                            BATCH, Duration.ofHours(1), CHECK, NO_RABBIT,
                             NO_ARTEMIS, checkpoints));
             crashThenRecover(settings, camel ->
             {
@@ -752,6 +756,11 @@ class QueueIntakeIT
                     announcer, fatal::add, Clock.systemUTC(),
                     settings.dedupWindow());
             setup.accept(camel);
+            if (settings.kind() == BrokerSettings.Kind.SQS)
+            {
+                new BrokerWatch(settings, new IntakeHealth(INTAKE,
+                        System::nanoTime), camel).bind(null);
+            }
             RouteBuilder route = settings.kind()
                     == BrokerSettings.Kind.ARTEMIS
                     ? new ArtemisIntakeRoute(INTAKE, settings, service,

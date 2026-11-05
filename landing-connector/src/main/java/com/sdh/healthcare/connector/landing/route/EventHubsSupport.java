@@ -10,6 +10,7 @@ import com.azure.identity.DefaultAzureCredentialBuilder;
 import com.azure.messaging.eventhubs.CheckpointStore;
 import com.azure.messaging.eventhubs.checkpointstore.blob.BlobCheckpointStore;
 import com.azure.messaging.eventhubs.models.EventPosition;
+import com.azure.storage.blob.BlobContainerAsyncClient;
 import com.azure.storage.blob.BlobContainerClientBuilder;
 import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
@@ -56,6 +57,19 @@ public final class EventHubsSupport
      */
     static CheckpointStore checkpoints(LandingProperties.Eventhubs settings)
     {
+        return new BlobCheckpointStore(container(settings));
+    }
+
+    /**
+     * The checkpoint container's client: by its connection string, or by
+     * its endpoint with the default Azure credential.
+     *
+     * @param settings where the checkpoints are kept
+     * @return the client
+     */
+    static BlobContainerAsyncClient container(
+            LandingProperties.Eventhubs settings)
+    {
         BlobContainerClientBuilder container = new BlobContainerClientBuilder()
                 .containerName(settings.checkpointContainer());
         String connection = settings.checkpointConnectionString();
@@ -68,7 +82,7 @@ public final class EventHubsSupport
             container.endpoint(settings.checkpointEndpoint())
                     .credential(new DefaultAzureCredentialBuilder().build());
         }
-        return new BlobCheckpointStore(container.buildAsyncClient());
+        return container.buildAsyncClient();
     }
 
     /**

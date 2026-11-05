@@ -31,6 +31,9 @@ class BrokerSettingsTest
             new LandingProperties.Rabbitmq("rabbit:5672", "/", "u", "p",
                     false);
 
+    /** How often the broker is checked. */
+    static final Duration CHECK = Duration.ofSeconds(30);
+
     /** No Artemis connection. */
     static final LandingProperties.Artemis NO_ARTEMIS =
             new LandingProperties.Artemis(null, null, null, null);
@@ -49,7 +52,7 @@ class BrokerSettingsTest
     static LandingProperties.Broker broker(String type, String uri)
     {
         return new LandingProperties.Broker(type, uri, BATCH,
-                Duration.ofHours(1), RABBIT, NO_ARTEMIS, NO_EVENTHUBS);
+                Duration.ofHours(1), CHECK, RABBIT, NO_ARTEMIS, NO_EVENTHUBS);
     }
 
     /**
@@ -103,7 +106,8 @@ class BrokerSettingsTest
                 "aws2-sqs:q?region=eu-west-1")).uri())
                 .contains("region=eu-west-1", "deleteAfterRead=true",
                         "extendMessageVisibility=true",
-                        "visibilityTimeout=60", "waitTimeSeconds=20");
+                        "visibilityTimeout=60", "waitTimeSeconds=20",
+                        "pollStrategy=#" + BrokerSettings.POLL_STRATEGY_BEAN);
         assertThat(BrokerSettings.of(broker("RabbitMQ",
                 "spring-rabbitmq:ex?queues=q")).uri())
                 .contains("queues=q", "acknowledgeMode=MANUAL",
@@ -142,10 +146,15 @@ class BrokerSettingsTest
         assertThatThrownBy(() -> BrokerSettings.of(
                 new LandingProperties.Broker("rabbitmq",
                         "spring-rabbitmq:ex?queues=q", BATCH,
-                        Duration.ofHours(1),
+                        Duration.ofHours(1), CHECK,
                         new LandingProperties.Rabbitmq(null, "/", null, null,
                                 false), NO_ARTEMIS, NO_EVENTHUBS)))
                 .hasMessageContaining("addresses");
+        assertThatThrownBy(() -> BrokerSettings.of(
+                new LandingProperties.Broker("kafka", "kafka:t?groupId=g",
+                        BATCH, Duration.ofHours(1), Duration.ZERO, RABBIT,
+                        NO_ARTEMIS, NO_EVENTHUBS)))
+                .hasMessageContaining("check-interval");
     }
 
     /**
@@ -212,14 +221,14 @@ class BrokerSettingsTest
         BrokerSettings settings = BrokerSettings.of(
                 new LandingProperties.Broker("eventhubs",
                         "azure-eventhubs:ns/hl7", BATCH, Duration.ofHours(1),
-                        RABBIT, NO_ARTEMIS, checkpoints));
+                        CHECK, RABBIT, NO_ARTEMIS, checkpoints));
         assertThat(settings.uri()).contains(
                 "checkpointStore=#" + BrokerSettings.CHECKPOINTS_BEAN,
                 "eventPosition=#" + BrokerSettings.POSITIONS_BEAN);
         assertThatThrownBy(() -> BrokerSettings.of(
                 new LandingProperties.Broker("eventhubs",
                         "azure-eventhubs:ns/hl7?blobAccountName=a", BATCH,
-                        Duration.ofHours(1), RABBIT, NO_ARTEMIS,
+                        Duration.ofHours(1), CHECK, RABBIT, NO_ARTEMIS,
                         checkpoints)))
                 .hasMessageContaining("blobAccountName");
         assertThatThrownBy(() -> BrokerSettings.of(broker("eventhubs",
@@ -228,8 +237,9 @@ class BrokerSettingsTest
         assertThatThrownBy(() -> BrokerSettings.of(
                 new LandingProperties.Broker("eventhubs",
                         "azure-eventhubs:ns/hl7", BATCH, Duration.ofHours(1),
-                        RABBIT, NO_ARTEMIS, new LandingProperties.Eventhubs(
-                                "cs", "https://x", "cp"))))
+                        CHECK, RABBIT, NO_ARTEMIS,
+                        new LandingProperties.Eventhubs("cs", "https://x",
+                                "cp"))))
                 .hasMessageContaining("one of");
         assertThat(new LandingProperties.Eventhubs("AccountKey=s3cret",
                 null, "cp").toString()).doesNotContain("s3cret");
@@ -243,13 +253,15 @@ class BrokerSettingsTest
                 "tcp://a:61616", "u", "p", "hl7");
         BrokerSettings settings = BrokerSettings.of(
                 new LandingProperties.Broker("artemis", null, BATCH,
-                        Duration.ofHours(1), RABBIT, artemis, NO_EVENTHUBS));
+                        Duration.ofHours(1), CHECK, RABBIT, artemis,
+                        NO_EVENTHUBS));
         assertThat(settings.uri()).isNull();
         assertThat(settings.artemis().queue()).isEqualTo("hl7");
         assertThat(settings.artemis().toString()).doesNotContain("p,", "=p");
         assertThatThrownBy(() -> BrokerSettings.of(
                 new LandingProperties.Broker("artemis", "jms:q", BATCH,
-                        Duration.ofHours(1), RABBIT, artemis, NO_EVENTHUBS)))
+                        Duration.ofHours(1), CHECK, RABBIT, artemis,
+                        NO_EVENTHUBS)))
                 .hasMessageContaining("isn't used");
         assertThatThrownBy(() -> BrokerSettings.of(broker("artemis", null)))
                 .hasMessageContaining("broker-url");
