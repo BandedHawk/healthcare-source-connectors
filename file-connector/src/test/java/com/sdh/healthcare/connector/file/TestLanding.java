@@ -26,6 +26,9 @@ import com.sdh.healthcare.connector.core.pipeline.UuidV7;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.interfaces.ECPrivateKey;
 import java.time.Clock;
 import java.util.Map;
@@ -137,6 +140,26 @@ public final class TestLanding
                 ItemKind.FILE, null, originalName, null),
                 offset -> new ByteArrayInputStream(bytes, (int) offset,
                         bytes.length - (int) offset));
+    }
+
+    /**
+     * Lands one item from a file, read as a stream, so that an item larger
+     * than the heap can be landed.
+     *
+     * @param file         the file
+     * @param originalName its original name; may be null
+     * @return the landed item
+     * @throws Exception if it can't be landed
+     */
+    public LandedItem land(Path file, String originalName) throws Exception
+    {
+        return lander.land(new NewItem(UuidV7.next(System.currentTimeMillis()),
+                ItemKind.FILE, null, originalName, null), offset ->
+                {
+                    InputStream input = Files.newInputStream(file);
+                    input.skipNBytes(offset);
+                    return input;
+                });
     }
 
     /**

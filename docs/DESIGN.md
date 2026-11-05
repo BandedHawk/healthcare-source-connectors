@@ -1,6 +1,6 @@
 # Healthcare Source Connectors — Design
 
-Status: **Draft for review; one spike item open (§16)** · Date: 2026-11-04 · Scope: parent project, `connector-contract`, `connector-core`, `connector-kms`, `connector-queue-reader`, `connector-runtime`, `file-connector`, `landing-connector`
+Status: **Draft for review; one spike item open (§16)** · Date: 2026-11-05 · Scope: parent project, `connector-contract`, `connector-core`, `connector-kms`, `connector-queue-reader`, `connector-runtime`, `file-connector`, `landing-connector`
 
 Revision 2026-10-28 (b): added the `connector-queue-reader` consumer library and `connector-contract` (§3, §10.2). Replaced the Iceberg-property lease with a Postgres lease plus fencing tokens (§9.3). Folded publish marks into batch commits (§9.2). Made host disk capacity an operator responsibility (§17). Recorded the §16 spike results.
 
@@ -72,6 +72,8 @@ Revision 2026-11-04 (bg): documentation only. The order of work (§5.3.10) marks
 Revision 2026-11-04 (bh): the ledger's memory, measured, and kept within a share of the heap (§5.3.2). Measured with 1 to 50 million random entries: the index took 48 to 96 bytes an item, not the 36 planned, because the digest set used 16-byte slots too and a set doubles when two-thirds full; 10 million items took 528 MiB and needed a 768 MiB heap to load, more than the README's 512 MiB. Decided 2026-11-04 with the user: the digest prefixes move to a set of plain longs (`LongSet`), so an item takes 36 to 72 bytes (10 million: 384 MiB); the sets are sized from the table's metadata before loading, so loading never grows them; the index may take half the heap, and startup fails with `LEDGER_TOO_LARGE` if it would take more; and `ledger.memory_low` warns when the next doubling would pass that half. The keys stay 128 bits. Still to check: the splitter's inbox (§5.3.10).
 
 Revision 2026-11-05 (bi): documentation only. Decided 2026-11-05 with the user: a pipeline (an intake, its landing node and its splitter) carries one type of content, and types are never mixed in the same landing storage or the same split storage (§5.3). This settles the question of several formats in one intake, which is no longer listed as still to check (§5.3.10); mixing them is out of scope (§17).
+
+Revision 2026-11-05 (bj): performance measured for each part of the consolidated pipeline, in shared columns (§13.1). Decided 2026-11-05 with the user: the real landing node and the real splitter, each in process; per stage plus end to end; bulk files plus many small documents; a shared summary; end to end by replaying the landing run's timeline in the splitter; and the existing benchmark kept as the split micro-benchmark (`core`). New `LandingPerf` and `SplitterPerf`, shared support in `connector-core`'s test JAR, one output directory (`target/perf/`) with `pipeline-summary.md`, and six NetBeans actions. First results: bulk files split as fast in the app as in the micro-benchmark; small documents split at about 1 a second, against 10 landed, which is the next thing to look at.
 
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
@@ -228,7 +230,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 ├── .gitignore                           excludes build output, IDE files, *.pem, *.key, *.p12, .env
 ├── mvnw, .mvn/wrapper/                  Maven 3.9.16
 ├── .mvn/jvm.config                      lets Maven's JVM use sun.misc.Unsafe without Java 25's warning (the local Maven 3.8.7 calls it)
-├── scripts/                             it-minikube.sh (Docker suite), k8s-minikube.sh (Kubernetes run, §15.2), sign-release.sh (SBOMs and signing, §14.4), vuln-scan.sh and base-images.sh (§14.5), build-image.sh (service or customer image), perf.sh (throughput), minikube-env.sh (shared),
+├── scripts/                             it-minikube.sh (Docker suite), k8s-minikube.sh (Kubernetes run, §15.2), sign-release.sh (SBOMs and signing, §14.4), vuln-scan.sh and base-images.sh (§14.5), build-image.sh (service or customer image), perf.sh (performance, §13.1), minikube-env.sh (shared),
 │                                        cda-model/ (generates the C-CDA converter's schema model, §6.4)
 ├── docs/DESIGN.md                       this document
 ├── LICENSE, NOTICE                      our proprietary notice and attributions (HL7), copied into every jar (§14.2)
@@ -1784,18 +1786,24 @@ Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has s
 
 ### 13.1 Measured throughput (built)
 
-The performance test measures throughput and memory use. It is a Maven profile: `./mvnw -Pperf -pl connector-core -am verify` (unit tests are skipped).
-- **Not part of any normal build:** the test is `ThroughputPerf`, and only `-Pperf` includes `*Perf.java`. The default build and `-Pit` never run it, because its results depend on the machine.
-- **How to run it:** `scripts/perf.sh` wraps the profile. NetBeans has three custom actions (`nbactions.xml`, root project > Run Maven):
-  - **Performance test (C-CDA, X12):** 1 GiB each, 1 GiB heap (as in a 2 GiB Kubernetes container, §14.1);
-  - **Performance test (quick, 64 MiB):** a check that it runs, in under a minute;
-  - **Performance test (512 MiB heap):** the smallest comfortable heap.
-- **Formats:** C-CDA and X12 by default; `-Dperf.formats=ccda,x12,csv` adds CSV. It generates synthetic files and runs each through the whole ingest path, assembled as the connector assembles it, with production defaults: commits every 10,000 sections or 512 MiB, one encrypt worker per core, 512 MiB archive commits and a 1 GiB heap (the Kubernetes sketch in §14.1).
-- **Generated files** (seeded random words from a 4,096-word vocabulary, so they compress roughly like real text):
-  - C-CDA: one `ClinicalDocument` per section, 50–350 KB each;
-  - X12 837P: one claim per section, 1–6 KB, 1,000 per group;
-  - CSV: one 150–400-byte record per section, with a header; 1 in 10 has a quoted note with a newline.
-- **Throughput:** wall time for the split and archive phases (from the pipeline's own spans), MiB/s and sections/s, average cores used, the busiest single thread's share of wall time, and stored bytes against source bytes.
+The performance tests measure throughput, per-item latency and memory use of each part of the consolidated pipeline, in the same columns, so the parts can be compared. They are a Maven profile: `./mvnw -Pperf -pl landing-connector,file-connector -am verify` (unit tests are skipped). Decided 2026-11-05 with the user: the real landing node and the real splitter, each in process; per stage plus end to end; bulk files plus many small documents; shared columns plus a summary; end to end by replay; and the core benchmark kept as the split micro-benchmark.
+- **Not part of any normal build:** only `-Pperf` includes `*Perf.java`. The default build and `-Pit` never run them, because their results depend on the machine.
+- **The stages,** in build order, chosen with `-Dperf.stages` (default `core,landing,split`):
+  - **core** (`connector-core` `ThroughputPerf`): split, encrypt and store one landed bulk file per format through the ingest path as the splitter assembles it, without Spring or Camel. Landing the file is done first and not timed, so its MiB/s is the old "split phase" column of the results below. It stays the place to compare formats, recipient keys and heap sizes;
+  - **landing** (`landing-connector` `LandingPerf`): the real landing node, started per run with its production settings: Spring, Camel, the lease, the ledger and the landing tables. The broker is a Camel queue that notes when each `item.landed` arrives;
+  - **split** (`file-connector` `SplitterPerf`): the real splitter, started per run the same way, its broker also a Camel queue (bounded, so a full queue holds the splitter up). It lands the same items itself, untimed, then sends their `item.landed` messages with the gaps the landing run recorded. It then writes **end to end** rows: each item's landing latency plus its splitting latency.
+- **Why end to end is a replay:** both apps' JARs are Spring Boot repackaged, so neither module can load the other app, and one JVM running both would mix their memory figures. The landing stage writes `timeline-<workload>-<intake>.csv` (each item's size, when it became available and when it was announced, from the run's start); the split stage replays it. Without a timeline the split stage sends at the workload's own schedule and writes no end to end.
+- **The workloads** (`-Dperf.workloads`, default all three), seeded, so both apps get the same bytes:
+  - **bulk-ccda** and **bulk-x12:** one file of `perf.size` (default 1 GiB) each, as generated for the core stage, through a directory intake;
+  - **small-ccda:** `perf.items` (default 1000) single C-CDA documents of 50–350 KB arriving at `perf.rate` a second (default 10; 0 for all at once), through each of `perf.intakes` (default `directory,http`). Each document's size is unique (trailing newlines), so an `item.landed`, which carries only the size, names its document.
+- **The intakes:** a read-write directory with `ready: marker`, each item moved in and then its `.done` marker written; and HTTP push with mTLS, at most 32 pushes in flight, a 503 sent again. HTTP push takes small items only, so bulk files go through the directory.
+- **Latency per item:**
+  - landing: from available (marker written, or push sent) to its `item.landed` at the broker;
+  - split: from its `item.landed` sent to its `file.completed` at the broker;
+  - end to end: the two added, so it includes queueing in both apps;
+  - core: a single file, so its latency is its wall time and isn't given.
+  Reported as p50, p95, p99 and max (nearest rank).
+- **Throughput and cost:** wall time from the first item available to the last done; MiB/s, items/s and sections/s; average cores used and the busiest thread's share of wall time; stored bytes against source bytes (core only).
 - **Memory:**
   - heap after GC, peak: the most heap still in use right after a collection, from the collectors' notifications. This is the closest measure of need; it is an upper bound, because a young collection leaves old garbage in place;
   - heap in use, peak, sampled every 50 ms; G1 grows towards the maximum, so this shows the heap given more than the heap needed;
@@ -1803,13 +1811,48 @@ The performance test measures throughput and memory use. It is a Maven profile: 
   - process resident memory (RSS), peak, which is what a container limit sees;
   - bytes allocated and the allocation rate;
   - the share of wall time in GC pauses, and the number of full collections.
-- **What it checks:** each file completes with exactly the expected number of sections and messages, and every section converts to JSON (none falls back to raw).
-- **The broker** is replaced by a counter that acknowledges at once, so broker latency isn't included; every message is still sealed and signed.
-- **Options:** `-Dperf.size=4GiB`, `-Dperf.formats=csv`, `-Dperf.storage=s3` (SeaweedFS in the minikube VM), `-Dperf.recipient=rsa`, `-Dperf.heap=512m` (default 1024m).
-- **Output:**
-  - printed at the end of the run (in NetBeans, the Output window);
-  - `connector-core/target/perf/throughput-<storage>-<recipient>.md`: this run's throughput and memory tables;
-  - `connector-core/target/perf/history.csv`: one row per format per run, with the settings, kept until `mvn clean`, for comparing runs.
+  For the landing and split stages these cover the whole JVM: the app with its Spring and Camel, plus the test's own feeding, which is small.
+- **What they check:** every item is announced and completed, with no fatal exit; the core stage also checks each file's section and message counts, and that every section converts to JSON (none falls back to raw).
+- **Brokers** are stand-ins that take each message at once, so broker latency isn't included; every message is still sealed and signed.
+- **How to run them:** `scripts/perf.sh` wraps the profile and prints the summary. NetBeans has six custom actions (`nbactions.xml`, root project > Run Maven):
+  - **Performance test (pipeline: core, landing, split):** every stage at the defaults, 1 GiB heap (as in a 2 GiB Kubernetes container, §14.1);
+  - **Performance test (pipeline, quick):** 64 MiB bulk files, 100 small documents at 20 a second; a check that every stage runs, in a few minutes;
+  - **Performance test (landing)** and **(landing, quick):** the landing node only; its timelines are kept for a later split run;
+  - **Performance test (core: split, encrypt, store):** the micro-benchmark alone;
+  - **Performance test (pipeline, 512 MiB heap):** the smallest comfortable heap.
+- **Options:** `-Dperf.size=4GiB`, `-Dperf.items`, `-Dperf.rate`, `-Dperf.workloads`, `-Dperf.intakes`, `-Dperf.formats=ccda,x12,csv` (core), `-Dperf.storage=s3` (SeaweedFS in the minikube VM), `-Dperf.recipient=rsa` (core), `-Dperf.heap=512m` (default 1024m).
+- **Output,** in `target/perf/` at the root, shared by every stage:
+  - printed at the end of each stage (in NetBeans, the Output window);
+  - `pipeline-summary.md`: for each workload, the latest landing, split, end-to-end and core rows side by side, with when each ran;
+  - `<stage>.md`: each stage's latest run, as throughput, latency and memory tables;
+  - `history.csv`: one row per stage, workload and intake per run, with the settings, kept until `mvn clean`; `latest.csv` holds the latest of each for the summary. A history with older columns is kept beside the new one as `history-<time>.csv`.
+**Pipeline stages, 2026-11-05** (the defaults: 1 GiB bulk files, 1000 small C-CDA documents of 194 MiB in all at 10 a second, P-256, local disk, 1 GiB heap; AMD Ryzen 9 8945HX, Java 26.0.2; single run):
+
+| Workload | Intake | Stage | Items/s | MiB/s | Latency p50 / p95 / max, s | Heap after GC, peak MiB | Avg cores |
+|---|---|---|---:|---:|---|---:|---:|
+| bulk C-CDA | directory | landing | – | 118 | 8.7 | 203 | 1.0 |
+| | | split | – | 54 | 18.9 | 610 | 4.1 |
+| | | end to end | – | 37 | 27.6 | – | – |
+| | – | core | – | 54 | – | 585 | 3.8 |
+| bulk X12 | directory | landing | – | 107 | 9.5 | 250 | 1.0 |
+| | | split | – | 34 | 30.5 | 890 | 16.6 |
+| | | end to end | – | 26 | 40.1 | – | – |
+| | – | core | – | 33 | – | 897 | 16.3 |
+| small C-CDA | directory | landing | 9.6 | 1.9 | 1.4 / 4.2 / 4.8 | 212 | 0.6 |
+| | | split | 1.25 | 0.24 | 316 / 659 / 699 | 150 | 2.3 |
+| | | end to end | 1.24 | 0.24 | 317 / 663 / 704 | – | – |
+| small C-CDA | HTTP | landing | 8.3 | 1.6 | 3.8 / 4.0 / 4.1 | 139 | 0.8 |
+| | | split | 0.64 | 0.12 | 681 / 1,358 / 1,435 | 174 | 2.5 |
+| | | end to end | 0.64 | 0.12 | 684 / 1,362 / 1,439 | – | – |
+
+- **Bulk files:** the app splits at the core benchmark's speed (54 against 54 MiB/s for C-CDA, 34 against 33 for X12), so Spring, Camel and the broker hand-off cost nothing measurable. Landing is two to three times faster than splitting and runs on about one core.
+- **Small documents, landing:** the node keeps up with 10 a second only just; in the quick run it took about 10 a second when offered 20. Each item pays its own commits to the landed-items table and the ledger, about 100 ms. Through HTTP latency is steadier (p50 3.8 s against 1.4 s) because pushes queue at the writer lock instead of in the directory.
+- **Small documents, splitting: the bottleneck.** 1.25 items a second through the directory and 0.64 through HTTP, against 10 arriving; in the quick run, with 100 items, it was about 4.4. Latency grows with the backlog to 12 and 24 minutes. Two causes to look at, not yet fixed:
+  - `landed_items` is partitioned by day, so finding one item by ID reads every manifest of the day, about one per landed item. The test lands all 1000 before replaying, with maintenance off; in production, maintenance rewrites manifests only hourly, so a busy day grows the same way;
+  - the HTTP run, the second small run on the same splitter catalog, was twice as slow as the directory run with the same items, although each run drops its namespaces. Something outlasts the drop, or grows with runs, and is to be found.
+- **Memory:** every stage stays under 900 MiB of heap after GC, with no full collections; RSS peaks at 2.2 GiB for the splitter on small documents.
+
+- **Before 2026-11-05** the test was the core stage alone, timed from landing the file to its last commit, with its output in `connector-core/target/perf/`. The results below are from that test.
 
 **Results, 2026-10-29:** 1 GiB per format; AMD Ryzen 9 8945HX (16 cores, 32 threads), Java 25.0.4. Iceberg on local disk, JDBC catalog. After the sealing-pool fix, before JSON conversion (§6.4); the conversion run follows the table.
 
@@ -2343,7 +2386,7 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 | Integration without Docker (default build) | Embedded PostgreSQL binaries (`io.zonky.test:embedded-postgres`) for the lease store and JDBC catalog. Iceberg's `RESTCatalogAdapter` for REST catalog commit rules, in-process. `InMemoryFileIO`. Fencing tests run against both catalog types. End-to-end write → message → `connector-queue-reader`. The whole Spring Boot app with a SEDA queue (`FileConnectorApplicationTest`). The admin commands against data the running app wrote, while it holds the lease (`AdminCommandsTest`) |
 | Integration with Docker (`-Pit`) | See §15.1 |
 | Crash and resume | Fault-injection points at every stage (after write, after commit, mid-publish, before end of file, mid-archive, after delete, while failing), then a restart. The test checks that there are no gaps, no lost or duplicated rows, and duplicate messages only within one batch |
-| Throughput | `-Pperf` / `scripts/perf.sh` (§13.1): synthetic multi-GB C-CDA, X12 and CSV through the whole ingest path, on local disk or SeaweedFS; MiB/s, sections/s, phase times, cores used, busiest thread, stored ÷ source |
+| Performance | `-Pperf` / `scripts/perf.sh` (§13.1): the split micro-benchmark (synthetic multi-GB C-CDA, X12 and CSV), the real landing node and the real splitter, and end to end by replay; bulk files and many small documents, through a directory and HTTP push; on local disk or SeaweedFS; MiB/s, items/s, sections/s, latency per item (p50–max), cores used, busiest thread, memory, stored ÷ source |
 
 ### 15.1 Docker integration suite (`-Pit`)
 

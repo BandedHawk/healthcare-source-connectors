@@ -1,23 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- NetBeans custom actions for the root project: right-click the project > Run Maven > (action).
-     Performance tests (design §13.1): throughput and memory use for C-CDA and X12, the same as scripts/perf.sh. They run
-     only through these actions or -Pperf, never in a normal build or with the integration tests (-Pit).
-     Results: printed in the Output window at the end, and written to connector-core/target/perf/:
-       throughput-<storage>-<recipient>.md   this run (a throughput table and a memory table)
-       history.csv                           one row per format per run, kept until `mvn clean`
-     Change a property here, or copy an action, for other settings: perf.size, perf.formats (add csv),
-     perf.recipient (rsa), perf.heap. perf.storage=s3 needs the minikube environment, so run that one with
-     scripts/perf.sh.
+     Performance tests (design §13.1), the same as scripts/perf.sh: throughput, per-item latency and memory use of each
+     part of the pipeline, in shared columns. They run only through these actions or -Pperf, never in a normal build or
+     with the integration tests (-Pit). The stages, in order (perf.stages):
+       core      split, encrypt and store without the apps (connector-core ThroughputPerf), one bulk file per format
+       landing   the real landing node (landing-connector LandingPerf): bulk files through a directory intake, and
+                 many small C-CDA documents at a steady rate through a directory and through HTTP push with mTLS
+       split     the real splitter (file-connector SplitterPerf), fed the same items at the landing run's
+                 announcements; then end to end, each item's landing plus splitting latency
+     Results: printed in the Output window, and written to target/perf/ at the root:
+       pipeline-summary.md   each workload's latest landing, split, end-to-end and core rows side by side
+       <stage>.md            each stage's latest run (throughput, latency and memory tables)
+       history.csv           one row per stage, workload and intake per run, kept until `mvn clean`
+     Change a property here, or copy an action, for other settings: perf.size, perf.items, perf.rate, perf.workloads,
+     perf.intakes, perf.formats (core; add csv), perf.recipient (rsa), perf.heap. perf.storage=s3 needs the minikube
+     environment, so run that one with scripts/perf.sh.
      Demo (design §15.3): C-CDA files through the connector with its log and OpenTelemetry output in the Output window,
      in-process or against containers in the minikube VM. Only these actions or -Pdemo run it. -->
 <actions>
     <action>
         <actionName>CUSTOM-performance-test</actionName>
-        <displayName>Performance test (C-CDA, X12)</displayName>
-        <!-- 1 GiB heap, as in a 2 GiB Kubernetes container (design §14.1). -->
+        <displayName>Performance test (pipeline: core, landing, split)</displayName>
+        <!-- Every stage, then the summary. 1 GiB heap, as in a 2 GiB Kubernetes container (design §14.1). -->
         <goals>
             <goal>-pl</goal>
-            <goal>connector-core</goal>
+            <goal>landing-connector,file-connector</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>
@@ -25,7 +32,12 @@
             <activatedProfile>perf</activatedProfile>
         </activatedProfiles>
         <properties>
+            <perf.stages>core,landing,split</perf.stages>
+            <perf.workloads>bulk-ccda,bulk-x12,small-ccda</perf.workloads>
+            <perf.intakes>directory,http</perf.intakes>
             <perf.size>1GiB</perf.size>
+            <perf.items>1000</perf.items>
+            <perf.rate>10</perf.rate>
             <perf.formats>ccda,x12</perf.formats>
             <perf.storage>local</perf.storage>
             <perf.recipient>ec</perf.recipient>
@@ -34,11 +46,11 @@
     </action>
     <action>
         <actionName>CUSTOM-performance-test-quick</actionName>
-        <displayName>Performance test (quick, 64 MiB)</displayName>
-        <!-- A check that the test runs, in under a minute; the numbers mean little at this size. -->
+        <displayName>Performance test (pipeline, quick)</displayName>
+        <!-- A check that every stage runs, in a few minutes; the numbers mean little at this size. -->
         <goals>
             <goal>-pl</goal>
-            <goal>connector-core</goal>
+            <goal>landing-connector,file-connector</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>
@@ -46,7 +58,90 @@
             <activatedProfile>perf</activatedProfile>
         </activatedProfiles>
         <properties>
+            <perf.stages>core,landing,split</perf.stages>
+            <perf.workloads>bulk-ccda,bulk-x12,small-ccda</perf.workloads>
+            <perf.intakes>directory,http</perf.intakes>
             <perf.size>64MiB</perf.size>
+            <perf.items>100</perf.items>
+            <perf.rate>20</perf.rate>
+            <perf.formats>ccda,x12</perf.formats>
+            <perf.storage>local</perf.storage>
+            <perf.recipient>ec</perf.recipient>
+            <perf.heap>1024m</perf.heap>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-performance-test-landing</actionName>
+        <displayName>Performance test (landing)</displayName>
+        <!-- The landing node only. Its timelines are kept, for a later split run to replay. -->
+        <goals>
+            <goal>-pl</goal>
+            <goal>landing-connector,file-connector</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>perf</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <perf.stages>landing</perf.stages>
+            <perf.workloads>bulk-ccda,bulk-x12,small-ccda</perf.workloads>
+            <perf.intakes>directory,http</perf.intakes>
+            <perf.size>1GiB</perf.size>
+            <perf.items>1000</perf.items>
+            <perf.rate>10</perf.rate>
+            <perf.formats>ccda,x12</perf.formats>
+            <perf.storage>local</perf.storage>
+            <perf.recipient>ec</perf.recipient>
+            <perf.heap>1024m</perf.heap>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-performance-test-landing-quick</actionName>
+        <displayName>Performance test (landing, quick)</displayName>
+        <!-- A check that the landing stage runs, in under a minute. -->
+        <goals>
+            <goal>-pl</goal>
+            <goal>landing-connector,file-connector</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>perf</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <perf.stages>landing</perf.stages>
+            <perf.workloads>bulk-ccda,bulk-x12,small-ccda</perf.workloads>
+            <perf.intakes>directory,http</perf.intakes>
+            <perf.size>64MiB</perf.size>
+            <perf.items>100</perf.items>
+            <perf.rate>20</perf.rate>
+            <perf.formats>ccda,x12</perf.formats>
+            <perf.storage>local</perf.storage>
+            <perf.recipient>ec</perf.recipient>
+            <perf.heap>1024m</perf.heap>
+        </properties>
+    </action>
+    <action>
+        <actionName>CUSTOM-performance-test-core</actionName>
+        <displayName>Performance test (core: split, encrypt, store)</displayName>
+        <!-- The split micro-benchmark without the apps, as the performance test was before the landing stage. -->
+        <goals>
+            <goal>-pl</goal>
+            <goal>landing-connector,file-connector</goal>
+            <goal>-am</goal>
+            <goal>verify</goal>
+        </goals>
+        <activatedProfiles>
+            <activatedProfile>perf</activatedProfile>
+        </activatedProfiles>
+        <properties>
+            <perf.stages>core</perf.stages>
+            <perf.workloads>bulk-ccda,bulk-x12,small-ccda</perf.workloads>
+            <perf.intakes>directory,http</perf.intakes>
+            <perf.size>1GiB</perf.size>
+            <perf.items>1000</perf.items>
+            <perf.rate>10</perf.rate>
             <perf.formats>ccda,x12</perf.formats>
             <perf.storage>local</perf.storage>
             <perf.recipient>ec</perf.recipient>
@@ -55,11 +150,11 @@
     </action>
     <action>
         <actionName>CUSTOM-performance-test-small-heap</actionName>
-        <displayName>Performance test (512 MiB heap)</displayName>
+        <displayName>Performance test (pipeline, 512 MiB heap)</displayName>
         <!-- The smallest comfortable heap (design §13.1): shows the memory and speed cost of a smaller pod. -->
         <goals>
             <goal>-pl</goal>
-            <goal>connector-core</goal>
+            <goal>landing-connector,file-connector</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>
@@ -67,7 +162,12 @@
             <activatedProfile>perf</activatedProfile>
         </activatedProfiles>
         <properties>
+            <perf.stages>core,landing,split</perf.stages>
+            <perf.workloads>bulk-ccda,bulk-x12,small-ccda</perf.workloads>
+            <perf.intakes>directory,http</perf.intakes>
             <perf.size>1GiB</perf.size>
+            <perf.items>1000</perf.items>
+            <perf.rate>10</perf.rate>
             <perf.formats>ccda,x12</perf.formats>
             <perf.storage>local</perf.storage>
             <perf.recipient>ec</perf.recipient>

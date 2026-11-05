@@ -8,6 +8,8 @@ package com.sdh.healthcare.connector.core.perf;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.StringWriter;
+import java.io.UncheckedIOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -24,7 +26,7 @@ import java.util.SplittableRandom;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class SyntheticFiles
+public final class SyntheticFiles
 {
 
     /**
@@ -34,7 +36,7 @@ final class SyntheticFiles
      * @param bytes its size
      * @param sections the number of sections it holds
      */
-    record Generated(Path path, long bytes, long sections)
+    public record Generated(Path path, long bytes, long sections)
     {
     }
 
@@ -235,7 +237,7 @@ final class SyntheticFiles
      * @return the file written
      * @throws IOException if writing fails
      */
-    static Generated ccda(Path path, long target, long seed)
+    public static Generated ccda(Path path, long target, long seed)
             throws IOException
     {
         SplittableRandom random = new SplittableRandom(seed);
@@ -254,6 +256,30 @@ final class SyntheticFiles
             writer.flush();
             return new Generated(path, writer.count, documents);
         }
+    }
+
+    /**
+     * One standalone C-CDA document of 50–350 KB, as a producer would send
+     * it: the XML declaration and a single {@code ClinicalDocument}.
+     *
+     * @param seed the random seed
+     * @return the document, in ASCII
+     */
+    public static byte[] ccdaDocument(long seed)
+    {
+        SplittableRandom random = new SplittableRandom(seed);
+        StringWriter text = new StringWriter(360_000);
+        try (Counting writer = new Counting(text))
+        {
+            writer.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+            clinicalDocument(writer, random,
+                    50_000 + random.nextInt(300_000));
+        }
+        catch (IOException failure)
+        {
+            throw new UncheckedIOException(failure);
+        }
+        return text.toString().getBytes(StandardCharsets.US_ASCII);
     }
 
     /**
@@ -356,7 +382,7 @@ final class SyntheticFiles
      * @return the file written
      * @throws IOException if writing fails
      */
-    static Generated x12(Path path, long target, long seed)
+    public static Generated x12(Path path, long target, long seed)
             throws IOException
     {
         SplittableRandom random = new SplittableRandom(seed);
@@ -473,7 +499,7 @@ final class SyntheticFiles
      * @return the file written
      * @throws IOException if writing fails
      */
-    static Generated csv(Path path, long target, long seed)
+    public static Generated csv(Path path, long target, long seed)
             throws IOException
     {
         SplittableRandom random = new SplittableRandom(seed);

@@ -41,11 +41,14 @@ import software.amazon.awssdk.services.s3.S3Client;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-abstract class PerfStorage implements AutoCloseable
+public abstract class PerfStorage implements AutoCloseable
 {
 
     /** The catalog the run's tables live in. */
     private final Catalog catalog;
+
+    /** The catalog's properties. */
+    private final Map<String, String> properties;
 
     /**
      * Builds a JDBC catalog on the test Postgres.
@@ -58,6 +61,7 @@ abstract class PerfStorage implements AutoCloseable
         all.put("type", "jdbc");
         all.put("uri", TestPostgres.jdbcUrl());
         all.put("jdbc.schema-version", "V1");
+        this.properties = Map.copyOf(all);
         this.catalog = CatalogUtil.buildIcebergCatalog("perf", all, null);
     }
 
@@ -68,7 +72,7 @@ abstract class PerfStorage implements AutoCloseable
      * @return the storage
      * @throws Exception if the storage can't start
      */
-    static PerfStorage create(String kind) throws Exception
+    public static PerfStorage create(String kind) throws Exception
     {
         return switch (kind)
         {
@@ -84,9 +88,34 @@ abstract class PerfStorage implements AutoCloseable
      *
      * @return the catalog
      */
-    Catalog catalog()
+    public Catalog catalog()
     {
         return catalog;
+    }
+
+    /**
+     * The catalog's properties.
+     *
+     * @return the properties, as given to Iceberg
+     */
+    public Map<String, String> catalogProperties()
+    {
+        return properties;
+    }
+
+    /**
+     * The catalog's properties, for an application under test to build the
+     * same catalog: as {@code sdh.storage.catalog} settings, each key in
+     * brackets so that dotted keys such as {@code jdbc.schema-version} bind.
+     *
+     * @return the settings
+     */
+    public Map<String, String> applicationSettings()
+    {
+        Map<String, String> settings = new HashMap<>();
+        properties.forEach((key, value) ->
+                settings.put("sdh.storage.catalog[" + key + "]", value));
+        return settings;
     }
 
     /**
@@ -94,16 +123,21 @@ abstract class PerfStorage implements AutoCloseable
      *
      * @return the description
      */
-    abstract String describe();
+    public abstract String describe();
 
     /**
      * Drops the run's tables and their files, so a multi-GB run doesn't
-     * accumulate.
+     * accumulate. Nothing happens if it was never made.
      *
      * @param namespace the run's namespace
      */
-    void dropNamespace(String namespace)
+    public void dropNamespace(String namespace)
     {
+        if (!((SupportsNamespaces) catalog).namespaceExists(
+                Namespace.of(namespace)))
+        {
+            return;
+        }
         for (TableIdentifier table :
                 catalog.listTables(Namespace.of(namespace)))
         {
@@ -150,7 +184,7 @@ abstract class PerfStorage implements AutoCloseable
          * @return the description
          */
         @Override
-        String describe()
+        public String describe()
         {
             return "local disk (" + DIR
                     + ") via a JDBC catalog on embedded Postgres";
@@ -266,7 +300,7 @@ abstract class PerfStorage implements AutoCloseable
          * @return the description
          */
         @Override
-        String describe()
+        public String describe()
         {
             return "SeaweedFS 4.48 at " + endpoint()
                     + " via S3FileIO, JDBC catalog on embedded Postgres";

@@ -168,4 +168,28 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <!-- The performance test support (design §13.1): settings, workloads, measurement and results, with the
+           local-disk FileIO and embedded Postgres they use. The applications' performance tests depend on it. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>perf-support</id>
+            <goals><goal>test-jar</goal></goals>
+            <configuration>
+              <includes>
+                <include>com/sdh/healthcare/connector/core/perf/**</include>
+                <include>com/sdh/healthcare/connector/core/LocalFileIO*</include>
+                <include>com/sdh/healthcare/connector/core/TestPostgres*</include>
+              </includes>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>
