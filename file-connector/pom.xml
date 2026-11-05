@@ -72,6 +72,29 @@
       <scope>test</scope>
     </dependency>
 
+    <!-- The demo (-Pdemo, design §15.3): a broker both apps reach without Docker, an OTLP receiver for their
+         telemetry, and certificates for the HTTP push intake. -->
+    <dependency>
+      <groupId>org.apache.artemis</groupId>
+      <artifactId>artemis-jakarta-server</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry.proto</groupId>
+      <artifactId>opentelemetry-proto</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java-util</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcpkix-jdk18on</artifactId>
+      <scope>test</scope>
+    </dependency>
+
     <!-- Integration tests (-Pit): real storage and brokers in containers. -->
     <dependency>
       <groupId>com.sdh.healthcare</groupId>

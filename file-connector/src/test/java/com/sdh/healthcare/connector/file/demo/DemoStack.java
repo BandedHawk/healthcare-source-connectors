@@ -7,8 +7,13 @@
 package com.sdh.healthcare.connector.file.demo;
 
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import jakarta.jms.JMSConsumer;
+import jakarta.jms.JMSContext;
+import jakarta.jms.Message;
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -17,10 +22,12 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import org.apache.camel.CamelContext;
-import org.apache.camel.ConsumerTemplate;
+import org.apache.activemq.artemis.core.config.impl.ConfigurationImpl;
+import org.apache.activemq.artemis.core.server.embedded.EmbeddedActiveMQ;
+import org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.testcontainers.containers.GenericContainer;
@@ -34,18 +41,23 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * What the demo's connector runs against: Postgres for the lease and the
- * JDBC catalog, somewhere for the Iceberg tables, and a broker.
+ * What the demo's two apps run against (design §15.3): Postgres for their
+ * leases and the JDBC catalog, somewhere for the Iceberg tables, and a
+ * broker between them and on to the downstream consumer. Both apps run as
+ * processes of their own, so the broker is a real one in both kinds.
  *
  * <ul>
- *   <li>{@code local} (default): one JVM, no Docker. Embedded Postgres,
- *       tables on local disk under {@code target/demo/warehouse/}, and a
- *       Camel SEDA queue standing in for the broker.
+ *   <li>{@code local} (default): no Docker. Embedded Postgres, tables on
+ *       local disk under {@code target/demo/warehouse/}, and an embedded
+ *       Apache Artemis broker in the demo's JVM.
  *   <li>{@code vm}: as deployed. Postgres, SeaweedFS (through Iceberg's
  *       {@code S3FileIO}) and Kafka as containers in the {@code sdh-it}
  *       minikube VM, which is started if needed and stopped afterwards
  *       ({@code -Ddemo.stop-vm=false} keeps it running).
  * </ul>
+ * Each pipeline has two queues: {@code <pipeline>-landed}, from its landing
+ * node to its splitter, and {@code <pipeline>-sections}, from the splitter
+ * to the downstream consumer.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -80,38 +92,80 @@ interface DemoStack extends AutoCloseable
     String describe();
 
     /**
-     * The Iceberg catalog's properties, shared by the splitter and the
-     * landing stand-in.
+     * Whether the tables are on local disk, so that the apps need the
+     * demo's {@link DemoLocalFileIO} on their class path.
+     *
+     * @return true for {@code local}
+     */
+    boolean localDisk();
+
+    /**
+     * The Iceberg catalog's properties, the same for both apps and the
+     * downstream consumer.
      *
      * @return the properties
      */
     Map<String, String> catalog();
 
     /**
-     * The catalog, lease and queue settings for the connector.
+     * The catalog and lease settings both apps get.
      *
-     * @return the settings
+     * @return the settings, as flat Spring property names
      */
-    Map<String, String> properties();
+    default Map<String, String> storage()
+    {
+        Map<String, String> settings = new LinkedHashMap<>();
+        catalog().forEach((key, value) -> settings.put(
+                "sdh.storage.catalog[" + key + "]", value));
+        settings.putAll(lease());
+        return settings;
+    }
+
+    /**
+     * The lease database's settings.
+     *
+     * @return the settings, as flat Spring property names
+     */
+    Map<String, String> lease();
+
+    /**
+     * Where a pipeline's landing node announces items.
+     *
+     * @param pipeline the pipeline
+     * @return its {@code sdh.queue} settings
+     */
+    Map<String, String> landingQueue(String pipeline);
+
+    /**
+     * Where a pipeline's splitter takes items from, and publishes to.
+     *
+     * @param pipeline the pipeline
+     * @return its {@code sdh.landing.queue-uri} and {@code sdh.queue}
+     *         settings
+     */
+    Map<String, String> splitterQueues(String pipeline);
 
     /**
      * A separate catalog client, as a downstream process would have.
      *
      * @return the catalog
      */
-    Catalog newCatalogClient();
+    default Catalog newCatalogClient()
+    {
+        return CatalogUtil.buildIcebergCatalog("sdh", catalog(), null);
+    }
 
     /**
-     * Every message the connector published, as a downstream consumer
-     * receives them.
+     * Every message a pipeline's splitter published, as a downstream
+     * consumer receives them.
      *
-     * @param camel the connector's Camel context
-     * @param atLeast how many to wait for, where the broker needs waiting
-     * @param timeout how long to wait at most
+     * @param pipeline the pipeline
+     * @param atLeast  how many to wait for
+     * @param timeout  how long to wait at most
      * @return the messages
      * @throws Exception if the messages can't be received
      */
-    List<String> receive(CamelContext camel, int atLeast, Duration timeout)
+    List<String> receive(String pipeline, int atLeast, Duration timeout)
             throws Exception;
 
     /**
@@ -125,14 +179,11 @@ interface DemoStack extends AutoCloseable
     }
 
     /**
-     * One JVM: embedded Postgres, tables on local disk, a SEDA queue for
-     * the broker.
+     * No Docker: embedded Postgres, tables on local disk, and an embedded
+     * Artemis broker.
      */
     final class Local implements DemoStack
     {
-
-        /** The queue standing in for the broker. */
-        static final String QUEUE = "seda:sdh-demo-out?size=100000";
 
         /** The lease database and catalog. */
         private final EmbeddedPostgres postgres;
@@ -140,26 +191,73 @@ interface DemoStack extends AutoCloseable
         /** Where the tables' files are written. */
         private final Path warehouse;
 
+        /** The broker. */
+        private final EmbeddedActiveMQ broker = new EmbeddedActiveMQ();
+
+        /** The broker's address. */
+        private final String brokerUrl;
+
         /**
-         * Starts embedded Postgres.
+         * Starts embedded Postgres and the broker.
          *
          * @param work the demo's working directory
-         * @throws Exception if Postgres can't start
+         * @throws Exception if one can't start
          */
         Local(Path work) throws Exception
         {
             this.postgres = EmbeddedPostgres.start();
             this.warehouse = work.resolve("warehouse").toAbsolutePath();
+            brokerUrl = "tcp://127.0.0.1:" + freePort();
+            broker.setConfiguration(new ConfigurationImpl()
+                    .setPersistenceEnabled(false)
+                    .setSecurityEnabled(false)
+                    .addAcceptorConfiguration("demo", brokerUrl));
+            broker.start();
         }
 
+        /**
+         * A free local port, for the broker.
+         *
+         * @return the port
+         * @throws IOException if none can be found
+         */
+        static int freePort() throws IOException
+        {
+            try (ServerSocket socket = new ServerSocket(0))
+            {
+                return socket.getLocalPort();
+            }
+        }
+
+        /**
+         * Describes the stack.
+         *
+         * @return the description
+         */
         @Override
         public String describe()
         {
-            return "in-process: embedded Postgres, Iceberg tables on local"
-                    + " disk (" + warehouse
-                    + "), a SEDA queue standing in for the broker";
+            return "no Docker: embedded Postgres, Iceberg tables on local"
+                    + " disk (" + warehouse + "), an embedded Artemis broker"
+                    + " (" + brokerUrl + ")";
         }
 
+        /**
+         * Whether the tables are on local disk.
+         *
+         * @return true
+         */
+        @Override
+        public boolean localDisk()
+        {
+            return true;
+        }
+
+        /**
+         * The catalog: JDBC on embedded Postgres, data on local disk.
+         *
+         * @return the properties
+         */
         @Override
         public Map<String, String> catalog()
         {
@@ -174,53 +272,100 @@ interface DemoStack extends AutoCloseable
             return catalog;
         }
 
+        /**
+         * The lease database: embedded Postgres.
+         *
+         * @return the settings
+         */
         @Override
-        public Map<String, String> properties()
+        public Map<String, String> lease()
         {
-            Map<String, String> properties = new LinkedHashMap<>();
-            catalog().forEach((key, value) -> properties.put(
-                    "sdh.storage.catalog[" + key + "]", value));
-            properties.put("sdh.lease.jdbc.url",
-                    postgres.getJdbcUrl("postgres", "postgres"));
-            properties.put("sdh.lease.jdbc.username", "postgres");
-            properties.put("sdh.lease.jdbc.password", "postgres");
-            properties.put("sdh.queue.type", "camel");
-            properties.put("sdh.queue.uri", QUEUE);
-            return properties;
-        }
-
-        @Override
-        public Catalog newCatalogClient()
-        {
-            return CatalogUtil.buildIcebergCatalog("sdh", catalog(), null);
+            return Map.of("sdh.lease.jdbc.url",
+                    postgres.getJdbcUrl("postgres", "postgres"),
+                    "sdh.lease.jdbc.username", "postgres",
+                    "sdh.lease.jdbc.password", "postgres");
         }
 
         /**
-         * Drains the queue; the connector has published everything by now.
+         * The landing node's queue on the broker.
          *
-         * @param camel the connector's Camel context
-         * @param atLeast unused: the queue is in process
-         * @param timeout unused
-         * @return the messages
+         * @param pipeline the pipeline
+         * @return the settings
          */
         @Override
-        public List<String> receive(CamelContext camel, int atLeast,
-                Duration timeout)
+        public Map<String, String> landingQueue(String pipeline)
+        {
+            return Map.of("sdh.queue.type", "artemis",
+                    "sdh.queue.uri", "jms:queue:" + pipeline + "-landed",
+                    "sdh.queue.artemis.broker-url", brokerUrl);
+        }
+
+        /**
+         * The splitter's queues on the broker. The JMS component the
+         * splitter's publisher is given serves its inbox route too.
+         *
+         * @param pipeline the pipeline
+         * @return the settings
+         */
+        @Override
+        public Map<String, String> splitterQueues(String pipeline)
+        {
+            return Map.of("sdh.landing.queue-uri",
+                    "jms:queue:" + pipeline + "-landed",
+                    "sdh.queue.type", "artemis",
+                    "sdh.queue.uri", "jms:queue:" + pipeline + "-sections",
+                    "sdh.queue.artemis.broker-url", brokerUrl);
+        }
+
+        /**
+         * Reads the sections queue until enough messages arrive or the
+         * time runs out.
+         *
+         * @param pipeline the pipeline
+         * @param atLeast  how many to wait for
+         * @param timeout  how long to wait at most
+         * @return the messages
+         * @throws Exception if a message can't be read
+         */
+        @Override
+        public List<String> receive(String pipeline, int atLeast,
+                Duration timeout) throws Exception
         {
             List<String> out = new ArrayList<>();
-            ConsumerTemplate consumer = camel.createConsumerTemplate();
-            String body;
-            while ((body = consumer.receiveBody("seda:sdh-demo-out", 1000,
-                    String.class)) != null)
+            try (ActiveMQConnectionFactory factory =
+                    new ActiveMQConnectionFactory(brokerUrl);
+                    JMSContext context = factory.createContext();
+                    JMSConsumer consumer = context.createConsumer(
+                            context.createQueue(pipeline + "-sections")))
             {
-                out.add(body);
+                long until = System.currentTimeMillis() + timeout.toMillis();
+                while (System.currentTimeMillis() < until)
+                {
+                    // Once enough have come, take what else is waiting.
+                    Message message = consumer.receive(
+                            out.size() < atLeast ? 500 : 200);
+                    if (message == null && out.size() >= atLeast)
+                    {
+                        break;
+                    }
+                    if (message != null)
+                    {
+                        out.add(message.getBody(String.class));
+                    }
+                }
             }
             return out;
         }
 
+        /**
+         * Stops the broker and Postgres.
+         *
+         * @throws Exception if one can't be stopped
+         */
         @Override
         public void close() throws Exception
         {
+            broker.stop();
             postgres.close();
         }
     }
@@ -237,9 +382,6 @@ interface DemoStack extends AutoCloseable
 
         /** The S3 secret key. */
         static final String SECRET_KEY = "sdh-demo-secret-key-0123456789";
-
-        /** The Kafka topic the connector publishes to. */
-        static final String TOPIC = "sdh-sections";
 
         /** The lease database and catalog. */
         private final PostgreSQLContainer postgres =
@@ -304,6 +446,11 @@ interface DemoStack extends AutoCloseable
                     + seaweed.getMappedPort(8333);
         }
 
+        /**
+         * Describes the stack.
+         *
+         * @return the description
+         */
         @Override
         public String describe()
         {
@@ -312,6 +459,22 @@ interface DemoStack extends AutoCloseable
                     + kafka.getBootstrapServers() + ")";
         }
 
+        /**
+         * Whether the tables are on local disk.
+         *
+         * @return false: they are in SeaweedFS
+         */
+        @Override
+        public boolean localDisk()
+        {
+            return false;
+        }
+
+        /**
+         * The catalog: JDBC on Postgres, data in SeaweedFS.
+         *
+         * @return the properties
+         */
         @Override
         public Map<String, String> catalog()
         {
@@ -331,54 +494,89 @@ interface DemoStack extends AutoCloseable
             return catalog;
         }
 
+        /**
+         * The lease database: Postgres in the VM.
+         *
+         * @return the settings
+         */
         @Override
-        public Map<String, String> properties()
+        public Map<String, String> lease()
         {
-            Map<String, String> properties = new LinkedHashMap<>();
-            catalog().forEach((key, value) -> properties.put(
-                    "sdh.storage.catalog[" + key + "]", value));
-            properties.put("sdh.lease.jdbc.url", postgres.getJdbcUrl());
-            properties.put("sdh.lease.jdbc.username", postgres.getUsername());
-            properties.put("sdh.lease.jdbc.password", postgres.getPassword());
-            properties.put("sdh.queue.type", "kafka");
-            properties.put("sdh.queue.uri", "kafka:" + TOPIC + "?brokers="
-                    + kafka.getBootstrapServers());
-            return properties;
-        }
-
-        @Override
-        public Catalog newCatalogClient()
-        {
-            return CatalogUtil.buildIcebergCatalog("sdh", catalog(), null);
+            return Map.of("sdh.lease.jdbc.url", postgres.getJdbcUrl(),
+                    "sdh.lease.jdbc.username", postgres.getUsername(),
+                    "sdh.lease.jdbc.password", postgres.getPassword());
         }
 
         /**
-         * Reads the topic from the start until enough messages arrive or
-         * the time runs out.
+         * The landing node's topic.
          *
-         * @param camel unused: Kafka is read directly
-         * @param atLeast how many to wait for
-         * @param timeout how long to wait at most
+         * @param pipeline the pipeline
+         * @return the settings
+         */
+        @Override
+        public Map<String, String> landingQueue(String pipeline)
+        {
+            return Map.of("sdh.queue.type", "kafka",
+                    "sdh.queue.uri", "kafka:" + pipeline + "-landed?brokers="
+                            + kafka.getBootstrapServers());
+        }
+
+        /**
+         * The splitter's topics. Offsets are committed automatically, one
+         * message per poll, so only for messages already handled;
+         * {@code breakOnFirstError} keeps a failed message from being
+         * skipped (design §5.3.12).
+         *
+         * @param pipeline the pipeline
+         * @return the settings
+         */
+        @Override
+        public Map<String, String> splitterQueues(String pipeline)
+        {
+            return Map.of("sdh.landing.queue-uri", "kafka:" + pipeline
+                    + "-landed?brokers=" + kafka.getBootstrapServers()
+                    + "&groupId=" + pipeline + "-splitter"
+                    + "&autoOffsetReset=earliest&maxPollRecords=1"
+                    + "&breakOnFirstError=true",
+                    "sdh.queue.type", "kafka",
+                    "sdh.queue.uri", "kafka:" + pipeline
+                            + "-sections?brokers="
+                            + kafka.getBootstrapServers());
+        }
+
+        /**
+         * Reads the sections topic from the start until enough messages
+         * arrive or the time runs out.
+         *
+         * @param pipeline the pipeline
+         * @param atLeast  how many to wait for
+         * @param timeout  how long to wait at most
          * @return the messages
          */
         @Override
-        public List<String> receive(CamelContext camel, int atLeast,
+        public List<String> receive(String pipeline, int atLeast,
                 Duration timeout)
         {
             List<String> out = new ArrayList<>();
             try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(
                     Map.of("bootstrap.servers", kafka.getBootstrapServers(),
-                            "group.id", "sdh-demo-downstream",
+                            "group.id", pipeline + "-downstream",
                             "auto.offset.reset", "earliest"),
                     new StringDeserializer(), new StringDeserializer()))
             {
-                consumer.subscribe(List.of(TOPIC));
+                consumer.subscribe(List.of(pipeline + "-sections"));
                 long until = System.currentTimeMillis() + timeout.toMillis();
-                while (out.size() < atLeast
-                        && System.currentTimeMillis() < until)
+                while (System.currentTimeMillis() < until)
                 {
-                    consumer.poll(Duration.ofMillis(500))
-                            .forEach(record -> out.add(record.value()));
+                    // Once enough have come, take what else is waiting.
+                    ConsumerRecords<String, String> records = consumer.poll(
+                            Duration.ofMillis(out.size() < atLeast
+                                    ? 500 : 1000));
+                    if (records.isEmpty() && out.size() >= atLeast)
+                    {
+                        break;
+                    }
+                    records.forEach(record -> out.add(record.value()));
                 }
             }
             return out;

@@ -75,6 +75,8 @@ Revision 2026-11-05 (bi): documentation only. Decided 2026-11-05 with the user: 
 
 Revision 2026-11-05 (bj): performance measured for each part of the consolidated pipeline, in shared columns (§13.1). Decided 2026-11-05 with the user: the real landing node and the real splitter, each in process; per stage plus end to end; bulk files plus many small documents; a shared summary; end to end by replaying the landing run's timeline in the splitter; and the existing benchmark kept as the split micro-benchmark (`core`). New `LandingPerf` and `SplitterPerf`, shared support in `connector-core`'s test JAR, one output directory (`target/perf/`) with `pipeline-summary.md`, and six NetBeans actions. First results: bulk files split as fast in the app as in the micro-benchmark; small documents split at about 1 a second, against 10 landed, which is the next thing to look at.
 
+Revision 2026-11-05 (bk): the demonstration shows the whole current pipeline, landing and splitting (§15.3). Decided 2026-11-05 with the user: the landing node and the splitter as two processes, run from their JARs; the telemetry kept as files plus a report; two pipelines, a watched directory and HTTP push with mTLS; and, for landing, duplicate content, refused pushes and a resubmission link. The apps export OTLP to a receiver in the demo, which follows each item by its audit events and writes `telemetry/report.md`. Locally, Artemis replaces the SEDA stand-in. The NetBeans actions now build both apps.
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -117,7 +119,7 @@ Revision 2026-10-31 (ai): a file that keeps stopping the connector no longer sto
 Revision 2026-10-30 (ah): documentation only. The US Core 6.1 C-CDA mapping (the `mapping` repository) now reads `ccda/1` as stored, so no reshaping step sits between the connector and the mapping (§6.4). Its sample documents are the connector's conversions of the C-CDA test documents.
 
 Revision 2026-10-30 (ag): a demonstration of the connector (§15.3).
-- **Running it:** `-Pdemo`, or two NetBeans actions, in-process or against Postgres, SeaweedFS and Kafka in the minikube VM.
+- **Running it:** `-Pdemo`, or two NetBeans actions, in-process or against Postgres, SeaweedFS and Kafka in the minikube VM. Since revision (bk), the landing node and the splitter run as two processes.
 - **What it shows:** C-CDA files delivered one at a time, with the connector's log, audit events, and OpenTelemetry traces and metrics on the console, through the production PHI filters. The files fail in three ways (unsupported encoding, a file cut off part-way, a document that can't be converted), and the converted documents are read back as a consumer would.
 - **Bug found and fixed:** a C-CDA document with an undeclared entity such as `&nbsp;` failed its whole file with `STORAGE_FAILED`, instead of being stored unconverted. Woodstox reports that error as an unchecked exception, which the converter didn't catch (§6.4).
 
@@ -2475,36 +2477,53 @@ The splitter's log is saved to `file-connector/target/k8s-minikube.log` and the 
 
 ### 15.3 Demonstration (`-Pdemo`)
 
-A demonstration of the splitter at work, for showing people rather than testing: C-CDA files are landed one at a time and announced to the splitter, and the console shows its log, its audit events, and its OpenTelemetry traces and metrics as each goes through. `TestLanding` stands in for the landing node, writing to the same catalog and sending sealed `item.landed` messages over a SEDA queue; the landing node itself isn't run. At the end, a downstream consumer reads the converted documents back and excerpts are shown.
+A demonstration of the pipeline at work, for showing people rather than testing. The landing node and the splitter run as two processes, started from the JARs the build made, as they are deployed. Items go in through two pipelines, one after the other, and the console shows each item's passage: the landing node's log, the splitter's log, and the telemetry both export. Errors and refusals are shown as they happen, beside the successes. At the end, a downstream consumer reads the converted documents back, and the telemetry is kept for later review.
 
-**Running it:** `./mvnw -Pdemo -pl file-connector -am verify`, or the NetBeans actions (root project > Run Maven). Only `-Pdemo` includes `*Demo.java`, so no normal build, `-Pit` or `-Pperf` run runs it.
-- **Demo (in-process):** one JVM, no Docker, under a minute. Embedded Postgres for the lease and JDBC catalog, Iceberg tables on local disk under `file-connector/target/demo/warehouse/`, and a Camel SEDA queue standing in for the broker.
-- **Demo (full stack in the VM):** `-Ddemo.stack=vm`, about a minute and a half once the images are in the VM. Postgres, SeaweedFS (through `S3FileIO`) and Kafka as containers in the `sdh-it` minikube VM, which is stopped afterwards (`-Ddemo.stop-vm=false` keeps it).
+**Running it:** `./mvnw -Pdemo -pl landing-connector,file-connector -am verify`, or the NetBeans actions (root project > Run Maven). Only `-Pdemo` includes `*Demo.java`, so no normal build, `-Pit` or `-Pperf` run runs it. The test itself (`PipelineDemo`) is plain JUnit; it starts the stack, the two apps and an OTLP receiver.
+- **Demo (pipeline, no Docker):** about two minutes. Embedded Postgres for the leases and the JDBC catalog, Iceberg tables on local disk under `file-connector/target/demo/warehouse/`, and an embedded Artemis broker. The apps are started through Spring Boot's `PropertiesLauncher` with `loader.path` set to a directory holding only the demo's `DemoLocalFileIO`, for the local disk tables.
+- **Demo (pipeline, full stack in the VM):** `-Ddemo.stack=vm`. Postgres, SeaweedFS (through `S3FileIO`) and Kafka as containers in the `sdh-it` minikube VM, which is stopped afterwards (`-Ddemo.stop-vm=false` keeps it).
   - **From NetBeans:** NetBeans starts Maven without the VM's `DOCKER_HOST`, and Testcontainers only reads that from the environment or `~/.testcontainers.properties`. So the demo asks `scripts/minikube-env.sh` for the address and certificates (starting the VM if needed), and passes them to its own Testcontainers strategy, `MinikubeDockerStrategy`. It is registered through `META-INF/services` in the test resources, and applies only when the demo has set its system properties, so the integration tests don't see it.
-- **Settings:** `demo.pause` between files (3 s), `demo.metric-interval` (15 s).
+- **Settings:** `demo.pause` between items (3 s), `demo.metric-interval` (15 s). The apps' settings go in as `SPRING_APPLICATION_JSON`, as in a container.
 
-**The files** (`DemoFiles`), built from the synthetic and de-identified samples in `connector-core/src/test/resources/ccda/`, so no PHI. A sample used in more than one file gets a tag in its title in each, because section IDs are keyed hashes of the content (§7.3): the same document in two files would be one section to a consumer.
+**The pipelines.** Each has its own landing node, splitter, queues and namespaces (`<pipeline>_landing` and `<pipeline>`), since a pipeline carries one type of content (§5.3).
+- **`demo-files`, a watched directory:** each file is written to an outbox, moved into the intake directory, and marked ready with a `.done` file; a resubmission also gets a `.sdh-replaces` file holding the earlier item's ID. The landing node moves a landed file to `landed/`.
+- **`demo-push`, HTTP push with mTLS:** the landing node listens on a free port with a server certificate from a CA made for the run (`DemoPki`), trusts clients from that CA, and lists one producer subject. Resubmissions name the earlier item in a `Replaces` header; the 202 receipt gives the item ID.
 
-| File | Content | Outcome |
+**The items** (`DemoFiles`), built from the synthetic and de-identified samples in `connector-core/src/test/resources/ccda/`, so no PHI. A sample used in more than one item gets a tag in its title in each, because section IDs are keyed hashes of the content (§7.3): the same document in two items would be one section to a consumer. Files 8 and 9 repeat content on purpose.
+
+| Item | Content | Outcome |
 |---|---|---|
 | `01-synthea-patient.xml`, `02-alice-newman.xml` | one document each | completed, 1 section |
 | `03-clinic-batch.xml` | 3 documents in a `<batch>` wrapper | completed, 3 sections |
 | `04-batch-with-bad-document.xml` | 3 documents; the middle one has an undeclared `&nbsp;` | completed, 3 sections, 1 stored unconverted (`CONVERT_XML_MALFORMED`) |
 | `05-truncated-batch.xml` | a complete document, then one cut off part-way | failed, `PARSE_UNBALANCED_ELEMENT`; the first document stays stored (one commit per document in the demo) |
 | `06-utf16-document.xml` | a document in UTF-16 | failed at byte 0, `PARSE_XML_UNSUPPORTED_ENCODING` |
-| `07-epic-inpatient.xml` | one document | completed: the connector carries on after failures |
+| `07-epic-inpatient.xml` | one document | completed: the pipeline carries on after failures |
+| `08-synthea-patient-again.xml` | file 1's bytes again | landed as an item of its own with an `item.duplicate_content` warning naming file 1's item; completed, and its section has file 1's section ID |
+| `09-truncated-batch-corrected.xml` | file 5, corrected, naming file 5's item | landed and linked to it (`replaces_item_id` in `landed_items`), never in its place; completed, 2 sections |
+| `p1-referral.xml`, `p2-discharge-batch.xml` | pushed: one document, then two | completed |
+| `p3-unlisted-client.xml` | pushed with a certificate from the CA whose subject isn't listed | refused, 403, before it reaches the intake |
+| `p4-too-large.xml` | pushed, over `max-item-bytes` (2 MiB) | refused, 413 |
+| `p5-replaces-unknown.xml` | pushed, replacing an item that doesn't exist | refused, 400 |
+| `p6-referral-corrected.xml` | pushed, replacing p1 | landed and linked to p1; completed |
+| `p7-utf16-document.xml` | pushed, in UTF-16 | landed; failed, `PARSE_XML_UNSUPPORTED_ENCODING` |
 
-**What the console shows,** for each file:
-- the file's name, what should happen, and its landing (the item ID, and the `item.landed` message sent);
-- the splitter's log lines and audit events (`inbox.added`, `file.started`, `batch.committed`, `section.failed`, `file.failing`, `file.split`, `file.completed`, `file.failed`), each with its trace and span IDs;
-- the result, from the splitter's checkpoint once the item is finished: its state, section counts or failure, and whether it was as expected;
-- `[otel trace]`: the item's trace as a tree (`ingest.item` > `split.batch` > `storage.commit`, `publish.batch`) with durations and attributes;
-- `[otel log]`: the audit events as OpenTelemetry log records;
-- `[otel metrics]` every 15 s: the `sdh.*` metrics as running totals.
+**What the console shows,** for each item:
+- the item's name and what should happen;
+- `[landing]` and `[splitter]`: each app's own log, its audit events included;
+- the landing result: the item ID, a duplicate warning or resubmission link (checked in `landed_items`), or the HTTP refusal;
+- the splitter's result: its state, section counts or failure, the time from delivery to finished, and whether it was as expected;
+- `[otel trace]`: each trace as a tree with durations and attributes, `[otel log]`: the audit events as OpenTelemetry log records, and `[otel metrics]` every 15 s: the `sdh.*` metrics as running totals.
 
-The console exporters are wrapped in the production filters (`AllowListSpanExporter`, `AuditOnlyLogRecordExporter`), so what's printed is exactly what a collector would get. They replace the OTLP exporters, which only exist when an endpoint is set.
+The apps export over OTLP/HTTP, through the production filters, to a receiver in the demo's JVM (`OtlpReceiver`), so what is shown is exactly what a collector would get. The demo follows each item by its audit events: the landing node's `item.landed` and `item.announced`, then the splitter's `file.completed` or `file.failed`. The two apps trace an item separately, with no shared trace; the item ID joins them.
 
-**At the end:** a summary table, then the downstream read-back. Every message is decoded with `connector-queue-reader` (decrypted, signature checked), and every section is read back out of the Iceberg tables. Converted documents are pretty-printed to `target/demo/output/<file>/section-<n>.json`, with a 16-line excerpt of each on the console; the unconverted one is kept as `section-1.original.xml`. Repeated message IDs are dropped, as a consumer would: the failing file re-announces its committed section (`publish.republish`), which is at-least-once delivery working as designed.
+**At the end:** a summary table, then the downstream read-back for each pipeline. Every message is decoded with `connector-queue-reader` (decrypted, signature checked), and every section is read back out of the Iceberg tables. Converted documents are pretty-printed to `target/demo/output/<pipeline>/<item>/section-<n>.json`, with a 16-line excerpt of each on the console; unconverted ones are kept in their original form. Repeated message IDs are dropped, as a consumer would: a failing item re-announces its committed sections (`publish.republish`), which is at-least-once delivery working as designed. A section with the same content as an earlier one has the same message ID (`messageId = sectionId`, §10.1) and reaches downstream once: Artemis drops the repeat by `_AMQ_DUPL_ID`; Kafka delivers it and the consumer drops it. The count of distinct messages is checked against what the items should send.
+
+**Kept for later review,** under `file-connector/target/demo/`:
+- `telemetry/report.md`: every item through the pipeline, from its telemetry: a table of items, then for each item its audit events from both apps in time order and its traces as trees; the refused pushes; and the apps' own events (starting, leases);
+- `telemetry/<service>/traces.jsonl`, `logs.jsonl` and `metrics.jsonl`: the raw telemetry, as OTLP JSON;
+- `logs/<pipeline>-landing.log` and `logs/<pipeline>-splitter.log`: each app's console output;
+- `output/`: the converted documents.
 
 **What it found:** a document with an undeclared entity failed its whole file instead of being stored unconverted (§6.4); fixed.
 

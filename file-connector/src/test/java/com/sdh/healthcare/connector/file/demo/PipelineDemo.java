@@ -8,29 +8,30 @@ package com.sdh.healthcare.connector.file.demo;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
-import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
-import com.sdh.healthcare.connector.core.landing.LandedItem;
+import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.file.TestKeys;
-import com.sdh.healthcare.connector.file.TestLanding;
 import com.sdh.healthcare.connector.file.demo.DemoFiles.DemoFile;
-import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
+import com.sdh.healthcare.connector.file.demo.DemoFiles.Push;
+import com.sdh.healthcare.connector.file.demo.OtlpReceiver.AuditEvent;
 import com.sdh.healthcare.connector.reader.QueueReader;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
-import com.sdh.healthcare.connector.runtime.telemetry.AllowListSpanExporter;
-import com.sdh.healthcare.connector.runtime.telemetry.AuditOnlyLogRecordExporter;
-import io.opentelemetry.sdk.logs.export.LogRecordExporter;
-import io.opentelemetry.sdk.metrics.SdkMeterProvider;
-import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
-import io.opentelemetry.sdk.resources.Resource;
-import io.opentelemetry.sdk.trace.export.SpanExporter;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.interfaces.ECPublicKey;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -42,441 +43,745 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
-import org.apache.camel.CamelContext;
+import javax.net.ssl.SSLContext;
+import org.apache.iceberg.Table;
+import org.apache.iceberg.catalog.Catalog;
+import org.apache.iceberg.data.IcebergGenerics;
+import org.apache.iceberg.data.Record;
+import org.apache.iceberg.expressions.Expressions;
+import org.apache.iceberg.io.CloseableIterable;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.AfterAllCallback;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.junit.jupiter.api.extension.ExtensionContext;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
-import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
+import org.slf4j.LoggerFactory;
 
 /**
- * A demonstration of the splitter at work (design §15.3): C-CDA files are
- * landed one by one, as a landing node would land them, and each is
- * announced to the splitter with an {@code item.landed} message. The
- * console shows the splitter's log, its audit events, and its
- * OpenTelemetry traces and metrics as each file goes through. At the end,
- * a downstream consumer reads the converted documents back from the sealed
- * messages and the Iceberg tables, and excerpts are shown. Some files
- * fail, in the three ways a C-CDA file can: an encoding the connector
- * refuses, a file that breaks off part-way, and a document that splits but
- * can't be converted.
- *
- * <p>Run with {@code -Pdemo} ({@code ./mvnw -Pdemo -pl file-connector -am
- * verify}), or from NetBeans (Run Maven &gt; Demo). Never part of a normal
- * build or the integration tests. Settings: {@code demo.stack}
- * {@code local} (default: one JVM, no Docker) or {@code vm} (Postgres,
- * SeaweedFS and Kafka in the minikube VM); {@code demo.pause} between files
- * (default 3s); {@code demo.metric-interval} (default 15s). Output in
- * {@code file-connector/target/demo/}. The landing node itself isn't run:
- * {@link TestLanding} stands in for it, writing to the same tables.
- *
- * <p>The samples are synthetic or de-identified; none contains PHI. The
- * connector's own output stays PHI-free either way: the console telemetry
- * goes through the same filters as the OTLP export.
+ * A demonstration of the consolidated pipeline (design §15.3): the landing
+ * node and the splitter, each run as a process of its own from the JAR the
+ * build made, connected by a broker as they are deployed. Two pipelines
+ * run one after the other, each an intake with its own landing node and
+ * splitter:
+ * <ol>
+ *   <li>{@code demo-files}: C-CDA files dropped one by one into a watched
+ *       directory, each followed by its {@code .done} marker. Among them
+ *       are the three ways a file fails to split, a file sent twice, and a
+ *       corrected file that names the one it replaces;
+ *   <li>{@code demo-push}: documents pushed over HTTPS with mTLS, and the
+ *       pushes the landing node refuses: an unlisted client, one too
+ *       large, and one replacing an item that doesn't exist.
+ * </ol>
+ * The console shows each item's way through: the demo's own commentary
+ * ({@code [demo]}), each app's log ({@code [landing]}, {@code [splitter]})
+ * with its errors and warnings, and the telemetry both apps export over
+ * OTLP to the demo's {@link OtlpReceiver}: audit events
+ * ({@code [otel log]}), traces ({@code [otel trace]}) and metrics
+ * ({@code [otel metrics]}). The demo follows each item by the audit
+ * events: landed and announced by the landing node, then split, and
+ * completed or failed by the splitter. At the end of each pipeline a
+ * downstream consumer reads the converted documents back.
+ * <p>
+ * Everything is kept in {@code file-connector/target/demo/}: the apps'
+ * logs ({@code logs/}), their telemetry as OTLP JSON
+ * ({@code telemetry/<service>/}), a report that follows each item through
+ * the pipeline by its telemetry ({@code telemetry/report.md}), and the
+ * converted documents ({@code output/}).
+ * <p>
+ * Run with {@code -Pdemo} ({@code ./mvnw -Pdemo -pl
+ * landing-connector,file-connector -am verify}), or from NetBeans (Run
+ * Maven &gt; Demo). Never part of a normal build or the integration tests.
+ * Settings: {@code demo.stack} {@code local} (default: no Docker) or
+ * {@code vm} (Postgres, SeaweedFS and Kafka in the minikube VM);
+ * {@code demo.pause} between items (default 3s);
+ * {@code demo.metric-interval} (default 15s).
+ * <p>
+ * The samples are synthetic or de-identified; none contains PHI. The apps'
+ * own output stays PHI-free either way: their telemetry goes through the
+ * same filters as in production.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-// Registered before Spring's extension, so it runs after Spring has closed
-// the connector: the stack it shuts down (Postgres, the broker, the VM)
-// must outlive the connector's own shutdown, which releases the lease.
-@ExtendWith(PipelineDemo.StackCloser.class)
-@SpringBootTest(properties = {
-    "camel.main.run-controller=false",
-    // Export spans within half a second of a file finishing, rather than
-    // Boot's default 5 s.
-    "management.opentelemetry.tracing.export.schedule-delay=500ms",
-    // The connector's own log lines; libraries only when they warn.
-    "logging.level.root=WARN",
-    "logging.level.com.sdh=INFO",
-    "logging.level.sdh=INFO"})
-@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-@Import(PipelineDemo.ConsoleExporters.class)
 class PipelineDemo
 {
 
     /** The demo's working directory. */
-    static final Path WORK = Path.of("target", "demo");
-
-    /**
-     * Where the landing stand-in sends item.landed, and the splitter
-     * consumes from.
-     */
-    static final String LANDED_QUEUE = "seda:sdh-demo-landed";
+    static final Path WORK = Path.of("target", "demo").toAbsolutePath();
 
     /** Where the converted documents are written. */
-    static final Path OUTPUT = WORK.resolve("output").toAbsolutePath();
+    static final Path OUTPUT = WORK.resolve("output");
 
-    /** The pause between files. */
-    static final Duration PAUSE = Duration.parse("PT"
-            + System.getProperty("demo.pause", "3s").toUpperCase(Locale.ROOT));
+    /** The pause between items. */
+    static final Duration PAUSE = duration("demo.pause", "3s");
 
-    /** Pretty-prints the converted JSON. */
+    /** How often the apps export metrics. */
+    static final Duration METRIC_INTERVAL =
+            duration("demo.metric-interval", "15s");
+
+    /** How long one item may take through the pipeline. */
+    static final Duration ITEM_LIMIT = Duration.ofMinutes(3);
+
+    /** The directory pipeline. */
+    static final String FILES = "demo-files";
+
+    /** The HTTP push pipeline. */
+    static final String PUSH = "demo-push";
+
+    /** The landing node's service name, in its telemetry. */
+    static final String LANDING = "landing-connector";
+
+    /** The splitter's service name, in its telemetry. */
+    static final String SPLITTER = "file-connector";
+
+    /** The producer the HTTP intake lists. */
+    static final String PRODUCER = "CN=claims-producer,O=Example";
+
+    /** A client with a certificate from the same CA, but not listed. */
+    static final String STRANGER = "CN=stranger,O=Example";
+
+    /** Pretty-prints the converted JSON, and reads push receipts. */
     static final ObjectMapper JSON = new ObjectMapper();
 
-    /** The landing intake's name. */
-    static final String INTAKE = "demo";
-
-    /** The key files. */
-    static final TestKeys KEYS;
-
-    /** What the connector runs against. */
-    static final DemoStack STACK;
-
-    /** The files to land, in order. */
-    static final List<DemoFile> FILES;
-
-    static
-    {
-        try
-        {
-            deleteTree(WORK);
-            Files.createDirectories(OUTPUT);
-            KEYS = new TestKeys(
-                    Files.createDirectories(WORK.resolve("keys")));
-            FILES = DemoFiles.build();
-            banner("Healthcare file connector demo");
-            STACK = DemoStack.create(
-                    System.getProperty("demo.stack", "local"), WORK);
-            say("Running against: " + STACK.describe());
-            say("Files to land, one at a time:");
-            for (DemoFile file : FILES)
-            {
-                say(String.format(Locale.ROOT, "  %-32s %,9d bytes  %s",
-                        file.name(), file.content().length, file.expected()));
-            }
-            say("Each file shows the connector's log lines and [otel log]"
-                    + " audit events as it runs, then its [otel trace]."
-                    + " [otel metrics] are printed every "
-                    + System.getProperty("demo.metric-interval", "15s") + ".");
-        }
-        catch (Exception failure)
-        {
-            throw new ExceptionInInitializerError(failure);
-        }
-    }
-
     /**
-     * Console exporters, wrapped in the production filters. They take the
-     * place of the OTLP exporters, which only exist when
-     * {@code sdh.telemetry.otlp.endpoint} is set.
-     */
-    @TestConfiguration
-    static class ConsoleExporters
-    {
-
-        /**
-         * Span trees, allow-listed attributes only.
-         *
-         * @return the exporter
-         */
-        @Bean
-        SpanExporter demoSpanExporter()
-        {
-            return new AllowListSpanExporter(new ConsoleTelemetry.SpanTrees());
-        }
-
-        /**
-         * Audit events only, one line each.
-         *
-         * @return the exporter
-         */
-        @Bean
-        LogRecordExporter demoLogRecordExporter()
-        {
-            return new AuditOnlyLogRecordExporter(
-                    new ConsoleTelemetry.LogLines());
-        }
-
-        /**
-         * Metrics, printed every {@code demo.metric-interval}.
-         *
-         * @param resource the service's resource
-         * @return the meter provider
-         */
-        @Bean(destroyMethod = "close")
-        SdkMeterProvider demoMeterProvider(Resource resource)
-        {
-            Duration interval = Duration.parse("PT" + System.getProperty(
-                    "demo.metric-interval", "15s").toUpperCase(Locale.ROOT));
-            return SdkMeterProvider.builder().setResource(resource)
-                    .registerMetricReader(PeriodicMetricReader
-                            .builder(new ConsoleTelemetry.MetricTable())
-                            .setInterval(interval).build())
-                    .build();
-        }
-    }
-
-    /**
-     * Gives the connector its settings.
+     * One item and what became of it.
      *
-     * @param registry the Spring property registry
-     * @throws Exception if the recipient key's fingerprint can't be made
+     * @param pipeline      the pipeline it went through
+     * @param file          the item, and what was expected
+     * @param itemId        its item ID; null if it wasn't landed
+     * @param landing       what the landing node did
+     * @param status        the splitter's final status, or the HTTP
+     *                      status of a refused push
+     * @param sections      the sections it stored
+     * @param failed        how many of those weren't converted
+     * @param committedSeq  the last committed section of a failed item;
+     *                      -1 if none
+     * @param millis        how long it took, from delivered to finished
      */
-    @DynamicPropertySource
-    static void properties(DynamicPropertyRegistry registry) throws Exception
-    {
-        Map<String, String> properties = new LinkedHashMap<>();
-        properties.put("sdh.landing.intake", INTAKE);
-        properties.put("sdh.landing.queue-uri", LANDED_QUEUE);
-        properties.put("sdh.landing.idle-wait", "200ms");
-        properties.put("sdh.split.format", "ccda");
-        properties.put("sdh.storage.catalog-name", "sdh");
-        // A commit per document, so each one is stored (and announced) as
-        // soon as it's split: a file that fails part-way keeps what came
-        // before the failure.
-        properties.put("sdh.storage.commit.max-sections", "1");
-        properties.put("sdh.maintenance.enabled", "false");
-        properties.put("sdh.crypto.keystore.path", KEYS.keystore.toString());
-        properties.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
-        properties.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
-        properties.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
-        properties.put("sdh.crypto.keys.signing.kid", "connector-2026");
-        properties.put("sdh.crypto.keys.signing.pem",
-                KEYS.signingPem.toString());
-        properties.put("sdh.crypto.keys.signing.passphrase",
-                TestKeys.SIGNING_PASSPHRASE);
-        properties.put("sdh.crypto.keys.recipient.kid", "downstream-2026");
-        properties.put("sdh.crypto.keys.recipient.pem",
-                KEYS.recipientPem.toString());
-        properties.put("sdh.crypto.keys.recipient.sha256",
-                KeyMaterial.fingerprint(KEYS.recipient.getPublic()));
-        properties.put("sdh.crypto.keys.inbox.kid", TestKeys.INBOX_KID);
-        properties.put("sdh.crypto.keys.inbox.pem", KEYS.inboxPem.toString());
-        properties.put("sdh.crypto.keys.inbox.passphrase",
-                TestKeys.INBOX_PASSPHRASE);
-        properties.put("sdh.crypto.keys.landing-signer.kid",
-                TestKeys.LANDING_SIGNER_KID);
-        properties.put("sdh.crypto.keys.landing-signer.pem",
-                KEYS.landingSignerPem.toString());
-        properties.putAll(STACK.properties());
-        properties.forEach((key, value) -> registry.add(key, () -> value));
-    }
-
-    /** The running connector. */
-    @Autowired
-    ConnectorRuntime runtime;
-
-    /** The connector's Camel context. */
-    @Autowired
-    CamelContext camel;
-
-    /** The demo's meter provider, flushed before the summary. */
-    @Autowired
-    SdkMeterProvider meters;
-
-    /**
-     * One landed file and what became of it: the splitter's checkpoint once
-     * it finished.
-     *
-     * @param file the file
-     * @param fileId its item ID
-     * @param checkpoint the splitter's final checkpoint for it
-     * @param failedSections the sections stored unconverted
-     * @param millis how long it took, from landing to finished
-     */
-    record Outcome(DemoFile file, UUID fileId, Checkpoint checkpoint,
-            long failedSections, long millis)
+    record Outcome(String pipeline, DemoFile file, UUID itemId,
+            String landing, String status, long sections, long failed,
+            long committedSeq, long millis)
     {
 
         /**
-         * The final state.
-         *
-         * @return {@code COMPLETED} or {@code FAILED}
-         */
-        String status()
-        {
-            return checkpoint.state().name();
-        }
-
-        /**
-         * Whether the file ended as the demo expected.
+         * Whether it ended as the demo expected.
          *
          * @return true if it did
          */
         boolean asExpected()
         {
-            return status().equals(file.status())
-                    && (!file.status().equals("COMPLETED")
-                            || checkpoint.sectionCount() == file.sections()
-                                    && failedSections
-                                            == file.failedSections());
-        }
-    }
-
-    /** Shuts the stack down once Spring has closed the connector. */
-    static final class StackCloser implements AfterAllCallback
-    {
-
-        /** Created by JUnit. */
-        StackCloser()
-        {
+            return status.equals(file.status())
+                    && (!status.equals("COMPLETED")
+                            || sections == file.sections()
+                                    && failed == file.failedSections());
         }
 
         /**
-         * Shuts the stack down.
+         * The distinct messages a downstream consumer gets for it:
+         * file.started, each committed section, and file.completed if it
+         * completed. A section an earlier item already sent has the same
+         * message ID, so it doesn't count again: Artemis drops it by
+         * {@code _AMQ_DUPL_ID}, and a consumer would drop it anyway.
          *
-         * @param context the test context
-         * @throws Exception if the stack can't be stopped
+         * @return how many
          */
-        @Override
-        public void afterAll(ExtensionContext context) throws Exception
+        int messages()
         {
-            STACK.close();
-            banner("Demo finished");
+            if (itemId == null)
+            {
+                return 0;
+            }
+            return status.equals("COMPLETED")
+                    ? (int) sections - file.repeats() + 2
+                    : 1 + (int) Math.max(0, committedSeq + 1);
         }
     }
 
+    /** The key files. */
+    TestKeys keys;
+
+    /** What the apps run against. */
+    DemoStack stack;
+
+    /** Receives the apps' telemetry. */
+    OtlpReceiver otlp;
+
+    /** The class path extras for the apps; null if they need none. */
+    Path extras;
+
+    /** Every item's outcome, in order. */
+    final List<Outcome> outcomes = new ArrayList<>();
+
     /**
-     * Lands each file in turn, then shows a summary and reads everything
-     * back as a downstream consumer would.
+     * Runs both pipelines, then the summary and the telemetry report.
      *
      * @throws Exception if the demo fails
      */
     @Test
     void demo() throws Exception
     {
-        TestLanding landing = new TestLanding(STACK.catalog(),
-                runtime.keys().wrap(), KEYS, INTAKE);
-        List<Outcome> outcomes = new ArrayList<>();
-        int number = 0;
-        for (DemoFile file : FILES)
+        quietLogging();
+        deleteTree(WORK);
+        Files.createDirectories(OUTPUT);
+        keys = new TestKeys(Files.createDirectories(WORK.resolve("keys")));
+        banner("Healthcare source connectors: pipeline demo");
+        say("Two pipelines, one after the other. Each is an intake with its"
+                + " own landing node and splitter, run as separate processes"
+                + " from their JARs and joined by a broker:");
+        say("  " + FILES + ": files dropped into a watched directory");
+        say("  " + PUSH + ": documents pushed over HTTPS with mTLS");
+        say("Console tags: [demo] this commentary; [landing] and [splitter]"
+                + " each app's log; [otel log] audit events, [otel trace]"
+                + " traces and [otel metrics] metrics (every "
+                + METRIC_INTERVAL.toSeconds() + " s), as the apps exported"
+                + " them over OTLP.");
+        try (DemoStack running = DemoStack.create(
+                System.getProperty("demo.stack", "local"), WORK);
+                OtlpReceiver receiver =
+                        new OtlpReceiver(WORK.resolve("telemetry")))
         {
-            outcomes.add(deliver(landing, file, ++number));
-            Thread.sleep(PAUSE.toMillis());
+            stack = running;
+            otlp = receiver;
+            say("Running against: " + stack.describe());
+            say("Telemetry received at " + otlp.endpoint());
+            extras = stack.localDisk() ? extras() : null;
+            filesPipeline();
+            pushPipeline();
+            summary();
+            Path report = TelemetryReport.write(otlp, outcomes,
+                    otlp.directory().resolve("report.md"));
+            banner("Kept for later review");
+            say("Each item through the pipeline, from its telemetry: "
+                    + report);
+            say("Telemetry as OTLP JSON: " + otlp.directory() + "/<service>/"
+                    + "{traces,logs,metrics}.jsonl");
+            say("The apps' logs: " + WORK.resolve("logs"));
+            say("Converted documents: " + OUTPUT);
         }
-        meters.forceFlush().join(10, TimeUnit.SECONDS);
-        summary(outcomes);
-        readBack(outcomes);
+        banner("Demo finished");
+    }
+
+    // ---- the directory pipeline ----
+
+    /**
+     * The directory pipeline: each file is dropped into the intake
+     * directory with its marker, landed, announced, and split.
+     *
+     * @throws Exception if the pipeline fails
+     */
+    void filesPipeline() throws Exception
+    {
+        List<DemoFile> files = DemoFiles.build();
+        Path base = Files.createDirectories(WORK.resolve(FILES));
+        Path intake = Files.createDirectories(base.resolve("intake"));
+        Path landed = Files.createDirectories(base.resolve("landed"));
+        Path outbox = Files.createDirectories(base.resolve("outbox"));
+        banner("Pipeline 1 of 2: " + FILES + " (a watched directory)");
+        say("Intake directory: " + intake);
+        say("Files to deliver, one at a time:");
+        for (DemoFile file : files)
+        {
+            say(String.format(Locale.ROOT, "  %-34s %,9d bytes  %s",
+                    file.name(), file.content().length, file.expected()));
+        }
+        Map<String, String> landing = new LinkedHashMap<>();
+        landing.put("sdh.landing.source.path", intake.toString());
+        landing.put("sdh.landing.source.access", "read-write");
+        landing.put("sdh.landing.source.after", "move");
+        landing.put("sdh.landing.source.move-to", landed.toString());
+        landing.put("sdh.landing.source.ready", "marker");
+        landing.put("sdh.landing.source.poll-interval", "200ms");
+        try (DemoApp splitter = startSplitter(FILES);
+                DemoApp node = startLanding(FILES, landing))
+        {
+            Map<String, UUID> items = new LinkedHashMap<>();
+            int number = 0;
+            for (DemoFile file : files)
+            {
+                banner(String.format(Locale.ROOT, "%s, file %d of %d: %s",
+                        FILES, ++number, files.size(), file.name()));
+                say("Expected: " + file.expected());
+                int from = otlp.eventCount();
+                long start = System.currentTimeMillis();
+                Path staged = Files.write(outbox.resolve(file.name()),
+                        file.content());
+                if (file.replaces() != null)
+                {
+                    UUID earlier = items.get(file.replaces());
+                    Files.writeString(intake.resolve(file.name()
+                            + ".sdh-replaces"), earlier.toString());
+                    say("Wrote " + file.name() + ".sdh-replaces naming "
+                            + file.replaces() + "'s item " + earlier);
+                }
+                Files.move(staged, intake.resolve(file.name()),
+                        StandardCopyOption.ATOMIC_MOVE);
+                Files.createFile(intake.resolve(file.name() + ".done"));
+                say("Dropped " + file.name() + " ("
+                        + file.content().length + " bytes) into the intake"
+                        + " directory, then its .done marker");
+                AuditEvent itemLanded = otlp.await(LANDING, "item.landed",
+                        event -> String.valueOf(file.content().length)
+                                .equals(event.get("bytes")),
+                        from, ITEM_LIMIT);
+                UUID itemId = UUID.fromString(itemLanded.get("item_id"));
+                items.put(file.name(), itemId);
+                Outcome outcome = follow(FILES, file, itemId, from, start,
+                        landingResult(FILES, file, itemId, from, items));
+                outcomes.add(outcome);
+                say("The landing node moved it out of the intake: landed/"
+                        + " now holds " + count(landed) + " file(s)");
+                Thread.sleep(PAUSE.toMillis());
+            }
+            readBack(FILES);
+        }
     }
 
     /**
-     * Lands and announces one file, and waits for the splitter to finish
-     * it.
+     * What the landing node did with an item beyond landing it: warned of
+     * a duplicate, or linked a resubmission, as the demo expected.
      *
-     * @param landing the landing stand-in
-     * @param file the file
-     * @param number its position in the delivery order, from 1
-     * @return what became of it
-     * @throws Exception if landing fails or the file isn't finished within
-     *         3 minutes
+     * @param pipeline the pipeline
+     * @param file     the item
+     * @param itemId   its ID
+     * @param from     where its events start
+     * @param items    the items so far, by file name
+     * @return a short description
+     * @throws Exception if an expected event doesn't come, or a link
+     *                   isn't recorded
      */
-    Outcome deliver(TestLanding landing, DemoFile file, int number)
-            throws Exception
+    String landingResult(String pipeline, DemoFile file, UUID itemId,
+            int from, Map<String, UUID> items) throws Exception
     {
-        banner(String.format(Locale.ROOT, "File %d of %d: %s", number,
-                FILES.size(), file.name()));
-        say("Expected: " + file.expected());
-        long start = System.currentTimeMillis();
-        LandedItem item = landing.land(file.content(), file.name());
-        landing.announce(camel, LANDED_QUEUE, item);
-        UUID fileId = item.itemId();
-        say("Landed " + file.name() + " (" + file.content().length
-                + " bytes) as item " + fileId
-                + ", and announced it to the splitter");
-        Checkpoint done = null;
-        while (done == null && System.currentTimeMillis() - start < 180_000)
+        if (file.duplicateOf() != null)
         {
-            Thread.sleep(200);
-            done = runtime.processor().last()
-                    .filter(checkpoint -> checkpoint.fileId().equals(fileId)
-                            && !checkpoint.state().inProgress())
-                    .orElse(null);
+            AuditEvent duplicate = otlp.await(LANDING,
+                    "item.duplicate_content", event -> true, from,
+                    ITEM_LIMIT);
+            say("The landing node warned: same content as "
+                    + file.duplicateOf() + "'s item "
+                    + items.get(file.duplicateOf()) + " ("
+                    + OtlpReceiver.text(duplicate.attributes())
+                    + "); landed anyway, as an item of its own");
+            return "landed, duplicate content";
         }
-        if (done == null)
+        if (file.replaces() != null)
         {
-            throw new IllegalStateException(
-                    file.name() + " wasn't finished within 3 minutes");
+            UUID earlier = items.get(file.replaces());
+            UUID recorded = replaces(pipeline, itemId);
+            say("landed_items records item " + itemId + " as replacing "
+                    + recorded + (earlier.equals(recorded)
+                            ? " (" + file.replaces() + "): linked, and "
+                                    + file.replaces() + "'s item is still"
+                                    + " there"
+                            : ", NOT " + earlier));
+            return earlier.equals(recorded) ? "landed, linked to "
+                    + file.replaces() : "landed, link WRONG";
         }
+        return "landed";
+    }
+
+    // ---- the HTTP push pipeline ----
+
+    /**
+     * The HTTP push pipeline: each document is pushed over HTTPS with
+     * mTLS; those the landing node accepts are landed, announced and
+     * split.
+     *
+     * @throws Exception if the pipeline fails
+     */
+    void pushPipeline() throws Exception
+    {
+        List<Push> pushes = DemoFiles.pushes();
+        DemoPki pki = new DemoPki(WORK.resolve(PUSH).resolve("pki"));
+        banner("Pipeline 2 of 2: " + PUSH + " (HTTP push with mTLS)");
+        say("The node trusts the demo CA's client certificates, and lists"
+                + " one subject: " + PRODUCER);
+        say("Pushes, one at a time:");
+        for (Push push : pushes)
+        {
+            say(String.format(Locale.ROOT, "  %-34s %,9d bytes  %s",
+                    push.file().name(), push.file().content().length,
+                    push.file().expected()));
+        }
+        Map<String, String> landing = new LinkedHashMap<>();
+        landing.put("sdh.landing.source.type", "http");
+        landing.put("sdh.landing.http.port", "0");
+        landing.put("sdh.landing.http.tls.certificate",
+                pki.serverCertificate.toString());
+        landing.put("sdh.landing.http.tls.private-key",
+                pki.serverKey.toString());
+        landing.put("sdh.landing.http.auth", "mtls");
+        landing.put("sdh.landing.http.mtls.trusted-cas",
+                pki.caCertificate.toString());
+        landing.put("sdh.landing.http.mtls.subjects[0]", PRODUCER);
+        landing.put("sdh.landing.http.max-item-bytes",
+                Integer.toString(DemoFiles.MAX_PUSH_BYTES));
+        try (DemoApp splitter = startSplitter(PUSH);
+                DemoApp node = startLanding(PUSH, landing))
+        {
+            Matcher port = Pattern.compile("started on port (\\d+)")
+                    .matcher(node.await("started on port \\d+",
+                            Duration.ofSeconds(30)));
+            if (!port.find())
+            {
+                throw new IllegalStateException("No HTTP port in the log");
+            }
+            URI uri = URI.create("https://127.0.0.1:" + port.group(1)
+                    + "/intakes/" + PUSH + "/items");
+            say("Pushing to " + uri);
+            SSLContext producer = pki.clientContext(pki.issue(PRODUCER,
+                    false));
+            SSLContext stranger = pki.clientContext(pki.issue(STRANGER,
+                    false));
+            Map<String, UUID> items = new LinkedHashMap<>();
+            int number = 0;
+            for (Push push : pushes)
+            {
+                DemoFile file = push.file();
+                banner(String.format(Locale.ROOT, "%s, push %d of %d: %s",
+                        PUSH, ++number, pushes.size(), file.name()));
+                say("Expected: " + file.expected());
+                int from = otlp.eventCount();
+                long start = System.currentTimeMillis();
+                HttpRequest.Builder request = HttpRequest.newBuilder(uri)
+                        .timeout(Duration.ofSeconds(60))
+                        .header("Content-Type", "application/octet-stream")
+                        .header("X-Correlation-Id", "demo-push-" + number);
+                if (push.replaces() != null)
+                {
+                    String replaced = push.replaces().equals("unknown")
+                            ? UUID.randomUUID().toString()
+                            : items.get(push.replaces()).toString();
+                    request.header("Replaces", replaced);
+                    say("Replaces: " + replaced);
+                }
+                HttpResponse<String> response = HttpClient.newBuilder()
+                        .sslContext(push.listed() ? producer : stranger)
+                        .connectTimeout(Duration.ofSeconds(5)).build()
+                        .send(request.POST(HttpRequest.BodyPublishers
+                                .ofByteArray(file.content())).build(),
+                                HttpResponse.BodyHandlers.ofString());
+                say("Pushed " + file.name() + " as "
+                        + (push.listed() ? PRODUCER : STRANGER) + ": HTTP "
+                        + response.statusCode() + " " + response.body());
+                if (response.statusCode() != 202)
+                {
+                    Outcome outcome = new Outcome(PUSH, file, null,
+                            "refused",
+                            Integer.toString(response.statusCode()), 0, 0,
+                            -1, System.currentTimeMillis() - start);
+                    outcomes.add(outcome);
+                    say("Result: " + file.name() + " refused with HTTP "
+                            + response.statusCode() + "; nothing landed"
+                            + (outcome.asExpected() ? ""
+                                    : "  (NOT AS EXPECTED)"));
+                    Thread.sleep(PAUSE.toMillis());
+                    continue;
+                }
+                UUID itemId = UUID.fromString(JSON.readTree(response.body())
+                        .path("itemId").asText());
+                items.put(file.name(), itemId);
+                otlp.await(LANDING, "item.landed", event ->
+                        itemId.toString().equals(event.get("item_id")), from,
+                        ITEM_LIMIT);
+                outcomes.add(follow(PUSH, file, itemId, from, start,
+                        landingResult(PUSH, file, itemId, from, items)));
+                Thread.sleep(PAUSE.toMillis());
+            }
+            readBack(PUSH);
+        }
+    }
+
+    // ---- following an item ----
+
+    /**
+     * Follows a landed item through the rest of the pipeline: its
+     * announcement, then the splitter's outcome.
+     *
+     * @param pipeline the pipeline
+     * @param file     the item
+     * @param itemId   its ID
+     * @param from     where its events start
+     * @param start    when it was delivered
+     * @param landing  what the landing node did
+     * @return what became of it
+     * @throws Exception if it isn't finished in time
+     */
+    Outcome follow(String pipeline, DemoFile file, UUID itemId, int from,
+            long start, String landing) throws Exception
+    {
+        String id = itemId.toString();
+        otlp.await(LANDING, "item.announced",
+                event -> id.equals(event.get("item_id")), from, ITEM_LIMIT);
+        say("Landed as item " + id + " and announced to the splitter");
+        AuditEvent done = otlp.await(SPLITTER,
+                Set.of("file.completed", "file.failed"),
+                event -> id.equals(event.get("file_id")), from, ITEM_LIMIT);
         long millis = System.currentTimeMillis() - start;
-        Outcome outcome = new Outcome(file, fileId, done,
-                runtime.processor().failedSectionCount(fileId), millis);
-        String detail = done.failure() == null
-                ? done.sectionCount() + " sections, "
-                        + outcome.failedSections() + " stored unconverted"
-                : done.failure().code() + " at byte "
-                        + done.failure().offset() + " in stage "
-                        + done.failure().stage()
-                        + "; the original stays in landing";
+        long failed = otlp.events().stream()
+                .filter(event -> event.service().equals(SPLITTER)
+                        && event.name().equals("section.failed")
+                        && id.equals(event.get("file_id")))
+                .count();
+        Outcome outcome;
+        String detail;
+        if (done.name().equals("file.completed"))
+        {
+            long sections = Long.parseLong(done.get("count"));
+            outcome = new Outcome(pipeline, file, itemId, landing,
+                    "COMPLETED", sections, failed, sections - 1, millis);
+            detail = sections + " section(s), " + failed
+                    + " stored unconverted";
+        }
+        else
+        {
+            long seq = Long.parseLong(done.get("seq"));
+            outcome = new Outcome(pipeline, file, itemId, landing, "FAILED",
+                    0, failed, seq, millis);
+            detail = done.get("error_code") + " at byte "
+                    + done.get("offset") + " in stage " + done.get("stage")
+                    + "; " + (seq + 1) + " section(s) stored before it;"
+                    + " the original stays in landing";
+        }
         say(String.format(Locale.ROOT,
-                "Result: %s is item %s: %s (%s) after %.1f s%s", file.name(),
-                fileId, outcome.status(), detail, millis / 1000.0,
-                outcome.asExpected() ? "" : "  (NOT AS EXPECTED)"));
+                "Result: %s is item %s: %s, %s (%s) after %.1f s%s",
+                file.name(), id, landing, outcome.status(), detail,
+                millis / 1000.0, outcome.asExpected() ? ""
+                        : "  (NOT AS EXPECTED)"));
         return outcome;
     }
 
     /**
-     * Prints a table of what became of each file.
+     * The item a landed item replaces, as {@code landed_items} records it.
      *
-     * @param outcomes the files' outcomes
+     * @param pipeline the pipeline
+     * @param itemId   the item
+     * @return the item it replaces; null if none
+     * @throws IOException if the table can't be read
      */
-    void summary(List<Outcome> outcomes)
+    UUID replaces(String pipeline, UUID itemId) throws IOException
     {
-        banner("Summary");
-        say(String.format(Locale.ROOT, "  %-32s %-36s %-9s %8s %8s %s",
-                "File", "File ID", "Status", "Sections", "Raw",
-                "As expected"));
-        for (Outcome outcome : outcomes)
+        Catalog catalog = stack.newCatalogClient();
+        Table table = LandingTables.landedItems(catalog,
+                landingNamespace(pipeline));
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                .where(Expressions.equal(LandingTables.ITEM_ID,
+                        itemId.toString()))
+                .select(LandingTables.ITEM_ID, LandingTables.REPLACES_ITEM_ID)
+                .build())
         {
-            boolean done = outcome.status().equals("COMPLETED");
-            say(String.format(Locale.ROOT, "  %-32s %-36s %-9s %8s %8s %s",
-                    outcome.file().name(), outcome.fileId(), outcome.status(),
-                    done ? String.valueOf(outcome.checkpoint().sectionCount())
-                            : "-",
-                    done ? String.valueOf(outcome.failedSections())
-                            : String.valueOf(
-                                    outcome.checkpoint().failure().code()),
-                    outcome.asExpected() ? "yes" : "NO"));
+            for (Record row : rows)
+            {
+                Object replaced = row.getField(LandingTables.REPLACES_ITEM_ID);
+                if (replaced != null)
+                {
+                    return UUID.fromString(replaced.toString());
+                }
+            }
         }
+        return null;
+    }
+
+    // ---- the apps ----
+
+    /**
+     * Starts a pipeline's splitter and waits until it is ready.
+     *
+     * @param pipeline the pipeline
+     * @return the running app
+     * @throws Exception if it can't start
+     */
+    DemoApp startSplitter(String pipeline) throws Exception
+    {
+        Map<String, String> settings = common(pipeline);
+        settings.put("sdh.landing.intake", pipeline);
+        settings.put("sdh.landing.idle-wait", "200ms");
+        settings.put("sdh.landing.storage.namespace",
+                landingNamespace(pipeline));
+        settings.put("sdh.split.format", "ccda");
+        settings.put("sdh.storage.namespace", pipeline.replace('-', '_'));
+        // A commit per document, so each one is stored (and announced) as
+        // soon as it's split: a file that fails part-way keeps what came
+        // before the failure.
+        settings.put("sdh.storage.commit.max-sections", "1");
+        settings.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
+        settings.put("sdh.crypto.keys.signing.kid", "connector-2026");
+        settings.put("sdh.crypto.keys.signing.pem",
+                keys.signingPem.toString());
+        settings.put("sdh.crypto.keys.recipient.kid", "downstream-2026");
+        settings.put("sdh.crypto.keys.recipient.pem",
+                keys.recipientPem.toString());
+        settings.put("sdh.crypto.keys.recipient.sha256",
+                KeyMaterial.fingerprint(keys.recipient.getPublic()));
+        settings.put("sdh.crypto.keys.inbox.kid", TestKeys.INBOX_KID);
+        settings.put("sdh.crypto.keys.inbox.pem", keys.inboxPem.toString());
+        settings.put("sdh.crypto.keys.inbox.passphrase",
+                TestKeys.INBOX_PASSPHRASE);
+        settings.put("sdh.crypto.keys.landing-signer.kid",
+                TestKeys.LANDING_SIGNER_KID);
+        settings.put("sdh.crypto.keys.landing-signer.pem",
+                keys.landingSignerPem.toString());
+        settings.putAll(stack.splitterQueues(pipeline));
+        say("Starting the " + pipeline + " splitter ("
+                + DemoApp.jar("file-connector").getFileName() + ")");
+        DemoApp app = new DemoApp("splitter", DemoApp.jar("file-connector"),
+                extras, settings, WORK.resolve("logs")
+                        .resolve(pipeline + "-splitter.log"));
+        app.await("Started FileConnectorApplication", Duration.ofMinutes(2));
+        return app;
     }
 
     /**
-     * Downstream: decode every message (decrypt, check the signature) and
-     * read each section back out of the Iceberg tables with
-     * connector-queue-reader, as a consumer would. Converted documents are
-     * written to target/demo/output/ and an excerpt of each is shown;
-     * unconverted ones are kept in their original form.
+     * Starts a pipeline's landing node and waits until it is ready.
      *
-     * @param outcomes the files' outcomes
+     * @param pipeline the pipeline
+     * @param source   its intake's settings
+     * @return the running app
+     * @throws Exception if it can't start
+     */
+    DemoApp startLanding(String pipeline, Map<String, String> source)
+            throws Exception
+    {
+        Map<String, String> settings = common(pipeline);
+        settings.put("sdh.connector-id", "landing-" + pipeline);
+        settings.put("sdh.landing.intake", pipeline);
+        settings.putAll(source);
+        settings.put("sdh.storage.namespace", landingNamespace(pipeline));
+        settings.put("sdh.crypto.keys.signing.kid",
+                TestKeys.LANDING_SIGNER_KID);
+        settings.put("sdh.crypto.keys.signing.pem",
+                keys.landingSigningPem.toString());
+        settings.put("sdh.crypto.keys.recipient.kid", TestKeys.INBOX_KID);
+        settings.put("sdh.crypto.keys.recipient.pem",
+                keys.inboxPublicPem.toString());
+        settings.put("sdh.crypto.keys.recipient.sha256",
+                KeyMaterial.fingerprint(keys.inbox.getPublic()));
+        settings.putAll(stack.landingQueue(pipeline));
+        say("Starting the " + pipeline + " landing node ("
+                + DemoApp.jar("landing-connector").getFileName() + ")");
+        DemoApp app = new DemoApp("landing",
+                DemoApp.jar("landing-connector"), extras, settings,
+                WORK.resolve("logs").resolve(pipeline + "-landing.log"));
+        app.await("Started LandingConnectorApplication",
+                Duration.ofMinutes(2));
+        return app;
+    }
+
+    /**
+     * The settings both apps of a pipeline share: storage, lease, the
+     * landed-items KEK, telemetry and logging.
+     *
+     * @param pipeline the pipeline
+     * @return the settings, to add to
+     */
+    Map<String, String> common(String pipeline)
+    {
+        Map<String, String> settings = new LinkedHashMap<>(stack.storage());
+        settings.put("sdh.storage.catalog-name", "sdh");
+        settings.put("sdh.maintenance.enabled", "false");
+        settings.put("sdh.crypto.keystore.path", keys.keystore.toString());
+        settings.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
+        settings.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
+        settings.put("sdh.crypto.keys.signing.passphrase",
+                TestKeys.SIGNING_PASSPHRASE);
+        settings.put("sdh.telemetry.otlp.endpoint", otlp.endpoint());
+        settings.put("sdh.telemetry.metric-interval",
+                METRIC_INTERVAL.toSeconds() + "s");
+        // Export spans within half a second of an item finishing, rather
+        // than Boot's default 5 s.
+        settings.put("management.opentelemetry.tracing.export"
+                + ".schedule-delay", "500ms");
+        // The apps' own log lines, with Boot's startup lines; libraries
+        // only when they warn.
+        settings.put("logging.level.root", "WARN");
+        settings.put("logging.level.com.sdh", "INFO");
+        settings.put("logging.level.sdh", "INFO");
+        settings.put("logging.level.org.springframework.boot", "INFO");
+        return settings;
+    }
+
+    /**
+     * A pipeline's landing namespace.
+     *
+     * @param pipeline the pipeline
+     * @return the namespace
+     */
+    static String landingNamespace(String pipeline)
+    {
+        return pipeline.replace('-', '_') + "_landing";
+    }
+
+    /**
+     * The class path extras the apps need for tables on local disk: the
+     * compiled {@link DemoLocalFileIO}, alone in a directory of its own,
+     * so that nothing else of the tests reaches the apps.
+     *
+     * @return the directory
+     * @throws IOException if it can't be made
+     */
+    static Path extras() throws IOException
+    {
+        String name = DemoLocalFileIO.class.getName().replace('.', '/')
+                + ".class";
+        Path extras = WORK.resolve("app-extras");
+        Path target = extras.resolve(name);
+        Files.createDirectories(target.getParent());
+        try (InputStream input = DemoLocalFileIO.class.getClassLoader()
+                .getResourceAsStream(name))
+        {
+            Files.copy(input, target);
+        }
+        return extras;
+    }
+
+    // ---- downstream ----
+
+    /**
+     * Downstream: decode every message of a pipeline (decrypt, check the
+     * signature) and read each section back out of the Iceberg tables
+     * with connector-queue-reader, as a consumer would. Converted
+     * documents are written to {@code target/demo/output/<pipeline>/} and
+     * an excerpt of each is shown; unconverted ones are kept in their
+     * original form.
+     *
+     * @param pipeline the pipeline
      * @throws Exception if a message can't be decoded or a section read
      */
-    void readBack(List<Outcome> outcomes) throws Exception
+    void readBack(String pipeline) throws Exception
     {
-        banner("Downstream: reading the converted documents back");
+        banner(pipeline + ": downstream reads the converted documents back");
         Map<UUID, Outcome> byId = new LinkedHashMap<>();
         int expected = 0;
         for (Outcome outcome : outcomes)
         {
-            byId.put(outcome.fileId(), outcome);
-            // file.started, then each committed section; file.completed
-            // only for completed files.
-            expected += outcome.status().equals("COMPLETED")
-                    ? 2 + outcome.checkpoint().sectionCount()
-                    : 1 + Math.max(0,
-                            outcome.checkpoint().committedSeq() + 1);
+            if (outcome.pipeline().equals(pipeline)
+                    && outcome.itemId() != null)
+            {
+                byId.put(outcome.itemId(), outcome);
+                expected += outcome.messages();
+            }
         }
-        List<String> bodies =
-                STACK.receive(camel, expected, Duration.ofSeconds(60));
+        List<String> bodies = stack.receive(pipeline, expected,
+                Duration.ofSeconds(60));
         say(bodies.size() + " messages received (" + expected
-                + " distinct expected), each a signed JWS inside a"
-                + " JWE: decrypted with the downstream key and checked"
-                + " against the connector's signing key");
+                + " distinct expected), each a signed JWS inside a JWE:"
+                + " decrypted with the downstream key and checked against"
+                + " the splitter's signing key");
+        CommonSettings.Crypto crypto = new CommonSettings.Crypto("local",
+                "local", new CommonSettings.Keystore(keys.keystore,
+                        TestKeys.KS_PASSWORD),
+                keys.splitterKeys(
+                        KeyMaterial.fingerprint(keys.recipient.getPublic()),
+                        keys.signingPem, null),
+                new CommonSettings.Aws(null, null),
+                new CommonSettings.Gcp(null),
+                new CommonSettings.Vault(null, null, null, "transit", null));
         try (QueueReader reader = QueueReader.builder()
-                .recipientKey("downstream-2026", KEYS.recipient.getPrivate())
+                .recipientKey("downstream-2026", keys.recipient.getPrivate())
                 .trustedSigner("connector-2026",
-                        (ECPublicKey) KEYS.signing.getPublic())
-                .catalog(STACK.newCatalogClient())
+                        (ECPublicKey) keys.signing.getPublic())
+                .catalog(stack.newCatalogClient())
                 .expectedCatalogName("sdh")
-                .keyProvider(runtime.keys().wrap())
+                .keyProvider(KeyMaterial.load(crypto).wrap())
                 .build())
         {
             Map<String, Integer> byType = new LinkedHashMap<>();
@@ -494,7 +799,8 @@ class PipelineDemo
                     continue;
                 }
                 byType.merge(message.type().wireName(), 1, Integer::sum);
-                if (message instanceof SectionInStorage section)
+                if (message instanceof SectionInStorage section
+                        && byId.containsKey(section.fileId()))
                 {
                     sections.add(section);
                 }
@@ -503,39 +809,56 @@ class PipelineDemo
             if (repeats > 0)
             {
                 say(repeats + " repeated message ID(s) dropped. Delivery is"
-                        + " at least once: a file that fails"
-                        + " announces its committed sections again"
-                        + " (publish.republish) in case the first send was"
-                        + " lost, and consumers ignore an ID they've already"
+                        + " at least once: a file that fails announces its"
+                        + " committed sections again (publish.republish) in"
+                        + " case the first send was lost, and a section with"
+                        + " the same content as an earlier one has the same"
+                        + " ID. Consumers ignore an ID they've already"
                         + " handled.");
             }
+            int distinct = seen.size();
+            int shared = byId.values().stream()
+                    .mapToInt(outcome -> outcome.file().repeats()).sum();
+            say(distinct != expected
+                    ? "MISMATCH: " + distinct + " distinct messages, "
+                            + expected + " expected"
+                    : shared == 0 ? distinct + " distinct messages, as"
+                            + " expected"
+                    : distinct + " distinct messages, as expected: " + shared
+                            + " section(s) had the same content as an"
+                            + " earlier item's, so the same ID, and came"
+                            + " once. Artemis drops such a repeat by its"
+                            + " message ID; Kafka delivers it, and the"
+                            + " consumer drops it.");
+            List<UUID> order = new ArrayList<>(byId.keySet());
             sections.sort(Comparator.comparing((SectionInStorage section) ->
-                    FILES.indexOf(byId.get(section.fileId()).file()))
+                    order.indexOf(section.fileId()))
                     .thenComparingLong(SectionInStorage::seq));
             for (SectionInStorage section : sections)
             {
-                show(reader, section, byId.get(section.fileId()).file());
+                show(reader, section, pipeline,
+                        byId.get(section.fileId()).file());
             }
         }
-        say("");
-        say("Converted documents: " + OUTPUT);
     }
 
     /**
      * Reads one section back, writes it to the output directory and shows
      * an excerpt.
      *
-     * @param reader the queue reader
-     * @param section the section's message
-     * @param file the file it came from
+     * @param reader   the queue reader
+     * @param section  the section's message
+     * @param pipeline the pipeline
+     * @param file     the item it came from
      * @throws IOException if the section can't be read or written
      */
-    void show(QueueReader reader, SectionInStorage section, DemoFile file)
-            throws IOException
+    void show(QueueReader reader, SectionInStorage section, String pipeline,
+            DemoFile file) throws IOException
     {
         byte[] content = reader.readSection(section, 16 << 20);
         String stem = file.name().replaceFirst("\\.xml$", "");
-        Path dir = Files.createDirectories(OUTPUT.resolve(stem));
+        Path dir = Files.createDirectories(OUTPUT.resolve(pipeline)
+                .resolve(stem));
         say("");
         if (section instanceof SectionStored stored)
         {
@@ -547,8 +870,8 @@ class PipelineDemo
                     + " C-CDA at offset %,d -> %s", file.name(),
                     section.seq(), stored.mapping(), content.length,
                     section.sourceLength(), section.sourceOffset(),
-                    OUTPUT.getParent().relativize(out)));
-            excerpt(pretty, 16);
+                    WORK.relativize(out)));
+            excerpt(pretty, 12);
         }
         else if (section instanceof SectionFailed failed)
         {
@@ -558,16 +881,54 @@ class PipelineDemo
                     + " converted (%s); stored in its original form,"
                     + " %,d bytes at offset %,d -> %s", file.name(),
                     section.seq(), failed.errorCode(), content.length,
-                    section.sourceOffset(),
-                    OUTPUT.getParent().relativize(out)));
+                    section.sourceOffset(), WORK.relativize(out)));
             excerpt(new String(content, UTF_8), 8);
         }
+    }
+
+    // ---- the summary ----
+
+    /** Prints a table of what became of each item. */
+    void summary()
+    {
+        banner("Summary");
+        String format = "  %-10s %-34s %-36s %-30s %-9s %8s %5s %s";
+        say(String.format(Locale.ROOT, format, "Pipeline", "Item", "Item ID",
+                "Landing", "Splitter", "Sections", "Raw", "As expected"));
+        for (Outcome outcome : outcomes)
+        {
+            boolean completed = outcome.status().equals("COMPLETED");
+            say(String.format(Locale.ROOT, format, outcome.pipeline(),
+                    outcome.file().name(), outcome.itemId() == null ? "-"
+                            : outcome.itemId().toString(),
+                    outcome.landing(), outcome.itemId() == null ? "-"
+                            : outcome.status(),
+                    completed ? Long.toString(outcome.sections()) : "-",
+                    completed ? Long.toString(outcome.failed()) : "-",
+                    outcome.asExpected() ? "yes" : "NO"));
+        }
+        long unexpected = outcomes.stream()
+                .filter(outcome -> !outcome.asExpected()).count();
+        say(unexpected == 0 ? "Every item ended as expected."
+                : unexpected + " item(s) did NOT end as expected.");
+    }
+
+    // ---- console ----
+
+    /**
+     * Keeps the demo's own libraries (Testcontainers, the broker, Iceberg)
+     * to warnings, since no Spring context sets their levels here.
+     */
+    static void quietLogging()
+    {
+        ((Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME))
+                .setLevel(Level.WARN);
     }
 
     /**
      * Prints the first lines of a text, each cut at 140 characters.
      *
-     * @param text the text
+     * @param text  the text
      * @param lines how many lines to show
      */
     static void excerpt(String text, int lines)
@@ -607,6 +968,34 @@ class PipelineDemo
     {
         System.out.println("[demo] " + line);
         System.out.flush();
+    }
+
+    /**
+     * A duration setting, such as {@code 3s}.
+     *
+     * @param property the system property
+     * @param fallback its value when unset
+     * @return the duration
+     */
+    static Duration duration(String property, String fallback)
+    {
+        return Duration.parse("PT" + System.getProperty(property, fallback)
+                .toUpperCase(Locale.ROOT));
+    }
+
+    /**
+     * How many files are in a directory.
+     *
+     * @param directory the directory
+     * @return the count
+     * @throws IOException if it can't be listed
+     */
+    static long count(Path directory) throws IOException
+    {
+        try (Stream<Path> files = Files.list(directory))
+        {
+            return files.count();
+        }
     }
 
     /**

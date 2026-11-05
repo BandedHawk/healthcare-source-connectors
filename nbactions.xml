@@ -15,8 +15,10 @@
      Change a property here, or copy an action, for other settings: perf.size, perf.items, perf.rate, perf.workloads,
      perf.intakes, perf.formats (core; add csv), perf.recipient (rsa), perf.heap. perf.storage=s3 needs the minikube
      environment, so run that one with scripts/perf.sh.
-     Demo (design §15.3): C-CDA files through the connector with its log and OpenTelemetry output in the Output window,
-     in-process or against containers in the minikube VM. Only these actions or -Pdemo run it. -->
+     Demo (design §15.3): the landing node and the splitter as separate processes, joined by a broker, with C-CDA
+     files through a watched directory and pushes over HTTPS; both apps' logs and OpenTelemetry output in the Output
+     window, kept in file-connector/target/demo/ (logs/, telemetry/ with report.md, output/). Without Docker, or
+     against containers in the minikube VM. Only these actions or -Pdemo run it. -->
 <actions>
     <action>
         <actionName>CUSTOM-performance-test</actionName>
@@ -176,13 +178,14 @@
     </action>
     <action>
         <actionName>CUSTOM-demo</actionName>
-        <displayName>Demo (in-process)</displayName>
-        <!-- Demonstration (design §15.3): C-CDA files delivered one by one, with the connector's log, audit events and
-             OpenTelemetry traces and metrics in the Output window, a failure mix, then the converted documents read
-             back. One JVM, no Docker, under a minute. Output: file-connector/target/demo/. -->
+        <displayName>Demo (pipeline, no Docker)</displayName>
+        <!-- Demonstration (design §15.3): two pipelines, each a landing node and a splitter run from their JARs. Files
+             dropped into a watched directory, then pushes over HTTPS with mTLS, with failures in both apps; each
+             item's way through on the console, then the converted documents read back. Embedded Postgres, tables on
+             local disk and an embedded Artemis broker; a few minutes. Output: file-connector/target/demo/. -->
         <goals>
             <goal>-pl</goal>
-            <goal>file-connector</goal>
+            <goal>landing-connector,file-connector</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>
@@ -196,12 +199,12 @@
     </action>
     <action>
         <actionName>CUSTOM-demo-vm</actionName>
-        <displayName>Demo (full stack in the VM)</displayName>
-        <!-- The same demo as deployed: Postgres, SeaweedFS (S3) and Kafka as containers in the sdh-it minikube VM,
-             which is started if needed and stopped afterwards (demo.stop-vm=false keeps it running). A few minutes. -->
+        <displayName>Demo (pipeline, full stack in the VM)</displayName>
+        <!-- The same demo against Postgres, SeaweedFS (S3) and Kafka as containers in the sdh-it minikube VM, which is
+             started if needed and stopped afterwards (demo.stop-vm=false keeps it running). A few minutes. -->
         <goals>
             <goal>-pl</goal>
-            <goal>file-connector</goal>
+            <goal>landing-connector,file-connector</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>
