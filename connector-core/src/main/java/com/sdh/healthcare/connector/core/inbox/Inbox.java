@@ -236,6 +236,19 @@ public final class Inbox
     }
 
     /**
+     * Whether an item is in the inbox, whether or not it has been
+     * processed.
+     *
+     * @param itemId the item
+     * @return true if it is
+     */
+    public synchronized boolean contains(UUID itemId)
+    {
+        return itemIds.contains(itemId.getMostSignificantBits(),
+                itemId.getLeastSignificantBits());
+    }
+
+    /**
      * The next item to process: the first after the position. Waits up to
      * the given time for one to arrive if there is none.
      *

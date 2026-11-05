@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.contract.table.SectionsTable;
 import com.sdh.healthcare.connector.core.inbox.InboxTables;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
+import com.sdh.healthcare.connector.file.inbox.InboxReconciler;
 import com.sdh.healthcare.connector.file.inbox.InboxRoute;
 import com.sdh.healthcare.connector.file.inbox.InboxWorker;
 import com.sdh.healthcare.connector.file.inbox.ResultReporter;
@@ -122,11 +123,24 @@ public class ConnectorConfiguration
                         runtime.keys().wrap(), properties.landing().intake(),
                         Clock.systemUTC()))
                 .orElse(null);
-        return new InboxWorker(runtime.processor(), runtime.inbox(),
-                runtime.tables().landedItems(), runtime.keys().wrap(),
-                properties.landing().idleWait(),
+        InboxWorker worker = new InboxWorker(runtime.processor(),
+                runtime.inbox(), runtime.tables().landedItems(),
+                runtime.keys().wrap(), properties.landing().idleWait(),
                 properties.retry().initialBackoff(), fatal, writerLock,
                 results);
+        ConnectorProperties.Reconcile reconcile =
+                properties.landing().reconcile();
+        if (reconcile.enabled())
+        {
+            worker.reconcileWith(new InboxReconciler(runtime.inbox(),
+                    runtime.tables().landedItems(),
+                    properties.landing().intake(),
+                    properties.landing().storage().catalogName(),
+                    properties.landing().storage().namespace(),
+                    reconcile.grace(), Clock.systemUTC()),
+                    reconcile.interval());
+        }
+        return worker;
     }
 
     /**

@@ -78,6 +78,15 @@ public final class InboxWorker implements AutoCloseable
     /** Sends results to the producer; null if they are off. */
     private final ResultReporter results;
 
+    /** Adds items whose messages were lost; null if off. */
+    private InboxReconciler reconciler;
+
+    /** How often the reconciler runs. */
+    private Duration reconcileInterval;
+
+    /** When the reconciler is next due, in {@link System#nanoTime}. */
+    private long reconcileDue;
+
     /** False once closing has begun. */
     private volatile boolean running = true;
 
@@ -140,6 +149,24 @@ public final class InboxWorker implements AutoCloseable
         this.results = results;
     }
 
+    /**
+     * Has the worker look for landed items whose messages were lost, as
+     * soon as it starts and then at each interval, between items. Called
+     * before {@link #start}.
+     *
+     * @param reconciler finds and adds the items
+     * @param interval   how often to look
+     * @return this worker
+     */
+    public InboxWorker reconcileWith(InboxReconciler reconciler,
+            Duration interval)
+    {
+        this.reconciler = reconciler;
+        this.reconcileInterval = interval;
+        this.reconcileDue = System.nanoTime();
+        return this;
+    }
+
     /** Starts the worker's thread. */
     public synchronized void start()
     {
@@ -155,6 +182,7 @@ public final class InboxWorker implements AutoCloseable
      */
     public boolean processNext() throws Exception
     {
+        reconcileIfDue();
         Optional<Inbox.Entry> next = inbox.next(idleWait);
         if (next.isEmpty())
         {
@@ -202,6 +230,40 @@ public final class InboxWorker implements AutoCloseable
         LOG.info("inbox.done itemId={} seq={} result={} sections={}",
                 entry.itemId(), entry.seq(), outcome.result(),
                 outcome.sectionCount());
+    }
+
+    /**
+     * Runs the reconciler if it is due. If it fails, splitting carries on
+     * and it runs again at the next interval; only a fatal error, such as
+     * a lost lease, is passed on, to stop the process.
+     *
+     * @throws Exception if interrupted, or the error is fatal
+     */
+    void reconcileIfDue() throws Exception
+    {
+        if (reconciler == null || System.nanoTime() - reconcileDue < 0)
+        {
+            return;
+        }
+        reconcileDue = System.nanoTime() + reconcileInterval.toNanos();
+        try
+        {
+            reconciler.reconcile();
+        }
+        catch (InterruptedException interrupted)
+        {
+            throw interrupted;
+        }
+        catch (Exception failure)
+        {
+            if (fatalReason(failure).isPresent())
+            {
+                throw failure;
+            }
+            LOG.warn("inbox.reconcile_failed error={} next_in_s={}",
+                    failure.getClass().getSimpleName(),
+                    reconcileInterval.toSeconds());
+        }
     }
 
     /** The thread's loop: process items until closed. */

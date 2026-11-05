@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.PublicKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
+import java.util.Map;
 
 /**
  * Signs a message (JWS, ES256) and encrypts the signed object to one
@@ -111,6 +112,21 @@ public final class MessageSealer
      */
     public byte[] seal(ConnectorMessage message)
     {
+        return seal(PayloadCodec.toJson(message));
+    }
+
+    /**
+     * Signs a payload as given, then encrypts it to the recipient. A
+     * message is sealed with {@link #seal(ConnectorMessage)}; this is for
+     * payloads that build couldn't write, such as one of another contract
+     * version, to test how readers take them.
+     *
+     * @param payload the payload's fields
+     * @return the JWE compact serialisation, as ASCII bytes
+     * @throws IllegalStateException if signing or encryption fails
+     */
+    public byte[] seal(Map<String, Object> payload)
+    {
         try
         {
             JWSObject jws = new JWSObject(
@@ -118,8 +134,7 @@ public final class MessageSealer
                             .keyID(signerKid)
                             .type(JWS_TYPE)
                             .build(),
-                    new Payload(JSONObjectUtils.toJSONString(
-                            PayloadCodec.toJson(message))));
+                    new Payload(JSONObjectUtils.toJSONString(payload)));
             jws.sign(signer);
             JWEObject jwe = new JWEObject(
                     new JWEHeader.Builder(jweAlgorithm,

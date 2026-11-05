@@ -518,6 +518,41 @@ class IntakeServiceTest
     }
 
     /**
+     * An item landed just before a crash, whose message was never sent,
+     * is announced at startup, before anything else lands; items
+     * announced before it aren't sent again (docs/DEPLOYMENT.md). This is
+     * the landing node's half of keeping items from being stranded; the
+     * splitter's reconciling covers a message the broker lost.
+     */
+    @Test
+    void announcesTheLastItemAgainAfterACrashBeforeItsMessage()
+            throws Exception
+    {
+        FencedCommitter committer = committer();
+        ItemLander lander = lander(committer);
+        IntakeService service = service(
+                new LocalDirectorySource(settings("read-write")), lander,
+                committer, Duration.ZERO);
+        service.onListed(write("a.csv", "first"));
+        assertThat(sent).hasSize(1);
+        failSends.set(Integer.MAX_VALUE);
+        service.onListed(write("b.csv", "second"));
+        assertThat(sent).as("its message never went").hasSize(1);
+        UUID unannounced = lander.lastLanded().orElseThrow().itemId();
+        failSends.set(0);
+
+        IntakeService restarted = service(
+                new LocalDirectorySource(settings("read-write")),
+                Duration.ZERO);
+        restarted.recoverAtStartup();
+        List<ConnectorMessage.ItemLanded> messages = landed();
+        assertThat(messages).extracting(ConnectorMessage.ItemLanded::fileId)
+                .hasSize(2).last().isEqualTo(unannounced);
+        assertThat(messages.get(0).fileId()).isNotEqualTo(unannounced);
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
      * An item landed before a crash, but not removed from the source, is
      * removed later without being landed again.
      */

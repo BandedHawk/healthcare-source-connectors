@@ -60,5 +60,10 @@ class ConnectorPropertiesTest
                 .isEqualTo(Duration.ofSeconds(5));
         assertThat(properties.landing().storage().namespace())
                 .isEqualTo("sdh_landing");
+        assertThat(properties.landing().reconcile().enabled()).isTrue();
+        assertThat(properties.landing().reconcile().grace())
+                .isEqualTo(Duration.ofMinutes(10));
+        assertThat(properties.landing().reconcile().interval())
+                .isEqualTo(Duration.ofMinutes(15));
     }
 }

@@ -76,12 +76,30 @@ public record ConnectorProperties(
      *                 consumed from, such as
      *                 {@code kafka:sdh.landing.claims?brokers=...&groupId=...}
      * @param storage  where the landed items are
-     * @param idleWait how long the splitter waits for an item before
-     *                 looking again
+     * @param idleWait  how long the splitter waits for an item before
+     *                  looking again
+     * @param reconcile how the splitter finds landed items whose messages
+     *                  were lost
      */
     public record Landing(String intake, String queueUri,
             @DefaultValue LandingStorage storage,
-            @DefaultValue("5s") Duration idleWait)
+            @DefaultValue("5s") Duration idleWait,
+            @DefaultValue Reconcile reconcile)
+    {
+    }
+
+    /**
+     * Finding landed items whose {@code item.landed} messages were lost
+     * (docs/DEPLOYMENT.md).
+     *
+     * @param enabled  whether to look; on unless turned off
+     * @param grace    how long an item may wait for its message before it
+     *                 is added without it
+     * @param interval how often to look, after the first time at startup
+     */
+    public record Reconcile(@DefaultValue("true") boolean enabled,
+            @DefaultValue("10m") Duration grace,
+            @DefaultValue("15m") Duration interval)
     {
     }
 

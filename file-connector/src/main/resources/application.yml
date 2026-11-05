@@ -45,3 +45,8 @@ logging:
 sdh:
   landing:
     idle-wait: 5s
+    # Landed items whose item.landed message was lost (docs/DEPLOYMENT.md).
+    reconcile:
+      enabled: true
+      grace: 10m
+      interval: 15m

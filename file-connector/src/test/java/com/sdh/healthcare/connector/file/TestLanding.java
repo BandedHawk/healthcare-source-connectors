@@ -189,6 +189,18 @@ public final class TestLanding
     }
 
     /**
+     * Seals a payload as the landing node, as given: for payloads this
+     * build wouldn't write, such as one of another contract version.
+     *
+     * @param payload the payload's fields
+     * @return the sealed message
+     */
+    public byte[] seal(Map<String, Object> payload)
+    {
+        return sealer.seal(payload);
+    }
+
+    /**
      * An item's {@code item.landed} message, sealed.
      *
      * @param item the item

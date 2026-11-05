@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.file.inbox;
 
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
+import com.sdh.healthcare.connector.contract.jose.MessageRejectedException.Reason;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
@@ -24,6 +25,10 @@ import com.sdh.healthcare.connector.core.telemetry.Telemetry;
  * sealed to the splitter and signed by the landing node, for the splitter's
  * intake, and point at the landing table it reads. One that fails a check
  * is refused, audited and dropped: delivering it again won't change it.
+ * One of a contract major version this splitter can't read is the
+ * exception: it isn't acknowledged, and waits on the queue until the
+ * splitter is upgraded, so that no item is stranded by a landing node
+ * upgraded first.
  * <p>
  * The caller acknowledges the message once {@link #receive} returns. If the
  * inbox can't be written, it throws, and the message stays on the queue to
@@ -87,8 +92,13 @@ public final class InboxReceiver
      *
      * @param body the message as received
      * @return what became of it
-     * @throws Exception if the inbox can't be written; the message is to be
-     *                   delivered again
+     * @throws UnreadableVersionException if the message is of a contract
+     *                                     major version this splitter
+     *                                     can't read; it is to be
+     *                                     delivered again
+     * @throws Exception                   if the inbox can't be written;
+     *                                     the message is to be delivered
+     *                                     again
      */
     public Result receive(byte[] body) throws Exception
     {
@@ -99,6 +109,16 @@ public final class InboxReceiver
         }
         catch (MessageRejectedException rejected)
         {
+            if (rejected.reason() == Reason.UNSUPPORTED_VERSION)
+            {
+                // Dropping it would strand the item; it waits on the queue
+                // until this splitter is upgraded.
+                Telemetry.get().auditError("inbox.unreadable_version",
+                        Fields.of(Attr.ERROR_CODE, ErrorCode.MESSAGE_REJECTED)
+                                .with(Attr.INTAKE, intake)
+                                .with(Attr.REASON, rejected.reason().name()));
+                throw new UnreadableVersionException(rejected);
+            }
             return reject(rejected.reason().name());
         }
         if (!(message instanceof ItemLanded landed))
