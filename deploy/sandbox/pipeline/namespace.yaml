@@ -1,0 +1,43 @@
+# A pipeline's namespace: its landing node and splitter (docs/SANDBOX.md). Filled in by scripts/sandbox.sh
+# (${K8S_NS}, ${PIPELINE}). Restricted Pod Security Standard; nothing in or out but what the policies below allow.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${K8S_NS}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    sdh.smiledigitalhealth.com/infra-client: "true"
+    sdh.smiledigitalhealth.com/pipeline: ${PIPELINE}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: ${K8S_NS} }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Both stages reach DNS and the shared services, and nothing else: no internet, no other pipeline.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: to-services, namespace: ${K8S_NS} }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: sdh-infra } } }]
+      ports: [{ port: 5432 }, { port: 9092 }, { port: 8333 }, { port: 8200 }, { port: 4318 }]
+---
+# Producers push to the landing node, and nothing else reaches either stage.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: producers-to-landing, namespace: ${K8S_NS} }
+spec:
+  podSelector: { matchLabels: { app: landing } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: sdh-producers } } }]
+      ports: [{ port: 8443 }]

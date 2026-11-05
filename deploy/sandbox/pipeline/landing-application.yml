@@ -1,0 +1,44 @@
+# A pipeline's landing node: an HTTP push intake with mTLS (design §5.3.15), landing into the bronze bucket.
+# Mounted from the ConfigMap landing-config, as the landing README describes. ${...} in capitals with a prefix
+# are filled in by scripts/sandbox.sh; ${S3_SECRET_ACCESS_KEY} and ${SDH_LEASE_JDBC_PASSWORD} are left for Spring,
+# from the secret landing-env. Keys and certificates are in the secret landing-keys, at /run/secrets.
+sdh:
+  connector-id: landing-${PIPELINE}
+  landing:
+    intake: ${PIPELINE}
+    source: { type: http }
+    http:
+      port: 8443
+      auth: mtls
+      tls: { certificate: /run/secrets/tls.crt, private-key: /run/secrets/tls.key }
+      mtls: { trusted-cas: /run/secrets/producers-ca.pem, subjects: ["${PRODUCER_SUBJECT}"] }
+      max-item-bytes: 104857600
+  storage:
+    catalog-name: sdh
+    namespace: ${ICEBERG_PREFIX}_landing
+    catalog:
+      type: jdbc
+      uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+      jdbc.user: landing_${ICEBERG_PREFIX}
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://sdh-bronze/warehouse
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
+            access-key-id: landing-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+      client: { region: us-east-1 }
+  lease:
+    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: landing_${ICEBERG_PREFIX} }
+  crypto:
+    wrap-provider: vault-transit
+    sign-provider: vault-transit
+    vault: { address: "http://vault.sdh-infra.svc:8200", token-file: /run/secrets/vault-token }
+    keys:
+      landed-items-kek: ${PIPELINE}-landed-items
+      signing: { kid: landing-${PIPELINE}, key-ref: ${PIPELINE}-landing-signing }
+      recipient: { kid: splitter-${PIPELINE}-inbox, pem: /run/secrets/splitter-inbox.pem, sha256: "${INBOX_SHA256}" }
+  queue:
+    type: kafka
+    uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}"
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }

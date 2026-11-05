@@ -1,0 +1,41 @@
+# Reserved for the FHIR stage, not yet built (the healthcare-data-transformer project): it will read each
+# pipeline's sections from Kafka (<pipeline>.sections) and the silver bucket, map C-CDA JSON to FHIR (US Core
+# 6.1, fail-fast), write the resources as Iceberg tables (<pipeline>_fhir) in the gold bucket, and send what fails
+# to <pipeline>.fhir.dlq for the report mode. Everything it needs is made ready by scripts/sandbox.sh: its topics,
+# its bucket and access key (reads silver, writes gold), its Vault token (unwraps the sections KEK), the
+# private key the splitter seals sections to, and the ConfigMap fhir-<pipeline> naming them all.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdh-fhir
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    sdh.smiledigitalhealth.com/infra-client: "true"
+---
+# Room kept for it on the cluster: what it may reserve, so the pipelines can't take it.
+apiVersion: v1
+kind: ResourceQuota
+metadata: { name: fhir-stage, namespace: sdh-fhir }
+spec:
+  hard: { requests.cpu: "3", requests.memory: 4Gi, limits.memory: 4Gi, pods: "6" }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: sdh-fhir }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: to-services, namespace: sdh-fhir }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: sdh-infra } } }]
+      ports: [{ port: 5432 }, { port: 9092 }, { port: 8333 }, { port: 8200 }, { port: 4318 }]

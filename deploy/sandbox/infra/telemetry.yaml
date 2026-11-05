@@ -1,0 +1,109 @@
+# Telemetry (design §12): the stages export OTLP/HTTP to a collector, as they would to a customer's, which passes
+# it on to Grafana's all-in-one OpenTelemetry backend (Tempo traces, Prometheus metrics, Loki logs, Grafana).
+# Only the allow-listed attributes and audit events leave the stages, so nothing here holds PHI.
+# Grafana: scripts/sandbox.sh grafana (port-forward to http://localhost:3000; admin password in the secret
+# grafana, made by the script).
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: otel-collector, namespace: sdh-infra }
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http: { endpoint: "0.0.0.0:4318" }
+    processors:
+      memory_limiter: { check_interval: 1s, limit_percentage: 80, spike_limit_percentage: 20 }
+      batch: {}
+    exporters:
+      otlphttp:
+        endpoint: http://lgtm.sdh-infra.svc:4318
+    extensions:
+      health_check: { endpoint: "0.0.0.0:13133" }
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces: { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp] }
+        metrics: { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp] }
+        logs: { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp] }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: otel-collector, namespace: sdh-infra }
+spec:
+  selector: { app: otel-collector }
+  ports: [{ name: otlp-http, port: 4318 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: otel-collector, namespace: sdh-infra }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: otel-collector } }
+  template:
+    metadata: { labels: { app: otel-collector } }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.162.0
+          args: [--config=/etc/otelcol/config.yaml]
+          ports: [{ name: otlp-http, containerPort: 4318 }]
+          readinessProbe: { httpGet: { path: /, port: 13133 }, periodSeconds: 5 }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/otelcol, readOnly: true }
+      volumes:
+        - { name: config, configMap: { name: otel-collector } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: lgtm, namespace: sdh-infra }
+spec:
+  selector: { app: lgtm }
+  ports:
+    - { name: grafana, port: 3000 }
+    - { name: otlp-http, port: 4318 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: lgtm, namespace: sdh-infra }
+spec:
+  serviceName: lgtm
+  replicas: 1
+  selector: { matchLabels: { app: lgtm } }
+  template:
+    metadata: { labels: { app: lgtm } }
+    spec:
+      containers:
+        - name: lgtm
+          image: grafana/otel-lgtm:0.36.0
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: grafana, key: admin-password } }
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "false" }
+          ports:
+            - { name: grafana, containerPort: 3000 }
+            - { name: otlp-http, containerPort: 4318 }
+          readinessProbe: { tcpSocket: { port: 3000 }, periodSeconds: 5 }
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests: { cpu: 200m, memory: 1Gi }
+            limits: { memory: 1536Mi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 20Gi } }

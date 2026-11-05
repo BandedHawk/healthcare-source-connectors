@@ -1,16 +1,20 @@
 # Sourced by it-minikube.sh and build-image.sh: starts the minikube profile if needed (KVM2 driver, Docker runtime,
 # no Kubernetes) and points the Docker CLI and Testcontainers at the Docker daemon inside the VM.
 #
-# Environment (defaults): SDH_IT_PROFILE=sdh-it SDH_IT_CPUS=6 SDH_IT_MEMORY=12g SDH_IT_DISK=60g
+# Environment (defaults): SDH_IT_PROFILE=sdh-it SDH_IT_CPUS=8 SDH_IT_MEMORY=8g SDH_IT_DISK=100g
+# Where the VM is kept: see minikube-home.sh (SDH_SANDBOX). 8 GB leaves room for the demo cluster alongside
+# (scripts/sandbox.sh); the integration tests need about 6.
 #
 # The profile is single-node with no Kubernetes: only its Docker daemon is used. `minikube docker-env` doesn't
 # work on multi-node clusters, and the tests shouldn't share a cluster you use for other work.
 # Remove it with: minikube delete -p sdh-it
 
 PROFILE="${SDH_IT_PROFILE:-sdh-it}"
-CPUS="${SDH_IT_CPUS:-6}"
-MEMORY="${SDH_IT_MEMORY:-12g}"
-DISK="${SDH_IT_DISK:-60g}"
+CPUS="${SDH_IT_CPUS:-8}"
+MEMORY="${SDH_IT_MEMORY:-8g}"
+DISK="${SDH_IT_DISK:-100g}"
+
+source "$(dirname "${BASH_SOURCE[0]}")/minikube-home.sh" || exit 1
 
 command -v minikube >/dev/null || { echo "minikube is not installed" >&2; exit 1; }
 

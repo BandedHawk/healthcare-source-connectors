@@ -1,0 +1,12 @@
+# The splitter README's Deployment, with requests: its memory is reserved on the node, as its limit.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: splitter }
+spec:
+  template:
+    spec:
+      containers:
+        - name: file-connector
+          resources:
+            requests: { cpu: 500m, memory: 2Gi }
+            limits: { memory: 2Gi }

@@ -11,9 +11,10 @@
 #   SDH_K8S_NAMESPACE=sdh-k8s-test (the services the stages need go in <namespace>-services)
 #
 # The profile is a single-node cluster of its own (KVM2, Docker runtime), separate from the sdh-it profile, which
-# runs no Kubernetes. Its kubeconfig is ~/.kube/sdh-k8s, so the current context in ~/.kube/config doesn't change.
+# runs no Kubernetes, and is kept where minikube-home.sh says (SDH_SANDBOX). Its kubeconfig is $SDH_KUBE_DIR/sdh-k8s
+# (minikube-home.sh), so the current kubectl context elsewhere doesn't change.
 # kubectl comes from `minikube kubectl`. The namespace is recreated on every run and left in place afterwards
-# for inspection:  KUBECONFIG=~/.kube/sdh-k8s minikube -p sdh-k8s kubectl -- -n sdh-k8s-test get pods
+# for inspection:  KUBECONFIG=$SDH_KUBE_DIR/sdh-k8s minikube -p sdh-k8s kubectl -- -n sdh-k8s-test get pods
 # Remove everything with: minikube delete -p sdh-k8s
 #
 # What it checks, in order: both READMEs' Deployments start under the restricted security settings, landing as an
@@ -30,7 +31,6 @@ VARIANT="${1:-customer}"
 PROFILE="${SDH_K8S_PROFILE:-sdh-k8s}"
 NS="${SDH_K8S_NAMESPACE:-sdh-k8s-test}"
 SVC_NS="$NS-services"
-export KUBECONFIG="${HOME}/.kube/${PROFILE}"
 K8S="$ROOT/file-connector/src/test/k8s"
 README="$ROOT/file-connector/src/dist/README.md"
 LANDING_README="$ROOT/landing-connector/src/dist/README.md"
@@ -40,6 +40,8 @@ SIGNING_PASSPHRASE="sign-secret"
 INBOX_PASSPHRASE="inbox-secret"
 
 command -v minikube >/dev/null || { echo "minikube is not installed" >&2; exit 1; }
+source "$ROOT/scripts/minikube-home.sh" || exit 1
+export KUBECONFIG="$SDH_KUBE_DIR/$PROFILE"
 for tool in keytool openssl python3; do
   command -v "$tool" >/dev/null || { echo "$tool is needed" >&2; exit 1; }
 done

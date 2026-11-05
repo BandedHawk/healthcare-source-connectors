@@ -1,0 +1,54 @@
+# The Iceberg JDBC catalog and the stages' leases, in one database. Each stage logs in as its own role
+# (scripts/sandbox.sh creates them); all share the catalog's tables through the sdh_catalog role, because a JDBC
+# catalog keeps every namespace in the same tables. The data itself is separated by bucket (seaweedfs.yaml).
+# The superuser password is in the secret postgres, made by the script.
+apiVersion: v1
+kind: Service
+metadata: { name: postgres, namespace: sdh-infra }
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres, namespace: sdh-infra }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:18.4
+          env:
+            - { name: POSTGRES_DB, value: sdh }
+            - { name: POSTGRES_USER, value: postgres }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres, key: password } }
+          args: [-c, max_connections=200, -c, shared_buffers=128MB]
+          ports: [{ containerPort: 5432 }]
+          readinessProbe: { exec: { command: [pg_isready, -U, postgres, -d, sdh] }, periodSeconds: 5 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }
+            - { name: run, mountPath: /var/run/postgresql }
+      volumes:
+        - { name: run, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 20Gi } }

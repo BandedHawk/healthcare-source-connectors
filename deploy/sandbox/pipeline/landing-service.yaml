@@ -1,0 +1,7 @@
+# Where producers push: https://landing.<namespace>.svc:8443/intakes/<pipeline>/items (mTLS; TLS ends at the pod).
+apiVersion: v1
+kind: Service
+metadata: { name: landing }
+spec:
+  selector: { app: landing }
+  ports: [{ name: push, port: 8443 }]

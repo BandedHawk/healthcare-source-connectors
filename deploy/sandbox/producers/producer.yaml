@@ -1,0 +1,58 @@
+# Stands in for the systems that send a pipeline its items: a pod that pushes files over HTTPS with its own
+# client certificate (subject in the landing node's list), as `scripts/sandbox.sh push` asks it to. Its key and
+# the sandbox CA are in the secret producer, made by the script. It reaches only the landing nodes' push port.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdh-producers
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: push-only, namespace: sdh-producers }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to: [{ namespaceSelector: { matchExpressions: [{ key: sdh.smiledigitalhealth.com/pipeline, operator: Exists }] },
+             podSelector: { matchLabels: { app: landing } } }]
+      ports: [{ port: 8443 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: producer, namespace: sdh-producers }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: producer } }
+  template:
+    metadata: { labels: { app: producer } }
+    spec:
+      automountServiceAccountToken: false   # it doesn't use the Kubernetes API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: producer
+          image: curlimages/curl:8.22.0
+          command: [sleep, infinity]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/producer, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tls, secret: { secretName: producer, defaultMode: 0440 } }
+        - { name: tmp, emptyDir: { sizeLimit: 256Mi } }

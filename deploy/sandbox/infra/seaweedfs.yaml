@@ -1,0 +1,46 @@
+# Object storage (S3), holding the medallion layers in a bucket each (docs/SANDBOX.md):
+#   sdh-bronze  items as landed (landing nodes write; splitters read)
+#   sdh-silver  sections, split and converted (splitters write; the FHIR stage reads)
+#   sdh-gold    FHIR resources (the FHIR stage writes, once built)
+# Each stage has its own access key, allowed only the buckets it needs: the secret seaweedfs (key s3.json), made
+# by scripts/sandbox.sh. One server, on one node, as a customer's single object store would be; SeaweedFS's
+# replication across servers isn't shown.
+apiVersion: v1
+kind: Service
+metadata: { name: seaweedfs, namespace: sdh-infra }
+spec:
+  selector: { app: seaweedfs }
+  ports: [{ name: s3, port: 8333 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: seaweedfs, namespace: sdh-infra }
+spec:
+  serviceName: seaweedfs
+  replicas: 1
+  selector: { matchLabels: { app: seaweedfs } }
+  template:
+    metadata: { labels: { app: seaweedfs } }
+    spec:
+      containers:
+        - name: seaweedfs
+          image: chrislusf/seaweedfs:4.48
+          args: [server, -s3, -s3.config=/etc/seaweedfs/s3.json, -dir=/data, -ip.bind=0.0.0.0, -volume.max=50,
+                 -master.volumeSizeLimitMB=1024]
+          ports: [{ name: s3, containerPort: 8333 }]
+          readinessProbe: { tcpSocket: { port: 8333 }, periodSeconds: 5 }
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/seaweedfs, readOnly: true }
+            - { name: data, mountPath: /data }
+      volumes:
+        - { name: config, secret: { secretName: seaweedfs, items: [{ key: s3.json, path: s3.json }] } }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 100Gi } }

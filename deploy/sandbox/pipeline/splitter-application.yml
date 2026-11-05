@@ -1,0 +1,61 @@
+# A pipeline's splitter: reads items from the bronze bucket, and stores sections in the silver bucket, sealed to
+# the FHIR stage (the recipient). Mounted from the ConfigMap splitter-config, as the splitter README describes.
+# ${...} in capitals with a prefix are filled in by scripts/sandbox.sh; ${S3_SECRET_ACCESS_KEY} and
+# ${SDH_LEASE_JDBC_PASSWORD} are left for Spring, from the secret splitter-env. Keys are in the secret
+# splitter-keys, at /run/secrets.
+sdh:
+  landing:
+    intake: ${PIPELINE}
+    # Automatic offset commits, one message per poll, so a commit covers only messages already handled;
+    # breakOnFirstError keeps a failed one from being skipped (design §5.3.12).
+    queue-uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&groupId=splitter-${PIPELINE}&autoOffsetReset=earliest&maxPollRecords=1&breakOnFirstError=true"
+    storage:
+      catalog-name: sdh
+      namespace: ${ICEBERG_PREFIX}_landing
+      catalog:
+        type: jdbc
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        jdbc.user: splitter_${ICEBERG_PREFIX}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://sdh-bronze/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        # The splitter's key may only read the bronze bucket.
+        s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
+              access-key-id: splitter-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+        client: { region: us-east-1 }
+  split:
+    format: ${SPLIT_FORMAT}
+  storage:
+    catalog-name: sdh
+    namespace: ${ICEBERG_PREFIX}
+    catalog:
+      type: jdbc
+      uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+      jdbc.user: splitter_${ICEBERG_PREFIX}
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://sdh-silver/warehouse
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
+            access-key-id: splitter-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+      client: { region: us-east-1 }
+  lease:
+    name: splitter-${PIPELINE}
+    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: splitter_${ICEBERG_PREFIX} }
+  crypto:
+    wrap-provider: vault-transit
+    sign-provider: vault-transit
+    vault: { address: "http://vault.sdh-infra.svc:8200", token-file: /run/secrets/vault-token }
+    keys:
+      sections-kek: ${PIPELINE}-sections
+      landed-items-kek: ${PIPELINE}-landed-items
+      signing: { kid: splitter-${PIPELINE}, key-ref: ${PIPELINE}-splitter-signing }
+      recipient: { kid: fhir-${PIPELINE}, pem: /run/secrets/recipient.pem, sha256: "${RECIPIENT_SHA256}" }
+      inbox: { kid: splitter-${PIPELINE}-inbox, pem: /run/secrets/inbox.pem }
+      landing-signer: { kid: landing-${PIPELINE}, pem: /run/secrets/landing-signer.pem }
+  queue:
+    type: kafka
+    uri: "kafka:${PIPELINE}.sections?brokers=${KAFKA_BROKERS}"
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }

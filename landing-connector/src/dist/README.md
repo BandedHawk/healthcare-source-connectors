@@ -224,7 +224,12 @@ The node needs:
   volume.
 - **HTTP push only:** a Service for the push port, the TLS certificate and key in the secret volume, and a TCP
   readiness probe on the port, so only the active node receives pushes. For mTLS, the ingress or load balancer
-  must pass TLS through to the pod, so that the node sees the client's own certificate.
+  must pass TLS through to the pod, so that the node sees the client's own certificate. Give the Deployment
+  `strategy: { type: Recreate }`. A standby is never ready, so a rolling update waits for ever for a new pod to
+  become ready while the old active node holds the lease. With Recreate, both pods are replaced together, and
+  pushes are refused (connection refused, then `503`) until the new active node takes the lease. For the same
+  reason the Deployment shows one of its two replicas ready, and `kubectl rollout status` never completes: watch
+  for one ready pod instead.
 
 Two replicas give an active node and a standby: both run with `standby: true`, the first to take the lease lands,
 and the other waits. The intake volume must be mountable by both pods (`ReadWriteMany`, or `ReadOnlyMany` for a
