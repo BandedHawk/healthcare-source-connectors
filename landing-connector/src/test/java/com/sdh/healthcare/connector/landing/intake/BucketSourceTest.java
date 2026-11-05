@@ -13,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -207,6 +208,47 @@ class BucketSourceTest
         source.failure = new Refused(IntakeProblem.NETWORK);
         assertThatThrownBy(source::checkWritable)
                 .isInstanceOf(IntakeUnavailableException.class);
+    }
+
+    /**
+     * A read-write bucket is claimed by one node through the claim object
+     * under its prefix, which is never listed; another node is refused,
+     * and a store that can't be reached is unavailable. A read-only
+     * bucket has no claim.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void claimsAReadWriteBucket() throws Exception
+    {
+        Memory source = new Memory(settings("read-write", "delete",
+                "settled", false));
+        InboundDirectoryClaim.Owner owner = new InboundDirectoryClaim.Owner(
+                "landing-a", "lease-a", "cat", "ns");
+        InboundDirectoryClaim claim = InboundDirectoryClaim.claim(
+                source.claimFile().orElseThrow(), owner);
+        assertThat(source.text("in/" + InboundDirectoryClaim.FILE))
+                .contains("connector-id=landing-a");
+        claim.verify();
+        assertThat(source.list()).isEmpty();
+
+        assertThatThrownBy(() -> InboundDirectoryClaim.claim(
+                source.claimFile().orElseThrow(),
+                new InboundDirectoryClaim.Owner("landing-b", "lease-b", "cat",
+                        "ns")))
+                .isInstanceOf(InboundDirectoryClaim.ClaimedException.class);
+
+        source.objects.clear();
+        source.bytes.clear();
+        claim.verify();
+        assertThat(source.text("in/" + InboundDirectoryClaim.FILE))
+                .contains("connector-id=landing-a");
+
+        source.failure = new Refused(IntakeProblem.NETWORK);
+        assertThatThrownBy(claim::verify)
+                .isInstanceOf(IntakeUnavailableException.class);
+        assertThat(new Memory(settings("read-only", null, "settled", false))
+                .claimFile()).isEmpty();
     }
 
     /**
@@ -422,6 +464,25 @@ class BucketSourceTest
             check();
             probed.add(key);
             put(key, "", 0);
+        }
+
+        @Override
+        protected byte[] readSmall(String key)
+        {
+            check();
+            return bytes.get(key);
+        }
+
+        @Override
+        protected boolean createNew(String key, byte[] content)
+        {
+            check();
+            if (objects.containsKey(key))
+            {
+                return false;
+            }
+            put(key, new String(content, UTF_8), 0);
+            return true;
         }
 
         @Override

@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.landing.intake;
 
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Optional;
@@ -72,6 +73,17 @@ public interface IntakeSource
      * @return the item ID as given; empty if none
      */
     default Optional<String> replacesValue(ListedItem item)
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Where a read-write remote source keeps its claim (design §9.5),
+     * through its own client.
+     *
+     * @return the claim file; empty if the source keeps none here
+     */
+    default Optional<InboundDirectoryClaim.ClaimFile> claimFile()
     {
         return Optional.empty();
     }

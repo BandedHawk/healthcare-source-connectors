@@ -65,6 +65,8 @@ Revision 2026-11-04 (bd): built broker health for the Camel queue intakes (§5.3
 
 Revision 2026-11-04 (be): queue and table intakes can name what they replace (§5.3.8). Decided 2026-11-04 with the user: a queue message names the earlier message it replaces, item and message, in an `sdh_replaces` header (`<itemId>/<messageId>`), kept per message, encrypted, in `landed_items.record_replaces_enc` (§5.3.2), and reported per message in `item.received` and in each problem of `item.result`; a table append names the item its files replace in its snapshot property `sdh.replaces`. As for markers, a link that is malformed or names an item the intake never landed is ignored with `item.replaces_ignored`, and the data is landed without it. SQS consumers now ask for the `sdh_replaces` attribute. Contract 2.4 (§10.1). A status endpoint for producers stays unbuilt, until a producer needs one.
 
+Revision 2026-11-04 (bf): items given up are cleaned up, and remote sources are claimed. Decided 2026-11-04 with the user: the chunks of an item given up part way are kept for a grace period, `sdh.maintenance.retention.given-up` (7 days, at least 1), then removed by maintenance and audited as `item.purged` (§5.3.13). Each give-up is recorded, MAC'd, in the commit that clears its checkpoint, so none is missed, and a landed item is never removed. `TableMaintenance` takes a purge step of the caller's, run before expiry so the removed files leave storage in the same run, and shares its row copying with compaction. Decided the same day: every read-write source is now claimed (§9.5), SFTP and SMB through their connections (§5.3.14) and buckets by a conditional write (§5.3.17), checked once per listing. `InboundDirectoryClaim` keeps its claim through a `ClaimFile`.
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -490,7 +492,7 @@ Each reason is reported once, until the source is reachable again or the reason 
   - sends `item.landed` again for items whose message may not have been acknowledged (message IDs make this safe, §10.1);
   - starts the intake.
   Queue messages that weren't acknowledged are redelivered by the broker, and push senders retry, so nothing is lost and, thanks to the ledger, nothing is landed twice.
-- **Claims** (§9.5) stay on read-write directories and shares, so two intakes with different names can't land the same source. A read-only source can't hold a claim; there, unique intake names are the only guard, and it is a deployment rule.
+- **Claims** (§9.5) are made on every read-write source, local or remote, so two intakes with different names can't land the same source. A read-only source can't hold a claim; there, unique intake names are the only guard, and it is a deployment rule.
 
 #### 5.3.6 Signalling the splitter, and what changes in it
 
@@ -604,7 +606,7 @@ sdh:
     keys: { landed-items-kek: landed-items-kek/1 }
   lease: { name: landing-claims-sftp, standby: true }
   maintenance:
-    retention: { landed-items: 3650d }   # the ledger is always kept
+    retention: { landed-items: 3650d, given-up: 7d }   # the ledger is always kept
 ```
 
 - **SFTP, SMB, buckets and tables have explicit settings,** not a URI (§5.3.14, §5.3.17, §5.3.18). Their passwords, key passphrase, secret keys and connection strings come from the environment.
@@ -743,11 +745,16 @@ The cutoff is then rounded down to a whole day, so the delete still matches whol
 
 After a purge, recovery still works: the last landed item is rebuilt from the checkpoint alone, and the splitter sees its `item.landed` again as a repeat.
 
-**Not built:** removing the chunks of an item that was given up (§5.3.2) before retention reaches them.
+**Items given up** (`GivenUpItems`; decided 2026-11-04 with the user). An item given up part way (`item.abandoned`, `item.changed`, a broken push, a batch that failed) leaves committed chunks with no summary row, which nothing reads. Retention would only remove them with their day, and it is off by default. They are removed after a grace period instead, `sdh.maintenance.retention.given-up` (7 days by default, at least 1), so an operator has time to look into a give-up first: for a file the producer deleted while it was read, the chunks are the only copy left, incomplete as it is. In other cases the data still exists elsewhere: a changed file lands again as its new version, a broken push is answered with an error and sent again, a batch's messages come again, and a missing table file can't be landed anyway.
+- **Recorded as it is given up,** in the commit that clears the checkpoint, so the record can't be lost: the `landed_items` property `sdh.given-up.<intake>`, holding each item ID and when it was given up, MAC'd with the ID key and bound to the intake like a checkpoint, so nobody without the key can name an item to remove. A tampered record stops the node.
+- **Removed by maintenance,** before compaction and expiry, once the grace period has passed: files holding only the item's rows are dropped, and files it shares with other items, after compaction, are rewritten without its rows (the others' ciphertext copied unchanged). The item comes off the record in the same commit, validated against concurrent changes. A marker commit then lets the removed files be expired and deleted from storage in the same run, as retention's are. Each item is audited as `item.purged`, by ID.
+- **A landed item is never removed:** one the record names that has a summary row is taken off the record and reported (`item.purge_refused`, reason `LANDED`), and a summary row met while rewriting stops the purge.
+- Maintenance must be on (`sdh.maintenance.enabled`, the default) for items given up to be removed.
+- Found while testing: Iceberg's filtered reads (1.12.0) can miss rows in a Parquet file holding UUIDs on both sides of the sign bit. Item IDs are UUIDv7, all starting `01` for millennia, so landing never meets it; tests use UUIDv7 IDs.
 
-**Settings:** as §14's `sdh.maintenance`, with `retention.landed-items` in place of `retention.sections`.
+**Settings:** as §14's `sdh.maintenance`, with `retention.landed-items` in place of `retention.sections`, and `retention.given-up` (above).
 
-**Tests:** `LandingRetentionTest` lands an item a minute before midnight in 40-second batches. Retention keeps all of it and reads it back whole, and purges an older item completely. Without the guard, the same purge takes the item's first day. A checkpoint of an unfinished item keeps rows from its start. `MaintenanceSchedulerTest` checks the minimum. `LandingConnectorApplicationTest` runs a pass over both tables with retention set.
+**Tests:** `LandingRetentionTest` lands an item a minute before midnight in 40-second batches. Retention keeps all of it and reads it back whole, and purges an older item completely. Without the guard, the same purge takes the item's first day. A checkpoint of an unfinished item keeps rows from its start. `MaintenanceSchedulerTest` checks the minimum. `LandingConnectorApplicationTest` runs a pass over both tables with retention set. `GivenUpItemsTest`: an item given up is recorded as its checkpoint is cleared, kept through the grace period, then removed with its files, which leave storage in the same run; a file shared with a landed item after compaction is rewritten without its rows; a landed item named in the record is never removed; a tampered record, or one copied from another intake, is refused.
 
 #### 5.3.14 SFTP and SMB as built (step 4)
 
@@ -783,14 +790,16 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 - `smb`: `host`, `port` (445), `share` (a name, no slashes), `domain`, `user`, `password`, `connect-timeout` (15s), `read-timeout` (60s).
 - Secrets from the environment: `SDH_LANDING_SOURCE_SFTP_PASSWORD`, `SDH_LANDING_SOURCE_SFTP_PRIVATE_KEY_PASSPHRASE`, `SDH_LANDING_SOURCE_SMB_PASSWORD`.
 
-**Not built:** claims on remote sources (§5.3.5; the claim is only for local read-write directories), Kerberos, and the planned events of §5.3.4.
+**Claims** (§9.5): a read-write SFTP or SMB source is claimed like a local directory, through the source's own connection. SMB creates the claim with `FILE_CREATE`, which fails if it exists. SFTP has no exclusive create, and JSch's rename overwrites on OpenSSH (`posix-rename`), so the claim is written to a hidden staging file and hard-linked into place (`hardlink@openssh.com`), which fails if the claim exists; on a server without that extension it is renamed into place once no claim is found, so two nodes starting at the same moment could both think they won, and the loser stops at its next check.
+
+**Not built:** Kerberos, and the planned events of §5.3.4.
 
 **Tests:**
 - `SftpSourceTest` (embedded Apache SSHD): ordering and offset reads, password login, an unpinned host key, rejected credentials, a missing or unreadable directory, a server that drops part way, an item that changed, moves with markers, rename and delete, and the probe on a directory it can't write.
 - `RemoteIntakeRouteTest`: offering items, a listing cut short, the wait after refused credentials, and an immediate retry after a network failure. `IntakeServiceTest` adds resuming an item whose read broke, and reporting a failed listing by reason.
 - `SftpLandingApplicationTest`: the whole node on embedded SSHD, through an outage (reason `NETWORK`) and back, with no filenames in the logs.
-- `SftpIntakeIT` (OpenSSH container behind Toxiproxy): list, read and move; a cut connection, then resume; a stalled connection dropped within 20 s; a server restart; a wrong key against a changed host key.
-- `SmbIntakeIT` (two Samba containers, one requiring encryption and one with it off, behind Toxiproxy): an encrypted share works end to end; the unencrypted one is `ENCRYPTION`; a wrong password is `AUTH` and a missing share `NOT_FOUND`; a cut, a stall and a restart.
+- `SftpIntakeIT` (OpenSSH container behind Toxiproxy): list, read and move; a cut connection, then resume; a stalled connection dropped within 20 s; a server restart; a wrong key against a changed host key; the source claimed by a hard link, a second create refused, another node refused, and neither the claim nor its staging file listed.
+- `SmbIntakeIT` (two Samba containers, one requiring encryption and one with it off, behind Toxiproxy): an encrypted share works end to end; the unencrypted one is `ENCRYPTION`; a wrong password is `AUTH` and a missing share `NOT_FOUND`; a cut, a stall and a restart; the share claimed, a second create refused, another node refused, and the claim not listed.
 
 #### 5.3.15 HTTP push as built (step 5)
 
@@ -817,7 +826,7 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 - **Waiting:** a push waits up to `max-wait` (30s) for the one before it, then gets `503` with `Retry-After` (`retry-after`, 30s) and `push.busy`.
 - **Replays:** with an `Idempotency-Key`, the source reference is the hash of the sender and key. A reference already in the ledger gets the first push's receipt again (`push.replayed`) and lands nothing; the same key from another sender is a new push. Without a key, every push is new.
 - **Receipt** (`Receipt`): `itemId`, `intake`, `size`, `sha256` and `landedAt`, as JSON, sent only after the item's commit. `landedAt` is to the microsecond, as stored, so a replay gives exactly the same receipt.
-- **A push can't resume.** If its body breaks off, is the wrong length or is too large, or storage fails, its checkpoint is cleared at once (`item.abandoned`); the committed chunks stay, without a summary row, until retention removes them. The answer is `400`, `413` or `503`, and `push.broken` or `push.too_large` says which.
+- **A push can't resume.** If its body breaks off, is the wrong length or is too large, or storage fails, its checkpoint is cleared at once (`item.abandoned`); the committed chunks stay, without a summary row, until maintenance removes them after `retention.given-up` (§5.3.13). The answer is `400`, `413` or `503`, and `push.broken` or `push.too_large` says which.
 - **After the commit,** the ledger entry and the `item.landed` message are written. If either fails, the receipt still holds (the item is committed), and they are finished before the next push lands (`push.finish_deferred`); until they are, pushes get `503`. So an item is never announced behind a newer one.
 - **Startup** repairs the ledger, clears an unfinished push and announces the last landed item again, as for the other intakes. A push that arrives before that has run does it first.
 - Fatal errors stop the node, as in §5.3.11.
@@ -950,13 +959,15 @@ A check waits up to 20 s; the next starts `check-interval` after it ends. The Pu
 
 **Settings** (`sdh.landing.source.bucket`, checked by `BucketSettings`, whose `toString` hides secrets): `name` (the bucket or container), `endpoint`, `region` (S3 only), `path-style-access` (false), `access-key-id` and `secret-access-key` (S3 only), `connection-string` (Azure only), `project-id` (GCS only), `anonymous` (false), `connect-timeout` (15s), `read-timeout` (60s). A setting for another store is refused. Secrets from the environment: `SDH_LANDING_SOURCE_BUCKET_SECRET_ACCESS_KEY`, `SDH_LANDING_SOURCE_BUCKET_CONNECTION_STRING`, or the SDKs' own variables.
 
+**Claims** (§9.5): a read-write bucket is claimed by the object `.sdh-owner` under `path`, written only if there is none: S3 with `If-None-Match: *` (a 412 or 409 means another writer won), Azure with `overwrite=false` (409), GCS with `doesNotExist` (412). An S3-compatible store that ignores the condition overwrites instead, and the node that lost stops at its next check.
+
 **Not built:** event notifications; conditional deletes on S3; S3 object versions (a versioned bucket is read at its latest versions, and a delete leaves a delete marker); Azure copies between accounts.
 
 **Tests:**
-- `BucketSourceTest` (a bucket in memory): the listing rules flat and deep; reads from an offset and at the end; a changed object refused; `move` to a free key with its marker, and left alone if changed; `rename` and `delete`; the probe, refused and unreachable; failures and broken reads.
+- `BucketSourceTest` (a bucket in memory): the listing rules flat and deep; reads from an offset and at the end; a changed object refused; `move` to a free key with its marker, and left alone if changed; `rename` and `delete`; the probe, refused and unreachable; failures and broken reads; a claim made, refused to another node, made again once deleted, and none for a read-only bucket.
 - `BucketSettingsTest`: each type, a relative path, a missing name, S3 key pairs, `anonymous` with a key, Azure's one-of rule, settings for another store refused, the endpoint checked, secrets hidden. `ReadinessTest`: a new tag starts the wait again.
-- `BucketIntakeIT` (`-Pit`; SeaweedFS behind Toxiproxy, Azurite and fake-gcs-server): on each store, list, read from an offset and move, with the probe leaving nothing; rename to a free key; a changed object refused and left; a missing bucket `NOT_FOUND`; wrong credentials (S3 and Azure). On S3, a cut connection then a resume, and a stall that fails within 20 s.
-- `BucketLandingApplicationIT` (`-Pit`): the whole node on SeaweedFS: objects landed as kind `object`, announced and deleted, keys outside the prefix left; the store paused, reported unreachable, and resumed; no key in the log.
+- `BucketIntakeIT` (`-Pit`; SeaweedFS behind Toxiproxy, Azurite and fake-gcs-server): on each store, list, read from an offset and move, with the probe leaving nothing; rename to a free key; a changed object refused and left; a missing bucket `NOT_FOUND`; wrong credentials (S3 and Azure); the bucket claimed by a conditional write, a second write refused, another node refused, and the claim not listed. On S3, a cut connection then a resume, and a stall that fails within 20 s.
+- `BucketLandingApplicationIT` (`-Pit`): the whole node on SeaweedFS: objects landed as kind `object`, announced and deleted, keys outside the prefix left, and the bucket claimed; the store paused, reported unreachable, and resumed; no key in the log.
 
 #### 5.3.18 Iceberg tables as built (step 7b)
 
@@ -1488,7 +1499,7 @@ The result would be duplicate sections and duplicate `section.stored` messages f
 - with the same tables, fencing makes whichever has the higher epoch win, and the other exits with status 70 on its next commit and keeps restarting, but by then both may have picked up the same file;
 - with different tables or namespaces, nothing in storage stops them.
 
-**Directory claim (built, `InboundDirectoryClaim`):** the inbound directory records which connector owns it, in a hidden file `.sdh-owner` (hidden files are never picked up, §5).
+**Directory claim (built, `InboundDirectoryClaim`):** the inbound directory records which connector owns it, in a hidden file `.sdh-owner` (hidden files are never picked up, §5). The landing node claims every read-write source this way, local or remote (decided 2026-11-04 with the user): a remote source keeps the claim through its own client, by a `ClaimFile` that reads it and creates it only if there is none (SFTP and SMB, §5.3.14; buckets, §5.3.17). On a remote source the claim is checked once per listing rather than before every item, since each check is a call to the server: another node taking the source over is found within one poll, in which at most one listing's items could be landed by both.
 - **Owner:** `connector-id`, `lease.name`, `storage.catalog-name` and `storage.namespace`. A difference in any of them is another connector. The file holds only these, a format version and the claim time; no path, filename or PHI.
 - **At startup**, right after the lease is taken and before storage is opened (§5.2): if there is no claim, the connector creates one with `CREATE_NEW`, which is atomic, so of several connectors starting together exactly one wins (tested with 16). If the claim names another connector, startup fails with `INBOUND_DIR_CLAIMED`, the lease is released and the process exits non-zero. The error and the `connector.directory_claimed` audit event name the owner, so operators can see which deployment collides.
 - **Before every file** the claim is read again. If another connector has replaced it, the running connector stops (status 70, reason `INBOUND_DIR_CLAIMED`). A deleted claim is recreated. The cost is reading one small file per input file.

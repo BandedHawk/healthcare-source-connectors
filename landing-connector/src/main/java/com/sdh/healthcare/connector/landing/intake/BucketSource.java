@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.landing.config.BucketSettings;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -151,6 +152,27 @@ public abstract class BucketSource implements RemoteSource
      * @throws IOException if the write fails
      */
     protected abstract void putEmpty(String key) throws IOException;
+
+    /**
+     * Reads a small object whole.
+     *
+     * @param key its key
+     * @return its bytes; null if there is none
+     * @throws IOException if the read fails
+     */
+    protected abstract byte[] readSmall(String key) throws IOException;
+
+    /**
+     * Writes an object only if there is none with its key, by the store's
+     * own condition, so of two writers exactly one succeeds.
+     *
+     * @param key     its key
+     * @param content what it holds
+     * @return false if there was one already
+     * @throws IOException if the write fails
+     */
+    protected abstract boolean createNew(String key, byte[] content)
+            throws IOException;
 
     /**
      * Says why a call to the store failed.
@@ -304,6 +326,50 @@ public abstract class BucketSource implements RemoteSource
             probe(directory(settings.moveTo()),
                     "sdh.landing.source.move-to");
         }
+    }
+
+    /**
+     * The claim, the object {@code .sdh-owner} under the source prefix,
+     * written only if there is none.
+     *
+     * @return the claim file, for a read-write source
+     */
+    @Override
+    public Optional<InboundDirectoryClaim.ClaimFile> claimFile()
+    {
+        if (!settings.writable())
+        {
+            return Optional.empty();
+        }
+        String key = prefix + InboundDirectoryClaim.FILE;
+        return Optional.of(new InboundDirectoryClaim.ClaimFile()
+        {
+            @Override
+            public byte[] read() throws IOException
+            {
+                try
+                {
+                    return readSmall(key);
+                }
+                catch (IOException | RuntimeException failure)
+                {
+                    throw failed(failure);
+                }
+            }
+
+            @Override
+            public boolean create(byte[] content) throws IOException
+            {
+                try
+                {
+                    return createNew(key, content);
+                }
+                catch (IOException | RuntimeException failure)
+                {
+                    throw failed(failure);
+                }
+            }
+        });
     }
 
     @Override

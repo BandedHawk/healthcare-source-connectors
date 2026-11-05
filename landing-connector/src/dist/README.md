@@ -158,6 +158,14 @@ splitter has time to read each item). Retention removes whole days, and never pa
 kept, because a read-only source would otherwise land its files again. Set the retention longer than the splitter
 can ever fall behind: an item purged before the splitter reads it is reported there as failed.
 
+An item given up part way (it changed or vanished while being read, a push broke off, a batch failed) leaves
+stored chunks that nothing reads. They are removed `sdh.maintenance.retention.given-up` after the item was given up
+(`7d` by default, at least `1d`), and each removal is audited as `item.purged`. Maintenance must be on.
+
+A read-write source, local or remote, is claimed by the node in a hidden file `.sdh-owner` in the source directory
+(an object under the prefix on a bucket), so a second node with other settings is refused. To hand the source to
+another node, stop the old one and delete `.sdh-owner`.
+
 ## Run on a host
 
 ```sh

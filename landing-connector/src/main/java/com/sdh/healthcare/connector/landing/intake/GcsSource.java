@@ -197,6 +197,42 @@ public final class GcsSource extends BucketSource
     }
 
     @Override
+    protected byte[] readSmall(String key)
+    {
+        try
+        {
+            return storage.readAllBytes(BlobId.of(bucket.name(), key));
+        }
+        catch (StorageException failure)
+        {
+            if (failure.getCode() == 404)
+            {
+                return null;
+            }
+            throw failure;
+        }
+    }
+
+    @Override
+    protected boolean createNew(String key, byte[] content)
+    {
+        try
+        {
+            storage.create(BlobInfo.newBuilder(bucket.name(), key).build(),
+                    content, Storage.BlobTargetOption.doesNotExist());
+            return true;
+        }
+        catch (StorageException failure)
+        {
+            if (failure.getCode() == 412)
+            {
+                return false;
+            }
+            throw failure;
+        }
+    }
+
+    @Override
     protected IntakeProblem classify(Exception failure)
     {
         if (failure instanceof StorageException storageFailure)

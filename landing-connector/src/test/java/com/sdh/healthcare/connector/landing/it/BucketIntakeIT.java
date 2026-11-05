@@ -32,6 +32,7 @@ import com.sdh.healthcare.connector.landing.intake.S3Source;
 import eu.rekawek.toxiproxy.Proxy;
 import eu.rekawek.toxiproxy.ToxiproxyClient;
 import eu.rekawek.toxiproxy.model.ToxicDirection;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -470,6 +471,38 @@ class BucketIntakeIT
         assertThat(keys(store)).containsExactlyInAnyOrder("done/sub/a.csv",
                 "in/.hidden.csv", "other/b.csv");
         assertThat(moving.list()).isEmpty();
+    }
+
+    /**
+     * A read-write bucket is claimed through the store: the claim object is
+     * written only if there is none, so a second write is refused; another
+     * node is refused; the claim is never listed.
+     *
+     * @param store the store
+     * @throws Exception if the test fails
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"s3", "azure-blob", "gcs"})
+    void claimsTheBucket(String store) throws Exception
+    {
+        put(store, "in/a.csv", "1".getBytes(UTF_8));
+        BucketSource claiming = source(store, "read-write", "delete");
+        InboundDirectoryClaim.Owner first = new InboundDirectoryClaim.Owner(
+                "landing-a", "lease-a", "cat", "ns");
+        InboundDirectoryClaim.Owner second = new InboundDirectoryClaim.Owner(
+                "landing-b", "lease-b", "cat", "ns");
+        InboundDirectoryClaim claim = InboundDirectoryClaim.claim(
+                claiming.claimFile().orElseThrow(), first);
+        claim.verify();
+        assertThat(get(store, "in/" + InboundDirectoryClaim.FILE))
+                .contains("connector-id=landing-a");
+        assertThat(claiming.claimFile().orElseThrow().create(new byte[0]))
+                .isFalse();
+        assertThatThrownBy(() -> InboundDirectoryClaim.claim(
+                claiming.claimFile().orElseThrow(), second))
+                .isInstanceOf(InboundDirectoryClaim.ClaimedException.class);
+        assertThat(claiming.list()).extracting(ListedItem::ref)
+                .containsExactly("a.csv");
     }
 
     /**

@@ -16,6 +16,7 @@ import com.jcraft.jsch.SftpException;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.landing.config.SftpSettings;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.io.ByteArrayInputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
@@ -53,6 +54,9 @@ public final class SftpSource implements RemoteSource
      * one.
      */
     private static final int SERVER_ALIVE_COUNT = 3;
+
+    /** The most of a claim file that is read; a claim is far smaller. */
+    private static final int MAX_CLAIM_BYTES = 4096;
 
     static
     {
@@ -267,6 +271,159 @@ public final class SftpSource implements RemoteSource
             }
             probe(sftp, settings.moveTo().toString(),
                     "sdh.landing.source.move-to");
+        }
+    }
+
+    /**
+     * The claim, {@code .sdh-owner} in the source directory. It is created
+     * by a hard link from a hidden file, which fails if the claim exists;
+     * a server without OpenSSH's {@code hardlink} extension is given it by
+     * a rename once no claim is found, which two nodes starting at the same
+     * moment could both do, the loser finding out at its next listing.
+     *
+     * @return the claim file, for a read-write source
+     */
+    @Override
+    public Optional<InboundDirectoryClaim.ClaimFile> claimFile()
+    {
+        if (!settings.writable())
+        {
+            return Optional.empty();
+        }
+        String path = RemoteListing.join(settings.path().toString(),
+                InboundDirectoryClaim.FILE);
+        return Optional.of(new InboundDirectoryClaim.ClaimFile()
+        {
+            @Override
+            public byte[] read() throws IOException
+            {
+                return readClaim(path);
+            }
+
+            @Override
+            public boolean create(byte[] content) throws IOException
+            {
+                return createClaim(path, content);
+            }
+        });
+    }
+
+    /**
+     * Reads the claim file.
+     *
+     * @param path the claim file on the server
+     * @return its bytes; null if there is none
+     * @throws IntakeUnavailableException if the server fails
+     */
+    private synchronized byte[] readClaim(String path)
+            throws IntakeUnavailableException
+    {
+        ChannelSftp sftp = connect();
+        try (InputStream input = sftp.get(path))
+        {
+            return input.readNBytes(MAX_CLAIM_BYTES);
+        }
+        catch (SftpException failure)
+        {
+            if (failure.id == ChannelSftp.SSH_FX_NO_SUCH_FILE)
+            {
+                return null;
+            }
+            throw failed(failure);
+        }
+        catch (IOException failure)
+        {
+            throw failed(failure);
+        }
+    }
+
+    /**
+     * Creates the claim file, unless there is one.
+     *
+     * @param path    the claim file on the server
+     * @param content what it holds
+     * @return false if there was one already
+     * @throws IntakeUnavailableException if the server fails
+     */
+    private synchronized boolean createClaim(String path, byte[] content)
+            throws IntakeUnavailableException
+    {
+        ChannelSftp sftp = connect();
+        String staged = RemoteListing.join(settings.path().toString(),
+                LocalDirectorySource.PROBE_PREFIX + UUID.randomUUID());
+        try
+        {
+            sftp.put(new ByteArrayInputStream(content), staged);
+            try
+            {
+                sftp.hardlink(staged, path);
+                return true;
+            }
+            catch (SftpException refused)
+            {
+                if (exists(sftp, path))
+                {
+                    return false;
+                }
+                if (refused.id != ChannelSftp.SSH_FX_OP_UNSUPPORTED)
+                {
+                    throw refused;
+                }
+            }
+            sftp.rename(staged, path);
+            return true;
+        }
+        catch (SftpException failure)
+        {
+            throw failed(failure);
+        }
+        finally
+        {
+            removeQuietly(sftp, staged);
+        }
+    }
+
+    /**
+     * Tells whether a path exists.
+     *
+     * @param sftp the channel
+     * @param path the path
+     * @return true if it does
+     * @throws SftpException if the server fails otherwise
+     */
+    private static boolean exists(ChannelSftp sftp, String path)
+            throws SftpException
+    {
+        try
+        {
+            sftp.lstat(path);
+            return true;
+        }
+        catch (SftpException failure)
+        {
+            if (failure.id == ChannelSftp.SSH_FX_NO_SUCH_FILE)
+            {
+                return false;
+            }
+            throw failure;
+        }
+    }
+
+    /**
+     * Removes a file if it is there, ignoring failures.
+     *
+     * @param sftp the channel
+     * @param path the file
+     */
+    private static void removeQuietly(ChannelSftp sftp, String path)
+    {
+        try
+        {
+            sftp.rm(path);
+        }
+        catch (SftpException ignored)
+        {
+            // Renamed, or gone; a hidden file left is never listed.
         }
     }
 

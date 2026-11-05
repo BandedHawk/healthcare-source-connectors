@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.landing.runtime;
 
+import com.sdh.healthcare.connector.core.landing.GivenUpItems;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
@@ -148,7 +149,8 @@ public class LandingConfiguration
     /**
      * Runs table maintenance on the landing tables between items (design
      * §5.3.13). Retention purges whole days of {@code landed_items}, never
-     * part of an item; the ledger is kept forever.
+     * part of an item, and the chunks of items given up are removed after
+     * {@code retention.given-up}; the ledger is kept forever.
      *
      * @param runtime    the runtime
      * @param properties the node's settings
@@ -165,6 +167,9 @@ public class LandingConfiguration
                 settings.retention().landedItems(),
                 LandingProperties.Maintenance.MIN_RETENTION);
         LandingRuntime.Tables tables = runtime.tables();
+        GivenUpItems givenUp = new GivenUpItems(tables.committer(),
+                tables.ids(), properties.landing().intake(),
+                settings.retention().givenUp());
         UnaryOperator<Instant> wholeItems = cutoff ->
         {
             try
@@ -182,7 +187,7 @@ public class LandingConfiguration
                 () -> List.of(
                         new MaintenanceScheduler.Target(tables.landedItems(),
                                 LandingTables.LANDED_AT, retention,
-                                wholeItems),
+                                wholeItems, givenUp),
                         MaintenanceScheduler.Target.of(tables.ledger(),
                                 LandingTables.LANDED_AT, Optional.empty())),
                 runtime.intake().writerLock(), fatal, Clock.systemUTC());

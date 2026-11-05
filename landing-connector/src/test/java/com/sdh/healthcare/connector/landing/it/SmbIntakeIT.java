@@ -19,6 +19,7 @@ import com.sdh.healthcare.connector.landing.intake.SmbSource;
 import eu.rekawek.toxiproxy.Proxy;
 import eu.rekawek.toxiproxy.ToxiproxyClient;
 import eu.rekawek.toxiproxy.model.ToxicDirection;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.io.InputStream;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -274,6 +275,37 @@ class SmbIntakeIT
         assertThat(encrypted.execInContainer("ls", "-A",
                 SHARE_PATH + "/drop").getStdout()).doesNotContain(".sdh-probe");
         assertThat(moving.list()).isEmpty();
+    }
+
+    /**
+     * A read-write share is claimed through the server: the claim is
+     * created only if there is none, so a second create is refused;
+     * another node is refused; the claim is never listed.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void claimsTheShare() throws Exception
+    {
+        put("/drop/a.csv", "1".getBytes(UTF_8));
+        SmbSource claiming = source("read-write", "delete");
+        InboundDirectoryClaim.Owner first = new InboundDirectoryClaim.Owner(
+                "landing-a", "lease-a", "cat", "ns");
+        InboundDirectoryClaim.Owner second = new InboundDirectoryClaim.Owner(
+                "landing-b", "lease-b", "cat", "ns");
+        InboundDirectoryClaim claim = InboundDirectoryClaim.claim(
+                claiming.claimFile().orElseThrow(), first);
+        claim.verify();
+        assertThat(encrypted.execInContainer("cat", SHARE_PATH + "/drop/"
+                + InboundDirectoryClaim.FILE).getStdout())
+                .contains("connector-id=landing-a");
+        assertThat(claiming.claimFile().orElseThrow().create(new byte[0]))
+                .isFalse();
+        assertThatThrownBy(() -> InboundDirectoryClaim.claim(
+                claiming.claimFile().orElseThrow(), second))
+                .isInstanceOf(InboundDirectoryClaim.ClaimedException.class);
+        assertThat(claiming.list()).extracting(ListedItem::ref)
+                .containsExactly("a.csv");
     }
 
     /**

@@ -59,6 +59,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 import org.apache.camel.CamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
@@ -70,7 +71,7 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 /**
  * Everything a landing node runs on, started in a fixed order (design
  * §5.3.5): settings and keys → lease (waiting as a standby if set) → the
- * directory claim and write probe of a read-write source → catalog and
+ * claim and write probe of a read-write source, local or remote → catalog and
  * tables, fenced with the lease's epoch → ID key → lander, ledger and
  * its index → publisher. Closed in reverse, after the route has stopped,
  * so no item is in flight when the lease is released.
@@ -152,9 +153,11 @@ public final class LandingRuntime implements AutoCloseable
      * @param landedItems the {@value LandingTables#LANDED_ITEMS} table
      * @param ledger      the {@value LandingTables#LEDGER} table
      * @param lander      lands items; holds the intake's checkpoint
+     * @param ids         makes the MACs of what is kept in table
+     *                    properties, with the ID key
      */
     public record Tables(FencedCommitter committer, Table landedItems,
-            Table ledger, ItemLander lander)
+            Table ledger, ItemLander lander, SectionIds ids)
     {
     }
 
@@ -286,14 +289,26 @@ public final class LandingRuntime implements AutoCloseable
                 case HTTP, QUEUE -> null;
             };
             InboundDirectoryClaim claim = null;
-            if (source.writable() && !source.remote())
+            if (source.writable())
             {
-                claim = InboundDirectoryClaim.claim(source.path(),
+                InboundDirectoryClaim.Owner owner =
                         new InboundDirectoryClaim.Owner(
                                 properties.connectorId(),
                                 properties.leaseName(),
                                 storageSettings.catalogName(),
-                                storageSettings.namespace()));
+                                storageSettings.namespace());
+                Optional<InboundDirectoryClaim.ClaimFile> remoteClaim =
+                        intakeSource == null ? Optional.empty()
+                                : intakeSource.claimFile();
+                if (remoteClaim.isPresent())
+                {
+                    claim = InboundDirectoryClaim.claim(remoteClaim.get(),
+                            owner);
+                }
+                else if (!source.remote())
+                {
+                    claim = InboundDirectoryClaim.claim(source.path(), owner);
+                }
             }
             if (source.writable())
             {
@@ -397,7 +412,8 @@ public final class LandingRuntime implements AutoCloseable
             return new LandingRuntime(camel, dataSource, catalog, lease,
                     publisher, results, keys, source, intakeSource, service,
                     pushService, queue,
-                    new Tables(committer, items, ledgerTable, lander));
+                    new Tables(committer, items, ledgerTable, lander,
+                            ids));
         }
         catch (Exception | Error failure)
         {

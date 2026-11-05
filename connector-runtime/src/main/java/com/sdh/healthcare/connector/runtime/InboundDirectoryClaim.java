@@ -9,7 +9,7 @@ package com.sdh.healthcare.connector.runtime;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.io.Reader;
+import java.io.StringReader;
 import java.io.StringWriter;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
@@ -30,14 +30,17 @@ import java.util.Properties;
  * <p>
  * The claim is a hidden file, {@value #FILE}, in the inbound directory,
  * recording which node owns it. It holds no PHI. It is created atomically
- * ({@code CREATE_NEW}), so of two nodes starting together exactly one wins.
+ * ({@code CREATE_NEW} on a local disk), so of two nodes starting together
+ * exactly one wins. A remote source keeps it through its own client, by a
+ * {@link ClaimFile} of its own.
  * It stays after shutdown: the directory still belongs to its node, which
  * may have a file in progress there. To hand a directory to another node,
  * stop the old one and delete the file.
  * <p>
  * {@link #claim} runs at startup, after the lease is taken; {@link #verify}
- * runs before every file, so a running node stops if its claim is
- * replaced. A deleted claim is created again.
+ * runs before every file (on a remote source, once per listing), so a
+ * running node stops if its claim is replaced. A deleted claim is created
+ * again.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -47,6 +50,31 @@ public final class InboundDirectoryClaim
 
     /** The claim file's name. */
     public static final String FILE = ".sdh-owner";
+
+    /**
+     * Where a claim is kept: a file read whole, and created only if there
+     * is none, atomically where the store allows.
+     */
+    public interface ClaimFile
+    {
+
+        /**
+         * Reads the claim file.
+         *
+         * @return its bytes; null if there is none
+         * @throws IOException if it can't be read
+         */
+        byte[] read() throws IOException;
+
+        /**
+         * Creates the claim file, unless there is one.
+         *
+         * @param content what it holds
+         * @return false if there was one already
+         * @throws IOException if it can't be written
+         */
+        boolean create(byte[] content) throws IOException;
+    }
 
     /** The claim file's format version. */
     private static final String VERSION = "1";
@@ -161,7 +189,7 @@ public final class InboundDirectoryClaim
     }
 
     /** The claim file. */
-    private final Path file;
+    private final ClaimFile file;
 
     /** This node's identity. */
     private final Owner owner;
@@ -172,7 +200,7 @@ public final class InboundDirectoryClaim
      * @param file  the claim file
      * @param owner this node's identity
      */
-    private InboundDirectoryClaim(Path file, Owner owner)
+    private InboundDirectoryClaim(ClaimFile file, Owner owner)
     {
         this.file = file;
         this.owner = owner;
@@ -191,8 +219,23 @@ public final class InboundDirectoryClaim
     public static InboundDirectoryClaim claim(Path directory, Owner owner)
             throws IOException
     {
-        InboundDirectoryClaim claim =
-                new InboundDirectoryClaim(directory.resolve(FILE), owner);
+        return claim(new LocalFile(directory.resolve(FILE)), owner);
+    }
+
+    /**
+     * Claims a source for a node, or confirms an existing claim is its
+     * own, keeping the claim where the source says.
+     *
+     * @param file  the source's claim file
+     * @param owner the node's identity
+     * @return the claim
+     * @throws IOException      if the claim file can't be read or written
+     * @throws ClaimedException if another node holds the source
+     */
+    public static InboundDirectoryClaim claim(ClaimFile file, Owner owner)
+            throws IOException
+    {
+        InboundDirectoryClaim claim = new InboundDirectoryClaim(file, owner);
         claim.verify();
         return claim;
     }
@@ -237,13 +280,8 @@ public final class InboundDirectoryClaim
     {
         for (int attempt = 1; ; attempt++)
         {
-            Properties properties = new Properties();
-            try (Reader reader =
-                    Files.newBufferedReader(file, StandardCharsets.UTF_8))
-            {
-                properties.load(reader);
-            }
-            catch (NoSuchFileException missing)
+            byte[] stored = file.read();
+            if (stored == null)
             {
                 if (create())
                 {
@@ -251,6 +289,9 @@ public final class InboundDirectoryClaim
                 }
                 continue; // another node created it first: read theirs
             }
+            Properties properties = new Properties();
+            properties.load(new StringReader(
+                    new String(stored, StandardCharsets.UTF_8)));
             if (VERSION.equals(properties.getProperty("version"))
                     && complete(properties))
             {
@@ -293,7 +334,7 @@ public final class InboundDirectoryClaim
     }
 
     /**
-     * Writes the claim, if there is none, and forces it to disk.
+     * Writes the claim, if there is none.
      *
      * @return false if another process created it first
      * @throws IOException if it can't be written
@@ -305,20 +346,64 @@ public final class InboundDirectoryClaim
         properties.setProperty("claimed-at", Instant.now().toString());
         properties.store(text, "Owner of this inbound directory (design 9.5)."
                 + " Delete only to hand it to another connector.");
-        byte[] bytes = text.toString().getBytes(StandardCharsets.UTF_8);
-        try (FileChannel channel = FileChannel.open(file,
-                        StandardOpenOption.CREATE_NEW,
-                        StandardOpenOption.WRITE);
-                OutputStream out = Channels.newOutputStream(channel))
+        return file.create(text.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** A claim file on a local disk. */
+    private static final class LocalFile implements ClaimFile
+    {
+
+        /** The file. */
+        private final Path path;
+
+        /**
+         * Keeps a claim in a file.
+         *
+         * @param path the file
+         */
+        LocalFile(Path path)
         {
-            out.write(bytes);
-            out.flush();
-            channel.force(true);
+            this.path = path;
         }
-        catch (FileAlreadyExistsException taken)
+
+        @Override
+        public byte[] read() throws IOException
         {
-            return false;
+            try
+            {
+                return Files.readAllBytes(path);
+            }
+            catch (NoSuchFileException missing)
+            {
+                return null;
+            }
         }
-        return true;
+
+        /**
+         * Creates the file with {@code CREATE_NEW}, which is atomic, and
+         * forces it to disk.
+         *
+         * @param content what it holds
+         * @return false if there was one already
+         * @throws IOException if it can't be written
+         */
+        @Override
+        public boolean create(byte[] content) throws IOException
+        {
+            try (FileChannel channel = FileChannel.open(path,
+                            StandardOpenOption.CREATE_NEW,
+                            StandardOpenOption.WRITE);
+                    OutputStream out = Channels.newOutputStream(channel))
+            {
+                out.write(content);
+                out.flush();
+                channel.force(true);
+            }
+            catch (FileAlreadyExistsException taken)
+            {
+                return false;
+            }
+            return true;
+        }
     }
 }

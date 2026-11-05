@@ -33,6 +33,7 @@ import software.amazon.awssdk.services.s3.model.CompletedPart;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
@@ -284,6 +285,49 @@ public final class S3Source extends BucketSource
     {
         s3.putObject(request -> request.bucket(bucket.name()).key(key),
                 RequestBody.empty());
+    }
+
+    @Override
+    protected byte[] readSmall(String key)
+    {
+        try
+        {
+            return s3.getObjectAsBytes(request -> request
+                    .bucket(bucket.name()).key(key)).asByteArray();
+        }
+        catch (NoSuchKeyException missing)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Writes with {@code If-None-Match: *}. A store that ignores the
+     * condition overwrites instead; for a claim, the node that lost then
+     * finds out at its next check.
+     *
+     * @param key     its key
+     * @param content what it holds
+     * @return false if there was one already
+     */
+    @Override
+    protected boolean createNew(String key, byte[] content)
+    {
+        try
+        {
+            s3.putObject(request -> request.bucket(bucket.name()).key(key)
+                    .ifNoneMatch("*"), RequestBody.fromBytes(content));
+            return true;
+        }
+        catch (S3Exception failure)
+        {
+            // 409 is a concurrent conditional write: one of the two wins.
+            if (failure.statusCode() == 412 || failure.statusCode() == 409)
+            {
+                return false;
+            }
+            throw failure;
+        }
     }
 
     @Override

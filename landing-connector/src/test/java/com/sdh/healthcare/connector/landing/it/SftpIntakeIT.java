@@ -19,6 +19,7 @@ import com.sdh.healthcare.connector.landing.intake.SftpSource;
 import eu.rekawek.toxiproxy.Proxy;
 import eu.rekawek.toxiproxy.ToxiproxyClient;
 import eu.rekawek.toxiproxy.model.ToxicDirection;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
@@ -299,6 +300,40 @@ class SftpIntakeIT
         assertThat(sftp.execInContainer("ls", "-A", DROP).getStdout())
                 .doesNotContain(".sdh-probe");
         assertThat(moving.list()).isEmpty();
+    }
+
+    /**
+     * A read-write source is claimed through the server: the claim is made
+     * by a hard link, so a second create is refused; another node is
+     * refused; the claim and its staging file are never listed.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void claimsTheSourceOnARealServer() throws Exception
+    {
+        put(DROP + "/a.csv", "1".getBytes(UTF_8));
+        SftpSource claiming = source("read-write", "delete");
+        InboundDirectoryClaim.Owner first = new InboundDirectoryClaim.Owner(
+                "landing-a", "lease-a", "cat", "ns");
+        InboundDirectoryClaim.Owner second = new InboundDirectoryClaim.Owner(
+                "landing-b", "lease-b", "cat", "ns");
+        InboundDirectoryClaim claim = InboundDirectoryClaim.claim(
+                claiming.claimFile().orElseThrow(), first);
+        claim.verify();
+        assertThat(sftp.execInContainer("cat", DROP + "/"
+                + InboundDirectoryClaim.FILE).getStdout())
+                .contains("connector-id=landing-a");
+        assertThat(sftp.execInContainer("ls", "-A", DROP).getStdout())
+                .doesNotContain(".sdh-probe");
+        assertThat(claiming.claimFile().orElseThrow().create(new byte[0]))
+                .isFalse();
+        assertThatThrownBy(() -> InboundDirectoryClaim.claim(
+                claiming.claimFile().orElseThrow(), second))
+                .isInstanceOf(InboundDirectoryClaim.ClaimedException.class);
+        assertThat(claiming.list()).extracting(ListedItem::ref)
+                .containsExactly("a.csv");
+        assertThat(source("read-only", null).claimFile()).isEmpty();
     }
 
     /**

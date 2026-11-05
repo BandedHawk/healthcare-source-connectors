@@ -152,6 +152,16 @@ public final class IntakeService implements LandingIntake
     private int consecutiveErrors;
 
     /**
+     * Whether the claim is checked once per listing, as on a remote
+     * source, where each check is a call to the server, rather than before
+     * every item.
+     */
+    private final boolean claimPerListing;
+
+    /** Whether the claim has been checked in this listing. */
+    private boolean claimChecked;
+
+    /**
      * Creates the service.
      *
      * @param intake         the intake's name
@@ -159,8 +169,9 @@ public final class IntakeService implements LandingIntake
      * @param readiness      decides when an item is ready
      * @param storage        the landing storage
      * @param announcer      sends {@code item.landed} messages
-     * @param claim          the read-write source's directory claim; null
-     *                       when read-only
+     * @param claim          the read-write source's claim; null when
+     *                       read-only. Checked before every item, or on a
+     *                       remote source once per listing.
      * @param fatal          stops the process
      * @param clock          gives the times item IDs are made from
      * @param initialBackoff the wait after the first error in a row
@@ -177,6 +188,7 @@ public final class IntakeService implements LandingIntake
         this.storage = storage;
         this.announcer = announcer;
         this.claim = claim;
+        this.claimPerListing = source instanceof RemoteSource;
         this.fatal = fatal;
         this.clock = clock;
         this.initialBackoff = initialBackoff;
@@ -238,9 +250,10 @@ public final class IntakeService implements LandingIntake
     {
         ensureRecovered();
         reloadUnfinished();
-        if (claim != null)
+        if (claim != null && !(claimPerListing && claimChecked))
         {
             claim.verify();
+            claimChecked = true;
         }
         announcePending();
         health.answered();
@@ -366,6 +379,7 @@ public final class IntakeService implements LandingIntake
         writer.lock();
         try
         {
+            claimChecked = false;
             ensureRecovered();
             if (!source.reachable())
             {
@@ -409,6 +423,7 @@ public final class IntakeService implements LandingIntake
         try
         {
             unfinishedListed = false;
+            claimChecked = false;
             health.unreachable(problem);
         }
         finally

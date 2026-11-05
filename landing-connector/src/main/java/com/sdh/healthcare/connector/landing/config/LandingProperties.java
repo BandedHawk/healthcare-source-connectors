@@ -543,6 +543,12 @@ public record LandingProperties(
         public static final Duration MIN_RETENTION = Duration.ofDays(7);
 
         /**
+         * The shortest time the chunks of an item given up are kept, so an
+         * operator has time to look into it.
+         */
+        public static final Duration MIN_GIVEN_UP = Duration.ofDays(1);
+
+        /**
          * What each run does.
          *
          * @return the settings
@@ -566,12 +572,38 @@ public record LandingProperties(
     }
 
     /**
-     * How long landed items are kept, in whole days; unset keeps them
-     * forever (the default). At least {@link Maintenance#MIN_RETENTION}.
+     * How long landed items are kept.
      *
-     * @param landedItems the {@value LandingTables#LANDED_ITEMS} table
+     * @param landedItems the {@value LandingTables#LANDED_ITEMS} table, in
+     *                    whole days; unset keeps them forever (the
+     *                    default). At least
+     *                    {@link Maintenance#MIN_RETENTION}.
+     * @param givenUp     the chunks of an item given up part way, from when
+     *                    it was given up (7 days by default). At least
+     *                    {@link Maintenance#MIN_GIVEN_UP}.
      */
-    public record Retention(Duration landedItems)
+    public record Retention(Duration landedItems,
+            @DefaultValue("7d") Duration givenUp)
     {
+
+        /**
+         * Checks the settings.
+         *
+         * @param landedItems how long landed items are kept
+         * @param givenUp     how long a given-up item's chunks are kept
+         */
+        public Retention
+        {
+            if (givenUp == null)
+            {
+                givenUp = Duration.ofDays(7);
+            }
+            if (givenUp.compareTo(Maintenance.MIN_GIVEN_UP) < 0)
+            {
+                throw new IllegalArgumentException(
+                        "sdh.maintenance.retention.given-up must be at least"
+                                + " 1 day");
+            }
+        }
     }
 }

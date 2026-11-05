@@ -89,10 +89,29 @@ public final class MaintenanceScheduler implements AutoCloseable
      * @param keepFrom   moves the retention cutoff back where rows must be
      *                   kept (see {@link TableMaintenance#run(Table, String,
      *                   Optional, boolean, UnaryOperator)})
+     * @param purge      removes rows the caller no longer keeps, such as
+     *                   the chunks of items given up
      */
     public record Target(Table table, String timeColumn,
-            Optional<Duration> retention, UnaryOperator<Instant> keepFrom)
+            Optional<Duration> retention, UnaryOperator<Instant> keepFrom,
+            TableMaintenance.Purge purge)
     {
+
+        /**
+         * A table with no purge of its own.
+         *
+         * @param table      the table
+         * @param timeColumn its partition source column
+         * @param retention  how long rows are kept; empty keeps them forever
+         * @param keepFrom   moves the retention cutoff back where rows must
+         *                   be kept
+         */
+        public Target(Table table, String timeColumn,
+                Optional<Duration> retention, UnaryOperator<Instant> keepFrom)
+        {
+            this(table, timeColumn, retention, keepFrom,
+                    TableMaintenance.Purge.NONE);
+        }
 
         /**
          * A table whose rows can be purged by day as they are.
@@ -267,7 +286,8 @@ public final class MaintenanceScheduler implements AutoCloseable
         for (Target target : targets.get())
         {
             reports.add(maintenance.run(target.table(), target.timeColumn(),
-                    target.retention(), orphans, target.keepFrom()));
+                    target.retention(), orphans, target.keepFrom(),
+                    target.purge()));
         }
         if (orphans)
         {

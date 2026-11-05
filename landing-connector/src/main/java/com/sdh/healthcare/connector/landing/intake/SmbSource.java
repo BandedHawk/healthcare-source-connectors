@@ -28,6 +28,7 @@ import com.hierynomus.smbj.share.Share;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.landing.config.SmbSettings;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
@@ -62,6 +63,9 @@ public final class SmbSource implements RemoteSource
 
     /** The most asked for in one read. */
     private static final int MAX_READ = 1 << 20;
+
+    /** The most of a claim file that is read; a claim is far smaller. */
+    private static final int MAX_CLAIM_BYTES = 4096;
 
     /** The source's settings. */
     private final SourceSettings settings;
@@ -304,6 +308,104 @@ public final class SmbSource implements RemoteSource
             }
             probe(disk, onShare(settings.moveTo()),
                     "sdh.landing.source.move-to");
+        }
+    }
+
+    /**
+     * The claim, {@code .sdh-owner} in the source directory, created with
+     * {@code FILE_CREATE}, which fails if it exists, and hidden.
+     *
+     * @return the claim file, for a read-write source
+     */
+    @Override
+    public Optional<InboundDirectoryClaim.ClaimFile> claimFile()
+    {
+        if (!settings.writable())
+        {
+            return Optional.empty();
+        }
+        String path = RemoteListing.join(onShare(settings.path()),
+                InboundDirectoryClaim.FILE);
+        return Optional.of(new InboundDirectoryClaim.ClaimFile()
+        {
+            @Override
+            public byte[] read() throws IOException
+            {
+                return readClaim(path);
+            }
+
+            @Override
+            public boolean create(byte[] content) throws IOException
+            {
+                return createClaim(path, content);
+            }
+        });
+    }
+
+    /**
+     * Reads the claim file.
+     *
+     * @param path the claim file within the share
+     * @return its bytes; null if there is none
+     * @throws IntakeUnavailableException if the server fails
+     */
+    private synchronized byte[] readClaim(String path)
+            throws IntakeUnavailableException
+    {
+        DiskShare disk = connect();
+        try (File file = disk.openFile(path,
+                EnumSet.of(AccessMask.GENERIC_READ), null,
+                SMB2ShareAccess.ALL, SMB2CreateDisposition.FILE_OPEN, null);
+                InputStream input = file.getInputStream())
+        {
+            return input.readNBytes(MAX_CLAIM_BYTES);
+        }
+        catch (SMBApiException failure)
+        {
+            if (failure.getStatus() == NtStatus.STATUS_OBJECT_NAME_NOT_FOUND)
+            {
+                return null;
+            }
+            throw failed(failure);
+        }
+        catch (IOException | SMBRuntimeException failure)
+        {
+            throw failed(failure);
+        }
+    }
+
+    /**
+     * Creates the claim file, unless there is one.
+     *
+     * @param path    the claim file within the share
+     * @param content what it holds
+     * @return false if there was one already
+     * @throws IntakeUnavailableException if the server fails
+     */
+    private synchronized boolean createClaim(String path, byte[] content)
+            throws IntakeUnavailableException
+    {
+        DiskShare disk = connect();
+        try (File file = disk.openFile(path,
+                EnumSet.of(AccessMask.GENERIC_WRITE),
+                EnumSet.of(FileAttributes.FILE_ATTRIBUTE_HIDDEN),
+                SMB2ShareAccess.ALL, SMB2CreateDisposition.FILE_CREATE,
+                null))
+        {
+            file.write(content, 0);
+            return true;
+        }
+        catch (SMBApiException failure)
+        {
+            if (failure.getStatus() == NtStatus.STATUS_OBJECT_NAME_COLLISION)
+            {
+                return false;
+            }
+            throw failed(failure);
+        }
+        catch (SMBRuntimeException failure)
+        {
+            throw failed(failure);
         }
     }
 

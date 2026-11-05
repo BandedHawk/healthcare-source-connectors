@@ -359,8 +359,9 @@ public final class ItemLander
 
     /**
      * Removes the checkpoint of an unfinished item, so the intake can land
-     * others. The item's committed chunks stay, without a summary row, until
-     * maintenance removes them.
+     * others. In the same commit the item is recorded as given up
+     * ({@link GivenUpItems}): its committed chunks stay, without a summary
+     * row, until maintenance removes them after the grace period.
      *
      * @param itemId the unfinished item
      * @throws IllegalStateException if that item isn't the unfinished one
@@ -376,8 +377,14 @@ public final class ItemLander
         }
         settings.retry().call("landing.clear",
                 RetryPolicy.TRANSIENT_STORAGE, attempt -> committer.commit(
-                        table, transaction -> transaction.updateProperties()
-                                .remove(checkpointKey).commit()));
+                        table, transaction ->
+                        {
+                            transaction.updateProperties()
+                                    .remove(checkpointKey).commit();
+                            GivenUpItems.record(transaction, ids,
+                                    settings.intake(), new GivenUpItems.Entry(
+                                            itemId, clock.instant()));
+                        }));
         Telemetry.get().audit("item.cleared",
                 Fields.of(Attr.ITEM_ID, itemId)
                         .with(Attr.INTAKE, settings.intake()));

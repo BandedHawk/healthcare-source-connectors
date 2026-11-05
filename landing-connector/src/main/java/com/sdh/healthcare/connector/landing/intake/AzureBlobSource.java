@@ -241,6 +241,42 @@ public final class AzureBlobSource extends BucketSource
     }
 
     @Override
+    protected byte[] readSmall(String key)
+    {
+        try
+        {
+            return container.getBlobClient(key).downloadContent().toBytes();
+        }
+        catch (BlobStorageException failure)
+        {
+            if (failure.getStatusCode() == 404)
+            {
+                return null;
+            }
+            throw failure;
+        }
+    }
+
+    @Override
+    protected boolean createNew(String key, byte[] content)
+    {
+        try
+        {
+            container.getBlobClient(key).upload(BinaryData.fromBytes(content),
+                    false);
+            return true;
+        }
+        catch (BlobStorageException failure)
+        {
+            if (failure.getStatusCode() == 409)
+            {
+                return false;
+            }
+            throw failure;
+        }
+    }
+
+    @Override
     protected IntakeProblem classify(Exception failure)
     {
         if (failure instanceof ClientAuthenticationException

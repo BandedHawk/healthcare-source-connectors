@@ -15,6 +15,7 @@ import com.sdh.healthcare.connector.landing.runtime.LandingRuntime;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -232,9 +233,10 @@ class BucketLandingApplicationIT
     LandingRuntime runtime;
 
     /**
-     * Objects in the bucket are landed as objects, announced and deleted;
-     * while the store is paused the intake is reported unreachable, and
-     * once it is back the node carries on. No key reaches the log.
+     * Objects in the bucket are landed as objects, announced and deleted,
+     * and the node claims the bucket; while the store is paused the intake
+     * is reported unreachable, and once it is back the node carries on. No
+     * key reaches the log.
      *
      * @param output what the node logged
      * @throws Exception if the test fails
@@ -251,8 +253,9 @@ class BucketLandingApplicationIT
                 .containsExactlyInAnyOrder(8L, 4L);
         assertThat(landed).extracting(ConnectorMessage.ItemLanded::kind)
                 .containsOnly("object");
-        awaitTrue(() -> keys().equals(
-                List.of("elsewhere/" + SECRET_NAME + "-x.csv")));
+        // What is left: the object outside the prefix, and the node's claim.
+        awaitTrue(() -> keys().equals(List.of("elsewhere/" + SECRET_NAME
+                + "-x.csv", "inbound/" + InboundDirectoryClaim.FILE)));
 
         SEAWEED.getDockerClient().pauseContainerCmd(SEAWEED.getContainerId())
                 .exec();
@@ -269,7 +272,7 @@ class BucketLandingApplicationIT
         assertThat(receive(1)).singleElement().extracting(
                 ConnectorMessage.ItemLanded::size).isEqualTo(12L);
         assertThat(runtime.service().reachable()).isTrue();
-        awaitTrue(() -> keys().size() == 1);
+        awaitTrue(() -> keys().size() == 2);
         assertThat(FATAL).isEmpty();
         assertThat(output.getAll()).doesNotContain(SECRET_NAME)
                 .contains("intake.unreachable");

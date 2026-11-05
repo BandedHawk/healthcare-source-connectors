@@ -26,6 +26,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Scope;
@@ -88,6 +89,9 @@ public final class TableMaintenance
      *
      * @param table                 the table's name
      * @param retentionDeletedFiles data files removed by retention
+     * @param purgedFiles           data files removed or rewritten by the
+     *                              caller's purge, such as of given-up
+     *                              items
      * @param compactedFiles        small files compacted
      * @param compactedInto         files they were compacted into
      * @param compactedBytes        bytes rewritten by compaction
@@ -95,8 +99,41 @@ public final class TableMaintenance
      * @param orphansDeleted        unreferenced files deleted
      */
     public record Report(String table, int retentionDeletedFiles,
-            int compactedFiles, int compactedInto,
+            int purgedFiles, int compactedFiles, int compactedInto,
             long compactedBytes, int expiredSnapshots, int orphansDeleted)
+    {
+    }
+
+    /**
+     * Rows a caller removes before compaction and expiry, such as the
+     * chunks of items given up, so the files it removes are deleted from
+     * storage in the same run, as retention's are.
+     */
+    @FunctionalInterface
+    public interface Purge
+    {
+
+        /** Purges nothing. */
+        Purge NONE = (table, now) -> 0;
+
+        /**
+         * Removes the rows, committing through the table's fence.
+         *
+         * @param table the table
+         * @param now   the time of the run
+         * @return how many data files were removed or rewritten
+         */
+        int purge(Table table, Instant now);
+    }
+
+    /**
+     * What {@link #copyRows} wrote.
+     *
+     * @param file the new file; null if no row was kept
+     * @param read how many rows were read
+     * @param kept how many were kept
+     */
+    public record Copied(DataFile file, long read, long kept)
     {
     }
 
@@ -164,12 +201,35 @@ public final class TableMaintenance
             Optional<Duration> retention, boolean orphans,
             UnaryOperator<Instant> keepFrom)
     {
+        return run(table, timeColumn, retention, orphans, keepFrom,
+                Purge.NONE);
+    }
+
+    /**
+     * Runs maintenance on a table, with a purge of the caller's after
+     * retention.
+     *
+     * @param table      the table
+     * @param timeColumn the partition source column, used for retention
+     * @param retention  delete rows older than this (whole UTC days); empty
+     *                   = keep forever
+     * @param orphans    also clean up unreferenced files this run
+     * @param keepFrom   where rows must be kept from instead, as for
+     *                   {@link #run(Table, String, Optional, boolean,
+     *                   UnaryOperator)}
+     * @param purge      removes rows the caller no longer keeps
+     * @return what it did
+     */
+    public Report run(Table table, String timeColumn,
+            Optional<Duration> retention, boolean orphans,
+            UnaryOperator<Instant> keepFrom, Purge purge)
+    {
         Span span = Telemetry.get().span("maintenance",
                 Fields.of(Attr.TABLE, table.name()));
         try (Scope ignored = span.makeCurrent())
         {
             return runTraced(table, timeColumn, retention, orphans,
-                    keepFrom);
+                    keepFrom, purge);
         }
         catch (RuntimeException | Error failure)
         {
@@ -190,11 +250,12 @@ public final class TableMaintenance
      * @param retention  how long rows are kept; empty = forever
      * @param orphans    also clean up unreferenced files
      * @param keepFrom   where rows must be kept from instead
+     * @param purge      removes rows the caller no longer keeps
      * @return what it did
      */
     private Report runTraced(Table table, String timeColumn,
             Optional<Duration> retention, boolean orphans,
-            UnaryOperator<Instant> keepFrom)
+            UnaryOperator<Instant> keepFrom, Purge purge)
     {
         committer.verifyCurrent(table);
         Instant now = clock.instant();
@@ -205,18 +266,19 @@ public final class TableMaintenance
         {
             retentionDeleted = applyRetention(table, timeColumn,
                     retention.get(), now, keepFrom);
-            if (retentionDeleted > 0)
+        }
+        int purged = purge.purge(table, now);
+        if (retentionDeleted + purged > 0)
+        {
+            // Iceberg's expiry deletes a file only once the snapshot that
+            // removed it has expired, and the current snapshot never
+            // expires. A fenced marker commit makes the delete non-current,
+            // so it (and every snapshot before it) can be expired now and
+            // the PHI files deleted in this run.
+            committer.commit(table, transaction ->
             {
-                // Iceberg's expiry deletes a file only once the snapshot
-                // that removed it has expired, and the current snapshot
-                // never expires. A fenced marker commit makes the retention
-                // delete non-current, so it (and every snapshot before it)
-                // can be expired now and the PHI files deleted in this run.
-                committer.commit(table, transaction ->
-                {
-                });
-                purgeBefore = table.currentSnapshot().timestampMillis() + 1;
-            }
+            });
+            purgeBefore = table.currentSnapshot().timestampMillis() + 1;
         }
 
         long[] compaction = settings.compaction()
@@ -224,13 +286,14 @@ public final class TableMaintenance
         int expired = expire(table, now, purgeBefore);
         int orphansDeleted = orphans ? deleteOrphans(table, now) : 0;
 
-        Report report = new Report(table.name(), retentionDeleted,
+        Report report = new Report(table.name(), retentionDeleted, purged,
                 (int) compaction[0], (int) compaction[1], compaction[2],
                 expired, orphansDeleted);
         LOG.info("maintenance.done table={} retentionDeletedFiles={}"
-                + " compactedFiles={} into={} expiredSnapshots={}"
-                + " orphansDeleted={}", table.name(),
-                report.retentionDeletedFiles(), report.compactedFiles(),
+                + " purgedFiles={} compactedFiles={} into={}"
+                + " expiredSnapshots={} orphansDeleted={}", table.name(),
+                report.retentionDeletedFiles(), report.purgedFiles(),
+                report.compactedFiles(),
                 report.compactedInto(), report.expiredSnapshots(),
                 report.orphansDeleted());
         return report;
@@ -421,11 +484,54 @@ public final class TableMaintenance
      */
     private void rewrite(Table table, long startSnapshot, List<DataFile> bin)
     {
-        DataFile first = bin.getFirst();
+        long expectedRows = 0;
+        for (DataFile file : bin)
+        {
+            expectedRows += file.recordCount();
+        }
+        Copied copied = copyRows(table, bin, row -> true, "compact");
+        DataFile merged = copied.file();
+        if (merged == null || merged.recordCount() != expectedRows
+                || copied.read() != expectedRows)
+        {
+            if (merged != null)
+            {
+                table.io().deleteFile(merged.location());
+            }
+            throw new IllegalStateException(
+                    "Compaction row count mismatch in " + table.name());
+        }
+        committer.commit(table, transaction ->
+        {
+            RewriteFiles rewriteFiles = transaction.newRewrite()
+                    .validateFromSnapshot(startSnapshot);
+            bin.forEach(rewriteFiles::deleteFile);
+            rewriteFiles.addFile(merged);
+            rewriteFiles.commit();
+        });
+    }
+
+    /**
+     * Copies the rows of data files that a filter keeps, unchanged
+     * (ciphertext included), into one new file in the first one's
+     * partition, written unsorted. Nothing is committed: the caller swaps
+     * the file in, or deletes it.
+     *
+     * @param table  the table
+     * @param files  the files, all in one partition
+     * @param keep   which rows to keep
+     * @param prefix the start of the new file's name
+     * @return the new file, null if no row was kept, and the counts
+     * @throws UncheckedIOException if a file can't be read or written
+     */
+    public static Copied copyRows(Table table, List<DataFile> files,
+            Predicate<Record> keep, String prefix)
+    {
+        DataFile first = files.getFirst();
         String location = table.locationProvider().newDataLocation(
                 table.spec(), first.partition(),
                 FileFormat.PARQUET.addExtension(
-                        "compact-" + UUID.randomUUID()));
+                        prefix + "-" + UUID.randomUUID()));
         DataWriter<Record> writer;
         try
         {
@@ -443,12 +549,12 @@ public final class TableMaintenance
         {
             throw new UncheckedIOException(failure);
         }
-        long expectedRows = 0;
+        long read = 0;
+        long kept = 0;
         try (writer)
         {
-            for (DataFile file : bin)
+            for (DataFile file : files)
             {
-                expectedRows += file.recordCount();
                 try (CloseableIterable<Record> rows = Parquet.read(
                         table.io().newInputFile(file.location()))
                         .project(table.schema())
@@ -458,30 +564,46 @@ public final class TableMaintenance
                 {
                     for (Record row : rows)
                     {
-                        writer.write(row);
+                        read++;
+                        if (keep.test(row))
+                        {
+                            writer.write(row);
+                            kept++;
+                        }
                     }
                 }
             }
         }
         catch (IOException failure)
         {
+            deleteQuietly(table, location);
             throw new UncheckedIOException(failure);
         }
-        DataFile merged = writer.toDataFile();
-        if (merged.recordCount() != expectedRows)
+        if (kept == 0)
+        {
+            deleteQuietly(table, location);
+            return new Copied(null, read, 0);
+        }
+        return new Copied(writer.toDataFile(), read, kept);
+    }
+
+    /**
+     * Deletes a file that was never committed, if it was written at all.
+     * An unreferenced file left behind is removed by orphan cleanup.
+     *
+     * @param table    the table
+     * @param location the file
+     */
+    private static void deleteQuietly(Table table, String location)
+    {
+        try
         {
             table.io().deleteFile(location);
-            throw new IllegalStateException(
-                    "Compaction row count mismatch in " + table.name());
         }
-        committer.commit(table, transaction ->
+        catch (RuntimeException ignored)
         {
-            RewriteFiles rewriteFiles = transaction.newRewrite()
-                    .validateFromSnapshot(startSnapshot);
-            bin.forEach(rewriteFiles::deleteFile);
-            rewriteFiles.addFile(merged);
-            rewriteFiles.commit();
-        });
+            // Not written, or not deletable now; orphan cleanup removes it.
+        }
     }
 
     // ---- expiry ----
