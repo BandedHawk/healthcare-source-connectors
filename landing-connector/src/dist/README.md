@@ -166,6 +166,23 @@ A read-write source, local or remote, is claimed by the node in a hidden file `.
 (an object under the prefix on a bucket), so a second node with other settings is refused. To hand the source to
 another node, stop the old one and delete `.sdh-owner`.
 
+### Memory
+
+The node keeps its ledger, one entry for every file or object it has landed, in memory, and keeps it forever. Queue
+and HTTP intakes add one entry per batch or push, so they stay small; a listing intake that lands many small files
+grows. The ledger may take half the heap. A node whose ledger has outgrown that won't start: it logs
+`ledger.too_large` (error code `LEDGER_TOO_LARGE`) with the heap it needs. Before that, `ledger.memory_low` warns
+once, while there is still room. `sdh.landing.ledger_items` gives the number of entries.
+
+| Ledger entries | Heap at least | Container memory limit (heap is half) |
+|---|---|---|
+| up to 5.5 million | 512 MiB | 1Gi |
+| up to 11 million | 1 GiB | 2Gi |
+| up to 22 million | 2 GiB | 4Gi |
+| up to 44 million | 4 GiB | 8Gi |
+
+Leave room to grow: a ledger near the top of its row needs the next row's heap the next time its index doubles.
+
 ## Run on a host
 
 ```sh

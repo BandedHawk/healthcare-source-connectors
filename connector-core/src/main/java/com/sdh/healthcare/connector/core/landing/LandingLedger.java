@@ -23,6 +23,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.IcebergGenerics;
@@ -136,7 +137,32 @@ public final class LandingLedger
     }
 
     /**
-     * Loads an intake's entries into memory.
+     * How many entries an intake has, at most, from the table's metadata
+     * alone: the rows of every data file that may hold some of its entries.
+     *
+     * @param intake the intake's name
+     * @return the count; more than the entries if files are shared with
+     *         another intake
+     * @throws IOException if the table can't be read
+     */
+    public long count(String intake) throws IOException
+    {
+        table.refresh();
+        long rows = 0;
+        try (CloseableIterable<FileScanTask> tasks = table.newScan()
+                .filter(Expressions.equal(INTAKE, intake)).planFiles())
+        {
+            for (FileScanTask task : tasks)
+            {
+                rows += task.file().recordCount();
+            }
+        }
+        return rows;
+    }
+
+    /**
+     * Loads an intake's entries into memory, with no limit on the heap the
+     * index may take.
      *
      * @param intake the intake's name
      * @return the index of everything the intake has landed
@@ -144,8 +170,21 @@ public final class LandingLedger
      */
     public LedgerIndex load(String intake) throws IOException
     {
-        LedgerIndex index = new LedgerIndex();
-        table.refresh();
+        return load(intake, Long.MAX_VALUE);
+    }
+
+    /**
+     * Loads an intake's entries into memory, in an index sized for them.
+     *
+     * @param intake the intake's name
+     * @param budget the bytes of heap the index may take before it warns
+     *               ({@link LedgerIndex})
+     * @return the index of everything the intake has landed
+     * @throws IOException if the table can't be read
+     */
+    public LedgerIndex load(String intake, long budget) throws IOException
+    {
+        LedgerIndex index = new LedgerIndex(count(intake), budget, intake);
         try (CloseableIterable<Record> scan = IcebergGenerics.read(table)
                 .select(SOURCE_REF_HASH, SOURCE_SIZE, SOURCE_VERSION,
                         ITEM_DIGEST)
@@ -160,6 +199,7 @@ public final class LandingLedger
                 index.add(key, (String) row.getField(ITEM_DIGEST));
             }
         }
+        index.checkBudget();
         return index;
     }
 

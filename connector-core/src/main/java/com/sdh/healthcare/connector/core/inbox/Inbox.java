@@ -125,7 +125,7 @@ public final class Inbox
     private final String positionKey;
 
     /** The item IDs in the inbox. */
-    private final PairSet itemIds = new PairSet();
+    private final PairSet itemIds = new PairSet(0);
 
     /** The highest sequence number in the inbox. */
     private long lastSeq;

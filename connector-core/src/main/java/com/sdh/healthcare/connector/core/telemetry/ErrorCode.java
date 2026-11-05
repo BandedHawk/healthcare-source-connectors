@@ -59,6 +59,13 @@ public enum ErrorCode
     INTAKE_UNREACHABLE,
 
     /**
+     * The landing ledger is too large for the heap: its index would take
+     * more than half of it (design §5.3.2). The landing node won't start
+     * until its memory is raised.
+     */
+    LEDGER_TOO_LARGE,
+
+    /**
      * An {@code item.landed} message the splitter won't take: it can't be
      * opened or verified, isn't {@code item.landed}, or names another
      * intake or landing table. It is dropped, and the landing node's

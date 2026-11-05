@@ -6,16 +6,26 @@
  */
 package com.sdh.healthcare.connector.core.landing;
 
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+
 /**
  * The ledger in memory (design §5.3.2): what has been landed, so an intake
  * can tell at once whether something it has found is new. It is loaded from
  * the ledger table at startup and added to as items land.
  * <p>
  * It holds two compact sets, to stay small with tens of millions of items:
- * the 128-bit key of each sighting ({@link SourceRef#key()}), about 24 bytes
- * an item, and 60 bits of each item's digest, about 12 bytes an item. The
- * digest set only says that some earlier item may have the same content; the
- * ledger table says which. Thread-safe.
+ * the 128-bit key of each sighting ({@link SourceRef#key()}), 16 bytes a
+ * slot, and 60 bits of each item's digest, 8 bytes a slot. A set is at most
+ * two-thirds full and doubles when it would be fuller, so an item costs 36
+ * to 72 bytes. Both are sized for the ledger when it is loaded, so loading
+ * doesn't grow them. The digest set only says that some earlier item may
+ * have the same content; the ledger table says which.
+ * <p>
+ * It is given a share of the heap. When its next growth would take it past
+ * that share, it reports {@code ledger.memory_low} once, so an operator can
+ * raise the memory before a restart finds the ledger too large. Thread-safe.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -30,16 +40,45 @@ public final class LedgerIndex
     private static final int BITS_PER_CHARACTER = 5;
 
     /** The keys of the sightings landed. */
-    private final PairSet keys = new PairSet();
+    private final PairSet keys;
 
     /** The digest prefixes of the items landed. */
-    private final PairSet digests = new PairSet();
+    private final LongSet digests;
+
+    /** The bytes it may take, before it warns. */
+    private final long budget;
+
+    /** The intake, for the warning. */
+    private final String intake;
+
+    /** Whether {@code ledger.memory_low} has been reported. */
+    private boolean warned;
 
     /**
      * Creates an empty index.
+     *
+     * @param expected how many items it should hold without growing
+     * @param budget   the bytes of heap it may take; {@link Long#MAX_VALUE}
+     *                 for no limit
+     * @param intake   the intake, for the warning
      */
-    public LedgerIndex()
+    public LedgerIndex(long expected, long budget, String intake)
     {
+        keys = new PairSet(expected);
+        digests = new LongSet(expected);
+        this.budget = budget;
+        this.intake = intake;
+    }
+
+    /**
+     * How many bytes of heap an index sized for some items takes.
+     *
+     * @param items how many items
+     * @return the bytes
+     */
+    public static long bytesFor(long items)
+    {
+        return (long) PairSet.slotsFor(items) * (2 * Long.BYTES + Long.BYTES);
     }
 
     /**
@@ -60,11 +99,16 @@ public final class LedgerIndex
      */
     public synchronized void add(Key key, String digest)
     {
+        long before = bytes();
         if (key != null)
         {
             keys.add(key.high(), key.low());
         }
-        digests.add(digestPrefix(digest), 0);
+        digests.add(digestPrefix(digest));
+        if (bytes() != before)
+        {
+            checkBudget();
+        }
     }
 
     /**
@@ -88,7 +132,7 @@ public final class LedgerIndex
      */
     public synchronized boolean mayHaveContent(String digest)
     {
-        return digests.contains(digestPrefix(digest), 0);
+        return digests.contains(digestPrefix(digest));
     }
 
     /**
@@ -99,6 +143,34 @@ public final class LedgerIndex
     public synchronized long size()
     {
         return keys.size();
+    }
+
+    /**
+     * How many bytes of heap the index takes.
+     *
+     * @return the bytes
+     */
+    public synchronized long bytes()
+    {
+        return keys.bytes() + digests.bytes();
+    }
+
+    /**
+     * Reports, once, that the next growth would take the index past its
+     * share of the heap. It is checked when the ledger has been loaded and
+     * whenever the index grows.
+     */
+    synchronized void checkBudget()
+    {
+        long next = 2 * bytes();
+        if (!warned && next > budget)
+        {
+            warned = true;
+            Telemetry.get().auditWarn("ledger.memory_low",
+                    Fields.of(Attr.INTAKE, intake)
+                            .with(Attr.COUNT, size())
+                            .with(Attr.BYTES, next));
+        }
     }
 
     /**

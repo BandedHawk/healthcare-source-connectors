@@ -340,7 +340,8 @@ public final class LandingRuntime implements AutoCloseable
                     ids, landing, clock);
             LandingLedger ledger =
                     new LandingLedger(ledgerTable, committer, retry);
-            LedgerIndex index = ledger.load(intake);
+            LedgerIndex index = loadLedger(ledger, intake,
+                    Runtime.getRuntime().maxMemory());
             if (intakeSource instanceof IcebergTableSource tableSource)
             {
                 tableSource.attach(new TableProgress(ledgerTable, committer,
@@ -462,6 +463,40 @@ public final class LandingRuntime implements AutoCloseable
         }
         return LeaseKeeper.acquire(store, properties.leaseName(), owner,
                 timing, lost -> fatal.exit("LEASE_LOST:" + lost.reason()));
+    }
+
+    /**
+     * Loads the ledger's index, once its size is known to fit: the index
+     * may take at most half of the heap, leaving the rest for landing
+     * (design §5.3.2). Its size is found from the table's metadata, so a
+     * ledger too large fails at once, with the heap it needs, rather than
+     * running out of memory part way.
+     *
+     * @param ledger  the ledger
+     * @param intake  the intake's name
+     * @param maxHeap the largest heap the JVM will use, in bytes
+     * @return the index, sized for the ledger
+     * @throws IOException if the table can't be read
+     * @throws LedgerTooLargeException if the index wouldn't fit
+     */
+    static LedgerIndex loadLedger(LandingLedger ledger, String intake,
+            long maxHeap) throws IOException
+    {
+        long budget = maxHeap / 2;
+        long entries = ledger.count(intake);
+        long needed = LedgerIndex.bytesFor(entries);
+        if (needed > budget)
+        {
+            LedgerTooLargeException failure =
+                    new LedgerTooLargeException(entries, 2 * needed);
+            Telemetry.get().auditError("ledger.too_large",
+                    Fields.of(Attr.INTAKE, intake)
+                            .with(Attr.ERROR_CODE, failure.code())
+                            .with(Attr.COUNT, entries)
+                            .with(Attr.BYTES, 2 * needed));
+            throw failure;
+        }
+        return ledger.load(intake, budget);
     }
 
     /**

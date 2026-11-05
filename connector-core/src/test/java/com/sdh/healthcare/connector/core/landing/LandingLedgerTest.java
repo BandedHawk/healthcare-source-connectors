@@ -13,10 +13,21 @@ import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.SectionIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.logs.SdkLoggerProvider;
+import io.opentelemetry.sdk.logs.data.LogRecordData;
+import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
+import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
 import java.io.ByteArrayInputStream;
+import java.nio.ByteBuffer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -258,7 +269,7 @@ class LandingLedgerTest
     @Test
     void theIndexGrowsAndKeepsEveryKey()
     {
-        LedgerIndex index = new LedgerIndex();
+        LedgerIndex index = new LedgerIndex(0, Long.MAX_VALUE, INTAKE);
         int count = 100_000;
         for (long value = 0; value < count; value++)
         {
@@ -273,6 +284,109 @@ class LandingLedgerTest
         }
         assertThat(index.contains(new LedgerIndex.Key(1, 1))).isFalse();
         assertThat(index.contains(new LedgerIndex.Key(0, 0))).isTrue();
+    }
+
+    /**
+     * The index is sized for the ledger as it loads, from the table's
+     * metadata, so loading doesn't grow it.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void sizesTheIndexForTheLedger() throws Exception
+    {
+        LandingLedger ledger =
+                new LandingLedger(ledgerTable, committer(), RETRY);
+        ledger.record(entries(2_000));
+        ledger.record(entries(1_000));
+        assertThat(ledger.count(INTAKE)).isEqualTo(3_000);
+        assertThat(ledger.count("another-intake")).isZero();
+
+        LedgerIndex index = ledger.load(INTAKE);
+        assertThat(index.size()).isEqualTo(3_000);
+        assertThat(index.bytes()).isEqualTo(LedgerIndex.bytesFor(3_000))
+                .as("8,192 slots of 24 bytes").isEqualTo(8_192 * 24);
+    }
+
+    /**
+     * When its next growth would take the index past its share of the
+     * heap, it warns, once.
+     */
+    @Test
+    void warnsOnceBeforeTheIndexOutgrowsItsShare()
+    {
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            long smallest = LedgerIndex.bytesFor(0);
+            LedgerIndex index = new LedgerIndex(0, 3 * smallest, INTAKE);
+            index.checkBudget();
+            assertThat(lowMemoryWarnings(events)).isEmpty();
+            for (long value = 1; value <= 2_000; value++)
+            {
+                index.add(new LedgerIndex.Key(value, value),
+                        SectionIds.encode(ByteBuffer.allocate(Long.BYTES)
+                                .putLong(value << 4).array()));
+            }
+            assertThat(index.bytes()).isEqualTo(4 * smallest);
+            assertThat(lowMemoryWarnings(events)).singleElement()
+                    .satisfies(warning ->
+                    {
+                        assertThat(warning.getAttributes().get(
+                                AttributeKey.longKey(Attr.COUNT.key())))
+                                .isEqualTo(683);
+                        assertThat(warning.getAttributes().get(
+                                AttributeKey.longKey(Attr.BYTES.key())))
+                                .isEqualTo(4 * smallest);
+                    });
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
+    }
+
+    /**
+     * The {@code ledger.memory_low} events recorded.
+     *
+     * @param events the exporter
+     * @return the events
+     */
+    static List<LogRecordData> lowMemoryWarnings(
+            InMemoryLogRecordExporter events)
+    {
+        return events.getFinishedLogRecordItems().stream()
+                .filter(record -> "sdh.audit.ledger.memory_low"
+                        .equals(record.getEventName()))
+                .toList();
+    }
+
+    /**
+     * Ledger entries with random references and digests.
+     *
+     * @param count how many
+     * @return the entries
+     */
+    List<LandingLedger.Entry> entries(int count)
+    {
+        List<LandingLedger.Entry> entries = new ArrayList<>(count);
+        for (int index = 0; index < count; index++)
+        {
+            String path = UUID.randomUUID().toString();
+            entries.add(new LandingLedger.Entry(INTAKE,
+                    SourceRef.of(ids, INTAKE, path, 1, "1"),
+                    UUID.randomUUID(), SectionIds.encode(
+                            ids.newLabelledMac("test").doFinal(
+                                    path.getBytes())),
+                    Instant.now(), 1, null));
+        }
+        return entries;
     }
 
     /** A digest prefix is 60 bits of the base32 digest. */
