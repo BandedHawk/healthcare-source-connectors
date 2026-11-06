@@ -6,15 +6,19 @@
  */
 package com.sdh.healthcare.connector.file.runtime;
 
+import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
-import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
+import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
-import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
-import com.sdh.healthcare.connector.core.inbox.Inbox;
-import com.sdh.healthcare.connector.core.inbox.InboxTables;
+import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.pipeline.PipelineSettings;
@@ -27,22 +31,27 @@ import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.file.inbox.InboxReceiver;
-import com.sdh.healthcare.connector.file.inbox.InboxRoute;
-import com.sdh.healthcare.connector.file.inbox.LandedItemsTable;
+import com.sdh.healthcare.connector.file.split.ItemSplitter;
+import com.sdh.healthcare.connector.file.split.LandedItemsTable;
+import com.sdh.healthcare.connector.file.split.SplitDuties;
+import com.sdh.healthcare.connector.file.split.SplitHandler;
+import com.sdh.healthcare.connector.file.split.SplitReconciler;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.LeaseDatabase;
-import com.sdh.healthcare.connector.runtime.config.CommonSettings.Lease;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
-import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
-import com.sdh.healthcare.connector.broker.send.Publishers;
-import com.sdh.healthcare.connector.broker.send.QueueType;
-import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
+import com.sdh.healthcare.connector.stage.StageHealth;
+import com.sdh.healthcare.connector.stage.StageProperties;
+import com.sdh.healthcare.connector.stage.StageReceiver;
 import com.zaxxer.hikari.HikariDataSource;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.camel.CamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
@@ -51,14 +60,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Everything the splitter runs on, started in a fixed order (design §9.3,
- * §5.3.6): settings and keys → lease → the splitter's catalog, with the
- * {@code records} and {@code inbox} tables fenced with the lease's epoch
- * → ID key → the landing catalog, whose {@code landed_items} is read
- * only, and loaded when first needed →
- * pipeline, processor and inbox → publisher. Closed in reverse, after the
- * inbox route has stopped, so no message is in flight when the lease is
- * released.
+ * Everything the split stage runs on (STAGES.md §8), started in a fixed
+ * order: settings and keys → the lease database, holding the item and
+ * duties leases and the items' checkpoints → the stage's catalog, with the
+ * shared {@code split_records} table and its ID key → the landing catalog,
+ * whose {@code landed_items} is read only, and loaded when first needed →
+ * publisher, pipeline and splitter → the input route and the duties, both
+ * left stopped. {@link #start()} starts them, and {@link #close()} stops
+ * them first, so no item is being split when the rest is closed.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -66,27 +75,24 @@ import org.slf4j.LoggerFactory;
 public final class ConnectorRuntime implements AutoCloseable
 {
 
-    /** How long to wait for the broker to acknowledge a result. */
-    static final Duration ACK_TIMEOUT = Duration.ofSeconds(30);
+    /** The longest pause before a held batch is tried again. */
+    static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
+
+    /** The shortest age orphan cleanup may delete files at. */
+    static final Duration MIN_ORPHAN_AGE = Duration.ofHours(1);
 
     /** Logs start and stop. */
     private static final Logger LOG =
             LoggerFactory.getLogger(ConnectorRuntime.class);
 
-    /** Stops the route on close. */
-    private final CamelContext camel;
-
     /** The lease database's pool. */
     private final HikariDataSource dataSource;
 
-    /** The splitter's catalog. */
+    /** The stage's catalog. */
     private final Catalog catalog;
 
-    /** The landing catalog; the splitter's own if they are the same. */
+    /** The landing catalog; the stage's own if they are the same. */
     private final Catalog landingCatalog;
-
-    /** The splitter's lease. */
-    private final LeaseKeeper lease;
 
     /** Sends messages. */
     private final ClosablePublisher publisher;
@@ -97,11 +103,17 @@ public final class ConnectorRuntime implements AutoCloseable
     /** Takes items through the pipeline. */
     private final ItemProcessor processor;
 
-    /** Where items wait. */
-    private final Inbox inbox;
+    /** Splits one item at a time, under its lease. */
+    private final ItemSplitter splitter;
 
-    /** Takes {@code item.landed} messages into the inbox. */
-    private final InboxReceiver receiver;
+    /** Takes {@code item.landed} messages off the broker. */
+    private final StageReceiver receiver;
+
+    /** Whether the broker answers. */
+    private final StageHealth health;
+
+    /** The reconciler and maintenance, on one pod. */
+    private final SplitDuties duties;
 
     /** The tables the runtime uses. */
     private final Tables tables;
@@ -109,93 +121,86 @@ public final class ConnectorRuntime implements AutoCloseable
     /** The keys, closed with the runtime. */
     private final KeyMaterial keys;
 
-    /** Makes IDs and MACs with the splitter's ID key. */
+    /** Makes IDs and MACs with the stage's ID key. */
     private final RecordIds ids;
-
-    /** Makes fenced commits under the lease. */
-    private final FencedCommitter committer;
-
-    /** How transient failures are retried. */
-    private final RetryPolicy retry;
-
-    /** Sends final results to the producer; null if they are off. */
-    private final ResultsChannel results;
 
     /**
      * The tables the runtime uses.
      *
-     * @param records     the splitter's {@code records}
-     * @param inbox       the splitter's {@code inbox}
-     * @param landedItems the landing node's {@code landed_items}, read only
+     * @param splitRecords the stage's {@code split_records}
+     * @param landedItems  the landing node's {@code landed_items}, read
+     *                     only
+     * @param checkpoints  the items' checkpoints
      */
-    public record Tables(Table records, Table inbox,
-            LandedItemsTable landedItems)
+    public record Tables(Table splitRecords, LandedItemsTable landedItems,
+            ItemCheckpoints checkpoints)
+    {
+    }
+
+    /**
+     * What a started runtime holds.
+     *
+     * @param dataSource     the lease database's pool
+     * @param catalog        the stage's catalog
+     * @param landingCatalog the landing catalog
+     * @param publisher      sends messages
+     * @param pipeline       splits, stores and publishes
+     * @param processor      takes items through the pipeline
+     * @param splitter       splits one item at a time
+     * @param receiver       takes messages off the broker
+     * @param health         whether the broker answers
+     * @param duties         the reconciler and maintenance
+     * @param tables         the tables
+     * @param keys           the keys
+     * @param ids            makes IDs and MACs
+     */
+    private record Parts(HikariDataSource dataSource, Catalog catalog,
+            Catalog landingCatalog, ClosablePublisher publisher,
+            IngestPipeline pipeline, ItemProcessor processor,
+            ItemSplitter splitter, StageReceiver receiver, StageHealth health,
+            SplitDuties duties, Tables tables, KeyMaterial keys,
+            RecordIds ids)
     {
     }
 
     /**
      * Holds what has been started.
      *
-     * @param camel          stops the route on close
-     * @param dataSource     the lease database's pool
-     * @param catalog        the splitter's catalog
-     * @param landingCatalog the landing catalog
-     * @param lease          the splitter's lease
-     * @param publisher      sends messages
-     * @param pipeline       splits, stores and publishes
-     * @param processor      takes items through the pipeline
-     * @param inbox          where items wait
-     * @param receiver       takes messages into the inbox
-     * @param tables         the tables
-     * @param keys           the keys
-     * @param ids            makes IDs and MACs
-     * @param committer      makes fenced commits
-     * @param retry          how transient failures are retried
-     * @param results        sends final results; null if they are off
+     * @param parts what has been started
      */
-    @SuppressWarnings("checkstyle:ParameterNumber")
-    private ConnectorRuntime(CamelContext camel, HikariDataSource dataSource,
-            Catalog catalog, Catalog landingCatalog, LeaseKeeper lease,
-            ClosablePublisher publisher, IngestPipeline pipeline,
-            ItemProcessor processor, Inbox inbox, InboxReceiver receiver,
-            Tables tables, KeyMaterial keys, RecordIds ids,
-            FencedCommitter committer, RetryPolicy retry,
-            ResultsChannel results)
+    private ConnectorRuntime(Parts parts)
     {
-        this.camel = camel;
-        this.dataSource = dataSource;
-        this.catalog = catalog;
-        this.landingCatalog = landingCatalog;
-        this.lease = lease;
-        this.publisher = publisher;
-        this.pipeline = pipeline;
-        this.processor = processor;
-        this.inbox = inbox;
-        this.receiver = receiver;
-        this.tables = tables;
-        this.keys = keys;
-        this.ids = ids;
-        this.committer = committer;
-        this.retry = retry;
-        this.results = results;
+        this.dataSource = parts.dataSource();
+        this.catalog = parts.catalog();
+        this.landingCatalog = parts.landingCatalog();
+        this.publisher = parts.publisher();
+        this.pipeline = parts.pipeline();
+        this.processor = parts.processor();
+        this.splitter = parts.splitter();
+        this.receiver = parts.receiver();
+        this.health = parts.health();
+        this.duties = parts.duties();
+        this.tables = parts.tables();
+        this.keys = parts.keys();
+        this.ids = parts.ids();
     }
 
     /**
-     * Starts the splitter's runtime.
+     * Sets up the split stage's runtime, with its input and duties not yet
+     * started.
      *
-     * @param properties the splitter's settings
-     * @param camel      the Camel context, for the publisher
-     * @param fatal      stops the process, on lease loss and the like
-     * @return the started runtime
-     * @throws Exception if a setting is wrong, a key can't be loaded, the
-     *                   lease is held, or storage can't be reached
+     * @param properties the stage's settings
+     * @param camel      the Camel context, for the publisher and the input
+     * @param fatal      stops the process on a fatal error
+     * @return the runtime
+     * @throws Exception if a setting is wrong, a key can't be loaded, or
+     *                   storage can't be reached
      */
-    public static ConnectorRuntime start(ConnectorProperties properties,
+    public static ConnectorRuntime create(ConnectorProperties properties,
             CamelContext camel, FatalExit fatal) throws Exception
     {
         ConnectorProperties.Landing landing = properties.landing();
         String intake = require(landing.intake(), "sdh.landing.intake");
-        require(landing.queueUri(), "sdh.landing.queue-uri");
         String format = require(properties.split().format(),
                 "sdh.split.format");
         SplitterRegistry splitters = SplitterRegistry.load();
@@ -207,34 +212,53 @@ public final class ConnectorRuntime implements AutoCloseable
                 landing.storage().catalog() == null
                         || landing.storage().catalog().isEmpty()
                         ? null : landing.storage().catalog();
-        QueueType queueType = QueueType.of(properties.queue().type());
-        String queueUri = queueType.effectiveUri(properties.queue().uri());
+        StageProperties stage = properties.stage();
+        ReceiveSettings input = stage.receive(Set.of());
+        CommonSettings.Queue output = requireQueue(stage.output());
+        QueueType queueType = QueueType.of(output.type());
+        String queueUri = queueType.effectiveUri(output.uri());
+        ConnectorProperties.Maintenance maintenance =
+                properties.maintenance();
+        MaintenanceSettings maintenanceSettings = maintenance.toSettings();
+        if (maintenanceSettings.orphanMinAge().compareTo(MIN_ORPHAN_AGE) < 0)
+        {
+            throw new IllegalArgumentException(
+                    "sdh.maintenance.orphans.min-age must be at least 1 hour");
+        }
+        Optional<Duration> retention = MaintenanceScheduler.retention(
+                "sdh.maintenance.retention.records",
+                maintenance.retention().records(), Duration.ofDays(1));
         KeyMaterial keys = KeyMaterial.load(properties.crypto());
 
         HikariDataSource dataSource = null;
-        LeaseKeeper lease = null;
         Catalog catalog = null;
         Catalog landingCatalog = null;
         ClosablePublisher publisher = null;
         IngestPipeline pipeline = null;
-        ResultsChannel results = null;
+        StageReceiver receiver = null;
         try
         {
             dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
-            lease = acquire(properties, dataSource, fatal);
+            JdbcLeaseStore leases = new JdbcLeaseStore(dataSource,
+                    properties.lease().jdbc().table(),
+                    Duration.ofSeconds(10));
+            leases.createTableIfMissing();
+            LeaseKeeper.Settings leaseSettings = leaseSettings(
+                    properties.lease());
 
             String namespace = properties.storage().namespace();
             catalog = CatalogUtil.buildIcebergCatalog(
                     properties.storage().catalogName(), catalogProperties,
                     null);
-            Table records = IngestTables.records(catalog, namespace);
-            Table inboxTable = InboxTables.inbox(catalog, namespace);
-            FencedCommitter committer = new FencedCommitter(lease);
-            committer.establish(records);
-            committer.establish(inboxTable);
+            Table splitRecords = IngestTables.splitRecords(catalog,
+                    namespace);
             String recordsKek = properties.crypto().keys().recordsKek();
-            RecordIds ids = new RecordIds(IdKeys.loadOrCreate(records,
-                    committer, keys.wrap(), recordsKek));
+            RecordIds ids = new RecordIds(IdKeys.loadOrCreateShared(
+                    splitRecords, keys.wrap(), recordsKek));
+            ItemCheckpoints checkpoints = new ItemCheckpoints(dataSource,
+                    stage.registrySchema(), new CheckpointCodec(ids),
+                    Duration.ofSeconds(10));
+            checkpoints.createTableIfMissing();
 
             landingCatalog = landingCatalogProperties == null ? catalog
                     : CatalogUtil.buildIcebergCatalog(
@@ -249,52 +273,66 @@ public final class ConnectorRuntime implements AutoCloseable
                     properties.retry().maxBackoff());
             Clock clock = Clock.systemUTC();
             Publishers.configureBroker(camel, queueType,
-                    properties.queue().artemis().brokerUrl(),
-                    properties.queue().artemis().username(),
-                    properties.queue().artemis().password());
+                    output.artemis().brokerUrl(),
+                    output.artemis().username(),
+                    output.artemis().password());
             publisher = Publishers.create(camel, queueType, queueUri);
             pipeline = new IngestPipeline(
                     pipelineSettings(properties, format, split, retry),
-                    records, committer, keys.wrap(), ids, splitters,
+                    splitRecords, checkpoints, keys.wrap(), ids, splitters,
                     new MessageSealer(keys.signer(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
                     publisher, clock);
-            if (properties.results().enabled())
-            {
-                results = ResultsChannel.open(properties.results(),
-                        properties.queue(), camel, keys.signer(),
-                        keys.signerKid(), retry, ACK_TIMEOUT);
-            }
-            ItemProcessor processor = new ItemProcessor(pipeline);
-            Inbox inbox = new Inbox(inboxTable, committer, ids,
-                    properties.connectorId(), retry, clock);
-            inbox.load();
-            InboxReceiver receiver = new InboxReceiver(inbox, keys.inbox(),
-                    intake, landing.storage().catalogName(),
-                    landing.storage().namespace());
+            ItemProcessor processor = new ItemProcessor(pipeline, intake);
+            ItemSplitter splitter = new ItemSplitter(processor, landedItems,
+                    keys.wrap(), leases, properties.connectorId(),
+                    leaseSettings);
+
+            StageHealth health = new StageHealth();
+            receiver = new StageReceiver(camel, input,
+                    new SplitHandler(splitter, keys.inbox(), intake,
+                            landing.storage().catalogName(),
+                            landing.storage().namespace(), fatal),
+                    health, Fields.of(Attr.INTAKE, intake),
+                    properties.retry().initialBackoff(), MAX_BACKOFF);
+
+            ConnectorProperties.Reconcile reconcile = landing.reconcile();
+            SplitReconciler reconciler = reconcile.enabled()
+                    ? new SplitReconciler(checkpoints, splitter, landedItems,
+                            intake, reconcile.grace(), clock)
+                    : null;
+            SplitDuties duties = new SplitDuties(leases,
+                    properties.connectorId(), leaseSettings, reconciler,
+                    reconcile.interval(),
+                    (committer, dutiesFatal) -> new MaintenanceScheduler(
+                            committer, maintenanceSettings,
+                            maintenance.toSchedule(),
+                            () -> List.of(MaintenanceScheduler.Target.of(
+                                    splitRecords, RecordsTable.INGESTED_AT,
+                                    retention)),
+                            new ReentrantLock(), dutiesFatal, clock),
+                    fatal);
             Telemetry.get().audit("connector.started",
-                    Fields.of(Attr.FORMAT, format).with(Attr.INTAKE, intake)
-                            .with(Attr.EPOCH, lease.epoch()));
-            return new ConnectorRuntime(camel, dataSource, catalog,
-                    landingCatalog, lease, publisher, pipeline, processor,
-                    inbox, receiver,
-                    new Tables(records, inboxTable, landedItems), keys, ids,
-                    committer, retry, results);
+                    Fields.of(Attr.FORMAT, format).with(Attr.INTAKE, intake));
+            return new ConnectorRuntime(new Parts(dataSource, catalog,
+                    landingCatalog, publisher, pipeline, processor, splitter,
+                    receiver, health, duties,
+                    new Tables(splitRecords, landedItems, checkpoints), keys,
+                    ids));
         }
         catch (Exception | Error failure)
         {
+            closeQuietly(receiver);
             if (pipeline != null)
             {
                 pipeline.close();
             }
-            closeQuietly(results);
             closeQuietly(publisher);
             if (landingCatalog != catalog)
             {
                 closeQuietly(landingCatalog);
             }
             closeQuietly(catalog);
-            closeQuietly(lease);
             closeQuietly(dataSource);
             keys.close();
             throw failure;
@@ -302,33 +340,22 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
-     * Takes the splitter's lease, waiting one TTL for a crashed holder's
-     * lease to run out, then failing with {@code LEASE_HELD}.
+     * The lease timings, for the item and duties leases.
      *
-     * @param properties the splitter's settings
-     * @param dataSource the lease database
-     * @param fatal      stops the process if the lease is lost
-     * @return the lease
-     * @throws Exception if it can't be taken
+     * @param settings the {@code sdh.lease} settings
+     * @return the timings
      */
-    private static LeaseKeeper acquire(ConnectorProperties properties,
-            HikariDataSource dataSource, FatalExit fatal) throws Exception
+    private static LeaseKeeper.Settings leaseSettings(
+            CommonSettings.Lease settings)
     {
-        Lease settings = properties.lease();
-        JdbcLeaseStore store = new JdbcLeaseStore(dataSource,
-                settings.jdbc().table(), Duration.ofSeconds(10));
-        store.createTableIfMissing();
-        return LeaseKeeper.acquire(store, settings.name(),
-                LeaseKeeper.defaultOwner(),
-                new LeaseKeeper.Settings(settings.ttl(),
-                        settings.renewInterval(), settings.safetyMargin()),
-                lost -> fatal.exit("LEASE_LOST:" + lost.reason()));
+        return new LeaseKeeper.Settings(settings.ttl(),
+                settings.renewInterval(), settings.safetyMargin());
     }
 
     /**
-     * The pipeline's settings, from the splitter's.
+     * The pipeline's settings, from the stage's.
      *
-     * @param properties the splitter's settings
+     * @param properties the stage's settings
      * @param format     the format
      * @param split      the checked split settings
      * @param retry      how transient failures are retried
@@ -338,7 +365,6 @@ public final class ConnectorRuntime implements AutoCloseable
             ConnectorProperties properties, String format, SplitConfig split,
             RetryPolicy retry)
     {
-        ConnectorProperties.Split splitSettings = properties.split();
         ConnectorProperties.Commit commit = properties.storage().commit();
         int workers = properties.encryptWorkers() > 0
                 ? properties.encryptWorkers()
@@ -350,13 +376,7 @@ public final class ConnectorRuntime implements AutoCloseable
                 .withCommit(commit.maxRecords(), commit.maxBytes().toBytes(),
                         commit.maxInterval())
                 .withWorkers(workers)
-                .withRetry(retry)
-                .withConversion(splitSettings.convert()
-                                ? ConverterRegistry.load()
-                                : ConverterRegistry.none(),
-                        splitSettings.convertMaxBytes().toBytes())
-                .withConvertMemory(splitSettings.convertMemory() == null ? 0
-                        : splitSettings.convertMemory().toBytes());
+                .withRetry(retry);
     }
 
     /**
@@ -394,6 +414,18 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
+     * Starts the duties, then the input (design §5.3.6).
+     *
+     * @throws Exception if the input route can't start
+     */
+    public void start() throws Exception
+    {
+        duties.start();
+        receiver.start();
+        LOG.info("split.started");
+    }
+
+    /**
      * Takes items through the pipeline.
      *
      * @return the processor
@@ -404,23 +436,23 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
-     * Where items wait.
+     * Splits one item at a time, under its lease.
      *
-     * @return the inbox
+     * @return the splitter
      */
-    public Inbox inbox()
+    public ItemSplitter splitter()
     {
-        return inbox;
+        return splitter;
     }
 
     /**
-     * Takes {@code item.landed} messages into the inbox, for the route.
+     * Whether the input broker answers.
      *
-     * @return the receiver
+     * @return the health
      */
-    public InboxReceiver receiver()
+    public StageHealth health()
     {
-        return receiver;
+        return health;
     }
 
     /**
@@ -434,17 +466,7 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
-     * Makes fenced commits under the lease, for maintenance.
-     *
-     * @return the committer
-     */
-    public FencedCommitter committer()
-    {
-        return committer;
-    }
-
-    /**
-     * Makes IDs and MACs with the splitter's ID key.
+     * Makes IDs and MACs with the stage's ID key.
      *
      * @return the IDs
      */
@@ -464,43 +486,17 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
-     * How transient failures are retried.
-     *
-     * @return the policy
+     * Stops the input and the duties, then closes everything in reverse
+     * order.
      */
-    public RetryPolicy retry()
-    {
-        return retry;
-    }
-
-    /**
-     * Sends final results to the intake's producer.
-     *
-     * @return the channel; empty if results are off
-     */
-    public Optional<ResultsChannel> results()
-    {
-        return Optional.ofNullable(results);
-    }
-
-    /** Stops the route, then closes everything in reverse order. */
     @Override
     public void close()
     {
-        try
-        {
-            camel.getRouteController().stopRoute(InboxRoute.ROUTE_ID);
-        }
-        catch (Exception failure)
-        {
-            LOG.warn("connector.stop_route_failed error={}",
-                    failure.getClass().getSimpleName());
-        }
+        receiver.close();
+        duties.close();
         pipeline.close();
-        closeQuietly(results);
         closeQuietly(publisher);
         keys.close();
-        closeQuietly(lease);
         if (landingCatalog != catalog)
         {
             closeQuietly(landingCatalog);
@@ -527,6 +523,26 @@ public final class ConnectorRuntime implements AutoCloseable
             throw new IllegalArgumentException(setting + " is required");
         }
         return value;
+    }
+
+    /**
+     * Checks that the output queue is configured.
+     *
+     * @param queue the {@code sdh.stage.output} settings
+     * @return the settings
+     * @throws IllegalArgumentException if its type or URI is missing
+     */
+    private static CommonSettings.Queue requireQueue(
+            CommonSettings.Queue queue)
+    {
+        if (queue == null)
+        {
+            throw new IllegalArgumentException(
+                    StageProperties.PREFIX + ".output is required");
+        }
+        require(queue.type(), StageProperties.PREFIX + ".output.type");
+        require(queue.uri(), StageProperties.PREFIX + ".output.uri");
+        return queue;
     }
 
     /**

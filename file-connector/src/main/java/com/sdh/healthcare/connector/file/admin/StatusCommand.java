@@ -199,10 +199,8 @@ final class StatusCommand implements AdminCommand
                 && checkpoint.restarts() > 0)
         {
             text.append(String.format("%n%-21s restarted %d time(s) in a row"
-                    + " without progress; at %d the batch is"
-                    + " stored unconverted, at %d the item fails", "",
+                    + " without progress; at %d the item fails", "",
                     checkpoint.restarts(),
-                    IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS,
                     IngestPipeline.FAIL_AFTER_RESTARTS));
         }
         return text.toString();

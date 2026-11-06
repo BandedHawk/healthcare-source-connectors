@@ -11,7 +11,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
+import com.sdh.healthcare.connector.core.TestPostgres;
+import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
@@ -44,6 +47,7 @@ import java.security.KeyPairGenerator;
 import java.security.interfaces.ECPrivateKey;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -244,9 +248,9 @@ class ThroughputPerf
         Catalog catalog = backend.catalog();
         String namespace = "perf_" + format + "_"
                 + UUID.randomUUID().toString().substring(0, 8);
-        Table records = IngestTables.records(catalog, namespace);
+        Table records = IngestTables.splitRecords(catalog, namespace);
         Table source = LandingTables.landedItems(catalog, namespace);
-        FencedCommitter committer = new FencedCommitter(new LeaseToken()
+        LeaseToken lease = new LeaseToken()
         {
             @Override
             public long epoch()
@@ -258,26 +262,28 @@ class ThroughputPerf
             public void checkHeld()
             {
             }
-        });
-        for (Table table : List.of(records, source))
-        {
-            committer.establish(table);
-        }
+        };
+        FencedCommitter committer = new FencedCommitter(lease);
+        committer.establish(source);
         RecordIds ids = new RecordIds(
-                IdKeys.loadOrCreate(records, committer, keys, RECORDS_KEK));
+                IdKeys.loadOrCreateShared(records, keys, RECORDS_KEK));
+        ItemCheckpoints checkpoints = new ItemCheckpoints(
+                TestPostgres.get().getPostgresDatabase(), namespace,
+                new CheckpointCodec(ids), Duration.ofSeconds(30));
+        checkpoints.createTableIfMissing();
         CountingPublisher publisher = new CountingPublisher();
         PipelineSettings settings = PipelineSettings
                 .defaults("perf", format, "perf", RECORDS_KEK)
                 .withSplit(split).withWorkers(workers);
         Clock clock = Clock.systemUTC();
         try (IngestPipeline pipeline = new IngestPipeline(settings, records,
-                committer, keys, ids, SplitterRegistry.load(),
+                checkpoints, keys, ids, SplitterRegistry.load(),
                 new MessageSealer(new ECDSASigner(
                         (ECPrivateKey) signer.getPrivate()), "connector",
                         recipient.getPublic(), "downstream"),
                 publisher, clock))
         {
-            ItemProcessor processor = new ItemProcessor(pipeline);
+            ItemProcessor processor = new ItemProcessor(pipeline, "perf");
             ItemLander lander = new ItemLander(source, committer, keys, ids,
                     ItemLander.Settings.defaults("perf", LANDED_KEK), clock);
             UUID itemId = UuidV7.next(clock.millis());
@@ -293,20 +299,19 @@ class ThroughputPerf
             ResourceMonitor monitor = ResourceMonitor.start();
             ItemProcessor.Outcome outcome = processor.process(itemId,
                     landed.digest(),
-                    () -> LandedItemSource.open(source, itemId, keys));
+                    () -> LandedItemSource.open(source, itemId, keys),
+                    lease);
             ResourceMonitor.Resources resources = monitor.stop();
 
             assertThat(outcome.result()).as("outcome")
                     .isEqualTo(ItemProcessor.Result.COMPLETED);
             assertThat(outcome.recordCount())
                     .isEqualTo(generated.records());
-            // Every generated record converts to JSON; a raw fallback
-            // would measure the wrong path.
             assertThat(pipeline.failedRecordCount(outcome.itemId()))
-                    .as("records stored raw").isZero();
+                    .as("records the splitter couldn't parse").isZero();
             assertThat(publisher.count.get())
-                    .as("file.started + records + file.completed")
-                    .isEqualTo(generated.records() + 2);
+                    .as("records + item.split")
+                    .isEqualTo(generated.records() + 1);
 
             records.refresh();
             StageResult result = new StageResult(PerfSettings.CORE,

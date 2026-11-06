@@ -13,10 +13,11 @@ import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
-import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.core.TestPostgres;
+import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
+import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
@@ -60,10 +61,11 @@ class PipelineToReaderTest
     }
 
     /**
-     * A file of 25 C-CDA documents is split into a record each. A reader
-     * downstream reads each document back from its message, as JSON with the
-     * element positions, and the record's origin leads to its place in the
-     * file.
+     * A file of 25 C-CDA documents is split into a record each, by the
+     * split stage's pipeline (STAGES.md §8). A reader downstream reads each
+     * document back from its {@code record.split}, as it was cut, and the
+     * record's origin leads to its place in the file. Reading converted
+     * records is tested with the convert stage.
      *
      * @throws Exception if a key can't be made or the file processed
      */
@@ -79,28 +81,25 @@ class PipelineToReaderTest
         {
             String document = template.formatted(index, index);
             file.append("  ").append(document).append('\n');
-            // Each document arrives as JSON in the C-CDA mapping (design
-            // §6.4); ClinicalDocument has one id and title. Positions are in
-            // the record: line 1 is the XML declaration the splitter adds,
-            // and the root tag gains the batch's namespace, which moves the
-            // id to column 42.
-            expected.add(("{\"ClinicalDocument\":{\"#line\":2,\"#col\":1,"
-                    + "\"id\":{\"#line\":2,\"#col\":42,\"root\":\"%d\"},"
-                    + "\"title\":\"Patient %d\"}}").formatted(index, index));
+            // The splitter repeats the file's XML declaration on line 1,
+            // and gives the root tag the batch's namespace.
+            expected.add("<?xml version=\"1.0\"?>\n"
+                    + document.replace("<ClinicalDocument>",
+                            "<ClinicalDocument xmlns=\"urn:hl7-org:v3\">"));
         }
         file.append("</batch>\n");
 
         InMemoryCatalog catalog = new InMemoryCatalog();
         catalog.initialize("prod", Map.of(CatalogProperties.WAREHOUSE_LOCATION,
                 "memory://wh-" + UUID.randomUUID()));
-        Table table = IngestTables.records(catalog, "sdh_ingest");
+        Table table = IngestTables.splitRecords(catalog, "sdh_split");
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(256);
         AesKeyWrapProvider kms = new AesKeyWrapProvider(
                 Map.of("records-kek/1", generator.generateKey()));
         KeyPair signer = QueueReaderTest.ec();
         KeyPair recipient = QueueReaderTest.ec();
-        FencedCommitter committer = new FencedCommitter(new LeaseToken()
+        LeaseToken lease = new LeaseToken()
         {
 
             /** Holds epoch 1, the only one. */
@@ -113,10 +112,13 @@ class PipelineToReaderTest
             public void checkHeld()
             {
             }
-        });
-        committer.establish(table);
+        };
         RecordIds ids = new RecordIds(
-                IdKeys.loadOrCreate(table, committer, kms, "records-kek/1"));
+                IdKeys.loadOrCreateShared(table, kms, "records-kek/1"));
+        ItemCheckpoints checkpoints = new ItemCheckpoints(
+                TestPostgres.get().getPostgresDatabase(), "reader_test",
+                new CheckpointCodec(ids), Duration.ofSeconds(10));
+        checkpoints.createTableIfMissing();
         List<OutboundMessage> sent =
                 Collections.synchronizedList(new ArrayList<>());
 
@@ -128,7 +130,7 @@ class PipelineToReaderTest
                 new ECDSASigner((ECPrivateKey) signer.getPrivate()),
                 "connector-2026", recipient.getPublic(), "downstream-2026");
         try (IngestPipeline pipeline = new IngestPipeline(settings, table,
-                committer, kms, ids, SplitterRegistry.load(), sealer,
+                checkpoints, kms, ids, SplitterRegistry.load(), sealer,
                 message ->
                 {
                     sent.add(message);
@@ -136,7 +138,8 @@ class PipelineToReaderTest
                 }, Clock.systemUTC()))
         {
             pipeline.split(
-                    SeekableByteSource.of(file.toString().getBytes(UTF_8)));
+                    SeekableByteSource.of(file.toString().getBytes(UTF_8)),
+                    UUID.randomUUID(), lease);
         }
 
         try (QueueReader reader = QueueReader.builder()
@@ -149,19 +152,18 @@ class PipelineToReaderTest
                 .build())
         {
             List<String> read = new ArrayList<>();
-            ConnectorMessage first = reader.decode(sent.getFirst().body());
-            assertThat(first).isInstanceOf(FileStarted.class);
-            for (OutboundMessage message : sent.subList(1, sent.size()))
+            for (OutboundMessage message : sent)
             {
-                RecordStored stored =
-                        (RecordStored) reader.decode(message.body());
-                assertThat(stored.contentType()).isEqualTo("application/json");
-                assertThat(stored.mapping()).isEqualTo("ccda/2");
+                ConnectorMessage decoded = reader.decode(message.body());
+                assertThat(decoded).isInstanceOf(RecordSplit.class);
+                RecordSplit split = (RecordSplit) decoded;
+                assertThat(split.errorCode()).isNull();
                 // The id's place in the file: document i is on line 3 + i,
-                // its id after "  <ClinicalDocument>".
-                assertThat(stored.origin().toFile(new SourcePosition(2, 42)))
-                        .isEqualTo(new SourcePosition(3 + stored.seq(), 21));
-                read.add(new String(reader.readRecord(stored, 1 << 20),
+                // its id after "  <ClinicalDocument>"; in the record it is
+                // on line 2, after the root tag with its namespace.
+                assertThat(split.origin().toFile(new SourcePosition(2, 42)))
+                        .isEqualTo(new SourcePosition(3 + split.seq(), 21));
+                read.add(new String(reader.readRecord(split, 1 << 20),
                         UTF_8));
             }
             assertThat(read).containsExactlyElementsOf(expected);

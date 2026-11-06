@@ -9,7 +9,7 @@ package com.sdh.healthcare.connector.landing.runtime;
 import com.sdh.healthcare.connector.broker.receive.BrokerKind;
 import com.sdh.healthcare.connector.broker.receive.BrokerWatch;
 import com.sdh.healthcare.connector.broker.receive.EventHubsSupport;
-import com.sdh.healthcare.connector.broker.receive.ReceiveProperties;
+import com.sdh.healthcare.connector.broker.receive.RabbitmqConnections;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
@@ -386,7 +386,7 @@ public final class LandingRuntime implements AutoCloseable
                 ReceiveSettings receive = broker.receive();
                 if (receive.kind() == BrokerKind.RABBITMQ)
                 {
-                    rabbitmq = rabbitmq(receive.rabbitmq());
+                    rabbitmq = RabbitmqConnections.factory(receive.rabbitmq());
                     camel.getRegistry().bind(ReceiveSettings.RABBITMQ_BEAN,
                             rabbitmq);
                 }
@@ -583,38 +583,6 @@ public final class LandingRuntime implements AutoCloseable
     public BrokerSettings broker()
     {
         return broker;
-    }
-
-    /**
-     * Makes a queue intake's RabbitMQ connection factory.
-     *
-     * @param settings the connection settings
-     * @return the factory
-     * @throws Exception if TLS can't be set up
-     */
-    private static CachingConnectionFactory rabbitmq(
-            ReceiveProperties.Rabbitmq settings) throws Exception
-    {
-        com.rabbitmq.client.ConnectionFactory client =
-                new com.rabbitmq.client.ConnectionFactory();
-        if (settings.ssl())
-        {
-            client.useSslProtocol(javax.net.ssl.SSLContext.getDefault());
-            client.enableHostnameVerification();
-        }
-        CachingConnectionFactory factory =
-                new CachingConnectionFactory(client);
-        factory.setAddresses(settings.addresses());
-        factory.setVirtualHost(settings.virtualHost());
-        if (settings.username() != null)
-        {
-            factory.setUsername(settings.username());
-        }
-        if (settings.password() != null)
-        {
-            factory.setPassword(settings.password());
-        }
-        return factory;
     }
 
     /**

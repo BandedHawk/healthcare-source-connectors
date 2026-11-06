@@ -7,7 +7,7 @@
 package com.sdh.healthcare.connector.runtime.maintenance;
 
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
-import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
@@ -166,7 +166,7 @@ public final class MaintenanceScheduler implements AutoCloseable
      * @throws IllegalArgumentException if orphan cleanup could delete files
      *                                  less than an hour old
      */
-    public MaintenanceScheduler(FencedCommitter committer,
+    public MaintenanceScheduler(TableCommitter committer,
             MaintenanceSettings settings, Schedule schedule,
             Supplier<List<Target>> targets, ReentrantLock writer,
             FatalExit fatal, Clock clock)

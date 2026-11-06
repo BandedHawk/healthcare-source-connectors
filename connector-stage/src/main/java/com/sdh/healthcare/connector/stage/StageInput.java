@@ -21,11 +21,22 @@ public sealed interface StageInput
     /**
      * A record to process.
      *
-     * @param recordId the record's id, the registry's key (STAGES.md §6)
-     * @param itemId   the id of the item it came from
+     * @param recordId the record's id
+     * @param itemId   the id of the item it came from; with the record id,
+     *                 the registry's key (STAGES.md §6)
      */
     record RecordInput(String recordId, UUID itemId) implements StageInput
     {
+
+        /**
+         * What the registry knows the record by.
+         *
+         * @return its key
+         */
+        StageRegistry.Key key()
+        {
+            return new StageRegistry.Key(itemId, recordId);
+        }
     }
 
     /**

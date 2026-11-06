@@ -8,7 +8,11 @@ package com.sdh.healthcare.connector.contract.message;
 
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 
@@ -279,12 +283,13 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * {@inheritDoc}
          *
-         * @return the record id
+         * @return "rec-", the item id and the record id: the same content
+         *         in another item is a record of its own there
          */
         @Override
         public String messageId()
         {
-            return recordId;
+            return "rec-" + itemId + "-" + recordId;
         }
     }
 
@@ -370,12 +375,13 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * {@inheritDoc}
          *
-         * @return the record id
+         * @return "rec-", the item id and the record id: the same content
+         *         in another item is a record of its own there
          */
         @Override
         public String messageId()
         {
-            return recordId;
+            return "rec-" + itemId + "-" + recordId;
         }
     }
 
@@ -690,13 +696,25 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * {@inheritDoc}
          *
-         * @return "rc-", the stage, the record id and the new digest, so
-         *         each different output is reported once
+         * @return "rc-" and a SHA-256 of the stage, the item id, the record
+         *         id and the new digest, so each different output is
+         *         reported once, in an id short enough for every broker
          */
         @Override
         public String messageId()
         {
-            return "rc-" + stage + "-" + recordId + "-" + newDigest;
+            try
+            {
+                MessageDigest sha = MessageDigest.getInstance("SHA-256");
+                byte[] hash = sha.digest(String.join("\n", stage,
+                        itemId.toString(), recordId, newDigest)
+                        .getBytes(StandardCharsets.UTF_8));
+                return "rc-" + HexFormat.of().formatHex(hash);
+            }
+            catch (NoSuchAlgorithmException missing)
+            {
+                throw new IllegalStateException(missing);
+            }
         }
 
         /**
@@ -765,12 +783,13 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * {@inheritDoc}
          *
-         * @return "sp-" and the record id
+         * @return "sp-", the item id and the record id: the same content
+         *         in another item is a record of its own there
          */
         @Override
         public String messageId()
         {
-            return "sp-" + recordId;
+            return "sp-" + itemId + "-" + recordId;
         }
     }
 

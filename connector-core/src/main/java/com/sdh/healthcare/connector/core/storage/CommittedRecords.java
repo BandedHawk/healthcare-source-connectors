@@ -153,6 +153,34 @@ public final class CommittedRecords
     }
 
     /**
+     * Tells whether a record of an item is committed: after an ambiguous
+     * commit, or at resume, whether a batch ending with it landed.
+     *
+     * @param table  the table
+     * @param itemId the item's id
+     * @param seq    the record's sequence number
+     * @return true if its first chunk is in the table
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static boolean has(Table table, UUID itemId, long seq)
+    {
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(ITEM_ID, itemId),
+                        Expressions.equal(SEQ, seq),
+                        Expressions.equal(CHUNK_INDEX, 0)))
+                .select(SEQ)
+                .build())
+        {
+            return rows.iterator().hasNext();
+        }
+        catch (IOException error)
+        {
+            throw new UncheckedIOException(error);
+        }
+    }
+
+    /**
      * Reads a row's origin.
      *
      * @param row a row of the table

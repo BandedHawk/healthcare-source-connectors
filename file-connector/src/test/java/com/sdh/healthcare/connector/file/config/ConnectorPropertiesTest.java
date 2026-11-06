@@ -25,7 +25,8 @@ class ConnectorPropertiesTest
 
     /**
      * Nested YAML keys bind as dotted catalog properties and split
-     * options, and unset settings take their defaults.
+     * options, record messages go to the stage's output, and unset
+     * settings take their defaults.
      */
     @Test
     void nestedYamlKeysBindAsDottedCatalogPropertiesAndSplitOptions()
@@ -40,7 +41,9 @@ class ConnectorPropertiesTest
                 "sdh.storage.catalog.s3.path-style-access", "true",
                 "sdh.storage.catalog.io-impl",
                 "org.apache.iceberg.aws.s3.S3FileIO",
-                "sdh.lease.ttl", "90s");
+                "sdh.lease.ttl", "90s",
+                "sdh.stage.output.type", "kafka",
+                "sdh.stage.output.uri", "kafka:sdh.records");
         ConnectorProperties properties =
                 new Binder(new MapConfigurationPropertySource(yaml))
                         .bindOrCreate("sdh", ConnectorProperties.class);
@@ -56,8 +59,9 @@ class ConnectorPropertiesTest
                 .isEqualTo(Duration.ofSeconds(15));
         assertThat(properties.storage().commit().maxRecords())
                 .isEqualTo(10_000);
-        assertThat(properties.landing().idleWait())
-                .isEqualTo(Duration.ofSeconds(5));
+        assertThat(properties.queue().uri()).isEqualTo("kafka:sdh.records");
+        assertThat(properties.stage().registrySchema())
+                .isEqualTo("sdh_stage");
         assertThat(properties.landing().storage().namespace())
                 .isEqualTo("sdh_landing");
         assertThat(properties.landing().reconcile().enabled()).isTrue();

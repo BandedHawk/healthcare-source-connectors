@@ -52,7 +52,7 @@ require the signature before the image runs.
 
 - Linux on x86-64 or ARM64, with glibc.
 - Java 25.
-- PostgreSQL, for the single-instance lease; it can be the JDBC catalog's database.
+- PostgreSQL, for the item and duties leases and the items' checkpoints; it can be the JDBC catalog's database.
 - An Iceberg catalog: REST (for example Apache Polaris) or JDBC.
 - Object storage: Amazon S3, Google Cloud Storage or Azure Data Lake Storage Gen2. Of the S3-compatible stores,
   SeaweedFS is tested; MinIO is not supported.
@@ -61,11 +61,12 @@ require the signature before the image runs.
   Cloud KMS is available but untested against the live service; contact Smile Digital Health before relying on
   it in production. Besides its own keys, the connector needs `landed-items-kek` (to read landed items), its inbox
   key pair (the landing node encrypts `item.landed` to the public half) and the landing node's signing public key.
-- A landing node for the intake, and the queue it sends `item.landed` on.
+- A landing node for the intake, and the queue it sends `item.landed` on (`sdh.stage.input`).
 
-Run exactly one connector per intake. A second instance is refused at startup, after waiting up to
-70 seconds (the lease's TTL plus its safety margin) in case the first one has crashed. A connector restarted after a
-crash waits the same way and takes over once the old lease lapses.
+Run as many instances per intake as you like. Each splits one item at a time, under that item's lease, so items are
+split in parallel across instances and no item by two at once. An item whose instance crashed is taken up again, from
+its checkpoint, when its message is delivered again. One instance at a time also finds landed items whose message was
+lost and runs table maintenance; if it stops, another takes over within the lease's TTL (60 seconds by default).
 
 ## Configure
 
@@ -79,12 +80,8 @@ variables, never in the file:
 
 Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` becomes `SDH_LEASE_JDBC_URL`) or as an argument (`--sdh.lease.jdbc.url=…`).
 
-**Producer feedback** (`sdh.results`, off by default). With the same settings as the intake's landing node, the
-connector sends each item's final result to the producer's own queue, sealed to the producer's public key: whether
-it completed or failed, and for each problem its error code, record, byte offset, line and column, and for a queue
-batch the message and its broker ID. No content is sent. Long lists of problems come in numbered parts, each with
-the totals. A result is sent before the connector moves on, so after a crash it may be sent again, with the same
-message ID, but is never lost.
+Records are stored as split, in their original form. Conversion to JSON and the producer's final results
+(`sdh.results`) move to the convert stage, which follows in a later release.
 
 ## Run on a host
 

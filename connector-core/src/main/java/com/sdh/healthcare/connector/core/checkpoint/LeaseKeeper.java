@@ -225,6 +225,29 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable
     }
 
     /**
+     * Acquires the lease if it is free, without waiting, and starts
+     * background renewal. A split stage worker takes an item's lease this
+     * way (STAGES.md §8): if another worker holds it, the item's message
+     * is tried again later rather than holding this worker.
+     *
+     * @param store     where the lease is kept
+     * @param leaseName the lease's name
+     * @param owner     who is taking it
+     * @param settings  the lease timings
+     * @param onLost    told when the lease is lost
+     * @return the keeper
+     * @throws LeaseHeldException if another instance holds the lease
+     */
+    public static LeaseKeeper tryAcquire(LeaseStore store, String leaseName,
+            String owner, Settings settings,
+            Consumer<LeaseLostException> onLost) throws LeaseHeldException
+    {
+        return acquire(store, leaseName, owner, settings, Duration.ZERO,
+                System::nanoTime, duration -> Thread.sleep(duration), onLost,
+                true);
+    }
+
+    /**
      * Acquires the lease as a standby (design §5.3.5): waits for it for as
      * long as it takes, then starts background renewal. A standby pod for
      * a landing intake calls this, so it takes over within one TTL of the

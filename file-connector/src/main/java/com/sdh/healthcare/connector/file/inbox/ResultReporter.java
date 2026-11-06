@@ -18,6 +18,7 @@ import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor.Outcome;
 import com.sdh.healthcare.connector.core.pipeline.PublishFailedException;
 import com.sdh.healthcare.connector.core.storage.CommittedRecords;
+import com.sdh.healthcare.connector.file.split.LandedItemsTable;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import java.time.Clock;
 import java.time.Instant;
@@ -110,10 +111,6 @@ public final class ResultReporter
      */
     public void report(Outcome outcome) throws Exception
     {
-        if (outcome.result() == ItemProcessor.Result.ABANDONED)
-        {
-            return;
-        }
         Optional<Record> summary = LandedItems.summary(landedItems.get(),
                 outcome.itemId());
         Landed landed = summary.isEmpty() ? Landed.NONE

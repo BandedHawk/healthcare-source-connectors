@@ -31,6 +31,26 @@ interface PipelineHooks
     }
 
     /**
+     * The checkpoint after the batch is kept as pending; the batch isn't
+     * appended yet (STAGES.md §8).
+     *
+     * @param lastSeq the batch's last record
+     */
+    default void batchPrepared(long lastSeq)
+    {
+    }
+
+    /**
+     * The batch is appended to the table; the item's checkpoint still has
+     * it as pending (STAGES.md §8).
+     *
+     * @param lastSeq the batch's last record
+     */
+    default void batchAppended(long lastSeq)
+    {
+    }
+
+    /**
      * The batch is committed; its messages are not yet published.
      *
      * @param lastSeq the batch's last record

@@ -191,6 +191,58 @@ pod of the stage at a time.
 - **No conversion:** records are stored as cut, and a piece the splitter can't parse is stored with its error
   (§5.3.16), counted in `failedRecordCount`.
 
+**How it is built (step 4b, 2026-11-05):**
+- **One item at a time per pod.** Within an item the pod already uses every core (reading, hashing, encrypting
+  and sealing run on worker pools); items run in parallel across pods, which KEDA adds. The handler takes the
+  messages of a received batch one after the other, so `sdh.stage.input.batch.max-messages` should be 1: a
+  long item would otherwise hold the others past their visibility timeout.
+- **The item's lease** is a row in the existing lease table, `split/<connector-id>/<itemId>`, taken without
+  waiting. If another worker holds it, the batch is answered retry and tried again after the pause, so a
+  redelivered `item.landed` waits for the worker splitting it. The lease is renewed in the background while
+  the item is split, and released at the end. Losing it stops the item, not the pod: the next commit or
+  checkpoint write finds the lease gone, and the batch is retried, and by then waits for whoever took it over.
+  The rows stay in the lease table after release: the epoch must only grow, for fencing.
+- **The checkpoint row,** `<registry-schema>.split_item(item_id, epoch, checkpoint, pending, state, ended_at,
+  updated_at)`, holds the item's checkpoint, MAC'd as now, and its state in plain text, for counting. `ended_at`
+  is set once, when the checkpoint first passes `SPLITTING`, and every `item.split` for the item carries it as
+  `completedAt`, so one sent again is identical to the first. Each write is fenced by the lease's epoch
+  (`WHERE epoch <= ?`), so a worker whose lease was taken over can't write it again. A batch is committed in
+  three steps: the checkpoint after it is written as `pending`; the batch is appended to `split_records`;
+  `pending` becomes the checkpoint. At resume, a `pending` checkpoint is kept if its last record is in the
+  table, and dropped if not. So no batch is split twice, and the plan's re-split (and its duplicate rows) is
+  not needed.
+- **Appends aren't fenced by a table epoch:** many pods append to `split_records` at once, which Iceberg
+  retries on conflict. The lease is checked just before each append. A worker that stalls between that check
+  and its commit, for longer than the lease lasts, could append a batch its successor also appends: the rows
+  are identical, carry their record IDs, and the next stage drops the repeated messages as duplicates (§6,
+  "What remains").
+- **The record-ID key** is created once, on `split_records`, by a compare-and-swap of the table's properties:
+  of two pods starting together, one wins and the other reads its key.
+- **Messages:** a `record.split` for each record (a piece that couldn't be parsed carries its error code),
+  sent after its batch commits, then `item.split` once all of them are acknowledged, with `failure` set if the
+  item couldn't be split to its end. No `file.started` or `file.completed`. An `item.landed` for an item
+  already finished is answered by sending its `item.split` again (its ID is fixed) and acknowledging.
+- **Messages it doesn't take** (another intake, other storage, another type, a bad signature) are audited and
+  dropped, as the inbox did; one of a contract version it can't read holds the batch back.
+- **Errors:** another pod on the item, a lost item lease, storage, the broker or the lease database down: the
+  batch is held and retried in place, with a growing pause. A tampered checkpoint, a commit whose outcome isn't
+  known, or a JVM `Error` stops the process.
+- **Settings:** `sdh.stage.input` and `sdh.stage.output` replace `sdh.landing.queue-uri` and `sdh.queue`;
+  `sdh.stage.registry-schema` holds `split_item`. The item lease uses the `sdh.lease` timings and database.
+  `sdh.landing.idle-wait`, `sdh.split.convert*` and `sdh.results` are gone. The application's defaults set
+  `sdh.stage.input.batch.max-messages` to 1. `sdh.split.autostart: false` leaves the input and duties stopped,
+  for tests that hand messages to the handler themselves.
+- **Duties for one pod:** reconciling and table maintenance run under a lease of their own,
+  `split/<connector-id>/duties`, taken as a standby by every pod, so one pod has it at a time; losing it sends
+  that pod back to waiting, and splitting carries on. Maintenance commits through `LeasedCommitter` on that
+  lease, while other pods append: Iceberg checks rewrites against appends, and orphan cleanup's minimum age (at
+  least an hour, checked at startup) covers appends in flight. The reconciler splits a missing item itself,
+  under the item's lease, rather than sending its `item.landed` again; an item another pod has taken meanwhile
+  is left to it.
+- **Conversion** is removed from the pipeline; step 4c builds it again in the convert stage, from the code in
+  git history before 4b. `item.result` moves to the convert stage in step 4c too: the split stage sends none
+  (`ResultReporter` is left in `file-connector`, unwired, for 4c to move).
+
 ## 9. The convert stage
 
 Per record: read the split record, convert it (§6.4), store it in `records`, send `record.stored` (or
@@ -229,7 +281,10 @@ Each step builds and passes its tests before the next.
      `record.conflict`), `OutboundMessage` carries it as `key`, and every adapter keys by it.
    - **4b:** the split stage: `file-connector` splits with conversion off into `split_records`, under a lease per
      item, its checkpoint in the item's row, without the inbox (§8). The module keeps its name; its image becomes
-     `sdh/split-stage` (decided).
+     `sdh/split-stage` (decided). **Done 2026-11-05.** The same content in two items is a record of each (decided:
+     "copy per item"): record message IDs and the stage registry's key include the item ID. Left for 4d: the
+     admin commands and their test (disabled until then), and the demo, sandbox, image and integration-test
+     settings, which still name the inbox's; the integration tests compile but aren't run.
    - **4c:** the convert stage, a new module `convert-stage` on `connector-stage` (§9), image `sdh/convert-stage`.
    - **4d:** `file.started` and `file.completed` removed; the demo, sandbox, images, integration tests and docs
      moved to the stages; the admin commands (`restore`, `decrypt-fallback`, `status`) adapted to the per-item

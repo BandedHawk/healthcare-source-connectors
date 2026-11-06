@@ -12,10 +12,13 @@ import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import java.security.SecureRandom;
 import java.text.ParseException;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.Transaction;
+import org.apache.iceberg.exceptions.CommitFailedException;
 
 /**
  * Loads the ID key (design §7.1): a 256-bit HMAC secret, made when the
@@ -41,9 +44,63 @@ public final class IdKeys
     /** The stored JSON's field holding the wrapped key, in base64. */
     private static final String WRAPPED_KEY = "wrapped";
 
+    /** The summary property of the marker a shared key's commit adds. */
+    static final String MARKER_SUMMARY = "sdh.id-key-marker";
+
+    /** Attempts to store a shared key while the table keeps moving. */
+    private static final int CREATE_ATTEMPTS = 10;
+
     /** Not used: there are only static methods. */
     private IdKeys()
     {
+    }
+
+    /**
+     * As {@link #loadOrCreate}, for a table many workers write to without a
+     * single writer's lease (a stage's {@code split_records}, STAGES.md
+     * §8). A new key is stored by a strict compare-and-swap with an empty
+     * marker append, so of two workers starting together one stores its key
+     * and the other, whose commit fails, reads that key.
+     *
+     * @param table  the table that holds the key
+     * @param keys   wraps and unwraps the key
+     * @param kekRef the KEK to wrap a new key with
+     * @return the ID key
+     * @throws IllegalStateException if the stored key can't be read or has
+     *                               the wrong length
+     * @throws CommitFailedException if the table keeps moving
+     */
+    public static byte[] loadOrCreateShared(Table table, KeyProvider keys,
+            String kekRef)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            table.refresh();
+            String stored = table.properties().get(PROPERTY);
+            if (stored != null)
+            {
+                return unwrap(stored, keys);
+            }
+            byte[] newKey = new byte[KEY_BYTES];
+            new SecureRandom().nextBytes(newKey);
+            String encoded = encode(keys.wrap(kekRef, newKey));
+            Arrays.fill(newKey, (byte) 0);
+            Transaction transaction = table.newTransaction();
+            transaction.updateProperties().set(PROPERTY, encoded).commit();
+            transaction.newFastAppend().set(MARKER_SUMMARY, "1").commit();
+            try
+            {
+                FencedCommitter.commitStrictly(transaction);
+            }
+            catch (CommitFailedException lost)
+            {
+                // Another worker committed first, perhaps its own key.
+                if (attempt >= CREATE_ATTEMPTS)
+                {
+                    throw lost;
+                }
+            }
+        }
     }
 
     /**

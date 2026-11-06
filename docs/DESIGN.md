@@ -1565,7 +1565,8 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 - **Change from earlier discussion:** the "duplicates skipped" count is **not** included in `file.completed`. Counting it would require checking every record against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
 - **Unencrypted broker metadata** is limited to: `messageId`, `type`, `itemId`, and the content type `application/jose`.
 - **Message IDs:**
-  - `record.stored` and `record.failed`: `messageId = recordId`.
+  - `record.stored` and `record.failed`: `rec-<itemId>-<recordId>`; `record.split`: `sp-<itemId>-<recordId>`. The item is part of the ID because a record ID comes from the content alone (§7.3): the same document in two items is a record of each, and must reach the next stage for both, past the brokers' duplicate detection (decided 2026-11-05). A reader that wants each document once drops repeats by `recordId`.
+  - `item.split`: `is-<itemId>`; `item.converted`: `ic-convert-<itemId>`; `record.conflict`: `rc-` and a SHA-256 of the stage, item ID, record ID and new digest, so the ID fits every broker's limit (128 characters on SQS and Service Bus).
   - `file.started`: `fs-<itemId>`.
   - `file.completed`: `fc-<itemId>`.
   - `item.landed`: `il-<itemId>`; `item.received`: `rc-<itemId>`; `item.result`: `rs-<itemId>-<part>`.

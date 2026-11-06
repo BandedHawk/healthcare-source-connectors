@@ -54,7 +54,7 @@ import org.slf4j.LoggerFactory;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class FencedCommitter
+public final class FencedCommitter implements TableCommitter
 {
 
     /** The table property that holds the epoch. */
@@ -164,6 +164,7 @@ public final class FencedCommitter
      *                               fenced this instance out
      * @throws CommitFailedException if the commit keeps conflicting
      */
+    @Override
     public Snapshot commit(Table table, Consumer<Transaction> changes)
     {
         for (int attempt = 1; ; attempt++)
@@ -211,6 +212,7 @@ public final class FencedCommitter
      * @param table the table
      * @throws LeaseLostException if the lease was lost or fenced
      */
+    @Override
     public void verifyCurrent(Table table)
     {
         lease.checkHeld();
@@ -262,11 +264,32 @@ public final class FencedCommitter
             throw new IllegalStateException("Unsupported transaction type "
                     + transaction.getClass().getName());
         }
-        TableMetadata start = base.startMetadata();
-        if (epochOf(start.properties()) != expectedEpoch)
+        if (epochOf(base.startMetadata().properties()) != expectedEpoch)
         {
             throw new LeaseLostException(LeaseLostException.Reason.FENCED);
         }
+        commitStrictly(transaction);
+    }
+
+    /**
+     * Commits a transaction from exactly the metadata it started on, with
+     * {@code TableOperations.commit}: it fails if anyone else committed in
+     * between, where Iceberg's own commit would apply the changes again on
+     * top. For a REST catalog the transaction must add a snapshot (see the
+     * class notes) for the server to check that.
+     *
+     * @param transaction the transaction, from {@code Table.newTransaction}
+     * @throws CommitFailedException if the table moved
+     * @throws IllegalStateException if it isn't Iceberg's own transaction
+     */
+    public static void commitStrictly(Transaction transaction)
+    {
+        if (!(transaction instanceof BaseTransaction base))
+        {
+            throw new IllegalStateException("Unsupported transaction type "
+                    + transaction.getClass().getName());
+        }
+        TableMetadata start = base.startMetadata();
         base.underlyingOps().commit(start, base.currentMetadata());
     }
 }

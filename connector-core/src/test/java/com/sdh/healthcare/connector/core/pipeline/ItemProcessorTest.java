@@ -15,10 +15,8 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
@@ -72,8 +70,11 @@ class ItemProcessorTest
     /** The landing KEK. */
     static final String LANDED_KEK = "landed-items-kek/1";
 
-    /** The records table. */
+    /** The split records table. */
     Table records;
+
+    /** The schema of this test's checkpoint table. */
+    final String schema = SplitTestSupport.freshSchema();
 
     /** The landed items table. */
     Table landed;
@@ -113,7 +114,7 @@ class ItemProcessorTest
         InMemoryCatalog catalog = new InMemoryCatalog();
         catalog.initialize("prod", Map.of(CatalogProperties.WAREHOUSE_LOCATION,
                 "memory://wh-" + UUID.randomUUID()));
-        records = IngestTables.records(catalog, "sdh_ingest");
+        records = IngestTables.splitRecords(catalog, "sdh_split");
         landed = LandingTables.landedItems(catalog, "sdh_landing");
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(256);
@@ -162,29 +163,28 @@ class ItemProcessorTest
     }
 
     /**
-     * A processor as a fresh start of the splitter would make it.
+     * A processor as a fresh start of a split worker would make it.
      *
      * @return the processor
      * @throws Exception if the signer can't be made
      */
     ItemProcessor processor() throws Exception
     {
-        FencedCommitter committer = committer();
-        committer.establish(records);
-        RecordIds ids = new RecordIds(IdKeys.loadOrCreate(records,
-                committer, keys, RECORDS_KEK));
+        RecordIds ids = new RecordIds(IdKeys.loadOrCreateShared(records,
+                keys, RECORDS_KEK));
         PipelineSettings settings = PipelineSettings.defaults("splitter",
                 "csv", "prod", RECORDS_KEK)
                 .withCommit(3, 1L << 30, Duration.ofHours(1)).withWorkers(2)
                 .withRetry(new RetryPolicy(2, Duration.ofMillis(1),
                         Duration.ofMillis(2)));
         IngestPipeline pipeline = new IngestPipeline(settings, records,
-                committer, keys, ids, SplitterRegistry.load(),
+                SplitTestSupport.checkpoints(schema, ids), keys, ids,
+                SplitterRegistry.load(),
                 new MessageSealer(new ECDSASigner((ECPrivateKey) signer
                         .getPrivate()), "connector", recipient.getPublic(),
                         "downstream"), publisher, Clock.systemUTC());
         open.add(pipeline);
-        return new ItemProcessor(pipeline);
+        return new ItemProcessor(pipeline, "claims");
     }
 
     /**
@@ -215,7 +215,19 @@ class ItemProcessorTest
             throws Exception
     {
         return processor.process(item.itemId(), item.digest(),
-                () -> LandedItemSource.open(landed, item.itemId(), keys));
+                () -> LandedItemSource.open(landed, item.itemId(), keys),
+                lease());
+    }
+
+    /**
+     * The item's lease, at a higher epoch than any before, as a worker
+     * taking the item over would hold.
+     *
+     * @return the lease
+     */
+    SplitTestSupport.TestLease lease()
+    {
+        return new SplitTestSupport.TestLease(++epochs);
     }
 
     /**
@@ -256,8 +268,9 @@ class ItemProcessorTest
     }
 
     /**
-     * An item is split under its item ID, and file.completed reports its
-     * landed digest. Processing it again changes nothing.
+     * An item is split under its item ID, and {@code item.split} reports
+     * its landed digest. Processing it again sends {@code item.split} again,
+     * without reading the item.
      *
      * @throws Exception if the test fails to run
      */
@@ -272,30 +285,32 @@ class ItemProcessorTest
         assertThat(outcome.recordCount()).isEqualTo(10);
 
         List<ConnectorMessage> messages = messages();
-        assertThat(messages.getFirst()).isInstanceOfSatisfying(
-                FileStarted.class, started -> assertThat(started.itemId())
+        assertThat(messages.stream().filter(RecordSplit.class::isInstance))
+                .hasSize(10).allSatisfy(record -> assertThat(record.itemId())
                         .isEqualTo(item.itemId()));
-        assertThat(messages.stream().filter(RecordStored.class::isInstance))
-                .hasSize(10);
         assertThat(messages.getLast()).isInstanceOfSatisfying(
-                FileCompleted.class, completed ->
+                ItemSplit.class, split ->
                 {
-                    assertThat(completed.itemDigest())
-                            .isEqualTo(item.digest());
-                    assertThat(completed.itemSize()).isEqualTo(item.size());
+                    assertThat(split.itemDigest()).isEqualTo(item.digest());
+                    assertThat(split.itemSize()).isEqualTo(item.size());
+                    assertThat(split.intake()).isEqualTo("claims");
+                    assertThat(split.recordCount()).isEqualTo(10);
+                    assertThat(split.failure()).isNull();
                 });
 
         int sent = publisher.sent.size();
         assertThat(processor().process(item.itemId(), item.digest(), () ->
         {
             throw new AssertionError("a finished item isn't read");
-        }).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
-        assertThat(publisher.sent).hasSize(sent);
+        }, lease()).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
+        assertThat(publisher.sent).hasSize(sent + 1);
+        assertThat(messages().getLast().messageId())
+                .isEqualTo(messages.getLast().messageId());
     }
 
     /**
      * A message batch is split message by message: a message that can't be
-     * split is announced as a failed record with the splitter's error, and
+     * split is stored as it is and announced with the splitter's error, and
      * the item still completes, with the messages either side of it.
      *
      * @throws Exception if the test fails
@@ -322,24 +337,18 @@ class ItemProcessorTest
         ItemProcessor.Outcome outcome = process(processor(), item);
         assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.COMPLETED);
         assertThat(outcome.recordCount()).isEqualTo(3);
-        List<ConnectorMessage> published = messages();
-        assertThat(published.stream().filter(RecordStored.class::isInstance)
-                .map(m -> ((RecordStored) m).sourceOffset()))
-                .containsExactly(offsets.get(0), offsets.get(2));
-        assertThat(published.stream().filter(RecordFailed.class::isInstance))
-                .singleElement().isInstanceOfSatisfying(RecordFailed.class,
-                        failed ->
-                        {
-                            assertThat(failed.errorCode()).isEqualTo(
-                                    "PARSE_UNTERMINATED_QUOTE");
-                            assertThat(failed.sourceOffset())
-                                    .isEqualTo(offsets.get(1));
-                            assertThat(failed.sourceLength()).isEqualTo(
-                                    messages[1].length());
-                        });
-        assertThat(published.getLast()).isInstanceOfSatisfying(
-                FileCompleted.class, completed -> assertThat(
-                        completed.failedRecordCount()).isEqualTo(1));
+        List<RecordSplit> split = messages().stream()
+                .filter(RecordSplit.class::isInstance)
+                .map(RecordSplit.class::cast).toList();
+        assertThat(split).extracting(RecordSplit::sourceOffset)
+                .containsExactlyElementsOf(offsets);
+        assertThat(split).extracting(RecordSplit::errorCode)
+                .containsExactly(null, "PARSE_UNTERMINATED_QUOTE", null);
+        assertThat(split.get(1).sourceLength())
+                .isEqualTo(messages[1].length());
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, done -> assertThat(
+                        done.failedRecordCount()).isEqualTo(1));
     }
 
     /**
@@ -356,8 +365,16 @@ class ItemProcessorTest
         assertThat(outcome.failure().code())
                 .isEqualTo(ErrorCode.PARSE_UNTERMINATED_QUOTE);
         assertThat(outcome.failure().stage()).isEqualTo("split");
-        assertThat(messages()).noneMatch(FileCompleted.class::isInstance);
-        assertThat(processor().inProgress()).isEmpty();
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, done ->
+                {
+                    assertThat(done.failure().code())
+                            .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+                    assertThat(done.failure().stage()).isEqualTo("split");
+                });
+        assertThat(processor().checkpoint(item.itemId())).hasValueSatisfying(
+                checkpoint -> assertThat(checkpoint.state())
+                        .isEqualTo(Checkpoint.State.FAILED));
     }
 
     /**
@@ -370,7 +387,7 @@ class ItemProcessorTest
     {
         UUID missing = UUID.randomUUID();
         ItemProcessor.Outcome outcome = processor().process(missing, "x",
-                () -> LandedItemSource.open(landed, missing, keys));
+                () -> LandedItemSource.open(landed, missing, keys), lease());
         assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.FAILED);
         assertThat(outcome.failure().stage()).isEqualTo("landing");
         assertThat(outcome.failure().code())
@@ -390,15 +407,15 @@ class ItemProcessorTest
         publisher.fail = call -> call >= 2;
         assertThatThrownBy(() -> process(processor(), item))
                 .isInstanceOf(PublishFailedException.class);
-        assertThat(processor().inProgress()).hasValueSatisfying(
+        assertThat(processor().checkpoint(item.itemId())).hasValueSatisfying(
                 checkpoint -> assertThat(checkpoint.state())
                         .isEqualTo(Checkpoint.State.SPLITTING));
 
         publisher.fail = call -> false;
         ItemProcessor.Outcome outcome = process(processor(), item);
         assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.COMPLETED);
-        assertThat(messages().stream().filter(RecordStored.class::isInstance)
-                .map(message -> ((RecordStored) message).seq()).distinct())
+        assertThat(messages().stream().filter(RecordSplit.class::isInstance)
+                .map(message -> ((RecordSplit) message).seq()).distinct())
                 .hasSize(10);
     }
 
@@ -411,10 +428,11 @@ class ItemProcessorTest
     void finishesASplitItemWithoutReadingIt() throws Exception
     {
         LandedItem item = land(csv(4));
-        publisher.fail = call -> call >= 5;
+        // The four records are sent; item.split is not.
+        publisher.fail = call -> call >= 4;
         assertThatThrownBy(() -> process(processor(), item))
                 .isInstanceOf(Exception.class);
-        assertThat(processor().inProgress()).hasValueSatisfying(
+        assertThat(processor().checkpoint(item.itemId())).hasValueSatisfying(
                 checkpoint -> assertThat(checkpoint.state())
                         .isEqualTo(Checkpoint.State.ARCHIVING));
 
@@ -422,28 +440,6 @@ class ItemProcessorTest
         assertThat(processor().process(item.itemId(), item.digest(), () ->
         {
             throw new AssertionError("a split item isn't read");
-        }).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
-    }
-
-    /**
-     * An item in progress can be given up, so another can start.
-     *
-     * @throws Exception if the test fails to run
-     */
-    @Test
-    void abandonsAnItemInProgress() throws Exception
-    {
-        LandedItem first = land(csv(10));
-        publisher.fail = call -> call >= 2;
-        assertThatThrownBy(() -> process(processor(), first))
-                .isInstanceOf(PublishFailedException.class);
-        publisher.fail = call -> false;
-
-        ItemProcessor processor = processor();
-        Checkpoint stuck = processor.inProgress().orElseThrow();
-        assertThat(processor.abandon(stuck).result())
-                .isEqualTo(ItemProcessor.Result.ABANDONED);
-        assertThat(process(processor(), land(csv(2))).result())
-                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        }, lease()).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
     }
 }

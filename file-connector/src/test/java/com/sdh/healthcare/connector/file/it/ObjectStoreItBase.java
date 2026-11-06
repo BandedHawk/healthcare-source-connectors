@@ -38,7 +38,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.locks.ReentrantLock;
 import org.apache.camel.CamelContext;
 import org.apache.camel.ConsumerTemplate;
 import org.apache.iceberg.CatalogUtil;
@@ -209,9 +208,6 @@ abstract class ObjectStoreItBase
     @Autowired
     CamelContext camel;
 
-    /** Held while maintenance runs, so the splitter doesn't commit. */
-    @Autowired
-    ReentrantLock writerLock;
 
     /**
      * The store's fixture.
@@ -304,12 +300,10 @@ abstract class ObjectStoreItBase
 
             // Maintenance, between files: compaction, orphan cleanup where
             // the emulator can list, then retention.
-            writerLock.lock();
-            try
             {
-                FileIO io = runtime.tables().records().io();
+                FileIO io = runtime.tables().splitRecords().io();
                 String dataPrefix =
-                        runtime.tables().records().location() + "/data/";
+                        runtime.tables().splitRecords().location() + "/data/";
                 String stray = dataPrefix + "stray-crashed-batch.parquet";
                 boolean orphans = orphanCleanupSupported();
                 if (orphans)
@@ -324,11 +318,11 @@ abstract class ObjectStoreItBase
                 // JVM's; a minute's lead keeps the just-planted stray old
                 // enough to count as an orphan.
                 TableMaintenance.Report report = new TableMaintenance(
-                        runtime.committer(),
+                        ItSupport.committer(),
                         new MaintenanceSettings(Duration.ofDays(7), 10, true,
                                 0.75, 2, 8L << 30, Duration.ZERO),
                         Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
-                        .run(runtime.tables().records(),
+                        .run(runtime.tables().splitRecords(),
                                 RecordsTable.INGESTED_AT, Optional.empty(),
                                 orphans);
                 assertThat(report.compactedFiles())
@@ -345,24 +339,20 @@ abstract class ObjectStoreItBase
                                     rows.get((int) record.seq())));
                 }
                 TableMaintenance.Report purge = new TableMaintenance(
-                        runtime.committer(), MaintenanceSettings.DEFAULT,
+                        ItSupport.committer(), MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
-                        .run(runtime.tables().records(),
+                        .run(runtime.tables().splitRecords(),
                                 RecordsTable.INGESTED_AT,
                                 Optional.of(Duration.ofDays(1)), false);
                 assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
                 assertThat(list(dataPrefix))
                         .as("PHI data objects physically removed").isEmpty();
             }
-            finally
-            {
-                writerLock.unlock();
-            }
         }
 
         // Nothing the connector wrote is readable: data, manifests and
         // metadata alike.
-        FileIO io = runtime.tables().records().io();
+        FileIO io = runtime.tables().splitRecords().io();
         String warehouse = fixture.catalog().get("warehouse");
         List<String> objects = list(warehouse);
         assertThat(objects).isNotEmpty();

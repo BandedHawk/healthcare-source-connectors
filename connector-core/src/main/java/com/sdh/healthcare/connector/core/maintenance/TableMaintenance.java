@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.maintenance;
 
-import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -61,17 +61,21 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Maintenance for one ingest table without Spark (design §8.4): retention,
- * bin-pack compaction, snapshot expiry and orphan-file cleanup. Runs on the
- * single writer, never at the same time as ingest (the caller guarantees
- * that).
+ * bin-pack compaction, snapshot expiry and orphan-file cleanup. On a table
+ * with one writer it runs on that writer, never at the same time as ingest
+ * (the caller guarantees that). On a table many stage workers append to
+ * (STAGES.md §8) it runs on the pod holding the stage's duties lease while
+ * the others append: a compaction that conflicts with an append is tried
+ * again, and only files older than {@code orphanMinAge} are taken as
+ * orphans, so a data file being written isn't one.
  * <p>
- * Every commit goes through the {@link FencedCommitter} except snapshot
+ * Every commit goes through the {@link TableCommitter} except snapshot
  * expiry, which must use Iceberg's own commit path to delete files
  * physically. Iceberg deletes a removed file once the snapshot that removed
  * it expires, so files replaced by compaction disappear when the compaction
  * snapshot ages out ({@code snapshotRetention}); retention purges at once
  * (see {@link #run}). It runs straight after
- * {@link FencedCommitter#verifyCurrent}; the worst a stale instance could
+ * {@link TableCommitter#verifyCurrent}; the worst a stale instance could
  * do with it is expire snapshots that are already past retention.
  *
  * @author Jonas Barnett
@@ -138,7 +142,7 @@ public final class TableMaintenance
     }
 
     /** Commits under the lease. */
-    private final FencedCommitter committer;
+    private final TableCommitter committer;
 
     /** The maintenance settings. */
     private final MaintenanceSettings settings;
@@ -153,7 +157,7 @@ public final class TableMaintenance
      * @param settings  the maintenance settings
      * @param clock     tells the time
      */
-    public TableMaintenance(FencedCommitter committer,
+    public TableMaintenance(TableCommitter committer,
             MaintenanceSettings settings, Clock clock)
     {
         this.committer = committer;

@@ -144,7 +144,7 @@ class GcsIT extends ObjectStoreItBase
     List<String> list(String location)
     {
         SupportsPrefixOperations io =
-                (SupportsPrefixOperations) runtime.tables().records().io();
+                (SupportsPrefixOperations) runtime.tables().splitRecords().io();
         return StreamSupport.stream(io.listPrefix(location).spliterator(),
                 false).map(FileInfo::location).toList();
     }

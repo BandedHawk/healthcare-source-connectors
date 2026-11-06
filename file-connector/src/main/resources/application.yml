@@ -43,8 +43,13 @@ logging:
     com.azure.core.http.jdk.httpclient.JdkHttpClient: error
 
 sdh:
+  stage:
+    input:
+      # One item.landed message per batch: a batch is held until each of its items is split (STAGES.md §8), so a
+      # larger one would hold finished items' messages behind a slow one.
+      batch:
+        max-messages: 1
   landing:
-    idle-wait: 5s
     # Landed items whose item.landed message was lost (docs/DEPLOYMENT.md).
     reconcile:
       enabled: true

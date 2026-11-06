@@ -12,12 +12,12 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings.Compaction;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Crypto;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Lease;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Queue;
-import com.sdh.healthcare.connector.runtime.config.CommonSettings.Results;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Retry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Telemetry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Orphans;
 import com.sdh.healthcare.connector.runtime.config.ConnectorSettings;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
+import com.sdh.healthcare.connector.stage.StageProperties;
 import java.time.Duration;
 import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -25,28 +25,30 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.util.unit.DataSize;
 
 /**
- * Every {@code sdh.*} setting of the splitter (design §14). The settings
+ * Every {@code sdh.*} setting of the split stage (design §14, STAGES.md
+ * §8). The settings
  * both applications share are in
  * {@link com.sdh.healthcare.connector.runtime.config.CommonSettings}.
  * Secrets (passwords, passphrases) normally come from environment
  * variables, such as {@code SDH_CRYPTO_KEYSTORE_PASSWORD}, or a Spring
  * {@code configtree:} mount.
  *
- * @param connectorId    the splitter's ID, recorded in messages and naming
- *                       its checkpoint
+ * @param connectorId    the stage's ID, recorded in messages and naming
+ *                       its leases
  * @param landing        the intake it splits, and where its items are
- * @param split          how items are split and converted
- * @param storage        the splitter's catalog and namespace
- * @param lease          the lease database and timings
+ * @param split          how items are split
+ * @param storage        the stage's catalog and namespace
+ * @param lease          the lease database and timings, for the item and
+ *                       duties leases
  * @param crypto         the keys and who holds them
- * @param queue          where record messages go
+ * @param stage          the broker {@code item.landed} messages come from,
+ *                       where record messages go, and the Postgres schema
+ *                       of the items' checkpoints
  * @param retry          how transient failures are retried
  * @param maintenance    table maintenance
  * @param telemetry      the telemetry export
  * @param encryptWorkers hash, encrypt and seal threads; 0 for one per CPU
  *                       core
- * @param results        final results for the intake's producer (design
- *                       §5.3.8)
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -58,32 +60,36 @@ public record ConnectorProperties(
         @DefaultValue Storage storage,
         @DefaultValue Lease lease,
         @DefaultValue Crypto crypto,
-        @DefaultValue Queue queue,
+        @DefaultValue StageProperties stage,
         @DefaultValue Retry retry,
         @DefaultValue Maintenance maintenance,
         @DefaultValue Telemetry telemetry,
-        @DefaultValue("0") int encryptWorkers,
-        @DefaultValue Results results)
+        @DefaultValue("0") int encryptWorkers)
         implements ConnectorSettings
 {
 
     /**
-     * The intake this splitter serves (design §5.3.6).
+     * Where record messages go: the stage's output.
+     *
+     * @return the output queue; null if it isn't set
+     */
+    @Override
+    public Queue queue()
+    {
+        return stage.output();
+    }
+
+    /**
+     * The intake this stage serves (design §5.3.6).
      *
      * @param intake    its name; {@code item.landed} messages for any other
      *                  intake are refused
-     * @param queueUri  the Camel endpoint {@code item.landed} messages are
-     *                  consumed from, such as
-     *                  {@code kafka:sdh.landing.claims?brokers=...&groupId=...}
      * @param storage   where the landed items are
-     * @param idleWait  how long the splitter waits for an item before
-     *                  looking again
-     * @param reconcile how the splitter finds landed items whose messages
-     *                  were lost
+     * @param reconcile how the stage finds landed items whose messages were
+     *                  lost
      */
-    public record Landing(String intake, String queueUri,
+    public record Landing(String intake,
             @DefaultValue LandingStorage storage,
-            @DefaultValue("5s") Duration idleWait,
             @DefaultValue Reconcile reconcile)
     {
     }
@@ -104,7 +110,7 @@ public record ConnectorProperties(
     }
 
     /**
-     * The landing catalog, read-only to the splitter.
+     * The landing catalog, read-only to the stage.
      *
      * @param catalog     Iceberg catalog properties; unset to use
      *                    {@code sdh.storage.catalog}
@@ -119,25 +125,16 @@ public record ConnectorProperties(
     }
 
     /**
-     * How items are split and converted.
+     * How items are split. Records are converted by the convert stage.
      *
-     * @param format          the format, such as {@code csv}
-     * @param boundary        a boundary override, where the format has one
-     * @param options         format options as in design §6.2, such as
-     *                        {@code csv.header} or {@code namespace}
-     * @param limits          size limits; null values keep the format's
-     * @param convert         convert records to JSON where the format has
-     *                        a converter (design §6.4)
-     * @param convertMaxBytes larger records aren't converted, and are
-     *                        stored in their original form as failed
-     * @param convertMemory   heap that conversions running at once may use
-     *                        between them; unset for 40% of the heap
+     * @param format   the format, such as {@code csv}
+     * @param boundary a boundary override, where the format has one
+     * @param options  format options as in design §6.2, such as
+     *                 {@code csv.header} or {@code namespace}
+     * @param limits   size limits; null values keep the format's
      */
     public record Split(String format, String boundary,
-            Map<String, String> options, @DefaultValue Limits limits,
-            @DefaultValue("true") boolean convert,
-            @DefaultValue("64MB") DataSize convertMaxBytes,
-            DataSize convertMemory)
+            Map<String, String> options, @DefaultValue Limits limits)
     {
     }
 
@@ -154,13 +151,14 @@ public record ConnectorProperties(
     }
 
     /**
-     * The splitter's catalog.
+     * The stage's catalog.
      *
      * @param catalog     Iceberg catalog properties, passed through as they
      *                    are: {@code type}, {@code uri}, {@code warehouse},
      *                    {@code io-impl}, and so on
      * @param catalogName the catalog's name, also put in messages
-     * @param namespace   the splitter's namespace
+     * @param namespace   the stage's namespace, holding
+     *                    {@code split_records}
      * @param commit      when a batch of records is committed
      */
     public record Storage(Map<String, String> catalog,
@@ -185,12 +183,11 @@ public record ConnectorProperties(
     }
 
     /**
-     * Table maintenance (design §8.4), run between items on the single
-     * writer.
+     * Table maintenance (design §8.4), run by the pod that holds the
+     * duties lease.
      *
      * @param enabled           whether it runs
-     * @param interval          how often to try; a run is skipped while an
-     *                          item is being processed
+     * @param interval          how often it runs
      * @param snapshotRetention how long old snapshots are kept
      * @param minSnapshots      the fewest snapshots kept
      * @param compaction        compaction of small files
@@ -233,7 +230,7 @@ public record ConnectorProperties(
      * How long to keep each table's rows, in whole days; unset keeps them
      * forever (the default).
      *
-     * @param records the {@code records} table
+     * @param records the {@code split_records} table
      */
     public record Retention(Duration records)
     {

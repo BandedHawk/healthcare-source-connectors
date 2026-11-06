@@ -104,6 +104,19 @@ public final class StageRegistry
     }
 
     /**
+     * What a record is known by: its item and its id. A record id comes
+     * from the content alone (design §7.3), so the same content in two
+     * items is a record of each, counted and stored for both (decided
+     * 2026-11-05).
+     *
+     * @param itemId   the id of the record's item
+     * @param recordId the record's id
+     */
+    public record Key(UUID itemId, String recordId)
+    {
+    }
+
+    /**
      * A record to mark stored.
      *
      * @param recordId the record's id
@@ -115,6 +128,16 @@ public final class StageRegistry
     public record Entry(String recordId, UUID itemId, String digest,
             boolean failed, OutboundMessage message)
     {
+
+        /**
+         * What the record is known by.
+         *
+         * @return its key
+         */
+        public Key key()
+        {
+            return new Key(itemId, recordId);
+        }
     }
 
     /**
@@ -164,8 +187,8 @@ public final class StageRegistry
         String recordDdl = """
                 CREATE TABLE IF NOT EXISTS %s (
                   stage           text        NOT NULL,
-                  record_id       text        NOT NULL,
                   item_id         uuid        NOT NULL,
+                  record_id       text        NOT NULL,
                   state           text        NOT NULL,
                   owner           text        NOT NULL,
                   attempts        integer     NOT NULL,
@@ -176,7 +199,7 @@ public final class StageRegistry
                   message_key     text,
                   pending_message bytea,
                   stored_at       timestamptz,
-                  PRIMARY KEY (stage, record_id)
+                  PRIMARY KEY (stage, item_id, record_id)
                 )""".formatted(records);
         String itemDdl = """
                 CREATE TABLE IF NOT EXISTS %s (
@@ -222,11 +245,11 @@ public final class StageRegistry
         // workers at once can't both win.
         String sql = """
                 INSERT INTO %1$s AS r
-                       (stage, record_id, item_id, state, owner, attempts,
+                       (stage, item_id, record_id, state, owner, attempts,
                         claim_expires)
                 VALUES (?, ?, ?, 'CLAIMED', ?, 1,
                         clock_timestamp() + ? * interval '1 millisecond')
-                ON CONFLICT (stage, record_id) DO UPDATE
+                ON CONFLICT (stage, item_id, record_id) DO UPDATE
                    SET owner = EXCLUDED.owner,
                        attempts = r.attempts
                            + CASE WHEN r.owner = EXCLUDED.owner
@@ -243,8 +266,8 @@ public final class StageRegistry
             {
                 insert.setQueryTimeout(queryTimeoutSeconds);
                 insert.setString(1, stage);
-                insert.setString(2, recordId);
-                insert.setObject(3, itemId);
+                insert.setObject(2, itemId);
+                insert.setString(3, recordId);
                 insert.setString(4, owner);
                 insert.setLong(5, ttl.toMillis());
                 try (ResultSet rows = insert.executeQuery())
@@ -259,11 +282,13 @@ public final class StageRegistry
                     "SELECT state, output_digest, owner, message_id,"
                             + " message_type, message_key, pending_message"
                             + " FROM " + records
-                            + " WHERE stage = ? AND record_id = ?"))
+                            + " WHERE stage = ? AND item_id = ?"
+                            + " AND record_id = ?"))
             {
                 select.setQueryTimeout(queryTimeoutSeconds);
                 select.setString(1, stage);
-                select.setString(2, recordId);
+                select.setObject(2, itemId);
+                select.setString(3, recordId);
                 try (ResultSet rows = select.executeQuery())
                 {
                     if (rows.next() && !"CLAIMED".equals(rows.getString(1)))
@@ -326,10 +351,10 @@ public final class StageRegistry
      * counts it.
      *
      * @param entries the records, all committed
-     * @return the ids of those marked; the others' claims were lost
+     * @return the keys of those marked; the others' claims were lost
      * @throws IllegalStateException if the database can't be reached
      */
-    public Set<String> store(List<Entry> entries)
+    public Set<Key> store(List<Entry> entries)
     {
         String mark = """
                 UPDATE %s
@@ -337,8 +362,8 @@ public final class StageRegistry
                        message_id = ?, message_type = ?, message_key = ?,
                        pending_message = ?, stored_at = clock_timestamp(),
                        claim_expires = NULL
-                 WHERE stage = ? AND record_id = ? AND owner = ?
-                   AND state = 'CLAIMED'""".formatted(records);
+                 WHERE stage = ? AND item_id = ? AND record_id = ?
+                   AND owner = ? AND state = 'CLAIMED'""".formatted(records);
         String count = """
                 INSERT INTO %1$s AS i (stage, item_id, done, failed)
                 VALUES (?, ?, ?, ?)
@@ -351,7 +376,7 @@ public final class StageRegistry
             connection.setAutoCommit(false);
             try
             {
-                Set<String> marked = new HashSet<>();
+                Set<Key> marked = new HashSet<>();
                 Map<UUID, long[]> counts = new LinkedHashMap<>();
                 try (PreparedStatement update =
                         connection.prepareStatement(mark))
@@ -366,11 +391,12 @@ public final class StageRegistry
                         update.setString(4, entry.message().key());
                         update.setBytes(5, entry.message().body());
                         update.setString(6, stage);
-                        update.setString(7, entry.recordId());
-                        update.setString(8, owner);
+                        update.setObject(7, entry.itemId());
+                        update.setString(8, entry.recordId());
+                        update.setString(9, owner);
                         if (update.executeUpdate() == 1)
                         {
-                            marked.add(entry.recordId());
+                            marked.add(entry.key());
                             long[] itemCounts = counts.computeIfAbsent(
                                     entry.itemId(), id -> new long[2]);
                             itemCounts[0]++;
@@ -411,28 +437,38 @@ public final class StageRegistry
     /**
      * Marks records sent, dropping their messages.
      *
-     * @param recordIds the records
+     * @param keys the records
      * @throws IllegalStateException if the database can't be reached
      */
-    public void markSent(Collection<String> recordIds)
+    public void markSent(Collection<Key> keys)
     {
-        if (recordIds.isEmpty())
+        if (keys.isEmpty())
         {
             return;
         }
         String sql = """
                 UPDATE %s
                    SET state = 'SENT', pending_message = NULL
-                 WHERE stage = ? AND record_id = ANY (?)
+                 WHERE stage = ?
+                   AND (item_id, record_id) IN
+                       (SELECT * FROM unnest(?::uuid[], ?::text[]))
                    AND state = 'STORED'""".formatted(records);
+        List<UUID> itemIds = new ArrayList<>();
+        List<String> recordIds = new ArrayList<>();
+        for (Key key : keys)
+        {
+            itemIds.add(key.itemId());
+            recordIds.add(key.recordId());
+        }
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement update = connection.prepareStatement(sql))
         {
             update.setQueryTimeout(queryTimeoutSeconds);
             update.setString(1, stage);
-            Array ids = connection.createArrayOf("text",
-                    recordIds.toArray());
-            update.setArray(2, ids);
+            Array items = connection.createArrayOf("uuid", itemIds.toArray());
+            Array ids = connection.createArrayOf("text", recordIds.toArray());
+            update.setArray(2, items);
+            update.setArray(3, ids);
             update.executeUpdate();
         }
         catch (SQLException failure)

@@ -50,6 +50,11 @@
       <artifactId>connector-runtime</artifactId>
     </dependency>
     <dependency>
+      <!-- The stage's settings and its input from any broker (STAGES.md §7). -->
+      <groupId>com.sdh.healthcare</groupId>
+      <artifactId>connector-stage</artifactId>
+    </dependency>
+    <dependency>
       <!-- The performance test support (design §13.1): settings, workloads, measurement and results. -->
       <groupId>com.sdh.healthcare</groupId>
       <artifactId>connector-core</artifactId>

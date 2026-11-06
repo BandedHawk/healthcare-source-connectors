@@ -9,6 +9,9 @@ package com.sdh.healthcare.connector.file.it;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.contract.message.MessageType;
+import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
+import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
+import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.TestKeys;
@@ -64,8 +67,31 @@ final class ItSupport
     }
 
     /**
-     * Waits until the splitter has finished a number of items from its
-     * inbox, and nothing is in progress.
+     * Commits as maintenance would under the duties lease, with a lease
+     * that is always held: for tests that run maintenance themselves.
+     *
+     * @return the committer
+     */
+    static TableCommitter committer()
+    {
+        return new LeasedCommitter(new LeaseToken()
+        {
+            @Override
+            public long epoch()
+            {
+                return 1;
+            }
+
+            @Override
+            public void checkHeld()
+            {
+            }
+        });
+    }
+
+    /**
+     * Waits until the split stage has finished a number of items, completed
+     * or failed.
      *
      * @param runtime the running connector
      * @param items   how many items
@@ -77,13 +103,12 @@ final class ItSupport
     {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline
-                && (runtime.inbox().position() < items
-                        || runtime.processor().inProgress().isPresent()))
+                && runtime.tables().checkpoints().countFinished() < items)
         {
             Thread.sleep(200);
         }
-        assertThat(runtime.inbox().position()).as("items split")
-                .isGreaterThanOrEqualTo(items);
+        assertThat(runtime.tables().checkpoints().countFinished())
+                .as("items split").isGreaterThanOrEqualTo(items);
     }
 
     /**

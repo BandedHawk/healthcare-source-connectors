@@ -261,7 +261,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     {
         try
         {
-            Map<String, Pending> records = new LinkedHashMap<>();
+            Map<StageRegistry.Key, Pending> records =
+                    new LinkedHashMap<>();
             Set<UUID> items = new LinkedHashSet<>();
             for (BrokerMessage received : batch)
             {
@@ -293,7 +294,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     case StageInput.RecordInput input ->
                     {
                         // The same record twice in one batch is one record.
-                        records.putIfAbsent(input.recordId(),
+                        records.putIfAbsent(input.key(),
                                 new Pending(input, message));
                         items.add(input.itemId());
                     }
@@ -357,7 +358,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         }
         List<Result<O>> owned = new ArrayList<>();
         List<OutboundMessage> resend = new ArrayList<>();
-        List<String> resent = new ArrayList<>();
+        List<StageRegistry.Key> resent = new ArrayList<>();
         List<Pending> busy = new ArrayList<>();
         for (Future<Result<O>> future : workers.invokeAll(tasks))
         {
@@ -370,7 +371,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     if (result.stored().pending() != null)
                     {
                         resend.add(result.stored().pending());
-                        resent.add(result.pending().input().recordId());
+                        resent.add(result.pending().input().key());
                     }
                 }
                 case DUPLICATE ->
@@ -380,7 +381,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     if (result.stored().pending() != null)
                     {
                         resend.add(result.stored().pending());
-                        resent.add(result.pending().input().recordId());
+                        resent.add(result.pending().input().key());
                     }
                 }
                 case CONFLICT -> conflict(result);
@@ -388,17 +389,17 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             }
         }
         List<OutboundMessage> sends = new ArrayList<>(resend);
-        List<String> sent = new ArrayList<>(resent);
+        List<StageRegistry.Key> sent = new ArrayList<>(resent);
         if (!owned.isEmpty())
         {
             List<StageRegistry.Entry> entries = commit(owned);
-            Set<String> marked = registry.store(entries);
+            Set<StageRegistry.Key> marked = registry.store(entries);
             for (StageRegistry.Entry entry : entries)
             {
-                if (marked.contains(entry.recordId()))
+                if (marked.contains(entry.key()))
                 {
                     sends.add(entry.message());
-                    sent.add(entry.recordId());
+                    sent.add(entry.key());
                 }
                 else
                 {

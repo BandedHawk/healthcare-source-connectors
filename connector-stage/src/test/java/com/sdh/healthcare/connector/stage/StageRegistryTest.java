@@ -72,6 +72,17 @@ class StageRegistryTest
     }
 
     /**
+     * A record's key in the test's item.
+     *
+     * @param recordId the record
+     * @return its key
+     */
+    StageRegistry.Key key(String recordId)
+    {
+        return new StageRegistry.Key(item, recordId);
+    }
+
+    /**
      * A new record is claimed, its owner may claim it again without an
      * attempt counted, and another worker finds it busy.
      */
@@ -118,7 +129,8 @@ class StageRegistryTest
         first.claim("r1", item, LONG);
         first.claim("r2", item, LONG);
         assertThat(first.store(List.of(entry("r1", false),
-                entry("r2", true)))).containsExactlyInAnyOrder("r1", "r2");
+                entry("r2", true)))).containsExactlyInAnyOrder(key("r1"),
+                        key("r2"));
         assertThat(first.item(item)).contains(
                 new ItemProgress(item, -1, 2, 1));
 
@@ -140,7 +152,7 @@ class StageRegistryTest
                 StageRegistry.Stored.class, row ->
                         assertThat(row.mine()).isTrue());
 
-        first.markSent(Set.of("r1"));
+        first.markSent(Set.of(key("r1")));
         assertThat(second.claim("r1", item, LONG)).isInstanceOfSatisfying(
                 StageRegistry.Stored.class, row ->
                         assertThat(row.pending()).isNull());
@@ -164,7 +176,7 @@ class StageRegistryTest
         assertThat(first.store(List.of(entry("r1", false)))).isEmpty();
         assertThat(first.item(item)).isEmpty();
         assertThat(second.store(List.of(entry("r1", false))))
-                .containsExactly("r1");
+                .containsExactly(key("r1"));
         assertThat(second.item(item)).contains(
                 new ItemProgress(item, -1, 1, 0));
     }
@@ -195,6 +207,29 @@ class StageRegistryTest
         assertThat(first.due(List.of(item, other))).containsExactly(
                 new ItemProgress(other, 0, 0, 0));
         assertThat(first.due(List.of())).isEmpty();
+    }
+
+    /**
+     * The same content in another item is a record of that item: claimed,
+     * stored and counted there too.
+     */
+    @Test
+    void theSameRecordInAnotherItemIsItsOwn()
+    {
+        UUID other = UUID.randomUUID();
+        first.claim("r1", item, LONG);
+        first.store(List.of(entry("r1", false)));
+        assertThat(second.claim("r1", other, LONG))
+                .isEqualTo(new StageRegistry.Owned(1));
+        assertThat(second.store(List.of(new StageRegistry.Entry("r1", other,
+                "d-r1", false, new OutboundMessage("m-r1-other",
+                        MessageType.RECORD_STORED, other, "r1",
+                        new byte[] {4}))))).containsExactly(
+                                new StageRegistry.Key(other, "r1"));
+        assertThat(second.item(other)).contains(
+                new ItemProgress(other, -1, 1, 0));
+        assertThat(first.item(item)).contains(
+                new ItemProgress(item, -1, 1, 0));
     }
 
     /** A schema name that isn't a plain identifier is refused. */

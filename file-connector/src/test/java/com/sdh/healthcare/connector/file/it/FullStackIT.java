@@ -44,7 +44,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.locks.ReentrantLock;
 import org.apache.camel.CamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
@@ -190,9 +189,6 @@ class FullStackIT
     @Autowired
     ConnectorRuntime runtime;
 
-    /** The lock the writer holds while it writes. */
-    @Autowired
-    ReentrantLock writerLock;
 
     /** The connector's settings. */
     @Autowired
@@ -451,11 +447,9 @@ class FullStackIT
 
             // Maintenance on real S3, between files (route idle, writer lock
             // held).
-            writerLock.lock();
-            try
             {
                 String dataPrefix =
-                        keyOf(runtime.tables().records().location())
+                        keyOf(runtime.tables().splitRecords().location())
                                 + "/data/";
                 String stray = dataPrefix + "stray-crashed-batch.parquet";
                 try (S3Client s3 = s3())
@@ -467,11 +461,11 @@ class FullStackIT
                 // minikube VM's), which can run a little ahead of this JVM's;
                 // a minute's lead keeps the just-planted stray old enough to
                 // count as an orphan.
-                Report report = new TableMaintenance(runtime.committer(),
+                Report report = new TableMaintenance(ItSupport.committer(),
                         new MaintenanceSettings(Duration.ofDays(7), 10, true,
                                 0.75, 2, 8L << 30, Duration.ZERO),
                         Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
-                        .run(runtime.tables().records(),
+                        .run(runtime.tables().splitRecords(),
                                 RecordsTable.INGESTED_AT, Optional.empty(),
                                 true);
                 assertThat(report.compactedFiles())
@@ -488,19 +482,15 @@ class FullStackIT
 
                 // Retention: three days on, a one-day policy drops today's
                 // partition and purges its objects at once.
-                Report purge = new TableMaintenance(runtime.committer(),
+                Report purge = new TableMaintenance(ItSupport.committer(),
                         MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
-                        .run(runtime.tables().records(),
+                        .run(runtime.tables().splitRecords(),
                                 RecordsTable.INGESTED_AT,
                                 Optional.of(Duration.ofDays(1)), false);
                 assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
                 assertThat(keys(dataPrefix))
                         .as("PHI data objects physically removed").isEmpty();
-            }
-            finally
-            {
-                writerLock.unlock();
             }
         }
 

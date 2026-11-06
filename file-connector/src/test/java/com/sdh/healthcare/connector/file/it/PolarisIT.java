@@ -57,7 +57,6 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
 import org.apache.camel.CamelContext;
 import org.apache.camel.ConsumerTemplate;
 import org.apache.iceberg.CatalogUtil;
@@ -222,9 +221,6 @@ class PolarisIT
     @Autowired
     CamelContext camel;
 
-    /** The lock the writer holds while it writes. */
-    @Autowired
-    ReentrantLock writerLock;
 
     /**
      * The object store's endpoint as this JVM reaches it.
@@ -519,11 +515,9 @@ class PolarisIT
                     .containsPattern("inbox: +no items waiting");
 
             // Maintenance through the REST catalog, between files.
-            writerLock.lock();
-            try
             {
                 String dataPrefix =
-                        keyOf(runtime.tables().records().location())
+                        keyOf(runtime.tables().splitRecords().location())
                                 + "/data/";
                 String stray = dataPrefix + "stray-crashed-batch.parquet";
                 try (S3Client s3 = s3())
@@ -535,11 +529,11 @@ class PolarisIT
                 // minikube VM's), which can run a little ahead of this JVM's;
                 // a minute's lead keeps the just-planted stray old enough to
                 // count as an orphan.
-                Report report = new TableMaintenance(runtime.committer(),
+                Report report = new TableMaintenance(ItSupport.committer(),
                         new MaintenanceSettings(Duration.ofDays(7), 10, true,
                                 0.75, 2, 8L << 30, Duration.ZERO),
                         Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
-                        .run(runtime.tables().records(),
+                        .run(runtime.tables().splitRecords(),
                                 RecordsTable.INGESTED_AT, Optional.empty(),
                                 true);
                 assertThat(report.compactedFiles())
@@ -552,19 +546,15 @@ class PolarisIT
                             1 << 20), UTF_8)).isEqualTo(csvRowJson(
                                     rows.get((int) record.seq())));
                 }
-                Report purge = new TableMaintenance(runtime.committer(),
+                Report purge = new TableMaintenance(ItSupport.committer(),
                         MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
-                        .run(runtime.tables().records(),
+                        .run(runtime.tables().splitRecords(),
                                 RecordsTable.INGESTED_AT,
                                 Optional.of(Duration.ofDays(1)), false);
                 assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
                 assertThat(keys(dataPrefix))
                         .as("PHI data objects physically removed").isEmpty();
-            }
-            finally
-            {
-                writerLock.unlock();
             }
         }
 

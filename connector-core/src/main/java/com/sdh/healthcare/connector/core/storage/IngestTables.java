@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.core.storage;
 
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.PartitionSpec;
@@ -68,6 +69,16 @@ public final class IngestTables
     public static final Map<String, String> WRITE_OVERRIDES = Map.of(
             TableProperties.PARQUET_ROW_GROUP_CHECK_MIN_RECORD_COUNT, "1");
 
+    /** The split stage's table of records as cut (STAGES.md §3). */
+    public static final String SPLIT_RECORDS = "split_records";
+
+    /**
+     * Commit retries for a table many stage workers append to at once
+     * (STAGES.md §7): each conflict costs Iceberg one retry, and with many
+     * pods committing, the default of four runs out.
+     */
+    static final String SHARED_COMMIT_RETRIES = "20";
+
     /** Not instantiated: this class only has static methods. */
     private IngestTables()
     {
@@ -85,6 +96,24 @@ public final class IngestTables
         return create(catalog, namespace, RecordsTable.DEFAULT_NAME,
                 RecordsTable.SCHEMA, RecordsTable.SPEC,
                 RecordsTable.SORT_ORDER);
+    }
+
+    /**
+     * Creates or loads the split stage's {@code split_records} table: the
+     * {@code records} columns, with more commit retries, since every split
+     * worker appends to it (STAGES.md §8).
+     *
+     * @param catalog   the Iceberg catalog
+     * @param namespace the namespace the table is in, created if missing
+     * @return the table
+     */
+    public static Table splitRecords(Catalog catalog, String namespace)
+    {
+        Map<String, String> properties = new HashMap<>(PROPERTIES);
+        properties.put(TableProperties.COMMIT_NUM_RETRIES,
+                SHARED_COMMIT_RETRIES);
+        return create(catalog, namespace, SPLIT_RECORDS, RecordsTable.SCHEMA,
+                RecordsTable.SPEC, RecordsTable.SORT_ORDER, properties);
     }
 
     /**
@@ -158,6 +187,27 @@ public final class IngestTables
     public static Table create(Catalog catalog, String namespace,
             String name, Schema schema, PartitionSpec spec, SortOrder order)
     {
+        return create(catalog, namespace, name, schema, spec, order,
+                PROPERTIES);
+    }
+
+    /**
+     * Creates or loads a table with the given properties for a new one.
+     * Of workers creating it at once, the losers load the winner's.
+     *
+     * @param catalog    the Iceberg catalog
+     * @param namespace  the namespace the table is in
+     * @param name       the table's name
+     * @param schema     its columns
+     * @param spec       its partitioning, for a new table
+     * @param order      its sort order, for a new table
+     * @param properties its properties, for a new table
+     * @return the table
+     */
+    static Table create(Catalog catalog, String namespace, String name,
+            Schema schema, PartitionSpec spec, SortOrder order,
+            Map<String, String> properties)
+    {
         Namespace tableNamespace = Namespace.of(namespace);
         if (catalog instanceof SupportsNamespaces namespaces
                 && !namespaces.namespaceExists(tableNamespace))
@@ -176,10 +226,18 @@ public final class IngestTables
         {
             return addMissingColumns(catalog.loadTable(id), schema);
         }
-        return catalog.buildTable(id, schema)
-                .withPartitionSpec(spec)
-                .withSortOrder(order)
-                .withProperties(PROPERTIES)
-                .create();
+        try
+        {
+            return catalog.buildTable(id, schema)
+                    .withPartitionSpec(spec)
+                    .withSortOrder(order)
+                    .withProperties(properties)
+                    .create();
+        }
+        catch (AlreadyExistsException created)
+        {
+            // Another worker created it just now.
+            return addMissingColumns(catalog.loadTable(id), schema);
+        }
     }
 }
