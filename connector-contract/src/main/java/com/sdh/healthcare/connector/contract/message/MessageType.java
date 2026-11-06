@@ -40,7 +40,13 @@ public enum MessageType
     ITEM_RECEIVED("item.received"),
 
     /** An item's final result, for its producer. */
-    ITEM_RESULT("item.result");
+    ITEM_RESULT("item.result"),
+
+    /**
+     * A stage stored a record before, and has now produced different output
+     * for it; for the stage's dead-letter queue.
+     */
+    RECORD_CONFLICT("record.conflict");
 
     /** The name used on the queue. */
     private final String wireName;

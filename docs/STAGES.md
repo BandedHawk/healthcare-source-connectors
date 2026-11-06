@@ -23,8 +23,11 @@ the user are marked **(decided)**. Section numbers (§) refer to [DESIGN.md](DES
   - **Split** works per item: it reads a landed item as a stream, cuts it into records and stores each in its
     original form. One item is split by one worker at a time; different items in parallel.
   - **Convert** works per record: C-CDA XML to JSON, X12 to JSON and so on (§6.4), any worker taking any record.
-  - **Transform** works per record: C-CDA JSON to FHIR with the Whistle mapping, fail-fast. Built in
-    `healthcare-data-transformer`, on the library from this repository (decided).
+  - **Transform** works per record: it runs the Whistle runtime, fail-fast, over the converted JSON. What it maps
+    is set entirely by the WSTL set it is given at run time (decided 2026-11-05): C-CDA JSON to a FHIR bundle
+    is the US Core 6.1 WSTL configuration, but any converted format can be mapped to anything a WSTL set
+    defines, without a new build. Built in `healthcare-data-transformer`, on the library from this repository
+    (decided).
 - **No ordering between records (decided).** A large batch spreads across every worker. Each stage sends an
   item-complete message once all of an item's records are done (§5).
 
@@ -67,7 +70,7 @@ rows are encrypted under its own KEK; the split stage gets the split-records KEK
 | `item.split` | split → convert | itemId, recordCount, failedRecordCount (pieces the splitter couldn't parse, stored raw), itemDigest |
 | `record.stored`, `record.failed` | convert → transform and other readers | as `section.stored` and `section.failed` now |
 | `item.converted` | convert → transform and readers | itemId, recordCount, failedRecordCount |
-| `record.transformed`, `record.untransformed`, `item.transformed` | transform → readers | defined in `connector-contract`, for the transformer |
+| `record.transformed`, `record.untransformed`, `item.transformed` | transform → readers | defined in `connector-contract`, for the transformer; each names the WSTL set (and its digest) that mapped it |
 | `record.conflict` | any stage → its dead-letter queue | the record's ID, the stage, both output digests (§6) |
 | `item.received`, `item.result` | landing / convert → producer | as now; `item.result` moves to the convert stage, after `item.converted` |
 
@@ -92,18 +95,22 @@ Delivery is at least once on every broker. A record is processed twice when a wo
 its lock or visibility times out while it is still working, Kafka moves its partition during a scale-up, or the
 stage before sends again after a crash. So each stage keeps a registry in Postgres,
 `stage_record(stage, record_id, item_id, state, output_digest, owner, claim_expires, stored_at)`, primary key
-`(stage, record_id)`. For each record a worker:
-1. does the work (converts, maps), and takes the digest of the output;
-2. **claims** the record: insert-if-absent, as `CLAIMED` with its own owner and an expiry, renewed while it works;
-3. if the claim is new (or an expired one it takes over): stores the output, commits, marks it `STORED` (only
-   if it still owns the claim), sends the record's message, then acknowledges;
-4. if the record is already `STORED`: with the same digest, a **duplicate**: dropped, `record.duplicate` audited
-   and counted, acknowledged. With a different digest (the converter or mapping changed between the two), a
-   **conflict**: the first stays, the second goes to the stage's dead-letter queue as `record.conflict`, audited,
-   and acknowledged. Nothing is replaced (decided);
-5. if another worker holds a live claim: not acknowledged, so the broker delivers it again later, by when the
-   other has stored it (a duplicate) or its claim has expired (taken over). Acknowledging would lose the record
-   if the other worker died.
+`(stage, record_id)`. For each record a worker (as built in step 3):
+1. **claims** the record first: insert-if-absent, as `CLAIMED` with its own owner and an expiry, renewed while it
+   works. A claim taken over from a worker that let it expire counts one more attempt, which the processor is
+   told, so a record that keeps stopping workers can be stored unprocessed (§9);
+2. if the claim is its own: does the work, commits it with the rest of the batch, then marks it `STORED` (only if
+   it still owns the claim) with the record's sealed message, sends the message, marks it `SENT` (dropping the
+   message), and only then acknowledges. A crash between the commit and the send loses nothing: whichever worker
+   gets the record next finds it `STORED` and sends the message kept with it;
+3. if the record is already stored: does the work again to compare digests. The same digest is a **duplicate**:
+   dropped, `record.duplicate` audited, acknowledged. A different digest (the converter or mapping changed between
+   the two) is a **conflict**: the first stays, the second goes to the stage's dead-letter queue as
+   `record.conflict`, audited, and acknowledged. Nothing is replaced (decided);
+4. if another worker holds a live claim: the rest of the batch is stored and sent first, then the record is
+   looked at again until the other has stored it (a duplicate) or let its claim expire (taken over). It is never
+   acknowledged before: that would lose the record if the other worker died. Storing the rest first means two
+   workers each waiting on the other's records can't hold each other up.
 
 A record ID is a keyed hash of the record's content (§7.3), so the same ID means the same input.
 
@@ -130,8 +137,34 @@ Two new modules, both published, so `healthcare-data-transformer` can use them:
   (`connector-contract`), and gives each one to the stage's processor (an interface: split, convert, transform)
   with the claim registry, the item rows, batched Iceberg commits, sending, the dead-letter queue and telemetry
   around it. Settings: `sdh.stage.input` (type and URI, as the landing node's broker settings), `sdh.stage.output`
-  (`sdh.queue` as now), `sdh.stage.dlq`, `sdh.stage.concurrency` (messages in flight per pod), and the commit
+  (`sdh.queue` as now), `sdh.stage.dlq`, `sdh.stage.concurrency` (records processed at once per pod), and the commit
   batch (`max-records`, `max-wait`).
+
+  **Built (step 3):** `StageProcessor` is a stage's own work: it reads what a message asks (a record, an item's
+  total, or nothing), processes a record into an output and its digest (or a failed record, stored as it was),
+  commits a batch of outputs in one append and makes each one's message, and makes the item-complete message.
+  `StageWorker` is the `BatchHandler` around it (§6): it opens each message, claims, processes up to
+  `concurrency` records at once, commits, marks stored, sends, and completes items, and answers retry when anything
+  fails on the way, so the batch is tried again in place and what was already stored is recognised. A processor
+  returns an error in a record as a failed output; whatever it throws is taken as passing, and the batch is tried
+  again. `StageRegistry` holds `stage_record` and `stage_item` in the lease database (schema
+  `sdh.stage.registry-schema`, `sdh_stage` by default). The received batch is the commit batch, so its limits
+  (`sdh.stage.input.batch.max-messages`, `max-bytes`, `max-wait`) replace `max-records` and `max-wait`. Claims last
+  `sdh.stage.claim.ttl` (60 s), renewed every `renew-interval` (15 s). A message that can't be trusted is audited
+  (`stage.message_rejected`) and dropped, one the processor doesn't take is audited (`stage.message_unwanted`) and
+  acknowledged, and one of a contract major version the stage can't read holds the batch back until the stage is
+  upgraded (`stage.unreadable_version`), as for the splitter now. Other audit events: `record.duplicate`,
+  `record.conflict` (`RECORD_CONFLICT`), `record.claim_lost`, `stage.batch_failed` (`STAGE_BATCH_FAILED`) and
+  `stage.item_completed`; none carries a record ID. Messages are still keyed by item ID on the broker; record
+  messages move to the record ID in step 4 (§4). Tested by `StageRegistryTest` and `StageWorkerTest` (embedded
+  Postgres, real sealing), and `StageWorkerIT` on all seven brokers: a worker stops part-way with records claimed,
+  two more run at once, wait out its claims and take them over, and store every record exactly once. Its output is
+  kept in memory, since sending on each broker is tested by `file-connector`.
+
+The processor interface knows nothing of formats or mappings: a record's bytes and metadata in, its output (or
+the error that stopped it) out. The transform stage's processor loads its WSTL set at startup, from a location in
+its settings, and the set's digest goes into each record's output digest, so a record mapped again under a
+changed set is seen as a conflict (§6), not a duplicate.
 
 Each stage is then a small application on `connector-stage`, with an image of its own (decided):
 `sdh/split-stage` and `sdh/convert-stage` here, the transformer's in its own repository. `file-connector` becomes
@@ -186,7 +219,7 @@ Each step builds and passes its tests before the next.
 2. **`connector-broker`:** move the receive and publish layers; the landing node's queue intake uses it unchanged.
    Done 2026-11-05 (§7).
 3. **`connector-stage`:** the worker, registry, item rows, batched commits, dead-letter queue; tested with a test
-   processor against every broker's integration test.
+   processor against every broker's integration test. Done 2026-11-05 (§6, §7).
 4. **The split stage** on it (from `file-connector`), and **the convert stage**; the new messages.
 5. **KEDA** in the sandbox, with a scaling demonstration (a large batch spread across workers).
 6. **The transformer** in `healthcare-data-transformer`, on the published library.

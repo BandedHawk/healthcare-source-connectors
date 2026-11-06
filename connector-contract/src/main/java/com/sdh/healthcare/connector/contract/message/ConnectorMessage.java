@@ -26,7 +26,7 @@ import java.util.UUID;
 public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         ConnectorMessage.RecordInStorage, ConnectorMessage.FileCompleted,
         ConnectorMessage.ItemLanded, ConnectorMessage.ItemReceived,
-        ConnectorMessage.ItemResult
+        ConnectorMessage.ItemResult, ConnectorMessage.RecordConflict
 {
 
     /**
@@ -628,6 +628,49 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         public String messageId()
         {
             return "rs-" + itemId + "-" + part;
+        }
+    }
+
+    /**
+     * A stage had already stored a record, and has now produced different
+     * output for it: the converter or the mapping changed between the two
+     * deliveries (STAGES.md §6). The first output is kept; this tells the
+     * stage's dead-letter queue about the second, which is not stored. It
+     * holds no content, only digests.
+     *
+     * @param recordId     the record's id
+     * @param itemId       the id of the item it came from
+     * @param stage        the stage, such as {@code convert}
+     * @param storedDigest the digest of the output stored first
+     * @param newDigest    the digest of the output now produced
+     * @param foundAt      when the conflict was found
+     */
+    record RecordConflict(String recordId, UUID itemId, String stage,
+            String storedDigest, String newDigest, Instant foundAt)
+            implements ConnectorMessage
+    {
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#RECORD_CONFLICT}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.RECORD_CONFLICT;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "rc-", the stage, the record id and the new digest, so
+         *         each different output is reported once
+         */
+        @Override
+        public String messageId()
+        {
+            return "rc-" + stage + "-" + recordId + "-" + newDigest;
         }
     }
 

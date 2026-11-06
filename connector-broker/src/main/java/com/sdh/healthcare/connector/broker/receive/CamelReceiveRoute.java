@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.camel.Exchange;
+import org.apache.camel.Processor;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.component.azure.eventhubs.EventHubsConstants;
 import org.apache.camel.component.azure.servicebus.ServiceBusConstants;
@@ -26,6 +27,8 @@ import org.apache.camel.component.google.pubsub.consumer.GooglePubsubAcknowledge
 import org.apache.camel.component.kafka.KafkaConstants;
 import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 import org.apache.camel.model.RouteDefinition;
+import org.apache.camel.spi.ShutdownPrepared;
+import org.apache.camel.support.service.ServiceSupport;
 
 /**
  * Consumes a broker through Camel and hands its messages to a
@@ -88,6 +91,9 @@ public final class CamelReceiveRoute extends RouteBuilder
     /** The longest pause after failures. */
     private final Duration maxBackoff;
 
+    /** Whether the Kafka route is stopping, so a retry should give up. */
+    private volatile boolean stopping;
+
     /**
      * Creates the route. It doesn't start with the Camel context: the caller
      * starts it by its ID when ready.
@@ -116,7 +122,7 @@ public final class CamelReceiveRoute extends RouteBuilder
                 .autoStartup(false);
         switch (settings.kind())
         {
-            case KAFKA -> route.process(this::kafka);
+            case KAFKA -> route.process(new KafkaPolls());
             case SQS -> route.process(held(new Sqs(settings.attributes())));
             case RABBITMQ -> route.process(
                     held(new Rabbitmq(settings.attributes())));
@@ -142,6 +148,46 @@ public final class CamelReceiveRoute extends RouteBuilder
         return new HeldBatches(handler, broker, settings.maxMessages(),
                 settings.maxBytes(), settings.maxWait(), initialBackoff,
                 maxBackoff, System::nanoTime);
+    }
+
+    /**
+     * The Kafka route's processor. It tells a batch being retried to give
+     * up as soon as Camel prepares the route to stop: the poll's offsets
+     * aren't committed, so its records come again, and the route stops at
+     * once rather than when its shutdown times out.
+     */
+    private final class KafkaPolls extends ServiceSupport
+            implements Processor, ShutdownPrepared
+    {
+
+        /** Creates the processor. */
+        KafkaPolls()
+        {
+        }
+
+        @Override
+        public void process(Exchange exchange) throws Exception
+        {
+            kafka(exchange);
+        }
+
+        @Override
+        public void prepareShutdown(boolean suspendOnly, boolean forced)
+        {
+            stopping = true;
+        }
+
+        @Override
+        protected void doStart()
+        {
+            stopping = false;
+        }
+
+        @Override
+        protected void doStop()
+        {
+            stopping = true;
+        }
     }
 
     /**
@@ -289,9 +335,18 @@ public final class CamelReceiveRoute extends RouteBuilder
                 case RETRY ->
                 {
                     failures++;
-                    Thread.sleep(Math.min(maxBackoff.toMillis(),
-                            initialBackoff.toMillis()
-                                    << Math.min(failures - 1, 20)));
+                    long until = System.nanoTime() + 1_000_000L * Math.min(
+                            maxBackoff.toMillis(), initialBackoff.toMillis()
+                                    << Math.min(failures - 1, 20));
+                    while (!stopping && System.nanoTime() < until)
+                    {
+                        Thread.sleep(Math.min(50, Math.max(1,
+                                (until - System.nanoTime()) / 1_000_000)));
+                    }
+                    if (stopping)
+                    {
+                        throw new HeldBatches.NotHandledException();
+                    }
                 }
             }
         }

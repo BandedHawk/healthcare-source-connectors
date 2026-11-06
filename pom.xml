@@ -27,6 +27,7 @@
     <module>connector-kms</module>
     <module>connector-broker</module>
     <module>connector-runtime</module>
+    <module>connector-stage</module>
     <!-- Before file-connector: its image tests (-Pit) run the landing node's packaged jar and kit. -->
     <module>landing-connector</module>
     <module>file-connector</module>
@@ -293,6 +294,11 @@
       <dependency>
         <groupId>com.sdh.healthcare</groupId>
         <artifactId>connector-runtime</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sdh.healthcare</groupId>
+        <artifactId>connector-stage</artifactId>
         <version>${project.version}</version>
       </dependency>
 

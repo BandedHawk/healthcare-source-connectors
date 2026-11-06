@@ -25,7 +25,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 import org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory;
+import org.apache.camel.Exchange;
+import org.apache.camel.Processor;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.spi.ShutdownPrepared;
 import org.apache.camel.support.service.ServiceSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -169,22 +172,49 @@ public final class ArtemisReceiveRoute extends RouteBuilder
         from("timer:sdh-artemis-" + routeId + "?delay=0&period=1")
                 .routeId(routeId)
                 .autoStartup(false)
-                .process(exchange -> pollOnce());
-        getContext().addService(new ServiceSupport()
-        {
-            @Override
-            protected void doStart()
-            {
-                stopping = false;
-            }
+                .process(new Poller());
+    }
 
-            @Override
-            protected void doStop()
-            {
-                stopping = true;
-                disconnect();
-            }
-        });
+    /**
+     * The route's processor: polls once per tick. It tells a batch being
+     * retried to give up as soon as Camel prepares the route to stop, so
+     * the route stops at once rather than when its shutdown times out, and
+     * drops the connection when the route stops, which returns whatever
+     * wasn't acknowledged.
+     */
+    private final class Poller extends ServiceSupport
+            implements Processor, ShutdownPrepared
+    {
+
+        /** Creates the processor. */
+        Poller()
+        {
+        }
+
+        @Override
+        public void process(Exchange exchange) throws Exception
+        {
+            pollOnce();
+        }
+
+        @Override
+        public void prepareShutdown(boolean suspendOnly, boolean forced)
+        {
+            stopping = true;
+        }
+
+        @Override
+        protected void doStart()
+        {
+            stopping = false;
+        }
+
+        @Override
+        protected void doStop()
+        {
+            stopping = true;
+            disconnect();
+        }
     }
 
     /**

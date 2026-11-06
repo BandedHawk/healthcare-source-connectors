@@ -161,7 +161,9 @@ class ContractRoundTripTest
                                 "split", -1, 7, null, 2, "m-3",
                                 itemId + "/m-1"),
                         3, 2, 2, java.util.List.of(), null,
-                        UUID.randomUUID(), java.time.Instant.EPOCH)))
+                        UUID.randomUUID(), java.time.Instant.EPOCH),
+                new ConnectorMessage.RecordConflict("ID6", itemId, "convert",
+                        "d-1", "d-2", java.time.Instant.EPOCH)))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
                     .isEqualTo(message);

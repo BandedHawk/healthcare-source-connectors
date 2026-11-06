@@ -14,6 +14,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReceived;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordConflict;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
@@ -158,6 +159,14 @@ public final class PayloadCodec
                 putIfSet(payload, "replaces", result.replaces());
                 payload.put("finishedAt", result.finishedAt().toString());
             }
+            case RecordConflict conflict ->
+            {
+                payload.put("recordId", conflict.recordId());
+                payload.put("stage", conflict.stage());
+                payload.put("storedDigest", conflict.storedDigest());
+                payload.put("newDigest", conflict.newDigest());
+                payload.put("foundAt", conflict.foundAt().toString());
+            }
         }
         return payload;
     }
@@ -264,6 +273,13 @@ public final class PayloadCodec
                             (String) payload.get("producerRef"),
                             uuid(payload, "replaces"),
                             Instant.parse(text(payload, "finishedAt")));
+                    case RECORD_CONFLICT -> new RecordConflict(
+                            text(payload, "recordId"),
+                            itemId,
+                            text(payload, "stage"),
+                            text(payload, "storedDigest"),
+                            text(payload, "newDigest"),
+                            Instant.parse(text(payload, "foundAt")));
                 };
         if (!message.messageId().equals(payload.get("messageId")))
         {

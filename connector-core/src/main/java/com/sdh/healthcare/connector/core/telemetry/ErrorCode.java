@@ -255,5 +255,20 @@ public enum ErrorCode
      * in the record. The record is stored in its original form like any
      * other conversion failure, and the file carries on (design §6.4).
      */
-    CONVERT_FAILED
+    CONVERT_FAILED,
+
+    /**
+     * A stage had already stored a record, and produced different output
+     * for it when it came again: the converter or the mapping changed
+     * between the two. The first output is kept, and the second is reported
+     * to the stage's dead-letter queue (STAGES.md §6).
+     */
+    RECORD_CONFLICT,
+
+    /**
+     * A stage's batch couldn't be finished (storage, the registry or the
+     * broker down, or a processor's unexpected error), and is tried again
+     * in place (STAGES.md §7).
+     */
+    STAGE_BATCH_FAILED
 }
