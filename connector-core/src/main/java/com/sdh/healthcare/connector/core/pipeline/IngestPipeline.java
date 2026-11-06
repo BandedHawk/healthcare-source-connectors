@@ -1343,8 +1343,8 @@ public final class IngestPipeline implements AutoCloseable
         for (int index = 0; index < messages.size(); index++)
         {
             ConnectorMessage message = messages.get(index);
-            OutboundMessage toSend = new OutboundMessage(message.messageId(),
-                    message.type(), message.itemId(), get(sealed.get(index)));
+            OutboundMessage toSend = OutboundMessage.of(message,
+                    get(sealed.get(index)));
             outbound.add(toSend);
             acks.add(send(toSend));
         }

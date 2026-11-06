@@ -545,8 +545,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      */
     private OutboundMessage outbound(ConnectorMessage message)
     {
-        return new OutboundMessage(message.messageId(), message.type(),
-                message.itemId(), sealer.seal(message));
+        return OutboundMessage.of(message, sealer.seal(message));
     }
 
     /**

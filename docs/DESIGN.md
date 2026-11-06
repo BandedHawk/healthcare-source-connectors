@@ -1551,16 +1551,19 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 |---|---|---|
 | `file.started` | file picked up (or resumed with a new run) | itemId, format, itemSize, startedAt, connectorId |
 | `record.stored` | after batch commit | messageId, itemId, recordId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef), origin (recordLine, recordColumn, sourceLine, sourceColumn) |
-| `record.failed` | after batch commit, in seq order with the others | as `record.stored`, with errorCode instead of mapping, and errorLine and errorColumn when the failure has a place; the record is stored in its original form (§6.4) |
+| `record.failed` | after batch commit; like `record.stored`, keyed by record ID, so no order between records (STAGES.md §1) | as `record.stored`, with errorCode instead of mapping, and errorLine and errorColumn when the failure has a place; the record is stored in its original form (§6.4) |
 | `file.completed` | after archive commit | itemId, recordCount (failed included), failedRecordCount, itemSize, itemDigest, startedAt, completedAt |
 | `item.landed` | landing node to its splitter, after the item's commit (§5.3.6) | itemId, intake, kind, size, itemDigest, landedAt, storage, replaces (if set) |
 | `item.received` | landing node to the producer, after `item.landed` (§5.3.8) | itemId, intake, kind, size, sha256, landedAt, producerRef, replaces, messageIds and messageReplaces (each if set) |
+| `record.split` | split stage to the convert stage, after the record's commit (STAGES.md §4) | as `record.stored`, without mapping, with errorCode (and errorLine and errorColumn) for a piece the splitter couldn't parse, stored as it was |
+| `item.split` | split stage to the convert stage, once all of an item's records are sent | itemId, intake, recordCount (failed included), failedRecordCount, itemSize, itemDigest, failure (a problem, if the item couldn't be split to its end), startedAt, completedAt |
+| `item.converted` | convert stage to readers, once all of an item's records are stored | itemId, intake, recordCount, failedRecordCount, completedAt |
 | `record.conflict` | a stage to its dead-letter queue, when a record it stored comes again with different output (STAGES.md §6) | itemId, recordId, stage, storedDigest, newDigest, foundAt; no content |
 | `item.result` | splitter to the producer, when an item is finished (§5.3.8) | itemId, intake, status, recordCount, failedRecordCount, failure, problemCount, part, partCount, problems (code, stage, seq, offset, line, column, message, messageRef, messageReplaces), producerRef, replaces, finishedAt |
 
 - **No `file.failed` message:** failure is reported through OpenTelemetry only, as agreed. Downstream can detect an unfinished file as a `file.started` with no matching `file.completed`.
 - **Change from earlier discussion:** the "duplicates skipped" count is **not** included in `file.completed`. Counting it would require checking every record against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
-- **Unencrypted broker metadata** is limited to: `messageId`, `type`, `itemId` (used for ordering), and the content type `application/jose`.
+- **Unencrypted broker metadata** is limited to: `messageId`, `type`, `itemId`, and the content type `application/jose`.
 - **Message IDs:**
   - `record.stored` and `record.failed`: `messageId = recordId`.
   - `file.started`: `fs-<itemId>`.
@@ -1606,24 +1609,26 @@ if (m instanceof RecordStored s) {
 
 `sdh.queue.type` selects the adapter, and `sdh.queue.uri` is a full Camel endpoint URI, so any component option can be set at run time. All client libraries are included in the single build.
 
+The **key** each adapter orders and partitions by is the record's ID for a message about a record (`record.split`, `record.stored`, `record.failed`, `record.conflict`), so an item's records spread over partitions and workers, and the item's ID for every other message (STAGES.md §4). A record ID is a keyed hash, and is already a record message's `messageId`, so it shows nothing more.
+
 | `type` | Camel component | Ordering key | Broker-side dedup |
 |---|---|---|---|
-| `kafka` | camel-kafka | record key = itemId | idempotent + transactional producer |
-| `sqs` | camel-aws2-sqs | MessageGroupId = itemId (FIFO) | MessageDeduplicationId (FIFO queues, 5 min) |
-| `pubsub` | camel-google-pubsub | orderingKey = itemId | none; `messageId` attribute |
-| `servicebus` | camel-azure-servicebus | SessionId = itemId | duplicate detection on MessageId |
-| `eventhubs` | camel-azure-eventhubs | partitionKey = itemId | none; `messageId` property |
-| `artemis` | camel-jms + Artemis JMS client | JMSXGroupID = itemId | `_AMQ_DUPL_ID` |
+| `kafka` | camel-kafka | record key = key | idempotent + transactional producer |
+| `sqs` | camel-aws2-sqs | MessageGroupId = key (FIFO) | MessageDeduplicationId (FIFO queues, 5 min) |
+| `pubsub` | camel-google-pubsub | orderingKey = key | none; `messageId` attribute |
+| `servicebus` | camel-azure-servicebus | SessionId = key | duplicate detection on MessageId |
+| `eventhubs` | camel-azure-eventhubs | partitionKey = key | none; `messageId` property |
+| `artemis` | camel-jms + Artemis JMS client | JMSXGroupID = key | `_AMQ_DUPL_ID` |
 | `rabbitmq` | camel-spring-rabbitmq | single queue / consistent-hash exchange | `message_id`; optional `x-deduplication-header` for the dedup plugin |
 
 **What each adapter sets** (`QueueType`):
 - **Common metadata, every adapter:** `messageId`, `type`, `itemId` and `contentType` (`application/jose`). These are the only unencrypted values; the body is the JWE compact serialisation, sent as ASCII text.
-- **`kafka`:** header `CamelKafkaKey` = itemId.
-- **`sqs`:** exchange property `CamelAwsMessageGroupId` = itemId, and the exchange ID = messageId.
-- **`pubsub`:** `CamelGooglePubsubOrderingKey` = itemId; the metadata travels as attributes.
+- **`kafka`:** header `CamelKafkaKey` = key.
+- **`sqs`:** exchange property `CamelAwsMessageGroupId` = key, and the exchange ID = messageId.
+- **`pubsub`:** `CamelGooglePubsubOrderingKey` = key; the metadata travels as attributes.
 - **`servicebus`:** `SessionId`, `MessageId`, `ContentType`, and the metadata as application properties.
-- **`eventhubs`:** `PartitionKey` = itemId; the metadata isn't carried.
-- **`artemis`:** `JMSXGroupID` = itemId and `_AMQ_DUPL_ID` = messageId.
+- **`eventhubs`:** `PartitionKey` = key; the metadata isn't carried.
+- **`artemis`:** `JMSXGroupID` = key and `_AMQ_DUPL_ID` = messageId.
 - **`rabbitmq`:** `MessageId` and `ContentType`.
 - **`camel`:** any endpoint with the common metadata only. Used for tests and for components without an adapter.
 
@@ -2429,7 +2434,7 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 | Test | Containers | Verifies |
 |---|---|---|
 | `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The splitter as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. `TestLanding` lands a good and a bad file in the same catalog and announces them (§5.3.12). The good file has one record with a missing field: that record arrives as `record.failed` and reads back in its original form, and the file still completes with `failedRecordCount` 1; the others read back as JSON rows. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every record back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. A second connector with a different lease name on the same directory is refused by the directory claim (§9.5) and the running one carries on. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every record; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every records data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
-| `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = itemId, metadata headers, per-file order, `acks=all` + idempotence |
+| `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = the message's key (the test keys by item), metadata headers, order per key, `acks=all` + idempotence |
 | `RabbitMqIT` | `rabbitmq:4.2.9-management-alpine` | `message_id`, content type, headers, publisher confirms (`CORRELATED`) |
 | `ArtemisIT` | `apache/activemq-artemis:2.44.0-alpine` | `JMSXGroupID`, and duplicates dropped by `_AMQ_DUPL_ID` |
 | `SqsIT` | `softwaremill/elasticmq-native:1.7.1` | FIFO MessageGroupId, and duplicates dropped by MessageDeduplicationId. ElasticMQ replaces LocalStack: it is SQS-compatible, light, and needs no account token |

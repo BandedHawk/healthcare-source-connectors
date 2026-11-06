@@ -67,7 +67,7 @@ class StageRegistryTest
     {
         return new StageRegistry.Entry(recordId, item, "d-" + recordId,
                 failed, new OutboundMessage("m-" + recordId,
-                        MessageType.RECORD_STORED, item,
+                        MessageType.RECORD_STORED, item, recordId,
                         new byte[] {1, 2, 3}));
     }
 
@@ -132,6 +132,7 @@ class StageRegistryTest
                     assertThat(row.pending().type())
                             .isEqualTo(MessageType.RECORD_STORED);
                     assertThat(row.pending().itemId()).isEqualTo(item);
+                    assertThat(row.pending().key()).isEqualTo("r1");
                     assertThat(row.pending().body())
                             .containsExactly(1, 2, 3);
                 });

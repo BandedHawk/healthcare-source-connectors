@@ -156,8 +156,8 @@ public final class ResultsChannel implements AutoCloseable
     public void send(ConnectorMessage message)
             throws PublishFailedException, InterruptedException
     {
-        OutboundMessage outbound = new OutboundMessage(message.messageId(),
-                message.type(), message.itemId(), sealer.seal(message));
+        OutboundMessage outbound = OutboundMessage.of(message,
+                sealer.seal(message));
         try
         {
             retry.call("results.send", failure -> true, attempt ->

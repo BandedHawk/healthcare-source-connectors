@@ -25,7 +25,7 @@ import org.apache.camel.component.azure.servicebus.ServiceBusType;
  * <p>
  * Camel 4.22's Service Bus producer ignores per-message SessionId,
  * MessageId and ContentType headers: it only takes a fixed session ID from
- * the endpoint. Per-file sessions (for order) and duplicate detection by
+ * the endpoint. Per-message sessions and duplicate detection by
  * MessageId therefore need the SDK directly; ServiceBusIT found this. The
  * connection settings still come from the configured Camel URI
  * ({@code connectionString}, or {@code fullyQualifiedNamespace} with a token
@@ -104,8 +104,9 @@ public final class ServiceBusPublisher implements ClosablePublisher
     }
 
     /**
-     * Builds the Service Bus message: SessionId is the file ID, MessageId
-     * the message ID, and the metadata goes in application properties.
+     * Builds the Service Bus message: SessionId is the message's key,
+     * MessageId the message ID, and the metadata goes in application
+     * properties.
      *
      * @param message the message
      * @return the Service Bus message
@@ -116,7 +117,7 @@ public final class ServiceBusPublisher implements ClosablePublisher
                 BinaryData.fromString(new String(message.body(),
                         StandardCharsets.US_ASCII)));
         busMessage.setMessageId(message.messageId());
-        busMessage.setSessionId(message.itemId().toString());
+        busMessage.setSessionId(message.key());
         busMessage.setContentType(OutboundMessage.CONTENT_TYPE);
         QueueType.metadata(message).forEach((key, value) ->
                 busMessage.getApplicationProperties().put(key, value));

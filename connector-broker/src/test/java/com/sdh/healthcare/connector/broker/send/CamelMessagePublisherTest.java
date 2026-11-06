@@ -63,7 +63,7 @@ class CamelMessagePublisherTest
                 for (int i = 0; i < COUNT; i++)
                 {
                     acks.add(publisher.publish(new OutboundMessage("m" + i,
-                            MessageType.RECORD_STORED, file,
+                            MessageType.RECORD_STORED, file, "m" + i,
                             ("body" + i).getBytes(StandardCharsets.US_ASCII))));
                 }
                 CompletableFuture.allOf(
@@ -84,7 +84,7 @@ class CamelMessagePublisherTest
             {
                 CompletableFuture<Void> sent = broken.publish(
                         new OutboundMessage("x", MessageType.FILE_STARTED,
-                                file, new byte[0]));
+                                file, file.toString(), new byte[0]));
                 assertThatThrownBy(sent::get)
                         .isInstanceOf(ExecutionException.class)
                         .hasCauseInstanceOf(IllegalStateException.class);

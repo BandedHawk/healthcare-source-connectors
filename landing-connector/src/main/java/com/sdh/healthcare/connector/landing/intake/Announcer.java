@@ -9,7 +9,6 @@ package com.sdh.healthcare.connector.landing.intake;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.pipeline.PublishFailedException;
@@ -134,8 +133,8 @@ public final class Announcer
     {
         ConnectorMessage.ItemLanded message =
                 item.message(catalogName, namespace);
-        OutboundMessage outbound = new OutboundMessage(message.messageId(),
-                MessageType.ITEM_LANDED, item.itemId(), sealer.seal(message));
+        OutboundMessage outbound = OutboundMessage.of(message,
+                sealer.seal(message));
         try
         {
             retry.call("landing.announce", failure -> true, attempt ->

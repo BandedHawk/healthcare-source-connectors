@@ -10,13 +10,16 @@ import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReceived;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordConflict;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
@@ -82,16 +85,23 @@ public final class PayloadCodec
                             payload.put("mapping", stored.mapping());
                     case RecordFailed failed ->
                             payload.put("errorCode", failed.errorCode());
+                    case RecordSplit split when split.errorCode() != null ->
+                            payload.put("errorCode", split.errorCode());
                     default ->
                     {
                         // Stored as split: no mapping.
                     }
                 }
-                if (record instanceof RecordFailed failed
-                        && failed.errorAt() != null)
+                SourcePosition errorAt = switch (record)
                 {
-                    payload.put("errorLine", failed.errorAt().line());
-                    payload.put("errorColumn", failed.errorAt().column());
+                    case RecordFailed failed -> failed.errorAt();
+                    case RecordSplit split -> split.errorAt();
+                    default -> null;
+                };
+                if (errorAt != null)
+                {
+                    payload.put("errorLine", errorAt.line());
+                    payload.put("errorColumn", errorAt.column());
                 }
                 payload.put("plaintextLength", record.plaintextLength());
                 payload.put("chunkCount", record.chunkCount());
@@ -158,6 +168,29 @@ public final class PayloadCodec
                 putIfSet(payload, "producerRef", result.producerRef());
                 putIfSet(payload, "replaces", result.replaces());
                 payload.put("finishedAt", result.finishedAt().toString());
+            }
+            case ItemSplit split ->
+            {
+                payload.put("intake", split.intake());
+                payload.put("recordCount", split.recordCount());
+                payload.put("failedRecordCount", split.failedRecordCount());
+                payload.put("itemSize", split.itemSize());
+                payload.put("itemDigest", split.itemDigest());
+                if (split.failure() != null)
+                {
+                    payload.put("failure", problemFields(split.failure()));
+                }
+                payload.put("startedAt", split.startedAt().toString());
+                payload.put("completedAt", split.completedAt().toString());
+            }
+            case ItemConverted converted ->
+            {
+                payload.put("intake", converted.intake());
+                payload.put("recordCount", converted.recordCount());
+                payload.put("failedRecordCount",
+                        converted.failedRecordCount());
+                payload.put("completedAt",
+                        converted.completedAt().toString());
             }
             case RecordConflict conflict ->
             {
@@ -273,6 +306,38 @@ public final class PayloadCodec
                             (String) payload.get("producerRef"),
                             uuid(payload, "replaces"),
                             Instant.parse(text(payload, "finishedAt")));
+                    case RECORD_SPLIT -> new RecordSplit(
+                            text(payload, "recordId"),
+                            itemId,
+                            number(payload, "seq"),
+                            number(payload, "sourceOffset"),
+                            number(payload, "sourceLength"),
+                            text(payload, "format"),
+                            text(payload, "contentType"),
+                            number(payload, "plaintextLength"),
+                            Math.toIntExact(number(payload, "chunkCount")),
+                            storage(payload),
+                            origin(payload),
+                            (String) payload.get("errorCode"),
+                            position(payload, "errorLine", "errorColumn"));
+                    case ITEM_SPLIT -> new ItemSplit(
+                            itemId,
+                            text(payload, "intake"),
+                            number(payload, "recordCount"),
+                            number(payload, "failedRecordCount"),
+                            number(payload, "itemSize"),
+                            text(payload, "itemDigest"),
+                            payload.get("failure") instanceof Map<?, ?> failure
+                                    ? problem((Map<String, Object>) failure)
+                                    : null,
+                            Instant.parse(text(payload, "startedAt")),
+                            Instant.parse(text(payload, "completedAt")));
+                    case ITEM_CONVERTED -> new ItemConverted(
+                            itemId,
+                            text(payload, "intake"),
+                            number(payload, "recordCount"),
+                            number(payload, "failedRecordCount"),
+                            Instant.parse(text(payload, "completedAt")));
                     case RECORD_CONFLICT -> new RecordConflict(
                             text(payload, "recordId"),
                             itemId,

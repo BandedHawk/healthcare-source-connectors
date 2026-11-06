@@ -173,6 +173,7 @@ public final class StageRegistry
                   output_digest   text,
                   message_id      text,
                   message_type    text,
+                  message_key     text,
                   pending_message bytea,
                   stored_at       timestamptz,
                   PRIMARY KEY (stage, record_id)
@@ -256,7 +257,7 @@ public final class StageRegistry
             }
             try (PreparedStatement select = connection.prepareStatement(
                     "SELECT state, output_digest, owner, message_id,"
-                            + " message_type, pending_message"
+                            + " message_type, message_key, pending_message"
                             + " FROM " + records
                             + " WHERE stage = ? AND record_id = ?"))
             {
@@ -267,13 +268,13 @@ public final class StageRegistry
                 {
                     if (rows.next() && !"CLAIMED".equals(rows.getString(1)))
                     {
-                        byte[] body = rows.getBytes(6);
+                        byte[] body = rows.getBytes(7);
                         return new Stored(rows.getString(2), body == null
                                 ? null
                                 : new OutboundMessage(rows.getString(4),
                                         MessageType.fromWire(
                                                 rows.getString(5)),
-                                        itemId, body),
+                                        itemId, rows.getString(6), body),
                                 owner.equals(rows.getString(3)));
                     }
                 }
@@ -333,7 +334,7 @@ public final class StageRegistry
         String mark = """
                 UPDATE %s
                    SET state = 'STORED', output_digest = ?,
-                       message_id = ?, message_type = ?,
+                       message_id = ?, message_type = ?, message_key = ?,
                        pending_message = ?, stored_at = clock_timestamp(),
                        claim_expires = NULL
                  WHERE stage = ? AND record_id = ? AND owner = ?
@@ -362,10 +363,11 @@ public final class StageRegistry
                         update.setString(2, entry.message().messageId());
                         update.setString(3,
                                 entry.message().type().wireName());
-                        update.setBytes(4, entry.message().body());
-                        update.setString(5, stage);
-                        update.setString(6, entry.recordId());
-                        update.setString(7, owner);
+                        update.setString(4, entry.message().key());
+                        update.setBytes(5, entry.message().body());
+                        update.setString(6, stage);
+                        update.setString(7, entry.recordId());
+                        update.setString(8, owner);
                         if (update.executeUpdate() == 1)
                         {
                             marked.add(entry.recordId());

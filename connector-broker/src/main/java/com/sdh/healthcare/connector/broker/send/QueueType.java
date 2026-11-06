@@ -18,13 +18,14 @@ import org.apache.camel.Exchange;
 
 /**
  * Broker adapters (design §10.3). Each sets its broker's ordering key
- * ({@code itemId}) and dedup ID ({@code messageId}), and adds the endpoint
- * options needed for durable acknowledgement when the configured URI
- * doesn't set them.
+ * ({@code key}: the record's ID for a record's message, the item's
+ * otherwise; STAGES.md §4) and dedup ID ({@code messageId}), and adds the
+ * endpoint options needed for durable acknowledgement when the
+ * configured URI doesn't set them.
  * <p>
  * Unencrypted metadata is limited to {@code messageId}, {@code type},
- * {@code itemId} and the content type (design §10.1); the body is the JWE
- * compact serialisation, as ASCII text.
+ * {@code itemId}, the key and the content type (design §10.1); the body
+ * is the JWE compact serialisation, as ASCII text.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -32,7 +33,7 @@ import org.apache.camel.Exchange;
 public enum QueueType
 {
 
-    /** Record key = itemId; idempotent producer, acks=all. */
+    /** Record key = key; idempotent producer, acks=all. */
     KAFKA("kafka", Map.of("requestRequiredAcks", "all",
             "enableIdempotence", "true"))
     {
@@ -40,12 +41,12 @@ public enum QueueType
         void decorate(Exchange exchange, OutboundMessage message)
         {
             exchange.getIn().setHeader("CamelKafkaKey",
-                    message.itemId().toString());
+                    message.key());
         }
     },
 
     /**
-     * FIFO queues: MessageGroupId = itemId, MessageDeduplicationId =
+     * FIFO queues: MessageGroupId = key, MessageDeduplicationId =
      * messageId.
      */
     SQS("aws2-sqs", Map.of())
@@ -54,7 +55,7 @@ public enum QueueType
         void decorate(Exchange exchange, OutboundMessage message)
         {
             exchange.setProperty("CamelAwsMessageGroupId",
-                    message.itemId().toString());
+                    message.key());
             exchange.setExchangeId(message.messageId());
         }
 
@@ -69,7 +70,7 @@ public enum QueueType
     },
 
     /**
-     * orderingKey = itemId (needs a regional {@code pubsubEndpoint});
+     * orderingKey = key (needs a regional {@code pubsubEndpoint});
      * metadata as attributes.
      */
     PUBSUB("google-pubsub", Map.of("messageOrderingEnabled", "true"))
@@ -78,14 +79,14 @@ public enum QueueType
         void decorate(Exchange exchange, OutboundMessage message)
         {
             exchange.getIn().setHeader("CamelGooglePubsubOrderingKey",
-                    message.itemId().toString());
+                    message.key());
             exchange.getIn().setHeader("CamelGooglePubsubAttributes",
                     metadata(message));
         }
     },
 
     /**
-     * SessionId = itemId; MessageId = messageId (enable duplicate detection
+     * SessionId = key; MessageId = messageId (enable duplicate detection
      * on the entity). Sent by {@link ServiceBusPublisher}: the Camel
      * producer can't set these per message.
      */
@@ -111,7 +112,7 @@ public enum QueueType
     },
 
     /**
-     * partitionKey = itemId; no broker-side dedup (the messageId is inside
+     * partitionKey = key; no broker-side dedup (the messageId is inside
      * the payload). Sends one at a time: the Azure AMQP client reorders
      * sends that are in flight together (found by EventHubsIT).
      */
@@ -121,7 +122,7 @@ public enum QueueType
         void decorate(Exchange exchange, OutboundMessage message)
         {
             exchange.getIn().setHeader("CamelAzureEventHubsPartitionKey",
-                    message.itemId().toString());
+                    message.key());
         }
 
         @Override
@@ -132,7 +133,7 @@ public enum QueueType
     },
 
     /**
-     * JMSXGroupID = itemId; Artemis duplicate detection through
+     * JMSXGroupID = key; Artemis duplicate detection through
      * {@code _AMQ_DUPL_ID} = messageId.
      */
     ARTEMIS("jms", Map.of())
@@ -141,7 +142,7 @@ public enum QueueType
         void decorate(Exchange exchange, OutboundMessage message)
         {
             exchange.getIn().setHeader("JMSXGroupID",
-                    message.itemId().toString());
+                    message.key());
             exchange.getIn().setHeader("_AMQ_DUPL_ID", message.messageId());
         }
     },

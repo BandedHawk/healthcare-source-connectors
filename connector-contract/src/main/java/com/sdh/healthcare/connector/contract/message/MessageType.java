@@ -42,6 +42,15 @@ public enum MessageType
     /** An item's final result, for its producer. */
     ITEM_RESULT("item.result"),
 
+    /** The split stage stored a record as cut, for the convert stage. */
+    RECORD_SPLIT("record.split"),
+
+    /** The split stage finished an item, for the convert stage. */
+    ITEM_SPLIT("item.split"),
+
+    /** The convert stage stored every record of an item. */
+    ITEM_CONVERTED("item.converted"),
+
     /**
      * A stage stored a record before, and has now produced different output
      * for it; for the stage's dead-letter queue.

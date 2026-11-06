@@ -220,7 +220,20 @@ Each step builds and passes its tests before the next.
    Done 2026-11-05 (§7).
 3. **`connector-stage`:** the worker, registry, item rows, batched commits, dead-letter queue; tested with a test
    processor against every broker's integration test. Done 2026-11-05 (§6, §7).
-4. **The split stage** on it (from `file-connector`), and **the convert stage**; the new messages.
+4. **The split stage** on it (from `file-connector`), and **the convert stage**; the new messages. In four parts
+   (decided 2026-11-05), each building and passing its tests:
+   - **4a:** the contract: `record.split`, `item.split` and `item.converted`, and record messages keyed by record
+     ID on the broker (§4). `record.split` carries the storage fields `record.stored` does, so a split record is
+     read with the reader's own code. The transform stage's messages are defined in step 6, with its tables.
+     **Done 2026-11-05:** each message names its `orderingKey()` (the item, or the record for record messages and
+     `record.conflict`), `OutboundMessage` carries it as `key`, and every adapter keys by it.
+   - **4b:** the split stage: `file-connector` splits with conversion off into `split_records`, under a lease per
+     item, its checkpoint in the item's row, without the inbox (§8). The module keeps its name; its image becomes
+     `sdh/split-stage` (decided).
+   - **4c:** the convert stage, a new module `convert-stage` on `connector-stage` (§9), image `sdh/convert-stage`.
+   - **4d:** `file.started` and `file.completed` removed; the demo, sandbox, images, integration tests and docs
+     moved to the stages; the admin commands (`restore`, `decrypt-fallback`, `status`) adapted to the per-item
+     rows and `split_records` (decided).
 5. **KEDA** in the sandbox, with a scaling demonstration (a large batch spread across workers).
 6. **The transformer** in `healthcare-data-transformer`, on the published library.
 

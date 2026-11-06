@@ -148,6 +148,8 @@ final class ItSupport
 
     /**
      * A test message whose ID and body name its file and sequence number.
+     * Its key is the file's ID, so the adapters' order by key is tested
+     * with a file's messages sharing one.
      *
      * @param itemId the file's ID
      * @param seq    the sequence number
@@ -157,6 +159,7 @@ final class ItSupport
     {
         String id = itemId + "-" + seq;
         return new OutboundMessage(id, MessageType.RECORD_STORED, itemId,
+                itemId.toString(),
                 ("jwe." + id).getBytes(StandardCharsets.US_ASCII));
     }
 

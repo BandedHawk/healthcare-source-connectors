@@ -26,7 +26,8 @@ import java.util.UUID;
 public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         ConnectorMessage.RecordInStorage, ConnectorMessage.FileCompleted,
         ConnectorMessage.ItemLanded, ConnectorMessage.ItemReceived,
-        ConnectorMessage.ItemResult, ConnectorMessage.RecordConflict
+        ConnectorMessage.ItemResult, ConnectorMessage.RecordConflict,
+        ConnectorMessage.ItemSplit, ConnectorMessage.ItemConverted
 {
 
     /**
@@ -50,6 +51,20 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * @return the file id
      */
     UUID itemId();
+
+    /**
+     * The key the broker orders and partitions by (STAGES.md §4): the
+     * record's id for a message about a record, so an item's records
+     * spread over partitions and workers, and the item's id otherwise. A
+     * record id is a keyed hash, and is the message id of a record's
+     * message already, so it shows nothing more.
+     *
+     * @return the key
+     */
+    default String orderingKey()
+    {
+        return itemId().toString();
+    }
 
     /**
      * A file was picked up, or resumed in a new run.
@@ -94,7 +109,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * conversion ({@link RecordFailed}).
      */
     sealed interface RecordInStorage extends ConnectorMessage
-            permits RecordStored, RecordFailed
+            permits RecordStored, RecordFailed, RecordSplit
     {
 
         /**
@@ -103,6 +118,17 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
          * @return the record id
          */
         String recordId();
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return the record's id
+         */
+        @Override
+        default String orderingKey()
+        {
+            return recordId();
+        }
 
         /**
          * The record's number in its file, from 0.
@@ -671,6 +697,164 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         public String messageId()
         {
             return "rc-" + stage + "-" + recordId + "-" + newDigest;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return the record's id
+         */
+        @Override
+        public String orderingKey()
+        {
+            return recordId;
+        }
+    }
+
+    /**
+     * The split stage stored a record as it was cut from its item, in the
+     * split records table, for the convert stage (STAGES.md §4). A piece the
+     * splitter couldn't parse is stored too, as it was, with the error that
+     * stopped it.
+     *
+     * @param recordId        the record's id
+     * @param itemId          the id of its item
+     * @param seq             its number in the item, from 0
+     * @param sourceOffset    where it starts in the item, in bytes
+     * @param sourceLength    how many bytes of the item it covers
+     * @param format          the name of the item's format
+     * @param contentType     what the stored bytes are
+     * @param plaintextLength the stored length before compression and
+     *                        encryption
+     * @param chunkCount      how many encrypted chunks it is stored in
+     * @param storage         where it is stored
+     * @param origin          where its text came from in the item
+     * @param errorCode       why the splitter couldn't parse it; null if it
+     *                        could
+     * @param errorAt         where in the item that was; null if unknown or
+     *                        none
+     */
+    record RecordSplit(
+            String recordId,
+            UUID itemId,
+            long seq,
+            long sourceOffset,
+            long sourceLength,
+            String format,
+            String contentType,
+            long plaintextLength,
+            int chunkCount,
+            StorageRef storage,
+            RecordOrigin origin,
+            String errorCode,
+            SourcePosition errorAt)
+            implements RecordInStorage
+    {
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#RECORD_SPLIT}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.RECORD_SPLIT;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "sp-" and the record id
+         */
+        @Override
+        public String messageId()
+        {
+            return "sp-" + recordId;
+        }
+    }
+
+    /**
+     * The split stage finished an item: every record it was cut into is
+     * stored and announced (STAGES.md §5).
+     *
+     * @param itemId            the item's id
+     * @param intake            the intake it came in through
+     * @param recordCount       its records, failed ones included
+     * @param failedRecordCount the pieces the splitter couldn't parse,
+     *                          stored as they were
+     * @param itemSize          the item's size, in bytes
+     * @param itemDigest        its keyed digest, as landed
+     * @param failure           why the item as a whole couldn't be split
+     *                          further, with the records before it kept;
+     *                          null if it was split to the end
+     * @param startedAt         when the split stage started on it
+     * @param completedAt       when it finished
+     */
+    record ItemSplit(UUID itemId, String intake, long recordCount,
+            long failedRecordCount, long itemSize, String itemDigest,
+            Problem failure, Instant startedAt, Instant completedAt)
+            implements ConnectorMessage
+    {
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#ITEM_SPLIT}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.ITEM_SPLIT;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "is-" and the item id
+         */
+        @Override
+        public String messageId()
+        {
+            return "is-" + itemId;
+        }
+    }
+
+    /**
+     * The convert stage stored every record of an item (STAGES.md §5).
+     *
+     * @param itemId            the item's id
+     * @param intake            the intake it came in through
+     * @param recordCount       its records, failed ones included
+     * @param failedRecordCount those stored in their original form, after
+     *                          failing to split or to convert
+     * @param completedAt       when the last was stored
+     */
+    record ItemConverted(UUID itemId, String intake, long recordCount,
+            long failedRecordCount, Instant completedAt)
+            implements ConnectorMessage
+    {
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#ITEM_CONVERTED}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.ITEM_CONVERTED;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "ic-convert-" and the item id
+         */
+        @Override
+        public String messageId()
+        {
+            return "ic-convert-" + itemId;
         }
     }
 

@@ -34,7 +34,7 @@ class QueueTypeTest
 
     /** The message. */
     static final OutboundMessage MESSAGE = new OutboundMessage("sec-abc",
-            MessageType.RECORD_STORED, FILE, new byte[0]);
+            MessageType.RECORD_STORED, FILE, "rec-key", new byte[0]);
 
     /**
      * Applies a type's headers to a new exchange.
@@ -80,8 +80,8 @@ class QueueTypeTest
     }
 
     /**
-     * Each type sets its ordering key and dedup ID, and only the allowed
-     * metadata.
+     * Each type sets its ordering key (the message's key, not its item) and
+     * dedup ID, and only the allowed metadata.
      */
     @Test
     void setsOrderingKeyDedupIdAndOnlyAllowedMetadata()
@@ -90,23 +90,23 @@ class QueueTypeTest
         assertThat(kafka.getIn().getHeaders()).containsOnlyKeys("messageId",
                 "type", "itemId", "contentType", "CamelKafkaKey");
         assertThat(kafka.getIn().getHeader("CamelKafkaKey"))
-                .isEqualTo(FILE.toString());
+                .isEqualTo("rec-key");
         assertThat(kafka.getIn().getHeader("type"))
                 .isEqualTo("record.stored");
 
         Exchange sqs = apply(QueueType.SQS);
         assertThat(sqs.getProperty("CamelAwsMessageGroupId"))
-                .isEqualTo(FILE.toString());
+                .isEqualTo("rec-key");
         assertThat(sqs.getExchangeId()).isEqualTo("sec-abc");
 
         Exchange artemis = apply(QueueType.ARTEMIS);
         assertThat(artemis.getIn().getHeader("JMSXGroupID"))
-                .isEqualTo(FILE.toString());
+                .isEqualTo("rec-key");
         assertThat(artemis.getIn().getHeader("_AMQ_DUPL_ID"))
                 .isEqualTo("sec-abc");
 
         ServiceBusMessage serviceBus = ServiceBusPublisher.toMessage(MESSAGE);
-        assertThat(serviceBus.getSessionId()).isEqualTo(FILE.toString());
+        assertThat(serviceBus.getSessionId()).isEqualTo("rec-key");
         assertThat(serviceBus.getMessageId()).isEqualTo("sec-abc");
         assertThat(serviceBus.getContentType())
                 .isEqualTo(OutboundMessage.CONTENT_TYPE);
@@ -115,7 +115,7 @@ class QueueTypeTest
 
         Exchange pubsub = apply(QueueType.PUBSUB);
         assertThat(pubsub.getIn().getHeader("CamelGooglePubsubOrderingKey"))
-                .isEqualTo(FILE.toString());
+                .isEqualTo("rec-key");
         assertThat(pubsub.getIn().getHeader("CamelGooglePubsubAttributes",
                 Map.class)).containsEntry("messageId", "sec-abc");
 
@@ -124,6 +124,6 @@ class QueueTypeTest
                 .isEqualTo("sec-abc");
         assertThat(apply(QueueType.EVENTHUBS).getIn()
                 .getHeader("CamelAzureEventHubsPartitionKey"))
-                .isEqualTo(FILE.toString());
+                .isEqualTo("rec-key");
     }
 }

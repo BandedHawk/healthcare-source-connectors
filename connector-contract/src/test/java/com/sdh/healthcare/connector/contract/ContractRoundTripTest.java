@@ -163,7 +163,24 @@ class ContractRoundTripTest
                         3, 2, 2, java.util.List.of(), null,
                         UUID.randomUUID(), java.time.Instant.EPOCH),
                 new ConnectorMessage.RecordConflict("ID6", itemId, "convert",
-                        "d-1", "d-2", java.time.Instant.EPOCH)))
+                        "d-1", "d-2", java.time.Instant.EPOCH),
+                new ConnectorMessage.RecordSplit("ID7", itemId, 5, 110, 20,
+                        "ccda", "application/xml", 20, 1, ref,
+                        new RecordOrigin(new SourcePosition(2, 1),
+                                new SourcePosition(9, 3)), null, null),
+                new ConnectorMessage.RecordSplit("ID8", itemId, 6, 130, 20,
+                        "csv", "text/csv", 20, 1, ref, null,
+                        "PARSE_UNTERMINATED_QUOTE", new SourcePosition(7, 4)),
+                new ConnectorMessage.ItemSplit(itemId, "claims", 7, 1, 999,
+                        "digest", null, java.time.Instant.EPOCH,
+                        java.time.Instant.EPOCH),
+                new ConnectorMessage.ItemSplit(itemId, "claims", 2, 0, 999,
+                        "digest", new ConnectorMessage.Problem(
+                                "PARSE_XML_MALFORMED", "split", -1, 300,
+                                new SourcePosition(12, 1), -1, null, null),
+                        java.time.Instant.EPOCH, java.time.Instant.EPOCH),
+                new ConnectorMessage.ItemConverted(itemId, "claims", 7, 2,
+                        java.time.Instant.EPOCH)))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
                     .isEqualTo(message);
@@ -171,6 +188,16 @@ class ContractRoundTripTest
         assertThat(PayloadCodec.toJson(new RecordStored("ID2", itemId, 1, 30,
                 20, "fhir", "application/fhir+json", null, 20, 1, ref)))
                 .doesNotContainKey("mapping");
+        assertThat(PayloadCodec.toJson(new ConnectorMessage.RecordSplit("ID7",
+                itemId, 5, 110, 20, "ccda", "application/xml", 20, 1, ref,
+                null, null, null)))
+                .doesNotContainKeys("errorCode", "errorLine", "mapping");
+        assertThat(new ConnectorMessage.RecordSplit("ID7", itemId, 5, 110, 20,
+                "ccda", "application/xml", 20, 1, ref, null, null, null)
+                .orderingKey()).isEqualTo("ID7");
+        assertThat(new ConnectorMessage.ItemConverted(itemId, "claims", 1, 0,
+                java.time.Instant.EPOCH).orderingKey())
+                .isEqualTo(itemId.toString());
         assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemReceived(
                 itemId, "claims", "push", 1, null, java.time.Instant.EPOCH,
                 null, null, null, null)))
