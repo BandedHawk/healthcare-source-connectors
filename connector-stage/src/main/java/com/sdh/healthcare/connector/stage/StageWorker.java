@@ -59,7 +59,10 @@ import org.slf4j.LoggerFactory;
  * <li>a record already stored is a duplicate if its output is the same,
  *     and is only sent again if its message never was; with a different
  *     output it is a conflict, reported to the dead-letter queue, and the
- *     first output is kept;</li>
+ *     first output is kept. Under the version it was stored with, its
+ *     output must be the same, so it isn't processed again; under another
+ *     it is, which is announced and flushed first, since that may stop the
+ *     process (STAGES.md §6);</li>
  * <li>a record another worker holds is waited for, after the rest is
  *     stored and sent, until that worker stores it or lets its claim
  *     expire;</li>
@@ -157,10 +160,12 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * A record of the batch, with its message.
      *
      * @param input   what the processor read in it
-     * @param message the message
+     * @param message  the message
+     * @param brokerId the broker's ID of the message it came in; null if
+     *                 none, or if it was rebuilt rather than received
      */
     private record Pending(StageInput.RecordInput input,
-            ConnectorMessage message)
+            ConnectorMessage message, String brokerId)
     {
     }
 
@@ -169,12 +174,15 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      *
      * @param pending  the record
      * @param found    what was found
-     * @param output   its output: when claimed, or when stored before by
-     *                 another worker
+     * @param output   its output: when claimed, or when processed again
+     *                 to compare with what another worker stored
      * @param stored   the registry's row, when stored before
+     * @param version  the processor's version for it, when claimed or
+     *                 stored before by another worker
      */
     private record Result<O>(Pending pending, Found found,
-            StageOutput<O> output, StageRegistry.Stored stored)
+            StageOutput<O> output, StageRegistry.Stored stored,
+            String version)
     {
     }
 
@@ -265,7 +273,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             try
             {
                 opened.add(new Opened(opener.open(received.body()),
-                        received.body()));
+                        received.body(), received.messageId()));
             }
             catch (MessageRejectedException rejected)
             {
@@ -303,7 +311,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         List<Opened> opened = new ArrayList<>(messages.size());
         for (ConnectorMessage message : messages)
         {
-            opened.add(new Opened(message, null));
+            opened.add(new Opened(message, null, null));
         }
         return run(opened);
     }
@@ -311,10 +319,13 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     /**
      * A message, opened, with its body as received.
      *
-     * @param message the message
-     * @param body    its sealed body; null if it wasn't received
+     * @param message  the message
+     * @param body     its sealed body; null if it wasn't received
+     * @param brokerId the broker's ID for it; null if none, or if it
+     *                 wasn't received
      */
-    private record Opened(ConnectorMessage message, byte[] body)
+    private record Opened(ConnectorMessage message, byte[] body,
+            String brokerId)
     {
     }
 
@@ -343,7 +354,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     {
                         // The same record twice in one batch is one record.
                         records.putIfAbsent(input.key(),
-                                new Pending(input, message));
+                                new Pending(input, message,
+                                        received.brokerId()));
                         items.add(input.itemId());
                     }
                     case StageInput.ItemTotal total ->
@@ -426,7 +438,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                 case DUPLICATE ->
                 {
                     Telemetry.get().audit("record.duplicate",
-                            itemFields(result.pending()));
+                            storedFields(result));
                     if (result.stored().pending() != null)
                     {
                         resend.add(result.stored().pending());
@@ -480,25 +492,60 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                 record.input().itemId(), settings.claimTtl());
         return switch (claim)
         {
-            case StageRegistry.Owned owned -> new Result<>(record,
-                    Found.OWNED,
-                    processor.process(record.message(), owned.attempts()),
-                    null);
-            case StageRegistry.Stored stored when stored.mine() ->
-                    new Result<>(record, Found.MINE, null, stored);
-            case StageRegistry.Stored stored ->
+            case StageRegistry.Owned owned ->
             {
-                // Processed again only to compare: the same output is a
-                // duplicate, a different one a conflict.
-                StageOutput<O> again = processor.process(record.message(), 1);
-                yield new Result<>(record,
-                        again.digest().equals(stored.digest())
-                                ? Found.DUPLICATE : Found.CONFLICT,
-                        again, stored);
+                String version = processor.version(record.message());
+                yield new Result<>(record, Found.OWNED,
+                        processor.process(record.message(), owned.attempts()),
+                        null, version);
             }
+            case StageRegistry.Stored stored when stored.mine() ->
+                    new Result<>(record, Found.MINE, null, stored, null);
+            case StageRegistry.Stored stored -> compare(record, stored);
             case StageRegistry.Busy busy ->
-                    new Result<>(record, Found.BUSY, null, null);
+                    new Result<>(record, Found.BUSY, null, null, null);
         };
+    }
+
+    /**
+     * Compares a record received again with what another worker stored
+     * (STAGES.md §6). Under the version it was stored with, the output must
+     * be the same: a duplicate, not processed again. Under another, it is
+     * processed again, at the attempt it was stored at, and the same output
+     * is a duplicate, a different one a conflict.
+     * <p>
+     * Processing again under another version happens only when the stage
+     * was changed while records were in flight, and may stop the process,
+     * over and over, as it is delivered again. So it is announced first,
+     * in the console log and as {@code record.compare_started}, flushed to
+     * the collector, with what an operator needs to find the record and
+     * recover by hand.
+     *
+     * @param record the record
+     * @param stored its row
+     * @return a duplicate or a conflict
+     * @throws InterruptedException if interrupted
+     */
+    private Result<O> compare(Pending record, StageRegistry.Stored stored)
+            throws InterruptedException
+    {
+        String version = processor.version(record.message());
+        if (version.equals(stored.version()))
+        {
+            return new Result<>(record, Found.DUPLICATE, null, stored,
+                    version);
+        }
+        Telemetry telemetry = Telemetry.get();
+        telemetry.versionDiffers(processor.stage());
+        telemetry.auditWarn("record.compare_started",
+                storedFields(record, stored, version));
+        telemetry.flush();
+        StageOutput<O> again = processor.process(record.message(),
+                stored.attempts());
+        return new Result<>(record,
+                again.digest().equals(stored.digest())
+                        ? Found.DUPLICATE : Found.CONFLICT,
+                again, stored, version);
     }
 
     /**
@@ -532,7 +579,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             entries.add(new StageRegistry.Entry(
                     result.pending().input().recordId(),
                     result.pending().input().itemId(),
-                    result.output().digest(), result.output().failed(),
+                    result.output().digest(), result.version(),
+                    result.output().failed(),
                     outbound(messages.get(index))));
         }
         return entries;
@@ -552,7 +600,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             TimeoutException
     {
         Telemetry.get().auditWarn("record.conflict",
-                itemFields(result.pending())
+                storedFields(result)
                         .with(Attr.ERROR_CODE, ErrorCode.RECORD_CONFLICT));
         send(deadLetters, List.of(outbound(
                 new ConnectorMessage.RecordConflict(
@@ -681,16 +729,41 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     }
 
     /**
-     * The fields of an event about a record: its stage and item, never its
-     * id.
+     * The fields of an event about a record received again: enough to find
+     * it and recover by hand (STAGES.md §6). A record is named by its item
+     * and sequence number, never its id.
      *
-     * @param record the record
+     * @param result the record, its row and the version now
      * @return the fields
      */
-    private Fields itemFields(Pending record)
+    private Fields storedFields(Result<O> result)
     {
+        return storedFields(result.pending(), result.stored(),
+                result.version());
+    }
+
+    /**
+     * The fields of an event about a record received again.
+     *
+     * @param record  the record
+     * @param stored  its row
+     * @param version the processor's version for it now
+     * @return its stage, item, sequence number, broker ID, both versions,
+     *         attempts and the row's state
+     */
+    private Fields storedFields(Pending record, StageRegistry.Stored stored,
+            String version)
+    {
+        long seq = record.input().seq();
         return Fields.of(Attr.STAGE, processor.stage())
-                .with(Attr.ITEM_ID, record.input().itemId());
+                .with(Attr.ITEM_ID, record.input().itemId())
+                .with(Attr.SEQ, seq < 0 ? null : seq)
+                .with(Attr.BROKER_MESSAGE_ID, record.brokerId())
+                .with(Attr.VERSION, version)
+                .with(Attr.STORED_VERSION, stored.version() == null
+                        ? "none" : stored.version())
+                .with(Attr.ATTEMPTS, stored.attempts())
+                .with(Attr.STATE, stored.state());
     }
 
     /** Stops processing and renewing; held claims expire. */

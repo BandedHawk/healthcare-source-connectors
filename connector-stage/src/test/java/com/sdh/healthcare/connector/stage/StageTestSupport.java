@@ -261,7 +261,7 @@ final class StageTestSupport
      * A processor that stores each record's id, with an output digest of
      * its version and the id.
      */
-    static final class TestProcessor implements StageProcessor<String>
+    static class TestProcessor implements StageProcessor<String>
     {
 
         /** The version, which decides the output. */
@@ -275,6 +275,9 @@ final class StageTestSupport
 
         /** How many more calls to process are to fail. */
         final AtomicInteger failures = new AtomicInteger();
+
+        /** How many times a record was processed, over all calls. */
+        final AtomicInteger processed = new AtomicInteger();
 
         /** Whether every commit fails, as for a worker about to stop. */
         final java.util.concurrent.atomic.AtomicBoolean commitFails =
@@ -313,7 +316,7 @@ final class StageTestSupport
             return switch (message)
             {
                 case RecordStored stored -> new StageInput.RecordInput(
-                        stored.recordId(), stored.itemId());
+                        stored.recordId(), stored.itemId(), stored.seq());
                 case FileCompleted completed -> new StageInput.ItemTotal(
                         completed.itemId(), completed.recordCount());
                 default -> new StageInput.Unwanted("wrong_type");
@@ -321,9 +324,16 @@ final class StageTestSupport
         }
 
         @Override
+        public String version(ConnectorMessage message)
+        {
+            return "v" + version;
+        }
+
+        @Override
         public StageOutput<String> process(ConnectorMessage message,
                 int attempt)
         {
+            processed.incrementAndGet();
             if (failures.getAndUpdate(left -> Math.max(0, left - 1)) > 0)
             {
                 throw new IllegalStateException("A dependency is down");

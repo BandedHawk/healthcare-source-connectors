@@ -215,8 +215,9 @@ class StageWorkerTest
     }
 
     /**
-     * A batch delivered again to another worker is recognised: nothing is
-     * committed or sent again, and each record is audited as a duplicate.
+     * A batch delivered again to another worker of the same version is
+     * recognised without processing it again: nothing is committed or sent
+     * again, each record is audited as a duplicate, and nothing is flushed.
      *
      * @throws InterruptedException if interrupted
      */
@@ -225,12 +226,95 @@ class StageWorkerTest
     {
         worker("pod-a", processor()).handle(batch(3));
         int sent = output.sent.size();
-        assertThat(worker("pod-b", processor()).handle(batch(3)))
+        StageTestSupport.TestProcessor again = processor();
+        assertThat(worker("pod-b", again).handle(batch(3)))
                 .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(again.processed).hasValue(0);
         assertThat(committed).hasSize(3);
         assertThat(output.sent).hasSize(sent);
         assertThat(audit.names()).containsExactly("stage.item_completed",
                 "record.duplicate", "record.duplicate", "record.duplicate");
+        assertThat(audit.flushes()).isZero();
+        assertThat(audit.attributes("record.duplicate"))
+                .containsEntry("sdh.version", "v1")
+                .containsEntry("sdh.stored_version", "v1")
+                .containsEntry("sdh.state", "SENT");
+    }
+
+    /**
+     * A record received again under another version, whose output is the
+     * same, is a duplicate once processed again. Before that, the worker
+     * announces the comparison with what an operator needs to recover by
+     * hand, and flushes it, since processing again may stop the process.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void announcesAComparisonUnderAnotherVersion() throws InterruptedException
+    {
+        worker("pod-a", processor()).handle(batch(1));
+        StageTestSupport.TestProcessor changed =
+                new StageTestSupport.TestProcessor(2, committed)
+                {
+                    @Override
+                    public StageOutput<String> process(
+                            ConnectorMessage message, int attempt)
+                    {
+                        // A build that changed nothing in the output.
+                        StageOutput<String> output =
+                                super.process(message, attempt);
+                        return new StageOutput<>(
+                                output.digest().replace("v2:", "v1:"),
+                                output.failed(), output.value());
+                    }
+                };
+        assertThat(worker("pod-b", changed).handle(batch(1)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(changed.processed).hasValue(1);
+        assertThat(deadLetters.sent).isEmpty();
+        assertThat(audit.names()).containsSubsequence(
+                "record.compare_started", "record.duplicate");
+        assertThat(audit.flushes()).isEqualTo(1);
+        assertThat(audit.attributes("record.compare_started"))
+                .containsEntry("sdh.stage", "test")
+                .containsEntry("sdh.item_id", item.toString())
+                .containsEntry("sdh.seq", 0L)
+                .containsEntry("sdh.broker_message_id",
+                        StageTestSupport.record(item, 0).messageId())
+                .containsEntry("sdh.version", "v2")
+                .containsEntry("sdh.stored_version", "v1")
+                .containsEntry("sdh.attempts", 1L)
+                .containsEntry("sdh.state", "SENT");
+    }
+
+    /**
+     * A record stored at its third attempt, received again under another
+     * version, is processed again at that attempt, so an output decided by
+     * attempts (the convert stage's {@code CONVERT_SKIPPED}) comes out the
+     * same rather than doing the work that stopped two workers.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void comparesAtTheAttemptItWasStoredAt() throws InterruptedException
+    {
+        String held = "rec-" + item + "-0";
+        StageTestSupport.registry(schema, "pod-y").claim(held, item,
+                Duration.ofMillis(1));
+        Thread.sleep(20);
+        StageTestSupport.registry(schema, "pod-z").claim(held, item,
+                Duration.ofMillis(1));
+        Thread.sleep(20);
+        StageTestSupport.TestProcessor first = processor();
+        worker("pod-a", first).handle(batch(1));
+        assertThat(first.attempts).containsEntry(held, 3);
+
+        StageTestSupport.TestProcessor changed =
+                new StageTestSupport.TestProcessor(2, committed);
+        worker("pod-b", changed).handle(batch(1));
+        assertThat(changed.attempts).containsEntry(held, 3);
+        assertThat(audit.attributes("record.compare_started"))
+                .containsEntry("sdh.attempts", 3L);
     }
 
     /**
@@ -306,7 +390,11 @@ class StageWorkerTest
                     assertThat(conflict.storedDigest()).startsWith("v1:");
                     assertThat(conflict.newDigest()).startsWith("v2:");
                 });
-        assertThat(audit.names()).contains("record.conflict");
+        assertThat(audit.names()).containsSubsequence(
+                "record.compare_started", "record.conflict");
+        assertThat(audit.attributes("record.conflict"))
+                .containsEntry("sdh.version", "v2")
+                .containsEntry("sdh.stored_version", "v1");
     }
 
     /**

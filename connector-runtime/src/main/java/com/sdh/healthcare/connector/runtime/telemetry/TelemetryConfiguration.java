@@ -18,10 +18,13 @@ import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
 import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporterBuilder;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
+import java.time.Duration;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -142,6 +145,9 @@ public class TelemetryConfiguration
                 .build();
     }
 
+    /** The longest a flush waits for the collector. */
+    private static final Duration FLUSH_WAIT = Duration.ofSeconds(2);
+
     /**
      * Installs the SDK for connector-core. Each application adds its own
      * gauges to the result.
@@ -152,6 +158,24 @@ public class TelemetryConfiguration
     @Bean
     Telemetry telemetry(OpenTelemetry openTelemetry)
     {
-        return Telemetry.install(openTelemetry);
+        return Telemetry.install(openTelemetry, () -> flush(openTelemetry));
+    }
+
+    /**
+     * Exports the SDK's buffered audit events and metrics, waiting a short
+     * while at most. Spans are left to their batches: those of a process
+     * that dies are of no use without their ends.
+     *
+     * @param openTelemetry the SDK
+     */
+    static void flush(OpenTelemetry openTelemetry)
+    {
+        if (openTelemetry instanceof OpenTelemetrySdk sdk)
+        {
+            sdk.getSdkLoggerProvider().forceFlush()
+                    .join(FLUSH_WAIT.toMillis(), TimeUnit.MILLISECONDS);
+            sdk.getSdkMeterProvider().forceFlush()
+                    .join(FLUSH_WAIT.toMillis(), TimeUnit.MILLISECONDS);
+        }
     }
 }

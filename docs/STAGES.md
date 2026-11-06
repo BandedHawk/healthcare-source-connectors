@@ -103,16 +103,47 @@ stage before sends again after a crash. So each stage keeps a registry in Postgr
    it still owns the claim) with the record's sealed message, sends the message, marks it `SENT` (dropping the
    message), and only then acknowledges. A crash between the commit and the send loses nothing: whichever worker
    gets the record next finds it `STORED` and sends the message kept with it;
-3. if the record is already stored: does the work again to compare digests. The same digest is a **duplicate**:
-   dropped, `record.duplicate` audited, acknowledged. A different digest (the converter or mapping changed between
-   the two) is a **conflict**: the first stays, the second goes to the stage's dead-letter queue as
-   `record.conflict`, audited, and acknowledged. Nothing is replaced (decided);
+3. if the record is already stored: compares versions first, then, only if they differ, digests (versions below).
+   The same version, or the same digest, is a **duplicate**: dropped, `record.duplicate` audited, acknowledged. A
+   different digest (the converter or mapping changed between the two) is a **conflict**: the first stays, the
+   second goes to the stage's dead-letter queue as `record.conflict`, audited, and acknowledged. Nothing is replaced
+   (decided);
 4. if another worker holds a live claim: the rest of the batch is stored and sent first, then the record is
    looked at again until the other has stored it (a duplicate) or let its claim expire (taken over). It is never
    acknowledged before: that would lose the record if the other worker died. Storing the rest first means two
    workers each waiting on the other's records can't hold each other up.
 
 A record ID is a keyed hash of the record's content (§7.3), so the same ID means the same input.
+
+**Versions (decided 2026-11-06).** Processing a stored record again to compare digests went wrong for an output
+that depends on more than the record. A record stored `CONVERT_SKIPPED` (§9), because two workers died converting
+it, was converted again in full when it was delivered again: the very work that had stopped them. If it stopped
+this worker too, the message came back and stopped the next, without end, since a comparison takes no claim and
+counts no attempt (on Kafka the partition stalls). If the conversion worked this time, its digest differed from the
+skipped one, and the record was reported as a conflict it wasn't. And every ordinary redelivery was processed again
+only to learn it was a duplicate. So, as built:
+- **A processor states a version** (`StageProcessor.version`), found without doing the work: everything the output
+  depends on beyond the record. The registry keeps it with the digest (`stage_record.output_version`). For the
+  convert stage it is the build (version and build time, from Spring Boot's `build-info`, `StageBuild`), the
+  converter's mapping (`none` without a converter), and a digest of the settings that change output (the format
+  options and `max-bytes`): `0.1.0@2026-11-06T14:48:36Z/csv-row/1/3f9a0c1d22b7`. A rebuild counts as a change.
+- **Under the same version** the output must be the same: a duplicate, not processed again.
+- **Under another version** the record is processed again, at the attempt it was stored at (the registry's
+  `attempts`), so an output decided by attempts comes out the same: a skipped record is skipped again, not
+  converted. The same digest is then a duplicate, a different one a conflict.
+- **No guard against a comparison that stops the worker (decided).** It can happen only when a stage is changed
+  while records are in flight, which isn't expected to be done; when it happens by accident, an operator recovers
+  by hand (§13). What is built now is the telemetry that recovery needs: before processing again under another
+  version the worker audits `record.compare_started`, which reaches the console log at once, and flushes the
+  OpenTelemetry exporters (audit events and metrics are otherwise exported in batches, and the last few seconds die
+  with the process). It also counts `sdh.stage.version_differs` (by stage).
+- **What every event about a record received again carries** (`record.compare_started`, `record.duplicate`,
+  `record.conflict`): the stage, the item ID and the record's sequence number (a record is named by these in
+  telemetry, never by its ID), the broker's ID of the message (`sdh.broker_message_id`: `topic/partition/offset` on
+  Kafka; none for a record the reconciler rebuilt), the version now and the stored one (`sdh.version`,
+  `sdh.stored_version`; `none` for a row from before versions were kept), the attempts it was stored at
+  (`sdh.attempts`), and the row's state (`sdh.state`: `STORED` while its message is still to be sent, `SENT`
+  after). These four attributes are new on the allow-list (§12 of DESIGN.md).
 
 **What remains:** a worker that stalls for longer than its claim's expiry between checking it and committing
 could commit a row a successor also commits. The row is identical (same record, same output), every row carries
@@ -370,9 +401,8 @@ Each step builds and passes its tests before the next.
   but not an `item.split`, whose producer's references come from landing. Options: the split stage's duties send
   each item's `item.split` again once, a grace after it finished; or an operator command does it for the items the
   convert stage audits.
-- **A redelivered record stored as `CONVERT_SKIPPED`** (§9): the worker processes it again to compare digests
-  (§6), so it is converted again, which may stop the worker as before. Options: the worker compares by attempt
-  for such records, or a processor may give the digest of a stored record without redoing the work.
+- **A redelivered record stored as `CONVERT_SKIPPED`** (§9). Resolved 2026-11-06: versions, comparing at the stored
+  attempt, and recovery by hand from a stage changed in flight (§6, §13).
 - **A reconciled record has no queue message** (§9): its producer's result names no message for it if it fails.
   The split stage could keep `message_index` and `message_refs_enc` on every `split_records` row of a batch.
 - Split records as bronze, in their own namespace and table (§3).
@@ -380,3 +410,46 @@ Each step builds and passes its tests before the next.
   per stage, kept as long as the records are (it is how duplicates are recognised); about 100 bytes each.
 - `item.result` to producers sent by the convert stage, after conversion (§4).
 - Moving publishing into `connector-broker` with receiving (§7). Done in step 2.
+
+## 13. Recovery by hand
+
+Situations the stages leave to an operator, how to recognise them, and what to do. Tooling for these is to be
+built later, from what this section needs; until then a step that needs it says so.
+
+### 13.1 A stage changed while records were in flight
+
+Stages are changed only once their queues are drained (decided 2026-11-06). If one is changed with records still
+in flight, a record delivered again may meet a different version than it was stored with (§6). It is then processed
+again to compare, and one of three things happens.
+
+**Recognising it:** `sdh.stage.version_differs` above zero for the stage, and a `record.compare_started` event for
+each such record, with the fields of §6.
+
+| What follows `record.compare_started` | What it means | What to do |
+|---|---|---|
+| `record.duplicate` | the change didn't change this record's output | nothing |
+| `record.conflict`, and the record on the stage's dead-letter queue | the change gave a different output; the first, stored under the old version, is kept | decide whether the first output is acceptable: usually it is (it is what an undisturbed run of the old version gives). If not, the record is to be processed again under the new version as a resubmission linked to the first, never replacing it (decided); needs tooling |
+| nothing, and the pod restarted | processing again stopped the worker; delivered again, it stops the next | below |
+
+**A comparison that stops the worker, step by step:**
+1. **Confirm the loop.** The stage's pods restart over and over (on Kafka, one partition's consumer lag grows while
+   the others drain). The same `sdh.item_id` and `sdh.seq` appear in `record.compare_started` after each restart,
+   with no outcome. The console log (`kubectl logs --previous` on a restarted pod) has the event even when the
+   collector didn't receive it.
+2. **Identify the record:** stage, item ID and sequence number, `sdh.broker_message_id` for where it sits on the
+   queue, `sdh.version` (the build now) and `sdh.stored_version` (the build it was stored with), and `sdh.state`.
+3. **Stop the loop by rolling back.** Deploy the build named in `sdh.stored_version` again: the image built from
+   it, whose version and build time are those of its jar. The record then meets its own version, is a duplicate without being processed, and is
+   acknowledged; anything stored but unsent is sent, as for any duplicate. Needs no tooling.
+4. **Then let the queues drain,** and redeploy the new build with nothing in flight.
+5. **If rolling back isn't possible** (the old build is withdrawn, or other records already need the new one): the
+   delivery is to be marked a duplicate without processing it. Needs tooling: an admin command that names the stage,
+   item and sequence number. Before it acknowledges, it must check the row's state: a `STORED` row's message has
+   not been sent, and must be sent first, or the next stage never gets the record.
+6. **Afterwards:** the records audited `record.compare_started` under that build are listed for review, since
+   their stored outputs come from the old build.
+
+**To build later, for this section:** the admin command to mark a delivery a duplicate (step 5); a way to process a
+conflicting record again under the new version as a linked resubmission (the conflict row of the table); and a
+listing of the records compared under a given pair of versions (step 6).
+

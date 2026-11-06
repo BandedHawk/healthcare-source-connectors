@@ -129,7 +129,7 @@ class ConvertProcessorTest
     {
         return new ConvertProcessor(reader, ConverterRegistry.load(),
                 new ConvertProcessor.Settings(Map.of("csv.header", "true"),
-                        maxBytes, 64L << 20, "prod", NS),
+                        maxBytes, 64L << 20, "prod", NS, "test-build"),
                 new ConvertProcessor.Storage(records, kms, KEK,
                         new RecordIds(new byte[32])),
                 null, Clock.fixed(NOW, ZoneOffset.UTC));
@@ -299,6 +299,74 @@ class ConvertProcessorTest
                 .isNotEqualTo(skipped.digest());
         assertThat(once.failed()).isFalse();
         assertThat(skipped.failed()).isTrue();
+    }
+
+    /**
+     * A record stored skipped and compared again at the attempt it was
+     * stored at (STAGES.md §6) is skipped again, with the same digest: it
+     * isn't converted, so it can't stop the worker as it did twice before,
+     * and isn't taken for a conflict.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aSkippedRecordComparesAsSkipped() throws Exception
+    {
+        List<String> errors = new ArrayList<>();
+        errors.add(null);
+        RecordSplit message = split(errors, HEADER + "1,2\n").get(0);
+        StageOutput<ConvertProcessor.Prepared> stored = processor(1 << 20)
+                .process(message, ConvertProcessor.SKIP_ON_ATTEMPT);
+        ConvertProcessor rebuilt = new ConvertProcessor(reader,
+                ConverterRegistry.load(),
+                new ConvertProcessor.Settings(Map.of("csv.header", "true"),
+                        1 << 20, 64L << 20, "prod", NS, "another-build"),
+                new ConvertProcessor.Storage(records, kms, KEK,
+                        new RecordIds(new byte[32])),
+                null, Clock.fixed(NOW, ZoneOffset.UTC));
+        assertThat(rebuilt.version(message))
+                .isNotEqualTo(processor(1 << 20).version(message));
+        StageOutput<ConvertProcessor.Prepared> again = rebuilt.process(
+                message, ConvertProcessor.SKIP_ON_ATTEMPT);
+        assertThat(again.digest()).isEqualTo(stored.digest());
+        assertThat(again.value().error())
+                .isEqualTo(ErrorCode.CONVERT_SKIPPED);
+    }
+
+    /**
+     * A record's version names the build and its converter's mapping, and
+     * changes with the settings that change its output, but not with the
+     * rest; it holds no setting's value.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void theVersionFollowsWhatDecidesTheOutput() throws Exception
+    {
+        List<String> errors = new ArrayList<>();
+        errors.add(null);
+        RecordSplit message = split(errors, HEADER + "1,2\n").get(0);
+        String version = processor(1 << 20).version(message);
+        assertThat(version).startsWith("test-build/csv-row/")
+                .doesNotContain("csv.header")
+                .isEqualTo(processor(1 << 20).version(message))
+                .isNotEqualTo(processor(1 << 19).version(message));
+        ConvertProcessor otherOptions = new ConvertProcessor(reader,
+                ConverterRegistry.load(),
+                new ConvertProcessor.Settings(Map.of("csv.header", "false"),
+                        1 << 20, 32L << 20, "other", NS, "test-build"),
+                new ConvertProcessor.Storage(records, kms, KEK,
+                        new RecordIds(new byte[32])),
+                null, Clock.fixed(NOW, ZoneOffset.UTC));
+        assertThat(otherOptions.version(message)).isNotEqualTo(version);
+        ConvertProcessor otherMemory = new ConvertProcessor(reader,
+                ConverterRegistry.load(),
+                new ConvertProcessor.Settings(Map.of("csv.header", "true"),
+                        1 << 20, 32L << 20, "other", NS, "test-build"),
+                new ConvertProcessor.Storage(records, kms, KEK,
+                        new RecordIds(new byte[32])),
+                null, Clock.fixed(NOW, ZoneOffset.UTC));
+        assertThat(otherMemory.version(message)).isEqualTo(version);
     }
 
     /**

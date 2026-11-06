@@ -99,7 +99,27 @@ public enum Attr
     SNAPSHOT_ID("sdh.snapshot_id"),
 
     /** A message's type, such as {@code item.result}. */
-    MESSAGE_TYPE("sdh.message_type");
+    MESSAGE_TYPE("sdh.message_type"),
+
+    /**
+     * The version of what decides a stage's output beyond the record
+     * (STAGES.md §6), as the stage running now has it: build, mapping and
+     * a digest of the settings, never the settings themselves.
+     */
+    VERSION("sdh.version"),
+
+    /** The version a record's stored output was made with. */
+    STORED_VERSION("sdh.stored_version"),
+
+    /** How many workers have claimed a record. */
+    ATTEMPTS("sdh.attempts"),
+
+    /**
+     * The broker's ID of a received message, such as
+     * {@code topic/partition/offset} on Kafka: where it is on the queue,
+     * never its content.
+     */
+    BROKER_MESSAGE_ID("sdh.broker_message_id");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

@@ -13,7 +13,10 @@ import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.data.LogRecordData;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
 import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.BeforeEachCallback;
 import org.junit.jupiter.api.extension.ExtensionContext;
@@ -36,6 +39,9 @@ final class AuditCapture implements BeforeEachCallback, AfterEachCallback
     /** The SDK installed for the test. */
     private OpenTelemetrySdk sdk;
 
+    /** How many times telemetry was flushed. */
+    private final AtomicInteger flushes = new AtomicInteger();
+
     /** Creates the extension; nothing is installed until a test starts. */
     AuditCapture()
     {
@@ -56,7 +62,8 @@ final class AuditCapture implements BeforeEachCallback, AfterEachCallback
                                 SimpleLogRecordProcessor.create(events))
                         .build())
                 .build();
-        Telemetry.install(sdk);
+        flushes.set(0);
+        Telemetry.install(sdk, flushes::incrementAndGet);
     }
 
     /**
@@ -83,5 +90,35 @@ final class AuditCapture implements BeforeEachCallback, AfterEachCallback
                 .filter(name -> name != null && name.startsWith(PREFIX))
                 .map(name -> name.substring(PREFIX.length()))
                 .toList();
+    }
+
+    /**
+     * How many times telemetry was flushed.
+     *
+     * @return the count
+     */
+    int flushes()
+    {
+        return flushes.get();
+    }
+
+    /**
+     * The attributes of the first audit event of a name.
+     *
+     * @param name the event's name, without the prefix
+     * @return its attributes, by key
+     * @throws AssertionError if there was no such event
+     */
+    Map<String, Object> attributes(String name)
+    {
+        LogRecordData event = events.getFinishedLogRecordItems().stream()
+                .filter(record -> (PREFIX + name).equals(
+                        record.getEventName()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("No " + name));
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        event.getAttributes().forEach((key, value) ->
+                attributes.put(key.getKey(), value));
+        return attributes;
     }
 }

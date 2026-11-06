@@ -69,7 +69,9 @@ public final class Telemetry
 
     /** The installed instance; one that does nothing until then. */
     private static volatile Telemetry current =
-            new Telemetry(OpenTelemetry.noop());
+            new Telemetry(OpenTelemetry.noop(), () ->
+            {
+            });
 
     /** The OpenTelemetry instance everything is recorded with. */
     private final OpenTelemetry openTelemetry;
@@ -134,6 +136,15 @@ public final class Telemetry
     /** How long publishing a batch's messages takes, in seconds. */
     private final DoubleHistogram publishDuration;
 
+    /**
+     * Records received again under a different version than they were
+     * stored with, by stage (STAGES.md §6).
+     */
+    private final LongCounter versionDiffers;
+
+    /** Exports what is buffered, so a process about to die loses nothing. */
+    private final Runnable flush;
+
     /** How many files are being processed now. */
     private final AtomicLong itemsInProgress = new AtomicLong();
 
@@ -148,9 +159,10 @@ public final class Telemetry
      *
      * @param openTelemetry the OpenTelemetry instance to record with
      */
-    private Telemetry(OpenTelemetry openTelemetry)
+    private Telemetry(OpenTelemetry openTelemetry, Runnable flush)
     {
         this.openTelemetry = openTelemetry;
+        this.flush = flush;
         this.tracer = openTelemetry.getTracer(SCOPE);
         this.eventLogger = openTelemetry.getLogsBridge().get(SCOPE);
         this.meter = openTelemetry.getMeter(SCOPE);
@@ -203,6 +215,11 @@ public final class Telemetry
                 .setUnit("s").build();
         publishDuration = meter.histogramBuilder("sdh.publish.duration")
                 .setUnit("s").build();
+        versionDiffers = meter.counterBuilder("sdh.stage.version_differs")
+                .setUnit("{record}")
+                .setDescription("Records received again under a different"
+                        + " version than they were stored with, by stage")
+                .build();
         meter.gaugeBuilder("sdh.items.in_progress").ofLongs()
                 .buildWithCallback(measurement ->
                         measurement.record(itemsInProgress.get()));
@@ -222,8 +239,37 @@ public final class Telemetry
      */
     public static Telemetry install(OpenTelemetry openTelemetry)
     {
-        current = new Telemetry(openTelemetry);
+        return install(openTelemetry, () ->
+        {
+        });
+    }
+
+    /**
+     * Installs the application's OpenTelemetry instance, with a way to
+     * export what it has buffered.
+     *
+     * @param openTelemetry the application's OpenTelemetry instance
+     * @param flush         exports the buffered audit events and metrics,
+     *                      waiting a short while at most; must not throw
+     * @return the new telemetry
+     */
+    public static Telemetry install(OpenTelemetry openTelemetry,
+            Runnable flush)
+    {
+        current = new Telemetry(openTelemetry, flush);
         return current;
+    }
+
+    /**
+     * Exports the audit events and metrics buffered so far, before
+     * something that may stop the process (STAGES.md §6). They are
+     * otherwise exported in batches, and those of the last few seconds are
+     * lost with a process that dies. The console log is written at once,
+     * and needs no flush.
+     */
+    public void flush()
+    {
+        flush.run();
     }
 
     /**
@@ -488,6 +534,17 @@ public final class Telemetry
     {
         itemsFailed.add(1, Fields.of(Attr.ERROR_CODE, code)
                 .with(Attr.STAGE, stage).toAttributes());
+    }
+
+    /**
+     * Counts a record received again under a different version than it
+     * was stored with.
+     *
+     * @param stage the stage
+     */
+    public void versionDiffers(String stage)
+    {
+        versionDiffers.add(1, Fields.of(Attr.STAGE, stage).toAttributes());
     }
 
     /**

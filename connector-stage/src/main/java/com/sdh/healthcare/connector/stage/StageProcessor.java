@@ -41,6 +41,23 @@ public interface StageProcessor<O>
     StageInput classify(ConnectorMessage message);
 
     /**
+     * The version of everything a record's output depends on beyond the
+     * record itself: the stage's build, and for the convert stage the
+     * converter's mapping and the settings that change its output. Found
+     * without doing the work, it is stored with the output's digest. A
+     * record received again under the same version is a duplicate, and is
+     * not processed again; under another it is processed again to compare
+     * (STAGES.md §6). A version that leaves out something the output
+     * depends on hides a conflict, so it should err on the side of
+     * changing.
+     *
+     * @param message the record's message
+     * @return the version; never null, and short: it is stored with every
+     *         record and goes in telemetry, so it must hold no content
+     */
+    String version(ConnectorMessage message);
+
+    /**
      * Processes a record. An error in the record itself is not thrown, but
      * returned as a failed output, stored with the record; whatever is
      * thrown is taken as passing (storage or a dependency down), and the
@@ -49,7 +66,10 @@ public interface StageProcessor<O>
      * @param message the record's message
      * @param attempt how many workers have claimed the record, this one
      *                included: above 1, an earlier one stopped part-way,
-     *                perhaps on this very record
+     *                perhaps on this very record. When the record is
+     *                processed again to compare, the attempt it was stored
+     *                at, so an output decided by attempts comes out the
+     *                same
      * @return the output, or the failed record
      * @throws InterruptedException if interrupted
      */

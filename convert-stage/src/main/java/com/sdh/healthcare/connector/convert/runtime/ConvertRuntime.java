@@ -33,6 +33,7 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
+import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
 import com.sdh.healthcare.connector.stage.StageProperties;
@@ -307,7 +308,8 @@ public final class ConvertRuntime implements AutoCloseable
                         * DEFAULT_MEMORY_SHARE);
         return new ConvertProcessor.Settings(convert.options(), maxBytes,
                 memory, properties.storage().catalogName(),
-                properties.storage().namespace());
+                properties.storage().namespace(),
+                StageBuild.identity(ConvertRuntime.class));
     }
 
     /**

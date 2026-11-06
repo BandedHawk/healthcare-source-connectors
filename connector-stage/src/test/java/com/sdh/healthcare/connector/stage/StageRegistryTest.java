@@ -66,7 +66,7 @@ class StageRegistryTest
     StageRegistry.Entry entry(String recordId, boolean failed)
     {
         return new StageRegistry.Entry(recordId, item, "d-" + recordId,
-                failed, new OutboundMessage("m-" + recordId,
+                "v1", failed, new OutboundMessage("m-" + recordId,
                         MessageType.RECORD_STORED, item, recordId,
                         new byte[] {1, 2, 3}));
     }
@@ -139,6 +139,9 @@ class StageRegistryTest
                 row ->
                 {
                     assertThat(row.digest()).isEqualTo("d-r1");
+                    assertThat(row.version()).isEqualTo("v1");
+                    assertThat(row.attempts()).isEqualTo(1);
+                    assertThat(row.state()).isEqualTo("STORED");
                     assertThat(row.mine()).isFalse();
                     assertThat(row.pending().messageId()).isEqualTo("m-r1");
                     assertThat(row.pending().type())
@@ -228,7 +231,7 @@ class StageRegistryTest
         assertThat(second.claim("r1", other, LONG))
                 .isEqualTo(new StageRegistry.Owned(1));
         assertThat(second.store(List.of(new StageRegistry.Entry("r1", other,
-                "d-r1", false, new OutboundMessage("m-r1-other",
+                "d-r1", "v1", false, new OutboundMessage("m-r1-other",
                         MessageType.RECORD_STORED, other, "r1",
                         new byte[] {4}))))).containsExactly(
                                 new StageRegistry.Key(other, "r1"));

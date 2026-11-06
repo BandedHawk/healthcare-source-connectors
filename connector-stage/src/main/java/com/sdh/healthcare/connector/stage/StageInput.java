@@ -24,8 +24,12 @@ public sealed interface StageInput
      * @param recordId the record's id
      * @param itemId   the id of the item it came from; with the record id,
      *                 the registry's key (STAGES.md §6)
+     * @param seq      its sequence number in the item, from 0: what
+     *                 telemetry names it by, with the item, never by its
+     *                 id; -1 if it has none
      */
-    record RecordInput(String recordId, UUID itemId) implements StageInput
+    record RecordInput(String recordId, UUID itemId, long seq)
+            implements StageInput
     {
 
         /**

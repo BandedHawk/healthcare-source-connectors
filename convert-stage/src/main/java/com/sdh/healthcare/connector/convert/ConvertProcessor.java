@@ -51,6 +51,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
@@ -124,9 +125,12 @@ public final class ConvertProcessor
      * @param memoryBytes the heap the conversions running at once may use
      * @param catalogName the catalog's name, put in messages
      * @param namespace   the namespace of {@code records}
+     * @param build       the running build ({@code StageBuild}), the start
+     *                    of each record's version
      */
     public record Settings(Map<String, String> options, long maxBytes,
-            long memoryBytes, String catalogName, String namespace)
+            long memoryBytes, String catalogName, String namespace,
+            String build)
     {
     }
 
@@ -170,6 +174,12 @@ public final class ConvertProcessor
             new ConcurrentHashMap<>();
 
     /**
+     * A digest of the settings that change a record's output: the format
+     * options and the largest record converted.
+     */
+    private final String settingsDigest;
+
+    /**
      * Creates the processor.
      *
      * @param reader     reads split records
@@ -190,6 +200,7 @@ public final class ConvertProcessor
         this.budget = new ConversionBudget(settings.memoryBytes());
         this.results = results;
         this.clock = clock;
+        this.settingsDigest = settingsDigest(settings);
     }
 
     @Override
@@ -210,11 +221,28 @@ public final class ConvertProcessor
         return switch (message)
         {
             case RecordSplit split -> new StageInput.RecordInput(
-                    split.recordId(), split.itemId());
+                    split.recordId(), split.itemId(), split.seq());
             case ItemSplit item -> new StageInput.ItemTotal(item.itemId(),
                     item.recordCount());
             default -> new StageInput.Unwanted("wrong_type");
         };
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @return the build, the mapping of the record's converter ({@code none}
+     *         if its format has none) and a digest of the format options
+     *         and the largest record converted, such as
+     *         {@code 0.1.0@2026-11-06T10:15:30Z/ccda/2/3f9a0c1d22b7}
+     */
+    @Override
+    public String version(ConnectorMessage message)
+    {
+        RecordSplit split = (RecordSplit) message;
+        String mapping = converters.get(split.format())
+                .map(RecordConverter::mapping).orElse("none");
+        return settings.build() + "/" + mapping + "/" + settingsDigest;
     }
 
     /**
@@ -580,6 +608,24 @@ public final class ConvertProcessor
         }
         int offset = (int) Math.max(0, Math.min(position, raw.length));
         return split.origin().toFile(LineCounter.positionOf(raw, offset));
+    }
+
+    /**
+     * A short digest of the settings that change a record's output, for
+     * its version: the format options, in order of name, and the largest
+     * record converted. A digest, so no setting's value reaches telemetry.
+     *
+     * @param settings the settings
+     * @return the first 12 hex digits of the SHA-256
+     */
+    private static String settingsDigest(Settings settings)
+    {
+        StringBuilder text = new StringBuilder();
+        new TreeMap<>(settings.options()).forEach((name, value) ->
+                text.append(name).append('=').append(value).append('\0'));
+        text.append("max-bytes=").append(settings.maxBytes());
+        return digest(text.toString().getBytes(StandardCharsets.UTF_8),
+                null, null).substring(0, 12);
     }
 
     /**

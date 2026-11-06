@@ -86,16 +86,30 @@ public final class StageRegistry
     /**
      * The record was stored already.
      *
-     * @param digest  the digest of the output stored
-     * @param pending the message it is to be sent as, sealed, if it hasn't
-     *                been sent; null once it has
-     * @param mine    whether this worker stored it, as when a batch is
-     *                tried again after its send failed
+     * @param digest   the digest of the output stored
+     * @param version  the version it was made with (STAGES.md §6); null
+     *                 for a row from before versions were kept
+     * @param attempts how many workers had claimed it when it was stored
+     * @param pending  the message it is to be sent as, sealed, if it
+     *                 hasn't been sent; null once it has
+     * @param mine     whether this worker stored it, as when a batch is
+     *                 tried again after its send failed
      */
-    public record Stored(String digest, OutboundMessage pending,
-            boolean mine)
+    public record Stored(String digest, String version, int attempts,
+            OutboundMessage pending, boolean mine)
             implements Claim
     {
+
+        /**
+         * The row's state, as telemetry names it.
+         *
+         * @return {@code STORED} while its message is still to be sent,
+         *         {@code SENT} after
+         */
+        public String state()
+        {
+            return pending == null ? "SENT" : "STORED";
+        }
     }
 
     /** Another worker holds a live claim on the record. */
@@ -122,11 +136,12 @@ public final class StageRegistry
      * @param recordId the record's id
      * @param itemId   the id of its item
      * @param digest   its output's digest
+     * @param version  the version its output was made with
      * @param failed   whether it failed, and was stored as it was
      * @param message  the message it is to be sent as, sealed
      */
     public record Entry(String recordId, UUID itemId, String digest,
-            boolean failed, OutboundMessage message)
+            String version, boolean failed, OutboundMessage message)
     {
 
         /**
@@ -194,6 +209,7 @@ public final class StageRegistry
                   attempts        integer     NOT NULL,
                   claim_expires   timestamptz,
                   output_digest   text,
+                  output_version  text,
                   message_id      text,
                   message_type    text,
                   message_key     text,
@@ -219,6 +235,9 @@ public final class StageRegistry
             statement.execute("CREATE SCHEMA IF NOT EXISTS "
                     + records.substring(0, records.indexOf('.')));
             statement.execute(recordDdl);
+            // Kept since 2026-11-06 (STAGES.md §6); added to older tables.
+            statement.execute("ALTER TABLE " + records
+                    + " ADD COLUMN IF NOT EXISTS output_version text");
             statement.execute(itemDdl);
         }
         catch (SQLException failure)
@@ -281,8 +300,8 @@ public final class StageRegistry
             }
             try (PreparedStatement select = connection.prepareStatement(
                     "SELECT state, output_digest, owner, message_id,"
-                            + " message_type, message_key, pending_message"
-                            + " FROM " + records
+                            + " message_type, message_key, pending_message,"
+                            + " output_version, attempts FROM " + records
                             + " WHERE stage = ? AND item_id = ?"
                             + " AND record_id = ?"))
             {
@@ -295,12 +314,15 @@ public final class StageRegistry
                     if (rows.next() && !"CLAIMED".equals(rows.getString(1)))
                     {
                         byte[] body = rows.getBytes(7);
-                        return new Stored(rows.getString(2), body == null
-                                ? null
-                                : new OutboundMessage(rows.getString(4),
-                                        MessageType.fromWire(
-                                                rows.getString(5)),
-                                        itemId, rows.getString(6), body),
+                        return new Stored(rows.getString(2),
+                                rows.getString(8), rows.getInt(9),
+                                body == null ? null
+                                        : new OutboundMessage(
+                                                rows.getString(4),
+                                                MessageType.fromWire(
+                                                        rows.getString(5)),
+                                                itemId, rows.getString(6),
+                                                body),
                                 owner.equals(rows.getString(3)));
                     }
                 }
@@ -360,6 +382,7 @@ public final class StageRegistry
         String mark = """
                 UPDATE %s
                    SET state = 'STORED', output_digest = ?,
+                       output_version = ?,
                        message_id = ?, message_type = ?, message_key = ?,
                        pending_message = ?, stored_at = clock_timestamp(),
                        claim_expires = NULL
@@ -386,15 +409,16 @@ public final class StageRegistry
                     for (Entry entry : entries)
                     {
                         update.setString(1, entry.digest());
-                        update.setString(2, entry.message().messageId());
-                        update.setString(3,
+                        update.setString(2, entry.version());
+                        update.setString(3, entry.message().messageId());
+                        update.setString(4,
                                 entry.message().type().wireName());
-                        update.setString(4, entry.message().key());
-                        update.setBytes(5, entry.message().body());
-                        update.setString(6, stage);
-                        update.setObject(7, entry.itemId());
-                        update.setString(8, entry.recordId());
-                        update.setString(9, owner);
+                        update.setString(5, entry.message().key());
+                        update.setBytes(6, entry.message().body());
+                        update.setString(7, stage);
+                        update.setObject(8, entry.itemId());
+                        update.setString(9, entry.recordId());
+                        update.setString(10, owner);
                         if (update.executeUpdate() == 1)
                         {
                             marked.add(entry.key());

@@ -175,7 +175,7 @@ class ConvertStageTest
         ConvertProcessor processor = new ConvertProcessor(reader,
                 ConverterRegistry.load(),
                 new ConvertProcessor.Settings(Map.of("csv.header", "true"),
-                        1 << 20, 64L << 20, "prod", NS),
+                        1 << 20, 64L << 20, "prod", NS, "test-build"),
                 new ConvertProcessor.Storage(records, kms, KEK,
                         new RecordIds(new byte[32])),
                 null, clock);

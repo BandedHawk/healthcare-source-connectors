@@ -87,6 +87,11 @@
           <execution>
             <goals><goal>repackage</goal></goals>
           </execution>
+          <!-- The build's version and time, in the processor's version (STAGES.md §6). -->
+          <execution>
+            <id>build-info</id>
+            <goals><goal>build-info</goal></goals>
+          </execution>
         </executions>
       </plugin>
     </plugins>
