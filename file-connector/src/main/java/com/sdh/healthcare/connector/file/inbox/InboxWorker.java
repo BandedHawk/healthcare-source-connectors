@@ -215,7 +215,7 @@ public final class InboxWorker implements AutoCloseable
     {
         Optional<Checkpoint> inProgress = processor.inProgress();
         if (inProgress.isPresent()
-                && !inProgress.get().fileId().equals(entry.itemId()))
+                && !inProgress.get().itemId().equals(entry.itemId()))
         {
             processor.abandon(inProgress.get());
         }
@@ -227,9 +227,9 @@ public final class InboxWorker implements AutoCloseable
             results.report(outcome);
         }
         inbox.done(entry.seq());
-        LOG.info("inbox.done itemId={} seq={} result={} sections={}",
+        LOG.info("inbox.done itemId={} seq={} result={} records={}",
                 entry.itemId(), entry.seq(), outcome.result(),
-                outcome.sectionCount());
+                outcome.recordCount());
     }
 
     /**

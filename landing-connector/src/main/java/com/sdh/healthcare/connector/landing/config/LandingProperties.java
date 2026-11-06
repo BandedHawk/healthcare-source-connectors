@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.landing.config;
 
+import com.sdh.healthcare.connector.broker.receive.ReceiveProperties;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Compaction;
@@ -119,108 +120,23 @@ public record LandingProperties(
      * @param eventhubs     the checkpoint store, for {@code eventhubs}
      */
     public record Broker(String type, String uri,
-            @DefaultValue Batch batch,
+            @DefaultValue ReceiveProperties.Batch batch,
             @DefaultValue("1h") Duration dedupWindow,
             @DefaultValue("30s") Duration checkInterval,
-            @DefaultValue Rabbitmq rabbitmq,
-            @DefaultValue Artemis artemis,
-            @DefaultValue Eventhubs eventhubs)
-    {
-    }
-
-    /**
-     * Where an Event Hubs intake keeps its checkpoints: a blob container,
-     * which must exist. Reached by a connection string, or by its endpoint
-     * with the default Azure credential (managed or workload identity).
-     *
-     * @param checkpointConnectionString the storage account's connection
-     *                                   string; from the environment
-     * @param checkpointEndpoint         the blob endpoint, such as
-     *                                   {@code https://a.blob.core.windows.net}
-     * @param checkpointContainer        the container's name
-     */
-    public record Eventhubs(String checkpointConnectionString,
-            String checkpointEndpoint, String checkpointContainer)
+            @DefaultValue ReceiveProperties.Rabbitmq rabbitmq,
+            @DefaultValue ReceiveProperties.Artemis artemis,
+            @DefaultValue ReceiveProperties.Eventhubs eventhubs)
     {
 
         /**
-         * The settings without the connection string.
+         * The settings receiving takes, without the landing node's own.
          *
-         * @return the settings as text
+         * @return the broker's settings
          */
-        @Override
-        public String toString()
+        public ReceiveProperties receive()
         {
-            return "Eventhubs[checkpointEndpoint=" + checkpointEndpoint
-                    + ", checkpointContainer=" + checkpointContainer + "]";
-        }
-    }
-
-    /**
-     * When a batch of messages is closed: whichever limit comes first.
-     *
-     * @param maxMessages the most messages in a batch
-     * @param maxBytes    the most bytes in a batch; a single larger message
-     *                    is a batch of its own
-     * @param maxWait     the longest a batch stays open after its first
-     *                    message
-     */
-    public record Batch(@DefaultValue("1000") int maxMessages,
-            @DefaultValue("64MB") DataSize maxBytes,
-            @DefaultValue("5s") Duration maxWait)
-    {
-    }
-
-    /**
-     * A RabbitMQ connection.
-     *
-     * @param addresses   {@code host:port}, comma-separated
-     * @param virtualHost the virtual host
-     * @param username    the user
-     * @param password    the password; from the environment
-     * @param ssl         whether to connect over TLS
-     */
-    public record Rabbitmq(String addresses,
-            @DefaultValue("/") String virtualHost, String username,
-            String password, @DefaultValue("false") boolean ssl)
-    {
-
-        /**
-         * The connection without its password.
-         *
-         * @return the settings as text
-         */
-        @Override
-        public String toString()
-        {
-            return "Rabbitmq[addresses=" + addresses + ", virtualHost="
-                    + virtualHost + ", username=" + username + ", ssl=" + ssl
-                    + "]";
-        }
-    }
-
-    /**
-     * An Artemis connection and the queue to consume.
-     *
-     * @param brokerUrl the broker URL, such as {@code tcp://host:61616}
-     * @param username  the user
-     * @param password  the password; from the environment
-     * @param queue     the queue's name
-     */
-    public record Artemis(String brokerUrl, String username, String password,
-            String queue)
-    {
-
-        /**
-         * The connection without its password.
-         *
-         * @return the settings as text
-         */
-        @Override
-        public String toString()
-        {
-            return "Artemis[brokerUrl=" + brokerUrl + ", username=" + username
-                    + ", queue=" + queue + "]";
+            return new ReceiveProperties(type, uri, batch, checkInterval,
+                    rabbitmq, artemis, eventhubs);
         }
     }
 
@@ -301,40 +217,40 @@ public record LandingProperties(
     /**
      * A directory the node picks items up from.
      *
-     * @param path         the directory
-     * @param access       {@code read-only}, so nothing in it is changed,
-     *                     or {@code read-write}, so each item is removed
-     *                     from it after landing
-     * @param after        what to do with an item after landing, on a
-     *                     read-write source: {@code delete} (the default),
-     *                     {@code move} or {@code rename}; {@code none} on a
-     *                     read-only source
-     * @param moveTo       where {@code move} puts items, keeping their
-     *                     relative paths
-     * @param renameSuffix what {@code rename} appends to an item's name;
-     *                     names ending in it are never picked up
-     * @param ready        when an item is ready: {@code settled}, once its
-     *                     size and modification time have stayed the same
-     *                     for {@code settle}, or {@code marker}, once a
-     *                     {@code <name>.done} file sits beside it
-     * @param settle       how long an item must stay unchanged, for
-     *                     {@code settled}
-     * @param include      an Ant-style pattern of the paths to pick up
-     * @param recursive    whether to look in subdirectories
-     * @param pollInterval how often the source is listed
-     * @param type         {@code directory} (the default), {@code sftp},
-     *                     {@code smb}, {@code s3}, {@code azure-blob},
-     *                     {@code gcs}, {@code iceberg}, {@code http} or
-     *                     {@code queue}
+     * @param path              the directory
+     * @param access            {@code read-only}, so nothing in it is changed,
+     *                          or {@code read-write}, so each item is removed
+     *                          from it after landing
+     * @param after             what to do with an item after landing, on a
+     *                          read-write source: {@code delete} (the default),
+     *                          {@code move} or {@code rename}; {@code none} on
+     *                          a read-only source
+     * @param moveTo            where {@code move} puts items, keeping their
+     *                          relative paths
+     * @param renameSuffix      what {@code rename} appends to an item's name;
+     *                          names ending in it are never picked up
+     * @param ready             when an item is ready: {@code settled}, once its
+     *                          size and modification time have stayed the same
+     *                          for {@code settle}, or {@code marker}, once a
+     *                          {@code <name>.done} file sits beside it
+     * @param settle            how long an item must stay unchanged, for
+     *                          {@code settled}
+     * @param include           an Ant-style pattern of the paths to pick up
+     * @param recursive         whether to look in subdirectories
+     * @param pollInterval      how often the source is listed
+     * @param type              {@code directory} (the default), {@code sftp},
+     *                          {@code smb}, {@code s3}, {@code azure-blob},
+     *                          {@code gcs}, {@code iceberg}, {@code http} or
+     *                          {@code queue}
      * @param authRetryInterval how long to wait before trying a remote
      *                     source again after its credentials, permissions,
      *                     host key or share were refused, so an account
      *                     isn't locked by retries
-     * @param sftp         the SFTP server, for {@code sftp}
-     * @param smb          the SMB share, for {@code smb}
-     * @param bucket       the bucket or container, for {@code s3},
-     *                     {@code azure-blob} and {@code gcs}
-     * @param table        the table, for {@code iceberg}
+     * @param sftp              the SFTP server, for {@code sftp}
+     * @param smb               the SMB share, for {@code smb}
+     * @param bucket            the bucket or container, for {@code s3},
+     *                          {@code azure-blob} and {@code gcs}
+     * @param table             the table, for {@code iceberg}
      */
     public record Source(Path path,
             @DefaultValue("read-only") String access,
@@ -360,19 +276,19 @@ public record LandingProperties(
      * directory on the server. The password and the key's passphrase come
      * from the environment, never the file.
      *
-     * @param host                the server's name or address
-     * @param port                its port
-     * @param user                the account
-     * @param privateKey          the account's private key file, if it uses
-     *                            one
+     * @param host                 the server's name or address
+     * @param port                 its port
+     * @param user                 the account
+     * @param privateKey           the account's private key file, if it uses
+     *                             one
      * @param privateKeyPassphrase the key's passphrase, if it has one
-     * @param password            the account's password, if it uses one
-     * @param knownHosts          a {@code known_hosts} file holding the
-     *                            server's host key; required, since an
-     *                            unknown key is never accepted
-     * @param connectTimeout      how long to wait for the connection
-     * @param readTimeout         how long a connection may stall before
-     *                            it is dropped
+     * @param password             the account's password, if it uses one
+     * @param knownHosts           a {@code known_hosts} file holding the
+     *                             server's host key; required, since an
+     *                             unknown key is never accepted
+     * @param connectTimeout       how long to wait for the connection
+     * @param readTimeout          how long a connection may stall before
+     *                             it is dropped
      */
     public record Sftp(String host,
             @DefaultValue("22") int port,
@@ -499,7 +415,7 @@ public record LandingProperties(
 
     /**
      * The landing catalog (design §5.3.3). It may be a different catalog,
-     * on different storage, from the one the splitter writes sections to.
+     * on different storage, from the one the splitter writes records to.
      *
      * @param catalog     Iceberg catalog properties, passed through as they
      *                    are: {@code type}, {@code uri}, {@code warehouse},

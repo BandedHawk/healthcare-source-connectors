@@ -9,8 +9,8 @@ package com.sdh.healthcare.connector.contract.position;
 /**
  * A place in a text: a line and a column, both counted from 1, the column in
  * characters, as a text editor shows them. It says where something is in a
- * section or in the file it came from, so an operator can find it there: an
- * element of a C-CDA document, the start of a section, or the place a
+ * record or in the file it came from, so an operator can find it there: an
+ * element of a C-CDA document, the start of a record, or the place a
  * conversion failed.
  * <p>
  * Lines end at a line feed (LF), a carriage return and line feed (CRLF) or a
@@ -22,7 +22,7 @@ package com.sdh.healthcare.connector.contract.position;
  *
  * @author Jonas Barnett
  * @since 0.1.0
- * @see SectionOrigin
+ * @see RecordOrigin
  */
 public record SourcePosition(long line, int column)
 {

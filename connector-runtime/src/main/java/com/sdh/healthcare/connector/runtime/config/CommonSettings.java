@@ -134,7 +134,7 @@ public final class CommonSettings
     /**
      * Which keys to use. Each application requires only the keys it needs.
      *
-     * @param sectionsKek    the KEK of the {@code sections} table; the
+     * @param recordsKek     the KEK of the {@code records} table; the
      *                       splitter only
      * @param landedItemsKek the KEK of {@code landed_items} (design §5.3):
      *                       the landing node wraps with it, the splitter
@@ -149,7 +149,7 @@ public final class CommonSettings
      *                       {@code item.landed} messages must be signed
      *                       with; the splitter only
      */
-    public record Keys(String sectionsKek, String landedItemsKek,
+    public record Keys(String recordsKek, String landedItemsKek,
             @DefaultValue Signing signing, @DefaultValue Recipient recipient,
             @DefaultValue InboxKey inbox, @DefaultValue Signer landingSigner)
     {

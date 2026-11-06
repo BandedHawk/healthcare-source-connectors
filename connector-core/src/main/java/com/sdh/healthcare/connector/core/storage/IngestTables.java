@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.storage;
 
-import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -74,17 +74,17 @@ public final class IngestTables
     }
 
     /**
-     * Creates or loads the {@code sections} table.
+     * Creates or loads the {@code records} table.
      *
      * @param catalog   the Iceberg catalog
      * @param namespace the namespace the table is in, created if missing
      * @return the table
      */
-    public static Table sections(Catalog catalog, String namespace)
+    public static Table records(Catalog catalog, String namespace)
     {
-        return create(catalog, namespace, SectionsTable.DEFAULT_NAME,
-                SectionsTable.SCHEMA, SectionsTable.SPEC,
-                SectionsTable.SORT_ORDER);
+        return create(catalog, namespace, RecordsTable.DEFAULT_NAME,
+                RecordsTable.SCHEMA, RecordsTable.SPEC,
+                RecordsTable.SORT_ORDER);
     }
 
     /**

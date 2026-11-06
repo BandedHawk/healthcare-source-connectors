@@ -9,7 +9,7 @@ package com.sdh.healthcare.connector.core.landing;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.crypto.MacedJson;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
@@ -86,7 +86,7 @@ public final class GivenUpItems implements TableMaintenance.Purge
     private final FencedCommitter committer;
 
     /** Makes the MACs, with the ID key. */
-    private final SectionIds ids;
+    private final RecordIds ids;
 
     /** The intake. */
     private final String intake;
@@ -102,7 +102,7 @@ public final class GivenUpItems implements TableMaintenance.Purge
      * @param intake    the intake
      * @param grace     how long a given-up item's chunks are kept
      */
-    public GivenUpItems(FencedCommitter committer, SectionIds ids,
+    public GivenUpItems(FencedCommitter committer, RecordIds ids,
             String intake, Duration grace)
     {
         this.committer = committer;
@@ -134,7 +134,7 @@ public final class GivenUpItems implements TableMaintenance.Purge
      *                                     verify, or it names another
      *                                     intake
      */
-    public static List<Entry> entries(Table table, SectionIds ids,
+    public static List<Entry> entries(Table table, RecordIds ids,
             String intake)
     {
         return decode(table.properties().get(propertyKey(intake)), ids,
@@ -150,7 +150,7 @@ public final class GivenUpItems implements TableMaintenance.Purge
      * @param intake      the intake
      * @param entry       the item given up
      */
-    static void record(Transaction transaction, SectionIds ids,
+    static void record(Transaction transaction, RecordIds ids,
             String intake, Entry entry)
     {
         List<Entry> entries = new ArrayList<>(decode(transaction.table()
@@ -357,7 +357,7 @@ public final class GivenUpItems implements TableMaintenance.Purge
      * @return the items; empty if there is no record
      * @throws CheckpointTamperedException if it doesn't verify
      */
-    private static List<Entry> decode(String stored, SectionIds ids,
+    private static List<Entry> decode(String stored, RecordIds ids,
             String intake)
     {
         if (stored == null)
@@ -386,7 +386,7 @@ public final class GivenUpItems implements TableMaintenance.Purge
      * @param ids makes the MACs, with the ID key
      * @return the codec
      */
-    private static MacedJson<Stored> codec(SectionIds ids)
+    private static MacedJson<Stored> codec(RecordIds ids)
     {
         return new MacedJson<>(ids, LABEL, GivenUpItems::canonical,
                 GivenUpItems::parse);

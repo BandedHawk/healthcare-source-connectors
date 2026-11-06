@@ -47,19 +47,19 @@ public final class SplitTesting
      * @param data     the file
      * @param config   the split settings
      * @param from     where to start
-     * @return the sections
+     * @return the records
      * @throws Exception if splitting fails
      */
-    public static List<Section> sections(SectionSplitter splitter,
+    public static List<SplitRecord> records(RecordSplitter splitter,
             byte[] data, SplitConfig config, ResumePoint from)
             throws Exception
     {
         SeekableByteSource source = SeekableByteSource.of(data);
-        List<Section> out = new ArrayList<>();
+        List<SplitRecord> out = new ArrayList<>();
         try (SplitSession session = SplitterRegistry.of(splitter)
                 .open(splitter.format(), source, from, 0, config))
         {
-            Optional<Section> next;
+            Optional<SplitRecord> next;
             while ((next = session.next()).isPresent())
             {
                 out.add(next.get());
@@ -69,59 +69,59 @@ public final class SplitTesting
     }
 
     /**
-     * Reads sections' bytes as text, checking each one's length.
+     * Reads records' bytes as text, checking each one's length.
      *
-     * @param data     the file
-     * @param sections the sections
+     * @param data    the file
+     * @param records the records
      * @return their text
-     * @throws Exception if a section can't be read
+     * @throws Exception if a record can't be read
      */
-    public static List<String> texts(byte[] data, List<Section> sections)
+    public static List<String> texts(byte[] data, List<SplitRecord> records)
             throws Exception
     {
         SeekableByteSource source = SeekableByteSource.of(data);
         List<String> out = new ArrayList<>();
-        for (Section section : sections)
+        for (SplitRecord record : records)
         {
-            byte[] bytes = section.readAll(source);
+            byte[] bytes = record.readAll(source);
             assertThat((long) bytes.length)
-                    .isEqualTo(section.plaintextLength());
+                    .isEqualTo(record.plaintextLength());
             out.add(new String(bytes, UTF_8));
         }
         return out;
     }
 
     /**
-     * Splits the whole input, then checks that resuming after each section
+     * Splits the whole input, then checks that resuming after each record
      * yields exactly the rest.
      *
      * @param splitter the splitter
      * @param input    the file, as text
      * @param config   the split settings
-     * @return the sections' text
+     * @return the records' text
      * @throws Exception if splitting fails
      */
-    public static List<String> splitAndCheckResume(SectionSplitter splitter,
+    public static List<String> splitAndCheckResume(RecordSplitter splitter,
             String input, SplitConfig config) throws Exception
     {
         byte[] data = input.getBytes(UTF_8);
-        List<Section> all = sections(splitter, data, config,
+        List<SplitRecord> all = records(splitter, data, config,
                 ResumePoint.START);
         List<String> texts = texts(data, all);
         for (int index = 0; index < all.size(); index++)
         {
             ResumePoint resume = ResumePoint.parse(
                     all.get(index).resume().encode());
-            List<Section> rest = sections(splitter, data, config, resume);
+            List<SplitRecord> rest = records(splitter, data, config, resume);
             assertThat(texts(data, rest))
-                    .as("resume after section %d", index)
+                    .as("resume after record %d", index)
                     .isEqualTo(texts.subList(index + 1, texts.size()));
-            assertThat(rest).extracting(Section::sourceOffset)
+            assertThat(rest).extracting(SplitRecord::sourceOffset)
                     .isEqualTo(all.subList(index + 1, all.size()).stream()
-                            .map(Section::sourceOffset).toList());
+                            .map(SplitRecord::sourceOffset).toList());
         }
         // Same answer with a normal-sized buffer.
-        assertThat(texts(data, sections(splitter, data,
+        assertThat(texts(data, records(splitter, data,
                 config.withReadBuffer(SplitConfig.DEFAULT_READ_BUFFER),
                 ResumePoint.START))).isEqualTo(texts);
         return texts;
@@ -136,12 +136,12 @@ public final class SplitTesting
      * @return the error
      * @throws AssertionError if splitting succeeds or fails otherwise
      */
-    public static SplitException splitError(SectionSplitter splitter,
+    public static SplitException splitError(RecordSplitter splitter,
             String input, SplitConfig config)
     {
         try
         {
-            sections(splitter, input.getBytes(UTF_8), config,
+            records(splitter, input.getBytes(UTF_8), config,
                     ResumePoint.START);
         }
         catch (SplitException expected)

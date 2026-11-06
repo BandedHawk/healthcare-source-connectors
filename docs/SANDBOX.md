@@ -74,7 +74,7 @@ afterwards unless `SDH_IT_STOP=0`.
 
 ```
  sdh-producers           sdh-ccda-push (one namespace per pipeline)            sdh-fhir (reserved)
- ┌──────────┐  mTLS   ┌──────────────────────┐ item.landed ┌──────────┐ sections ┌──────────────────┐
+ ┌──────────┐  mTLS   ┌──────────────────────┐ item.landed ┌──────────┐ records ┌──────────────────┐
  │ producer ├────────►│ landing (active)     ├────────────►│ splitter ├─────────►│ FHIR stage, not  │
  └──────────┘  push   │ landing (standby)    │  Kafka      └────┬─────┘  Kafka   │ yet built        │
                       └──────────┬───────────┘                  │                └────────┬─────────┘
@@ -120,21 +120,21 @@ Each layer has its own bucket and Iceberg namespace, and each stage's S3 key may
 | Layer | Bucket | Iceberg namespace | Written by | Read by |
 |---|---|---|---|---|
 | Bronze: items as landed | `sdh-bronze` | `<pipeline>_landing` | landing node | splitter |
-| Silver: sections, split and converted | `sdh-silver` | `<pipeline>` | splitter | FHIR stage |
+| Silver: records, split and converted | `sdh-silver` | `<pipeline>` | splitter | FHIR stage |
 | Gold: FHIR resources | `sdh-gold` | `<pipeline>_fhir` | FHIR stage | consumers |
 
-Everything is Iceberg tables of Parquet files. Items and sections are encrypted under the pipeline's KEKs in
+Everything is Iceberg tables of Parquet files. Items and records are encrypted under the pipeline's KEKs in
 Vault; the splitter seals its messages to the FHIR stage's key.
 
 ## The FHIR stage
 
 Not built yet: it is the planned `healthcare-data-transformer` project, which runs the Whistle mapping (the
-`mapping` repository, US Core 6.1) on each section, fail-fast, writes the resources to the gold layer, and sends
+`mapping` repository, US Core 6.1) on each record, fail-fast, writes the resources to the gold layer, and sends
 what fails to a dead-letter topic for its report mode. The sandbox has its place ready:
 - the namespace `sdh-fhir`, with a quota (3 CPUs, 4 GB) the pipelines can't take, and the same network policies;
-- per pipeline: the topics `<pipeline>.sections` (its input) and `<pipeline>.fhir.dlq`; the gold bucket and an S3
-  key that reads silver and writes gold; a database role; a Vault token that unwraps the sections KEK and uses
-  its own gold KEK (`<pipeline>-fhir`); the private key the splitter seals sections to;
+- per pipeline: the topics `<pipeline>.records` (its input) and `<pipeline>.fhir.dlq`; the gold bucket and an S3
+  key that reads silver and writes gold; a database role; a Vault token that unwraps the records KEK and uses
+  its own gold KEK (`<pipeline>-fhir`); the private key the splitter seals records to;
 - the secret and ConfigMap `fhir-<pipeline>` in `sdh-fhir`, naming all of these.
 
 Deploying it is then one more Deployment in `sdh-fhir`.
@@ -162,7 +162,7 @@ Deploying it is then one more Deployment in `sdh-fhir`.
 
 On 2026-11-05, with the `ccda-push` pipeline:
 - `check`: five synthetic and de-identified C-CDA documents pushed over mTLS, each landed with a receipt, five
-  `item.landed` messages, all split (`file.completed`), 15 messages on `ccda-push.sections`, and no document
+  `item.landed` messages, all split (`file.completed`), 15 messages on `ccda-push.records`, and no document
   content or filenames in any pod's log.
 - **Layers:** data in `sdh-bronze` and `sdh-silver`, none in `sdh-gold`. Each stage's S3 key, tried from a pod:
   the splitter's lists bronze but can't write it; the landing node's can't list silver; the FHIR stage's writes

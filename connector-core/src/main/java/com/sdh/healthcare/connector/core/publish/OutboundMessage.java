@@ -11,17 +11,17 @@ import java.util.UUID;
 
 /**
  * A sealed message ready for a broker. Only {@code messageId}, {@code type} and
- * {@code fileId} may appear as unencrypted broker metadata (design §10.1); the
+ * {@code itemId} may appear as unencrypted broker metadata (design §10.1); the
  * body is the JWE, content type {@value #CONTENT_TYPE}.
  *
  * @param messageId the message's ID
  * @param type      the message's type
- * @param fileId    the file it belongs to
+ * @param itemId    the file it belongs to
  * @param body      the sealed message
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public record OutboundMessage(String messageId, MessageType type, UUID fileId,
+public record OutboundMessage(String messageId, MessageType type, UUID itemId,
         byte[] body)
 {
 

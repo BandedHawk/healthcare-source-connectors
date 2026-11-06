@@ -31,7 +31,7 @@ RUN mkdir legal && cd legal \
  && jar xf ../app.jar META-INF/LICENSE META-INF/NOTICE META-INF/THIRD-PARTY.txt META-INF/licenses \
  && mv META-INF/* . && rmdir META-INF \
  && test -s THIRD-PARTY.txt && test -s NOTICE
-# zstd-jni (section and Parquet compression) and snappy-java (an optional Kafka codec, probed at startup) normally
+# zstd-jni (record and Parquet compression) and snappy-java (an optional Kafka codec, probed at startup) normally
 # unpack their native libraries into java.io.tmpdir and load them from there, which fails on a noexec /tmp. Unpack
 # them here instead; the -D options in ENTRYPOINT point both libraries at /app/native.
 RUN set -eu; \
@@ -49,7 +49,7 @@ RUN set -eu; \
 
 FROM ${JRE_IMAGE}
 LABEL org.opencontainers.image.title="file-connector (service)" \
-      org.opencontainers.image.description="Splits landed healthcare files into encrypted Iceberg sections and announces them" \
+      org.opencontainers.image.description="Splits landed healthcare items into encrypted Iceberg records and announces them" \
       org.opencontainers.image.vendor="Smile Digital Health Inc." \
       org.opencontainers.image.licenses="LicenseRef-Proprietary" \
       org.opencontainers.image.documentation="Third-party notices: /app/legal/NOTICE and /app/legal/THIRD-PARTY.txt"

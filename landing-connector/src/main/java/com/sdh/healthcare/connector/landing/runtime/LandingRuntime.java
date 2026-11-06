@@ -6,13 +6,18 @@
  */
 package com.sdh.healthcare.connector.landing.runtime;
 
-import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
+import com.sdh.healthcare.connector.broker.receive.BrokerKind;
+import com.sdh.healthcare.connector.broker.receive.BrokerWatch;
+import com.sdh.healthcare.connector.broker.receive.EventHubsSupport;
+import com.sdh.healthcare.connector.broker.receive.ReceiveProperties;
+import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandingLedger;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
@@ -42,17 +47,15 @@ import com.sdh.healthcare.connector.landing.intake.S3Source;
 import com.sdh.healthcare.connector.landing.intake.SftpSource;
 import com.sdh.healthcare.connector.landing.intake.SmbSource;
 import com.sdh.healthcare.connector.landing.intake.TableProgress;
-import com.sdh.healthcare.connector.landing.route.BrokerWatch;
-import com.sdh.healthcare.connector.landing.route.EventHubsSupport;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.web.PushController;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.zaxxer.hikari.HikariDataSource;
 import java.io.IOException;
@@ -157,27 +160,27 @@ public final class LandingRuntime implements AutoCloseable
      *                    properties, with the ID key
      */
     public record Tables(FencedCommitter committer, Table landedItems,
-            Table ledger, ItemLander lander, SectionIds ids)
+            Table ledger, ItemLander lander, RecordIds ids)
     {
     }
 
     /**
      * Holds what has been started.
      *
-     * @param camel      stops the route on close
-     * @param dataSource the lease database's pool
-     * @param catalog    the landing catalog
-     * @param lease      the intake's lease
-     * @param publisher  sends messages
-     * @param results    sends receipts; null when results are off
-     * @param keys       the keys
-     * @param source     the source's settings
+     * @param camel        stops the route on close
+     * @param dataSource   the lease database's pool
+     * @param catalog      the landing catalog
+     * @param lease        the intake's lease
+     * @param publisher    sends messages
+     * @param results      sends receipts; null when results are off
+     * @param keys         the keys
+     * @param source       the source's settings
      * @param intakeSource where items come from
-     * @param service    lands a listing intake's items; null for HTTP
-     * @param pushService lands an HTTP intake's pushes; null otherwise
-     * @param queue      a queue intake's service, broker and connection;
-     *                   null otherwise
-     * @param tables     the landing tables
+     * @param service      lands a listing intake's items; null for HTTP
+     * @param pushService  lands an HTTP intake's pushes; null otherwise
+     * @param queue        a queue intake's service, broker and connection;
+     *                     null otherwise
+     * @param tables       the landing tables
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
@@ -325,7 +328,7 @@ public final class LandingRuntime implements AutoCloseable
             committer.establish(items);
             committer.establish(ledgerTable);
             String kek = properties.crypto().keys().landedItemsKek();
-            SectionIds ids = new SectionIds(IdKeys.loadOrCreate(items,
+            RecordIds ids = new RecordIds(IdKeys.loadOrCreate(items,
                     committer, keys.wrap(), kek));
 
             RetryPolicy retry = new RetryPolicy(
@@ -335,7 +338,7 @@ public final class LandingRuntime implements AutoCloseable
             Clock clock = Clock.systemUTC();
             ItemLander.Settings landing = new ItemLander.Settings(intake,
                     kek, storageSettings.commitBytes().toBytes(), retry,
-                    SectionCrypto.CHUNK_SIZE, ItemLander.DEFAULT_BLOCK);
+                    RecordCrypto.CHUNK_SIZE, ItemLander.DEFAULT_BLOCK);
             ItemLander lander = new ItemLander(items, committer, keys.wrap(),
                     ids, landing, clock);
             LandingLedger ledger =
@@ -348,7 +351,10 @@ public final class LandingRuntime implements AutoCloseable
                         ids, intake));
             }
 
-            Publishers.configureBroker(camel, queueType, properties.queue());
+            Publishers.configureBroker(camel, queueType,
+                    properties.queue().artemis().brokerUrl(),
+                    properties.queue().artemis().username(),
+                    properties.queue().artemis().password());
             publisher = Publishers.create(camel, queueType, queueUri);
             Announcer.Receipts receipts = null;
             if (properties.results().enabled())
@@ -377,22 +383,24 @@ public final class LandingRuntime implements AutoCloseable
             }
             else if (broker != null)
             {
-                if (broker.kind() == BrokerSettings.Kind.RABBITMQ)
+                ReceiveSettings receive = broker.receive();
+                if (receive.kind() == BrokerKind.RABBITMQ)
                 {
-                    rabbitmq = rabbitmq(broker.rabbitmq());
-                    camel.getRegistry().bind(BrokerSettings.RABBITMQ_BEAN,
+                    rabbitmq = rabbitmq(receive.rabbitmq());
+                    camel.getRegistry().bind(ReceiveSettings.RABBITMQ_BEAN,
                             rabbitmq);
                 }
-                if (broker.kind() == BrokerSettings.Kind.EVENTHUBS)
+                if (receive.kind() == BrokerKind.EVENTHUBS)
                 {
-                    EventHubsSupport.bind(camel, broker.eventhubs());
+                    EventHubsSupport.bind(camel, receive.eventhubs());
                 }
                 IntakeHealth health = new IntakeHealth(intake,
                         System::nanoTime);
                 BrokerWatch watch = null;
-                if (broker.kind() != BrokerSettings.Kind.ARTEMIS)
+                if (receive.kind() != BrokerKind.ARTEMIS)
                 {
-                    watch = new BrokerWatch(broker, health, camel);
+                    watch = new BrokerWatch(IntakeRoute.ROUTE_ID, receive,
+                            health, camel);
                     watch.bind(rabbitmq);
                 }
                 queue = new QueueIntake(new BatchService(intake, storage,
@@ -585,7 +593,7 @@ public final class LandingRuntime implements AutoCloseable
      * @throws Exception if TLS can't be set up
      */
     private static CachingConnectionFactory rabbitmq(
-            LandingProperties.Rabbitmq settings) throws Exception
+            ReceiveProperties.Rabbitmq settings) throws Exception
     {
         com.rabbitmq.client.ConnectionFactory client =
                 new com.rabbitmq.client.ConnectionFactory();

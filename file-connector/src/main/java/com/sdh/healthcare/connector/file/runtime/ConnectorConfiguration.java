@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.file.runtime;
 
-import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.inbox.InboxTables;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
@@ -158,17 +158,17 @@ public class ConnectorConfiguration
             FatalExit fatal)
     {
         ConnectorProperties.Maintenance settings = properties.maintenance();
-        // Only sections has retention: the inbox keeps every row, to
+        // Only records has retention: the inbox keeps every row, to
         // recognise items delivered again.
-        Optional<Duration> sections = MaintenanceScheduler.retention(
-                "sdh.maintenance.retention.sections",
-                settings.retention().sections(), Duration.ofDays(1));
+        Optional<Duration> records = MaintenanceScheduler.retention(
+                "sdh.maintenance.retention.records",
+                settings.retention().records(), Duration.ofDays(1));
         return new MaintenanceScheduler(runtime.committer(),
                 settings.toSettings(), settings.toSchedule(),
                 () -> List.of(
                         MaintenanceScheduler.Target.of(
-                                runtime.tables().sections(),
-                                SectionsTable.INGESTED_AT, sections),
+                                runtime.tables().records(),
+                                RecordsTable.INGESTED_AT, records),
                         MaintenanceScheduler.Target.of(
                                 runtime.tables().inbox(),
                                 InboxTables.RECEIVED_AT, Optional.empty())),

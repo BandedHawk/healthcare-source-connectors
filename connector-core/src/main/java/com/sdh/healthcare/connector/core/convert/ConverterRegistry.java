@@ -12,12 +12,12 @@ import java.util.Optional;
 import java.util.ServiceLoader;
 
 /**
- * The section converters the connector can use, each found by the name of the
+ * The record converters the connector can use, each found by the name of the
  * file format it converts (design §6.4).
  * <p>
- * After a file is split into sections, the pipeline asks the registry for the
+ * After a file is split into records, the pipeline asks the registry for the
  * converter of the file's format ({@link #get}), and uses it to turn each
- * section into JSON before storing it. A format with no converter, such as FHIR
+ * record into JSON before storing it. A format with no converter, such as FHIR
  * (already JSON), generic XML or delimited text, is stored as split.
  * <p>
  * The connector itself builds its registry with {@link #load()}, or with
@@ -27,19 +27,19 @@ import java.util.ServiceLoader;
  * <p>
  * Converters are found the same way as splitters, with Java's
  * {@link ServiceLoader}: each jar lists its converters in the
- * {@code META-INF/services} file named after {@link SectionConverter}'s
+ * {@code META-INF/services} file named after {@link RecordConverter}'s
  * full class name.
  * So a plugin jar can add a converter for a new format just by being on the
  * class path, without any change here. The connector's own jar lists four:
  * {@code csv}, {@code ccda}, {@code x12} and {@code edifact}.
  * <p>
  * A registry can't be changed once made, and its converters are thread-safe
- * ({@link SectionConverter}), so one registry can serve every file and worker
+ * ({@link RecordConverter}), so one registry can serve every file and worker
  * thread at once.
  *
  * @author Jonas Barnett
  * @since 0.1.0
- * @see SectionConverter
+ * @see RecordConverter
  * @see com.sdh.healthcare.connector.core.split.SplitterRegistry
  */
 public final class ConverterRegistry
@@ -47,10 +47,10 @@ public final class ConverterRegistry
 
     /**
      * The converters, by the format name each gives in
-     * {@link SectionConverter#format()}, such as {@code "ccda"}. At most one
+     * {@link RecordConverter#format()}, such as {@code "ccda"}. At most one
      * converter per format. The map can't be changed.
      */
-    private final Map<String, SectionConverter> byFormat;
+    private final Map<String, RecordConverter> byFormat;
 
     /**
      * Creates a registry of the given converters. Only this class's factory
@@ -59,7 +59,7 @@ public final class ConverterRegistry
      * @param byFormat the converters by format name; copied, so later changes
      * to it don't affect the registry
      */
-    private ConverterRegistry(Map<String, SectionConverter> byFormat)
+    private ConverterRegistry(Map<String, RecordConverter> byFormat)
     {
         this.byFormat = Map.copyOf(byFormat);
     }
@@ -97,9 +97,9 @@ public final class ConverterRegistry
     public static ConverterRegistry load(ClassLoader classLoader)
     {
         // The converters found so far, by format name.
-        Map<String, SectionConverter> map = new HashMap<>();
-        for (SectionConverter converter : ServiceLoader.load(
-                SectionConverter.class, classLoader))
+        Map<String, RecordConverter> map = new HashMap<>();
+        for (RecordConverter converter : ServiceLoader.load(
+                RecordConverter.class, classLoader))
         {
             if (map.putIfAbsent(converter.format(), converter) != null)
             {
@@ -122,12 +122,12 @@ public final class ConverterRegistry
      * {@link #none()}
      * @return a registry of those converters
      */
-    public static ConverterRegistry of(SectionConverter... converters)
+    public static ConverterRegistry of(RecordConverter... converters)
     {
         // The converters given, by format name; a later one replaces an
         // earlier one with the same name.
-        Map<String, SectionConverter> m = new HashMap<>();
-        for (SectionConverter converter : converters)
+        Map<String, RecordConverter> m = new HashMap<>();
+        for (RecordConverter converter : converters)
         {
             m.put(converter.format(), converter);
         }
@@ -135,7 +135,7 @@ public final class ConverterRegistry
     }
 
     /**
-     * Makes a registry with no converters, so every section is stored exactly
+     * Makes a registry with no converters, so every record is stored exactly
      * as it was split. The connector uses it when conversion is turned off
      * ({@code sdh.split.convert: false}).
      *
@@ -152,9 +152,9 @@ public final class ConverterRegistry
      * @param format the format's name, as the connector is configured with,
      * such as {@code "ccda"}; it must match exactly, case included
      * @return the converter for that format, or an empty {@code Optional} if
-     * there is none, in which case the format's sections are stored as split
+     * there is none, in which case the format's records are stored as split
      */
-    public Optional<SectionConverter> get(String format)
+    public Optional<RecordConverter> get(String format)
     {
         return Optional.ofNullable(byFormat.get(format));
     }

@@ -2,14 +2,14 @@
 
 How the pipeline is meant to be deployed, why, and what else was considered. Written 2026-11-05. The design itself is in [DESIGN.md](DESIGN.md); section numbers below (§) refer to it.
 
-A pipeline is one intake, its landing node and its splitter, and carries one type of content (§5.3). The **landing node** (`landing-connector`) takes items in through the intake (a watched directory, HTTP push, a remote source or a queue) and stores each exactly as received, encrypted, in `landed_items` (§5.3). It then sends a signed, encrypted `item.landed` message to its splitter. The **splitter** (`file-connector`) takes that message into its inbox, reads the item from landing, and splits, converts, stores and announces its sections to downstream consumers (§5.3.12, §6, §10).
+A pipeline is one intake, its landing node and its splitter, and carries one type of content (§5.3). The **landing node** (`landing-connector`) takes items in through the intake (a watched directory, HTTP push, a remote source or a queue) and stores each exactly as received, encrypted, in `landed_items` (§5.3). It then sends a signed, encrypted `item.landed` message to its splitter. The **splitter** (`file-connector`) takes that message into its inbox, reads the item from landing, and splits, converts, stores and announces its records to downstream consumers (§5.3.12, §6, §10).
 
 ## Recommendation
 
 **Run the landing node and the splitter as separate images and deployments, with the queue between them on an external broker.** Use the broker the customer already runs for the splitter's output, with a queue or topic of its own.
 
 - Each stage has its own image (`sdh/landing-connector`, `sdh/file-connector`), its own deployment, its own active/standby lease (§9) and its own keys (§7.4).
-- `item.landed` goes over its own queue or topic on the broker, separate from the output (`section.stored` and the rest).
+- `item.landed` goes over its own queue or topic on the broker, separate from the output (`record.stored` and the rest).
 - For trials and small sites, ship a single bundle (a Compose file or Helm chart) that runs the two images and a small broker. That makes installation simple without supporting a second shape of the product.
 
 The demonstration (`-Pdemo`, §15.3) has the same layout: two processes and an external broker, with separate queues for the two stages. It runs the apps from their JARs rather than their images, and without standbys. The image tests and the Kubernetes run (§15) cover the images and failover.

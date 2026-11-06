@@ -6,20 +6,21 @@
  */
 package com.sdh.healthcare.connector.landing.runtime;
 
+import com.sdh.healthcare.connector.broker.receive.ArtemisReceiveRoute;
+import com.sdh.healthcare.connector.broker.receive.BrokerKind;
+import com.sdh.healthcare.connector.broker.receive.CamelReceiveRoute;
+import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.core.landing.GivenUpItems;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
-import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.intake.RemoteSource;
-import com.sdh.healthcare.connector.landing.route.ArtemisIntakeRoute;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
-import com.sdh.healthcare.connector.landing.route.QueueIntakeRoute;
 import com.sdh.healthcare.connector.landing.route.RemoteIntakeRoute;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
@@ -210,11 +211,14 @@ public class LandingConfiguration
         {
             Duration backoff = properties.retry().initialBackoff();
             Duration longest = properties.retry().maxBackoff();
-            return runtime.broker().kind() == BrokerSettings.Kind.ARTEMIS
-                    ? new ArtemisIntakeRoute(properties.landing().intake(),
-                            runtime.broker(), runtime.batchService(),
+            ReceiveSettings receive = runtime.broker().receive();
+            return receive.kind() == BrokerKind.ARTEMIS
+                    ? new ArtemisReceiveRoute(IntakeRoute.ROUTE_ID,
+                            Fields.of(Attr.INTAKE,
+                                    properties.landing().intake()),
+                            receive, runtime.batchService(),
                             runtime.health(), backoff, longest)
-                    : new QueueIntakeRoute(runtime.broker(),
+                    : new CamelReceiveRoute(IntakeRoute.ROUTE_ID, receive,
                             runtime.batchService(), backoff, longest);
         }
         if (runtime.pushService() != null)

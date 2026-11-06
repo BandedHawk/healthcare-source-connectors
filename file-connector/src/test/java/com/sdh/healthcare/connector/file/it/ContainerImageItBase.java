@@ -21,7 +21,7 @@ import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
@@ -76,7 +76,7 @@ import software.amazon.awssdk.services.s3.S3Client;
  * by an upstream container and both landing nodes. Postgres, SeaweedFS and
  * Kafka are reached by network alias. A good and a bad CSV file are
  * landed, announced on Kafka and split, and a downstream reader reads
- * every section back. Then the active landing node is killed and the
+ * every record back. Then the active landing node is killed and the
  * standby lands the next file, and the splitter is restarted and splits
  * another.
  *
@@ -125,7 +125,7 @@ abstract class ContainerImageItBase
     static final String LANDING_TOPIC = "sdh-landing";
 
     /** The topic the splitter publishes to. */
-    static final String SECTIONS_TOPIC = "sdh-sections";
+    static final String RECORDS_TOPIC = "sdh-records";
 
     /** The test files' header row. */
     static final String HEADER = "id,name,note\n";
@@ -181,11 +181,11 @@ abstract class ContainerImageItBase
     /** The intake volume. */
     static String intake;
 
-    /** Downstream's keys, for reading sections back. */
+    /** Downstream's keys, for reading records back. */
     static KeyMaterial downstreamKeys;
 
     /**
-     * Downstream: reads the splitter's sections from SeaweedFS.
+     * Downstream: reads the splitter's records from SeaweedFS.
      */
     static QueueReader reader;
 
@@ -234,7 +234,7 @@ abstract class ContainerImageItBase
      * Image-specific checks of what the base image contains.
      *
      * @param container a running container of the image
-     * @param packages the image's OS package names
+     * @param packages  the image's OS package names
      * @throws Exception if a file can't be read from the container
      */
     abstract void checkBaseImage(GenericContainer<?> container,
@@ -343,7 +343,7 @@ abstract class ContainerImageItBase
                 "bootstrap.servers", kafka.getBootstrapServers(),
                 "group.id", "downstream", "auto.offset.reset", "earliest"),
                 new StringDeserializer(), new StringDeserializer());
-        consumer.subscribe(List.of(SECTIONS_TOPIC));
+        consumer.subscribe(List.of(RECORDS_TOPIC));
     }
 
     /**
@@ -396,9 +396,9 @@ abstract class ContainerImageItBase
      * The container as deployed: locked down, secrets read-only, settings
      * from the environment.
      *
-     * @param container the container
-     * @param config its settings, as SPRING_APPLICATION_JSON
-     * @param log where its console output goes
+     * @param container  the container
+     * @param config     its settings, as SPRING_APPLICATION_JSON
+     * @param log        where its console output goes
      * @param extraBinds volumes besides the secrets
      * @return the container, configured
      * @throws Exception if the settings can't be written as JSON
@@ -488,7 +488,7 @@ abstract class ContainerImageItBase
      * read-only root filesystem).
      *
      * @param container the container
-     * @param path the file's path inside it
+     * @param path      the file's path inside it
      * @return the file as UTF-8
      * @throws Exception if the file can't be copied out
      */
@@ -551,7 +551,7 @@ abstract class ContainerImageItBase
      * Delivers a file to the intake. Docker refuses copies into a read-only
      * root filesystem, even into volumes, so it goes through upstream.
      *
-     * @param name the file name
+     * @param name    the file name
      * @param content the file's content
      */
     static void deliver(String name, String content)
@@ -603,10 +603,10 @@ abstract class ContainerImageItBase
         long deadline = System.currentTimeMillis() + 120_000;
         while (!until.test(MESSAGES) && System.currentTimeMillis() < deadline)
         {
-            for (ConsumerRecord<String, String> record :
+            for (ConsumerRecord<String, String> consumed :
                     consumer.poll(Duration.ofMillis(500)))
             {
-                MESSAGES.add(reader.decode(record.value().getBytes(UTF_8)));
+                MESSAGES.add(reader.decode(consumed.value().getBytes(UTF_8)));
             }
         }
         assertThat(until.test(MESSAGES)).as("downstream messages %s"
@@ -759,7 +759,7 @@ abstract class ContainerImageItBase
         sdh.put("crypto", Map.of(
                 "keystore", Map.of("path", "/run/secrets/keks.p12"),
                 "keys", Map.of(
-                        "sections-kek", TestKeys.SECTIONS,
+                        "records-kek", TestKeys.RECORDS,
                         "landed-items-kek", TestKeys.LANDED,
                         "signing", Map.of("kid", "connector-2026",
                                 "pem", "/run/secrets/signing.pem"),
@@ -773,7 +773,7 @@ abstract class ContainerImageItBase
                                 "kid", TestKeys.LANDING_SIGNER_KID,
                                 "pem", "/run/secrets/landing-signer.pem"))));
         sdh.put("queue", Map.of("type", "kafka",
-                "uri", "kafka:" + SECTIONS_TOPIC + "?brokers=kafka:19092"));
+                "uri", "kafka:" + RECORDS_TOPIC + "?brokers=kafka:19092"));
         return Map.of("sdh", sdh);
     }
 
@@ -806,7 +806,7 @@ abstract class ContainerImageItBase
      * The catalog's properties for an S3 endpoint and database.
      *
      * @param s3Endpoint the object store's endpoint
-     * @param jdbcUrl the catalog database's URL
+     * @param jdbcUrl    the catalog database's URL
      * @return the properties
      */
     static Map<String, String> catalogProperties(String s3Endpoint,
@@ -857,7 +857,7 @@ abstract class ContainerImageItBase
      * Runs a command in a running container.
      *
      * @param container the container
-     * @param command the command and its arguments
+     * @param command   the command and its arguments
      * @return the exit status, a colon, and the output
      * @throws Exception if the command can't be run
      */
@@ -872,22 +872,22 @@ abstract class ContainerImageItBase
     }
 
     /**
-     * A CSV file of records, each with the PHI marker and a quoted newline.
+     * A CSV file of rows, each with the PHI marker and a quoted newline.
      *
-     * @param tag tells this file's records from others'
-     * @param count how many records
-     * @param records receives each record
+     * @param tag   tells this file's rows from others'
+     * @param count how many rows
+     * @param rows  receives each row
      * @return the file's content
      */
-    static String csv(String tag, int count, List<String> records)
+    static String csv(String tag, int count, List<String> rows)
     {
         StringBuilder file = new StringBuilder(HEADER);
         for (int index = 0; index < count; index++)
         {
-            String record = index + "," + MARKER + "-" + tag + "-" + index
+            String row = index + "," + MARKER + "-" + tag + "-" + index
                     + ",\"multi\nline\"\n";
-            records.add(record);
-            file.append(record);
+            rows.add(row);
+            file.append(row);
         }
         return file.toString();
     }
@@ -926,30 +926,30 @@ abstract class ContainerImageItBase
         }
 
         // 1. Landing, announcing and splitting: a good file and a bad one.
-        List<String> records = new ArrayList<>();
-        deliver("good.csv", csv("a", 20, records));
+        List<String> rows = new ArrayList<>();
+        deliver("good.csv", csv("a", 20, rows));
         String bad = HEADER + "1," + MARKER + ",\"never closed\n";
         deliver("bad.csv", bad);
         awaitLanded(2);
-        // 2 × file.started, 20 × section.stored, 1 × file.completed (the bad
+        // 2 × file.started, 20 × record.stored, 1 × file.completed (the bad
         // file stores nothing).
         awaitMessages(messages -> messages.stream()
                 .filter(FileStarted.class::isInstance).count() == 2
                 && completed(messages) == 1
-                && messages.stream().filter(SectionStored.class::isInstance)
+                && messages.stream().filter(RecordStored.class::isInstance)
                         .count() == 20);
         UUID goodId = MESSAGES.stream().filter(FileCompleted.class::isInstance)
-                .findFirst().orElseThrow().fileId();
+                .findFirst().orElseThrow().itemId();
         UUID badId = MESSAGES.stream().filter(FileStarted.class::isInstance)
-                .map(ConnectorMessage::fileId)
+                .map(ConnectorMessage::itemId)
                 .filter(id -> !id.equals(goodId)).findFirst().orElseThrow();
-        for (SectionStored section : MESSAGES.stream()
-                .filter(SectionStored.class::isInstance)
-                .map(SectionStored.class::cast).toList())
+        for (RecordStored record : MESSAGES.stream()
+                .filter(RecordStored.class::isInstance)
+                .map(RecordStored.class::cast).toList())
         {
-            assertThat(new String(reader.readSection(section, 1 << 20), UTF_8))
+            assertThat(new String(reader.readRecord(record, 1 << 20), UTF_8))
                     .isEqualTo(csvRowJson(
-                            records.get((int) section.seq())));
+                            rows.get((int) record.seq())));
         }
 
         // 2. Operator commands inside the running splitter (design §11.4),
@@ -1007,7 +1007,7 @@ abstract class ContainerImageItBase
                 .contains("Started LandingConnectorApplication");
         // Native libraries load from /app/native, so nothing was unpacked
         // into /tmp (mounted noexec here). Without a shell, the work itself
-        // shows zstd loaded: sections and landed chunks couldn't be
+        // shows zstd loaded: records and landed chunks couldn't be
         // compressed otherwise.
         if (hasShell())
         {

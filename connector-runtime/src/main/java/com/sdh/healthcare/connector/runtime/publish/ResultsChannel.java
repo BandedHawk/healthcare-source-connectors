@@ -7,6 +7,9 @@
 package com.sdh.healthcare.connector.runtime.publish;
 
 import com.nimbusds.jose.JWSSigner;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.pipeline.PublishFailedException;
@@ -120,7 +123,10 @@ public final class ResultsChannel implements AutoCloseable
             }
             if (!shared)
             {
-                Publishers.configureBroker(camel, type, queue);
+                Publishers.configureBroker(camel, type,
+                        queue.artemis().brokerUrl(),
+                        queue.artemis().username(),
+                        queue.artemis().password());
             }
         }
         String recipientKid = results.recipient().kid();
@@ -151,7 +157,7 @@ public final class ResultsChannel implements AutoCloseable
             throws PublishFailedException, InterruptedException
     {
         OutboundMessage outbound = new OutboundMessage(message.messageId(),
-                message.type(), message.fileId(), sealer.seal(message));
+                message.type(), message.itemId(), sealer.seal(message));
         try
         {
             retry.call("results.send", failure -> true, attempt ->
@@ -167,7 +173,7 @@ public final class ResultsChannel implements AutoCloseable
             throw new PublishFailedException(failure);
         }
         Telemetry.get().audit("results.sent",
-                Fields.of(Attr.ITEM_ID, message.fileId())
+                Fields.of(Attr.ITEM_ID, message.itemId())
                         .with(Attr.MESSAGE_TYPE, message.type().wireName()));
     }
 

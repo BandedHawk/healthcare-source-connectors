@@ -61,7 +61,7 @@ class ThirdPartyAttributionIT
     static final Pattern SOURCE_FILE =
             Pattern.compile("(?i).*\\.(class|java|kt|groovy|scala)");
 
-    /** The component's primary NOTICE, given in its NOTICE section. */
+    /** The component's primary NOTICE, given in its NOTICE record. */
     static final Pattern PRIMARY_NOTICE =
             Pattern.compile("(?i)(META-INF/)?NOTICE(\\.TXT|\\.MD)?");
 

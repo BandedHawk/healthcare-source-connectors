@@ -10,8 +10,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import com.sdh.healthcare.connector.core.split.Section;
-import com.sdh.healthcare.connector.core.split.SectionSplitter;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
+import com.sdh.healthcare.connector.core.split.RecordSplitter;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
@@ -28,26 +28,26 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Streaming, byte-level XML splitter (design §6.2). A section runs from a
+ * Streaming, byte-level XML splitter (design §6.2). A record runs from a
  * boundary start tag to its matching end tag. Comments, CDATA, processing
  * instructions and DOCTYPE are skipped, so a boundary name inside them is
  * ignored. A boundary element nested inside another belongs to the outer
- * section.
+ * record.
  * <p>
- * Every section is a standalone document: the file's XML declaration is
+ * Every record is a standalone document: the file's XML declaration is
  * prepended, and namespace declarations in scope from ancestor elements
- * are copied onto the section's root start tag.
+ * are copied onto the record's root start tag.
  * <p>
  * Settings: boundary = element local name (required); option
  * {@code namespace} = the element's namespace URI, or {@code *} (default)
  * for any. Input must be in an ASCII-compatible encoding such as UTF-8;
  * UTF-16 is rejected. Entities declared in a DOCTYPE internal subset are
- * not carried into sections.
+ * not carried into records.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public class XmlSplitter implements SectionSplitter
+public class XmlSplitter implements RecordSplitter
 {
 
     /** The format's name. */
@@ -77,7 +77,7 @@ public class XmlSplitter implements SectionSplitter
     /**
      * The most elements a boundary element may be nested in. Every open
      * ancestor is held in memory (its start tag, for the namespaces it
-     * declares) and its offset goes into each section's resume point, which
+     * declares) and its offset goes into each record's resume point, which
      * is saved in the checkpoint, so without a limit a file of nested
      * wrappers could exhaust memory or make the checkpoint huge. Real
      * documents nest their boundary one to three deep. Deeper nesting fails
@@ -217,7 +217,7 @@ public class XmlSplitter implements SectionSplitter
         /** The split settings. */
         private final SplitConfig config;
 
-        /** The largest section allowed, in bytes. */
+        /** The largest record allowed, in bytes. */
         private final long max;
 
         /** The open ancestors of the current position, outermost first. */
@@ -244,7 +244,7 @@ public class XmlSplitter implements SectionSplitter
             this.boundary = boundary;
             this.namespace = namespace;
             this.config = config;
-            this.max = config.limits().maxSectionBytes();
+            this.max = config.limits().maxRecordBytes();
         }
 
         /**
@@ -333,11 +333,11 @@ public class XmlSplitter implements SectionSplitter
          * {@inheritDoc}
          *
          * @throws SplitException if the XML is malformed or unbalanced,
-         *                        nested too deeply, or a section is too
+         *                        nested too deeply, or a record is too
          *                        large
          */
         @Override
-        public Optional<Section> next() throws IOException, SplitException
+        public Optional<SplitRecord> next() throws IOException, SplitException
         {
             while (true)
             {
@@ -374,7 +374,7 @@ public class XmlSplitter implements SectionSplitter
                         (int) Math.min(max, MAX_CONTEXT_TAG * 64L));
                 if (isBoundary(tag))
                 {
-                    return Optional.of(section(tag));
+                    return Optional.of(record(tag));
                 }
                 if (!tag.selfClosing())
                 {
@@ -388,7 +388,7 @@ public class XmlSplitter implements SectionSplitter
                         // A resume re-reads ancestors only up to this size,
                         // so a larger one would fail every restart instead.
                         throw new SplitException(
-                                ErrorCode.LIMIT_SECTION_SIZE, at);
+                                ErrorCode.LIMIT_RECORD_SIZE, at);
                     }
                     outer.add(tag);
                 }
@@ -576,17 +576,17 @@ public class XmlSplitter implements SectionSplitter
         }
 
         /**
-         * Makes the section a boundary start tag opens: the XML declaration,
+         * Makes the record a boundary start tag opens: the XML declaration,
          * then the element, with the namespaces in scope from its ancestors
          * added to its start tag.
          *
          * @param tag the boundary start tag
-         * @return the section
+         * @return the record
          * @throws IOException    if the file can't be read
          * @throws SplitException if the element is malformed, unbalanced or
          *                        too large
          */
-        private Section section(StartTag tag)
+        private SplitRecord record(StartTag tag)
                 throws IOException, SplitException
         {
             long start = tag.offset();
@@ -611,14 +611,14 @@ public class XmlSplitter implements SectionSplitter
             {
                 inScope.remove(declaration.prefix());
             }
-            List<Section.Part> parts = new ArrayList<>(3);
+            List<SplitRecord.Part> parts = new ArrayList<>(3);
             if (decl.length > 0)
             {
-                parts.add(new Section.Literal(decl));
+                parts.add(new SplitRecord.Literal(decl));
             }
             if (inScope.isEmpty())
             {
-                parts.add(new Section.SourceRange(start, end - start));
+                parts.add(new SplitRecord.SourceRange(start, end - start));
             }
             else
             {
@@ -633,15 +633,15 @@ public class XmlSplitter implements SectionSplitter
                 }
                 rewritten.write(tagBytes, 1 + tag.nameLength(),
                         tagBytes.length - 1 - tag.nameLength());
-                parts.add(new Section.Literal(rewritten.toByteArray()));
+                parts.add(new SplitRecord.Literal(rewritten.toByteArray()));
                 long bodyStart = start + tagBytes.length;
                 if (end > bodyStart)
                 {
-                    parts.add(new Section.SourceRange(bodyStart,
+                    parts.add(new SplitRecord.SourceRange(bodyStart,
                             end - bodyStart));
                 }
             }
-            return new Section(start, end - start, parts, resume);
+            return new SplitRecord(start, end - start, parts, resume);
         }
 
         /**
@@ -670,7 +670,7 @@ public class XmlSplitter implements SectionSplitter
                 long at = scanner.position();
                 if (at - start > max)
                 {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
+                    throw new SplitException(ErrorCode.LIMIT_RECORD_SIZE,
                             start);
                 }
                 if (skipMarkup(at))
@@ -703,7 +703,7 @@ public class XmlSplitter implements SectionSplitter
         }
 
         /**
-         * After {@code <} inside a section: skips the tag.
+         * After {@code <} inside a record: skips the tag.
          *
          * @param at the offset of its {@code <}
          * @return its name, or null if self-closing
@@ -788,7 +788,7 @@ public class XmlSplitter implements SectionSplitter
             bytes.write(next);
             if (bytes.size() > cap)
             {
-                throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE, at);
+                throw new SplitException(ErrorCode.LIMIT_RECORD_SIZE, at);
             }
             if (quote != 0)
             {

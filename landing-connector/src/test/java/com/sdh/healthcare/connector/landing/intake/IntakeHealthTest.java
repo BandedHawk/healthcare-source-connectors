@@ -87,8 +87,8 @@ class IntakeHealthTest
     @Test
     void reportsADirectoryWithoutAReason()
     {
-        health.unreachable(null);
-        health.unreachable(null);
+        health.unreachable((IntakeProblem) null);
+        health.unreachable((IntakeProblem) null);
         assertThat(telemetry.attributesOf("intake.unreachable"))
                 .singleElement()
                 .satisfies(attributes ->

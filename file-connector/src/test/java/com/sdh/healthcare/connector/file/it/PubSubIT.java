@@ -28,9 +28,9 @@ import com.google.pubsub.v1.SubscriptionName;
 import com.google.pubsub.v1.TopicName;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.it.ItSupport.Received;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import java.util.ArrayList;
@@ -45,7 +45,7 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.gcloud.PubSubEmulatorContainer;
 
 /**
- * Design §10.3 pubsub: orderingKey = fileId with message ordering enabled,
+ * Design §10.3 pubsub: orderingKey = itemId with message ordering enabled,
  * metadata as attributes.
  *
  * @author Jonas Barnett
@@ -93,7 +93,7 @@ class PubSubIT
                 FixedTransportChannelProvider.create(
                         GrpcTransportChannel.create(channel));
         CredentialsProvider credentials = NoCredentialsProvider.create();
-        TopicName topic = TopicName.of(project, "sdh-sections");
+        TopicName topic = TopicName.of(project, "sdh-records");
         SubscriptionName subscription =
                 SubscriptionName.of(project, "sdh-reader");
         try (TopicAdminClient topics = TopicAdminClient.create(
@@ -124,7 +124,7 @@ class PubSubIT
                 camel.addComponent("google-pubsub", component);
                 camel.start();
                 String uri = QueueType.PUBSUB.effectiveUri("google-pubsub:"
-                        + project + ":sdh-sections" + "?pubsubEndpoint="
+                        + project + ":sdh-records" + "?pubsubEndpoint="
                         + emulator.getEmulatorEndpoint());
                 try (ClosablePublisher publisher =
                         Publishers.create(camel, QueueType.PUBSUB, uri))
@@ -150,7 +150,7 @@ class PubSubIT
                     Map<String, String> attributes =
                             message.getAttributesMap();
                     got.add(new Received(attributes.get("messageId"),
-                            attributes.get("type"), attributes.get("fileId"),
+                            attributes.get("type"), attributes.get("itemId"),
                             attributes.get("contentType"),
                             message.getOrderingKey(),
                             message.getData().toStringUtf8()));

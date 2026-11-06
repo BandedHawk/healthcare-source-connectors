@@ -12,9 +12,9 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.file.demo.DemoFiles.DemoFile;
@@ -145,20 +145,20 @@ class PipelineDemo
     /**
      * One item and what became of it.
      *
-     * @param pipeline      the pipeline it went through
-     * @param file          the item, and what was expected
-     * @param itemId        its item ID; null if it wasn't landed
-     * @param landing       what the landing node did
-     * @param status        the splitter's final status, or the HTTP
-     *                      status of a refused push
-     * @param sections      the sections it stored
-     * @param failed        how many of those weren't converted
-     * @param committedSeq  the last committed section of a failed item;
-     *                      -1 if none
-     * @param millis        how long it took, from delivered to finished
+     * @param pipeline     the pipeline it went through
+     * @param file         the item, and what was expected
+     * @param itemId       its item ID; null if it wasn't landed
+     * @param landing      what the landing node did
+     * @param status       the splitter's final status, or the HTTP
+     *                     status of a refused push
+     * @param records      the records it stored
+     * @param failed       how many of those weren't converted
+     * @param committedSeq the last committed record of a failed item;
+     *                     -1 if none
+     * @param millis       how long it took, from delivered to finished
      */
     record Outcome(String pipeline, DemoFile file, UUID itemId,
-            String landing, String status, long sections, long failed,
+            String landing, String status, long records, long failed,
             long committedSeq, long millis)
     {
 
@@ -171,14 +171,14 @@ class PipelineDemo
         {
             return status.equals(file.status())
                     && (!status.equals("COMPLETED")
-                            || sections == file.sections()
-                                    && failed == file.failedSections());
+                            || records == file.records()
+                                    && failed == file.failedRecords());
         }
 
         /**
          * The distinct messages a downstream consumer gets for it:
-         * file.started, each committed section, and file.completed if it
-         * completed. A section an earlier item already sent has the same
+         * file.started, each committed record, and file.completed if it
+         * completed. A record an earlier item already sent has the same
          * message ID, so it doesn't count again: Artemis drops it by
          * {@code _AMQ_DUPL_ID}, and a consumer would drop it anyway.
          *
@@ -191,7 +191,7 @@ class PipelineDemo
                 return 0;
             }
             return status.equals("COMPLETED")
-                    ? (int) sections - file.repeats() + 2
+                    ? (int) records - file.repeats() + 2
                     : 1 + (int) Math.max(0, committedSeq + 1);
         }
     }
@@ -514,22 +514,22 @@ class PipelineDemo
                 event -> id.equals(event.get("item_id")), from, ITEM_LIMIT);
         say("Landed as item " + id + " and announced to the splitter");
         AuditEvent done = otlp.await(SPLITTER,
-                Set.of("file.completed", "file.failed"),
-                event -> id.equals(event.get("file_id")), from, ITEM_LIMIT);
+                Set.of("file.completed", "item.failed"),
+                event -> id.equals(event.get("item_id")), from, ITEM_LIMIT);
         long millis = System.currentTimeMillis() - start;
         long failed = otlp.events().stream()
                 .filter(event -> event.service().equals(SPLITTER)
-                        && event.name().equals("section.failed")
-                        && id.equals(event.get("file_id")))
+                        && event.name().equals("record.failed")
+                        && id.equals(event.get("item_id")))
                 .count();
         Outcome outcome;
         String detail;
-        if (done.name().equals("file.completed"))
+        if (done.name().equals("item.completed"))
         {
-            long sections = Long.parseLong(done.get("count"));
+            long records = Long.parseLong(done.get("count"));
             outcome = new Outcome(pipeline, file, itemId, landing,
-                    "COMPLETED", sections, failed, sections - 1, millis);
-            detail = sections + " section(s), " + failed
+                    "COMPLETED", records, failed, records - 1, millis);
+            detail = records + " record(s), " + failed
                     + " stored unconverted";
         }
         else
@@ -539,7 +539,7 @@ class PipelineDemo
                     0, failed, seq, millis);
             detail = done.get("error_code") + " at byte "
                     + done.get("offset") + " in stage " + done.get("stage")
-                    + "; " + (seq + 1) + " section(s) stored before it;"
+                    + "; " + (seq + 1) + " record(s) stored before it;"
                     + " the original stays in landing";
         }
         say(String.format(Locale.ROOT,
@@ -602,8 +602,8 @@ class PipelineDemo
         // A commit per document, so each one is stored (and announced) as
         // soon as it's split: a file that fails part-way keeps what came
         // before the failure.
-        settings.put("sdh.storage.commit.max-sections", "1");
-        settings.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
+        settings.put("sdh.storage.commit.max-records", "1");
+        settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
         settings.put("sdh.crypto.keys.signing.kid", "connector-2026");
         settings.put("sdh.crypto.keys.signing.pem",
                 keys.signingPem.toString());
@@ -737,14 +737,14 @@ class PipelineDemo
 
     /**
      * Downstream: decode every message of a pipeline (decrypt, check the
-     * signature) and read each section back out of the Iceberg tables
+     * signature) and read each record back out of the Iceberg tables
      * with connector-queue-reader, as a consumer would. Converted
      * documents are written to {@code target/demo/output/<pipeline>/} and
      * an excerpt of each is shown; unconverted ones are kept in their
      * original form.
      *
      * @param pipeline the pipeline
-     * @throws Exception if a message can't be decoded or a section read
+     * @throws Exception if a message can't be decoded or a record read
      */
     void readBack(String pipeline) throws Exception
     {
@@ -785,7 +785,7 @@ class PipelineDemo
                 .build())
         {
             Map<String, Integer> byType = new LinkedHashMap<>();
-            List<SectionInStorage> sections = new ArrayList<>();
+            List<RecordInStorage> records = new ArrayList<>();
             Set<String> seen = new HashSet<>();
             int repeats = 0;
             for (String body : bodies)
@@ -799,10 +799,10 @@ class PipelineDemo
                     continue;
                 }
                 byType.merge(message.type().wireName(), 1, Integer::sum);
-                if (message instanceof SectionInStorage section
-                        && byId.containsKey(section.fileId()))
+                if (message instanceof RecordInStorage record
+                        && byId.containsKey(record.itemId()))
                 {
-                    sections.add(section);
+                    records.add(record);
                 }
             }
             say("By type: " + byType);
@@ -810,8 +810,8 @@ class PipelineDemo
             {
                 say(repeats + " repeated message ID(s) dropped. Delivery is"
                         + " at least once: a file that fails announces its"
-                        + " committed sections again (publish.republish) in"
-                        + " case the first send was lost, and a section with"
+                        + " committed records again (publish.republish) in"
+                        + " case the first send was lost, and a record with"
                         + " the same content as an earlier one has the same"
                         + " ID. Consumers ignore an ID they've already"
                         + " handled.");
@@ -825,63 +825,63 @@ class PipelineDemo
                     : shared == 0 ? distinct + " distinct messages, as"
                             + " expected"
                     : distinct + " distinct messages, as expected: " + shared
-                            + " section(s) had the same content as an"
+                            + " record(s) had the same content as an"
                             + " earlier item's, so the same ID, and came"
                             + " once. Artemis drops such a repeat by its"
                             + " message ID; Kafka delivers it, and the"
                             + " consumer drops it.");
             List<UUID> order = new ArrayList<>(byId.keySet());
-            sections.sort(Comparator.comparing((SectionInStorage section) ->
-                    order.indexOf(section.fileId()))
-                    .thenComparingLong(SectionInStorage::seq));
-            for (SectionInStorage section : sections)
+            records.sort(Comparator.comparing((RecordInStorage record) ->
+                    order.indexOf(record.itemId()))
+                    .thenComparingLong(RecordInStorage::seq));
+            for (RecordInStorage record : records)
             {
-                show(reader, section, pipeline,
-                        byId.get(section.fileId()).file());
+                show(reader, record, pipeline,
+                        byId.get(record.itemId()).file());
             }
         }
     }
 
     /**
-     * Reads one section back, writes it to the output directory and shows
+     * Reads one record back, writes it to the output directory and shows
      * an excerpt.
      *
      * @param reader   the queue reader
-     * @param section  the section's message
+     * @param record   the record's message
      * @param pipeline the pipeline
      * @param file     the item it came from
-     * @throws IOException if the section can't be read or written
+     * @throws IOException if the record can't be read or written
      */
-    void show(QueueReader reader, SectionInStorage section, String pipeline,
+    void show(QueueReader reader, RecordInStorage record, String pipeline,
             DemoFile file) throws IOException
     {
-        byte[] content = reader.readSection(section, 16 << 20);
+        byte[] content = reader.readRecord(record, 16 << 20);
         String stem = file.name().replaceFirst("\\.xml$", "");
         Path dir = Files.createDirectories(OUTPUT.resolve(pipeline)
                 .resolve(stem));
         say("");
-        if (section instanceof SectionStored stored)
+        if (record instanceof RecordStored stored)
         {
             String pretty = JSON.readTree(content).toPrettyString();
             Path out = Files.writeString(
-                    dir.resolve("section-" + section.seq() + ".json"), pretty);
-            say(String.format(Locale.ROOT, "--- %s, section %d: converted"
+                    dir.resolve("record-" + record.seq() + ".json"), pretty);
+            say(String.format(Locale.ROOT, "--- %s, record %d: converted"
                     + " (%s), %,d bytes of JSON from %,d bytes of"
                     + " C-CDA at offset %,d -> %s", file.name(),
-                    section.seq(), stored.mapping(), content.length,
-                    section.sourceLength(), section.sourceOffset(),
+                    record.seq(), stored.mapping(), content.length,
+                    record.sourceLength(), record.sourceOffset(),
                     WORK.relativize(out)));
             excerpt(pretty, 12);
         }
-        else if (section instanceof SectionFailed failed)
+        else if (record instanceof RecordFailed failed)
         {
             Path out = Files.write(dir.resolve(
-                    "section-" + section.seq() + ".original.xml"), content);
-            say(String.format(Locale.ROOT, "--- %s, section %d: NOT"
+                    "record-" + record.seq() + ".original.xml"), content);
+            say(String.format(Locale.ROOT, "--- %s, record %d: NOT"
                     + " converted (%s); stored in its original form,"
                     + " %,d bytes at offset %,d -> %s", file.name(),
-                    section.seq(), failed.errorCode(), content.length,
-                    section.sourceOffset(), WORK.relativize(out)));
+                    record.seq(), failed.errorCode(), content.length,
+                    record.sourceOffset(), WORK.relativize(out)));
             excerpt(new String(content, UTF_8), 8);
         }
     }
@@ -894,7 +894,7 @@ class PipelineDemo
         banner("Summary");
         String format = "  %-10s %-34s %-36s %-30s %-9s %8s %5s %s";
         say(String.format(Locale.ROOT, format, "Pipeline", "Item", "Item ID",
-                "Landing", "Splitter", "Sections", "Raw", "As expected"));
+                "Landing", "Splitter", "Records", "Raw", "As expected"));
         for (Outcome outcome : outcomes)
         {
             boolean completed = outcome.status().equals("COMPLETED");
@@ -903,7 +903,7 @@ class PipelineDemo
                             : outcome.itemId().toString(),
                     outcome.landing(), outcome.itemId() == null ? "-"
                             : outcome.status(),
-                    completed ? Long.toString(outcome.sections()) : "-",
+                    completed ? Long.toString(outcome.records()) : "-",
                     completed ? Long.toString(outcome.failed()) : "-",
                     outcome.asExpected() ? "yes" : "NO"));
         }

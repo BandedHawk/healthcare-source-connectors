@@ -14,19 +14,19 @@ import java.util.UUID;
 
 /**
  * The progress of the file a connector is working on (design §4.1, §9.1).
- * It is stored, MAC'd, in a table property of the {@code sections} table,
+ * It is stored, MAC'd, in a table property of the {@code records} table,
  * and written in the same atomic commit as the data it describes.
  * <p>
  * It holds no PHI: IDs, a keyed fingerprint, offsets, counts and error
  * codes only.
  *
- * @param fileId       the file's ID
+ * @param itemId       the file's ID
  * @param fingerprint  the file's keyed fingerprint
  * @param format       the name of the file's format
- * @param fileSize     the file's size, in bytes
+ * @param itemSize     the file's size, in bytes
  * @param state        where the file is in its life
  * @param resumeAt     where splitting continues after a restart
- * @param nextSeq      the seq of the next section to be produced
+ * @param nextSeq      the seq of the next record to be produced
  * @param committedSeq the last seq whose data is committed; -1 if none
  * @param publishedSeq the last seq whose message the broker acknowledged,
  *                     as known at this commit; -1 if none
@@ -37,17 +37,17 @@ import java.util.UUID;
  *                     checkpoint without committing a batch since (design
  *                     §9.2); 0 for a new file and after every batch commit.
  *                     It rises only when the connector stops part-way
- *                     through a batch, so a section that stops it every
+ *                     through a batch, so a record that stops it every
  *                     time (by running it out of memory, say) is noticed
  *                     instead of crashing the connector forever
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record Checkpoint(
-        UUID fileId,
+        UUID itemId,
         String fingerprint,
         String format,
-        long fileSize,
+        long itemSize,
         State state,
         ResumePoint resumeAt,
         long nextSeq,
@@ -64,13 +64,13 @@ public record Checkpoint(
     /** Where a file is in its life. */
     public enum State
     {
-        /** Sections are being split, stored and published. */
+        /** Records are being split, stored and published. */
         SPLITTING,
 
-        /** Every section is stored; the completion is being written. */
+        /** Every record is stored; the completion is being written. */
         ARCHIVING,
 
-        /** Finished: every section stored and published. */
+        /** Finished: every record stored and published. */
         COMPLETED,
 
         /** The decision to fail the file is durable; finishing that. */
@@ -129,13 +129,13 @@ public record Checkpoint(
     /**
      * Checks that the fields fit together.
      *
-     * @param fileId       the file's ID
+     * @param itemId       the file's ID
      * @param fingerprint  the file's keyed fingerprint
      * @param format       the file's format
-     * @param fileSize     the file's size
+     * @param itemSize     the file's size
      * @param state        where the file is in its life
      * @param resumeAt     where splitting continues
-     * @param nextSeq      the next section's seq
+     * @param nextSeq      the next record's seq
      * @param committedSeq the last committed seq
      * @param publishedSeq the last acknowledged seq
      * @param startedAt    when the file was started
@@ -148,7 +148,7 @@ public record Checkpoint(
      */
     public Checkpoint
     {
-        Objects.requireNonNull(fileId);
+        Objects.requireNonNull(itemId);
         Objects.requireNonNull(fingerprint);
         Objects.requireNonNull(format);
         Objects.requireNonNull(state);
@@ -175,17 +175,17 @@ public record Checkpoint(
     /**
      * A new file, with nothing split yet.
      *
-     * @param fileId      the file's ID
+     * @param itemId      the file's ID
      * @param fingerprint its keyed fingerprint
      * @param format      its format
-     * @param fileSize    its size
+     * @param itemSize    its size
      * @param startedAt   when it was started
      * @return the checkpoint, {@code SPLITTING} from the start
      */
-    public static Checkpoint start(UUID fileId, String fingerprint,
-            String format, long fileSize, Instant startedAt)
+    public static Checkpoint start(UUID itemId, String fingerprint,
+            String format, long itemSize, Instant startedAt)
     {
-        return new Checkpoint(fileId, fingerprint, format, fileSize,
+        return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.SPLITTING, ResumePoint.START, 0, -1, -1, startedAt,
                 null, 0);
     }
@@ -206,14 +206,14 @@ public record Checkpoint(
      * reset.
      *
      * @param resume    where splitting continues
-     * @param lastSeq   the batch's last section
+     * @param lastSeq   the batch's last record
      * @param published the last seq acknowledged so far
      * @return the new checkpoint
      */
     public Checkpoint committed(ResumePoint resume, long lastSeq,
             long published)
     {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, state,
+        return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resume, lastSeq + 1, lastSeq,
                 Math.max(publishedSeq, published), startedAt, failure, 0);
     }
@@ -226,7 +226,7 @@ public record Checkpoint(
      */
     public Checkpoint resumed()
     {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, state,
+        return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
                 failure, restarts + 1);
     }
@@ -239,7 +239,7 @@ public record Checkpoint(
      */
     public Checkpoint published(long published)
     {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, state,
+        return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq,
                 Math.max(publishedSeq, published), startedAt, failure,
                 restarts);
@@ -254,7 +254,7 @@ public record Checkpoint(
      */
     public Checkpoint withState(State next)
     {
-        return new Checkpoint(fileId, fingerprint, format, fileSize, next,
+        return new Checkpoint(itemId, fingerprint, format, itemSize, next,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
                 null, restarts);
     }
@@ -267,7 +267,7 @@ public record Checkpoint(
      */
     public Checkpoint failing(Failure why)
     {
-        return new Checkpoint(fileId, fingerprint, format, fileSize,
+        return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.FAILING, resumeAt, nextSeq, committedSeq, publishedSeq,
                 startedAt, why, restarts);
     }
@@ -284,17 +284,17 @@ public record Checkpoint(
         {
             throw new IllegalStateException("Not failing");
         }
-        return new Checkpoint(fileId, fingerprint, format, fileSize,
+        return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.FAILED, resumeAt, nextSeq, committedSeq, publishedSeq,
                 startedAt, failure, restarts);
     }
 
     /**
-     * How many sections are committed.
+     * How many records are committed.
      *
      * @return the count
      */
-    public long sectionCount()
+    public long recordCount()
     {
         return committedSeq + 1;
     }

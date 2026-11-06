@@ -13,34 +13,34 @@ import java.util.Locale;
  * (design §13.1), so landing, splitting and end to end can be set side by
  * side.
  *
- * @param stage      {@link PerfSettings#CORE}, {@link PerfSettings#LANDING},
- *                   {@link PerfSettings#SPLIT} or
- *                   {@link PerfSettings#END_TO_END}
- * @param workload   the workload, such as {@link PerfSettings#BULK_CCDA}
- * @param intake     the landing intake the items came through; {@code -}
- *                   for none
- * @param items      how many items
- * @param bytes      their total size
- * @param sections   the sections split from them; -1 where not split
- * @param wallNanos  the run's wall time, from the first item available to
- *                   the last done
- * @param latency    the per-item latencies; null where not measured
- * @param resources  what the run cost the JVM; null where not measured
+ * @param stage       {@link PerfSettings#CORE}, {@link PerfSettings#LANDING},
+ *                    {@link PerfSettings#SPLIT} or
+ *                    {@link PerfSettings#END_TO_END}
+ * @param workload    the workload, such as {@link PerfSettings#BULK_CCDA}
+ * @param intake      the landing intake the items came through; {@code -}
+ *                    for none
+ * @param items       how many items
+ * @param bytes       their total size
+ * @param records     the records split from them; -1 where not split
+ * @param wallNanos   the run's wall time, from the first item available to
+ *                    the last done
+ * @param latency     the per-item latencies; null where not measured
+ * @param resources   what the run cost the JVM; null where not measured
  * @param storedRatio the bytes stored over the bytes in; NaN where not
  *                   measured
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record StageResult(String stage, String workload, String intake,
-        long items, long bytes, long sections, long wallNanos,
+        long items, long bytes, long records, long wallNanos,
         Latencies.Summary latency, ResourceMonitor.Resources resources,
         double storedRatio)
 {
 
     /** The columns of {@code history.csv} and {@code latest.csv}. */
     public static final String CSV_HEADER = "timestamp,stage,workload,"
-            + "intake,storage,max_heap_mib,cpus,items,size_mib,sections,"
-            + "wall_s,mib_per_s,items_per_s,sections_per_s,"
+            + "intake,storage,max_heap_mib,cpus,items,size_mib,records,"
+            + "wall_s,mib_per_s,items_per_s,records_per_s,"
             + "latency_p50_ms,latency_p95_ms,latency_p99_ms,latency_max_ms,"
             + "avg_cores,busiest_thread,busiest_pct,stored_ratio,"
             + "heap_after_gc_peak_mib,heap_in_use_peak_mib,direct_peak_mib,"
@@ -78,11 +78,11 @@ public record StageResult(String stage, String workload, String intake,
                 "| %s | %s | %s | %,d | %.0f | %s | %.1f | %.1f | %,.1f"
                         + " | %s | %s | %s | %s |",
                 stage, workload, intake, items, mib(),
-                sections < 0 ? "–" : String.format(Locale.ROOT, "%,d",
-                        sections),
+                records < 0 ? "–" : String.format(Locale.ROOT, "%,d",
+                        records),
                 seconds(), mib() / seconds(), items / seconds(),
-                sections < 0 ? "–" : String.format(Locale.ROOT, "%,.0f",
-                        sections / seconds()),
+                records < 0 ? "–" : String.format(Locale.ROOT, "%,.0f",
+                        records / seconds()),
                 resources == null ? "–" : String.format(Locale.ROOT,
                         "%.1f", resources.cores()),
                 resources == null ? "–" : String.format(Locale.ROOT,
@@ -149,12 +149,12 @@ public record StageResult(String stage, String workload, String intake,
                 .append(Runtime.getRuntime().availableProcessors())
                 .append(',').append(items).append(',')
                 .append(number("%.1f", mib())).append(',')
-                .append(sections < 0 ? "" : Long.toString(sections))
+                .append(records < 0 ? "" : Long.toString(records))
                 .append(',').append(number("%.2f", seconds())).append(',')
                 .append(number("%.2f", mib() / seconds())).append(',')
                 .append(number("%.2f", items / seconds())).append(',')
-                .append(sections < 0 ? ""
-                        : number("%.0f", sections / seconds()))
+                .append(records < 0 ? ""
+                        : number("%.0f", records / seconds()))
                 .append(',');
         if (latency == null)
         {

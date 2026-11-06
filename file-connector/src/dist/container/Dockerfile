@@ -18,7 +18,7 @@ FROM ${JAVA_IMAGE}
 ARG TARGETARCH=amd64
 
 LABEL org.opencontainers.image.title="file-connector" \
-      org.opencontainers.image.description="Splits landed healthcare files into encrypted Iceberg sections and announces them" \
+      org.opencontainers.image.description="Splits landed healthcare items into encrypted Iceberg records and announces them" \
       org.opencontainers.image.vendor="Smile Digital Health Inc." \
       org.opencontainers.image.licenses="LicenseRef-Proprietary" \
       org.opencontainers.image.documentation="Third-party notices: /app/legal/NOTICE and /app/legal/THIRD-PARTY.txt"

@@ -6,11 +6,11 @@
  */
 package com.sdh.healthcare.connector.core.maintenance;
 
-import static com.sdh.healthcare.connector.contract.table.SectionsTable.CIPHERTEXT;
-import static com.sdh.healthcare.connector.contract.table.SectionsTable.DEFAULT_NAME;
-import static com.sdh.healthcare.connector.contract.table.SectionsTable.INGESTED_AT;
-import static com.sdh.healthcare.connector.contract.table.SectionsTable.SECTION_ID;
-import static com.sdh.healthcare.connector.contract.table.SectionsTable.SEQ;
+import static com.sdh.healthcare.connector.contract.table.RecordsTable.CIPHERTEXT;
+import static com.sdh.healthcare.connector.contract.table.RecordsTable.DEFAULT_NAME;
+import static com.sdh.healthcare.connector.contract.table.RecordsTable.INGESTED_AT;
+import static com.sdh.healthcare.connector.contract.table.RecordsTable.RECORD_ID;
+import static com.sdh.healthcare.connector.contract.table.RecordsTable.SEQ;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -20,14 +20,14 @@ import com.sdh.healthcare.connector.core.TestPostgres;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.landing.NewItem;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
-import com.sdh.healthcare.connector.core.storage.SectionBatchWriter;
+import com.sdh.healthcare.connector.core.storage.RecordBatchWriter;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -146,32 +146,32 @@ class TableMaintenanceTest
     }
 
     /**
-     * The sections table, established for the current committer.
+     * The records table, established for the current committer.
      *
      * @return the table
      */
-    Table sections()
+    Table records()
     {
-        Table table = IngestTables.sections(catalog, namespace);
+        Table table = IngestTables.records(catalog, namespace);
         committer.establish(table);
         return table;
     }
 
     /**
-     * Commits one small data file of sections ingested on a day.
+     * Commits one small data file of records ingested on a day.
      *
-     * @param table the sections table
-     * @param day the ingestion time
-     * @param rows the number of sections
+     * @param table the records table
+     * @param day   the ingestion time
+     * @param rows  the number of records
      */
     void batch(Table table, Instant day, int rows)
     {
-        SectionBatchWriter writer = new SectionBatchWriter(table, keys, "k",
-                new SectionIds(new byte[32]), day);
+        RecordBatchWriter writer = new RecordBatchWriter(table, keys, "k",
+                new RecordIds(new byte[32]), day);
         UUID file = UUID.randomUUID();
         for (int index = 0; index < rows; index++)
         {
-            writer.add(new SectionBatchWriter.SectionInput(file, index,
+            writer.add(new RecordBatchWriter.RecordInput(file, index,
                     index * 10L, "csv",
                     ("row-" + index + "-" + file).getBytes()));
         }
@@ -183,7 +183,7 @@ class TableMaintenanceTest
     /**
      * Every row of the table as text, for comparing contents.
      *
-     * @param table the sections table
+     * @param table the records table
      * @return id, sequence, ingestion time and ciphertext of each row
      * @throws IOException if the table can't be read
      */
@@ -191,18 +191,18 @@ class TableMaintenanceTest
     {
         table.refresh();
         Set<String> out = new TreeSet<>();
-        try (CloseableIterable<Record> records =
+        try (CloseableIterable<Record> scan =
                 IcebergGenerics.read(table).build())
         {
-            for (Record record : records)
+            for (Record row : scan)
             {
                 ByteBuffer ciphertext =
-                        ((ByteBuffer) record.getField(CIPHERTEXT)).duplicate();
+                        ((ByteBuffer) row.getField(CIPHERTEXT)).duplicate();
                 byte[] bytes = new byte[ciphertext.remaining()];
                 ciphertext.get(bytes);
-                out.add(record.getField(SECTION_ID) + "|"
-                        + record.getField(SEQ) + "|"
-                        + record.getField(INGESTED_AT) + "|"
+                out.add(row.getField(RECORD_ID) + "|"
+                        + row.getField(SEQ) + "|"
+                        + row.getField(INGESTED_AT) + "|"
                         + HexFormat.of().formatHex(bytes));
             }
         }
@@ -250,10 +250,10 @@ class TableMaintenanceTest
      * rewrite threshold of 0.75.
      *
      * @param snapshotRetention how long snapshots are kept
-     * @param minSnapshots the snapshots always kept
-     * @param minInputFiles the small files a partition needs to compact
-     * @param budget the bytes one run may rewrite
-     * @param orphanAge how old an unreferenced file must be to delete
+     * @param minSnapshots      the snapshots always kept
+     * @param minInputFiles     the small files a partition needs to compact
+     * @param budget            the bytes one run may rewrite
+     * @param orphanAge         how old an unreferenced file must be to delete
      * @return the settings
      */
     static MaintenanceSettings settings(Duration snapshotRetention,
@@ -285,7 +285,7 @@ class TableMaintenanceTest
     void compactsSmallFilesPerPartitionKeepingRowsThenExpiresOldFiles()
             throws Exception
     {
-        Table table = sections();
+        Table table = records();
         for (int index = 0; index < 4; index++)
         {
             batch(table, OLD_DAY, 3);
@@ -334,7 +334,7 @@ class TableMaintenanceTest
     @Test
     void compactionStopsAtTheBudgetAndKeepsRecentSnapshots() throws Exception
     {
-        Table table = sections();
+        Table table = records();
         for (int index = 0; index < 4; index++)
         {
             batch(table, OLD_DAY, 1);
@@ -366,7 +366,7 @@ class TableMaintenanceTest
     void retentionDropsWholeOldDaysAndRemovesTheirFilesAtOnce()
             throws Exception
     {
-        Table table = sections();
+        Table table = records();
         batch(table, OLD_DAY, 2);
         batch(table, RECENT_DAY, 2);
         int oldDay = (int) OLD_DAY.atOffset(ZoneOffset.UTC).toLocalDate()
@@ -416,7 +416,7 @@ class TableMaintenanceTest
     {
         Table table = LandingTables.landedItems(catalog, namespace);
         committer.establish(table);
-        SectionIds ids = new SectionIds(new byte[32]);
+        RecordIds ids = new RecordIds(new byte[32]);
         RetryPolicy fast = new RetryPolicy(1, Duration.ZERO, Duration.ZERO);
         ItemLander.Settings landerSettings = ItemLander.Settings
                 .defaults("c", "k").withSizes(64, 256, 256).withRetry(fast);
@@ -438,10 +438,10 @@ class TableMaintenanceTest
                         Optional.of(Duration.ofDays(5)), false);
 
         table.refresh();
-        try (CloseableIterable<Record> records =
+        try (CloseableIterable<Record> scan =
                 IcebergGenerics.read(table).build())
         {
-            assertThat(records).isNotEmpty().allMatch(record -> record
+            assertThat(scan).isNotEmpty().allMatch(row -> row
                     .getField(LandingTables.ITEM_ID).equals(recent));
         }
     }
@@ -455,7 +455,7 @@ class TableMaintenanceTest
     @Test
     void orphanCleanupDeletesOnlyOldUnreferencedFiles() throws Exception
     {
-        Table table = sections();
+        Table table = records();
         batch(table, RECENT_DAY, 2);
         batch(table, RECENT_DAY, 2);
         Set<String> before = rows(table);
@@ -554,7 +554,7 @@ class TableMaintenanceTest
                         CatalogProperties.FILE_IO_IMPL,
                         AliasListingFileIO.class.getName(),
                         "jdbc.schema-version", "V1"));
-        Table table = IngestTables.sections(aliased, namespace);
+        Table table = IngestTables.records(aliased, namespace);
         committer.establish(table);
         batch(table, RECENT_DAY, 2);
         Set<String> referenced = TableMaintenance.reachable(table);
@@ -584,7 +584,7 @@ class TableMaintenanceTest
     @Test
     void aFencedOutInstanceChangesNothing() throws Exception
     {
-        Table table = sections();
+        Table table = records();
         for (int index = 0; index < 3; index++)
         {
             batch(table, OLD_DAY, 1);

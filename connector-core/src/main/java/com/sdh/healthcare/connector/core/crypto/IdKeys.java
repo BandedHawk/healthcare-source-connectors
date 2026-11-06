@@ -21,7 +21,7 @@ import org.apache.iceberg.Table;
  * Loads the ID key (design §7.1): a 256-bit HMAC secret, made when the
  * connector first starts and stored, wrapped by a key-encryption key (KEK),
  * in the table property {@value #PROPERTY}. It is never rotated, because
- * section IDs, and so downstream deduplication, depend on it.
+ * record IDs, and so downstream deduplication, depend on it.
  *
  * @author Jonas Barnett
  * @since 0.1.0

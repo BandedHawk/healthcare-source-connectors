@@ -15,10 +15,10 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
-import com.sdh.healthcare.connector.core.landing.RecordIndex;
+import com.sdh.healthcare.connector.core.landing.MessageIndex;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor.Outcome;
-import com.sdh.healthcare.connector.core.storage.CommittedSections.Failed;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords.Failed;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -49,7 +49,7 @@ class ResultReporterTest
     static final UUID EARLIER = UUID.randomUUID();
 
     /** A batch of four messages; the third is empty. */
-    static final RecordIndex BATCH = new RecordIndex(
+    static final MessageIndex BATCH = new MessageIndex(
             List.of(0L, 100L, 250L, 250L), Arrays.asList("k0", "k1", null,
                     "k3"));
 
@@ -92,8 +92,8 @@ class ResultReporterTest
             assertThat(part.status()).isEqualTo(ItemResult.COMPLETED);
             assertThat(part.partCount()).isEqualTo(2);
             assertThat(part.problemCount()).isEqualTo(3);
-            assertThat(part.failedSectionCount()).isEqualTo(3);
-            assertThat(part.sectionCount()).isEqualTo(6);
+            assertThat(part.failedRecordCount()).isEqualTo(3);
+            assertThat(part.recordCount()).isEqualTo(6);
             assertThat(part.failure()).isNull();
             assertThat(part.producerRef()).isEqualTo("ref-1");
             assertThat(part.finishedAt()).isEqualTo(AT);
@@ -171,7 +171,7 @@ class ResultReporterTest
                     new SourcePosition(Long.MAX_VALUE, Integer.MAX_VALUE)));
         }
         ResultReporter.Landed landed = new ResultReporter.Landed("x".repeat(
-                1_000), UUID.randomUUID(), new RecordIndex(offsets, keys),
+                1_000), UUID.randomUUID(), new MessageIndex(offsets, keys),
                 refs, links);
         List<ItemResult> parts = ResultReporter.parts(
                 new Outcome(ITEM, ItemProcessor.Result.COMPLETED, count, null),

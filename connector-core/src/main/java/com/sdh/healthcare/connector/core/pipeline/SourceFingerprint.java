@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.pipeline;
 
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import java.io.IOException;
 import javax.crypto.Mac;
@@ -39,7 +39,7 @@ public final class SourceFingerprint
      * @return the fingerprint
      * @throws IOException if the file can't be read
      */
-    public static String of(SeekableByteSource source, SectionIds ids)
+    public static String of(SeekableByteSource source, RecordIds ids)
             throws IOException
     {
         long size = source.size();
@@ -48,6 +48,6 @@ public final class SourceFingerprint
         mac.update(source.readFully(0, head));
         int tail = (int) Math.min(EDGE, size);
         mac.update(source.readFully(size - tail, tail));
-        return size + ":" + SectionIds.encode(mac.doFinal());
+        return size + ":" + RecordIds.encode(mac.doFinal());
     }
 }

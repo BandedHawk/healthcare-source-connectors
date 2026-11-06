@@ -15,7 +15,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -60,7 +60,7 @@ public final class TestLanding
     private final KeyProvider wrap;
 
     /** The landing ID key, for digests. */
-    private final SectionIds ids;
+    private final RecordIds ids;
 
     /** Lands items. */
     private final ItemLander lander;
@@ -99,7 +99,7 @@ public final class TestLanding
             }
         });
         committer.establish(items);
-        ids = new SectionIds(IdKeys.loadOrCreate(items, committer,
+        ids = new RecordIds(IdKeys.loadOrCreate(items, committer,
                 wrap, TestKeys.LANDED));
         lander = new ItemLander(items, committer, wrap, ids,
                 ItemLander.Settings.defaults(intake, TestKeys.LANDED),

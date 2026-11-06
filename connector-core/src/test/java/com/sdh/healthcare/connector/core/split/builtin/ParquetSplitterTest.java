@@ -7,7 +7,7 @@
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static com.sdh.healthcare.connector.core.split.SplitTesting.config;
-import static com.sdh.healthcare.connector.core.split.SplitTesting.sections;
+import static com.sdh.healthcare.connector.core.split.SplitTesting.records;
 import static com.sdh.healthcare.connector.core.split.SplitTesting.texts;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -17,7 +17,7 @@ import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.convert.ParquetRowJson;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import com.sdh.healthcare.connector.core.split.Section;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitException;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
@@ -125,8 +125,8 @@ class ParquetSplitterTest
     }
 
     /**
-     * Each row is one JSON section, across row groups, with its row number
-     * as its origin; resuming after any section gives exactly the rest.
+     * Each row is one JSON record, across row groups, with its row number
+     * as its origin; resuming after any record gives exactly the rest.
      *
      * @throws Exception if the test fails
      */
@@ -134,28 +134,28 @@ class ParquetSplitterTest
     void splitsRowByRowAndResumesAfterAnyRow() throws Exception
     {
         byte[] file = write(SIMPLE, simpleRows(25), false);
-        List<Section> all = sections(splitter, file, config("parquet"),
+        List<SplitRecord> all = records(splitter, file, config("parquet"),
                 ResumePoint.START);
         List<String> texts = texts(file, all);
         assertThat(texts).hasSize(25);
         assertThat(texts.get(0)).isEqualTo("{\"id\":1,\"name\":\"n1\"}");
         assertThat(texts.get(2)).isEqualTo("{\"id\":3,\"name\":null}");
-        assertThat(all.stream().map(Section::sourceOffset).distinct())
+        assertThat(all.stream().map(SplitRecord::sourceOffset).distinct())
                 .hasSizeGreaterThan(3);
-        assertThat(all.get(24).origin().inFile())
+        assertThat(all.get(24).origin().inItem())
                 .isEqualTo(new SourcePosition(25, 1));
         assertThat(all.get(24).resume().offset()).isEqualTo(file.length);
         for (int i = 0; i < all.size(); i++)
         {
             ResumePoint resume = ResumePoint.parse(
                     all.get(i).resume().encode());
-            List<Section> rest = sections(splitter, file, config("parquet"),
+            List<SplitRecord> rest = records(splitter, file, config("parquet"),
                     resume);
             assertThat(texts(file, rest)).as("after row %d", i + 1)
                     .isEqualTo(texts.subList(i + 1, texts.size()));
-            assertThat(rest).extracting(section -> section.origin().inFile())
+            assertThat(rest).extracting(record -> record.origin().inItem())
                     .isEqualTo(all.subList(i + 1, all.size()).stream()
-                            .map(section -> section.origin().inFile())
+                            .map(record -> record.origin().inItem())
                             .toList());
         }
     }
@@ -169,11 +169,11 @@ class ParquetSplitterTest
     void resumesWithinARowGroup() throws Exception
     {
         byte[] file = write(SIMPLE, simpleRows(5), true);
-        List<Section> all = sections(splitter, file, config("parquet"),
+        List<SplitRecord> all = records(splitter, file, config("parquet"),
                 ResumePoint.START);
-        assertThat(all).extracting(Section::sourceOffset).containsOnly(4L);
+        assertThat(all).extracting(SplitRecord::sourceOffset).containsOnly(4L);
         assertThat(all.get(1).resume()).isEqualTo(ResumePoint.at(4, 2));
-        assertThat(texts(file, sections(splitter, file, config("parquet"),
+        assertThat(texts(file, records(splitter, file, config("parquet"),
                 ResumePoint.at(4, 3)))).containsExactly(
                         "{\"id\":4,\"name\":\"n4\"}",
                         "{\"id\":5,\"name\":\"n5\"}");
@@ -241,7 +241,7 @@ class ParquetSplitterTest
         row.setField("codes", Map.of(5, "five"));
         row.setField("s", "quote \" and é");
         byte[] file = write(schema, List.of(row), true);
-        assertThat(texts(file, sections(splitter, file, config("parquet"),
+        assertThat(texts(file, records(splitter, file, config("parquet"),
                 ResumePoint.START))).containsExactly("{\"b\":true,\"i\":7,"
                         + "\"f\":\"NaN\",\"d\":1.5,\"dec\":\"12.50\","
                         + "\"date\":\"2026-11-04\",\"time\":\"10:15:30.25\","
@@ -278,7 +278,7 @@ class ParquetSplitterTest
                     .append("name", "plain"));
         }
         byte[] file = Files.readAllBytes(path);
-        assertThat(texts(file, sections(splitter, file, config("parquet"),
+        assertThat(texts(file, records(splitter, file, config("parquet"),
                 ResumePoint.START)))
                 .containsExactly("{\"id\":1,\"name\":\"plain\"}");
     }
@@ -293,18 +293,18 @@ class ParquetSplitterTest
     void refusesWhatItCantRead() throws Exception
     {
         byte[] notParquet = "id,name\n1,x\n".getBytes(UTF_8);
-        assertThatThrownBy(() -> sections(splitter, notParquet,
+        assertThatThrownBy(() -> records(splitter, notParquet,
                 config("parquet"), ResumePoint.START))
                 .isInstanceOfSatisfying(SplitException.class,
                         failure -> assertThat(failure.code()).isEqualTo(
                                 ErrorCode.PARSE_PARQUET_MALFORMED));
         byte[] file = write(SIMPLE, simpleRows(3), true);
-        assertThatThrownBy(() -> sections(splitter, file, config("parquet"),
+        assertThatThrownBy(() -> records(splitter, file, config("parquet"),
                 ResumePoint.at(5)))
                 .isInstanceOfSatisfying(SplitException.class,
                         failure -> assertThat(failure.code())
                                 .isEqualTo(ErrorCode.RESUME_INVALID));
-        assertThatThrownBy(() -> sections(splitter, file, config("parquet"),
+        assertThatThrownBy(() -> records(splitter, file, config("parquet"),
                 ResumePoint.at(4, 3)))
                 .isInstanceOf(SplitException.class);
         assertThat(ParquetRowJson.check(new Schema(Types.NestedField
@@ -355,7 +355,7 @@ class ParquetSplitterTest
      * @throws Exception if the test fails to run
      */
     @Test
-    void labelsTheSectionsAsParquetRows() throws Exception
+    void labelsTheRecordsAsParquetRows() throws Exception
     {
         var converter = ConverterRegistry.load().get("parquet").orElseThrow();
         assertThat(converter.mapping()).isEqualTo("parquet-row/1");

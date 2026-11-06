@@ -12,7 +12,7 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.core.TestCatalogs;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -60,7 +60,7 @@ class MaintenanceSpikeTest
     });
 
     /**
-     * A new sections table with one small data file per commit.
+     * A new records table with one small data file per commit.
      *
      * @param files how many files
      * @return the table
@@ -68,7 +68,7 @@ class MaintenanceSpikeTest
      */
     Table tableWithSmallFiles(int files) throws Exception
     {
-        Table table = IngestTables.sections(TestCatalogs.jdbc().newClient(),
+        Table table = IngestTables.records(TestCatalogs.jdbc().newClient(),
                 "ns_" + UUID.randomUUID().toString().replace("-", ""));
         committer.establish(table);
         KeyGenerator generator = KeyGenerator.getInstance("AES");
@@ -78,9 +78,9 @@ class MaintenanceSpikeTest
         Instant day = Instant.parse("2026-10-28T10:00:00Z");
         for (int file = 0; file < files; file++)
         {
-            SectionBatchWriter writer = new SectionBatchWriter(table, keys,
-                    "k", new SectionIds(new byte[32]), day);
-            writer.add(new SectionBatchWriter.SectionInput(UUID.randomUUID(),
+            RecordBatchWriter writer = new RecordBatchWriter(table, keys,
+                    "k", new RecordIds(new byte[32]), day);
+            writer.add(new RecordBatchWriter.RecordInput(UUID.randomUUID(),
                     0, 0, "csv", ("row" + file).getBytes()));
             DataFile dataFile = writer.finish();
             committer.commit(table, transaction -> transaction

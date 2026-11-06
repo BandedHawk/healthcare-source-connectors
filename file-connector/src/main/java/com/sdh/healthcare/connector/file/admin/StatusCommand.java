@@ -92,9 +92,9 @@ final class StatusCommand implements AdminCommand
     /**
      * Prints one part, or that it is unavailable.
      *
-     * @param out where to print
+     * @param out   where to print
      * @param label the part's label
-     * @param part reads the part
+     * @param part  reads the part
      * @return true if the part was read
      */
     private static boolean part(PrintStream out, String label, Part part)
@@ -143,42 +143,42 @@ final class StatusCommand implements AdminCommand
      * it got.
      *
      * @param context the admin context
-     * @param audit the audit event, given the item's ID and state
+     * @param audit   the audit event, given the item's ID and state
      * @return the text to show
      * @throws Exception if the table or ID key can't be read
      */
     private static String checkpoint(AdminContext context, AuditRecord audit)
             throws Exception
     {
-        Table sections = context.sections();
-        sections.refresh();
-        String raw = sections.properties().get(Checkpoint.propertyKey(
+        Table records = context.records();
+        records.refresh();
+        String raw = records.properties().get(Checkpoint.propertyKey(
                 context.properties().connectorId()));
         if (raw == null)
         {
             return "none (no item processed yet)";
         }
         Checkpoint checkpoint = new CheckpointCodec(context.ids()).decode(raw);
-        audit.add(Attr.FILE_ID, checkpoint.fileId());
+        audit.add(Attr.ITEM_ID, checkpoint.itemId());
         audit.add(Attr.STATE, checkpoint.state());
         StringBuilder text = new StringBuilder();
-        text.append("item ").append(checkpoint.fileId()).append(' ')
+        text.append("item ").append(checkpoint.itemId()).append(' ')
                 .append(checkpoint.state()).append(" (")
                 .append(checkpoint.format()).append(")");
         if (checkpoint.state() == Checkpoint.State.SPLITTING)
         {
             long at = checkpoint.resumeAt().offset();
             text.append(String.format(", %.1f%% split (offset %d of %d bytes)",
-                    checkpoint.fileSize() == 0 ? 100.0
-                            : 100.0 * at / checkpoint.fileSize(),
-                    at, checkpoint.fileSize()));
+                    checkpoint.itemSize() == 0 ? 100.0
+                            : 100.0 * at / checkpoint.itemSize(),
+                    at, checkpoint.itemSize()));
         }
         else
         {
-            text.append(", ").append(checkpoint.fileSize()).append(" bytes");
+            text.append(", ").append(checkpoint.itemSize()).append(" bytes");
         }
-        text.append(", sections committed ")
-                .append(checkpoint.sectionCount()).append(", published ")
+        text.append(", records committed ")
+                .append(checkpoint.recordCount()).append(", published ")
                 .append(checkpoint.publishedSeq() + 1).append(", started ")
                 .append(checkpoint.startedAt());
         if (checkpoint.failure() != null)

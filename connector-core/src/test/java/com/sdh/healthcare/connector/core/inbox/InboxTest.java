@@ -13,7 +13,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import java.time.Clock;
 import java.time.Duration;
@@ -47,7 +47,7 @@ class InboxTest
     long epoch;
 
     /** MACs the position. */
-    final SectionIds ids = new SectionIds(new byte[32]);
+    final RecordIds ids = new RecordIds(new byte[32]);
 
     /** Creates the table. */
     @BeforeEach
@@ -120,19 +120,19 @@ class InboxTest
         assertThat(inbox.backlog()).isEqualTo(2);
 
         Inbox.Entry next = inbox.next(Duration.ZERO).orElseThrow();
-        assertThat(next.itemId()).isEqualTo(first.fileId());
+        assertThat(next.itemId()).isEqualTo(first.itemId());
         assertThat(next.seq()).isEqualTo(1);
         assertThat(next.size()).isEqualTo(42);
         assertThat(next.intake()).isEqualTo("claims");
         inbox.done(next.seq());
         assertThat(inbox.next(Duration.ZERO).orElseThrow().itemId())
-                .isEqualTo(second.fileId());
+                .isEqualTo(second.itemId());
 
         Inbox restarted = inbox();
         assertThat(restarted.backlog()).isEqualTo(1);
         assertThat(restarted.add(first)).as("still known").isFalse();
         Inbox.Entry resumed = restarted.next(Duration.ZERO).orElseThrow();
-        assertThat(resumed.itemId()).isEqualTo(second.fileId());
+        assertThat(resumed.itemId()).isEqualTo(second.itemId());
         restarted.done(resumed.seq());
         assertThat(restarted.next(Duration.ZERO)).isEmpty();
         assertThat(restarted.add(landed())).isTrue();
@@ -164,7 +164,7 @@ class InboxTest
         });
         long started = System.nanoTime();
         assertThat(inbox.next(Duration.ofSeconds(10))).hasValueSatisfying(
-                entry -> assertThat(entry.itemId()).isEqualTo(item.fileId()));
+                entry -> assertThat(entry.itemId()).isEqualTo(item.itemId()));
         assertThat(System.nanoTime() - started)
                 .isLessThan(Duration.ofSeconds(5).toNanos());
     }

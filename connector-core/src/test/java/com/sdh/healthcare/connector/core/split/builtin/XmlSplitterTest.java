@@ -7,7 +7,7 @@
 package com.sdh.healthcare.connector.core.split.builtin;
 
 import static com.sdh.healthcare.connector.core.split.SplitTesting.config;
-import static com.sdh.healthcare.connector.core.split.SplitTesting.sections;
+import static com.sdh.healthcare.connector.core.split.SplitTesting.records;
 import static com.sdh.healthcare.connector.core.split.SplitTesting.splitAndCheckResume;
 import static com.sdh.healthcare.connector.core.split.SplitTesting.splitError;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -68,28 +68,28 @@ class XmlSplitterTest
     private final CcdaSplitter ccda = new CcdaSplitter();
 
     /**
-     * Each section has the XML declaration and the namespaces in scope,
+     * Each record has the XML declaration and the namespaces in scope,
      * and parses as a C-CDA document; one in another namespace is skipped.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void sectionsAreStandaloneDocumentsWithInheritedNamespaces()
+    void recordsAreStandaloneDocumentsWithInheritedNamespaces()
             throws Exception
     {
-        List<String> sections = splitAndCheckResume(ccda, FILE,
+        List<String> records = splitAndCheckResume(ccda, FILE,
                 config("ccda"));
         String decl = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
         String inherited = " xmlns=\"urn:hl7-org:v3\""
                 + " xmlns:v3='urn:hl7-org:v3'" + XSI;
-        assertThat(sections).containsExactly(
+        assertThat(records).containsExactly(
                 decl + DOC1.replaceFirst("<ClinicalDocument",
                         "<ClinicalDocument" + inherited),
                 decl + DOC2.replaceFirst("<v3:ClinicalDocument",
                         "<v3:ClinicalDocument" + inherited),
                 decl + "<ClinicalDocument xmlns:v3='urn:hl7-org:v3'" + XSI
                         + "\n   xmlns=\"urn:hl7-org:v3\"/>");
-        for (String document : sections)
+        for (String document : records)
         {
             DocumentBuilderFactory factory =
                     DocumentBuilderFactory.newInstance();
@@ -111,9 +111,9 @@ class XmlSplitterTest
     @Test
     void anyNamespaceAndPlainXml() throws Exception
     {
-        List<String> sections = splitAndCheckResume(new XmlSplitter(), FILE,
+        List<String> records = splitAndCheckResume(new XmlSplitter(), FILE,
                 config("xml").withBoundary("ClinicalDocument"));
-        assertThat(sections).hasSize(4);
+        assertThat(records).hasSize(4);
         assertThat(splitAndCheckResume(new XmlSplitter(),
                 "<r><item a=\"1\">x</item><item/></r>",
                 config("xml").withBoundary("item")))
@@ -121,7 +121,7 @@ class XmlSplitterTest
     }
 
     /**
-     * A file that is one document gives one section, without what follows
+     * A file that is one document gives one record, without what follows
      * it.
      *
      * @throws Exception if the test fails to run
@@ -190,7 +190,7 @@ class XmlSplitterTest
         String big = "<a x=\"" + "y".repeat(1 << 20) + "\">"
                 + "<ClinicalDocument xmlns=\"urn:hl7-org:v3\"/></a>";
         assertThat(splitError(ccda, big, config("ccda")).code())
-                .isEqualTo(ErrorCode.LIMIT_SECTION_SIZE);
+                .isEqualTo(ErrorCode.LIMIT_RECORD_SIZE);
     }
 
     /**
@@ -205,7 +205,7 @@ class XmlSplitterTest
                 .getBytes(StandardCharsets.UTF_16);
         try
         {
-            sections(ccda, utf16, config("ccda"), ResumePoint.START);
+            records(ccda, utf16, config("ccda"), ResumePoint.START);
             throw new AssertionError("expected failure");
         }
         catch (SplitException expected)

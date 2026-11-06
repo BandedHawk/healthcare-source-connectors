@@ -180,7 +180,7 @@ public final class InboxReconciler
         {
             ItemLanded message = message(row, snapshot.snapshotId());
             Telemetry.get().auditWarn("inbox.recovered",
-                    Fields.of(Attr.ITEM_ID, message.fileId())
+                    Fields.of(Attr.ITEM_ID, message.itemId())
                             .with(Attr.INTAKE, intake)
                             .with(Attr.REASON, REASON));
             inbox.add(message);

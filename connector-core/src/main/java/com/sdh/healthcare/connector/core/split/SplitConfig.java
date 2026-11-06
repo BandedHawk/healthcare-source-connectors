@@ -12,7 +12,7 @@ import java.util.Map;
 /**
  * Run-time split settings (design §6.2, §14).
  *
- * @param boundary        the format's section boundary; null means the
+ * @param boundary        the format's record boundary; null means the
  *                        splitter's default
  * @param options         format-specific options, keyed as in
  *                        configuration (e.g. {@code csv.header})
@@ -31,7 +31,7 @@ public record SplitConfig(String boundary, Map<String, String> options,
     /**
      * Copies the options.
      *
-     * @param boundary        the section boundary; null for the default
+     * @param boundary        the record boundary; null for the default
      * @param options         format-specific options
      * @param limits          size and count limits
      * @param readBufferBytes read buffer size
@@ -56,12 +56,12 @@ public record SplitConfig(String boundary, Map<String, String> options,
     /**
      * A copy with another boundary.
      *
-     * @param sectionBoundary the boundary; null for the default
+     * @param recordBoundary the boundary; null for the default
      * @return the copy
      */
-    public SplitConfig withBoundary(String sectionBoundary)
+    public SplitConfig withBoundary(String recordBoundary)
     {
-        return new SplitConfig(sectionBoundary, options, limits,
+        return new SplitConfig(recordBoundary, options, limits,
                 readBufferBytes);
     }
 

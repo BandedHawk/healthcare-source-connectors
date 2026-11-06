@@ -62,7 +62,7 @@ class X12SplitterTest
     private final X12Splitter splitter = new X12Splitter();
 
     /**
-     * Each transaction set is a section, in its own group and interchange.
+     * Each transaction set is a record, in its own group and interchange.
      *
      * @throws Exception if the test fails to run
      */
@@ -80,7 +80,7 @@ class X12SplitterTest
     }
 
     /**
-     * At the GS boundary each group is a section.
+     * At the GS boundary each group is a record.
      *
      * @throws Exception if the test fails to run
      */
@@ -95,7 +95,7 @@ class X12SplitterTest
     }
 
     /**
-     * At the ISA boundary each interchange is a section; delimiters and
+     * At the ISA boundary each interchange is a record; delimiters and
      * line style are taken per interchange.
      *
      * @throws Exception if the test fails to run
@@ -118,7 +118,7 @@ class X12SplitterTest
     }
 
     /**
-     * A TA1 is a section in an interchange with no groups.
+     * A TA1 is a record in an interchange with no groups.
      *
      * @throws Exception if the test fails to run
      */

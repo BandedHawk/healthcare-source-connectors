@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.pipeline;
 
-import static com.sdh.healthcare.connector.contract.table.SectionsTable.*;
+import static com.sdh.healthcare.connector.contract.table.RecordsTable.*;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -16,16 +16,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
-import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
-import com.sdh.healthcare.connector.contract.position.SectionOrigin;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
@@ -34,16 +34,16 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.convert.ConversionException;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
-import com.sdh.healthcare.connector.core.convert.SectionConverter;
+import com.sdh.healthcare.connector.core.convert.RecordConverter;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
-import com.sdh.healthcare.connector.core.storage.CommittedSections;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.ByteArrayOutputStream;
@@ -91,19 +91,19 @@ import org.junit.jupiter.params.provider.EnumSource;
 class IngestPipelineTest
 {
 
-    /** The key encryption key that wraps the sections' data keys. */
-    static final String KEK = "sections-kek/1";
+    /** The key encryption key that wraps the records' data keys. */
+    static final String KEK = "records-kek/1";
 
-    /** How many records {@link #records()} makes. */
-    static final int RECORDS = 250;
+    /** How many rows {@link #csvRows()} makes. */
+    static final int CSV_ROWS = 250;
 
-    /** How many sections a batch commits at most. */
+    /** How many records a batch commits at most. */
     static final int BATCH = 100;
 
     /** The in-memory catalog, new for each test. */
     InMemoryCatalog catalog;
 
-    /** The {@code sections} table's identifier. */
+    /** The {@code records} table's identifier. */
     TableIdentifier tableId = TableIdentifier.of("sdh_ingest", DEFAULT_NAME);
 
     /** Wraps and unwraps data keys with {@link #KEK}. */
@@ -133,7 +133,7 @@ class IngestPipelineTest
     }
 
     /**
-     * Makes a new catalog with an empty {@code sections} table, a key
+     * Makes a new catalog with an empty {@code records} table, a key
      * encryption key, and the key pairs that seal and open messages.
      *
      * @throws Exception if a key can't be made
@@ -144,7 +144,7 @@ class IngestPipelineTest
         catalog = new InMemoryCatalog();
         catalog.initialize("prod", Map.of(CatalogProperties.WAREHOUSE_LOCATION,
                 "memory://wh-" + UUID.randomUUID()));
-        IngestTables.sections(catalog, "sdh_ingest");
+        IngestTables.records(catalog, "sdh_ingest");
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(256);
         keys = new AesKeyWrapProvider(Map.of(KEK, generator.generateKey()));
@@ -166,7 +166,7 @@ class IngestPipelineTest
     }
 
     /**
-     * Makes settings for testing the pipeline's mechanics, on sections stored
+     * Makes settings for testing the pipeline's mechanics, on records stored
      * as split. Conversion has its own tests below.
      *
      * @return the settings
@@ -200,14 +200,14 @@ class IngestPipelineTest
     static final String HEADER = "id,name,note\n";
 
     /**
-     * Converts sections to JSON, and stores those that fail in their
-     * original form. Every section keeps its lineage: its byte range in the
+     * Converts records to JSON, and stores those that fail in their
+     * original form. Every record keeps its lineage: its byte range in the
      * file, and the lines and columns of its start and of any error.
      *
      * @throws Exception if the file can't be processed or read back
      */
     @Test
-    void convertsToJsonAndStoresFailedSectionsInTheirOriginalFormWithLineage()
+    void convertsToJsonAndStoresFailedRecordsInTheirOriginalFormWithLineage()
             throws Exception
     {
         String good = "1,Ann,\"two\nlines\"\n";
@@ -227,23 +227,23 @@ class IngestPipelineTest
                 PipelineHooks.NONE);
         IngestPipeline.SplitResult result =
                 pipeline.split(SeekableByteSource.of(bytes));
-        assertThat(result.sectionCount()).isEqualTo(4);
+        assertThat(result.recordCount()).isEqualTo(4);
 
         List<ConnectorMessage> messages = decode(publisher.sent);
-        List<SectionInStorage> inStorage = messages.stream()
-                .filter(SectionInStorage.class::isInstance)
-                .map(SectionInStorage.class::cast).toList();
+        List<RecordInStorage> inStorage = messages.stream()
+                .filter(RecordInStorage.class::isInstance)
+                .map(RecordInStorage.class::cast).toList();
         assertThat(inStorage)
                 .extracting(message -> message.getClass().getSimpleName())
-                .containsExactly("SectionStored", "SectionFailed",
-                        "SectionFailed", "SectionStored");
-        SectionStored first = (SectionStored) inStorage.get(0);
+                .containsExactly("RecordStored", "RecordFailed",
+                        "RecordFailed", "RecordStored");
+        RecordStored first = (RecordStored) inStorage.get(0);
         assertThat(first.contentType()).isEqualTo("application/json");
         assertThat(first.mapping()).isEqualTo("csv-row/1");
-        SectionFailed mismatch = (SectionFailed) inStorage.get(1);
+        RecordFailed mismatch = (RecordFailed) inStorage.get(1);
         assertThat(mismatch.errorCode()).isEqualTo("CONVERT_CSV_FIELD_COUNT");
         assertThat(mismatch.contentType()).isEqualTo("text/csv");
-        assertThat(((SectionFailed) inStorage.get(2)).errorCode())
+        assertThat(((RecordFailed) inStorage.get(2)).errorCode())
                 .isEqualTo("CONVERT_INVALID_ENCODING");
 
         // Lineage: offsets point into the original file, whether converted
@@ -251,69 +251,69 @@ class IngestPipelineTest
         int goodAt = HEADER.length();
         int shortAt = goodAt + good.length();
         int latinAt = shortAt + shortRow.length();
-        assertThat(inStorage).extracting(SectionInStorage::sourceOffset)
+        assertThat(inStorage).extracting(RecordInStorage::sourceOffset)
                 .containsExactly((long) goodAt, (long) shortAt,
                         (long) latinAt, (long) latinAt + latin1.length);
-        assertThat(inStorage).extracting(SectionInStorage::sourceLength)
+        assertThat(inStorage).extracting(RecordInStorage::sourceLength)
                 .containsExactly((long) good.length(),
                         (long) shortRow.length(), (long) latin1.length,
                         (long) last.length());
 
-        // Stored bytes: JSON for converted sections, and the section as split
-        // (header included) for failed ones. The section ID is the keyed hash
+        // Stored bytes: JSON for converted records, and the record as split
+        // (header included) for failed ones. The record ID is the keyed hash
         // of what is stored.
         Table table = catalog.loadTable(tableId);
-        SectionIds ids =
-                new SectionIds(IdKeys.loadOrCreate(table, null, keys, KEK));
+        RecordIds ids =
+                new RecordIds(IdKeys.loadOrCreate(table, null, keys, KEK));
         byte[] json = "[\"1\",\"Ann\",\"two\\nlines\"]".getBytes(UTF_8);
-        assertThat(decrypt(table, result.fileId(), 0)).isEqualTo(json);
-        assertThat(first.sectionId()).isEqualTo(ids.of(json));
+        assertThat(decrypt(table, result.itemId(), 0)).isEqualTo(json);
+        assertThat(first.recordId()).isEqualTo(ids.of(json));
         byte[] raw = (HEADER + shortRow).getBytes(UTF_8);
-        assertThat(decrypt(table, result.fileId(), 1)).isEqualTo(raw);
-        assertThat(mismatch.sectionId()).isEqualTo(ids.of(raw));
-        assertThat(decrypt(table, result.fileId(), 3))
+        assertThat(decrypt(table, result.itemId(), 1)).isEqualTo(raw);
+        assertThat(mismatch.recordId()).isEqualTo(ids.of(raw));
+        assertThat(decrypt(table, result.itemId(), 3))
                 .isEqualTo("[\"4\",\"Cy\",\"\"]".getBytes(UTF_8));
-        assertThat(dataRows(table, result.fileId()))
+        assertThat(dataRows(table, result.itemId()))
                 .extracting(row -> row.getField(ERROR_CODE))
                 .containsExactly(null, "CONVERT_CSV_FIELD_COUNT",
                         "CONVERT_INVALID_ENCODING", null);
-        assertThat(pipeline.failedSectionCount(result.fileId())).isEqualTo(2);
+        assertThat(pipeline.failedRecordCount(result.itemId())).isEqualTo(2);
 
-        // Lines and columns: each section starts after the header the
-        // splitter added (section line 2), at its row's line in the file. The
+        // Lines and columns: each record starts after the header the
+        // splitter added (record line 2), at its row's line in the file. The
         // quoted line break in the first row moves the later ones down a
         // line.
         assertThat(inStorage)
-                .extracting(message -> message.origin().inSection())
+                .extracting(message -> message.origin().inRecord())
                 .containsOnly(new SourcePosition(2, 1));
         assertThat(inStorage)
-                .extracting(message -> message.origin().inFile().line())
+                .extracting(message -> message.origin().inItem().line())
                 .containsExactly(2L, 4L, 5L, 6L);
         // The invalid byte is "é" in ISO 8859-1, the sixth character of
         // line 5.
-        assertThat(((SectionFailed) inStorage.get(2)).errorAt())
+        assertThat(((RecordFailed) inStorage.get(2)).errorAt())
                 .isEqualTo(new SourcePosition(5, 6));
         assertThat(mismatch.errorAt().line()).isEqualTo(4L);
-        assertThat(dataRows(table, result.fileId()))
+        assertThat(dataRows(table, result.itemId()))
                 .extracting(row -> row.getField(SOURCE_LINE))
                 .containsExactly(2L, 4L, 5L, 6L);
-        assertThat(dataRows(table, result.fileId()))
+        assertThat(dataRows(table, result.itemId()))
                 .extracting(row -> row.getField(ERROR_LINE))
                 .containsExactly(null, 4L, 5L, null);
 
-        // The failed sections, as the producer's result lists them.
-        assertThat(pipeline.failedSections(result.fileId())).containsExactly(
-                new CommittedSections.Failed(1, mismatch.sourceOffset(),
+        // The failed records, as the producer's result lists them.
+        assertThat(pipeline.failedRecords(result.itemId())).containsExactly(
+                new CommittedRecords.Failed(1, mismatch.sourceOffset(),
                         "CONVERT_CSV_FIELD_COUNT", mismatch.errorAt()),
-                new CommittedSections.Failed(2, latinAt,
+                new CommittedRecords.Failed(2, latinAt,
                         "CONVERT_INVALID_ENCODING",
                         new SourcePosition(5, 6)));
     }
 
     /**
-     * A C-CDA element's position, from the converter, moved by its section's
+     * A C-CDA element's position, from the converter, moved by its record's
      * origin, is where the element is in the file. Here the file has a
-     * stylesheet line and a blank line before the document, and the section
+     * stylesheet line and a blank line before the document, and the record
      * has the XML declaration the splitter adds instead.
      *
      * @throws Exception if the file can't be processed or read back
@@ -339,13 +339,13 @@ class IngestPipelineTest
                 process(ccda, publisher, PipelineHooks.NONE)
                         .split(SeekableByteSource.of(file.getBytes(UTF_8)));
 
-        SectionStored stored =
-                (SectionStored) sections(decode(publisher.sent)).getFirst();
+        RecordStored stored =
+                (RecordStored) records(decode(publisher.sent)).getFirst();
         assertThat(stored.mapping()).isEqualTo("ccda/2");
-        assertThat(stored.origin()).isEqualTo(new SectionOrigin(
+        assertThat(stored.origin()).isEqualTo(new RecordOrigin(
                 new SourcePosition(2, 1), new SourcePosition(4, 3)));
         JsonNode document = new ObjectMapper()
-                .readTree(decrypt(catalog.loadTable(tableId), result.fileId(),
+                .readTree(decrypt(catalog.loadTable(tableId), result.itemId(),
                         0))
                 .get("ClinicalDocument");
         assertThat(stored.origin().toFile(position(document)))
@@ -361,7 +361,7 @@ class IngestPipelineTest
      * {@code #col} keys.
      *
      * @param element the element's JSON object
-     * @return the position, within its section
+     * @return the position, within its record
      */
     private static SourcePosition position(JsonNode element)
     {
@@ -370,13 +370,13 @@ class IngestPipelineTest
     }
 
     /**
-     * After a restart, the message for a failed section committed before it
+     * After a restart, the message for a failed record committed before it
      * is rebuilt from the table, with its lines and columns.
      *
      * @throws Exception if the file can't be processed or a message opened
      */
     @Test
-    void failedSectionMessagesAreRebuiltAfterARestart() throws Exception
+    void failedRecordMessagesAreRebuiltAfterARestart() throws Exception
     {
         RecordingPublisher publisher = new RecordingPublisher();
         PipelineHooks stopAtCommit = new PipelineHooks()
@@ -393,27 +393,27 @@ class IngestPipelineTest
         byte[] file = (HEADER + "1,a,b\n2,b\n").getBytes(UTF_8);
         assertThatThrownBy(() -> first.split(SeekableByteSource.of(file)))
                 .isInstanceOf(SimulatedCrash.class);
-        assertThat(sections(decode(publisher.sent))).isEmpty();
+        assertThat(records(decode(publisher.sent))).isEmpty();
 
         RecordingPublisher again = new RecordingPublisher();
         process(converting(), again, PipelineHooks.NONE)
                 .split(SeekableByteSource.of(file));
         List<ConnectorMessage> messages = decode(again.sent);
         assertThat(messages.stream().filter(message ->
-                message instanceof SectionFailed failed
+                message instanceof RecordFailed failed
                         && failed.errorCode().equals("CONVERT_CSV_FIELD_COUNT")
                         && failed.seq() == 1))
                 .singleElement()
                 .satisfies(message ->
                 {
                     // Rebuilt from the table, with its lines and columns.
-                    SectionFailed failed = (SectionFailed) message;
-                    assertThat(failed.origin()).isEqualTo(new SectionOrigin(
+                    RecordFailed failed = (RecordFailed) message;
+                    assertThat(failed.origin()).isEqualTo(new RecordOrigin(
                             new SourcePosition(2, 1),
                             new SourcePosition(3, 1)));
                     assertThat(failed.errorAt().line()).isEqualTo(3L);
                 });
-        assertThat(sections(messages)).singleElement()
+        assertThat(records(messages)).singleElement()
                 .satisfies(stored ->
                         assertThat(stored.mapping()).isEqualTo("csv-row/1"));
     }
@@ -427,28 +427,28 @@ class IngestPipelineTest
     void largeJsonIsStoredInChunks() throws Exception
     {
         RecordingPublisher publisher = new RecordingPublisher();
-        String big = "1,\"" + "x".repeat(SectionCrypto.CHUNK_SIZE + 500)
+        String big = "1,\"" + "x".repeat(RecordCrypto.CHUNK_SIZE + 500)
                 + "\",z\n";
         IngestPipeline pipeline = process(converting(), publisher,
                 PipelineHooks.NONE);
-        UUID fileId = pipeline.split(SeekableByteSource.of(
-                (HEADER + "2,short,ok\n" + big).getBytes(UTF_8))).fileId();
-        List<SectionStored> stored = sections(decode(publisher.sent));
-        assertThat(stored).extracting(SectionStored::chunkCount)
+        UUID itemId = pipeline.split(SeekableByteSource.of(
+                (HEADER + "2,short,ok\n" + big).getBytes(UTF_8))).itemId();
+        List<RecordStored> stored = records(decode(publisher.sent));
+        assertThat(stored).extracting(RecordStored::chunkCount)
                 .containsExactly(1, 2);
-        assertThat(decrypt(catalog.loadTable(tableId), fileId, 1)).isEqualTo(
-                ("[\"1\",\"" + "x".repeat(SectionCrypto.CHUNK_SIZE + 500)
+        assertThat(decrypt(catalog.loadTable(tableId), itemId, 1)).isEqualTo(
+                ("[\"1\",\"" + "x".repeat(RecordCrypto.CHUNK_SIZE + 500)
                         + "\",\"z\"]").getBytes(UTF_8));
     }
 
     /**
-     * A section larger than the conversion limit is stored as split, and
+     * A record larger than the conversion limit is stored as split, and
      * announced as failed with {@code CONVERT_TOO_LARGE}.
      *
      * @throws Exception if the file can't be processed or a message opened
      */
     @Test
-    void sectionsOverTheConversionLimitAreStoredRaw() throws Exception
+    void recordsOverTheConversionLimitAreStoredRaw() throws Exception
     {
         RecordingPublisher limited = new RecordingPublisher();
         IngestPipeline pipeline = process(
@@ -458,16 +458,16 @@ class IngestPipelineTest
                 (HEADER + "3,a,b\n4,a much longer record,c\n")
                         .getBytes(UTF_8)));
         List<ConnectorMessage> messages = decode(limited.sent);
-        assertThat(messages.stream().filter(SectionFailed.class::isInstance)
-                .map(message -> ((SectionFailed) message).errorCode()))
+        assertThat(messages.stream().filter(RecordFailed.class::isInstance)
+                .map(message -> ((RecordFailed) message).errorCode()))
                 .containsExactly("CONVERT_TOO_LARGE");
     }
 
     /**
-     * Sections whose conversion would need more than the conversion budget
-     * run one at a time (design §6.4), so several large sections can't
+     * Records whose conversion would need more than the conversion budget
+     * run one at a time (design §6.4), so several large records can't
      * exhaust the heap together. The file still completes, with every
-     * section converted.
+     * record converted.
      *
      * @throws Exception if the file can't be processed
      */
@@ -475,11 +475,11 @@ class IngestPipelineTest
     void conversionsThatDontFitTheBudgetTogetherRunOneAtATime()
             throws Exception
     {
-        SectionConverter csv =
+        RecordConverter csv =
                 ConverterRegistry.load().get("csv").orElseThrow();
         AtomicInteger running = new AtomicInteger();
         AtomicInteger most = new AtomicInteger();
-        SectionConverter greedy = new SectionConverter()
+        RecordConverter greedy = new RecordConverter()
         {
 
             /** Converts CSV, as the real converter does. */
@@ -496,7 +496,7 @@ class IngestPipelineTest
                 return csv.mapping();
             }
 
-            /** Claims the whole conversion budget for each section. */
+            /** Claims the whole conversion budget for each record. */
             @Override
             public double memoryFactor()
             {
@@ -508,7 +508,7 @@ class IngestPipelineTest
              * that run at once.
              */
             @Override
-            public byte[] convert(byte[] section, SplitConfig config)
+            public byte[] convert(byte[] record, SplitConfig config)
                     throws ConversionException
             {
                 most.accumulateAndGet(running.incrementAndGet(), Math::max);
@@ -524,7 +524,7 @@ class IngestPipelineTest
                 {
                     running.decrementAndGet();
                 }
-                return csv.convert(section, config);
+                return csv.convert(record, config);
             }
         };
         RecordingPublisher publisher = new RecordingPublisher();
@@ -533,25 +533,25 @@ class IngestPipelineTest
                 .withConvertMemory(64L << 20), publisher, PipelineHooks.NONE);
         IngestPipeline.SplitResult result =
                 pipeline.split(SeekableByteSource.of(convertibleFile()));
-        assertThat(result.sectionCount()).isEqualTo(RECORDS);
-        assertThat(pipeline.failedSectionCount(result.fileId())).isZero();
+        assertThat(result.recordCount()).isEqualTo(CSV_ROWS);
+        assertThat(pipeline.failedRecordCount(result.itemId())).isZero();
         assertThat(most.get()).isEqualTo(1);
     }
 
     /**
      * A converter that fails unexpectedly (a bug, not a problem it
-     * recognises) fails only that section: it is stored as split, announced
+     * recognises) fails only that record: it is stored as split, announced
      * as failed with {@code CONVERT_FAILED}, and the rest of the file is
      * converted.
      *
      * @throws Exception if the file can't be processed or read back
      */
     @Test
-    void aConverterBugFailsTheSectionNotTheFile() throws Exception
+    void aConverterBugFailsTheRecordNotTheFile() throws Exception
     {
-        SectionConverter csv =
+        RecordConverter csv =
                 ConverterRegistry.load().get("csv").orElseThrow();
-        SectionConverter buggy = new SectionConverter()
+        RecordConverter buggy = new RecordConverter()
         {
 
             /** Converts CSV, as the real converter does. */
@@ -570,18 +570,18 @@ class IngestPipelineTest
 
             /**
              * Converts with the real converter, but throws an unexpected
-             * exception on a section that has {@code boom} in it.
+             * exception on a record that has {@code boom} in it.
              */
             @Override
-            public byte[] convert(byte[] section, SplitConfig config)
+            public byte[] convert(byte[] record, SplitConfig config)
                     throws ConversionException
             {
-                if (new String(section, UTF_8).contains("boom"))
+                if (new String(record, UTF_8).contains("boom"))
                 {
                     throw new IndexOutOfBoundsException(
-                            "would quote the section: boom");
+                            "would quote the record: boom");
                 }
-                return csv.convert(section, config);
+                return csv.convert(record, config);
             }
         };
         RecordingPublisher publisher = new RecordingPublisher();
@@ -592,18 +592,18 @@ class IngestPipelineTest
         String bad = "2,boom,x\n";
         IngestPipeline.SplitResult result = pipeline.split(SeekableByteSource
                 .of((HEADER + "1,a,b\n" + bad + "3,c,d\n").getBytes(UTF_8)));
-        assertThat(result.sectionCount()).isEqualTo(3);
+        assertThat(result.recordCount()).isEqualTo(3);
         Table table = catalog.loadTable(tableId);
-        assertThat(dataRows(table, result.fileId()))
+        assertThat(dataRows(table, result.itemId()))
                 .extracting(row -> row.getField(ERROR_CODE))
                 .containsExactly(null, "CONVERT_FAILED", null);
-        assertThat(decrypt(table, result.fileId(), 1))
+        assertThat(decrypt(table, result.itemId(), 1))
                 .isEqualTo((HEADER + bad).getBytes(UTF_8));
         List<ConnectorMessage> messages = decode(publisher.sent);
-        assertThat(messages.stream().filter(SectionFailed.class::isInstance)
-                .map(message -> ((SectionFailed) message).errorCode()))
+        assertThat(messages.stream().filter(RecordFailed.class::isInstance)
+                .map(message -> ((RecordFailed) message).errorCode()))
                 .containsExactly("CONVERT_FAILED");
-        assertThat(sections(messages)).hasSize(2);
+        assertThat(records(messages)).hasSize(2);
     }
 
     /**
@@ -637,7 +637,7 @@ class IngestPipelineTest
         committer.establish(table);
         byte[] idKey = IdKeys.loadOrCreate(table, committer, keys, KEK);
         IngestPipeline pipeline = new IngestPipeline(settings, table,
-                committer, keys, new SectionIds(idKey),
+                committer, keys, new RecordIds(idKey),
                 SplitterRegistry.load(), sealer, publisher, Clock.systemUTC());
         pipeline.setHooks(hooks);
         open.add(pipeline);
@@ -645,37 +645,37 @@ class IngestPipelineTest
     }
 
     /**
-     * Makes {@link #RECORDS} CSV records, each with a quoted note of two
+     * Makes {@link #CSV_ROWS} CSV rows, each with a quoted note of two
      * lines that has a comma in it.
      *
-     * @return the records, each ending in a line break
+     * @return the rows, each ending in a line break
      */
-    static List<String> records()
+    static List<String> csvRows()
     {
-        List<String> records = new ArrayList<>();
-        for (int index = 0; index < RECORDS; index++)
+        List<String> rows = new ArrayList<>();
+        for (int index = 0; index < CSV_ROWS; index++)
         {
-            records.add(index + ",name-" + index + ",\"note " + index
+            rows.add(index + ",name-" + index + ",\"note " + index
                     + "\nsecond line, with comma\"\n");
         }
-        return records;
+        return rows;
     }
 
     /**
-     * Joins CSV records into a file.
+     * Joins CSV rows into a file.
      *
-     * @param records the records, each ending in a line break
+     * @param rows the rows, each ending in a line break
      * @return the file
      */
-    static SeekableByteSource csv(List<String> records)
+    static SeekableByteSource csv(List<String> rows)
     {
-        return SeekableByteSource.of(String.join("", records).getBytes(UTF_8));
+        return SeekableByteSource.of(String.join("", rows).getBytes(UTF_8));
     }
 
     // ---- happy path ----
 
     /**
-     * Splits a file, encrypts its sections, commits them in batches and
+     * Splits a file, encrypts its records, commits them in batches and
      * publishes a message for each, all readable back.
      *
      * @throws Exception if the file can't be processed or read back
@@ -686,88 +686,88 @@ class IngestPipelineTest
         RecordingPublisher publisher = new RecordingPublisher();
         IngestPipeline pipeline = process(settings(), publisher,
                 PipelineHooks.NONE);
-        IngestPipeline.SplitResult result = pipeline.split(csv(records()));
+        IngestPipeline.SplitResult result = pipeline.split(csv(csvRows()));
 
-        assertThat(result.sectionCount()).isEqualTo(RECORDS);
+        assertThat(result.recordCount()).isEqualTo(CSV_ROWS);
         Checkpoint checkpoint = pipeline.checkpoint().orElseThrow();
         assertThat(checkpoint.state()).isEqualTo(Checkpoint.State.ARCHIVING);
-        assertThat(checkpoint.publishedSeq()).isEqualTo(RECORDS - 1);
+        assertThat(checkpoint.publishedSeq()).isEqualTo(CSV_ROWS - 1);
 
         List<ConnectorMessage> messages = decode(publisher.sent);
         assertThat(messages.getFirst()).isInstanceOf(FileStarted.class);
-        List<SectionStored> sections = sections(messages);
-        assertThat(sections).extracting(SectionStored::seq)
+        List<RecordStored> records = records(messages);
+        assertThat(records).extracting(RecordStored::seq)
                 .containsExactlyElementsOf(
-                        LongStream.range(0, RECORDS).boxed().toList());
-        assertThat(sections).allSatisfy(section ->
+                        LongStream.range(0, CSV_ROWS).boxed().toList());
+        assertThat(records).allSatisfy(record ->
         {
-            assertThat(section.fileId()).isEqualTo(result.fileId());
-            assertThat(section.storage().catalog()).isEqualTo("prod");
-            assertThat(section.storage().namespace()).isEqualTo("sdh_ingest");
-            assertThat(section.storage().table()).isEqualTo(DEFAULT_NAME);
+            assertThat(record.itemId()).isEqualTo(result.itemId());
+            assertThat(record.storage().catalog()).isEqualTo("prod");
+            assertThat(record.storage().namespace()).isEqualTo("sdh_ingest");
+            assertThat(record.storage().table()).isEqualTo(DEFAULT_NAME);
         });
         // Three batches → three data snapshots, each referenced by its
         // messages.
-        assertThat(sections.stream()
-                .map(section -> section.storage().snapshotId()).distinct())
+        assertThat(records.stream()
+                .map(record -> record.storage().snapshotId()).distinct())
                 .hasSize(3);
 
         Table table = catalog.loadTable(tableId);
-        SectionIds ids =
-                new SectionIds(IdKeys.loadOrCreate(table, null, keys, KEK));
-        List<String> expected = records();
-        for (SectionStored section : List.of(sections.get(0),
-                sections.get(137), sections.get(249)))
+        RecordIds ids =
+                new RecordIds(IdKeys.loadOrCreate(table, null, keys, KEK));
+        List<String> expected = csvRows();
+        for (RecordStored record : List.of(records.get(0),
+                records.get(137), records.get(249)))
         {
             byte[] plaintext =
-                    expected.get((int) section.seq()).getBytes(UTF_8);
-            assertThat(section.sectionId()).isEqualTo(ids.of(plaintext));
-            assertThat(decrypt(table, section.fileId(), section.seq()))
+                    expected.get((int) record.seq()).getBytes(UTF_8);
+            assertThat(record.recordId()).isEqualTo(ids.of(plaintext));
+            assertThat(decrypt(table, record.itemId(), record.seq()))
                     .isEqualTo(plaintext);
         }
-        assertThat(dataRows(table, result.fileId())).hasSize(RECORDS);
+        assertThat(dataRows(table, result.itemId())).hasSize(CSV_ROWS);
     }
 
     /**
-     * A section longer than a chunk is stored in more than one, and reads
-     * back whole, as do the sections around it.
+     * A record longer than a chunk is stored in more than one, and reads
+     * back whole, as do the records around it.
      *
      * @throws Exception if the file can't be processed or read back
      */
     @Test
-    void multiChunkSectionIsStreamedInTwoPasses() throws Exception
+    void multiChunkRecordIsStreamedInTwoPasses() throws Exception
     {
-        String big = "1,\"" + "x".repeat(SectionCrypto.CHUNK_SIZE + 500)
+        String big = "1,\"" + "x".repeat(RecordCrypto.CHUNK_SIZE + 500)
                 + "\"\n";
         String small = "2,y\n";
         RecordingPublisher publisher = new RecordingPublisher();
         IngestPipeline pipeline = process(settings(), publisher,
                 PipelineHooks.NONE);
-        UUID fileId = pipeline.split(csv(List.of(small, big, small))).fileId();
+        UUID itemId = pipeline.split(csv(List.of(small, big, small))).itemId();
 
-        List<SectionStored> stored = sections(decode(publisher.sent));
-        assertThat(stored).extracting(SectionStored::chunkCount)
+        List<RecordStored> stored = records(decode(publisher.sent));
+        assertThat(stored).extracting(RecordStored::chunkCount)
                 .containsExactly(1, 2, 1);
         Table table = catalog.loadTable(tableId);
-        assertThat(decrypt(table, fileId, 1)).isEqualTo(big.getBytes(UTF_8));
-        assertThat(decrypt(table, fileId, 2)).isEqualTo(small.getBytes(UTF_8));
+        assertThat(decrypt(table, itemId, 1)).isEqualTo(big.getBytes(UTF_8));
+        assertThat(decrypt(table, itemId, 2)).isEqualTo(small.getBytes(UTF_8));
     }
 
     /**
-     * With no time between commits, every section is committed on its own.
+     * With no time between commits, every record is committed on its own.
      *
      * @throws Exception if the file can't be processed or a message opened
      */
     @Test
-    void zeroIntervalCommitsEverySection() throws Exception
+    void zeroIntervalCommitsEveryRecord() throws Exception
     {
         RecordingPublisher publisher = new RecordingPublisher();
         IngestPipeline pipeline = process(
                 settings().withCommit(BATCH, 1L << 30, Duration.ZERO),
                 publisher, PipelineHooks.NONE);
-        pipeline.split(csv(records().subList(0, 5)));
-        assertThat(sections(decode(publisher.sent)).stream()
-                .map(section -> section.storage().snapshotId()).distinct())
+        pipeline.split(csv(csvRows().subList(0, 5)));
+        assertThat(records(decode(publisher.sent)).stream()
+                .map(record -> record.storage().snapshotId()).distinct())
                 .hasSize(5);
     }
 
@@ -784,19 +784,19 @@ class IngestPipelineTest
                 PipelineHooks.NONE);
         IngestPipeline.SplitResult empty =
                 pipeline.split(SeekableByteSource.of(new byte[0]));
-        assertThat(empty.sectionCount()).isZero();
+        assertThat(empty.recordCount()).isZero();
         assertThat(empty.checkpoint().state())
                 .isEqualTo(Checkpoint.State.ARCHIVING);
         assertThat(decode(publisher.sent)).singleElement()
                 .isInstanceOf(FileStarted.class);
         // Splitting the same file again does nothing: it is already waiting
         // for archiving.
-        assertThat(pipeline.split(SeekableByteSource.of(new byte[0])).fileId())
-                .isEqualTo(empty.fileId());
+        assertThat(pipeline.split(SeekableByteSource.of(new byte[0])).itemId())
+                .isEqualTo(empty.itemId());
     }
 
     /**
-     * A send the broker fails is retried, and every section is still sent.
+     * A send the broker fails is retried, and every record is still sent.
      *
      * @throws Exception if the file can't be processed or a message opened
      */
@@ -808,9 +808,9 @@ class IngestPipelineTest
         publisher.fail = call -> call % 3 == 1;
         IngestPipeline pipeline = process(settings(), publisher,
                 PipelineHooks.NONE);
-        pipeline.split(csv(records()));
-        assertThat(sections(decode(publisher.sent)).stream()
-                .map(SectionStored::seq).distinct()).hasSize(RECORDS);
+        pipeline.split(csv(csvRows()));
+        assertThat(records(decode(publisher.sent)).stream()
+                .map(RecordStored::seq).distinct()).hasSize(CSV_ROWS);
     }
 
     // ---- crash and resume (design §15) ----
@@ -831,7 +831,7 @@ class IngestPipelineTest
         /** After the second batch commits, before its messages are sent. */
         AFTER_COMMIT_SECOND_BATCH,
 
-        /** After every section is sent, before the end-of-file commit. */
+        /** After every record is sent, before the end-of-file commit. */
         BEFORE_END_OF_FILE,
 
         /** The broker stops taking messages from the 151st send on. */
@@ -840,7 +840,7 @@ class IngestPipelineTest
 
     /**
      * After the connector stops anywhere in a file, a new process resumes the
-     * same file. Every section is stored exactly once and announced at least
+     * same file. Every record is stored exactly once and announced at least
      * once, with at most one batch announced twice.
      *
      * @param crash where the connector stops
@@ -897,42 +897,42 @@ class IngestPipelineTest
         {
             publisher.fail = call -> call >= 150;
         }
-        List<String> fileRecords = records();
+        List<String> fileRows = csvRows();
         IngestPipeline first = process(settings(), publisher, hooks);
-        assertThatThrownBy(() -> first.split(csv(fileRecords)))
+        assertThatThrownBy(() -> first.split(csv(fileRows)))
                 .isInstanceOfAny(SimulatedCrash.class,
                         PublishFailedException.class);
         first.close();
-        UUID firstFileId = first.checkpoint().orElseThrow().fileId();
+        UUID firstItemId = first.checkpoint().orElseThrow().itemId();
         assertThat(first.checkpoint().orElseThrow().state())
                 .isEqualTo(Checkpoint.State.SPLITTING);
 
         publisher.fail = call -> false;
         IngestPipeline second = process(settings(), publisher,
                 PipelineHooks.NONE);
-        IngestPipeline.SplitResult result = second.split(csv(fileRecords));
-        assertThat(result.fileId()).isEqualTo(firstFileId);
-        assertThat(result.sectionCount()).isEqualTo(RECORDS);
+        IngestPipeline.SplitResult result = second.split(csv(fileRows));
+        assertThat(result.itemId()).isEqualTo(firstItemId);
+        assertThat(result.recordCount()).isEqualTo(CSV_ROWS);
 
-        List<SectionStored> sent = sections(decode(publisher.sent));
-        Map<Long, List<SectionStored>> bySeq = sent.stream()
-                .collect(Collectors.groupingBy(SectionStored::seq));
-        assertThat(bySeq.keySet()).hasSize(RECORDS)
-                .allMatch(seq -> seq >= 0 && seq < RECORDS);
+        List<RecordStored> sent = records(decode(publisher.sent));
+        Map<Long, List<RecordStored>> bySeq = sent.stream()
+                .collect(Collectors.groupingBy(RecordStored::seq));
+        assertThat(bySeq.keySet()).hasSize(CSV_ROWS)
+                .allMatch(seq -> seq >= 0 && seq < CSV_ROWS);
         bySeq.values().forEach(copies -> assertThat(copies.stream()
-                .map(SectionStored::sectionId).distinct()).hasSize(1));
-        assertThat(sent.size() - RECORDS).as("duplicates")
+                .map(RecordStored::recordId).distinct()).hasSize(1));
+        assertThat(sent.size() - CSV_ROWS).as("duplicates")
                 .isLessThanOrEqualTo(BATCH);
 
         Table table = catalog.loadTable(tableId);
-        List<Record> rows = dataRows(table, firstFileId);
-        assertThat(rows).hasSize(RECORDS);
+        List<Record> rows = dataRows(table, firstItemId);
+        assertThat(rows).hasSize(CSV_ROWS);
         assertThat(rows.stream().map(row -> row.getField(SEQ)).distinct())
-                .hasSize(RECORDS);
-        SectionIds ids =
-                new SectionIds(IdKeys.loadOrCreate(table, null, keys, KEK));
-        assertThat(rows).allSatisfy(row -> assertThat(row.getField(SECTION_ID))
-                .isEqualTo(ids.of(fileRecords
+                .hasSize(CSV_ROWS);
+        RecordIds ids =
+                new RecordIds(IdKeys.loadOrCreate(table, null, keys, KEK));
+        assertThat(rows).allSatisfy(row -> assertThat(row.getField(RECORD_ID))
+                .isEqualTo(ids.of(fileRows
                         .get(((Long) row.getField(SEQ)).intValue())
                         .getBytes(UTF_8))));
     }
@@ -958,14 +958,14 @@ class IngestPipelineTest
     };
 
     /**
-     * Makes a CSV file with a header and {@link #RECORDS} records, all of
+     * Makes a CSV file with a header and {@link #CSV_ROWS} records, all of
      * which convert.
      *
      * @return the file's bytes
      */
     static byte[] convertibleFile()
     {
-        return (HEADER + String.join("", records())).getBytes(UTF_8);
+        return (HEADER + String.join("", csvRows())).getBytes(UTF_8);
     }
 
     /**
@@ -1011,22 +1011,22 @@ class IngestPipelineTest
                 PipelineHooks.NONE);
         IngestPipeline.SplitResult result =
                 pipeline.split(SeekableByteSource.of(file));
-        assertThat(result.sectionCount()).isEqualTo(RECORDS);
+        assertThat(result.recordCount()).isEqualTo(CSV_ROWS);
         assertThat(result.checkpoint().restarts()).isZero();
 
         List<Record> rows = dataRows(catalog.loadTable(tableId),
-                result.fileId());
-        assertThat(rows).hasSize(RECORDS)
+                result.itemId());
+        assertThat(rows).hasSize(CSV_ROWS)
                 .allSatisfy(row -> assertThat(row.getField(ERROR_CODE))
                         .isEqualTo((Long) row.getField(SEQ) < BATCH
                                 ? "CONVERT_SKIPPED" : null));
         List<ConnectorMessage> messages = decode(publisher.sent);
-        assertThat(messages.stream().filter(SectionFailed.class::isInstance))
+        assertThat(messages.stream().filter(RecordFailed.class::isInstance))
                 .hasSize(BATCH);
-        assertThat(sections(messages)).hasSize(RECORDS - BATCH)
+        assertThat(records(messages)).hasSize(CSV_ROWS - BATCH)
                 .allSatisfy(stored ->
                         assertThat(stored.mapping()).isEqualTo("csv-row/1"));
-        assertThat(pipeline.failedSectionCount(result.fileId()))
+        assertThat(pipeline.failedRecordCount(result.itemId()))
                 .isEqualTo(BATCH);
     }
 
@@ -1095,8 +1095,8 @@ class IngestPipelineTest
                 new RecordingPublisher(), PipelineHooks.NONE);
         IngestPipeline.SplitResult result =
                 pipeline.split(SeekableByteSource.of(file));
-        assertThat(result.sectionCount()).isEqualTo(RECORDS);
-        assertThat(pipeline.failedSectionCount(result.fileId())).isZero();
+        assertThat(result.recordCount()).isEqualTo(CSV_ROWS);
+        assertThat(pipeline.failedRecordCount(result.itemId())).isZero();
     }
 
     // ---- guards ----
@@ -1123,7 +1123,7 @@ class IngestPipelineTest
             }
         };
         IngestPipeline first = process(settings(), publisher, stopAtCommit);
-        assertThatThrownBy(() -> first.split(csv(records())))
+        assertThatThrownBy(() -> first.split(csv(csvRows())))
                 .isInstanceOf(SimulatedCrash.class);
 
         IngestPipeline second = process(settings(), publisher,
@@ -1134,9 +1134,9 @@ class IngestPipelineTest
         second.abandonInProgress();
         assertThat(second.checkpoint().orElseThrow().state())
                 .isEqualTo(Checkpoint.State.ABANDONED);
-        assertThat(second.split(other).sectionCount()).isEqualTo(1);
+        assertThat(second.split(other).recordCount()).isEqualTo(1);
         // A file still being archived is protected too.
-        assertThatThrownBy(() -> second.split(csv(records())))
+        assertThatThrownBy(() -> second.split(csv(csvRows())))
                 .isInstanceOf(IllegalStateException.class);
     }
 
@@ -1154,7 +1154,7 @@ class IngestPipelineTest
                 PipelineHooks.NONE);
         // Its successor establishes a higher epoch.
         process(settings(), publisher, PipelineHooks.NONE);
-        assertThatThrownBy(() -> stale.split(csv(records())))
+        assertThatThrownBy(() -> stale.split(csv(csvRows())))
                 .isInstanceOf(LeaseLostException.class);
         assertThat(publisher.sent).isEmpty();
     }
@@ -1171,7 +1171,7 @@ class IngestPipelineTest
         RecordingPublisher publisher = new RecordingPublisher();
         IngestPipeline pipeline = process(settings(), publisher,
                 PipelineHooks.NONE);
-        pipeline.split(csv(records().subList(0, 3)));
+        pipeline.split(csv(csvRows().subList(0, 3)));
         Table table = catalog.loadTable(tableId);
         String key = Checkpoint.propertyKey("file-connector");
         String forged = table.properties().get(key).replace(
@@ -1278,30 +1278,30 @@ class IngestPipelineTest
     }
 
     /**
-     * Picks out the messages announcing a stored section.
+     * Picks out the messages announcing a stored record.
      *
      * @param messages the messages
-     * @return those that are {@link SectionStored}, in order
+     * @return those that are {@link RecordStored}, in order
      */
-    static List<SectionStored> sections(List<ConnectorMessage> messages)
+    static List<RecordStored> records(List<ConnectorMessage> messages)
     {
-        return messages.stream().filter(SectionStored.class::isInstance)
-                .map(SectionStored.class::cast).toList();
+        return messages.stream().filter(RecordStored.class::isInstance)
+                .map(RecordStored.class::cast).toList();
     }
 
     /**
-     * Reads a file's rows from the {@code sections} table.
+     * Reads a file's rows from the {@code records} table.
      *
      * @param table  the table
-     * @param fileId the file's id
+     * @param itemId the file's id
      * @return copies of the rows, every chunk's
      * @throws IOException if the table can't be read
      */
-    static List<Record> dataRows(Table table, UUID fileId) throws IOException
+    static List<Record> dataRows(Table table, UUID itemId) throws IOException
     {
         List<Record> found = new ArrayList<>();
         try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
-                .where(Expressions.equal(FILE_ID, fileId)).build())
+                .where(Expressions.equal(ITEM_ID, itemId)).build())
         {
             rows.forEach(row -> found.add(row.copy()));
         }
@@ -1309,19 +1309,19 @@ class IngestPipelineTest
     }
 
     /**
-     * Reads a section's chunks from the table and decrypts them.
+     * Reads a record's chunks from the table and decrypts them.
      *
-     * @param table  the {@code sections} table
-     * @param fileId the file's id
-     * @param seq    the section's number in the file
-     * @return the section's stored plaintext
+     * @param table  the {@code records} table
+     * @param itemId the file's id
+     * @param seq    the record's number in the file
+     * @return the record's stored plaintext
      * @throws IOException if the table can't be read
      */
-    byte[] decrypt(Table table, UUID fileId, long seq) throws IOException
+    byte[] decrypt(Table table, UUID itemId, long seq) throws IOException
     {
         Map<Integer, Record> chunks = new HashMap<>();
         try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
-                .where(Expressions.and(Expressions.equal(FILE_ID, fileId),
+                .where(Expressions.and(Expressions.equal(ITEM_ID, itemId),
                         Expressions.equal(SEQ, seq)))
                 .build())
         {
@@ -1337,10 +1337,10 @@ class IngestPipelineTest
                     bytes(row.getField(BDK_WRAPPED))));
             int chunkCount = (Integer) row.getField(CHUNK_COUNT);
             long plaintextLength = (Long) row.getField(PLAINTEXT_LENGTH);
-            plaintext.writeBytes(SectionCrypto.decryptChunk(
-                    SectionCrypto.sectionKey(batchDataKey, fileId, seq),
-                    fileId, seq, chunkIndex, chunkCount,
-                    SectionCrypto.expectedChunkLength(plaintextLength,
+            plaintext.writeBytes(RecordCrypto.decryptChunk(
+                    RecordCrypto.recordKey(batchDataKey, itemId, seq),
+                    itemId, seq, chunkIndex, chunkCount,
+                    RecordCrypto.expectedChunkLength(plaintextLength,
                             chunkIndex),
                     bytes(row.getField(CIPHERTEXT))));
         }

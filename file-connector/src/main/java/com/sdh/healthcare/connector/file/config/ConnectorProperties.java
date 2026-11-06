@@ -39,7 +39,7 @@ import org.springframework.util.unit.DataSize;
  * @param storage        the splitter's catalog and namespace
  * @param lease          the lease database and timings
  * @param crypto         the keys and who holds them
- * @param queue          where section messages go
+ * @param queue          where record messages go
  * @param retry          how transient failures are retried
  * @param maintenance    table maintenance
  * @param telemetry      the telemetry export
@@ -70,12 +70,12 @@ public record ConnectorProperties(
     /**
      * The intake this splitter serves (design §5.3.6).
      *
-     * @param intake   its name; {@code item.landed} messages for any other
-     *                 intake are refused
-     * @param queueUri the Camel endpoint {@code item.landed} messages are
-     *                 consumed from, such as
-     *                 {@code kafka:sdh.landing.claims?brokers=...&groupId=...}
-     * @param storage  where the landed items are
+     * @param intake    its name; {@code item.landed} messages for any other
+     *                  intake are refused
+     * @param queueUri  the Camel endpoint {@code item.landed} messages are
+     *                  consumed from, such as
+     *                  {@code kafka:sdh.landing.claims?brokers=...&groupId=...}
+     * @param storage   where the landed items are
      * @param idleWait  how long the splitter waits for an item before
      *                  looking again
      * @param reconcile how the splitter finds landed items whose messages
@@ -126,9 +126,9 @@ public record ConnectorProperties(
      * @param options         format options as in design §6.2, such as
      *                        {@code csv.header} or {@code namespace}
      * @param limits          size limits; null values keep the format's
-     * @param convert         convert sections to JSON where the format has
+     * @param convert         convert records to JSON where the format has
      *                        a converter (design §6.4)
-     * @param convertMaxBytes larger sections aren't converted, and are
+     * @param convertMaxBytes larger records aren't converted, and are
      *                        stored in their original form as failed
      * @param convertMemory   heap that conversions running at once may use
      *                        between them; unset for 40% of the heap
@@ -144,12 +144,12 @@ public record ConnectorProperties(
     /**
      * Size limits (design §6.3). Null values keep the format's defaults.
      *
-     * @param maxFileBytes       the largest item
-     * @param maxSectionBytes    the largest section
-     * @param maxSectionsPerFile the most sections in one item
+     * @param maxItemBytes      the largest item
+     * @param maxRecordBytes    the largest record
+     * @param maxRecordsPerItem the most records in one item
      */
-    public record Limits(DataSize maxFileBytes, DataSize maxSectionBytes,
-            Long maxSectionsPerFile)
+    public record Limits(DataSize maxItemBytes, DataSize maxRecordBytes,
+            Long maxRecordsPerItem)
     {
     }
 
@@ -161,7 +161,7 @@ public record ConnectorProperties(
      *                    {@code io-impl}, and so on
      * @param catalogName the catalog's name, also put in messages
      * @param namespace   the splitter's namespace
-     * @param commit      when a batch of sections is committed
+     * @param commit      when a batch of records is committed
      */
     public record Storage(Map<String, String> catalog,
             @DefaultValue("sdh") String catalogName,
@@ -171,14 +171,14 @@ public record ConnectorProperties(
     }
 
     /**
-     * When a batch of sections is committed: at whichever limit comes
+     * When a batch of records is committed: at whichever limit comes
      * first.
      *
-     * @param maxSections the most sections in a batch
+     * @param maxRecords  the most records in a batch
      * @param maxBytes    the most bytes in a batch
      * @param maxInterval the longest a batch stays open
      */
-    public record Commit(@DefaultValue("10000") int maxSections,
+    public record Commit(@DefaultValue("10000") int maxRecords,
             @DefaultValue("512MB") DataSize maxBytes,
             @DefaultValue("30s") Duration maxInterval)
     {
@@ -233,9 +233,9 @@ public record ConnectorProperties(
      * How long to keep each table's rows, in whole days; unset keeps them
      * forever (the default).
      *
-     * @param sections the {@code sections} table
+     * @param records the {@code records} table
      */
-    public record Retention(Duration sections)
+    public record Retention(Duration records)
     {
     }
 }

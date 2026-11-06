@@ -180,7 +180,7 @@ setup_vault() {
   for p in $PIPELINES; do
     # The KEKs and signing keys never leave Vault, and can't be deleted (deletion_allowed is false).
     vault_sh "
-      for k in $p-landed-items $p-sections $p-fhir; do
+      for k in $p-landed-items $p-records $p-fhir; do
         vault read transit/keys/\$k >/dev/null 2>&1 || vault write -f transit/keys/\$k type=aes256-gcm96
       done
       for k in $p-landing-signing $p-splitter-signing; do
@@ -194,12 +194,12 @@ setup_vault() {
     vault_policy "splitter-$p" "
       path \"transit/encrypt/$p-landed-items\" { capabilities = [\"update\"] }
       path \"transit/decrypt/$p-landed-items\" { capabilities = [\"update\"] }
-      path \"transit/encrypt/$p-sections\" { capabilities = [\"update\"] }
-      path \"transit/decrypt/$p-sections\" { capabilities = [\"update\"] }
+      path \"transit/encrypt/$p-records\" { capabilities = [\"update\"] }
+      path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
       path \"transit/sign/$p-splitter-signing/*\" { capabilities = [\"update\"] }
       path \"transit/keys/$p-splitter-signing\" { capabilities = [\"read\"] }"
     vault_policy "fhir-$p" "
-      path \"transit/decrypt/$p-sections\" { capabilities = [\"update\"] }
+      path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
       path \"transit/encrypt/$p-fhir\" { capabilities = [\"update\"] }
       path \"transit/decrypt/$p-fhir\" { capabilities = [\"update\"] }
       path \"transit/keys/$p-splitter-signing\" { capabilities = [\"read\"] }"
@@ -261,7 +261,7 @@ setup_topics() {
   local p topic
   for p in $PIPELINES; do
     # One partition each: the splitter takes a pipeline's items in order, and its output keeps their order.
-    for topic in "$p.landed" "$p.sections" "$p.fhir.dlq"; do
+    for topic in "$p.landed" "$p.records" "$p.fhir.dlq"; do
       infra exec kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create \
         --if-not-exists --topic "$topic" --partitions 1 --replication-factor 3 \
         --config min.insync.replicas=2 >/dev/null
@@ -399,7 +399,7 @@ deploy_pipeline() {
     SPLIT_FORMAT="ccda"
   envsubst '$PIPELINE $K8S_NS' < "$DEPLOY/pipeline/namespace.yaml" | kc apply -f - >/dev/null
 
-  # The splitter's inbox key pair, and the FHIR stage's, which the splitter seals sections to.
+  # The splitter's inbox key pair, and the FHIR stage's, which the splitter seals records to.
   ec_key "$STATE/keys/$p-inbox" "$(secret "inbox-passphrase-$p")"
   ec_key "$STATE/keys/$p-fhir-recipient" "$(secret "fhir-recipient-passphrase-$p")"
   export INBOX_SHA256 RECIPIENT_SHA256
@@ -475,18 +475,18 @@ fhir_handover() {
     --from-file=splitter-signer.pem="$STATE/keys/$p-splitter-signing-public.pem"
   kc -n sdh-fhir create configmap "fhir-$p" \
     --from-literal=pipeline="$p" \
-    --from-literal=sections-topic="$p.sections" \
+    --from-literal=records-topic="$p.records" \
     --from-literal=dlq-topic="$p.fhir.dlq" \
     --from-literal=kafka-brokers="$KAFKA_BROKERS" \
     --from-literal=catalog-uri="jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh" \
     --from-literal=jdbc-user="fhir_$(prefix "$p")" \
-    --from-literal=sections-namespace="$(prefix "$p")" \
+    --from-literal=records-namespace="$(prefix "$p")" \
     --from-literal=fhir-namespace="$(prefix "$p")_fhir" \
     --from-literal=warehouse="s3://sdh-gold/warehouse" \
     --from-literal=s3-endpoint="http://seaweedfs.sdh-infra.svc:8333" \
     --from-literal=s3-access-key-id="fhir-$p" \
     --from-literal=vault-address="http://vault.sdh-infra.svc:8200" \
-    --from-literal=sections-kek="$p-sections" \
+    --from-literal=records-kek="$p-records" \
     --from-literal=fhir-kek="$p-fhir" \
     --from-literal=recipient-kid="fhir-$p" \
     --from-literal=splitter-signer-kid="splitter-$p" \
@@ -560,9 +560,9 @@ check() {
   for file in "$ROOT"/connector-core/src/test/resources/ccda/*.xml; do
     samples+=("$file")
   done
-  local landed_before sections_before completed_before
+  local landed_before records_before completed_before
   landed_before="$(topic_count "$p.landed")"
-  sections_before="$(topic_count "$p.sections")"
+  records_before="$(topic_count "$p.records")"
   completed_before="$(kc -n "$n" logs deploy/splitter 2>/dev/null | grep -c "file\.completed" || true)"
   say "Pushing ${#samples[@]} synthetic and de-identified C-CDA documents to $p"
   push "$p" "${samples[@]}" | sed 's/^/   /'
@@ -577,7 +577,7 @@ check() {
     say "  FAIL: not all split"; failures=1
   fi
   say "  item.landed messages: $(($(topic_count "$p.landed") - landed_before)) more on $p.landed"
-  say "  splitter messages: $(($(topic_count "$p.sections") - sections_before)) more on $p.sections"
+  say "  splitter messages: $(($(topic_count "$p.records") - records_before)) more on $p.records"
   local pod
   for pod in $(kc -n "$n" get pods -o name); do
     if kc -n "$n" logs "$pod" --all-containers 2>/dev/null | grep -qE "ClinicalDocument|Newman|\.xml"; then
@@ -597,7 +597,7 @@ status() {
   local p
   for p in $PIPELINES; do
     echo
-    echo "$p: $(topic_count "$p.landed") on $p.landed, $(topic_count "$p.sections") on $p.sections," \
+    echo "$p: $(topic_count "$p.landed") on $p.landed, $(topic_count "$p.records") on $p.records," \
       "$(topic_count "$p.fhir.dlq") on $p.fhir.dlq"
   done
 }

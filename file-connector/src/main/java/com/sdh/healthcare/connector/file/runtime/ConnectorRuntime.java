@@ -12,7 +12,7 @@ import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.inbox.Inbox;
 import com.sdh.healthcare.connector.core.inbox.InboxTables;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
@@ -34,9 +34,9 @@ import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Lease;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.zaxxer.hikari.HikariDataSource;
 import java.time.Clock;
@@ -53,7 +53,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Everything the splitter runs on, started in a fixed order (design §9.3,
  * §5.3.6): settings and keys → lease → the splitter's catalog, with the
- * {@code sections} and {@code inbox} tables fenced with the lease's epoch
+ * {@code records} and {@code inbox} tables fenced with the lease's epoch
  * → ID key → the landing catalog, whose {@code landed_items} is read
  * only, and loaded when first needed →
  * pipeline, processor and inbox → publisher. Closed in reverse, after the
@@ -110,7 +110,7 @@ public final class ConnectorRuntime implements AutoCloseable
     private final KeyMaterial keys;
 
     /** Makes IDs and MACs with the splitter's ID key. */
-    private final SectionIds ids;
+    private final RecordIds ids;
 
     /** Makes fenced commits under the lease. */
     private final FencedCommitter committer;
@@ -124,11 +124,11 @@ public final class ConnectorRuntime implements AutoCloseable
     /**
      * The tables the runtime uses.
      *
-     * @param sections    the splitter's {@code sections}
+     * @param records     the splitter's {@code records}
      * @param inbox       the splitter's {@code inbox}
      * @param landedItems the landing node's {@code landed_items}, read only
      */
-    public record Tables(Table sections, Table inbox,
+    public record Tables(Table records, Table inbox,
             LandedItemsTable landedItems)
     {
     }
@@ -158,7 +158,7 @@ public final class ConnectorRuntime implements AutoCloseable
             Catalog catalog, Catalog landingCatalog, LeaseKeeper lease,
             ClosablePublisher publisher, IngestPipeline pipeline,
             ItemProcessor processor, Inbox inbox, InboxReceiver receiver,
-            Tables tables, KeyMaterial keys, SectionIds ids,
+            Tables tables, KeyMaterial keys, RecordIds ids,
             FencedCommitter committer, RetryPolicy retry,
             ResultsChannel results)
     {
@@ -227,14 +227,14 @@ public final class ConnectorRuntime implements AutoCloseable
             catalog = CatalogUtil.buildIcebergCatalog(
                     properties.storage().catalogName(), catalogProperties,
                     null);
-            Table sections = IngestTables.sections(catalog, namespace);
+            Table records = IngestTables.records(catalog, namespace);
             Table inboxTable = InboxTables.inbox(catalog, namespace);
             FencedCommitter committer = new FencedCommitter(lease);
-            committer.establish(sections);
+            committer.establish(records);
             committer.establish(inboxTable);
-            String sectionsKek = properties.crypto().keys().sectionsKek();
-            SectionIds ids = new SectionIds(IdKeys.loadOrCreate(sections,
-                    committer, keys.wrap(), sectionsKek));
+            String recordsKek = properties.crypto().keys().recordsKek();
+            RecordIds ids = new RecordIds(IdKeys.loadOrCreate(records,
+                    committer, keys.wrap(), recordsKek));
 
             landingCatalog = landingCatalogProperties == null ? catalog
                     : CatalogUtil.buildIcebergCatalog(
@@ -248,11 +248,14 @@ public final class ConnectorRuntime implements AutoCloseable
                     properties.retry().initialBackoff(),
                     properties.retry().maxBackoff());
             Clock clock = Clock.systemUTC();
-            Publishers.configureBroker(camel, queueType, properties.queue());
+            Publishers.configureBroker(camel, queueType,
+                    properties.queue().artemis().brokerUrl(),
+                    properties.queue().artemis().username(),
+                    properties.queue().artemis().password());
             publisher = Publishers.create(camel, queueType, queueUri);
             pipeline = new IngestPipeline(
                     pipelineSettings(properties, format, split, retry),
-                    sections, committer, keys.wrap(), ids, splitters,
+                    records, committer, keys.wrap(), ids, splitters,
                     new MessageSealer(keys.signer(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
                     publisher, clock);
@@ -275,7 +278,7 @@ public final class ConnectorRuntime implements AutoCloseable
             return new ConnectorRuntime(camel, dataSource, catalog,
                     landingCatalog, lease, publisher, pipeline, processor,
                     inbox, receiver,
-                    new Tables(sections, inboxTable, landedItems), keys, ids,
+                    new Tables(records, inboxTable, landedItems), keys, ids,
                     committer, retry, results);
         }
         catch (Exception | Error failure)
@@ -342,9 +345,9 @@ public final class ConnectorRuntime implements AutoCloseable
                 : Runtime.getRuntime().availableProcessors();
         return PipelineSettings.defaults(properties.connectorId(), format,
                         properties.storage().catalogName(),
-                        properties.crypto().keys().sectionsKek())
+                        properties.crypto().keys().recordsKek())
                 .withSplit(split)
-                .withCommit(commit.maxSections(), commit.maxBytes().toBytes(),
+                .withCommit(commit.maxRecords(), commit.maxBytes().toBytes(),
                         commit.maxInterval())
                 .withWorkers(workers)
                 .withRetry(retry)
@@ -379,15 +382,15 @@ public final class ConnectorRuntime implements AutoCloseable
         SplitLimits defaults = config.limits();
         ConnectorProperties.Limits limits = settings.limits();
         return config.withLimits(new SplitLimits(
-                limits.maxFileBytes() != null
-                        ? limits.maxFileBytes().toBytes()
-                        : defaults.maxFileBytes(),
-                limits.maxSectionBytes() != null
-                        ? limits.maxSectionBytes().toBytes()
-                        : defaults.maxSectionBytes(),
-                limits.maxSectionsPerFile() != null
-                        ? limits.maxSectionsPerFile()
-                        : defaults.maxSectionsPerFile()));
+                limits.maxItemBytes() != null
+                        ? limits.maxItemBytes().toBytes()
+                        : defaults.maxItemBytes(),
+                limits.maxRecordBytes() != null
+                        ? limits.maxRecordBytes().toBytes()
+                        : defaults.maxRecordBytes(),
+                limits.maxRecordsPerItem() != null
+                        ? limits.maxRecordsPerItem()
+                        : defaults.maxRecordsPerItem()));
     }
 
     /**
@@ -445,7 +448,7 @@ public final class ConnectorRuntime implements AutoCloseable
      *
      * @return the IDs
      */
-    public SectionIds ids()
+    public RecordIds ids()
     {
         return ids;
     }

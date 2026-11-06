@@ -3,7 +3,7 @@
 Copyright (c) 2026 Smile Digital Health Inc. All rights reserved. See `legal/LICENSE`.
 
 The file connector takes each healthcare file (C-CDA, X12, EDIFACT, FHIR, CSV and others) that a landing node has
-landed, splits it into sections, stores every section encrypted in Apache Iceberg tables, and announces each one on a
+landed, splits it into records, stores every record encrypted in Apache Iceberg tables, and announces each one on a
 message queue with a signed, encrypted message. Files reach it only through a landing node (the
 `landing-connector` distribution), which stores each one as received and tells the file connector about it with an
 `item.landed` message.
@@ -81,7 +81,7 @@ Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` b
 
 **Producer feedback** (`sdh.results`, off by default). With the same settings as the intake's landing node, the
 connector sends each item's final result to the producer's own queue, sealed to the producer's public key: whether
-it completed or failed, and for each problem its error code, section, byte offset, line and column, and for a queue
+it completed or failed, and for each problem its error code, record, byte offset, line and column, and for a queue
 batch the message and its broker ID. No content is sent. Long lists of problems come in numbered parts, each with
 the totals. A result is sent before the connector moves on, so after a crash it may be sent again, with the same
 message ID, but is never lost.
@@ -120,7 +120,7 @@ The base image brings its own notices. For Debian-based images such as distroles
 ## Deploy on Kubernetes
 
 The connector needs no data volume: files come from landing. It needs:
-- **`/tmp`:** a writable `emptyDir` of about 1 GiB; `noexec` is fine. Uploads to object storage are staged here, with section data already encrypted.
+- **`/tmp`:** a writable `emptyDir` of about 1 GiB; `noexec` is fine. Uploads to object storage are staged here, with record data already encrypted.
 - **`/run/secrets`:** the keys, as a read-only secret volume (local key mode only).
 - **Configuration:** a ConfigMap mounted as `application.yml`, with `SPRING_CONFIG_ADDITIONAL_LOCATION` pointing at it.
 - **Secrets:** a Secret whose keys are environment variable names, passed whole with `envFrom`. It holds

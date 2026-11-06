@@ -49,24 +49,24 @@ class SplitterRegistryTest
     {
         SplitConfig settings = SplitTesting.config("csv")
                 .withLimits(new SplitLimits(10, 100, 100));
-        assertThatThrownBy(() -> SplitTesting.sections(new CsvSplitter(),
+        assertThatThrownBy(() -> SplitTesting.records(new CsvSplitter(),
                 "a\nb\nc\nd\ne\nf\n".getBytes(UTF_8), settings,
                 ResumePoint.START))
                 .isInstanceOfSatisfying(SplitException.class, error ->
                 {
                     assertThat(error.code())
-                            .isEqualTo(ErrorCode.LIMIT_FILE_SIZE);
+                            .isEqualTo(ErrorCode.LIMIT_ITEM_SIZE);
                     assertThat(error.getMessage()).doesNotContain("a\n");
                 });
     }
 
     /**
-     * The section count includes the sections before the resume point.
+     * The record count includes the records before the resume point.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void sectionCountLimitCountsFromResumedSeq() throws Exception
+    void recordCountLimitCountsFromResumedSeq() throws Exception
     {
         SplitConfig settings = SplitTesting.config("csv")
                 .withLimits(new SplitLimits(1000, 100, 3));
@@ -79,13 +79,13 @@ class SplitterRegistryTest
             assertThatThrownBy(session::next)
                     .isInstanceOfSatisfying(SplitException.class,
                             error -> assertThat(error.code())
-                                    .isEqualTo(ErrorCode.LIMIT_SECTION_COUNT));
+                                    .isEqualTo(ErrorCode.LIMIT_RECORD_COUNT));
         }
     }
 
-    /** The section size limit counts bytes the splitter adds. */
+    /** The record size limit counts bytes the splitter adds. */
     @Test
-    void sectionSizeLimitIncludesSynthesisedBytes()
+    void recordSizeLimitIncludesSynthesisedBytes()
     {
         SplitConfig settings = SplitTesting.config("csv")
                 .withOption("csv.header", "true")
@@ -94,7 +94,7 @@ class SplitterRegistryTest
         // is 6.
         SplitException error = SplitTesting.splitError(new CsvSplitter(),
                 "id,name\n1,abc\n", settings);
-        assertThat(error.code()).isEqualTo(ErrorCode.LIMIT_SECTION_SIZE);
+        assertThat(error.code()).isEqualTo(ErrorCode.LIMIT_RECORD_SIZE);
     }
 
     /** A resume point's text form reads back. */
@@ -107,23 +107,23 @@ class SplitterRegistryTest
     }
 
     /**
-     * A section streams its literal and range parts in order.
+     * A record streams its literal and range parts in order.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void sectionStreamsLiteralAndRangeParts() throws Exception
+    void recordStreamsLiteralAndRangeParts() throws Exception
     {
         SeekableByteSource source =
                 SeekableByteSource.of("0123456789".getBytes(UTF_8));
-        Section section = new Section(2, 5, List.of(
-                new Section.Literal("<".getBytes(UTF_8)),
-                new Section.SourceRange(2, 5),
-                new Section.SourceRange(9, 0),
-                new Section.Literal(">".getBytes(UTF_8))),
+        SplitRecord record = new SplitRecord(2, 5, List.of(
+                new SplitRecord.Literal("<".getBytes(UTF_8)),
+                new SplitRecord.SourceRange(2, 5),
+                new SplitRecord.SourceRange(9, 0),
+                new SplitRecord.Literal(">".getBytes(UTF_8))),
                 ResumePoint.at(7));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (InputStream in = section.open(source))
+        try (InputStream in = record.open(source))
         {
             byte[] buffer = new byte[2];
             int count;
@@ -133,6 +133,6 @@ class SplitterRegistryTest
             }
         }
         assertThat(out.toString(UTF_8)).isEqualTo("<23456>");
-        assertThat(section.plaintextLength()).isEqualTo(7);
+        assertThat(record.plaintextLength()).isEqualTo(7);
     }
 }

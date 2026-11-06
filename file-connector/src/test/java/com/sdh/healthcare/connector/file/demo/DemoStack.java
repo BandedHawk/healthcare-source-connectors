@@ -56,7 +56,7 @@ import software.amazon.awssdk.services.s3.S3Client;
  *       ({@code -Ddemo.stop-vm=false} keeps it running).
  * </ul>
  * Each pipeline has two queues: {@code <pipeline>-landed}, from its landing
- * node to its splitter, and {@code <pipeline>-sections}, from the splitter
+ * node to its splitter, and {@code <pipeline>-records}, from the splitter
  * to the downstream consumer.
  *
  * @author Jonas Barnett
@@ -313,12 +313,12 @@ interface DemoStack extends AutoCloseable
             return Map.of("sdh.landing.queue-uri",
                     "jms:queue:" + pipeline + "-landed",
                     "sdh.queue.type", "artemis",
-                    "sdh.queue.uri", "jms:queue:" + pipeline + "-sections",
+                    "sdh.queue.uri", "jms:queue:" + pipeline + "-records",
                     "sdh.queue.artemis.broker-url", brokerUrl);
         }
 
         /**
-         * Reads the sections queue until enough messages arrive or the
+         * Reads the records queue until enough messages arrive or the
          * time runs out.
          *
          * @param pipeline the pipeline
@@ -336,7 +336,7 @@ interface DemoStack extends AutoCloseable
                     new ActiveMQConnectionFactory(brokerUrl);
                     JMSContext context = factory.createContext();
                     JMSConsumer consumer = context.createConsumer(
-                            context.createQueue(pipeline + "-sections")))
+                            context.createQueue(pipeline + "-records")))
             {
                 long until = System.currentTimeMillis() + timeout.toMillis();
                 while (System.currentTimeMillis() < until)
@@ -540,12 +540,12 @@ interface DemoStack extends AutoCloseable
                     + "&breakOnFirstError=true",
                     "sdh.queue.type", "kafka",
                     "sdh.queue.uri", "kafka:" + pipeline
-                            + "-sections?brokers="
+                            + "-records?brokers="
                             + kafka.getBootstrapServers());
         }
 
         /**
-         * Reads the sections topic from the start until enough messages
+         * Reads the records topic from the start until enough messages
          * arrive or the time runs out.
          *
          * @param pipeline the pipeline
@@ -564,19 +564,19 @@ interface DemoStack extends AutoCloseable
                             "auto.offset.reset", "earliest"),
                     new StringDeserializer(), new StringDeserializer()))
             {
-                consumer.subscribe(List.of(pipeline + "-sections"));
+                consumer.subscribe(List.of(pipeline + "-records"));
                 long until = System.currentTimeMillis() + timeout.toMillis();
                 while (System.currentTimeMillis() < until)
                 {
                     // Once enough have come, take what else is waiting.
-                    ConsumerRecords<String, String> records = consumer.poll(
+                    ConsumerRecords<String, String> polled = consumer.poll(
                             Duration.ofMillis(out.size() < atLeast
                                     ? 500 : 1000));
-                    if (records.isEmpty() && out.size() >= atLeast)
+                    if (polled.isEmpty() && out.size() >= atLeast)
                     {
                         break;
                     }
-                    records.forEach(record -> out.add(record.value()));
+                    polled.forEach(record -> out.add(record.value()));
                 }
             }
             return out;

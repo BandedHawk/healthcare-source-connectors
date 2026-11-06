@@ -7,13 +7,13 @@
 package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
-import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.position.LineCounter;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
@@ -22,20 +22,20 @@ import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.convert.ConversionException;
 import com.sdh.healthcare.connector.core.convert.Representation;
-import com.sdh.healthcare.connector.core.convert.SectionConverter;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.convert.RecordConverter;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
-import com.sdh.healthcare.connector.core.split.Section;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitException;
 import com.sdh.healthcare.connector.core.split.SplitSession;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
-import com.sdh.healthcare.connector.core.storage.CommittedSections;
-import com.sdh.healthcare.connector.core.storage.SectionBatchWriter;
-import com.sdh.healthcare.connector.core.storage.SectionBatchWriter.EncryptedSection;
-import com.sdh.healthcare.connector.core.storage.SectionBatchWriter.WrittenSection;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
+import com.sdh.healthcare.connector.core.storage.RecordBatchWriter;
+import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.EncryptedRecord;
+import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.IOException;
 import java.time.Clock;
@@ -80,15 +80,15 @@ import org.slf4j.LoggerFactory;
  * checkpoint in progress is resumed instead.</li>
  * <li>{@code file.started} is published (again on resume; brokers and
  * readers drop repeats by message id).</li>
- * <li>On resume, the messages of sections committed but not published are
+ * <li>On resume, the messages of records committed but not published are
  * rebuilt from the table's columns and published again.</li>
- * <li>Sections are encrypted on a worker pool (sections of one chunk) or on
+ * <li>Records are encrypted on a worker pool (records of one chunk) or on
  * this thread (larger ones) and written in sequence order. A batch is
- * committed when it reaches {@code commitMaxSections},
+ * committed when it reaches {@code commitMaxRecords},
  * {@code commitMaxBytes} or {@code commitMaxInterval}: the data file and the
  * checkpoint in one fenced commit.</li>
  * <li>The batch's messages are published in the background while the next
- * batch is split. The next commit waits for that and records the
+ * batch is split. The next commit waits for that and messageIndex the
  * acknowledged sequence number as {@code publishedSeq}.</li>
  * <li>At the end, a commit without data moves the checkpoint to
  * {@code ARCHIVING}.</li>
@@ -106,7 +106,7 @@ import org.slf4j.LoggerFactory;
 public final class IngestPipeline implements AutoCloseable
 {
 
-    /** Where the pipeline's diagnostics go (never section content). */
+    /** Where the pipeline's diagnostics go (never record content). */
     private static final Logger LOG =
             LoggerFactory.getLogger(IngestPipeline.class);
 
@@ -131,11 +131,11 @@ public final class IngestPipeline implements AutoCloseable
      * The outcome of the split phase. The checkpoint is in state
      * {@code ARCHIVING}.
      *
-     * @param fileId       the file's id
-     * @param sectionCount how many sections it was split into
-     * @param checkpoint   the checkpoint after the split phase
+     * @param itemId      the file's id
+     * @param recordCount how many records it was split into
+     * @param checkpoint  the checkpoint after the split phase
      */
-    public record SplitResult(UUID fileId, long sectionCount,
+    public record SplitResult(UUID itemId, long recordCount,
             Checkpoint checkpoint)
     {
     }
@@ -143,7 +143,7 @@ public final class IngestPipeline implements AutoCloseable
     /** The pipeline's settings. */
     private final PipelineSettings settings;
 
-    /** The {@code sections} table, which also holds the checkpoint. */
+    /** The {@code records} table, which also holds the checkpoint. */
     private final Table table;
 
     /** Commits under the lease's fence. */
@@ -152,8 +152,8 @@ public final class IngestPipeline implements AutoCloseable
     /** Wraps each batch's data key. */
     private final KeyProvider keys;
 
-    /** Makes section ids and keys the checkpoint and fingerprints. */
-    private final SectionIds ids;
+    /** Makes record ids and keys the checkpoint and fingerprints. */
+    private final RecordIds ids;
 
     /** Encodes and verifies the checkpoint. */
     private final CheckpointCodec codec;
@@ -179,13 +179,13 @@ public final class IngestPipeline implements AutoCloseable
     /** The table's name without its catalog and namespace. */
     private final String tableName;
 
-    /** Reads, converts and encrypts sections of one chunk. */
+    /** Reads, converts and encrypts records of one chunk. */
     private final ExecutorService workers;
 
     /**
      * Seals messages. It has its own pool: sharing the encryption pool let
      * each batch's 10,000 sealing jobs queue ahead of the next batch's
-     * section encryption, so splitting stalled while the previous batch was
+     * record encryption, so splitting stalled while the previous batch was
      * sealed (found by the throughput tests, design §13).
      */
     private final ExecutorService sealers;
@@ -194,10 +194,10 @@ public final class IngestPipeline implements AutoCloseable
     private final ExecutorService publishing;
 
     /**
-     * This format's JSON converter (design §6.4); null when sections are
+     * This format's JSON converter (design §6.4); null when records are
      * stored as split.
      */
-    private final SectionConverter converter;
+    private final RecordConverter converter;
 
     /** The heap for conversions running at once (design §6.4). */
     private final ConversionBudget budget;
@@ -209,23 +209,23 @@ public final class IngestPipeline implements AutoCloseable
      * Creates the pipeline and its thread pools, checking that the split and
      * conversion settings suit the format.
      *
-     * @param settings      the pipeline's settings
-     * @param sectionsTable the {@code sections} table
-     * @param committer     commits under the lease's fence
-     * @param keys          wraps each batch's data key
-     * @param ids           makes section ids and keys
-     * @param splitters     the splitters, by format
-     * @param sealer        signs and encrypts messages
-     * @param publisher     sends messages to the broker
-     * @param clock         the time
+     * @param settings     the pipeline's settings
+     * @param recordsTable the {@code records} table
+     * @param committer    commits under the lease's fence
+     * @param keys         wraps each batch's data key
+     * @param ids          makes record ids and keys
+     * @param splitters    the splitters, by format
+     * @param sealer       signs and encrypts messages
+     * @param publisher    sends messages to the broker
+     * @param clock        the time
      */
-    public IngestPipeline(PipelineSettings settings, Table sectionsTable,
-            FencedCommitter committer, KeyProvider keys, SectionIds ids,
+    public IngestPipeline(PipelineSettings settings, Table recordsTable,
+            FencedCommitter committer, KeyProvider keys, RecordIds ids,
             SplitterRegistry splitters, MessageSealer sealer,
             MessagePublisher publisher, Clock clock)
     {
         this.settings = settings;
-        this.table = sectionsTable;
+        this.table = recordsTable;
         this.committer = committer;
         this.keys = keys;
         this.ids = ids;
@@ -235,7 +235,7 @@ public final class IngestPipeline implements AutoCloseable
         this.publisher = publisher;
         this.clock = clock;
         this.checkpointKey = Checkpoint.propertyKey(settings.connectorId());
-        String[] namespaceAndTable = namespaceAndTable(sectionsTable.name());
+        String[] namespaceAndTable = namespaceAndTable(recordsTable.name());
         this.namespace = namespaceAndTable[0];
         this.tableName = namespaceAndTable[1];
         splitters.get(settings.format()).validate(settings.split());
@@ -284,7 +284,7 @@ public final class IngestPipeline implements AutoCloseable
 
     /**
      * Closes a checkpoint in progress whose file has disappeared (design §5,
-     * startup). Sections already stored stay where they are.
+     * startup). Records already stored stay where they are.
      *
      * @throws Exception if the checkpoint can't be committed
      */
@@ -296,8 +296,8 @@ public final class IngestPipeline implements AutoCloseable
         {
             commitCheckpoint(
                     current.get().withState(Checkpoint.State.ABANDONED));
-            Telemetry.get().auditWarn("file.abandoned",
-                    Fields.of(Attr.FILE_ID, current.get().fileId())
+            Telemetry.get().auditWarn("item.abandoned",
+                    Fields.of(Attr.ITEM_ID, current.get().itemId())
                             .with(Attr.SEQ, current.get().committedSeq()));
         }
     }
@@ -305,7 +305,7 @@ public final class IngestPipeline implements AutoCloseable
     /**
      * Runs the split phase for a file: from the start for a new file, or
      * from the checkpoint if this is the file in progress. Returns once every
-     * section is committed and published.
+     * record is committed and published.
      *
      * @param source the file
      * @return the outcome
@@ -360,25 +360,25 @@ public final class IngestPipeline implements AutoCloseable
      *
      * @param source      the file or item
      * @param fingerprint what recognises it in the checkpoint
-     * @param fileId      the ID to give it if it is new; null for a new
+     * @param itemId      the ID to give it if it is new; null for a new
      *                    UUIDv7
      * @return the outcome
      * @throws Exception as {@link #split(SeekableByteSource)}
      */
     private SplitResult split(SeekableByteSource source, String fingerprint,
-            UUID fileId) throws Exception
+            UUID itemId) throws Exception
     {
         Checkpoint current = checkpoint().orElse(null);
         if (current != null && current.fingerprint().equals(fingerprint)
                 && current.state() == Checkpoint.State.ARCHIVING)
         {
-            return new SplitResult(current.fileId(), current.sectionCount(),
+            return new SplitResult(current.itemId(), current.recordCount(),
                     current);
         }
         if (current != null && current.state().inProgress()
                 && current.state() != Checkpoint.State.SPLITTING)
         {
-            throw new IllegalStateException("File " + current.fileId()
+            throw new IllegalStateException("File " + current.itemId()
                     + " is still " + current.state());
         }
         if (current != null && current.state() == Checkpoint.State.SPLITTING)
@@ -386,12 +386,12 @@ public final class IngestPipeline implements AutoCloseable
             if (!current.fingerprint().equals(fingerprint))
             {
                 throw new IllegalStateException(
-                        "File " + current.fileId() + " is still in progress");
+                        "File " + current.itemId() + " is still in progress");
             }
             if (!current.format().equals(settings.format()))
             {
                 throw new IllegalStateException("Split format changed while"
-                        + " file " + current.fileId() + " is in progress");
+                        + " file " + current.itemId() + " is in progress");
             }
             // Counted before any work, as a crash in this attempt (an
             // out-of-memory exit, say) can't record anything.
@@ -402,37 +402,37 @@ public final class IngestPipeline implements AutoCloseable
                         current.resumeAt().offset());
             }
             commitCheckpoint(current);
-            Telemetry.get().audit("file.resumed",
-                    Fields.of(Attr.FILE_ID, current.fileId())
+            Telemetry.get().audit("item.resumed",
+                    Fields.of(Attr.ITEM_ID, current.itemId())
                             .with(Attr.SEQ, current.nextSeq())
                             .with(Attr.OFFSET, current.resumeAt().offset())
                             .with(Attr.COUNT, current.restarts()));
             if (converter != null
                     && current.restarts() >= SKIP_CONVERSION_AFTER_RESTARTS)
             {
-                Telemetry.get().auditWarn("file.conversion_skipped",
-                        Fields.of(Attr.FILE_ID, current.fileId())
+                Telemetry.get().auditWarn("item.conversion_skipped",
+                        Fields.of(Attr.ITEM_ID, current.itemId())
                                 .with(Attr.SEQ, current.nextSeq())
                                 .with(Attr.COUNT, current.restarts()));
             }
         }
         else
         {
-            if (source.size() > settings.split().limits().maxFileBytes())
+            if (source.size() > settings.split().limits().maxItemBytes())
             {
                 // Rejected before ingestion (design §6.3): no checkpoint, no
                 // file.started.
-                throw new SplitException(ErrorCode.LIMIT_FILE_SIZE, 0);
+                throw new SplitException(ErrorCode.LIMIT_ITEM_SIZE, 0);
             }
-            current = Checkpoint.start(fileId != null ? fileId
+            current = Checkpoint.start(itemId != null ? itemId
                     : UuidV7.next(clock.millis()),
                     fingerprint, settings.format(), source.size(),
                     clock.instant());
             commitCheckpoint(current);
-            Telemetry.get().audit("file.started",
-                    Fields.of(Attr.FILE_ID, current.fileId())
+            Telemetry.get().audit("item.started",
+                    Fields.of(Attr.ITEM_ID, current.itemId())
                             .with(Attr.FORMAT, current.format())
-                            .with(Attr.BYTES, current.fileSize()));
+                            .with(Attr.BYTES, current.itemSize()));
         }
         return run(current, source);
     }
@@ -449,27 +449,27 @@ public final class IngestPipeline implements AutoCloseable
     private SplitResult run(Checkpoint start, SeekableByteSource source)
             throws Exception
     {
-        publish(List.of(new FileStarted(start.fileId(), start.format(),
-                start.fileSize(), start.startedAt(), settings.connectorId())));
+        publish(List.of(new FileStarted(start.itemId(), start.format(),
+                start.itemSize(), start.startedAt(), settings.connectorId())));
         republish(start);
         Checkpoint current = start.published(start.committedSeq());
 
         Batch batch = null;
         Future<Long> inFlightPublish = null;
         // Lines and columns, so failures and mapping issues can be found in
-        // the file (SectionOrigin).
+        // the file (RecordOrigin).
         try (SplitSession session = open(current, source);
-                SectionOrigins origins = new SectionOrigins(source))
+                RecordOrigins origins = new RecordOrigins(source))
         {
             long seq = current.nextSeq();
-            Optional<Section> next;
+            Optional<SplitRecord> next;
             while ((next = session.next()).isPresent())
             {
                 if (batch == null)
                 {
                     // Only the batch the connector kept stopping in goes
                     // unconverted: once it commits, the count is back to 0.
-                    batch = new Batch(current.fileId(), current.format(),
+                    batch = new Batch(current.itemId(), current.format(),
                             current.restarts()
                                     < SKIP_CONVERSION_AFTER_RESTARTS);
                 }
@@ -497,10 +497,10 @@ public final class IngestPipeline implements AutoCloseable
             hooks.beforeEndOfFile();
             current = current.withState(Checkpoint.State.ARCHIVING);
             commitCheckpoint(current);
-            Telemetry.get().audit("file.split",
-                    Fields.of(Attr.FILE_ID, current.fileId())
-                            .with(Attr.COUNT, current.sectionCount()));
-            return new SplitResult(current.fileId(), current.sectionCount(),
+            Telemetry.get().audit("item.split",
+                    Fields.of(Attr.ITEM_ID, current.itemId())
+                            .with(Attr.COUNT, current.recordCount()));
+            return new SplitResult(current.itemId(), current.recordCount(),
                     current);
         }
         finally
@@ -546,10 +546,10 @@ public final class IngestPipeline implements AutoCloseable
             throws IOException, SplitException
     {
         if (source instanceof LandedItemSource item
-                && item.records().isPresent())
+                && item.messageIndex().isPresent())
         {
-            return splitters.openRecords(current.format(), source,
-                    item.records().get().offsets(), current.resumeAt(),
+            return splitters.openMessages(current.format(), source,
+                    item.messageIndex().get().offsets(), current.resumeAt(),
                     current.nextSeq(), settings.split());
         }
         return splitters.open(current.format(), source, current.resumeAt(),
@@ -570,7 +570,7 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
-     * A section ready to be written: encrypted already, or (over one chunk)
+     * A record ready to be written: encrypted already, or (over one chunk)
      * still in memory.
      */
     private sealed interface Prepared permits Ready, InMemory
@@ -578,63 +578,63 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
-     * A section encrypted on a worker, ready to be written as rows.
+     * A record encrypted on a worker, ready to be written as rows.
      *
-     * @param encrypted the encrypted section
+     * @param encrypted the encrypted record
      */
-    private record Ready(EncryptedSection encrypted) implements Prepared
+    private record Ready(EncryptedRecord encrypted) implements Prepared
     {
     }
 
     /**
-     * A section of more than one chunk, converted (or not) and still in
+     * A record of more than one chunk, converted (or not) and still in
      * memory, for the writer thread to encrypt and store.
      *
      * @param seq            its number in the file, from 0
-     * @param lineage        the section as split
+     * @param lineage        the record as split
      * @param bytes          the bytes to store
      * @param representation what they are
      * @param error          why conversion failed; null if it didn't
-     * @param position       where in the section it failed, in bytes; -1
+     * @param position       where in the record it failed, in bytes; -1
      *                       without an error
      * @param errorAt        where in the file it failed; null if it didn't,
      *                       or the error has no place
      */
-    private record InMemory(long seq, Section lineage, byte[] bytes,
+    private record InMemory(long seq, SplitRecord lineage, byte[] bytes,
             Representation representation, ErrorCode error, long position,
             SourcePosition errorAt) implements Prepared
     {
     }
 
     /**
-     * One commit batch. Sections are added in sequence order; those of one
+     * One commit batch. Records are added in sequence order; those of one
      * chunk are read, converted and encrypted on the worker pool.
      */
     private final class Batch
     {
 
         /** Writes the batch's data file. */
-        private final SectionBatchWriter writer = new SectionBatchWriter(
+        private final RecordBatchWriter writer = new RecordBatchWriter(
                 table, keys, settings.kekRef(), ids, clock.instant());
 
-        /** Sections being prepared on the workers, in sequence order. */
+        /** Records being prepared on the workers, in sequence order. */
         private final Deque<Future<Prepared>> pending = new ArrayDeque<>();
 
         /** When the batch was started, in milliseconds. */
         private final long openedAt = clock.millis();
 
-        /** The most sections waiting on the workers before the writer
+        /** The most records waiting on the workers before the writer
          * catches up. */
         private final int maxPending = settings.encryptWorkers() * 4;
 
         /** The id of the file being split. */
-        private final UUID fileId;
+        private final UUID itemId;
 
         /** The name of its format. */
         private final String format;
 
         /**
-         * False to store every section as split, {@code CONVERT_SKIPPED}
+         * False to store every record as split, {@code CONVERT_SKIPPED}
          * (see {@link #SKIP_CONVERSION_AFTER_RESTARTS}).
          */
         private final boolean convert;
@@ -642,71 +642,71 @@ public final class IngestPipeline implements AutoCloseable
         /** The batch's trace span. */
         private final Span span;
 
-        /** The last section's sequence number; -1 before the first. */
+        /** The last record's sequence number; -1 before the first. */
         private long lastSeq = -1;
 
-        /** The total plaintext length of the sections added. */
+        /** The total plaintext length of the records added. */
         private long bytes;
 
-        /** How many sections have been added. */
+        /** How many records have been added. */
         private int count;
 
-        /** The last section added, whose resume point the checkpoint takes. */
-        private Section last;
+        /** The last record added, whose resume point the checkpoint takes. */
+        private SplitRecord last;
 
         /**
          * Starts a batch and its trace span.
          *
-         * @param fileId  the id of the file being split
+         * @param itemId  the id of the file being split
          * @param format  the name of its format
-         * @param convert false to store every section as split
+         * @param convert false to store every record as split
          */
-        Batch(UUID fileId, String format, boolean convert)
+        Batch(UUID itemId, String format, boolean convert)
         {
-            this.fileId = fileId;
+            this.itemId = itemId;
             this.format = format;
             this.convert = convert;
             this.span = Telemetry.get().span("split.batch",
-                    Fields.of(Attr.FILE_ID, fileId).with(Attr.FORMAT, format));
+                    Fields.of(Attr.ITEM_ID, itemId).with(Attr.FORMAT, format));
         }
 
         /**
-         * Adds a section. One of one chunk is read, converted and encrypted
+         * Adds a record. One of one chunk is read, converted and encrypted
          * on the worker pool; a larger one on this thread, after the ones
          * before it, so memory stays bounded.
          *
-         * @param seq     its number in the file, from 0
-         * @param section the section, with its origin
-         * @param source  the file it is read from
+         * @param seq    its number in the file, from 0
+         * @param record the record, with its origin
+         * @param source the file it is read from
          * @throws Exception if it can't be read, prepared or written
          */
-        void add(long seq, Section section, SeekableByteSource source)
+        void add(long seq, SplitRecord record, SeekableByteSource source)
                 throws Exception
         {
-            long length = section.plaintextLength();
-            if (section.failure() != null)
+            long length = record.plaintextLength();
+            if (record.failure() != null)
             {
-                addUnsplit(seq, section, source);
+                addUnsplit(seq, record, source);
             }
-            else if (SectionCrypto.chunkCount(length) == 1)
+            else if (RecordCrypto.chunkCount(length) == 1)
             {
                 // Read, convert (if any) and encrypt on the worker pool.
                 pending.add(workers.submit(() ->
                 {
                     if (converter == null)
                     {
-                        return new Ready(writer.encryptSmall(fileId, seq,
-                                format, section, source));
+                        return new Ready(writer.encryptSmall(itemId, seq,
+                                format, record, source));
                     }
                     ErrorCode skip = skipReason(length);
                     if (skip != null)
                     {
-                        return new Ready(writer.encrypt(fileId, seq, format,
-                                section, section.readAll(source),
+                        return new Ready(writer.encrypt(itemId, seq, format,
+                                record, record.readAll(source),
                                 Representation.raw(format), skip, 0, null));
                     }
                     return converting(length, () ->
-                            prepare(seq, section, section.readAll(source)));
+                            prepare(seq, record, record.readAll(source)));
                 }));
                 while (pending.size() > maxPending)
                 {
@@ -715,58 +715,58 @@ public final class IngestPipeline implements AutoCloseable
             }
             else
             {
-                // Larger sections run on this thread, one at a time, so
+                // Larger records run on this thread, one at a time, so
                 // memory stays bounded.
                 drain();
                 if (converter == null)
                 {
-                    writer.add(fileId, seq, format, section, source);
+                    writer.add(itemId, seq, format, record, source);
                 }
                 else if (skipReason(length) != null)
                 {
-                    writer.add(fileId, seq, format, section, source,
+                    writer.add(itemId, seq, format, record, source,
                             Representation.raw(format), skipReason(length), 0,
                             null);
                 }
                 else
                 {
                     store(converting(length, () ->
-                            prepare(seq, section, section.readAll(source))));
+                            prepare(seq, record, record.readAll(source))));
                 }
             }
             lastSeq = seq;
-            last = section;
+            last = record;
             bytes += length;
             count++;
-            Telemetry.get().bytesRead(section.sourceLength(), "split");
+            Telemetry.get().bytesRead(record.sourceLength(), "split");
         }
 
         /**
          * Adds the rest of a message that couldn't be split (design
          * §5.3.16): stored as it is, never converted, marked with the
          * splitter's error and where it was found, so it is announced with
-         * {@code section.failed} like a section that couldn't be converted.
+         * {@code record.failed} like a record that couldn't be converted.
          *
-         * @param seq     its number in the file, from 0
-         * @param section the section, with its failure and origin
-         * @param source  the file it is read from
+         * @param seq    its number in the file, from 0
+         * @param record the record, with its failure and origin
+         * @param source the file it is read from
          * @throws Exception if it can't be read, prepared or written
          */
-        private void addUnsplit(long seq, Section section,
+        private void addUnsplit(long seq, SplitRecord record,
                 SeekableByteSource source) throws Exception
         {
-            long length = section.plaintextLength();
+            long length = record.plaintextLength();
             long position = Math.max(0, Math.min(length,
-                    section.failure().offset() - section.sourceOffset()));
-            ErrorCode code = section.failure().code();
-            if (SectionCrypto.chunkCount(length) == 1)
+                    record.failure().offset() - record.sourceOffset()));
+            ErrorCode code = record.failure().code();
+            if (RecordCrypto.chunkCount(length) == 1)
             {
                 pending.add(workers.submit(() ->
                 {
-                    byte[] raw = section.readAll(source);
-                    return new Ready(writer.encrypt(fileId, seq, format,
-                            section, raw, Representation.raw(format), code,
-                            position, fileLineAndColumn(section, raw,
+                    byte[] raw = record.readAll(source);
+                    return new Ready(writer.encrypt(itemId, seq, format,
+                            record, raw, Representation.raw(format), code,
+                            position, itemLineAndColumn(record, raw,
                                     position)));
                 }));
                 while (pending.size() > maxPending)
@@ -777,20 +777,20 @@ public final class IngestPipeline implements AutoCloseable
             else
             {
                 drain();
-                writer.add(fileId, seq, format, section, source,
+                writer.add(itemId, seq, format, record, source,
                         Representation.raw(format), code, position, null);
             }
         }
 
         /**
-         * Reads and converts a section once there is room in the conversion
-         * budget for it, so large sections converting together can't exhaust
-         * the heap. The room is given back once the section is ready to
+         * Reads and converts a record once there is room in the conversion
+         * budget for it, so large records converting together can't exhaust
+         * the heap. The room is given back once the record is ready to
          * write.
          *
-         * @param length the section's length
+         * @param length the record's length
          * @param work   reads and converts it
-         * @return the prepared section
+         * @return the prepared record
          * @throws Exception if waiting is interrupted, or the work fails
          */
         private Prepared converting(long length,
@@ -809,9 +809,9 @@ public final class IngestPipeline implements AutoCloseable
         }
 
         /**
-         * Tells why a section of a length isn't converted.
+         * Tells why a record of a length isn't converted.
          *
-         * @param length the section's length
+         * @param length the record's length
          * @return {@code CONVERT_SKIPPED} or {@code CONVERT_TOO_LARGE}; null
          *         if it is converted
          */
@@ -824,24 +824,24 @@ public final class IngestPipeline implements AutoCloseable
 
         /**
          * Tells whether the batch should be committed: it has reached the
-         * most sections or bytes a batch holds, or has been open as long as
+         * most records or bytes a batch holds, or has been open as long as
          * one may be.
          *
          * @return true to commit it now
          */
         boolean full()
         {
-            return count >= settings.commitMaxSections()
+            return count >= settings.commitMaxRecords()
                     || bytes >= settings.commitMaxBytes()
                     || clock.millis() - openedAt
                     >= settings.commitMaxInterval().toMillis();
         }
 
         /**
-         * Writes the sections still being prepared and closes the data file.
+         * Writes the records still being prepared and closes the data file.
          *
          * @return the data file, to commit
-         * @throws Exception if a section can't be prepared or written
+         * @throws Exception if a record can't be prepared or written
          */
         DataFile finish() throws Exception
         {
@@ -850,9 +850,9 @@ public final class IngestPipeline implements AutoCloseable
         }
 
         /**
-         * Writes every section still being prepared, in order.
+         * Writes every record still being prepared, in order.
          *
-         * @throws Exception if a section can't be prepared or written
+         * @throws Exception if a record can't be prepared or written
          */
         void drain() throws Exception
         {
@@ -863,16 +863,16 @@ public final class IngestPipeline implements AutoCloseable
         }
 
         /**
-         * Converts a section to JSON; if that fails, keeps it as split,
+         * Converts a record to JSON; if that fails, keeps it as split,
          * marked with the error (design §6.4). Small results are encrypted
          * here (on a worker), larger ones are left for the writer thread.
          *
-         * @param seq     its number in the file, from 0
-         * @param section the section
-         * @param raw     its bytes, as split; wiped once converted
-         * @return the prepared section
+         * @param seq    its number in the file, from 0
+         * @param record the record
+         * @param raw    its bytes, as split; wiped once converted
+         * @return the prepared record
          */
-        private Prepared prepare(long seq, Section section, byte[] raw)
+        private Prepared prepare(long seq, SplitRecord record, byte[] raw)
         {
             byte[] stored;
             Representation representation;
@@ -891,66 +891,66 @@ public final class IngestPipeline implements AutoCloseable
                 representation = Representation.raw(format);
                 error = failure.code();
                 position = failure.position();
-                errorAt = fileLineAndColumn(section, raw, position);
+                errorAt = itemLineAndColumn(record, raw, position);
             }
             catch (RuntimeException bug)
             {
-                // A converter bug: fail the section, not the whole file
+                // A converter bug: fail the record, not the whole file
                 // (which would also be blamed on storage). Only the class
-                // name is logged; a message could quote the section.
-                LOG.warn("convert.unexpected fileId={} seq={} format={}"
-                        + " error={}", fileId, seq, format,
+                // name is logged; a message could quote the record.
+                LOG.warn("convert.unexpected itemId={} seq={} format={}"
+                        + " error={}", itemId, seq, format,
                         bug.getClass().getName());
                 stored = raw;
                 representation = Representation.raw(format);
                 error = ErrorCode.CONVERT_FAILED;
                 position = 0;
             }
-            if (SectionCrypto.chunkCount(stored.length) == 1)
+            if (RecordCrypto.chunkCount(stored.length) == 1)
             {
-                return new Ready(writer.encrypt(fileId, seq, format, section,
+                return new Ready(writer.encrypt(itemId, seq, format, record,
                         stored, representation, error, position, errorAt));
             }
-            return new InMemory(seq, section, stored, representation, error,
+            return new InMemory(seq, record, stored, representation, error,
                     position, errorAt);
         }
 
         /**
-         * Works out where a byte of a section is in the file, as a line and
+         * Works out where a byte of a record is in the file, as a line and
          * column, for a conversion failure: its line and column in the
-         * section, moved by the section's origin.
+         * record, moved by the record's origin.
          *
-         * @param section  the section
+         * @param record   the record
          * @param raw      its bytes, as split
          * @param position the byte's index in them; kept within them
-         * @return the position in the file; null if the section has no
+         * @return the position in the file; null if the record has no
          *         origin
          */
-        private static SourcePosition fileLineAndColumn(Section section,
+        private static SourcePosition itemLineAndColumn(SplitRecord record,
                 byte[] raw, long position)
         {
-            if (section.origin() == null)
+            if (record.origin() == null)
             {
                 return null;
             }
             int offset = (int) Math.max(0, Math.min(position, raw.length));
-            SourcePosition inSection = LineCounter.positionOf(raw, offset);
-            return section.origin().toFile(inSection);
+            SourcePosition inRecord = LineCounter.positionOf(raw, offset);
+            return record.origin().toFile(inRecord);
         }
 
         /**
-         * Writes a prepared section. Writer thread only; sections must come
+         * Writes a prepared record. Writer thread only; records must come
          * in sequence order.
          *
-         * @param prepared the section
-         * @throws IOException if a section in memory can't be stored
+         * @param prepared the record
+         * @throws IOException if a record in memory can't be stored
          */
         private void store(Prepared prepared) throws IOException
         {
             switch (prepared)
             {
                 case Ready ready -> writer.write(ready.encrypted());
-                case InMemory inMemory -> writer.addBytes(fileId,
+                case InMemory inMemory -> writer.addBytes(itemId,
                         inMemory.seq(), format, inMemory.lineage(),
                         inMemory.bytes(), inMemory.representation(),
                         inMemory.error(), inMemory.position(),
@@ -1030,10 +1030,10 @@ public final class IngestPipeline implements AutoCloseable
             }
             telemetry.commitDuration(System.nanoTime() - started,
                     table.name());
-            telemetry.sectionsStored(batch.count, batch.format);
-            telemetry.progress(next.resumeAt().offset(), next.fileSize());
+            telemetry.recordsStored(batch.count, batch.format);
+            telemetry.progress(next.resumeAt().offset(), next.itemSize());
             telemetry.audit("batch.committed",
-                    Fields.of(Attr.FILE_ID, next.fileId())
+                    Fields.of(Attr.ITEM_ID, next.itemId())
                             .with(Attr.SEQ, next.committedSeq())
                             .with(Attr.OFFSET, next.resumeAt().offset())
                             .with(Attr.COUNT, batch.count));
@@ -1046,22 +1046,22 @@ public final class IngestPipeline implements AutoCloseable
                     tableName, day, snapshot.snapshotId(),
                     batch.writer.kekRef());
             List<ConnectorMessage> messages = new ArrayList<>(batch.count);
-            for (WrittenSection section : batch.writer.written())
+            for (WrittenRecord record : batch.writer.written())
             {
-                messages.add(message(section, ref));
-                if (section.error() != null)
+                messages.add(message(record, ref));
+                if (record.error() != null)
                 {
                     // Audited once committed, so a restart doesn't report it
                     // twice.
-                    telemetry.auditWarn("section.failed",
-                            Fields.of(Attr.FILE_ID, section.fileId())
-                                    .with(Attr.SEQ, section.seq())
-                                    .with(Attr.FORMAT, section.format())
-                                    .with(Attr.ERROR_CODE, section.error())
-                                    .with(Attr.OFFSET, section.sourceOffset())
+                    telemetry.auditWarn("record.failed",
+                            Fields.of(Attr.ITEM_ID, record.itemId())
+                                    .with(Attr.SEQ, record.seq())
+                                    .with(Attr.FORMAT, record.format())
+                                    .with(Attr.ERROR_CODE, record.error())
+                                    .with(Attr.OFFSET, record.sourceOffset())
                                     .with(Attr.POSITION,
-                                            section.errorPosition()));
-                    telemetry.sectionFailed(section.error(), section.format());
+                                            record.errorPosition()));
+                    telemetry.recordFailed(record.error(), record.format());
                 }
             }
             long last = batch.lastSeq;
@@ -1097,7 +1097,7 @@ public final class IngestPipeline implements AutoCloseable
     {
         Optional<Checkpoint> stored = checkpoint();
         return stored.isPresent()
-                && stored.get().fileId().equals(next.fileId())
+                && stored.get().itemId().equals(next.itemId())
                 && stored.get().committedSeq() >= next.committedSeq()
                 && stored.get().state() == next.state();
     }
@@ -1136,13 +1136,13 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
-     * Publishes the messages of every section of a checkpoint's file that is
+     * Publishes the messages of every record of a checkpoint's file that is
      * committed but not known to be acknowledged
      * ({@code publishedSeq < seq <= committedSeq}). Repeats are harmless:
      * readers drop them by message id.
      *
      * @param current the checkpoint
-     * @throws Exception if the sections can't be read or published
+     * @throws Exception if the records can't be read or published
      */
     void announceCommitted(Checkpoint current) throws Exception
     {
@@ -1191,64 +1191,64 @@ public final class IngestPipeline implements AutoCloseable
     // ---- publishing ----
 
     /**
-     * The message announcing a section written in a batch.
+     * The message announcing a record written in a batch.
      *
-     * @param section the section
-     * @param ref     where it is stored
-     * @return {@code section.failed} if its conversion failed, else
-     *         {@code section.stored}
+     * @param record the record
+     * @param ref    where it is stored
+     * @return {@code record.failed} if its conversion failed, else
+     *         {@code record.stored}
      */
-    private static SectionInStorage message(WrittenSection section,
+    private static RecordInStorage message(WrittenRecord record,
             StorageRef ref)
     {
-        Representation representation = section.representation();
-        if (section.error() != null)
+        Representation representation = record.representation();
+        if (record.error() != null)
         {
-            return new SectionFailed(section.sectionId(), section.fileId(),
-                    section.seq(), section.sourceOffset(),
-                    section.sourceLength(), section.format(),
-                    representation.contentType(), section.error().name(),
-                    section.plaintextLength(), section.chunkCount(), ref,
-                    section.origin(), section.errorAt());
+            return new RecordFailed(record.recordId(), record.itemId(),
+                    record.seq(), record.sourceOffset(),
+                    record.sourceLength(), record.format(),
+                    representation.contentType(), record.error().name(),
+                    record.plaintextLength(), record.chunkCount(), ref,
+                    record.origin(), record.errorAt());
         }
-        return new SectionStored(section.sectionId(), section.fileId(),
-                section.seq(), section.sourceOffset(), section.sourceLength(),
-                section.format(), representation.contentType(),
-                representation.mapping(), section.plaintextLength(),
-                section.chunkCount(), ref, section.origin());
+        return new RecordStored(record.recordId(), record.itemId(),
+                record.seq(), record.sourceOffset(), record.sourceLength(),
+                record.format(), representation.contentType(),
+                representation.mapping(), record.plaintextLength(),
+                record.chunkCount(), ref, record.origin());
     }
 
     /**
-     * Counts a file's committed sections that failed conversion and are
+     * Counts a file's committed records that failed conversion and are
      * stored in their original form.
      *
-     * @param fileId the file's id
+     * @param itemId the file's id
      * @return how many there are
      */
-    public long failedSectionCount(UUID fileId)
+    public long failedRecordCount(UUID itemId)
     {
         table.refresh();
-        return CommittedSections.countFailed(table, fileId);
+        return CommittedRecords.countFailed(table, itemId);
     }
 
     /**
-     * Reads a file's stored sections that failed conversion.
+     * Reads a file's stored records that failed conversion.
      *
-     * @param fileId the file
+     * @param itemId the file
      * @return them, in sequence order
      */
-    public List<CommittedSections.Failed> failedSections(UUID fileId)
+    public List<CommittedRecords.Failed> failedRecords(UUID itemId)
     {
         table.refresh();
-        return CommittedSections.failed(table, fileId);
+        return CommittedRecords.failed(table, itemId);
     }
 
     /**
-     * Rebuilds and publishes again the messages of sections committed but
+     * Rebuilds and publishes again the messages of records committed but
      * not acknowledged before a restart.
      *
      * @param current the checkpoint
-     * @throws Exception if the sections can't be read or published
+     * @throws Exception if the records can't be read or published
      */
     private void republish(Checkpoint current) throws Exception
     {
@@ -1258,26 +1258,26 @@ public final class IngestPipeline implements AutoCloseable
         }
         long snapshotId = table.currentSnapshot().snapshotId();
         List<ConnectorMessage> messages = new ArrayList<>();
-        for (CommittedSections.Row row : CommittedSections.read(table,
-                current.fileId(), current.publishedSeq(),
+        for (CommittedRecords.Row row : CommittedRecords.read(table,
+                current.itemId(), current.publishedSeq(),
                 current.committedSeq()))
         {
             StorageRef ref = new StorageRef(settings.catalogName(), namespace,
                     tableName, row.ingestedDate(), snapshotId, row.kekRef());
             messages.add(row.errorCode() != null
-                    ? new SectionFailed(row.sectionId(), current.fileId(),
+                    ? new RecordFailed(row.recordId(), current.itemId(),
                             row.seq(), row.sourceOffset(), row.sourceLength(),
                             row.format(), row.contentType(), row.errorCode(),
                             row.plaintextLength(), row.chunkCount(), ref,
                             row.origin(), row.errorAt())
-                    : new SectionStored(row.sectionId(), current.fileId(),
+                    : new RecordStored(row.recordId(), current.itemId(),
                             row.seq(), row.sourceOffset(), row.sourceLength(),
                             row.format(), row.contentType(), row.mapping(),
                             row.plaintextLength(), row.chunkCount(), ref,
                             row.origin()));
         }
         Telemetry.get().audit("publish.republish",
-                Fields.of(Attr.FILE_ID, current.fileId())
+                Fields.of(Attr.ITEM_ID, current.itemId())
                         .with(Attr.SEQ, current.publishedSeq() + 1)
                         .with(Attr.COUNT, messages.size()));
         publish(messages);
@@ -1315,8 +1315,8 @@ public final class IngestPipeline implements AutoCloseable
             span.end();
         }
         telemetry.publishDuration(System.nanoTime() - started);
-        telemetry.sectionsPublished(messages.stream()
-                .filter(SectionInStorage.class::isInstance).count());
+        telemetry.recordsPublished(messages.stream()
+                .filter(RecordInStorage.class::isInstance).count());
     }
 
     /**
@@ -1344,7 +1344,7 @@ public final class IngestPipeline implements AutoCloseable
         {
             ConnectorMessage message = messages.get(index);
             OutboundMessage toSend = new OutboundMessage(message.messageId(),
-                    message.type(), message.fileId(), get(sealed.get(index)));
+                    message.type(), message.itemId(), get(sealed.get(index)));
             outbound.add(toSend);
             acks.add(send(toSend));
         }

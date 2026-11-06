@@ -13,9 +13,9 @@ import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
 
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.it.ItSupport.Received;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -108,9 +108,9 @@ class RabbitMqIT
                     message.getMessageProperties().getHeaders();
             got.add(new Received(
                     message.getMessageProperties().getMessageId(),
-                    text(headers.get("type")), text(headers.get("fileId")),
+                    text(headers.get("type")), text(headers.get("itemId")),
                     message.getMessageProperties().getContentType(),
-                    text(headers.get("fileId")),
+                    text(headers.get("itemId")),
                     new String(message.getBody(), StandardCharsets.US_ASCII)));
         }
         factory.destroy();

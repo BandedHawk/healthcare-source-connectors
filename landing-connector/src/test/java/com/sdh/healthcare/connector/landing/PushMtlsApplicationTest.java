@@ -120,7 +120,7 @@ class PushMtlsApplicationTest extends PushTestSupport
             ConnectorMessage.ItemReceived receipt =
                     (ConnectorMessage.ItemReceived) opener.open(
                             body.getBytes(StandardCharsets.UTF_8));
-            if (receipt.fileId().toString().equals(itemId))
+            if (receipt.itemId().toString().equals(itemId))
             {
                 return receipt;
             }
@@ -195,15 +195,15 @@ class PushMtlsApplicationTest extends PushTestSupport
 
         HttpResponse<String> second = client(PKI.clientContext(client)).send(
                 push(port, INTAKE)
-                        .header("Replaces", receipt.fileId().toString())
+                        .header("Replaces", receipt.itemId().toString())
                         .POST(HttpRequest.BodyPublishers.ofString("two"))
                         .build(), HttpResponse.BodyHandlers.ofString());
         assertThat(second.statusCode()).isEqualTo(202);
         assertThat(receipt(field(second.body(), "itemId")).replaces())
-                .isEqualTo(receipt.fileId());
+                .isEqualTo(receipt.itemId());
         assertThat(receive(INTAKE, 3, Duration.ofSeconds(5)))
                 .extracting(ConnectorMessage.ItemLanded::replaces)
-                .endsWith(null, receipt.fileId());
+                .endsWith(null, receipt.itemId());
         assertThat(FATAL).isEmpty();
     }
 

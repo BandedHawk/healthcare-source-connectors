@@ -16,7 +16,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandingCheckpoint;
@@ -97,7 +97,7 @@ class PushServiceTest
     AesKeyWrapProvider keys;
 
     /** Makes the hashes and MACs. */
-    final SectionIds ids = new SectionIds(new byte[32]);
+    final RecordIds ids = new RecordIds(new byte[32]);
 
     /** The last lease epoch handed out. */
     long epoch;
@@ -460,13 +460,13 @@ class PushServiceTest
         assertThat(results).hasSize(2);
         ConnectorMessage.ItemReceived receipt = (ConnectorMessage.ItemReceived)
                 opener.open(results.get(1).body());
-        assertThat(receipt.fileId()).isEqualTo(second.receipt().itemId());
+        assertThat(receipt.itemId()).isEqualTo(second.receipt().itemId());
         assertThat(receipt.producerRef()).isEqualTo("corr-42");
         assertThat(receipt.replaces()).isEqualTo(earlier);
         assertThat(receipt.sha256()).isEqualTo(second.receipt().sha256());
         assertThat(receipt.kind()).isEqualTo("push");
         assertThat(results.get(1).messageId())
-                .isEqualTo("rc-" + receipt.fileId());
+                .isEqualTo("rc-" + receipt.itemId());
         assertThat(((ConnectorMessage.ItemLanded) new MessageOpener(
                 Map.of("downstream", recipient.getPrivate()),
                 Map.of("connector", (ECPublicKey) signing.getPublic()))

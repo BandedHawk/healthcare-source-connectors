@@ -11,10 +11,10 @@
 
   <artifactId>connector-runtime</artifactId>
   <name>connector-runtime</name>
-  <description>What the connector applications share (design §3): the common settings, key loading, the queue
-    publishers, the PHI-filtered telemetry export, the lease database and the fatal-exit hook. Used by
-    file-connector and landing-connector, which bring the client libraries for every broker, store and KMS
-    through it.</description>
+  <description>What the connector applications share (design §3): the common settings, key loading, the
+    producer results channel, the PHI-filtered telemetry export, the lease database and the fatal-exit hook. Used by
+    file-connector and landing-connector, which bring the client libraries for every broker (through
+    connector-broker), store and KMS through it.</description>
 
   <dependencyManagement>
     <dependencies>
@@ -55,6 +55,11 @@
       <groupId>com.sdh.healthcare</groupId>
       <artifactId>connector-kms</artifactId>
     </dependency>
+    <!-- Receiving from and sending to every broker (design §10.3), with their Camel components and clients. -->
+    <dependency>
+      <groupId>com.sdh.healthcare</groupId>
+      <artifactId>connector-broker</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter</artifactId>
@@ -66,44 +71,6 @@
     <dependency>
       <groupId>org.apache.camel.springboot</groupId>
       <artifactId>camel-file-starter</artifactId>
-    </dependency>
-
-    <!-- All broker adapters ship in the single build (design §10.3). -->
-    <dependency>
-      <groupId>org.apache.camel.springboot</groupId>
-      <artifactId>camel-kafka-starter</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.camel.springboot</groupId>
-      <artifactId>camel-aws2-sqs-starter</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.camel.springboot</groupId>
-      <artifactId>camel-google-pubsub-starter</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.camel.springboot</groupId>
-      <artifactId>camel-azure-servicebus-starter</artifactId>
-      <exclusions>
-        <!-- Azure uses the JDK HTTP client (design §8.1); Service Bus itself talks AMQP. -->
-        <exclusion><groupId>com.azure</groupId><artifactId>azure-core-http-netty</artifactId></exclusion>
-      </exclusions>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.camel.springboot</groupId>
-      <artifactId>camel-azure-eventhubs-starter</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.camel.springboot</groupId>
-      <artifactId>camel-jms-starter</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.activemq</groupId>
-      <artifactId>artemis-jakarta-client</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.camel.springboot</groupId>
-      <artifactId>camel-spring-rabbitmq-starter</artifactId>
     </dependency>
 
     <!-- Telemetry (design §12): OpenTelemetry SDK with OTLP export of traces, metrics and audit logs. -->

@@ -127,7 +127,7 @@ class AzureKeyVaultIT
         // (real Key Vault accepts it and uses the latest version), and
         // versioned IDs are equally valid configuration.
         Map<String, String> id = new HashMap<>();
-        for (String name : new String[] {"sections-kek", "landed-items-kek"})
+        for (String name : new String[] {"records-kek", "landed-items-kek"})
         {
             // Key Vault needs wrapKey/unwrapKey on a KEK; Lowkey also checks
             // encrypt/decrypt when wrapping.
@@ -151,7 +151,7 @@ class AzureKeyVaultIT
                 AzureKeyVaultKeyProvider.create(credential, emulatorHttp());
         TestKeys keys = localKeys();
         CommonSettings.Crypto crypto = crypto(keys, "azure-keyvault",
-                id.get("sections-kek"), id.get("landed-items-kek"),
+                id.get("records-kek"), id.get("landed-items-kek"),
                 id.get("signing"), new CommonSettings.Aws(null, null),
                 new CommonSettings.Vault(null, null, null, "transit", null));
         try (KeyMaterial material =
@@ -159,9 +159,9 @@ class AzureKeyVaultIT
         {
             // The wrapped key records the versioned key ID, so a rotated
             // key still unwraps old data.
-            assertThat(material.wrap().wrap(id.get("sections-kek"),
-                    new byte[32]).keyRef()).isEqualTo(id.get("sections-kek"));
-            assertUsable(material, keys, id.get("sections-kek"),
+            assertThat(material.wrap().wrap(id.get("records-kek"),
+                    new byte[32]).keyRef()).isEqualTo(id.get("records-kek"));
+            assertUsable(material, keys, id.get("records-kek"),
                     provider.publicKey(id.get("signing")));
         }
     }

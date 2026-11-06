@@ -31,63 +31,63 @@ final class DemoFiles
     /**
      * One item to deliver, and what the pipeline should do with it.
      *
-     * @param name           the file name
-     * @param content        the item's bytes
-     * @param status         the splitter's final status, {@code COMPLETED}
-     *                       or {@code FAILED}; for a push the landing node
-     *                       refuses, its HTTP status, such as {@code 413}
-     * @param sections       how many sections it should store
-     * @param failedSections how many of those can't be converted
-     * @param expected       what should happen, and why
-     * @param replaces       the earlier item's file name, if this one is a
-     *                       resubmission of it; null if not
-     * @param duplicateOf    the earlier item with the same bytes, which the
-     *                       landing node warns of; null if none
-     * @param repeats        how many of its sections an earlier item
-     *                       already sent: the same content has the same
-     *                       section ID (§7.3), so the same message ID, and
-     *                       downstream gets it once
+     * @param name          the file name
+     * @param content       the item's bytes
+     * @param status        the splitter's final status, {@code COMPLETED}
+     *                      or {@code FAILED}; for a push the landing node
+     *                      refuses, its HTTP status, such as {@code 413}
+     * @param records       how many records it should store
+     * @param failedRecords how many of those can't be converted
+     * @param expected      what should happen, and why
+     * @param replaces      the earlier item's file name, if this one is a
+     *                      resubmission of it; null if not
+     * @param duplicateOf   the earlier item with the same bytes, which the
+     *                      landing node warns of; null if none
+     * @param repeats       how many of its records an earlier item
+     *                      already sent: the same content has the same
+     *                      record ID (§7.3), so the same message ID, and
+     *                      downstream gets it once
      */
-    record DemoFile(String name, byte[] content, String status, int sections,
-            int failedSections, String expected, String replaces,
+    record DemoFile(String name, byte[] content, String status, int records,
+            int failedRecords, String expected, String replaces,
             String duplicateOf, int repeats)
     {
 
         /**
          * An item with no earlier item.
          *
-         * @param name           the file name
-         * @param content        the item's bytes
-         * @param status         the final status
-         * @param sections       how many sections it should store
-         * @param failedSections how many of those can't be converted
-         * @param expected       what should happen, and why
+         * @param name          the file name
+         * @param content       the item's bytes
+         * @param status        the final status
+         * @param records       how many records it should store
+         * @param failedRecords how many of those can't be converted
+         * @param expected      what should happen, and why
          */
-        DemoFile(String name, byte[] content, String status, int sections,
-                int failedSections, String expected)
+        DemoFile(String name, byte[] content, String status, int records,
+                int failedRecords, String expected)
         {
-            this(name, content, status, sections, failedSections, expected,
+            this(name, content, status, records, failedRecords, expected,
                     null, null);
         }
 
         /**
-         * An item none of whose sections an earlier item sent.
+         * An item none of whose records an earlier item sent.
          *
-         * @param name           the file name
-         * @param content        the item's bytes
-         * @param status         the final status
-         * @param sections       how many sections it should store
-         * @param failedSections how many of those can't be converted
-         * @param expected       what should happen, and why
-         * @param replaces       the earlier item it resubmits; null if none
-         * @param duplicateOf    the earlier item with the same bytes; null
-         *                       if none
+         * @param name          the file name
+         * @param content       the item's bytes
+         * @param status        the final status
+         * @param records       how many records it should store
+         * @param failedRecords how many of those can't be converted
+         * @param expected      what should happen, and why
+         * @param replaces      the earlier item it resubmits; null if none
+         * @param duplicateOf   the earlier item with the same bytes; null
+         *                      if none
          */
-        DemoFile(String name, byte[] content, String status, int sections,
-                int failedSections, String expected, String replaces,
+        DemoFile(String name, byte[] content, String status, int records,
+                int failedRecords, String expected, String replaces,
                 String duplicateOf)
         {
-            this(name, content, status, sections, failedSections, expected,
+            this(name, content, status, records, failedRecords, expected,
                     replaces, duplicateOf, 0);
         }
 
@@ -152,8 +152,8 @@ final class DemoFiles
         String uscdi = document("uscdi-v3-all-mappings.xml");
         String epic = document("epic-inpatient-ccd-deidentified.xml");
         // Each file gets its own copy of a sample, tagged in its title.
-        // Section IDs are keyed hashes of the content (design §7.3), so the
-        // same document in two files would be one section to a downstream
+        // Record IDs are keyed hashes of the content (design §7.3), so the
+        // same document in two files would be one record to a downstream
         // consumer, which isn't what this demo is about.
         String synthea4 = tagged(synthea, "file 4");
         String alice4 = tagged(alice, "file 4");
@@ -180,11 +180,11 @@ final class DemoFiles
                 new DemoFile("03-clinic-batch.xml",
                         batch(master, uscdi, epic), "COMPLETED", 3, 0,
                         "completes: a batch of 3 documents, each its own"
-                                + " section"),
+                                + " record"),
                 new DemoFile("04-batch-with-bad-document.xml",
                         batch(synthea4, unconvertible, uscdi4), "COMPLETED",
                         3, 1,
-                        "completes with 1 failed section: the middle"
+                        "completes with 1 failed record: the middle"
                                 + " document has an undeclared &nbsp;"
                                 + " entity, so it is stored in its original"
                                 + " form (CONVERT_XML_MALFORMED) and the"
@@ -209,8 +209,8 @@ final class DemoFiles
                                 + " item of its own, with an"
                                 + " item.duplicate_content warning naming"
                                 + " file 1's item; nothing is dropped, and"
-                                + " it splits to the same section ID, so"
-                                + " downstream gets that section once",
+                                + " it splits to the same record ID, so"
+                                + " downstream gets that record once",
                         null, "01-synthea-patient.xml", 1),
                 new DemoFile("09-truncated-batch-corrected.xml",
                         batch(epic5, tagged(master, "file 9")), "COMPLETED",
@@ -219,7 +219,7 @@ final class DemoFiles
                                 + " item in a .sdh-replaces file: landed and"
                                 + " linked to it, never in its place; both"
                                 + " documents complete, and the first,"
-                                + " unchanged, has file 5's section ID",
+                                + " unchanged, has file 5's record ID",
                         "05-truncated-batch.xml", null, 1));
     }
 
@@ -313,10 +313,10 @@ final class DemoFiles
 
     /**
      * The document with a tag added to its title, so its content (and
-     * section ID) differs from the sample's.
+     * record ID) differs from the sample's.
      *
      * @param document the document
-     * @param tag the tag
+     * @param tag      the tag
      * @return the tagged document
      */
     static String tagged(String document, String tag)
@@ -338,7 +338,7 @@ final class DemoFiles
 
     /**
      * Several documents in one file, inside a wrapper element: each
-     * ClinicalDocument becomes a section.
+     * ClinicalDocument becomes a record.
      *
      * @param documents the documents
      * @return the file's bytes
@@ -357,7 +357,7 @@ final class DemoFiles
      * A batch whose second document is cut off, so it never closes.
      *
      * @param complete the whole first document
-     * @param cutOff the cut-off second document
+     * @param cutOff   the cut-off second document
      * @return the file's bytes
      */
     static byte[] unclosedBatch(String complete, String cutOff)

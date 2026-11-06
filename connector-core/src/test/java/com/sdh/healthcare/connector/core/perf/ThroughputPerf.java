@@ -14,7 +14,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -74,7 +74,7 @@ import org.junit.jupiter.params.provider.MethodSource;
  * integration tests, because the results depend on the machine.
  *
  * <p>The pipeline is assembled as the connector assembles it, with
- * production defaults: commits every 10,000 sections or 512 MiB, one
+ * production defaults: commits every 10,000 records or 512 MiB, one
  * encrypt worker per core. The broker is replaced by a counter that
  * acknowledges at once, so broker latency is excluded; every message is
  * still sealed (ECDH-ES + ES256).
@@ -93,8 +93,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 class ThroughputPerf
 {
 
-    /** The KEK id for section data keys. */
-    static final String SECTIONS_KEK = "sections-kek/1";
+    /** The KEK id for record data keys. */
+    static final String RECORDS_KEK = "records-kek/1";
 
     /** The KEK id for landed item data keys. */
     static final String LANDED_KEK = "landed-items-kek/1";
@@ -153,7 +153,7 @@ class ThroughputPerf
         backend = PerfStorage.create(PerfSettings.storage());
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(256);
-        keys = new AesKeyWrapProvider(Map.of(SECTIONS_KEK,
+        keys = new AesKeyWrapProvider(Map.of(RECORDS_KEK,
                 generator.generateKey(), LANDED_KEK,
                 generator.generateKey()));
         signer = ec();
@@ -244,7 +244,7 @@ class ThroughputPerf
         Catalog catalog = backend.catalog();
         String namespace = "perf_" + format + "_"
                 + UUID.randomUUID().toString().substring(0, 8);
-        Table sections = IngestTables.sections(catalog, namespace);
+        Table records = IngestTables.records(catalog, namespace);
         Table source = LandingTables.landedItems(catalog, namespace);
         FencedCommitter committer = new FencedCommitter(new LeaseToken()
         {
@@ -259,18 +259,18 @@ class ThroughputPerf
             {
             }
         });
-        for (Table table : List.of(sections, source))
+        for (Table table : List.of(records, source))
         {
             committer.establish(table);
         }
-        SectionIds ids = new SectionIds(
-                IdKeys.loadOrCreate(sections, committer, keys, SECTIONS_KEK));
+        RecordIds ids = new RecordIds(
+                IdKeys.loadOrCreate(records, committer, keys, RECORDS_KEK));
         CountingPublisher publisher = new CountingPublisher();
         PipelineSettings settings = PipelineSettings
-                .defaults("perf", format, "perf", SECTIONS_KEK)
+                .defaults("perf", format, "perf", RECORDS_KEK)
                 .withSplit(split).withWorkers(workers);
         Clock clock = Clock.systemUTC();
-        try (IngestPipeline pipeline = new IngestPipeline(settings, sections,
+        try (IngestPipeline pipeline = new IngestPipeline(settings, records,
                 committer, keys, ids, SplitterRegistry.load(),
                 new MessageSealer(new ECDSASigner(
                         (ECPrivateKey) signer.getPrivate()), "connector",
@@ -298,22 +298,22 @@ class ThroughputPerf
 
             assertThat(outcome.result()).as("outcome")
                     .isEqualTo(ItemProcessor.Result.COMPLETED);
-            assertThat(outcome.sectionCount())
-                    .isEqualTo(generated.sections());
-            // Every generated section converts to JSON; a raw fallback
+            assertThat(outcome.recordCount())
+                    .isEqualTo(generated.records());
+            // Every generated record converts to JSON; a raw fallback
             // would measure the wrong path.
-            assertThat(pipeline.failedSectionCount(outcome.fileId()))
-                    .as("sections stored raw").isZero();
+            assertThat(pipeline.failedRecordCount(outcome.itemId()))
+                    .as("records stored raw").isZero();
             assertThat(publisher.count.get())
-                    .as("file.started + sections + file.completed")
-                    .isEqualTo(generated.sections() + 2);
+                    .as("file.started + records + file.completed")
+                    .isEqualTo(generated.records() + 2);
 
-            sections.refresh();
+            records.refresh();
             StageResult result = new StageResult(PerfSettings.CORE,
                     "bulk-" + format, "-", 1, generated.bytes(),
-                    generated.sections(), resources.wallNanos(), null,
+                    generated.records(), resources.wallNanos(), null,
                     resources,
-                    (double) (totalSize(sections) + landedBytes)
+                    (double) (totalSize(records) + landedBytes)
                             / generated.bytes());
             results.add(result);
             System.out.println(result.throughputRow());

@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import java.io.ByteArrayInputStream;
 import java.nio.ByteBuffer;
 import java.time.Clock;
@@ -86,7 +86,7 @@ class LandedItemSourceTest
         });
         committer.establish(table);
         return new ItemLander(table, committer, keys,
-                new SectionIds(new byte[32]),
+                new RecordIds(new byte[32]),
                 ItemLander.Settings.defaults("claims", KEK)
                         .withSizes(16, 64, 64), Clock.systemUTC())
                 .land(new NewItem(UUID.randomUUID(), ItemKind.FILE, null,

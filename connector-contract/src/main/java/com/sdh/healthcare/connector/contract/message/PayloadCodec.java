@@ -14,11 +14,11 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReceived;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
-import com.sdh.healthcare.connector.contract.position.SectionOrigin;
+import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -57,56 +57,56 @@ public final class PayloadCodec
         payload.put("v", ContractVersion.CURRENT);
         payload.put("type", message.type().wireName());
         payload.put("messageId", message.messageId());
-        payload.put("fileId", message.fileId().toString());
+        payload.put("itemId", message.itemId().toString());
         switch (message)
         {
             case FileStarted started ->
             {
                 payload.put("format", started.format());
-                payload.put("fileSize", started.fileSize());
+                payload.put("itemSize", started.itemSize());
                 payload.put("startedAt", started.startedAt().toString());
                 payload.put("connectorId", started.connectorId());
             }
-            case SectionInStorage section ->
+            case RecordInStorage record ->
             {
-                payload.put("sectionId", section.sectionId());
-                payload.put("seq", section.seq());
-                payload.put("sourceOffset", section.sourceOffset());
-                payload.put("sourceLength", section.sourceLength());
-                payload.put("format", section.format());
-                payload.put("contentType", section.contentType());
-                switch (section)
+                payload.put("recordId", record.recordId());
+                payload.put("seq", record.seq());
+                payload.put("sourceOffset", record.sourceOffset());
+                payload.put("sourceLength", record.sourceLength());
+                payload.put("format", record.format());
+                payload.put("contentType", record.contentType());
+                switch (record)
                 {
-                    case SectionStored stored when stored.mapping() != null ->
+                    case RecordStored stored when stored.mapping() != null ->
                             payload.put("mapping", stored.mapping());
-                    case SectionFailed failed ->
+                    case RecordFailed failed ->
                             payload.put("errorCode", failed.errorCode());
                     default ->
                     {
                         // Stored as split: no mapping.
                     }
                 }
-                if (section instanceof SectionFailed failed
+                if (record instanceof RecordFailed failed
                         && failed.errorAt() != null)
                 {
                     payload.put("errorLine", failed.errorAt().line());
                     payload.put("errorColumn", failed.errorAt().column());
                 }
-                payload.put("plaintextLength", section.plaintextLength());
-                payload.put("chunkCount", section.chunkCount());
-                if (section.origin() != null)
+                payload.put("plaintextLength", record.plaintextLength());
+                payload.put("chunkCount", record.chunkCount());
+                if (record.origin() != null)
                 {
-                    payload.put("origin", originFields(section.origin()));
+                    payload.put("origin", originFields(record.origin()));
                 }
-                payload.put("storage", storageFields(section.storage()));
+                payload.put("storage", storageFields(record.storage()));
             }
             case FileCompleted completed ->
             {
-                payload.put("sectionCount", completed.sectionCount());
-                payload.put("failedSectionCount",
-                        completed.failedSectionCount());
-                payload.put("fileSize", completed.fileSize());
-                payload.put("fileDigest", completed.fileDigest());
+                payload.put("recordCount", completed.recordCount());
+                payload.put("failedRecordCount",
+                        completed.failedRecordCount());
+                payload.put("itemSize", completed.itemSize());
+                payload.put("itemDigest", completed.itemDigest());
                 payload.put("startedAt", completed.startedAt().toString());
                 payload.put("completedAt",
                         completed.completedAt().toString());
@@ -138,9 +138,9 @@ public final class PayloadCodec
             {
                 payload.put("intake", result.intake());
                 payload.put("status", result.status());
-                payload.put("sectionCount", result.sectionCount());
-                payload.put("failedSectionCount",
-                        result.failedSectionCount());
+                payload.put("recordCount", result.recordCount());
+                payload.put("failedRecordCount",
+                        result.failedRecordCount());
                 if (result.failure() != null)
                 {
                     payload.put("failure", problemFields(result.failure()));
@@ -183,19 +183,19 @@ public final class PayloadCodec
             throw new UnsupportedContractVersionException(version);
         }
         MessageType type = MessageType.fromWire(text(payload, "type"));
-        UUID fileId = UUID.fromString(text(payload, "fileId"));
+        UUID itemId = UUID.fromString(text(payload, "itemId"));
         ConnectorMessage message =
                 switch (type)
                 {
                     case FILE_STARTED -> new FileStarted(
-                            fileId,
+                            itemId,
                             text(payload, "format"),
-                            number(payload, "fileSize"),
+                            number(payload, "itemSize"),
                             Instant.parse(text(payload, "startedAt")),
                             text(payload, "connectorId"));
-                    case SECTION_STORED -> new SectionStored(
-                            text(payload, "sectionId"),
-                            fileId,
+                    case RECORD_STORED -> new RecordStored(
+                            text(payload, "recordId"),
+                            itemId,
                             number(payload, "seq"),
                             number(payload, "sourceOffset"),
                             number(payload, "sourceLength"),
@@ -206,9 +206,9 @@ public final class PayloadCodec
                             Math.toIntExact(number(payload, "chunkCount")),
                             storage(payload),
                             origin(payload));
-                    case SECTION_FAILED -> new SectionFailed(
-                            text(payload, "sectionId"),
-                            fileId,
+                    case RECORD_FAILED -> new RecordFailed(
+                            text(payload, "recordId"),
+                            itemId,
                             number(payload, "seq"),
                             number(payload, "sourceOffset"),
                             number(payload, "sourceLength"),
@@ -221,15 +221,15 @@ public final class PayloadCodec
                             origin(payload),
                             position(payload, "errorLine", "errorColumn"));
                     case FILE_COMPLETED -> new FileCompleted(
-                            fileId,
-                            number(payload, "sectionCount"),
-                            number(payload, "failedSectionCount"),
-                            number(payload, "fileSize"),
-                            text(payload, "fileDigest"),
+                            itemId,
+                            number(payload, "recordCount"),
+                            number(payload, "failedRecordCount"),
+                            number(payload, "itemSize"),
+                            text(payload, "itemDigest"),
                             Instant.parse(text(payload, "startedAt")),
                             Instant.parse(text(payload, "completedAt")));
                     case ITEM_LANDED -> new ItemLanded(
-                            fileId,
+                            itemId,
                             text(payload, "intake"),
                             text(payload, "kind"),
                             number(payload, "size"),
@@ -238,7 +238,7 @@ public final class PayloadCodec
                             storage(payload),
                             uuid(payload, "replaces"));
                     case ITEM_RECEIVED -> new ItemReceived(
-                            fileId,
+                            itemId,
                             text(payload, "intake"),
                             text(payload, "kind"),
                             number(payload, "size"),
@@ -249,11 +249,11 @@ public final class PayloadCodec
                             texts(payload, "messageIds"),
                             texts(payload, "messageReplaces"));
                     case ITEM_RESULT -> new ItemResult(
-                            fileId,
+                            itemId,
                             text(payload, "intake"),
                             text(payload, "status"),
-                            number(payload, "sectionCount"),
-                            number(payload, "failedSectionCount"),
+                            number(payload, "recordCount"),
+                            number(payload, "failedRecordCount"),
                             payload.get("failure") instanceof Map<?, ?> failure
                                     ? problem((Map<String, Object>) failure)
                                     : null,
@@ -393,7 +393,7 @@ public final class PayloadCodec
     }
 
     /**
-     * The JSON fields of where a section or item is stored.
+     * The JSON fields of where a record or item is stored.
      *
      * @param ref where it is stored
      * @return its catalog, namespace, table, day, snapshot and KEK
@@ -411,23 +411,23 @@ public final class PayloadCodec
     }
 
     /**
-     * The JSON fields of a section's origin.
+     * The JSON fields of a record's origin.
      *
      * @param origin the origin
-     * @return its line and column in the section and in the file
+     * @return its line and column in the record and in the file
      */
-    private static Map<String, Object> originFields(SectionOrigin origin)
+    private static Map<String, Object> originFields(RecordOrigin origin)
     {
         Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("sectionLine", origin.inSection().line());
-        fields.put("sectionColumn", origin.inSection().column());
-        fields.put("sourceLine", origin.inFile().line());
-        fields.put("sourceColumn", origin.inFile().column());
+        fields.put("recordLine", origin.inRecord().line());
+        fields.put("recordColumn", origin.inRecord().column());
+        fields.put("sourceLine", origin.inItem().line());
+        fields.put("sourceColumn", origin.inItem().column());
         return fields;
     }
 
     /**
-     * Reads where a section is stored from the payload's {@code storage}
+     * Reads where a record is stored from the payload's {@code storage}
      * field.
      *
      * @param payload the payload's fields
@@ -446,25 +446,25 @@ public final class PayloadCodec
     }
 
     /**
-     * Reads a section's origin from the payload's {@code origin} field.
+     * Reads a record's origin from the payload's {@code origin} field.
      *
      * @param payload the payload's fields
      * @return the origin; null if the message has none (a connector before
      *         contract 2.1) or it is incomplete
      */
     @SuppressWarnings("unchecked")
-    private static SectionOrigin origin(Map<String, Object> payload)
+    private static RecordOrigin origin(Map<String, Object> payload)
     {
         if (!(payload.get("origin") instanceof Map<?, ?> origin))
         {
             return null;
         }
         Map<String, Object> fields = (Map<String, Object>) origin;
-        SourcePosition inSection =
-                position(fields, "sectionLine", "sectionColumn");
-        SourcePosition inFile = position(fields, "sourceLine", "sourceColumn");
-        return inSection == null || inFile == null
-                ? null : new SectionOrigin(inSection, inFile);
+        SourcePosition inRecord =
+                position(fields, "recordLine", "recordColumn");
+        SourcePosition inItem = position(fields, "sourceLine", "sourceColumn");
+        return inRecord == null || inItem == null
+                ? null : new RecordOrigin(inRecord, inItem);
     }
 
     /**

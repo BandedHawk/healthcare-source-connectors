@@ -9,22 +9,22 @@ package com.sdh.healthcare.connector.core.convert;
 import java.util.Map;
 
 /**
- * What the stored bytes of a section are (design §6.4): JSON made by a
- * converter, or the section as split, in its original format. It is stored
- * with every section, in the {@code content_type} and {@code mapping} columns,
- * and carried in the message announcing the section, so whatever reads the
- * section knows how to read it.
+ * What the stored bytes of a record are (design §6.4): JSON made by a
+ * converter, or the record as split, in its original format. It is stored
+ * with every record, in the {@code content_type} and {@code mapping} columns,
+ * and carried in the message announcing the record, so whatever reads the
+ * record knows how to read it.
  * <p>
- * Create one with {@link #json} for a converted section, or with {@link #raw}
- * for a section stored as split: one in a format without a converter, or one
+ * Create one with {@link #json} for a converted record, or with {@link #raw}
+ * for a record stored as split: one in a format without a converter, or one
  * whose conversion failed.
  *
  * @param contentType the media type of the stored bytes:
- *                    {@value #JSON} for a converted section, otherwise the
+ *                    {@value #JSON} for a converted record, otherwise the
  *                    format's own, such as {@code text/csv}
  * @param mapping     the name and version of the converter's JSON, such as
- *                    {@code "csv-row/1"} ({@link SectionConverter#mapping()});
- *                    {@code null} for a section stored as split
+ *                    {@code "csv-row/1"} ({@link RecordConverter#mapping()});
+ *                    {@code null} for a record stored as split
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -32,11 +32,11 @@ import java.util.Map;
 public record Representation(String contentType, String mapping)
 {
 
-    /** The media type of a converted section: JSON. */
+    /** The media type of a converted record: JSON. */
     public static final String JSON = "application/json";
 
     /**
-     * The media type of a section stored as split, by the name of its format.
+     * The media type of a record stored as split, by the name of its format.
      * A format not listed here, such as {@code delimited} or one added as a
      * plugin, is stored as {@code application/octet-stream}: bytes of no
      * stated type.
@@ -51,10 +51,10 @@ public record Representation(String contentType, String mapping)
             "parquet", JSON);
 
     /**
-     * The representation of a converted section.
+     * The representation of a converted record.
      *
      * @param mapping the name and version of the converter's JSON, from
-     *                {@link SectionConverter#mapping()}
+     *                {@link RecordConverter#mapping()}
      * @return a representation with the media type {@value #JSON} and that
      *         mapping
      */
@@ -64,10 +64,10 @@ public record Representation(String contentType, String mapping)
     }
 
     /**
-     * The representation of a section stored as split, in its original
+     * The representation of a record stored as split, in its original
      * format.
      *
-     * @param format the name of the section's format, such as {@code "csv"}
+     * @param format the name of the record's format, such as {@code "csv"}
      * @return a representation with the format's media type, or
      *         {@code application/octet-stream} for a format with none listed,
      *         and no mapping

@@ -6,10 +6,10 @@
  */
 package com.sdh.healthcare.connector.file.admin;
 
-import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.inbox.InboxTables;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
@@ -49,10 +49,10 @@ final class AdminContext implements AutoCloseable
     private Catalog landingCatalog;
 
     /** The splitter's ID key, once loaded. */
-    private SectionIds ids;
+    private RecordIds ids;
 
     /** The landing node's ID key, once loaded. */
-    private SectionIds landingIds;
+    private RecordIds landingIds;
 
     /** The read-only lease database pool, once opened. */
     private HikariDataSource leaseDb;
@@ -150,9 +150,9 @@ final class AdminContext implements AutoCloseable
     /**
      * Loads a table, never creating it.
      *
-     * @param catalog the catalog
+     * @param catalog   the catalog
      * @param namespace the namespace
-     * @param name the table name
+     * @param name      the table name
      * @return the table
      * @throws IllegalStateException if the table doesn't exist
      */
@@ -170,13 +170,13 @@ final class AdminContext implements AutoCloseable
     }
 
     /**
-     * The sections table.
+     * The records table.
      *
      * @return the table
      */
-    Table sections()
+    Table records()
     {
-        return table(SectionsTable.DEFAULT_NAME);
+        return table(RecordsTable.DEFAULT_NAME);
     }
 
     /**
@@ -207,11 +207,11 @@ final class AdminContext implements AutoCloseable
      * @return the ID key
      * @throws Exception if the key can't be loaded or unwrapped
      */
-    SectionIds landingIds() throws Exception
+    RecordIds landingIds() throws Exception
     {
         if (landingIds == null)
         {
-            landingIds = new SectionIds(
+            landingIds = new RecordIds(
                     IdKeys.load(landedItems(), keys().wrap()));
         }
         return landingIds;
@@ -223,11 +223,11 @@ final class AdminContext implements AutoCloseable
      * @return the ID key
      * @throws Exception if the key can't be loaded or unwrapped
      */
-    SectionIds ids() throws Exception
+    RecordIds ids() throws Exception
     {
         if (ids == null)
         {
-            ids = new SectionIds(IdKeys.load(sections(), keys().wrap()));
+            ids = new RecordIds(IdKeys.load(records(), keys().wrap()));
         }
         return ids;
     }

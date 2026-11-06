@@ -1,4 +1,4 @@
-# A pipeline's splitter: reads items from the bronze bucket, and stores sections in the silver bucket, sealed to
+# A pipeline's splitter: reads items from the bronze bucket, and stores records in the silver bucket, sealed to
 # the FHIR stage (the recipient). Mounted from the ConfigMap splitter-config, as the splitter README describes.
 # ${...} in capitals with a prefix are filled in by scripts/sandbox.sh; ${S3_SECRET_ACCESS_KEY} and
 # ${SDH_LEASE_JDBC_PASSWORD} are left for Spring, from the secret splitter-env. Keys are in the secret
@@ -48,7 +48,7 @@ sdh:
     sign-provider: vault-transit
     vault: { address: "http://vault.sdh-infra.svc:8200", token-file: /run/secrets/vault-token }
     keys:
-      sections-kek: ${PIPELINE}-sections
+      records-kek: ${PIPELINE}-records
       landed-items-kek: ${PIPELINE}-landed-items
       signing: { kid: splitter-${PIPELINE}, key-ref: ${PIPELINE}-splitter-signing }
       recipient: { kid: fhir-${PIPELINE}, pem: /run/secrets/recipient.pem, sha256: "${RECIPIENT_SHA256}" }
@@ -56,6 +56,6 @@ sdh:
       landing-signer: { kid: landing-${PIPELINE}, pem: /run/secrets/landing-signer.pem }
   queue:
     type: kafka
-    uri: "kafka:${PIPELINE}.sections?brokers=${KAFKA_BROKERS}"
+    uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}"
   telemetry:
     otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }

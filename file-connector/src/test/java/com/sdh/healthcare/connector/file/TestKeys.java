@@ -45,8 +45,8 @@ public final class TestKeys
     /** The passphrase of both signing keys. */
     public static final String SIGNING_PASSPHRASE = "sign-secret";
 
-    /** The sections KEK's alias. */
-    public static final String SECTIONS = "sections-kek/1";
+    /** The records KEK's alias. */
+    public static final String RECORDS = "records-kek/1";
 
     /** The landed items KEK's alias. */
     public static final String LANDED = "landed-items-kek/1";
@@ -127,7 +127,7 @@ public final class TestKeys
         store.load(null, null);
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(256);
-        for (String alias : new String[] {SECTIONS, LANDED})
+        for (String alias : new String[] {RECORDS, LANDED})
         {
             store.setEntry(alias,
                     new KeyStore.SecretKeyEntry(generator.generateKey()),
@@ -161,15 +161,15 @@ public final class TestKeys
     /**
      * The splitter's key settings.
      *
-     * @param recipientPin the downstream recipient key's pinned fingerprint
-     * @param signingPem the splitter's signing key
+     * @param recipientPin  the downstream recipient key's pinned fingerprint
+     * @param signingPem    the splitter's signing key
      * @param signingKeyRef the KMS signing key, or null for the local one
      * @return the settings
      */
     public CommonSettings.Keys splitterKeys(String recipientPin,
             Path signingPem, String signingKeyRef)
     {
-        return new CommonSettings.Keys(SECTIONS, LANDED,
+        return new CommonSettings.Keys(RECORDS, LANDED,
                 new CommonSettings.Signing("connector-2026", signingPem,
                         SIGNING_PASSPHRASE, signingKeyRef),
                 new CommonSettings.Recipient("downstream-2026", recipientPem,
@@ -184,8 +184,8 @@ public final class TestKeys
      * Writes a key as an encrypted PKCS#8 PEM with owner-only permissions,
      * as an operator would keep it.
      *
-     * @param file the file to write
-     * @param key the private key
+     * @param file       the file to write
+     * @param key        the private key
      * @param passphrase the passphrase to encrypt it with
      * @return the file
      * @throws Exception if the key can't be encrypted or written
@@ -232,7 +232,7 @@ public final class TestKeys
      * AES-256-CBC), the same scheme {@code openssl pkcs8 -topk8} uses by
      * default.
      *
-     * @param key the private key
+     * @param key        the private key
      * @param passphrase the passphrase
      * @return the DER of the EncryptedPrivateKeyInfo
      * @throws Exception if encryption fails
@@ -270,7 +270,7 @@ public final class TestKeys
     /**
      * A DER tag-length-value, for lengths up to 65535.
      *
-     * @param tag the tag
+     * @param tag   the tag
      * @param parts the value's parts, in order
      * @return the encoding
      */
@@ -318,7 +318,7 @@ public final class TestKeys
      * DER as PEM with 64-character lines.
      *
      * @param type the PEM label
-     * @param der the encoding
+     * @param der  the encoding
      * @return the PEM text
      */
     static String pem(String type, byte[] der)

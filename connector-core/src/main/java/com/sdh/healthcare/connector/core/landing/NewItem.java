@@ -26,7 +26,7 @@ import java.util.UUID;
  *                        none
  * @param replaces        the item this one replaces, when its producer says so;
  *                        null otherwise
- * @param records         where each message starts, for a message batch; null
+ * @param messageIndex    where each message starts, for a message batch; null
  *                        for other items
  * @param messageRefs     each message's broker ID, for a message batch (null
  *                        for a message without one), kept only encrypted; null
@@ -40,7 +40,7 @@ import java.util.UUID;
  * @since 0.1.0
  */
 public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
-        String originalName, UUID replaces, RecordIndex records,
+        String originalName, UUID replaces, MessageIndex messageIndex,
         List<String> messageRefs, List<String> messageReplaces)
 {
 
@@ -52,7 +52,7 @@ public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
      * @param source          where it came from; null if not known
      * @param originalName    its name or path; null if it has none
      * @param replaces        the item it replaces; null if none
-     * @param records         where each message starts, for a message batch;
+     * @param messageIndex    where each message starts, for a message batch;
      *                        null for other items
      * @param messageRefs     each message's broker ID; null if not recorded
      * @param messageReplaces the message each message replaces; null if none
@@ -68,22 +68,22 @@ public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
     {
         Objects.requireNonNull(itemId, "itemId");
         Objects.requireNonNull(kind, "kind");
-        if ((records != null) != (kind == ItemKind.MESSAGE_BATCH))
+        if ((messageIndex != null) != (kind == ItemKind.MESSAGE_BATCH))
         {
             throw new IllegalArgumentException(
-                    "A message batch, and only one, has a record index");
+                    "A message batch, and only one, has a message index");
         }
-        if (messageRefs != null && (records == null
-                || messageRefs.size() != records.count()))
+        if (messageRefs != null && (messageIndex == null
+                || messageRefs.size() != messageIndex.count()))
         {
             throw new IllegalArgumentException(
-                    "A batch's broker IDs must match its record index");
+                    "A batch's broker IDs must match its message index");
         }
-        if (messageReplaces != null && (records == null
-                || messageReplaces.size() != records.count()))
+        if (messageReplaces != null && (messageIndex == null
+                || messageReplaces.size() != messageIndex.count()))
         {
             throw new IllegalArgumentException(
-                    "A batch's links must match its record index");
+                    "A batch's links must match its message index");
         }
         messageRefs = messageRefs == null ? null
                 : Collections.unmodifiableList(
@@ -101,15 +101,15 @@ public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
      * @param source       where it came from; null if not known
      * @param originalName its name or path; null if it has none
      * @param replaces     the item it replaces; null if none
-     * @param records      where each message starts, for a message batch;
+     * @param messageIndex where each message starts, for a message batch;
      *                     null for other items
      * @param messageRefs  each message's broker ID; null if not recorded
      */
     public NewItem(UUID itemId, ItemKind kind, SourceRef source,
-            String originalName, UUID replaces, RecordIndex records,
+            String originalName, UUID replaces, MessageIndex messageIndex,
             List<String> messageRefs)
     {
-        this(itemId, kind, source, originalName, replaces, records,
+        this(itemId, kind, source, originalName, replaces, messageIndex,
                 messageRefs, null);
     }
 
@@ -121,13 +121,13 @@ public record NewItem(UUID itemId, ItemKind kind, SourceRef source,
      * @param source       where it came from; null if not known
      * @param originalName its name or path; null if it has none
      * @param replaces     the item it replaces; null if none
-     * @param records      where each message starts, for a message batch;
+     * @param messageIndex where each message starts, for a message batch;
      *                     null for other items
      */
     public NewItem(UUID itemId, ItemKind kind, SourceRef source,
-            String originalName, UUID replaces, RecordIndex records)
+            String originalName, UUID replaces, MessageIndex messageIndex)
     {
-        this(itemId, kind, source, originalName, replaces, records, null,
+        this(itemId, kind, source, originalName, replaces, messageIndex, null,
                 null);
     }
 

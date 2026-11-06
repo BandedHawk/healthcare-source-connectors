@@ -8,8 +8,8 @@ package com.sdh.healthcare.connector.core.split.builtin;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import com.sdh.healthcare.connector.core.split.Section;
-import com.sdh.healthcare.connector.core.split.SectionSplitter;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
+import com.sdh.healthcare.connector.core.split.RecordSplitter;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
@@ -33,20 +33,20 @@ import java.util.regex.Pattern;
  * <li>{@code delimited.literal}: treat the pattern as plain text (default
  * false)</li>
  * <li>{@code delimited.mode}: {@code START} a matching line begins a
- * section; {@code END} it ends one (inclusive); {@code SEPARATOR} it sits
- * between sections and is dropped</li>
+ * record; {@code END} it ends one (inclusive); {@code SEPARATOR} it sits
+ * between records and is dropped</li>
  * <li>{@code delimited.charset}: used to decode lines for matching
  * (default UTF-8)</li>
  * </ul>
  * <p>
- * Lines that are empty or whitespace only never start a section. In START
- * mode, any lines before the first match become a section of their own, so
+ * Lines that are empty or whitespace only never start a record. In START
+ * mode, any lines before the first match become a record of their own, so
  * nothing is dropped.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class DelimitedSplitter implements SectionSplitter
+public final class DelimitedSplitter implements RecordSplitter
 {
 
     /** The format's name. */
@@ -62,13 +62,13 @@ public final class DelimitedSplitter implements SectionSplitter
     /** What a matching line does. */
     enum Mode
     {
-        /** It begins a section. */
+        /** It begins a record. */
         START,
 
-        /** It ends a section, and belongs to it. */
+        /** It ends a record, and belongs to it. */
         END,
 
-        /** It sits between sections, and is dropped. */
+        /** It sits between records, and is dropped. */
         SEPARATOR
     }
 
@@ -146,7 +146,7 @@ public final class DelimitedSplitter implements SectionSplitter
     {
         return new Session(new ByteScanner(source, from.offset(),
                 config.readBufferBytes()), settings(config),
-                config.limits().maxSectionBytes());
+                config.limits().maxRecordBytes());
     }
 
     /**
@@ -171,13 +171,13 @@ public final class DelimitedSplitter implements SectionSplitter
         /** The settings. */
         private final Settings settings;
 
-        /** The largest section allowed, in bytes. */
+        /** The largest record allowed, in bytes. */
         private final long max;
 
         /** The start of the current line, for matching. */
         private final byte[] window;
 
-        /** A line read but not yet used: the start of the next section. */
+        /** A line read but not yet used: the start of the next record. */
         private Line pending;
 
         /**
@@ -185,7 +185,7 @@ public final class DelimitedSplitter implements SectionSplitter
          *
          * @param scanner  reads the file
          * @param settings the settings
-         * @param max      the largest section allowed
+         * @param max      the largest record allowed
          */
         Session(ByteScanner scanner, Settings settings, long max)
         {
@@ -245,13 +245,13 @@ public final class DelimitedSplitter implements SectionSplitter
         /**
          * {@inheritDoc}
          *
-         * @throws SplitException if a section is too large
+         * @throws SplitException if a record is too large
          */
         @Override
-        public Optional<Section> next() throws IOException, SplitException
+        public Optional<SplitRecord> next() throws IOException, SplitException
         {
-            long sectionStart = -1;
-            long sectionEnd = -1;
+            long recordStart = -1;
+            long recordEnd = -1;
             boolean content = false;
             while (true)
             {
@@ -260,8 +260,8 @@ public final class DelimitedSplitter implements SectionSplitter
                 if (line == null)
                 {
                     return content
-                            ? Optional.of(Section.ofRange(sectionStart,
-                                    sectionEnd - sectionStart,
+                            ? Optional.of(SplitRecord.ofRange(recordStart,
+                                    recordEnd - recordStart,
                                     ResumePoint.at(scanner.position())))
                             : Optional.empty();
                 }
@@ -272,7 +272,7 @@ public final class DelimitedSplitter implements SectionSplitter
                         if (line.match() && content)
                         {
                             pending = line;
-                            return emit(sectionStart, sectionEnd,
+                            return emit(recordStart, recordEnd,
                                     line.start());
                         }
                     }
@@ -282,10 +282,10 @@ public final class DelimitedSplitter implements SectionSplitter
                         {
                             if (content)
                             {
-                                return emit(sectionStart, sectionEnd,
+                                return emit(recordStart, recordEnd,
                                         line.end());
                             }
-                            sectionStart = -1;
+                            recordStart = -1;
                             continue;
                         }
                     }
@@ -293,40 +293,40 @@ public final class DelimitedSplitter implements SectionSplitter
                     {
                     }
                 }
-                if (sectionStart < 0 || !content)
+                if (recordStart < 0 || !content)
                 {
                     if (line.blank())
                     {
                         continue;
                     }
-                    sectionStart = line.start();
+                    recordStart = line.start();
                 }
-                sectionEnd = line.end();
+                recordEnd = line.end();
                 content = true;
-                if (sectionEnd - sectionStart > max)
+                if (recordEnd - recordStart > max)
                 {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
-                            sectionStart);
+                    throw new SplitException(ErrorCode.LIMIT_RECORD_SIZE,
+                            recordStart);
                 }
                 if (settings.mode() == Mode.END && line.match())
                 {
-                    return emit(sectionStart, sectionEnd, sectionEnd);
+                    return emit(recordStart, recordEnd, recordEnd);
                 }
             }
         }
 
         /**
-         * A section.
+         * A record.
          *
          * @param start  its source offset
          * @param end    the offset after it
          * @param resume where splitting continues
-         * @return the section
+         * @return the record
          */
-        private static Optional<Section> emit(long start, long end,
+        private static Optional<SplitRecord> emit(long start, long end,
                 long resume)
         {
-            return Optional.of(Section.ofRange(start, end - start,
+            return Optional.of(SplitRecord.ofRange(start, end - start,
                     ResumePoint.at(resume)));
         }
     }

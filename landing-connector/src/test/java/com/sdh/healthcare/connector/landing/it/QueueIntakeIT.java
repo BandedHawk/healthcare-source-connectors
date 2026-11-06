@@ -17,9 +17,11 @@ import com.azure.messaging.servicebus.ServiceBusClientBuilder;
 import com.azure.messaging.servicebus.ServiceBusMessage;
 import com.azure.messaging.servicebus.ServiceBusSenderClient;
 import com.azure.storage.blob.BlobContainerClientBuilder;
+import com.google.api.gax.core.CredentialsProvider;
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.GrpcTransportChannel;
 import com.google.api.gax.rpc.FixedTransportChannelProvider;
+import com.google.api.gax.rpc.TransportChannelProvider;
 import com.google.cloud.pubsub.v1.Publisher;
 import com.google.cloud.pubsub.v1.SubscriptionAdminClient;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
@@ -31,28 +33,33 @@ import com.google.pubsub.v1.Subscription;
 import com.google.pubsub.v1.SubscriptionName;
 import com.google.pubsub.v1.TopicName;
 import com.nimbusds.jose.crypto.ECDSASigner;
+import com.sdh.healthcare.connector.broker.receive.ArtemisReceiveRoute;
+import com.sdh.healthcare.connector.broker.receive.BrokerKind;
+import com.sdh.healthcare.connector.broker.receive.BrokerWatch;
+import com.sdh.healthcare.connector.broker.receive.CamelReceiveRoute;
+import com.sdh.healthcare.connector.broker.receive.EventHubsSupport;
+import com.sdh.healthcare.connector.broker.receive.ReceiveProperties;
+import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingLedger;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.intake.Announcer;
 import com.sdh.healthcare.connector.landing.intake.BatchService;
 import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
-import com.sdh.healthcare.connector.landing.route.ArtemisIntakeRoute;
-import com.sdh.healthcare.connector.landing.route.BrokerWatch;
-import com.sdh.healthcare.connector.landing.route.EventHubsSupport;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
-import com.sdh.healthcare.connector.landing.route.QueueIntakeRoute;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import jakarta.jms.Connection;
@@ -155,23 +162,23 @@ class QueueIntakeIT
             new RetryPolicy(1, Duration.ofMillis(1), Duration.ofMillis(1));
 
     /** Small batches, closed quickly. */
-    static final LandingProperties.Batch BATCH = new LandingProperties.Batch(
+    static final ReceiveProperties.Batch BATCH = new ReceiveProperties.Batch(
             10, DataSize.ofKilobytes(64), Duration.ofMillis(500));
 
     /** No RabbitMQ connection. */
-    static final LandingProperties.Rabbitmq NO_RABBIT =
-            new LandingProperties.Rabbitmq(null, "/", null, null, false);
+    static final ReceiveProperties.Rabbitmq NO_RABBIT =
+            new ReceiveProperties.Rabbitmq(null, "/", null, null, false);
 
     /** How often the broker is checked. */
     static final Duration CHECK = Duration.ofSeconds(30);
 
     /** No Artemis connection. */
-    static final LandingProperties.Artemis NO_ARTEMIS =
-            new LandingProperties.Artemis(null, null, null, null);
+    static final ReceiveProperties.Artemis NO_ARTEMIS =
+            new ReceiveProperties.Artemis(null, null, null, null);
 
     /** No Event Hubs checkpoint store. */
-    static final LandingProperties.Eventhubs NO_EVENTHUBS =
-            new LandingProperties.Eventhubs(null, null, null);
+    static final ReceiveProperties.Eventhubs NO_EVENTHUBS =
+            new ReceiveProperties.Eventhubs(null, null, null);
 
     /** Thrown by the publisher of a node that is to crash. */
     static final class Crash extends Error
@@ -191,7 +198,7 @@ class QueueIntakeIT
     AesKeyWrapProvider keys;
 
     /** Makes the hashes and MACs. */
-    final SectionIds ids = new SectionIds(new byte[32]);
+    final RecordIds ids = new RecordIds(new byte[32]);
 
     /** The last lease epoch handed out. */
     long epoch;
@@ -355,8 +362,8 @@ class QueueIntakeIT
                 "rabbitmq:4.2.9-management-alpine"))
         {
             rabbit.start();
-            LandingProperties.Rabbitmq connection =
-                    new LandingProperties.Rabbitmq(rabbit.getHost() + ":"
+            ReceiveProperties.Rabbitmq connection =
+                    new ReceiveProperties.Rabbitmq(rabbit.getHost() + ":"
                             + rabbit.getAmqpPort(), "/",
                             rabbit.getAdminUsername(),
                             rabbit.getAdminPassword(), false);
@@ -383,7 +390,7 @@ class QueueIntakeIT
                                 Duration.ofHours(1), CHECK, connection,
                                 NO_ARTEMIS, NO_EVENTHUBS));
                 crashThenRecover(settings, camel -> camel.getRegistry().bind(
-                        BrokerSettings.RABBITMQ_BEAN, factory));
+                        ReceiveSettings.RABBITMQ_BEAN, factory));
             }
             finally
             {
@@ -405,8 +412,8 @@ class QueueIntakeIT
                 "apache/activemq-artemis:2.44.0-alpine"))
         {
             artemis.start();
-            LandingProperties.Artemis connection =
-                    new LandingProperties.Artemis(artemis.getBrokerUrl(),
+            ReceiveProperties.Artemis connection =
+                    new ReceiveProperties.Artemis(artemis.getBrokerUrl(),
                             artemis.getUser(), artemis.getPassword(), "hl7");
             try (ActiveMQConnectionFactory factory =
                     new ActiveMQConnectionFactory(connection.brokerUrl(),
@@ -455,9 +462,10 @@ class QueueIntakeIT
                     .usePlaintext().build();
             try
             {
-                var transport = FixedTransportChannelProvider.create(
-                        GrpcTransportChannel.create(channel));
-                var none = NoCredentialsProvider.create();
+                TransportChannelProvider transport =
+                        FixedTransportChannelProvider.create(
+                                GrpcTransportChannel.create(channel));
+                CredentialsProvider none = NoCredentialsProvider.create();
                 TopicName topic = TopicName.of("sdh-it", "hl7");
                 SubscriptionName subscription =
                         SubscriptionName.of("sdh-it", "hl7-landing");
@@ -617,8 +625,8 @@ class QueueIntakeIT
             String storage = azurite.getConnectionString();
             new BlobContainerClientBuilder().connectionString(storage)
                     .containerName("checkpoints").buildClient().create();
-            LandingProperties.Eventhubs checkpoints =
-                    new LandingProperties.Eventhubs(storage, null,
+            ReceiveProperties.Eventhubs checkpoints =
+                    new ReceiveProperties.Eventhubs(storage, null,
                             "checkpoints");
             BrokerSettings settings = BrokerSettings.of(
                     new LandingProperties.Broker("eventhubs",
@@ -710,7 +718,7 @@ class QueueIntakeIT
         try
         {
             items.refresh();
-            return LandedItems.recordKeys(items, INTAKE, Instant.EPOCH);
+            return LandedItems.messageKeys(items, INTAKE, Instant.EPOCH);
         }
         catch (Exception failure)
         {
@@ -734,7 +742,7 @@ class QueueIntakeIT
         {
             for (Record row : rows)
             {
-                if (LandedItems.records(row).isPresent())
+                if (LandedItems.messageIndex(row).isPresent())
                 {
                     links.addAll(LandedItems.messageReplaces(row, keys)
                             .orElseThrow());
@@ -833,18 +841,21 @@ class QueueIntakeIT
                     announcer, fatal::add, Clock.systemUTC(),
                     settings.dedupWindow());
             setup.accept(camel);
-            if (settings.kind() == BrokerSettings.Kind.SQS)
+            ReceiveSettings receive = settings.receive();
+            if (receive.kind() == BrokerKind.SQS)
             {
-                new BrokerWatch(settings, new IntakeHealth(INTAKE,
-                        System::nanoTime), camel).bind(null);
+                new BrokerWatch(IntakeRoute.ROUTE_ID, receive,
+                        new IntakeHealth(INTAKE, System::nanoTime), camel)
+                        .bind(null);
             }
-            RouteBuilder route = settings.kind()
-                    == BrokerSettings.Kind.ARTEMIS
-                    ? new ArtemisIntakeRoute(INTAKE, settings, service,
+            RouteBuilder route = receive.kind() == BrokerKind.ARTEMIS
+                    ? new ArtemisReceiveRoute(IntakeRoute.ROUTE_ID,
+                            Fields.of(Attr.INTAKE, INTAKE), receive, service,
                             new IntakeHealth(INTAKE, System::nanoTime),
                             Duration.ofMillis(50), Duration.ofMillis(200))
-                    : new QueueIntakeRoute(settings, service,
-                            Duration.ofMillis(50), Duration.ofMillis(200));
+                    : new CamelReceiveRoute(IntakeRoute.ROUTE_ID, receive,
+                            service, Duration.ofMillis(50),
+                            Duration.ofMillis(200));
             camel.addRoutes(route);
             camel.start();
             service.recoverAtStartup();

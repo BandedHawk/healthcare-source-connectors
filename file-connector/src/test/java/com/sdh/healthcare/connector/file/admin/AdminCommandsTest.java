@@ -100,7 +100,7 @@ class AdminCommandsTest
     static final String GOOD = "1,alpha\n2,beta\n3,gamma\n";
 
     /**
-     * Seven sections, so at least one batch of five is committed before
+     * Seven records, so at least one batch of five is committed before
      * the unterminated quote fails the file.
      */
     static final String BAD =
@@ -134,13 +134,13 @@ class AdminCommandsTest
         CONFIG.put("sdh.storage.catalog-name", TestLanding.CATALOG);
         CATALOG.forEach((key, value) ->
                 CONFIG.put("sdh.storage.catalog[" + key + "]", value));
-        CONFIG.put("sdh.storage.commit.max-sections", "5");
+        CONFIG.put("sdh.storage.commit.max-records", "5");
         CONFIG.put("sdh.lease.jdbc.url", jdbc);
         CONFIG.put("sdh.lease.jdbc.username", "postgres");
         CONFIG.put("sdh.lease.jdbc.password", "postgres");
         CONFIG.put("sdh.crypto.keystore.path", KEYS.keystore.toString());
         CONFIG.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
-        CONFIG.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
+        CONFIG.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
         CONFIG.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
         CONFIG.put("sdh.crypto.keys.inbox.kid", TestKeys.INBOX_KID);
         CONFIG.put("sdh.crypto.keys.inbox.pem", KEYS.inboxPem.toString());
@@ -250,7 +250,7 @@ class AdminCommandsTest
             }
         }
         assertThat(FATAL).isEmpty();
-        assertThat(started).extracting(FileStarted::fileId)
+        assertThat(started).extracting(FileStarted::itemId)
                 .containsExactly(good.itemId(), bad.itemId());
         assertThat(runtime.inbox().backlog()).isZero();
         goodId = good.itemId();
@@ -261,8 +261,8 @@ class AdminCommandsTest
      * What a command did.
      *
      * @param status the exit status
-     * @param out the standard output
-     * @param err the standard error
+     * @param out    the standard output
+     * @param err    the standard error
      */
     record Result(int status, String out, String err)
     {
@@ -271,7 +271,7 @@ class AdminCommandsTest
     /**
      * Runs an admin command with the connector's settings.
      *
-     * @param env the environment
+     * @param env  the environment
      * @param args the command and its options
      * @return what the command did
      */
@@ -345,10 +345,10 @@ class AdminCommandsTest
         assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(
                 dir.resolve(badId.toString())))).isEqualTo("rw-------");
 
-        // The tail starts right after the last stored section: at least one
+        // The tail starts right after the last stored record: at least one
         // batch of five was committed.
         int from = (int) RestoreCommand.unprocessedFrom(
-                runtime.tables().sections(), badId);
+                runtime.tables().records(), badId);
         assertThat(BAD.substring(0, from)).endsWith("\n");
         assertThat(BAD.substring(0, from).chars()
                 .filter(character -> character == '\n').count())
@@ -368,9 +368,9 @@ class AdminCommandsTest
                 badId + ".from-" + from);
 
         assertThat(log.getAll())
-                .contains("admin.restore operator=alice file_id=" + badId)
+                .contains("admin.restore operator=alice item_id=" + badId)
                 .contains("result=ok")
-                .contains("admin.restore operator=alice file_id=" + badId
+                .contains("admin.restore operator=alice item_id=" + badId
                         + " table=landed_items offset=0 result=failed"
                         + " reason=FileAlreadyExistsException");
     }

@@ -11,9 +11,9 @@ import static com.sdh.healthcare.connector.core.landing.LandingTables.*;
 import com.nimbusds.jose.util.JSONArrayUtils;
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
-import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
@@ -84,7 +84,7 @@ public final class LandedItems
      *                                 digest doesn't match
      */
     public static Record read(Table table, UUID itemId, KeyProvider keys,
-            SectionIds ids, OutputStream output) throws IOException
+            RecordIds ids, OutputStream output) throws IOException
     {
         Record summary = summary(table, itemId).orElseThrow(
                 () -> new IOException("Item isn't fully landed"));
@@ -125,8 +125,8 @@ public final class LandedItems
                                 bytes(row.getField(BDK_WRAPPED)))));
                 int length = (int) Math.min(chunkSize,
                         Math.max(0, size - (long) chunkIndex * chunkSize));
-                byte[] plaintext = SectionCrypto.decryptChunk(
-                        SectionCrypto.sectionKey(dataKey, itemId, 0), itemId,
+                byte[] plaintext = RecordCrypto.decryptChunk(
+                        RecordCrypto.recordKey(dataKey, itemId, 0), itemId,
                         0, chunkIndex, 0, length,
                         bytes(row.getField(CIPHERTEXT)));
                 if (chunkIndex % chunksPerBlock == 0)
@@ -143,7 +143,7 @@ public final class LandedItems
                 output.write(plaintext);
             }
         }
-        if (!SectionIds.encode(chain).equals(summary.getField(ITEM_DIGEST)))
+        if (!RecordIds.encode(chain).equals(summary.getField(ITEM_DIGEST)))
         {
             throw new ChunkIntegrityException("Item digest mismatch");
         }
@@ -220,21 +220,21 @@ public final class LandedItems
     }
 
     /**
-     * The record index kept on a message batch's summary row.
+     * The message index kept on a message batch's summary row.
      *
      * @param summary the item's summary row
      * @return the index; empty if the item isn't a message batch
      */
     @SuppressWarnings("unchecked")
-    public static Optional<RecordIndex> records(Record summary)
+    public static Optional<MessageIndex> messageIndex(Record summary)
     {
-        Object offsets = summary.getField(RECORD_OFFSETS);
+        Object offsets = summary.getField(MESSAGE_OFFSETS);
         if (offsets == null)
         {
             return Optional.empty();
         }
-        return Optional.of(new RecordIndex((List<Long>) offsets,
-                (List<String>) summary.getField(RECORD_KEYS)));
+        return Optional.of(new MessageIndex((List<Long>) offsets,
+                (List<String>) summary.getField(MESSAGE_KEYS)));
     }
 
     /**
@@ -250,7 +250,7 @@ public final class LandedItems
      * @throws IOException if the table can't be read
      */
     @SuppressWarnings("unchecked")
-    public static List<String> recordKeys(Table table, String intake,
+    public static List<String> messageKeys(Table table, String intake,
             Instant since) throws IOException
     {
         List<String> keys = new ArrayList<>();
@@ -266,12 +266,12 @@ public final class LandedItems
                         Expressions.equal(INTAKE, intake),
                         Expressions.greaterThanOrEqual(LANDED_AT,
                                 sinceMicros),
-                        Expressions.notNull(RECORD_KEYS)))
+                        Expressions.notNull(MESSAGE_KEYS)))
                 .build())
         {
             for (Record row : rows)
             {
-                for (String key : (List<String>) row.getField(RECORD_KEYS))
+                for (String key : (List<String>) row.getField(MESSAGE_KEYS))
                 {
                     if (key != null)
                     {
@@ -303,8 +303,8 @@ public final class LandedItems
         byte[] dataKey = keys.unwrap(new WrappedKey(
                 (String) summary.getField(KEK_REF),
                 bytes(summary.getField(BDK_WRAPPED))));
-        return Optional.of(new String(SectionCrypto.decryptSmall(
-                SectionCrypto.sectionKey(dataKey, itemId, -1), itemId, -1, 0,
+        return Optional.of(new String(RecordCrypto.decryptSmall(
+                RecordCrypto.recordKey(dataKey, itemId, -1), itemId, -1, 0,
                 1, MAX_NAME_BYTES, bytes(encrypted)), StandardCharsets.UTF_8));
     }
 
@@ -321,7 +321,7 @@ public final class LandedItems
     public static Optional<List<String>> messageRefs(Record summary,
             KeyProvider keys)
     {
-        return encryptedList(summary, keys, RECORD_REFS_ENC, RECORD_REFS_SEQ,
+        return encryptedList(summary, keys, MESSAGE_REFS_ENC, MESSAGE_REFS_SEQ,
                 "broker IDs");
     }
 
@@ -339,8 +339,8 @@ public final class LandedItems
     public static Optional<List<String>> messageReplaces(Record summary,
             KeyProvider keys)
     {
-        return encryptedList(summary, keys, RECORD_REPLACES_ENC,
-                RECORD_REPLACES_SEQ, "links");
+        return encryptedList(summary, keys, MESSAGE_REPLACES_ENC,
+                MESSAGE_REPLACES_SEQ, "links");
     }
 
     /**
@@ -367,8 +367,8 @@ public final class LandedItems
         byte[] dataKey = keys.unwrap(new WrappedKey(
                 (String) summary.getField(KEK_REF),
                 bytes(summary.getField(BDK_WRAPPED))));
-        String json = new String(SectionCrypto.decryptSmall(
-                SectionCrypto.sectionKey(dataKey, itemId, seq), itemId, seq,
+        String json = new String(RecordCrypto.decryptSmall(
+                RecordCrypto.recordKey(dataKey, itemId, seq), itemId, seq,
                 0, 1, MAX_REFS_BYTES, bytes(encrypted)),
                 StandardCharsets.UTF_8);
         try

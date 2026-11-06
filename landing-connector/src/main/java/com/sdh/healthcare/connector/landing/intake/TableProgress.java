@@ -9,7 +9,7 @@ package com.sdh.healthcare.connector.landing.intake;
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.crypto.MacedJson;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import java.text.ParseException;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -75,7 +75,7 @@ public class TableProgress
      * @param intake    the intake
      */
     public TableProgress(Table ledger, FencedCommitter committer,
-            SectionIds ids, String intake)
+            RecordIds ids, String intake)
     {
         this.ledger = ledger;
         this.committer = committer;

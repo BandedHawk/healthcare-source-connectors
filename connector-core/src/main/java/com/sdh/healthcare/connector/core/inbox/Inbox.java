@@ -19,7 +19,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.crypto.MacedJson;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.PairSet;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
@@ -143,7 +143,7 @@ public final class Inbox
      * @param retry       how commits are retried
      * @param clock       gives the times items are received
      */
-    public Inbox(Table table, FencedCommitter committer, SectionIds ids,
+    public Inbox(Table table, FencedCommitter committer, RecordIds ids,
             String connectorId, RetryPolicy retry, Clock clock)
     {
         this.table = table;
@@ -206,7 +206,7 @@ public final class Inbox
     public synchronized boolean add(ConnectorMessage.ItemLanded message)
             throws Exception
     {
-        UUID itemId = message.fileId();
+        UUID itemId = message.itemId();
         if (itemIds.contains(itemId.getMostSignificantBits(),
                 itemId.getLeastSignificantBits()))
         {
@@ -396,7 +396,7 @@ public final class Inbox
         {
             GenericRecord row = GenericRecord.create(table.schema());
             row.setField(SEQ, seq);
-            row.setField(ITEM_ID, message.fileId());
+            row.setField(ITEM_ID, message.itemId());
             row.setField(INTAKE, message.intake());
             row.setField(KIND, message.kind());
             row.setField(ITEM_SIZE, message.size());

@@ -800,7 +800,7 @@ class CcdaConverterTest
     /**
      * An undeclared entity is only reported when the text is read, and
      * Woodstox does that with an unchecked exception. It must still be a
-     * conversion failure (the section is stored unconverted), not an unknown
+     * conversion failure (the record is stored unconverted), not an unknown
      * error that fails the whole file. Found by the demo (design §15.3).
      */
     @Test

@@ -14,7 +14,7 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -23,7 +23,7 @@ import com.sdh.healthcare.connector.core.landing.LandingCheckpoint;
 import com.sdh.healthcare.connector.core.landing.LandingLedger;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.landing.NewItem;
-import com.sdh.healthcare.connector.core.landing.RecordIndex;
+import com.sdh.healthcare.connector.core.landing.MessageIndex;
 import com.sdh.healthcare.connector.core.landing.SourceRef;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
@@ -100,7 +100,7 @@ class BatchServiceTest
     AesKeyWrapProvider keys;
 
     /** Makes the hashes and MACs. */
-    final SectionIds ids = new SectionIds(new byte[32]);
+    final RecordIds ids = new RecordIds(new byte[32]);
 
     /** The last lease epoch handed out. */
     long epoch;
@@ -272,7 +272,7 @@ class BatchServiceTest
      * @throws Exception if the test fails
      */
     @Test
-    void landsABatchAsOneItemWithItsRecordIndex() throws Exception
+    void landsABatchAsOneItemWithItsMessageIndex() throws Exception
     {
         BatchService service = service();
         BatchService.Result result =
@@ -287,13 +287,14 @@ class BatchServiceTest
         LandedItems.read(items, item.itemId(), keys, ids, content);
         assertThat(content.toString(StandardCharsets.UTF_8))
                 .isEqualTo("one-twothree");
-        RecordIndex records = LandedItems.records(LandedItems.summary(items,
-                item.itemId()).orElseThrow()).orElseThrow();
-        assertThat(records.offsets()).containsExactly(0L, 3L, 7L);
-        assertThat(records.keys().get(0)).isEqualTo(SourceRef.of(ids, INTAKE,
-                "message\u0000one", -1, "").hash());
-        assertThat(records.keys().get(1)).isNull();
-        assertThat(records.keys().get(2)).isNotNull()
+        MessageIndex messageIndex = LandedItems.messageIndex(
+                LandedItems.summary(items, item.itemId()).orElseThrow())
+                .orElseThrow();
+        assertThat(messageIndex.offsets()).containsExactly(0L, 3L, 7L);
+        assertThat(messageIndex.keys().get(0)).isEqualTo(SourceRef.of(ids,
+                INTAKE, "message\u0000one", -1, "").hash());
+        assertThat(messageIndex.keys().get(1)).isNull();
+        assertThat(messageIndex.keys().get(2)).isNotNull()
                 .doesNotContain("three");
         assertThat(service.recentKeys()).isEqualTo(2);
         assertThat(LandedItems.messageRefs(LandedItems.summary(items,
@@ -466,7 +467,7 @@ class BatchServiceTest
         UUID itemId = UUID.randomUUID();
         assertThatThrownBy(() -> crashing.land(new NewItem(itemId,
                 ItemKind.MESSAGE_BATCH, SourceRef.of(ids, INTAKE, "batch",
-                        -1, ""), null, null, new RecordIndex(List.of(0L),
+                        -1, ""), null, null, new MessageIndex(List.of(0L),
                                 Arrays.asList((String) null))),
                 offset -> new ByteArrayInputStream(new byte[40])))
                 .isInstanceOf(Crash.class);
@@ -503,7 +504,7 @@ class BatchServiceTest
     }
 
     /**
-     * Each landed batch records its size, every message delivered again
+     * Each landed batch messageIndex its size, every message delivered again
      * counts as a duplicate, and the landed item counts with its bytes.
      *
      * @throws Exception if the test fails

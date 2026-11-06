@@ -98,7 +98,7 @@ wait_for() {
 }
 
 echo ">> Keys (local mode), as an operator would provide them"
-for alias in sections-kek/1 landed-items-kek/1; do
+for alias in records-kek/1 landed-items-kek/1; do
   keytool -genseckey -alias "$alias" -keyalg AES -keysize 256 -storetype PKCS12 -keystore "$WORK/keks.p12" \
     -storepass "$KS_PASSWORD" -keypass "$KS_PASSWORD" 2>/dev/null || exit 1
 done
@@ -252,11 +252,11 @@ topic_count() {
   svc exec deploy/kafka -- /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
     --topic "$1" --from-beginning --timeout-ms 10000 2>/dev/null | grep -c "${2:-.}"
 }
-# 2 × file.started, 20 × section.stored, 1 × file.completed (the bad file stores nothing).
-sections_at() { [[ "$(topic_count sdh-sections)" -ge "$1" ]]; }
-wait_for 120 sections_at 23
-check "messages on the sections topic" "23" "$(topic_count sdh-sections)"
-check "sections topic encrypted (no PHI marker)" "0" "$(topic_count sdh-sections "$MARKER")"
+# 2 × file.started, 20 × record.stored, 1 × file.completed (the bad file stores nothing).
+records_at() { [[ "$(topic_count sdh-records)" -ge "$1" ]]; }
+wait_for 120 records_at 23
+check "messages on the records topic" "23" "$(topic_count sdh-records)"
+check "records topic encrypted (no PHI marker)" "0" "$(topic_count sdh-records "$MARKER")"
 check "item.landed messages on the landing topic" "2" "$(topic_count sdh-landing-claims)"
 check "landing topic encrypted (no PHI marker)" "0" "$(topic_count sdh-landing-claims "$MARKER")"
 
@@ -274,7 +274,7 @@ if grep -qE "lease: +file-connector held by .+, epoch 1," <<<"$status"; then
 else
   fail "admin status"; echo "$status" | tail -20
 fi
-bad_id="$(k logs "$POD" | sed -n 's/.*file\.failed file_id=\([0-9a-f-]*\).*/\1/p' | head -n 1)"
+bad_id="$(k logs "$POD" | sed -n 's/.*item\.failed item_id=\([0-9a-f-]*\).*/\1/p' | head -n 1)"
 [[ -n "$bad_id" ]] || bad_id="none"
 restore="$(k exec "$POD" -- "${ADMIN[@]}" restore --operator k8s-operator --file-id "$bad_id" --to /tmp 2>&1)"
 if grep -q "digest verified" <<<"$restore"; then pass "admin restore from landing"; else
@@ -311,7 +311,7 @@ if wait_for 180 took_over; then pass "standby took over ($((SECONDS - t0)) s aft
 printf 'id,name,note\n1,after-failover,x\n' > "$WORK/again.csv"
 deliver again.csv "$WORK/again.csv"
 if wait_for 120 landed 3; then pass "the new active node lands"; else fail "the new active node lands"; fi
-if wait_for 120 sections_at 26; then pass "and the splitter splits it"; else fail "and the splitter splits it"; fi
+if wait_for 120 records_at 26; then pass "and the splitter splits it"; else fail "and the splitter splits it"; fi
 new_standby() {
   local p
   for p in $(landing_pods); do
@@ -336,7 +336,7 @@ if grep -qE "held by .+, epoch 2," <<<"$status2"; then pass "lease taken over (e
   fail "lease taken over (epoch 2)"; grep lease <<<"$status2"; fi
 printf 'id,name,note\n1,after-restart,x\n' > "$WORK/later.csv"
 deliver later.csv "$WORK/later.csv"
-if wait_for 120 sections_at 29; then pass "replacement splits"; else fail "replacement splits"; fi
+if wait_for 120 records_at 29; then pass "replacement splits"; else fail "replacement splits"; fi
 
 echo ">> Splitter JVM killed (no clean shutdown, as an OOM kill or crash): the restart waits for the lease to lapse"
 # SIGKILL from the node, as the OOM killer would send it; the lease isn't released. A forced pod delete isn't the

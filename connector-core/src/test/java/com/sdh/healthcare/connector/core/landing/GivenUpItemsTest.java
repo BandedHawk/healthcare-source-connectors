@@ -11,7 +11,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.core.pipeline.UuidV7;
@@ -58,7 +58,7 @@ class GivenUpItemsTest
     Table table;
 
     /** Makes the digests and MACs. */
-    SectionIds ids;
+    RecordIds ids;
 
     /**
      * Creates the catalog, the table and the KEK.

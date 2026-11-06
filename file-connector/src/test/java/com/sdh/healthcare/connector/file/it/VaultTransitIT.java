@@ -58,7 +58,7 @@ class VaultTransitIT
         vault.start();
         address = URI.create(vault.getHttpHostAddress());
         post("sys/mounts/transit", "{\"type\":\"transit\"}");
-        for (String kek : new String[] {"sections-kek", "landed-items-kek"})
+        for (String kek : new String[] {"records-kek", "landed-items-kek"})
         {
             post("transit/keys/" + kek, "{\"type\":\"aes256-gcm96\"}");
         }
@@ -108,15 +108,15 @@ class VaultTransitIT
         // The default provider factory: exactly what the running service
         // builds from sdh.crypto.vault.*.
         CommonSettings.Crypto crypto = crypto(keys, "vault-transit",
-                "sections-kek", "landed-items-kek", "signing",
+                "records-kek", "landed-items-kek", "signing",
                 new CommonSettings.Aws(null, null),
                 new CommonSettings.Vault(address, null, tokenFile, "transit",
                         null));
         try (KeyMaterial material = KeyMaterial.load(crypto))
         {
-            assertThat(new String(material.wrap().wrap("sections-kek",
+            assertThat(new String(material.wrap().wrap("records-kek",
                     new byte[32]).wrapped())).startsWith("vault:v1:");
-            assertUsable(material, keys, "sections-kek",
+            assertUsable(material, keys, "records-kek",
                     VaultTransitKeyProvider.create(address, "transit",
                             () -> "root-token", Optional.empty())
                             .publicKey("signing"));
@@ -133,12 +133,12 @@ class VaultTransitIT
     {
         TestKeys keys = localKeys();
         CommonSettings.Crypto crypto = crypto(keys, "vault-transit",
-                "sections-kek", "landed-items-kek", "signing",
+                "records-kek", "landed-items-kek", "signing",
                 new CommonSettings.Aws(null, null),
                 new CommonSettings.Vault(address, "wrong", null, "transit",
                         null));
         assertThatThrownBy(() -> KeyMaterial.load(crypto))
-                .hasMessageContaining("sections-kek")
+                .hasMessageContaining("records-kek")
                 .hasMessageContaining("403");
     }
 }

@@ -10,7 +10,7 @@ import java.util.Arrays;
 
 /**
  * The kinds of message the connectors publish. About a file, in the order
- * they happen: the file started, a section was stored or failed, and the
+ * they happen: the file started, a record was stored or failed, and the
  * file completed. From a landing node to its splitter: an item was landed.
  * To an intake's producer: an item was received, and its result. Each has
  * a fixed name used on the queue ({@link #wireName()}).
@@ -24,13 +24,13 @@ public enum MessageType
     /** A file was picked up, or resumed with a new run. */
     FILE_STARTED("file.started"),
 
-    /** A section was stored. */
-    SECTION_STORED("section.stored"),
+    /** A record was stored. */
+    RECORD_STORED("record.stored"),
 
-    /** A section failed conversion, and was stored as split. */
-    SECTION_FAILED("section.failed"),
+    /** A record failed conversion, and was stored as split. */
+    RECORD_FAILED("record.failed"),
 
-    /** Every section of a file was stored and published. */
+    /** Every record of a file was stored and published. */
     FILE_COMPLETED("file.completed"),
 
     /** A landing node landed an item, for its splitter. */

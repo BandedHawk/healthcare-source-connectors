@@ -95,8 +95,8 @@ class SplitterPerf
     /** When each item's {@code file.completed} was published, by item. */
     static final Map<UUID, Long> COMPLETED = new ConcurrentHashMap<>();
 
-    /** The sections stored in the current run, failed ones included. */
-    static final AtomicLong SECTIONS = new AtomicLong();
+    /** The records stored in the current run, failed ones included. */
+    static final AtomicLong RECORDS = new AtomicLong();
 
     /** The reasons given to the exit hook. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
@@ -134,7 +134,7 @@ class SplitterPerf
         }
 
         /**
-         * The broker stand-in: counts sections and notes when each item's
+         * The broker stand-in: counts records and notes when each item's
          * {@code file.completed} came, by the unencrypted headers, and
          * drops the messages.
          *
@@ -157,14 +157,14 @@ class SplitterPerf
                                 .equals(type))
                         {
                             COMPLETED.put(UUID.fromString(exchange.getIn()
-                                    .getHeader("fileId", String.class)), at);
+                                    .getHeader("itemId", String.class)), at);
                         }
-                        else if (MessageType.SECTION_STORED.wireName()
+                        else if (MessageType.RECORD_STORED.wireName()
                                 .equals(type)
-                                || MessageType.SECTION_FAILED.wireName()
+                                || MessageType.RECORD_FAILED.wireName()
                                         .equals(type))
                         {
-                            SECTIONS.incrementAndGet();
+                            RECORDS.incrementAndGet();
                         }
                     });
                 }
@@ -259,7 +259,7 @@ class SplitterPerf
         }
 
         COMPLETED.clear();
-        SECTIONS.set(0);
+        RECORDS.set(0);
         FATAL.clear();
         String name = "perf-" + workload + "-" + intake;
         Path work = Files.createDirectories(root.resolve(name));
@@ -327,13 +327,13 @@ class SplitterPerf
                 firstAvailable = Math.min(firstAvailable, entry.available());
             }
             RESULTS.add(new StageResult(PerfSettings.SPLIT, workload, intake,
-                    items.size(), bytes, SECTIONS.get(), last - start,
+                    items.size(), bytes, RECORDS.get(), last - start,
                     split.summary(), resources, Double.NaN));
             if (recorded.isPresent())
             {
                 RESULTS.add(new StageResult(PerfSettings.END_TO_END,
                         workload, intake, items.size(), bytes,
-                        SECTIONS.get(), endToEndLast - firstAvailable,
+                        RECORDS.get(), endToEndLast - firstAvailable,
                         endToEnd.summary(), null, Double.NaN));
             }
         }
@@ -428,7 +428,7 @@ class SplitterPerf
         settings.put("sdh.landing.queue-uri", LANDED_QUEUE);
         settings.put("sdh.landing.idle-wait", "200ms");
         settings.put("sdh.split.format", Workload.format(workload));
-        settings.put("sdh.split.limits.max-file-bytes", "64GB");
+        settings.put("sdh.split.limits.max-item-bytes", "64GB");
         settings.putAll(storage.applicationSettings());
         settings.put("sdh.storage.catalog-name", TestLanding.CATALOG);
         settings.put("sdh.storage.namespace", NAMESPACE);
@@ -437,7 +437,7 @@ class SplitterPerf
         settings.put("sdh.lease.jdbc.password", "postgres");
         settings.put("sdh.crypto.keystore.path", keys.keystore.toString());
         settings.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
-        settings.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
+        settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
         settings.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
         settings.put("sdh.crypto.keys.signing.kid", "connector-2026");
         settings.put("sdh.crypto.keys.signing.pem",

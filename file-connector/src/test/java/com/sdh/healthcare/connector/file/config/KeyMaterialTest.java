@@ -39,9 +39,9 @@ class KeyMaterialTest
     /**
      * Local key settings.
      *
-     * @param keys the key files
+     * @param keys         the key files
      * @param recipientPin the recipient key's pinned fingerprint
-     * @param signingPem the signing key
+     * @param signingPem   the signing key
      * @return the settings
      * @throws Exception if the settings can't be made
      */
@@ -54,11 +54,11 @@ class KeyMaterialTest
     /**
      * Key settings with chosen providers.
      *
-     * @param keys the key files
-     * @param recipientPin the recipient key's pinned fingerprint
-     * @param signingPem the signing key
-     * @param wrap the KEK provider
-     * @param sign the signing provider
+     * @param keys          the key files
+     * @param recipientPin  the recipient key's pinned fingerprint
+     * @param signingPem    the signing key
+     * @param wrap          the KEK provider
+     * @param sign          the signing provider
      * @param signingKeyRef the KMS signing key, or null for the local one
      * @return the settings
      */
@@ -91,7 +91,7 @@ class KeyMaterialTest
         assertThat(material.inbox()).isNotNull();
         byte[] dek = new byte[32];
         assertThat(material.wrap().unwrap(
-                material.wrap().wrap(TestKeys.SECTIONS, dek))).isEqualTo(dek);
+                material.wrap().wrap(TestKeys.RECORDS, dek))).isEqualTo(dek);
     }
 
     /**

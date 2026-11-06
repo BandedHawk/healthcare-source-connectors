@@ -9,9 +9,9 @@ package com.sdh.healthcare.connector.landing;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.sdh.healthcare.connector.broker.receive.BrokerKind;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.landing.runtime.LandingRuntime;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
@@ -205,8 +205,8 @@ class RabbitLandingApplicationIT
     @Test
     void landsAnnouncesAndAcknowledgesMessages() throws Exception
     {
-        assertThat(runtime.broker().kind())
-                .isEqualTo(BrokerSettings.Kind.RABBITMQ);
+        assertThat(runtime.broker().receive().kind())
+                .isEqualTo(BrokerKind.RABBITMQ);
         CachingConnectionFactory factory = factory();
         try
         {

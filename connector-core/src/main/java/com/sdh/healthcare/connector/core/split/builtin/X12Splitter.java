@@ -10,8 +10,8 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import com.sdh.healthcare.connector.core.split.Section;
-import com.sdh.healthcare.connector.core.split.SectionSplitter;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
+import com.sdh.healthcare.connector.core.split.RecordSplitter;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
@@ -27,16 +27,16 @@ import java.util.Set;
 
 /**
  * X12 splitter (design §6.2). Delimiters are read from each ISA segment,
- * and every section is a valid standalone interchange.
+ * and every record is a valid standalone interchange.
  * <p>
  * Boundary:
  * <ul>
- * <li>{@code ST} (default): one transaction set per section, as
+ * <li>{@code ST} (default): one transaction set per record, as
  * {@code ISA + GS + ST…SE + GE + IEA}, with GE01 and IEA01 rewritten to
  * 1</li>
- * <li>{@code GS}: one functional group per section, as
+ * <li>{@code GS}: one functional group per record, as
  * {@code ISA + GS…GE + IEA}, with IEA01 rewritten to 1</li>
- * <li>{@code ISA}: one whole interchange per section, unchanged</li>
+ * <li>{@code ISA}: one whole interchange per record, unchanged</li>
  * </ul>
  * A TA1 acknowledgement between ISA and GS becomes its own section,
  * {@code ISA + TA1 + IEA} with IEA01 = 0. Control numbers are checked
@@ -46,7 +46,7 @@ import java.util.Set;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class X12Splitter implements SectionSplitter
+public final class X12Splitter implements RecordSplitter
 {
 
     /** The format's name. */
@@ -69,7 +69,7 @@ public final class X12Splitter implements SectionSplitter
     {
     }
 
-    /** What one section holds. */
+    /** What one record holds. */
     enum Level
     {
         /** One transaction set. */
@@ -174,7 +174,7 @@ public final class X12Splitter implements SectionSplitter
      * An open ISA or GS.
      *
      * @param start   its source offset
-     * @param raw     its bytes, for the prefix of a section
+     * @param raw     its bytes, for the prefix of a record
      * @param control its control number
      */
     private record Envelope(long start, byte[] raw, String control)
@@ -188,13 +188,13 @@ public final class X12Splitter implements SectionSplitter
         /** The file. */
         private final SeekableByteSource source;
 
-        /** What one section holds. */
+        /** What one record holds. */
         private final Level level;
 
         /** The split settings. */
         private final SplitConfig config;
 
-        /** The largest section allowed, in bytes. */
+        /** The largest record allowed, in bytes. */
         private final long max;
 
         /** Reads the file. */
@@ -219,7 +219,7 @@ public final class X12Splitter implements SectionSplitter
          * Creates a session.
          *
          * @param source the file
-         * @param level  what one section holds
+         * @param level  what one record holds
          * @param config the split settings
          */
         Session(SeekableByteSource source, Level level, SplitConfig config)
@@ -227,7 +227,7 @@ public final class X12Splitter implements SectionSplitter
             this.source = source;
             this.level = level;
             this.config = config;
-            this.max = config.limits().maxSectionBytes();
+            this.max = config.limits().maxRecordBytes();
         }
 
         /**
@@ -448,11 +448,11 @@ public final class X12Splitter implements SectionSplitter
          * {@inheritDoc}
          *
          * @throws SplitException if the envelopes don't balance, a control
-         *                        number doesn't match, or a section is too
+         *                        number doesn't match, or a record is too
          *                        large
          */
         @Override
-        public Optional<Section> next() throws IOException, SplitException
+        public Optional<SplitRecord> next() throws IOException, SplitException
         {
             while (true)
             {
@@ -481,7 +481,7 @@ public final class X12Splitter implements SectionSplitter
                                 Set.of("ISA"));
                         checkControl(iea, 2,
                                 segment.element(13, elementSeparator));
-                        return Optional.of(Section.ofRange(segment.start(),
+                        return Optional.of(SplitRecord.ofRange(segment.start(),
                                 iea.end() - segment.start(),
                                 ResumePoint.at(iea.end())));
                     }
@@ -499,7 +499,7 @@ public final class X12Splitter implements SectionSplitter
                         }
                         case "TA1" ->
                         {
-                            return Optional.of(section(segment.start(),
+                            return Optional.of(record(segment.start(),
                                     segment.end(), concat(isa.raw()),
                                     concat(iea(0)),
                                     ResumePoint.at(segment.end(),
@@ -513,7 +513,7 @@ public final class X12Splitter implements SectionSplitter
                                         Set.of("ISA", "IEA", "GS"));
                                 checkControl(ge, 2,
                                         segment.element(6, elementSeparator));
-                                return Optional.of(section(segment.start(),
+                                return Optional.of(record(segment.start(),
                                         ge.end(), concat(isa.raw()),
                                         concat(iea(1)),
                                         ResumePoint.at(ge.end(),
@@ -542,7 +542,7 @@ public final class X12Splitter implements SectionSplitter
                         checkControl(se, 2,
                                 segment.element(2, elementSeparator));
                         byte[] ge = segment("GE", "1", gs.control());
-                        return Optional.of(section(segment.start(), se.end(),
+                        return Optional.of(record(segment.start(), se.end(),
                                 concat(isa.raw(), gs.raw()),
                                 concat(ge, iea(1)), ResumePoint.at(se.end(),
                                         isa.start(), gs.start())));
@@ -580,7 +580,7 @@ public final class X12Splitter implements SectionSplitter
                 }
                 if (segment.end() - first.start() > max)
                 {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
+                    throw new SplitException(ErrorCode.LIMIT_RECORD_SIZE,
                             first.start());
                 }
                 if (segment.id().equals(endId))
@@ -642,23 +642,23 @@ public final class X12Splitter implements SectionSplitter
         }
 
         /**
-         * A section of a source range between a prefix and a suffix.
+         * A record of a source range between a prefix and a suffix.
          *
          * @param start  the range's source offset
          * @param end    the offset after it
          * @param prefix bytes before it
          * @param suffix bytes after it
          * @param resume where splitting continues
-         * @return the section
+         * @return the record
          */
-        private static Section section(long start, long end, byte[] prefix,
+        private static SplitRecord record(long start, long end, byte[] prefix,
                 byte[] suffix, ResumePoint resume)
         {
-            List<Section.Part> parts = new ArrayList<>(3);
-            parts.add(new Section.Literal(prefix));
-            parts.add(new Section.SourceRange(start, end - start));
-            parts.add(new Section.Literal(suffix));
-            return new Section(start, end - start, parts, resume);
+            List<SplitRecord.Part> parts = new ArrayList<>(3);
+            parts.add(new SplitRecord.Literal(prefix));
+            parts.add(new SplitRecord.SourceRange(start, end - start));
+            parts.add(new SplitRecord.Literal(suffix));
+            return new SplitRecord(start, end - start, parts, resume);
         }
 
         /**

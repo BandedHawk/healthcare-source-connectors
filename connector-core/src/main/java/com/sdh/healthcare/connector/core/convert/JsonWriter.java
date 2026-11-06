@@ -10,7 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Writes JSON, one piece at a time, for the section converters. It is small and
+ * Writes JSON, one piece at a time, for the record converters. It is small and
  * does only what they need, and it always writes the same bytes for the same
  * calls.
  * <p>
@@ -28,24 +28,24 @@ import java.util.List;
  * Why it is written this way:
  * <ul>
  * <li><b>Memory.</b> It writes UTF-8 bytes straight into one array, so a
- * section's JSON is held once while it is written, not first as characters and
+ * record's JSON is held once while it is written, not first as characters and
  * then again as bytes. Text that is already UTF-8, such as a field of a CSV
- * record, can be copied from the section's own bytes ({@link #utf8}), so even a
- * large field is never decoded into a Java string. And for a large section,
+ * record, can be copied from the record's own bytes ({@link #utf8}), so even a
+ * large field is never decoded into a Java string. And for a large record,
  * {@link #build} writes the JSON twice, the first time only to count its size,
  * so the result can go straight into an array of exactly that size instead of a
  * growing buffer that is copied when trimmed.</li>
  * <li><b>Exact bytes.</b> The bytes are exactly what
  * {@code String.getBytes(UTF_8)} would give for the same text, including for a
  * broken character (half of a surrogate pair, written as {@code ?}). A stored
- * section's ID is a hash of its bytes, so the same section must always give the
+ * record's ID is a hash of its bytes, so the same record must always give the
  * same bytes.</li>
  * </ul>
- * A writer is used by one thread for one section's JSON, and then discarded.
+ * A writer is used by one thread for one record's JSON, and then discarded.
  *
  * @author Jonas Barnett
  * @since 0.1.0
- * @see SectionConverter
+ * @see RecordConverter
  */
 final class JsonWriter
 {
@@ -126,11 +126,11 @@ final class JsonWriter
     }
 
     /**
-     * The code that writes a section's JSON, given to {@link #build}.
+     * The code that writes a record's JSON, given to {@link #build}.
      * <p>
      * It may be run twice, once on a writer that only counts and once on one
      * that keeps the JSON, so it must write exactly the same both times: it
-     * must start from the beginning of the section each time, and keep nothing
+     * must start from the beginning of the record each time, and keep nothing
      * from the first run.
      */
     @FunctionalInterface
@@ -141,13 +141,13 @@ final class JsonWriter
          * Writes the JSON.
          *
          * @param w the writer to write it to
-         * @throws ConversionException if the section can't be converted
+         * @throws ConversionException if the record can't be converted
          */
         void write(JsonWriter w) throws ConversionException;
     }
 
     /**
-     * Writes a section's JSON and returns it in an array of exactly its size.
+     * Writes a record's JSON and returns it in an array of exactly its size.
      * This is how converters use the writer.
      * <p>
      * How it does so depends on the estimate:
@@ -157,12 +157,12 @@ final class JsonWriter
      * JSON's size if needed.</li>
      * <li><b>From there:</b> {@code body} is run first on a writer that only
      * counts, then again on one of exactly the counted size. The JSON is then
-     * held once, with no growing and no trimmed copy. If the section can't be
+     * held once, with no growing and no trimmed copy. If the record can't be
      * converted, the first run finds it before anything is kept.</li>
      * </ul>
      *
      * @param estimate the expected size of the JSON in bytes, usually about the
-     * section's size
+     * record's size
      * @param body the code that writes the JSON; it must write exactly the same
      * each time it is run
      * @return the JSON, as UTF-8
@@ -343,9 +343,9 @@ final class JsonWriter
      * without decoding it. The caller must have checked that the bytes are
      * valid UTF-8; nothing here checks it again.
      *
-     * @param bytes the bytes to copy from, such as a whole section
-     * @param from where the text starts in {@code bytes}
-     * @param to where it ends: the position just after its last byte
+     * @param bytes the bytes to copy from, such as a whole record
+     * @param from  where the text starts in {@code bytes}
+     * @param to    where it ends: the position just after its last byte
      * @return this writer, so calls can be chained
      */
     JsonWriter utf8(byte[] bytes, int from, int to)
@@ -385,8 +385,8 @@ final class JsonWriter
      * {@link #beginString()}, {@link #utf8} and {@link #endString()} in turn.
      *
      * @param bytes the bytes to copy from; they must be valid UTF-8
-     * @param from where the text starts in {@code bytes}
-     * @param to where it ends: the position just after its last byte
+     * @param from  where the text starts in {@code bytes}
+     * @param to    where it ends: the position just after its last byte
      * @return this writer, so calls can be chained
      */
     JsonWriter valueUtf8(byte[] bytes, int from, int to)
@@ -567,8 +567,8 @@ final class JsonWriter
      * and not copied.
      *
      * @param bytes the bytes to copy from
-     * @param from where to start copying
-     * @param size how many bytes to copy
+     * @param from  where to start copying
+     * @param size  how many bytes to copy
      */
     private void bytes(byte[] bytes, int from, int size)
     {

@@ -19,23 +19,24 @@ import com.nimbusds.jose.JWSObject;
 import com.nimbusds.jose.Payload;
 import com.nimbusds.jose.crypto.ECDHEncrypter;
 import com.nimbusds.jose.crypto.ECDSASigner;
+import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
-import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
-import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
-import com.sdh.healthcare.connector.core.storage.SectionBatchWriter;
-import com.sdh.healthcare.connector.core.storage.SectionBatchWriter.SectionInput;
-import com.sdh.healthcare.connector.core.storage.SectionBatchWriter.WrittenSection;
+import com.sdh.healthcare.connector.core.storage.RecordBatchWriter;
+import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.RecordInput;
+import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
@@ -66,7 +67,7 @@ import org.junit.jupiter.api.Test;
 class QueueReaderTest
 {
 
-    /** The namespace the sections table is in. */
+    /** The namespace the records table is in. */
     static final String NS = "sdh_ingest";
 
     /** The connector's signing key pair. */
@@ -75,20 +76,20 @@ class QueueReaderTest
     /** Downstream's key pair, which messages are encrypted to. */
     KeyPair recipient;
 
-    /** A local key provider holding the sections KEK. */
+    /** A local key provider holding the records KEK. */
     AesKeyWrapProvider kms;
 
     /** The catalog, named "prod". */
     InMemoryCatalog catalog;
 
-    /** The sections table. */
+    /** The records table. */
     Table table;
 
     /** Seals messages as the connector does. */
     MessageSealer sealer;
 
     /**
-     * Creates keys, a catalog with the sections table, and a sealer.
+     * Creates keys, a catalog with the records table, and a sealer.
      *
      * @throws Exception if a key can't be generated
      */
@@ -100,11 +101,11 @@ class QueueReaderTest
         KeyGenerator aesGenerator = KeyGenerator.getInstance("AES");
         aesGenerator.init(256);
         kms = new AesKeyWrapProvider(
-                Map.of("sections-kek/1", aesGenerator.generateKey()));
+                Map.of("records-kek/1", aesGenerator.generateKey()));
         catalog = new InMemoryCatalog();
         catalog.initialize("prod", Map.of(CatalogProperties.WAREHOUSE_LOCATION,
                 "memory://wh-" + UUID.randomUUID()));
-        table = IngestTables.sections(catalog, NS);
+        table = IngestTables.records(catalog, NS);
         sealer = new MessageSealer(
                 new ECDSASigner((ECPrivateKey) signer.getPrivate()),
                 "connector-2026", recipient.getPublic(), "downstream-2026");
@@ -129,13 +130,13 @@ class QueueReaderTest
 
     /**
      * What the connector does for one batch: write, fenced commit, then one
-     * message per section.
+     * message per record.
      *
-     * @param fileId the file the sections come from
-     * @param sections the sections' plaintext
-     * @return the sealed messages, one per section
+     * @param itemId  the file the records come from
+     * @param records the records' plaintext
+     * @return the sealed messages, one per record
      */
-    List<byte[]> ingest(UUID fileId, byte[]... sections)
+    List<byte[]> ingest(UUID itemId, byte[]... records)
     {
         FencedCommitter committer = new FencedCommitter(new LeaseToken()
         {
@@ -149,110 +150,110 @@ class QueueReaderTest
             }
         });
         committer.establish(table);
-        SectionBatchWriter writer = new SectionBatchWriter(table, kms,
-                "sections-kek/1", new SectionIds(new byte[32]), Instant.now());
+        RecordBatchWriter writer = new RecordBatchWriter(table, kms,
+                "records-kek/1", new RecordIds(new byte[32]), Instant.now());
         long offset = 0;
-        for (int index = 0; index < sections.length; index++)
+        for (int index = 0; index < records.length; index++)
         {
-            writer.add(new SectionInput(fileId, index, offset, "ccda",
-                    sections[index]));
-            offset += sections[index].length;
+            writer.add(new RecordInput(itemId, index, offset, "ccda",
+                    records[index]));
+            offset += records[index].length;
         }
         DataFile dataFile = writer.finish();
         Snapshot snapshot = committer.commit(table, transaction ->
                 transaction.newFastAppend().appendFile(dataFile).commit());
         return writer.written().stream()
-                .map(section -> sealer.seal(message(section, writer,
+                .map(record -> sealer.seal(message(record, writer,
                         snapshot)))
                 .toList();
     }
 
     /**
-     * The message the connector sends for a written section.
+     * The message the connector sends for a written record.
      *
-     * @param section the section
-     * @param writer the writer that wrote it
+     * @param record   the record
+     * @param writer   the writer that wrote it
      * @param snapshot the commit that made it visible
      * @return the message
      */
-    static SectionStored message(WrittenSection section,
-            SectionBatchWriter writer, Snapshot snapshot)
+    static RecordStored message(WrittenRecord record,
+            RecordBatchWriter writer, Snapshot snapshot)
     {
-        return new SectionStored(section.sectionId(), section.fileId(),
-                section.seq(), section.sourceOffset(), section.sourceLength(),
-                section.format(), section.representation().contentType(),
-                section.representation().mapping(), section.plaintextLength(),
-                section.chunkCount(),
-                new StorageRef("prod", NS, SectionsTable.DEFAULT_NAME,
+        return new RecordStored(record.recordId(), record.itemId(),
+                record.seq(), record.sourceOffset(), record.sourceLength(),
+                record.format(), record.representation().contentType(),
+                record.representation().mapping(), record.plaintextLength(),
+                record.chunkCount(),
+                new StorageRef("prod", NS, RecordsTable.DEFAULT_NAME,
                         writer.ingestedDate(), snapshot.snapshotId(),
                         writer.kekRef()));
     }
 
     /**
-     * Messages decode, and a small, a multi-chunk and an empty section
+     * Messages decode, and a small, a multi-chunk and an empty record
      * read back intact.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void decodesMessagesAndStreamsSections() throws Exception
+    void decodesMessagesAndStreamsRecords() throws Exception
     {
         byte[] small = ("<ClinicalDocument xmlns=\"urn:hl7-org:v3\">"
                 + "<id root=\"1\"/></ClinicalDocument>")
                 .getBytes(StandardCharsets.UTF_8);
         // Three chunks.
-        byte[] large = new byte[2 * SectionCrypto.CHUNK_SIZE + 12345];
+        byte[] large = new byte[2 * RecordCrypto.CHUNK_SIZE + 12345];
         new Random(7).nextBytes(large);
         byte[] empty = new byte[0];
-        UUID fileId = UUID.randomUUID();
-        List<byte[]> bodies = ingest(fileId, small, large, empty);
+        UUID itemId = UUID.randomUUID();
+        List<byte[]> bodies = ingest(itemId, small, large, empty);
 
         try (QueueReader reader = reader())
         {
-            SectionStored smallMessage =
-                    (SectionStored) reader.decode(bodies.get(0));
-            SectionStored largeMessage =
-                    (SectionStored) reader.decode(bodies.get(1));
-            SectionStored emptyMessage =
-                    (SectionStored) reader.decode(bodies.get(2));
+            RecordStored smallMessage =
+                    (RecordStored) reader.decode(bodies.get(0));
+            RecordStored largeMessage =
+                    (RecordStored) reader.decode(bodies.get(1));
+            RecordStored emptyMessage =
+                    (RecordStored) reader.decode(bodies.get(2));
             assertThat(largeMessage.chunkCount()).isEqualTo(3);
-            assertThat(reader.readSection(smallMessage, 1 << 20))
+            assertThat(reader.readRecord(smallMessage, 1 << 20))
                     .isEqualTo(small);
-            try (InputStream input = reader.openSection(largeMessage))
+            try (InputStream input = reader.openRecord(largeMessage))
             {
                 assertThat(input.readAllBytes()).isEqualTo(large);
             }
-            assertThat(reader.readSection(emptyMessage, 10)).isEmpty();
+            assertThat(reader.readRecord(emptyMessage, 10)).isEmpty();
         }
     }
 
     /**
-     * A message whose section ID doesn't match the rows is refused, and one
-     * for a section with no rows isn't found.
+     * A message whose record ID doesn't match the rows is refused, and one
+     * for a record with no rows isn't found.
      *
      * @throws Exception if the test fails to run
      */
     @Test
     void messageThatDoesNotMatchStoredRowsIsRejected() throws Exception
     {
-        UUID fileId = UUID.randomUUID();
+        UUID itemId = UUID.randomUUID();
         List<byte[]> bodies =
-                ingest(fileId, "abc".getBytes(StandardCharsets.UTF_8));
+                ingest(itemId, "abc".getBytes(StandardCharsets.UTF_8));
         try (QueueReader reader = reader())
         {
-            SectionStored real = (SectionStored) reader.decode(bodies.get(0));
-            SectionStored wrongId = new SectionStored("not-the-id",
-                    real.fileId(), real.seq(), real.sourceOffset(),
+            RecordStored real = (RecordStored) reader.decode(bodies.get(0));
+            RecordStored wrongId = new RecordStored("not-the-id",
+                    real.itemId(), real.seq(), real.sourceOffset(),
                     real.sourceLength(), real.format(), real.contentType(),
                     real.mapping(), real.plaintextLength(), real.chunkCount(),
                     real.storage());
-            assertThatThrownBy(() -> reader.readSection(wrongId, 100))
+            assertThatThrownBy(() -> reader.readRecord(wrongId, 100))
                     .isInstanceOf(ChunkIntegrityException.class);
-            SectionStored missing = new SectionStored(real.sectionId(),
-                    real.fileId(), 99, 0, 3, "ccda", "application/xml", null,
+            RecordStored missing = new RecordStored(real.recordId(),
+                    real.itemId(), 99, 0, 3, "ccda", "application/xml", null,
                     3, 1, real.storage());
-            assertThatThrownBy(() -> reader.readSection(missing, 100))
-                    .isInstanceOf(SectionNotFoundException.class);
+            assertThatThrownBy(() -> reader.readRecord(missing, 100))
+                    .isInstanceOf(RecordNotFoundException.class);
         }
     }
 
@@ -269,9 +270,10 @@ class QueueReaderTest
                 new JWSHeader.Builder(JWSAlgorithm.ES256)
                         .keyID("connector-2026")
                         .type(MessageSealer.JWS_TYPE).build(),
-                new Payload(Map.of("v", "3.0", "type", "file.started",
+                new Payload(Map.of("v", (ContractVersion.MAJOR + 1) + ".0",
+                        "type", "file.started",
                         "messageId", "x",
-                        "fileId", UUID.randomUUID().toString())));
+                        "itemId", UUID.randomUUID().toString())));
         jws.sign(new ECDSASigner((ECPrivateKey) signer.getPrivate()));
         JWEObject jwe = new JWEObject(
                 new JWEHeader.Builder(JWEAlgorithm.ECDH_ES_A256KW,
@@ -294,22 +296,22 @@ class QueueReaderTest
     }
 
     /**
-     * Message types other than sections decode too.
+     * Message types other than records decode too.
      *
      * @throws Exception if the test fails to run
      */
     @Test
     void otherMessageTypesDecode() throws Exception
     {
-        UUID fileId = UUID.randomUUID();
-        byte[] body = sealer.seal(new FileCompleted(fileId, 3, 0, 999,
+        UUID itemId = UUID.randomUUID();
+        byte[] body = sealer.seal(new FileCompleted(itemId, 3, 0, 999,
                 "digest", Instant.EPOCH, Instant.EPOCH.plusSeconds(5)));
         try (QueueReader reader = reader())
         {
             assertThat(reader.decode(body))
                     .isInstanceOf(FileCompleted.class)
                     .extracting(ConnectorMessage::messageId)
-                    .isEqualTo("fc-" + fileId);
+                    .isEqualTo("fc-" + itemId);
         }
     }
 

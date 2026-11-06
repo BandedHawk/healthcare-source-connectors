@@ -14,7 +14,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Small LRU of unwrapped batch data keys, so a batch's sections cost one
+ * Small LRU of unwrapped batch data keys, so a batch's records cost one
  * KMS call, not one each.
  *
  * @author Jonas Barnett
@@ -33,8 +33,8 @@ final class BatchKeyCache
      * Creates a cache.
      *
      * @param provider unwraps batch data keys
-     * @param size how many keys to keep; the least recently used is wiped
-     *        and dropped beyond that
+     * @param size     how many keys to keep; the least recently used is wiped
+     *                 and dropped beyond that
      */
     BatchKeyCache(KeyProvider provider, int size)
     {

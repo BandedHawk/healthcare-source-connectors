@@ -50,16 +50,16 @@ class RecoveryEnvelopeTest
      * Seals data in an envelope, with a fixed original name.
      *
      * @param data   the data
-     * @param fileId the file's ID
+     * @param itemId the file's ID
      * @param keys   the recipient's key pair
      * @return the envelope
      * @throws Exception if it can't be sealed
      */
-    static byte[] seal(byte[] data, UUID fileId, KeyPair keys)
+    static byte[] seal(byte[] data, UUID itemId, KeyPair keys)
             throws Exception
     {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        RecoveryEnvelope.encrypt(SeekableByteSource.of(data), fileId,
+        RecoveryEnvelope.encrypt(SeekableByteSource.of(data), itemId,
                 Optional.of("smith-ccd.xml"), (ECPublicKey) keys.getPublic(),
                 out);
         return out.toByteArray();
@@ -77,13 +77,13 @@ class RecoveryEnvelopeTest
         KeyPair keys = ec();
         byte[] data = new byte[(8 << 20) + 777];
         new Random(3).nextBytes(data);
-        UUID fileId = UUID.randomUUID();
-        byte[] sealed = seal(data, fileId, keys);
+        UUID itemId = UUID.randomUUID();
+        byte[] sealed = seal(data, itemId, keys);
         ByteArrayOutputStream plain = new ByteArrayOutputStream();
         RecoveryEnvelope.Metadata metadata = RecoveryEnvelope.decrypt(
                 new ByteArrayInputStream(sealed), keys.getPrivate(), plain);
         assertThat(plain.toByteArray()).isEqualTo(data);
-        assertThat(metadata.fileId()).isEqualTo(fileId);
+        assertThat(metadata.itemId()).isEqualTo(itemId);
         assertThat(metadata.originalName()).contains("smith-ccd.xml");
         assertThat(new String(sealed, StandardCharsets.ISO_8859_1))
                 .doesNotContain("smith");

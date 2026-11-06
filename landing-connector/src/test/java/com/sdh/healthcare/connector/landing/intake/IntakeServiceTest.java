@@ -16,7 +16,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandingCheckpoint;
 import com.sdh.healthcare.connector.core.landing.LandingLedger;
@@ -105,7 +105,7 @@ class IntakeServiceTest
     AesKeyWrapProvider keys;
 
     /** Makes the hashes and MACs. */
-    final SectionIds ids = new SectionIds(new byte[32]);
+    final RecordIds ids = new RecordIds(new byte[32]);
 
     /** The last lease epoch handed out. */
     long epoch;
@@ -324,7 +324,7 @@ class IntakeServiceTest
                 Duration.ZERO);
         service.recoverAtStartup();
         service.onListed(write("a.csv", "1,first\n"));
-        UUID earlier = landed().getFirst().fileId();
+        UUID earlier = landed().getFirst().itemId();
 
         Files.writeString(root.resolve("in/b.csv.sdh-replaces"),
                 " " + earlier + "\n");
@@ -407,7 +407,7 @@ class IntakeServiceTest
                 Duration.ZERO);
         service.recoverAtStartup();
         service.onListed(write("a.csv", "1,first\n"));
-        UUID earlier = landed().getFirst().fileId();
+        UUID earlier = landed().getFirst().itemId();
         values.put("b.csv", earlier.toString());
         values.put("c.csv", UUID.randomUUID().toString());
         values.put("d.csv", "x".repeat(300));
@@ -446,10 +446,10 @@ class IntakeServiceTest
         assertThat(messages.get(0).size()).isEqualTo(item.size());
         assertThat(messages.get(0).kind()).isEqualTo("file");
         assertThat(sent.get(0).messageId())
-                .isEqualTo("il-" + messages.get(0).fileId());
+                .isEqualTo("il-" + messages.get(0).itemId());
         assertThat(root.resolve("in/a.csv")).doesNotExist();
         assertThat(new LandingLedger(ledgerTable, committer(), RETRY)
-                .contains(messages.get(0).fileId())).isTrue();
+                .contains(messages.get(0).itemId())).isTrue();
         assertThat(fatal).isEmpty();
     }
 
@@ -546,9 +546,9 @@ class IntakeServiceTest
                 Duration.ZERO);
         restarted.recoverAtStartup();
         List<ConnectorMessage.ItemLanded> messages = landed();
-        assertThat(messages).extracting(ConnectorMessage.ItemLanded::fileId)
+        assertThat(messages).extracting(ConnectorMessage.ItemLanded::itemId)
                 .hasSize(2).last().isEqualTo(unannounced);
-        assertThat(messages.get(0).fileId()).isNotEqualTo(unannounced);
+        assertThat(messages.get(0).itemId()).isNotEqualTo(unannounced);
         assertThat(fatal).isEmpty();
     }
 
@@ -632,7 +632,7 @@ class IntakeServiceTest
         restarted.onListed(item);
         List<ConnectorMessage.ItemLanded> messages = landed();
         assertThat(messages).hasSize(1);
-        assertThat(messages.get(0).fileId()).isEqualTo(unfinished.itemId());
+        assertThat(messages.get(0).itemId()).isEqualTo(unfinished.itemId());
         assertThat(messages.get(0).size()).isEqualTo(item.size());
         assertThat(root.resolve("in/big.csv")).doesNotExist();
     }
@@ -715,7 +715,7 @@ class IntakeServiceTest
         assertThat(fatal).isEmpty();
         assertThat(landed()).singleElement().satisfies(message ->
         {
-            assertThat(message.fileId()).isEqualTo(broken.itemId());
+            assertThat(message.itemId()).isEqualTo(broken.itemId());
             assertThat(message.size()).isEqualTo(item.size());
         });
         service.onListed(listed("other.csv"));

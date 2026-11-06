@@ -33,7 +33,7 @@ import java.util.Map;
  * <p>
  * What is kept, and how:
  * <ul>
- * <li><b>Every segment</b> of the section is written, in order, the envelope
+ * <li><b>Every segment</b> of the record is written, in order, the envelope
  * segments ({@code UNB}, {@code UNH}, {@code UNT}, {@code UNZ} and so on)
  * included.</li>
  * <li><b>The UNA segment</b>, if the interchange starts with one, is not
@@ -60,10 +60,10 @@ import java.util.Map;
  * <li>{@code UNOW} and {@code UNOY}: UTF-8.</li>
  * </ul>
  * <p>
- * A section that can't be converted fails with a {@link ConversionException}
+ * A record that can't be converted fails with a {@link ConversionException}
  * giving the byte position of the problem, and is then stored as split:
  * <ul>
- * <li>{@code CONVERT_EDIFACT_MALFORMED}: the section doesn't start with a
+ * <li>{@code CONVERT_EDIFACT_MALFORMED}: the record doesn't start with a
  * {@code UNB} segment that has a syntax identifier, its last segment has no
  * {@code '}, or it ends in a release character with nothing after it.</li>
  * <li>{@code CONVERT_EDIFACT_CHARSET}: the syntax identifier names a
@@ -72,27 +72,27 @@ import java.util.Map;
  * character set.</li>
  * </ul>
  * <p>
- * The section is read twice ({@link #walk}): first to check its structure and
+ * The record is read twice ({@link #walk}): first to check its structure and
  * find its character set, then to write the JSON. Nothing is decoded until the
- * second reading, one component at a time, so the section is never decoded
+ * second reading, one component at a time, so the record is never decoded
  * into one large string.
  * <p>
- * The converter keeps no state between sections, so one instance can convert
- * several sections at once on different threads.
+ * The converter keeps no state between records, so one instance can convert
+ * several records at once on different threads.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  * @see EdifactSplitter
- * @see SectionConverter
+ * @see RecordConverter
  */
-public final class EdifactConverter implements SectionConverter
+public final class EdifactConverter implements RecordConverter
 {
 
     /**
      * The name and version of the JSON this converter produces, returned by
      * {@link #mapping()}: the interchange's segments, each with its tag and its
      * elements as lists of components. It travels with every converted
-     * section, so whatever reads the JSON knows its shape. The version changes
+     * record, so whatever reads the JSON knows its shape. The version changes
      * only if the shape changes in a way existing readers would get wrong.
      */
     public static final String MAPPING = "edifact/1";
@@ -101,7 +101,7 @@ public final class EdifactConverter implements SectionConverter
      * The character set for each syntax identifier the converter supports, by
      * the identifier's code. The identifier is the first component of the
      * {@code UNB} segment's first element, such as {@code UNOC} in
-     * {@code UNB+UNOC:3+…}. A code not listed here fails the section with
+     * {@code UNB+UNOC:3+…}. A code not listed here fails the record with
      * {@code CONVERT_EDIFACT_CHARSET}.
      */
     private static final Map<String, Charset> CHARSETS = Map.ofEntries(
@@ -131,7 +131,7 @@ public final class EdifactConverter implements SectionConverter
 
     /**
      * The format this converter handles: {@code "edifact"}, the same name as
-     * {@link EdifactSplitter}'s, so it is given the sections that splitter
+     * {@link EdifactSplitter}'s, so it is given the records that splitter
      * makes.
      *
      * @return {@code "edifact"}
@@ -154,8 +154,8 @@ public final class EdifactConverter implements SectionConverter
     }
 
     /**
-     * The most memory a conversion needs, as a multiple of the section's size:
-     * the section itself and its JSON, which is about 2.6 times the section's
+     * The most memory a conversion needs, as a multiple of the record's size:
+     * the record itself and its JSON, which is about 2.6 times the record's
      * size, as every segment gains its keys and every component its quotes and
      * comma. Measured at 256 MiB of heap for a 64 MB interchange.
      *
@@ -190,7 +190,7 @@ public final class EdifactConverter implements SectionConverter
      * they appear. There are two: {@link Header} checks the structure, and
      * {@link SegmentWriter} writes the JSON.
      * <p>
-     * A component is given as a range of the section's bytes, with any release
+     * A component is given as a range of the record's bytes, with any release
      * characters still in it, so nothing is copied or decoded unless the
      * receiver needs it.
      */
@@ -204,7 +204,7 @@ public final class EdifactConverter implements SectionConverter
          *                  counting the tag as element 0
          * @param component the number of the component within its element,
          *                  from 0
-         * @param from      where the component starts in the section
+         * @param from      where the component starts in the record
          * @param to        where it ends: the position of the separator after
          *                  it
          * @param released  whether it holds a release character, and so needs
@@ -232,17 +232,17 @@ public final class EdifactConverter implements SectionConverter
      * Converts one interchange into JSON, as the class description says.
      * <p>
      * It first reads the separators from the UNA segment, if there is one.
-     * Then the section is read twice. The first reading checks the structure
+     * Then the record is read twice. The first reading checks the structure
      * and finds the syntax identifier, and keeps nothing else. It comes first
      * because the character set is only known once the {@code UNB} segment has
-     * been read, and so that a malformed segment anywhere in the section is
+     * been read, and so that a malformed segment anywhere in the record is
      * reported before any encoding error. The second reading writes the JSON.
      *
-     * @param section the section's bytes exactly as split; not changed
-     * @param config  the connector's split settings; this converter needs none
-     *                of them
+     * @param record the record's bytes exactly as split; not changed
+     * @param config the connector's split settings; this converter needs none
+     *               of them
      * @return the interchange as JSON, in UTF-8, in a new array
-     * @throws ConversionException if the section isn't a well-formed
+     * @throws ConversionException if the record isn't a well-formed
      *                             interchange, declares an unsupported
      *                             character set, or has bytes that aren't
      *                             valid in it; it gives the byte position of
@@ -250,7 +250,7 @@ public final class EdifactConverter implements SectionConverter
      *                             (see the class description)
      */
     @Override
-    public byte[] convert(byte[] section, SplitConfig config) throws
+    public byte[] convert(byte[] record, SplitConfig config) throws
             ConversionException
     {
         // The standard separators, used unless a UNA segment says otherwise.
@@ -259,20 +259,20 @@ public final class EdifactConverter implements SectionConverter
         byte release = '?';
         byte terminator = '\'';
         // Where reading starts: the first segment, after any line breaks.
-        int position = skipBreaks(section, 0);
+        int position = skipBreaks(record, 0);
         // A UNA segment is "UNA" and six characters: the component separator,
         // the element separator, the decimal mark, the release character, a
         // reserved character and the segment terminator. The decimal mark and
         // the reserved character aren't needed.
-        if (section.length - position >= 9 && section[position] == 'U'
-                && section[position + 1] == 'N'
-                && section[position + 2] == 'A')
+        if (record.length - position >= 9 && record[position] == 'U'
+                && record[position + 1] == 'N'
+                && record[position + 2] == 'A')
         {
-            component = section[position + 3];
-            element = section[position + 4];
-            release = section[position + 6];
-            terminator = section[position + 8];
-            position = skipBreaks(section, position + 9);
+            component = record[position + 3];
+            element = record[position + 4];
+            release = record[position + 6];
+            terminator = record[position + 8];
+            position = skipBreaks(record, position + 9);
         }
         Delimiters delimiters = new Delimiters(component, element, release,
                 terminator);
@@ -281,8 +281,8 @@ public final class EdifactConverter implements SectionConverter
 
         // First reading: check the structure and find the syntax identifier,
         // keeping nothing else.
-        Header header = new Header(section, delimiters);
-        walk(section, firstSegment, delimiters, header);
+        Header header = new Header(record, delimiters);
+        walk(record, firstSegment, delimiters, header);
         if (header.segmentCount == 0 || !"UNB".equals(header.tag)
                 || header.elementCount < 2)
         {
@@ -298,20 +298,20 @@ public final class EdifactConverter implements SectionConverter
 
         // Second reading: write the JSON. JsonWriter.build may run this twice
         // (first only to count the JSON's size), so it starts from the first
-        // segment each time. The estimate is 2.5 times the section's size.
-        return JsonWriter.build(section.length * 2 + (section.length >> 1),
+        // segment each time. The estimate is 2.5 times the record's size.
+        return JsonWriter.build(record.length * 2 + (record.length >> 1),
                 writer ->
         {
             writer.beginObject().key("format").value("EDIFACT")
                     .key("segments").beginArray();
-            walk(section, firstSegment, delimiters,
-                    new SegmentWriter(section, delimiters, charset, writer));
+            walk(record, firstSegment, delimiters,
+                    new SegmentWriter(record, delimiters, charset, writer));
             writer.endArray().endObject();
         });
     }
 
     /**
-     * Reads the section's segments, elements and components in order, from a
+     * Reads the record's segments, elements and components in order, from a
      * given position to the end, and gives each to {@code sink}. It keeps
      * nothing itself, so it can be run once to check the structure and again
      * to write the JSON.
@@ -319,23 +319,23 @@ public final class EdifactConverter implements SectionConverter
      * A release character makes the character after it part of the value,
      * even if it is a separator. Line breaks between segments are skipped.
      *
-     * @param section   the section's bytes
-     * @param position  where the first segment to read starts
+     * @param record     the record's bytes
+     * @param position   where the first segment to read starts
      * @param delimiters the interchange's separators
-     * @param sink      what receives each component, element end and segment
-     *                  end
+     * @param sink       what receives each component, element end and segment
+     *                   end
      * @throws ConversionException {@code CONVERT_EDIFACT_MALFORMED} if the
-     *                             section ends in a release character with
+     *                             record ends in a release character with
      *                             nothing after it (at the release
      *                             character), or its last segment has no
      *                             terminator (at the start of its last
      *                             component); or whatever {@code sink}
      *                             throws
      */
-    private static void walk(byte[] section, int position,
+    private static void walk(byte[] record, int position,
             Delimiters delimiters, Sink sink) throws ConversionException
     {
-        while (position < section.length)
+        while (position < record.length)
         {
             // Where the reader is in this segment.
             int element = 0;
@@ -346,12 +346,12 @@ public final class EdifactConverter implements SectionConverter
             boolean released = false;
             // Whether the segment's terminator has been found.
             boolean terminated = false;
-            while (position < section.length)
+            while (position < record.length)
             {
-                byte current = section[position++];
+                byte current = record[position++];
                 if (current == delimiters.release())
                 {
-                    if (position >= section.length)
+                    if (position >= record.length)
                     {
                         throw new ConversionException(
                                 ErrorCode.CONVERT_EDIFACT_MALFORMED,
@@ -392,7 +392,7 @@ public final class EdifactConverter implements SectionConverter
                         ErrorCode.CONVERT_EDIFACT_MALFORMED, componentStart);
             }
             sink.endSegment();
-            position = skipBreaks(section, position);
+            position = skipBreaks(record, position);
         }
     }
 
@@ -405,7 +405,7 @@ public final class EdifactConverter implements SectionConverter
      * one-element array, so that this method can replace it with a bigger one
      * when a component doesn't fit.
      *
-     * @param section the section's bytes
+     * @param record  the record's bytes
      * @param from    where the component starts
      * @param to      where it ends: the position of the separator after it
      * @param release the release character
@@ -413,7 +413,7 @@ public final class EdifactConverter implements SectionConverter
      *                replaced by a bigger one if the component doesn't fit
      * @return how many bytes of {@code scratch[0]} hold the result
      */
-    private static int unreleased(byte[] section, int from, int to,
+    private static int unreleased(byte[] record, int from, int to,
             byte release, byte[][] scratch)
     {
         if (scratch[0].length < to - from)
@@ -425,42 +425,42 @@ public final class EdifactConverter implements SectionConverter
         int length = 0;
         for (int position = from; position < to; position++)
         {
-            if (section[position] == release)
+            if (record[position] == release)
             {
                 // Keep the character after the release character instead.
                 position++;
             }
-            result[length++] = section[position];
+            result[length++] = record[position];
         }
         return length;
     }
 
     /**
      * Finds where a byte of a component's copy without release characters
-     * ({@link #unreleased}) came from in the section. Used to report an
+     * ({@link #unreleased}) came from in the record. Used to report an
      * invalid byte at its real position.
      * <p>
      * It walks the component the same way {@link #unreleased} does, counting
      * the bytes it would copy: a release character is skipped and the byte
      * after it is the one copied.
      *
-     * @param section   the section's bytes
+     * @param record    the record's bytes
      * @param from      where the component starts
      * @param to        where it ends: the position of the separator after it
      * @param release   the release character
      * @param copyIndex the byte's position in the copy, from 0
-     * @return the byte's position in the section; {@code to} if the copy has
+     * @return the byte's position in the record; {@code to} if the copy has
      *         no byte at {@code copyIndex}, as when an error is found at the
      *         very end of the copy
      */
-    private static int sectionPosition(byte[] section, int from, int to,
+    private static int recordPosition(byte[] record, int from, int to,
             byte release, long copyIndex)
     {
         // How many bytes of the copy come before the current position.
         long copied = 0;
         for (int position = from; position < to; position++)
         {
-            if (section[position] == release)
+            if (record[position] == release)
             {
                 // The byte copied is the one after the release character.
                 position++;
@@ -475,7 +475,7 @@ public final class EdifactConverter implements SectionConverter
     }
 
     /**
-     * The first reading of a section: checks its structure (through
+     * The first reading of a record: checks its structure (through
      * {@link #walk}, which does the checking) and records what the first
      * segment says. That is all {@link #convert} needs before it can write
      * the JSON: whether the first segment is {@code UNB} with at least one
@@ -487,8 +487,8 @@ public final class EdifactConverter implements SectionConverter
     private static final class Header implements Sink
     {
 
-        /** The section's bytes. */
-        private final byte[] section;
+        /** The record's bytes. */
+        private final byte[] record;
         /** The interchange's separators. */
         private final Delimiters delimiters;
         /**
@@ -512,20 +512,20 @@ public final class EdifactConverter implements SectionConverter
         /** The syntax identifier code, such as {@code "UNOC"}. */
         String syntax;
         /**
-         * Where the syntax identifier starts in the section, to report if its
+         * Where the syntax identifier starts in the record, to report if its
          * character set isn't supported.
          */
         int syntaxPosition;
 
         /**
-         * Creates the first reading for a section.
+         * Creates the first reading for a record.
          *
-         * @param section    the section's bytes
+         * @param record     the record's bytes
          * @param delimiters the interchange's separators
          */
-        Header(byte[] section, Delimiters delimiters)
+        Header(byte[] record, Delimiters delimiters)
         {
-            this.section = section;
+            this.record = record;
             this.delimiters = delimiters;
         }
 
@@ -573,9 +573,9 @@ public final class EdifactConverter implements SectionConverter
         {
             if (!released)
             {
-                return Arrays.copyOfRange(section, from, to);
+                return Arrays.copyOfRange(record, from, to);
             }
-            int length = unreleased(section, from, to, delimiters.release(),
+            int length = unreleased(record, from, to, delimiters.release(),
                     scratch);
             return Arrays.copyOf(scratch[0], length);
         }
@@ -599,7 +599,7 @@ public final class EdifactConverter implements SectionConverter
     }
 
     /**
-     * The second reading of a section: writes each segment as
+     * The second reading of a record: writes each segment as
      * {@code {"segment_id":…,"elements":[[…],…]}}.
      * <p>
      * Of the tag (element 0), only its first component is written, as
@@ -609,8 +609,8 @@ public final class EdifactConverter implements SectionConverter
     private static final class SegmentWriter implements Sink
     {
 
-        /** The section's bytes. */
-        private final byte[] section;
+        /** The record's bytes. */
+        private final byte[] record;
         /** The interchange's separators. */
         private final Delimiters delimiters;
         /** The character set the interchange declares. */
@@ -628,17 +628,17 @@ public final class EdifactConverter implements SectionConverter
         };
 
         /**
-         * Creates the second reading for a section.
+         * Creates the second reading for a record.
          *
-         * @param section    the section's bytes
+         * @param record     the record's bytes
          * @param delimiters the interchange's separators
          * @param charset    the character set to decode components with
          * @param writer     where to write the JSON
          */
-        SegmentWriter(byte[] section, Delimiters delimiters, Charset charset,
+        SegmentWriter(byte[] record, Delimiters delimiters, Charset charset,
                 JsonWriter writer)
         {
-            this.section = section;
+            this.record = record;
             this.delimiters = delimiters;
             this.charset = charset;
             this.writer = writer;
@@ -681,10 +681,10 @@ public final class EdifactConverter implements SectionConverter
          * Decodes a component into text, with any release characters taken
          * out.
          * <p>
-         * An invalid byte is reported at its position in the section. A
+         * An invalid byte is reported at its position in the record. A
          * component with release characters is decoded from a copy without
          * them, so the position found in the copy is mapped back to the
-         * section ({@link #sectionPosition}).
+         * record ({@link #recordPosition}).
          *
          * @param from     where the component starts
          * @param to       where it ends
@@ -698,10 +698,10 @@ public final class EdifactConverter implements SectionConverter
         {
             if (!released)
             {
-                // Text.decode reports positions in the section already.
-                return Text.decode(section, from, to - from, charset);
+                // Text.decode reports positions in the record already.
+                return Text.decode(record, from, to - from, charset);
             }
-            int length = unreleased(section, from, to, delimiters.release(),
+            int length = unreleased(record, from, to, delimiters.release(),
                     scratch);
             try
             {
@@ -710,7 +710,7 @@ public final class EdifactConverter implements SectionConverter
             catch (ConversionException error)
             {
                 throw new ConversionException(error.code(),
-                        sectionPosition(section, from, to,
+                        recordPosition(record, from, to,
                                 delimiters.release(), error.position()));
             }
         }
@@ -741,15 +741,15 @@ public final class EdifactConverter implements SectionConverter
      * Skips any line breaks (CR or LF) at a position, as senders often put one
      * after each segment.
      *
-     * @param section  the section's bytes
+     * @param record   the record's bytes
      * @param position where to start
      * @return the position of the first byte that isn't a line break, or the
-     *         section's length if only line breaks remain
+     *         record's length if only line breaks remain
      */
-    private static int skipBreaks(byte[] section, int position)
+    private static int skipBreaks(byte[] record, int position)
     {
-        while (position < section.length
-                && (section[position] == '\r' || section[position] == '\n'))
+        while (position < record.length
+                && (record[position] == '\r' || record[position] == '\n'))
         {
             position++;
         }

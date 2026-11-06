@@ -25,9 +25,9 @@ sdh:
       csv: { header: true }       # → csv.header
       fhir: { ndjson-group-size: 0 }
       delimited: { pattern: "^MSH\\|", mode: START }
-    limits: { max-file-bytes: 1TB, max-section-bytes: 512MB }   # omitted = format defaults
+    limits: { max-item-bytes: 1TB, max-record-bytes: 512MB }    # omitted = format defaults
     convert: true                 # JSON conversion where the format has a converter
-    convert-max-bytes: 64MB       # larger sections are stored in their original form, as failed
+    convert-max-bytes: 64MB       # larger records are stored in their original form, as failed
   storage:
     catalog-name: sdh             # also sent in messages
     namespace: sdh_ingest
@@ -42,7 +42,7 @@ sdh:
       io-impl: org.apache.iceberg.aws.s3.S3FileIO   # or ...gcp.gcs.GCSFileIO, ...azure.adlsv2.ADLSFileIO
       s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
       client: { region: us-east-1 }
-    commit: { max-sections: 10000, max-bytes: 512MB, max-interval: 30s }
+    commit: { max-records: 10000, max-bytes: 512MB, max-interval: 30s }
   lease:
     name: file-connector
     jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
@@ -54,7 +54,7 @@ sdh:
     sign-provider: local          # same choices, independently
     keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
     keys:
-      sections-kek: sections-kek/1                          # keystore alias, or the KMS key ref
+      records-kek: records-kek/1                            # keystore alias, or the KMS key ref
       landed-items-kek: landed-items-kek/1                  # unwrap only: reads landed items
       signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
       # signing: { kid: connector-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
@@ -66,7 +66,7 @@ sdh:
     vault: { address: "https://vault:8200", token-file: /vault/secrets/token, mount: transit }   # vault-transit
   queue:
     type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
-    uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"
+    uri: "kafka:sdh.records?brokers=kafka:9093&securityProtocol=SSL"
     artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
   results:                        # final results for the producer; off by default
     enabled: false
@@ -88,4 +88,4 @@ sdh:
     min-snapshots: 10
     compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
     orphans: { enabled: true, interval: 24h, min-age: 3d }
-    retention: { sections: 30d }  # unset = keep forever (default)
+    retention: { records: 30d }   # unset = keep forever (default)

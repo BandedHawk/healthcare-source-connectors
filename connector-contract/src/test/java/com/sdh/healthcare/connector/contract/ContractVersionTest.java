@@ -131,7 +131,7 @@ class ContractVersionTest
 
         ItemLanded read = (ItemLanded) PayloadCodec.fromJson(payload);
         assertThat(read.replaces()).isNull();
-        assertThat(read.fileId()).isEqualTo(sent.fileId());
+        assertThat(read.itemId()).isEqualTo(sent.itemId());
         assertThat(read.storage()).isEqualTo(sent.storage());
     }
 
@@ -194,7 +194,7 @@ class ContractVersionTest
                         .UNSUPPORTED_VERSION);
 
         Map<String, Object> broken = payload(sent, ContractVersion.CURRENT);
-        broken.remove("fileId");
+        broken.remove("itemId");
         assertThatThrownBy(() -> opener.open(sealer.seal(broken)))
                 .isInstanceOf(MessageRejectedException.class)
                 .extracting(thrown ->

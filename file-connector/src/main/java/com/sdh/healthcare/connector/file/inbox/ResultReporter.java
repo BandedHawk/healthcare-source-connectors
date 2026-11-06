@@ -13,11 +13,11 @@ import com.sdh.healthcare.connector.contract.message.PayloadCodec;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
-import com.sdh.healthcare.connector.core.landing.RecordIndex;
+import com.sdh.healthcare.connector.core.landing.MessageIndex;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor.Outcome;
 import com.sdh.healthcare.connector.core.pipeline.PublishFailedException;
-import com.sdh.healthcare.connector.core.storage.CommittedSections;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import java.time.Clock;
 import java.time.Instant;
@@ -30,7 +30,7 @@ import org.apache.iceberg.data.Record;
 
 /**
  * Sends an item's final result to its producer (design §5.3.8): whether
- * it completed or failed, and where each problem is, by section, byte
+ * it completed or failed, and where each problem is, by record, byte
  * offset, line and column, and for a message batch the message and its
  * broker ID. Long lists of problems go in parts of at most
  * {@value #PART_SIZE} problems and {@value #PART_BYTES} bytes of them. No
@@ -56,13 +56,13 @@ public final class ResultReporter
      */
     public static final int PART_BYTES = 96 << 10;
 
-    /** The stage of a section that failed conversion. */
+    /** The stage of a record that failed conversion. */
     static final String CONVERT = "convert";
 
     /** Sends the parts. */
     private final ResultsChannel channel;
 
-    /** Reads the item's failed sections. */
+    /** Reads the item's failed records. */
     private final ItemProcessor processor;
 
     /** The {@code landed_items} table. */
@@ -81,7 +81,7 @@ public final class ResultReporter
      * Creates a reporter.
      *
      * @param channel     sends the parts
-     * @param processor   reads the item's failed sections
+     * @param processor   reads the item's failed records
      * @param landedItems the {@code landed_items} table
      * @param keys        unwraps the landed items' data keys
      * @param intake      the intake the splitter serves
@@ -115,13 +115,13 @@ public final class ResultReporter
             return;
         }
         Optional<Record> summary = LandedItems.summary(landedItems.get(),
-                outcome.fileId());
+                outcome.itemId());
         Landed landed = summary.isEmpty() ? Landed.NONE
                 : new Landed(
                         LandedItems.originalName(summary.get(), keys)
                                 .orElse(null),
                         LandedItems.replaces(summary.get()).orElse(null),
-                        LandedItems.records(summary.get()).orElse(null),
+                        LandedItems.messageIndex(summary.get()).orElse(null),
                         LandedItems.messageRefs(summary.get(), keys)
                                 .orElse(null),
                         LandedItems.messageReplaces(summary.get(), keys)
@@ -129,7 +129,7 @@ public final class ResultReporter
         Instant finishedAt = outcome.failure() != null
                 ? outcome.failure().failedAt() : clock.instant();
         for (ItemResult part : parts(outcome, intake,
-                processor.failedSections(outcome.fileId()), landed,
+                processor.failedRecords(outcome.itemId()), landed,
                 finishedAt, PART_SIZE, PART_BYTES))
         {
             channel.send(part);
@@ -139,16 +139,16 @@ public final class ResultReporter
     /**
      * What the landing node kept about an item that goes in its result.
      *
-     * @param producerRef the producer's own reference; null if none
-     * @param replaces    the item it replaces; null if none
-     * @param records     where each message of a batch starts; null if
-     *                    the item isn't a batch
-     * @param messageRefs each message's broker ID, or null; null if not
-     *                    kept
+     * @param producerRef     the producer's own reference; null if none
+     * @param replaces        the item it replaces; null if none
+     * @param messageIndex    where each message of a batch starts; null if
+     *                        the item isn't a batch
+     * @param messageRefs     each message's broker ID, or null; null if not
+     *                        kept
      * @param messageReplaces the earlier message each message replaces, or
      *                    null; null if none does
      */
-    record Landed(String producerRef, UUID replaces, RecordIndex records,
+    record Landed(String producerRef, UUID replaces, MessageIndex messageIndex,
             List<String> messageRefs, List<String> messageReplaces)
     {
 
@@ -161,7 +161,7 @@ public final class ResultReporter
      *
      * @param outcome    how the item ended, completed or failed
      * @param intake     the intake
-     * @param failed     its sections that failed conversion, in order
+     * @param failed     its records that failed conversion, in order
      * @param landed     what landing kept about it
      * @param finishedAt when it finished
      * @param partSize   the most problems in a part
@@ -170,7 +170,7 @@ public final class ResultReporter
      * @return the parts, at least one
      */
     static List<ItemResult> parts(Outcome outcome, String intake,
-            List<CommittedSections.Failed> failed, Landed landed,
+            List<CommittedRecords.Failed> failed, Landed landed,
             Instant finishedAt, int partSize, int partBytes)
     {
         String status = outcome.result() == ItemProcessor.Result.COMPLETED
@@ -180,10 +180,10 @@ public final class ResultReporter
                 : problem(failure.code().name(), failure.stage(), -1,
                         failure.offset(), null, landed);
         List<Problem> problems = new ArrayList<>(failed.size());
-        for (CommittedSections.Failed section : failed)
+        for (CommittedRecords.Failed record : failed)
         {
-            problems.add(problem(section.errorCode(), CONVERT, section.seq(),
-                    section.sourceOffset(), section.errorAt(), landed));
+            problems.add(problem(record.errorCode(), CONVERT, record.seq(),
+                    record.sourceOffset(), record.errorAt(), landed));
         }
         List<Integer> starts = new ArrayList<>();
         starts.add(0);
@@ -204,8 +204,8 @@ public final class ResultReporter
         List<ItemResult> parts = new ArrayList<>(partCount);
         for (int part = 0; part < partCount; part++)
         {
-            parts.add(new ItemResult(outcome.fileId(), intake, status,
-                    outcome.sectionCount(), failed.size(), whole,
+            parts.add(new ItemResult(outcome.itemId(), intake, status,
+                    outcome.recordCount(), failed.size(), whole,
                     problems.size(), part + 1, partCount,
                     problems.subList(starts.get(part), starts.get(part + 1)),
                     landed.producerRef(), landed.replaces(), finishedAt));
@@ -218,7 +218,7 @@ public final class ResultReporter
      *
      * @param code   the error code
      * @param stage  where it was found
-     * @param seq    the section, or -1 for the whole item
+     * @param seq    the record, or -1 for the whole item
      * @param offset its byte offset in the item
      * @param at     its line and column; null if unknown
      * @param landed what landing kept about the item
@@ -227,7 +227,7 @@ public final class ResultReporter
     private static Problem problem(String code, String stage, long seq,
             long offset, SourcePosition at, Landed landed)
     {
-        int message = message(landed.records(), offset);
+        int message = message(landed.messageIndex(), offset);
         return new Problem(code, stage, seq, offset, at, message,
                 at(landed.messageRefs(), message),
                 at(landed.messageReplaces(), message));
@@ -250,22 +250,22 @@ public final class ResultReporter
      * Finds the message of a batch that holds a byte offset: the last one
      * starting at or before it.
      *
-     * @param records where each message starts; null if not a batch
-     * @param offset  the byte offset in the item
+     * @param messageIndex where each message starts; null if not a batch
+     * @param offset       the byte offset in the item
      * @return the message's index; -1 if not a batch
      */
-    static int message(RecordIndex records, long offset)
+    static int message(MessageIndex messageIndex, long offset)
     {
-        if (records == null)
+        if (messageIndex == null)
         {
             return -1;
         }
-        int found = Collections.binarySearch(records.offsets(), offset);
+        int found = Collections.binarySearch(messageIndex.offsets(), offset);
         if (found >= 0)
         {
             // Empty messages share an offset with the next: take the last.
-            while (found + 1 < records.offsets().size()
-                    && records.offsets().get(found + 1) == offset)
+            while (found + 1 < messageIndex.offsets().size()
+                    && messageIndex.offsets().get(found + 1) == offset)
             {
                 found++;
             }

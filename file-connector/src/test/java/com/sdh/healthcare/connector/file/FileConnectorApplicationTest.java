@@ -20,7 +20,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileComple
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -155,7 +155,7 @@ class FileConnectorApplicationTest
         registry.add("sdh.landing.idle-wait", () -> "200ms");
         registry.add("sdh.split.format", () -> "csv");
         registry.add("sdh.storage.catalog-name", () -> "sdh");
-        registry.add("sdh.storage.commit.max-sections", () -> "5");
+        registry.add("sdh.storage.commit.max-records", () -> "5");
         registry.add("sdh.maintenance.compaction.min-input-files", () -> "2");
         registry.add("sdh.lease.jdbc.url", () -> jdbc);
         registry.add("sdh.lease.jdbc.username", () -> "postgres");
@@ -163,7 +163,7 @@ class FileConnectorApplicationTest
         registry.add("sdh.crypto.keystore.path", KEYS.keystore::toString);
         registry.add("sdh.crypto.keystore.password",
                 () -> TestKeys.KS_PASSWORD);
-        registry.add("sdh.crypto.keys.sections-kek", () -> TestKeys.SECTIONS);
+        registry.add("sdh.crypto.keys.records-kek", () -> TestKeys.RECORDS);
         registry.add("sdh.crypto.keys.landed-items-kek",
                 () -> TestKeys.LANDED);
         registry.add("sdh.crypto.keys.signing.kid", () -> "connector-2026");
@@ -324,33 +324,33 @@ class FileConnectorApplicationTest
         List<FileStarted> started = messages.stream()
                 .filter(FileStarted.class::isInstance)
                 .map(FileStarted.class::cast).toList();
-        assertThat(started).extracting(FileStarted::fileId).containsExactly(
+        assertThat(started).extracting(FileStarted::itemId).containsExactly(
                 first.itemId(), second.itemId(), third.itemId());
-        assertThat(started).extracting(FileStarted::fileSize).containsExactly(
+        assertThat(started).extracting(FileStarted::itemSize).containsExactly(
                 (long) older.length(), (long) newer.length(),
                 (long) bad.length());
-        assertThat(messages.stream().filter(SectionStored.class::isInstance))
+        assertThat(messages.stream().filter(RecordStored.class::isInstance))
                 .hasSize(15);
         List<FileCompleted> completed = messages.stream()
                 .filter(FileCompleted.class::isInstance)
                 .map(FileCompleted.class::cast).toList();
-        assertThat(completed).extracting(FileCompleted::fileId)
+        assertThat(completed).extracting(FileCompleted::itemId)
                 .containsExactly(first.itemId(), second.itemId());
-        assertThat(completed).extracting(FileCompleted::sectionCount)
+        assertThat(completed).extracting(FileCompleted::recordCount)
                 .containsExactly(12L, 3L);
-        assertThat(completed).extracting(FileCompleted::fileDigest)
+        assertThat(completed).extracting(FileCompleted::itemDigest)
                 .containsExactly(first.digest(), second.digest());
 
         // Each item's result goes to the producer, with its own reference.
         List<ItemResult> results = results();
-        assertThat(results).extracting(ItemResult::fileId).containsExactly(
+        assertThat(results).extracting(ItemResult::itemId).containsExactly(
                 first.itemId(), second.itemId(), third.itemId());
         assertThat(results).extracting(ItemResult::status).containsExactly(
                 ItemResult.COMPLETED, ItemResult.COMPLETED, ItemResult.FAILED);
         assertThat(results).extracting(ItemResult::producerRef)
                 .containsExactly("b-smith.csv", "a-jones.csv", null);
         assertThat(results.subList(0, 2))
-                .extracting(ItemResult::sectionCount)
+                .extracting(ItemResult::recordCount)
                 .containsExactly(12L, 3L);
         assertThat(results).allSatisfy(result ->
         {
@@ -417,11 +417,11 @@ class FileConnectorApplicationTest
         List<ConnectorMessage> messages = awaitFinished(lost);
         assertThat(messages.stream().filter(FileCompleted.class::isInstance)
                 .map(FileCompleted.class::cast)
-                .map(FileCompleted::fileId))
+                .map(FileCompleted::itemId))
                 .containsExactly(lostFirst.itemId(), lostSecond.itemId());
-        assertThat(messages.stream().filter(SectionStored.class::isInstance))
+        assertThat(messages.stream().filter(RecordStored.class::isInstance))
                 .hasSize(5);
-        assertThat(results()).extracting(ItemResult::fileId)
+        assertThat(results()).extracting(ItemResult::itemId)
                 .containsExactly(lostFirst.itemId(), lostSecond.itemId());
 
         // The lost message turns up after all: a repeat, nothing more.
@@ -557,7 +557,7 @@ class FileConnectorApplicationTest
             drain(messages);
         }
         assertThat(messages.stream().filter(FileCompleted.class::isInstance)
-                .map(ConnectorMessage::fileId))
+                .map(ConnectorMessage::itemId))
                 .containsExactlyInAnyOrderElementsOf(itemIds);
         return messages;
     }
@@ -572,7 +572,7 @@ class FileConnectorApplicationTest
     {
         ItemLanded message =
                 item.message("sdh", LandingTables.DEFAULT_NAMESPACE);
-        return new ItemLanded(message.fileId(), "other", message.kind(),
+        return new ItemLanded(message.itemId(), "other", message.kind(),
                 message.size(), message.itemDigest(), message.landedAt(),
                 message.storage());
     }

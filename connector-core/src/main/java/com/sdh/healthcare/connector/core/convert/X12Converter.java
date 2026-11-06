@@ -30,7 +30,7 @@ import java.nio.charset.StandardCharsets;
  * <p>
  * What is kept, and how:
  * <ul>
- * <li><b>Every segment</b> of the section is written, in order, the envelope
+ * <li><b>Every segment</b> of the record is written, in order, the envelope
  * segments ({@code ISA}, {@code GS}, {@code ST} to {@code SE}, {@code GE} and
  * {@code IEA}) included.</li>
  * <li><b>Elements are kept by position and exactly as written,</b> so whatever
@@ -45,36 +45,36 @@ import java.nio.charset.StandardCharsets;
  * senders add one after every segment.</li>
  * </ul>
  * <p>
- * The section must be UTF-8. X12's character sets are all part of UTF-8, so
+ * The record must be UTF-8. X12's character sets are all part of UTF-8, so
  * this accepts any interchange that keeps to them.
  * <p>
- * A section that can't be converted fails with a {@link ConversionException}
+ * A record that can't be converted fails with a {@link ConversionException}
  * giving the byte position of the problem, and is then stored as split:
  * <ul>
- * <li>{@code CONVERT_INVALID_ENCODING}: the section isn't valid UTF-8.</li>
- * <li>{@code CONVERT_X12_MALFORMED}: the section doesn't start with an
+ * <li>{@code CONVERT_INVALID_ENCODING}: the record isn't valid UTF-8.</li>
+ * <li>{@code CONVERT_X12_MALFORMED}: the record doesn't start with an
  * {@code ISA} segment from which the separators can be read, a separator
  * isn't a single ASCII character, or the last segment has no
  * terminator.</li>
  * </ul>
  * <p>
- * The section is worked on as bytes and never decoded into one large string.
+ * The record is worked on as bytes and never decoded into one large string.
  * <p>
- * The converter keeps no state between sections, so one instance can convert
- * several sections at once on different threads.
+ * The converter keeps no state between records, so one instance can convert
+ * several records at once on different threads.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  * @see X12Splitter
- * @see SectionConverter
+ * @see RecordConverter
  */
-public final class X12Converter implements SectionConverter
+public final class X12Converter implements RecordConverter
 {
 
     /**
      * The name and version of the JSON this converter produces, returned by
      * {@link #mapping()}: the interchange's segments, each with its ID and its
-     * elements as strings. It travels with every converted section, so
+     * elements as strings. It travels with every converted record, so
      * whatever reads the JSON knows its shape. The version changes only if the
      * shape changes in a way existing readers would get wrong.
      */
@@ -95,7 +95,7 @@ public final class X12Converter implements SectionConverter
 
     /**
      * The format this converter handles: {@code "x12"}, the same name as
-     * {@link X12Splitter}'s, so it is given the sections that splitter makes.
+     * {@link X12Splitter}'s, so it is given the records that splitter makes.
      *
      * @return {@code "x12"}
      */
@@ -117,8 +117,8 @@ public final class X12Converter implements SectionConverter
     }
 
     /**
-     * The most memory a conversion needs, as a multiple of the section's size:
-     * the section itself and its JSON, which is about 2.4 times the section's
+     * The most memory a conversion needs, as a multiple of the record's size:
+     * the record itself and its JSON, which is about 2.4 times the record's
      * size, as every segment gains its keys and every element its quotes and
      * comma. Measured at 224 MiB of heap for a 64 MB interchange.
      *
@@ -133,18 +133,18 @@ public final class X12Converter implements SectionConverter
     /**
      * Converts one interchange into JSON, as the class description says.
      * <p>
-     * It first checks that the whole section is valid UTF-8. Then it reads the
+     * It first checks that the whole record is valid UTF-8. Then it reads the
      * separators from the {@code ISA} segment. That segment has a fixed
      * layout: the character right after {@code ISA} separates its elements;
      * ISA16, the last element, is a single character; and the character after
      * that ends the segment. Then each segment is written in turn.
      *
-     * @param section the section's bytes exactly as split; not changed
-     * @param config  the connector's split settings; this converter needs none
-     *                of them
+     * @param record the record's bytes exactly as split; not changed
+     * @param config the connector's split settings; this converter needs none
+     *               of them
      * @return the interchange as JSON, in UTF-8, in a new array
      * @throws ConversionException {@code CONVERT_INVALID_ENCODING} if the
-     *                             section isn't valid UTF-8, at the first
+     *                             record isn't valid UTF-8, at the first
      *                             invalid byte; {@code CONVERT_X12_MALFORMED}
      *                             if the separators can't be read from the
      *                             {@code ISA} segment (at its start) or the
@@ -152,14 +152,14 @@ public final class X12Converter implements SectionConverter
      *                             segment's start)
      */
     @Override
-    public byte[] convert(byte[] section, SplitConfig config) throws
+    public byte[] convert(byte[] record, SplitConfig config) throws
             ConversionException
     {
-        Text.check(section, 0, section.length, StandardCharsets.UTF_8);
+        Text.check(record, 0, record.length, StandardCharsets.UTF_8);
         // Where the ISA segment starts, after any line breaks.
-        int isaStart = skipBreaks(section, 0);
-        if (!startsWith(section, isaStart, ISA)
-                || section.length < isaStart + 4)
+        int isaStart = skipBreaks(record, 0);
+        if (!startsWith(record, isaStart, ISA)
+                || record.length < isaStart + 4)
         {
             throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED,
                     isaStart);
@@ -167,27 +167,27 @@ public final class X12Converter implements SectionConverter
         // The ISA segment has a fixed layout: the element separator is right
         // after "ISA", and the terminator right after ISA16, which is one
         // character.
-        byte elementSeparator = section[isaStart + 3];
+        byte elementSeparator = record[isaStart + 3];
         // Finds the 16th element separator; ISA16 is the byte after it.
         int position = isaStart + 3;
         for (int separators = 0; separators < 16; position++)
         {
-            if (position >= section.length)
+            if (position >= record.length)
             {
                 throw new ConversionException(
                         ErrorCode.CONVERT_X12_MALFORMED, isaStart);
             }
-            if (section[position] == elementSeparator)
+            if (record[position] == elementSeparator)
             {
                 separators++;
             }
         }
-        if (position + 1 >= section.length)
+        if (position + 1 >= record.length)
         {
             throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED,
                     isaStart);
         }
-        byte terminator = section[position + 1];
+        byte terminator = record[position + 1];
         if (elementSeparator < 0 || terminator < 0)
         {
             // A separator must be one character; a byte of a multi-byte UTF-8
@@ -195,19 +195,19 @@ public final class X12Converter implements SectionConverter
             throw new ConversionException(ErrorCode.CONVERT_X12_MALFORMED,
                     isaStart);
         }
-        // The estimate is 2.5 times the section: every segment gains its keys
+        // The estimate is 2.5 times the record: every segment gains its keys
         // and every element its quotes. JsonWriter.build may run this twice
         // (first only to count the JSON's size), so it starts from the ISA
         // segment each time.
-        return JsonWriter.build(section.length * 2 + (section.length >> 1),
+        return JsonWriter.build(record.length * 2 + (record.length >> 1),
                 writer ->
         {
             writer.beginObject().key("format").value("X12").key("segments")
                     .beginArray();
             int segmentStart = isaStart;
-            while (segmentStart < section.length)
+            while (segmentStart < record.length)
             {
-                int segmentEnd = indexOf(section, terminator, segmentStart);
+                int segmentEnd = indexOf(record, terminator, segmentStart);
                 if (segmentEnd < 0)
                 {
                     throw new ConversionException(
@@ -215,12 +215,12 @@ public final class X12Converter implements SectionConverter
                 }
                 // With a newline as terminator, a file with CRLF line endings
                 // leaves a CR at the end of each segment, which isn't data.
-                segment(writer, section, segmentStart,
+                segment(writer, record, segmentStart,
                         terminator == '\n' && segmentEnd > segmentStart
-                                && section[segmentEnd - 1] == '\r'
+                                && record[segmentEnd - 1] == '\r'
                                 ? segmentEnd - 1 : segmentEnd,
                         elementSeparator);
-                segmentStart = skipBreaks(section, segmentEnd + 1);
+                segmentStart = skipBreaks(record, segmentEnd + 1);
             }
             writer.endArray().endObject();
         });
@@ -231,38 +231,38 @@ public final class X12Converter implements SectionConverter
      * strings, in order.
      * <p>
      * The bytes are copied as they are, without decoding. That is safe because
-     * the section is valid UTF-8 and the separators are ASCII characters,
+     * the record is valid UTF-8 and the separators are ASCII characters,
      * which never occur inside a character of more than one byte, so cutting
      * at separators never splits a character.
      *
      * @param writer           where the JSON is written
-     * @param section          the section's bytes
+     * @param record           the record's bytes
      * @param from             where the segment starts
      * @param to               where it ends: the position of its terminator,
      *                         or of a CR just before it
      * @param elementSeparator the character between elements
      */
-    private static void segment(JsonWriter writer, byte[] section, int from,
+    private static void segment(JsonWriter writer, byte[] record, int from,
             int to, byte elementSeparator)
     {
         // The separator before the next element, or the segment's end.
-        int separator = indexOf(section, elementSeparator, from);
+        int separator = indexOf(record, elementSeparator, from);
         if (separator < 0 || separator > to)
         {
             separator = to;
         }
         writer.beginObject().key("segment_id")
-                .valueUtf8(section, from, separator).key("elements")
+                .valueUtf8(record, from, separator).key("elements")
                 .beginArray();
         while (separator < to)
         {
-            int nextSeparator = indexOf(section, elementSeparator,
+            int nextSeparator = indexOf(record, elementSeparator,
                     separator + 1);
             if (nextSeparator < 0 || nextSeparator > to)
             {
                 nextSeparator = to;
             }
-            writer.valueUtf8(section, separator + 1, nextSeparator);
+            writer.valueUtf8(record, separator + 1, nextSeparator);
             separator = nextSeparator;
         }
         writer.endArray().endObject();
@@ -270,18 +270,18 @@ public final class X12Converter implements SectionConverter
 
     /**
      * Finds the first occurrence of a byte, from a position to the end of the
-     * section.
+     * record.
      *
-     * @param section the section's bytes
-     * @param target  the byte to find
-     * @param from    where to start looking
+     * @param record the record's bytes
+     * @param target the byte to find
+     * @param from   where to start looking
      * @return the byte's position, or -1 if it doesn't occur
      */
-    private static int indexOf(byte[] section, byte target, int from)
+    private static int indexOf(byte[] record, byte target, int from)
     {
-        for (int position = from; position < section.length; position++)
+        for (int position = from; position < record.length; position++)
         {
-            if (section[position] == target)
+            if (record[position] == target)
             {
                 return position;
             }
@@ -290,24 +290,24 @@ public final class X12Converter implements SectionConverter
     }
 
     /**
-     * Tells whether the section has the given bytes at a position.
+     * Tells whether the record has the given bytes at a position.
      *
-     * @param section  the section's bytes
+     * @param record   the record's bytes
      * @param position where the bytes should start
      * @param prefix   the bytes to look for
-     * @return true if they are all there, false if not or if the section ends
+     * @return true if they are all there, false if not or if the record ends
      *         first
      */
-    private static boolean startsWith(byte[] section, int position,
+    private static boolean startsWith(byte[] record, int position,
             byte[] prefix)
     {
-        if (section.length - position < prefix.length)
+        if (record.length - position < prefix.length)
         {
             return false;
         }
         for (int index = 0; index < prefix.length; index++)
         {
-            if (section[position + index] != prefix[index])
+            if (record[position + index] != prefix[index])
             {
                 return false;
             }
@@ -319,15 +319,15 @@ public final class X12Converter implements SectionConverter
      * Skips any line breaks (CR or LF) at a position, as senders often put one
      * after each segment.
      *
-     * @param section  the section's bytes
+     * @param record   the record's bytes
      * @param position where to start
      * @return the position of the first byte that isn't a line break, or the
-     *         section's length if only line breaks remain
+     *         record's length if only line breaks remain
      */
-    private static int skipBreaks(byte[] section, int position)
+    private static int skipBreaks(byte[] record, int position)
     {
-        while (position < section.length
-                && (section[position] == '\r' || section[position] == '\n'))
+        while (position < record.length
+                && (record[position] == '\r' || record[position] == '\n'))
         {
             position++;
         }

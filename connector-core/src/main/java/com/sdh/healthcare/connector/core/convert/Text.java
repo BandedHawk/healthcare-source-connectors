@@ -18,12 +18,12 @@ import java.nio.charset.CodingErrorAction;
  * Strict text decoding for the converters. Java's usual decoding replaces a
  * byte that isn't valid in the character set with a replacement character
  * ({@code U+FFFD}), so the text quietly changes. Here an invalid byte fails
- * the section instead, with {@code CONVERT_INVALID_ENCODING} and the byte's
- * position, so the section is stored as split and nothing is lost.
+ * the record instead, with {@code CONVERT_INVALID_ENCODING} and the byte's
+ * position, so the record is stored as split and nothing is lost.
  * <p>
  * A position is always an index into the array given, not a count from the
- * start of the range decoded, so a converter that decodes part of a section
- * gets the byte's position in the section.
+ * start of the range decoded, so a converter that decodes part of a record
+ * gets the byte's position in the record.
  * <p>
  * The class only has static methods and isn't meant to be created.
  *
@@ -42,7 +42,7 @@ final class Text
      * Decodes a range of bytes into text, failing on any byte that isn't valid
      * in the character set.
      *
-     * @param bytes   the bytes, such as a section
+     * @param bytes   the bytes, such as a record
      * @param from    where the range starts
      * @param length  how many bytes it has
      * @param charset the character set the bytes are in
@@ -86,9 +86,9 @@ final class Text
      * Checks that a range of bytes is valid in the character set, the same way
      * {@link #decode} does and with the same error position, without keeping
      * the text. The text is decoded a few thousand characters at a time and
-     * thrown away, so checking a large section needs little memory.
+     * thrown away, so checking a large record needs little memory.
      *
-     * @param bytes   the bytes, such as a section
+     * @param bytes   the bytes, such as a record
      * @param from    where the range starts
      * @param length  how many bytes it has
      * @param charset the character set the bytes should be in
@@ -136,7 +136,7 @@ final class Text
      * Tells whether there is a UTF-8 byte order mark at a position: the bytes
      * {@code EF BB BF}, which some programs put at the start of a file.
      *
-     * @param bytes the bytes, such as a section
+     * @param bytes the bytes, such as a record
      * @param from  where to look
      * @return the mark's length, 3, if there is one there; 0 if not
      */

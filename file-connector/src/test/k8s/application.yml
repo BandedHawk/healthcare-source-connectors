@@ -28,7 +28,7 @@ sdh:
   crypto:
     keystore: { path: /run/secrets/keks.p12 }
     keys:
-      sections-kek: sections-kek/1
+      records-kek: records-kek/1
       landed-items-kek: landed-items-kek/1
       signing: { kid: connector-2026, pem: /run/secrets/signing.pem }
       recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "RECIPIENT_SHA256" }
@@ -36,4 +36,4 @@ sdh:
       landing-signer: { kid: landing-2026, pem: /run/secrets/landing-signer.pem }
   queue:
     type: kafka
-    uri: "kafka:sdh-sections?brokers=kafka.SERVICES_NS:9092"
+    uri: "kafka:sdh-records?brokers=kafka.SERVICES_NS:9092"

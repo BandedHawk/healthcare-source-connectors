@@ -54,7 +54,7 @@ class ConnectorPropertiesTest
         assertThat(properties.lease().ttl()).isEqualTo(Duration.ofSeconds(90));
         assertThat(properties.lease().renewInterval())
                 .isEqualTo(Duration.ofSeconds(15));
-        assertThat(properties.storage().commit().maxSections())
+        assertThat(properties.storage().commit().maxRecords())
                 .isEqualTo(10_000);
         assertThat(properties.landing().idleWait())
                 .isEqualTo(Duration.ofSeconds(5));

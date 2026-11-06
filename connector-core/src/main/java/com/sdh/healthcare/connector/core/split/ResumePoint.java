@@ -66,7 +66,7 @@ public record ResumePoint(long offset, List<Long> context)
      * Whether this point is past another: a greater offset, or the same
      * offset with a greater context, compared entry by entry, a longer
      * context being past a shorter one it starts with. A splitter whose
-     * sections share an offset, such as the rows of a Parquet row group,
+     * records share an offset, such as the rows of a Parquet row group,
      * counts on in its context.
      *
      * @param other the other point

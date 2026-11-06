@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.contract.message;
 
-import com.sdh.healthcare.connector.contract.position.SectionOrigin;
+import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import java.time.Instant;
 import java.util.List;
@@ -14,7 +14,7 @@ import java.util.UUID;
 
 /**
  * A message a connector publishes (design §10.1): a file was started, a
- * section is in storage, or a file was completed. A landing node publishes
+ * record is in storage, or a file was completed. A landing node publishes
  * one more, to its splitter only: an item was landed (design §5.3.6). Two
  * go to an intake's producer only, on its results queue (design §5.3.8):
  * an item was received, and what came of it. The payload is always
@@ -24,7 +24,7 @@ import java.util.UUID;
  * @since 0.1.0
  */
 public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
-        ConnectorMessage.SectionInStorage, ConnectorMessage.FileCompleted,
+        ConnectorMessage.RecordInStorage, ConnectorMessage.FileCompleted,
         ConnectorMessage.ItemLanded, ConnectorMessage.ItemReceived,
         ConnectorMessage.ItemResult
 {
@@ -49,18 +49,18 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      *
      * @return the file id
      */
-    UUID fileId();
+    UUID itemId();
 
     /**
      * A file was picked up, or resumed in a new run.
      *
-     * @param fileId      the file's id
+     * @param itemId      the file's id
      * @param format      the name of the file's format, such as {@code csv}
-     * @param fileSize    the file's size, in bytes
+     * @param itemSize    the file's size, in bytes
      * @param startedAt   when the connector started on the file
      * @param connectorId the id of the connector that picked it up
      */
-    record FileStarted(UUID fileId, String format, long fileSize,
+    record FileStarted(UUID itemId, String format, long itemSize,
             Instant startedAt, String connectorId)
             implements ConnectorMessage
     {
@@ -84,42 +84,42 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         @Override
         public String messageId()
         {
-            return "fs-" + fileId;
+            return "fs-" + itemId;
         }
     }
 
     /**
-     * A section in storage, readable with connector-queue-reader: stored
-     * ({@link SectionStored}) or kept in its original form after failing
-     * conversion ({@link SectionFailed}).
+     * A record in storage, readable with connector-queue-reader: stored
+     * ({@link RecordStored}) or kept in its original form after failing
+     * conversion ({@link RecordFailed}).
      */
-    sealed interface SectionInStorage extends ConnectorMessage
-            permits SectionStored, SectionFailed
+    sealed interface RecordInStorage extends ConnectorMessage
+            permits RecordStored, RecordFailed
     {
 
         /**
-         * The section's id.
+         * The record's id.
          *
-         * @return the section id
+         * @return the record id
          */
-        String sectionId();
+        String recordId();
 
         /**
-         * The section's number in its file, from 0.
+         * The record's number in its file, from 0.
          *
          * @return the sequence number
          */
         long seq();
 
         /**
-         * Where the section starts in the original, unsplit file.
+         * Where the record starts in the original, unsplit file.
          *
          * @return the offset, in bytes
          */
         long sourceOffset();
 
         /**
-         * How many bytes of the original file the section covers.
+         * How many bytes of the original file the record covers.
          *
          * @return the length, in bytes
          */
@@ -141,50 +141,50 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         String contentType();
 
         /**
-         * The stored section's length before compression and encryption.
+         * The stored record's length before compression and encryption.
          *
          * @return the length, in bytes
          */
         long plaintextLength();
 
         /**
-         * How many encrypted chunks the section is stored in.
+         * How many encrypted chunks the record is stored in.
          *
          * @return the number of chunks
          */
         int chunkCount();
 
         /**
-         * Where the section is stored.
+         * Where the record is stored.
          *
          * @return the storage reference
          */
         StorageRef storage();
 
         /**
-         * Where the section's text came from in the file, as lines and
-         * columns, to turn a position in the section (such as one a mapping
-         * reports) into one in the file ({@link SectionOrigin#toFile}).
+         * Where the record's text came from in the file, as lines and
+         * columns, to turn a position in the record (such as one a mapping
+         * reports) into one in the file ({@link RecordOrigin#toFile}).
          *
          * @return the origin; null in messages from connectors before
          *         contract 2.1
          */
-        SectionOrigin origin();
+        RecordOrigin origin();
     }
 
     /**
-     * A section was committed to storage and can be read with
+     * A record was committed to storage and can be read with
      * connector-queue-reader.
      *
-     * @param sectionId       the section's id
-     * @param fileId          the id of its file
+     * @param recordId        the record's id
+     * @param itemId          the id of its file
      * @param seq             its number in the file, from 0
      * @param sourceOffset    where it starts in the file, in bytes
      * @param sourceLength    how many bytes of the file it covers
      * @param format          the name of the file's format
      * @param contentType     what the stored bytes are, such as
      *                        {@code application/json}
-     * @param mapping         the JSON mapping the section was converted with,
+     * @param mapping         the JSON mapping the record was converted with,
      *                        such as {@code csv-row/1} or {@code ccda/2};
      *                        null when it was stored as split (FHIR, generic
      *                        XML, delimited)
@@ -192,12 +192,12 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      *                        encryption
      * @param chunkCount      how many encrypted chunks it is stored in
      * @param storage         where it is stored
-     * @param origin          where the section's text came from in the file;
+     * @param origin          where the record's text came from in the file;
      *                        null before contract 2.1
      */
-    record SectionStored(
-            String sectionId,
-            UUID fileId,
+    record RecordStored(
+            String recordId,
+            UUID itemId,
             long seq,
             long sourceOffset,
             long sourceLength,
@@ -207,16 +207,16 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
             long plaintextLength,
             int chunkCount,
             StorageRef storage,
-            SectionOrigin origin)
-            implements SectionInStorage
+            RecordOrigin origin)
+            implements RecordInStorage
     {
 
         /**
          * A message without an origin, as connectors before contract 2.1
          * sent.
          *
-         * @param sectionId       the section's id
-         * @param fileId          the id of its file
+         * @param recordId        the record's id
+         * @param itemId          the id of its file
          * @param seq             its number in the file, from 0
          * @param sourceOffset    where it starts in the file, in bytes
          * @param sourceLength    how many bytes of the file it covers
@@ -229,12 +229,12 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
          * @param chunkCount      how many encrypted chunks it is stored in
          * @param storage         where it is stored
          */
-        public SectionStored(String sectionId, UUID fileId, long seq,
+        public RecordStored(String recordId, UUID itemId, long seq,
                 long sourceOffset, long sourceLength, String format,
                 String contentType, String mapping, long plaintextLength,
                 int chunkCount, StorageRef storage)
         {
-            this(sectionId, fileId, seq, sourceOffset, sourceLength, format,
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
                     contentType, mapping, plaintextLength, chunkCount, storage,
                     null);
         }
@@ -242,33 +242,33 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * {@inheritDoc}
          *
-         * @return {@link MessageType#SECTION_STORED}
+         * @return {@link MessageType#RECORD_STORED}
          */
         @Override
         public MessageType type()
         {
-            return MessageType.SECTION_STORED;
+            return MessageType.RECORD_STORED;
         }
 
         /**
          * {@inheritDoc}
          *
-         * @return the section id
+         * @return the record id
          */
         @Override
         public String messageId()
         {
-            return sectionId;
+            return recordId;
         }
     }
 
     /**
-     * A section couldn't be converted to JSON (design §6.4). It is stored as
+     * A record couldn't be converted to JSON (design §6.4). It is stored as
      * split, in its original format, for remediation, and the rest of the
-     * file carries on. Read it like any section.
+     * file carries on. Read it like any record.
      *
-     * @param sectionId       the section's id
-     * @param fileId          the id of its file
+     * @param recordId        the record's id
+     * @param itemId          the id of its file
      * @param seq             its number in the file, from 0
      * @param sourceOffset    where it starts in the file, in bytes
      * @param sourceLength    how many bytes of the file it covers
@@ -281,14 +281,14 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      *                        encryption
      * @param chunkCount      how many encrypted chunks it is stored in
      * @param storage         where it is stored
-     * @param origin          where the section's text came from in the file;
+     * @param origin          where the record's text came from in the file;
      *                        null before contract 2.1
      * @param errorAt         where in the file conversion failed, as a line
      *                        and column; null before contract 2.1
      */
-    record SectionFailed(
-            String sectionId,
-            UUID fileId,
+    record RecordFailed(
+            String recordId,
+            UUID itemId,
             long seq,
             long sourceOffset,
             long sourceLength,
@@ -298,17 +298,17 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
             long plaintextLength,
             int chunkCount,
             StorageRef storage,
-            SectionOrigin origin,
+            RecordOrigin origin,
             SourcePosition errorAt)
-            implements SectionInStorage
+            implements RecordInStorage
     {
 
         /**
          * A message without positions, as connectors before contract 2.1
          * sent.
          *
-         * @param sectionId       the section's id
-         * @param fileId          the id of its file
+         * @param recordId        the record's id
+         * @param itemId          the id of its file
          * @param seq             its number in the file, from 0
          * @param sourceOffset    where it starts in the file, in bytes
          * @param sourceLength    how many bytes of the file it covers
@@ -320,12 +320,12 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
          * @param chunkCount      how many encrypted chunks it is stored in
          * @param storage         where it is stored
          */
-        public SectionFailed(String sectionId, UUID fileId, long seq,
+        public RecordFailed(String recordId, UUID itemId, long seq,
                 long sourceOffset, long sourceLength, String format,
                 String contentType, String errorCode, long plaintextLength,
                 int chunkCount, StorageRef storage)
         {
-            this(sectionId, fileId, seq, sourceOffset, sourceLength, format,
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
                     contentType, errorCode, plaintextLength, chunkCount,
                     storage, null, null);
         }
@@ -333,42 +333,42 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * {@inheritDoc}
          *
-         * @return {@link MessageType#SECTION_FAILED}
+         * @return {@link MessageType#RECORD_FAILED}
          */
         @Override
         public MessageType type()
         {
-            return MessageType.SECTION_FAILED;
+            return MessageType.RECORD_FAILED;
         }
 
         /**
          * {@inheritDoc}
          *
-         * @return the section id
+         * @return the record id
          */
         @Override
         public String messageId()
         {
-            return sectionId;
+            return recordId;
         }
     }
 
     /**
-     * Every section of a file was stored and published. The original is
+     * Every record of a file was stored and published. The original is
      * the landed item with the same ID (design §5.3.6).
      *
-     * @param fileId             the file's id
-     * @param sectionCount       all its sections, failed ones included
-     * @param failedSectionCount the sections that failed conversion and were
+     * @param itemId            the file's id
+     * @param recordCount       all its records, failed ones included
+     * @param failedRecordCount the records that failed conversion and were
      *                           stored in their original form
-     * @param fileSize           the file's size, in bytes
-     * @param fileDigest         the keyed digest of the original, as
-     *                           landed
-     * @param startedAt          when the connector started on the file
-     * @param completedAt        when it finished
+     * @param itemSize          the file's size, in bytes
+     * @param itemDigest        the keyed digest of the original, as
+     *                          landed
+     * @param startedAt         when the connector started on the file
+     * @param completedAt       when it finished
      */
-    record FileCompleted(UUID fileId, long sectionCount,
-            long failedSectionCount, long fileSize, String fileDigest,
+    record FileCompleted(UUID itemId, long recordCount,
+            long failedRecordCount, long itemSize, String itemDigest,
             Instant startedAt, Instant completedAt)
             implements ConnectorMessage
     {
@@ -392,7 +392,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         @Override
         public String messageId()
         {
-            return "fc-" + fileId;
+            return "fc-" + itemId;
         }
     }
 
@@ -401,9 +401,9 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * landing tables (design §5.3). Sent by a landing node to its splitter
      * only, never to downstream readers. The splitter processes the item
      * under its item id, so the item id is also the file id of every
-     * section and message that comes from it.
+     * record and message that comes from it.
      *
-     * @param fileId     the item's id
+     * @param itemId     the item's id
      * @param intake     the name of the intake it came in through
      * @param kind       what it is, such as {@code file} or
      *                   {@code message-batch}
@@ -417,7 +417,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      *                   link only: both are kept in full (design §5.3.8);
      *                   null if none, or before contract 2.3
      */
-    record ItemLanded(UUID fileId, String intake, String kind, long size,
+    record ItemLanded(UUID itemId, String intake, String kind, long size,
             String itemDigest, Instant landedAt, StorageRef storage,
             UUID replaces)
             implements ConnectorMessage
@@ -426,7 +426,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * An item that replaces nothing.
          *
-         * @param fileId     the item's id
+         * @param itemId     the item's id
          * @param intake     the intake it came in through
          * @param kind       what it is
          * @param size       its size, in bytes
@@ -434,10 +434,10 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
          * @param landedAt   when its landing was committed
          * @param storage    where it is stored
          */
-        public ItemLanded(UUID fileId, String intake, String kind, long size,
+        public ItemLanded(UUID itemId, String intake, String kind, long size,
                 String itemDigest, Instant landedAt, StorageRef storage)
         {
-            this(fileId, intake, kind, size, itemDigest, landedAt, storage,
+            this(itemId, intake, kind, size, itemDigest, landedAt, storage,
                     null);
         }
 
@@ -460,7 +460,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         @Override
         public String messageId()
         {
-            return "il-" + fileId;
+            return "il-" + itemId;
         }
     }
 
@@ -469,7 +469,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * results queue (design §5.3.8). It is sealed to the producer's key, as
      * it carries the producer's own reference, which can be PHI.
      *
-     * @param fileId          the item's id, which every later message about it
+     * @param itemId          the item's id, which every later message about it
      *                        carries
      * @param intake          the intake it came in through
      * @param kind            what it is, such as {@code file} or
@@ -491,10 +491,10 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * @param messageReplaces for a message batch, the earlier message each
      *                        message replaces, as its producer said, as
      *                        {@code <itemId>/<messageId>} (null for one that
-     *                        replaces none), from contract 2.4; null if none
-     *                        does, and for other items
+     *                        replaces none); null if none does, and for other
+     *                        items
      */
-    record ItemReceived(UUID fileId, String intake, String kind, long size,
+    record ItemReceived(UUID itemId, String intake, String kind, long size,
             String sha256, Instant landedAt, String producerRef,
             UUID replaces, List<String> messageIds,
             List<String> messageReplaces)
@@ -504,7 +504,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * Copies the message IDs, which may hold nulls.
          *
-         * @param fileId          the item's id
+         * @param itemId          the item's id
          * @param intake          the intake
          * @param kind            what it is
          * @param size            its size
@@ -544,7 +544,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         @Override
         public String messageId()
         {
-            return "rc-" + fileId;
+            return "rc-" + itemId;
         }
     }
 
@@ -554,33 +554,33 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * part carries everything but its share of the problems, so any one of
      * them says how the item ended.
      *
-     * @param fileId             the item's id
-     * @param intake             the intake it came in through
-     * @param status             {@code completed} (every section stored,
-     *                           some perhaps failed) or {@code failed} (the
-     *                           item couldn't be split)
-     * @param sectionCount       the sections stored, failed ones included
-     * @param failedSectionCount the sections that failed conversion
-     * @param failure            why the item failed; null if it completed
-     * @param problemCount       how many problems there are in all, across
-     *                           every part
-     * @param part               this part's number, from 1
-     * @param partCount          how many parts there are
-     * @param problems           this part's problems, in section order
-     * @param producerRef        the producer's own reference, as in
-     *                           {@link ItemReceived}; null if none
-     * @param replaces           the item it replaces; null if none
-     * @param finishedAt         when the item was finished
+     * @param itemId            the item's id
+     * @param intake            the intake it came in through
+     * @param status            {@code completed} (every record stored,
+     *                          some perhaps failed) or {@code failed} (the
+     *                          item couldn't be split)
+     * @param recordCount       the records stored, failed ones included
+     * @param failedRecordCount the records that failed conversion
+     * @param failure           why the item failed; null if it completed
+     * @param problemCount      how many problems there are in all, across
+     *                          every part
+     * @param part              this part's number, from 1
+     * @param partCount         how many parts there are
+     * @param problems          this part's problems, in record order
+     * @param producerRef       the producer's own reference, as in
+     *                          {@link ItemReceived}; null if none
+     * @param replaces          the item it replaces; null if none
+     * @param finishedAt        when the item was finished
      */
-    record ItemResult(UUID fileId, String intake, String status,
-            long sectionCount, long failedSectionCount, Problem failure,
+    record ItemResult(UUID itemId, String intake, String status,
+            long recordCount, long failedRecordCount, Problem failure,
             long problemCount, int part, int partCount,
             List<Problem> problems, String producerRef, UUID replaces,
             Instant finishedAt)
             implements ConnectorMessage
     {
 
-        /** The status of an item whose sections were all stored. */
+        /** The status of an item whose records were all stored. */
         public static final String COMPLETED = "completed";
 
         /** The status of an item that couldn't be split. */
@@ -589,19 +589,19 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         /**
          * Copies the problems.
          *
-         * @param fileId             the item's id
-         * @param intake             the intake
-         * @param status             completed or failed
-         * @param sectionCount       the sections stored
-         * @param failedSectionCount the sections that failed
-         * @param failure            why it failed, or null
-         * @param problemCount       the problems in all
-         * @param part               this part, from 1
-         * @param partCount          the parts
-         * @param problems           this part's problems
-         * @param producerRef        the producer's reference, or null
-         * @param replaces           the item it replaces, or null
-         * @param finishedAt         when it was finished
+         * @param itemId            the item's id
+         * @param intake            the intake
+         * @param status            completed or failed
+         * @param recordCount       the records stored
+         * @param failedRecordCount the records that failed
+         * @param failure           why it failed, or null
+         * @param problemCount      the problems in all
+         * @param part              this part, from 1
+         * @param partCount         the parts
+         * @param problems          this part's problems
+         * @param producerRef       the producer's reference, or null
+         * @param replaces          the item it replaces, or null
+         * @param finishedAt        when it was finished
          */
         public ItemResult
         {
@@ -627,7 +627,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
         @Override
         public String messageId()
         {
-            return "rs-" + fileId + "-" + part;
+            return "rs-" + itemId + "-" + part;
         }
     }
 
@@ -640,7 +640,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * @param stage           where it was found: {@code split} or
      *                        {@code convert} for the splitter, {@code landing}
      *                        if the item couldn't be read
-     * @param seq             the section's number in the item, from 0; -1 for a
+     * @param seq             the record's number in the item, from 0; -1 for a
      *                        problem with the item as a whole
      * @param offset          the byte offset in the item where it is
      * @param at              the line and column in the item; null if unknown
@@ -648,8 +648,8 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      *                        batch, from 0; otherwise -1
      * @param messageRef      that message's broker ID; null if none
      * @param messageReplaces the earlier message that message replaces, as its
-     *                        producer said, as {@code <itemId>/<messageId>},
-     *                        from contract 2.4; null if none
+     *                        producer said, as {@code <itemId>/<messageId>};
+     *                        null if none
      */
     record Problem(String code, String stage, long seq, long offset,
             SourcePosition at, int message, String messageRef,
@@ -658,15 +658,15 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
     }
 
     /**
-     * Where a section is stored.
+     * Where a record is stored.
      *
      * @param catalog      the Iceberg catalog's name
      * @param namespace    the table's namespace
      * @param table        the table's name
-     * @param ingestedDate the day the section was written, the table's
+     * @param ingestedDate the day the record was written, the table's
      *                     partition, so a reader can prune to it
-     * @param snapshotId   the Iceberg snapshot the section was committed in
-     * @param kekRef       which key encryption key wrapped the section's
+     * @param snapshotId   the Iceberg snapshot the record was committed in
+     * @param kekRef       which key encryption key wrapped the record's
      *                     data key
      */
     record StorageRef(

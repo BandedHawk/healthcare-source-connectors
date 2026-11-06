@@ -24,7 +24,7 @@ interface PipelineHooks
     /**
      * The batch's data file is written but not committed.
      *
-     * @param lastSeq the batch's last section
+     * @param lastSeq the batch's last record
      */
     default void batchWritten(long lastSeq)
     {
@@ -33,14 +33,14 @@ interface PipelineHooks
     /**
      * The batch is committed; its messages are not yet published.
      *
-     * @param lastSeq the batch's last section
+     * @param lastSeq the batch's last record
      */
     default void batchCommitted(long lastSeq)
     {
     }
 
     /**
-     * All sections are committed and published; the end-of-file commit
+     * All records are committed and published; the end-of-file commit
      * hasn't happened.
      */
     default void beforeEndOfFile()

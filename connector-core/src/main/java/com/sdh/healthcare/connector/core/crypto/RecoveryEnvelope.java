@@ -41,14 +41,14 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.HKDFParameterSpec;
 
 /**
- * The local {@code failed/<fileId>.enc} fallback (design §11): a whole file
+ * The local {@code failed/<itemId>.enc} fallback (design §11): a whole file
  * encrypted to the recovery public key, for when storage or the KMS can't be
- * reached, or the file is over {@code max-file-bytes}. Only whoever holds the
+ * reached, or the file is over {@code max-item-bytes}. Only whoever holds the
  * recovery private key can read it, so the host needs no secret.
  * <p>
  * The format streams, and suits a file of any size:
  * <pre>
- * header = "SDHFB1" ‖ fileId (16) ‖ SHA-256(recovery public key) (32)
+ * header = "SDHFB1" ‖ itemId (16) ‖ SHA-256(recovery public key) (32)
  *          ‖ u16 length ‖ ephemeral EC public key (X.509)
  * key    = HKDF-SHA256(ECDH(ephemeral, recovery),
  *                      salt = SHA-256(header), info = "sdh-fallback")
@@ -89,7 +89,7 @@ public final class RecoveryEnvelope
             RECORD_BYTES + (RECORD_BYTES >> 4) + 4096;
 
     /** How long a file ID is, in bytes. */
-    private static final int FILE_ID_BYTES = 16;
+    private static final int ITEM_ID_BYTES = 16;
 
     /** How long a SHA-256 hash is, in bytes. */
     private static final int HASH_BYTES = 32;
@@ -108,7 +108,7 @@ public final class RecoveryEnvelope
             "sdh-fallback".getBytes(StandardCharsets.US_ASCII);
 
     /** The metadata field holding the file's ID. */
-    private static final String FILE_ID_FIELD = "fileId";
+    private static final String ITEM_ID_FIELD = "itemId";
 
     /** The metadata field holding the file's original name, if known. */
     private static final String NAME_FIELD = "name";
@@ -122,11 +122,11 @@ public final class RecoveryEnvelope
     /**
      * What an envelope says about the file inside it.
      *
-     * @param fileId       the file's ID
+     * @param itemId       the file's ID
      * @param originalName the file's name when it arrived, if it was kept
      * @param size         the file's size, in bytes
      */
-    public record Metadata(UUID fileId, Optional<String> originalName,
+    public record Metadata(UUID itemId, Optional<String> originalName,
             long size)
     {
     }
@@ -142,7 +142,7 @@ public final class RecoveryEnvelope
      * it is written.
      *
      * @param source       the file
-     * @param fileId       the file's ID
+     * @param itemId       the file's ID
      * @param originalName the file's name when it arrived, to keep with it;
      *                     empty to leave it out
      * @param recovery     the recovery public key
@@ -152,7 +152,7 @@ public final class RecoveryEnvelope
      * @throws IllegalStateException if the Java runtime lacks the
      *                               algorithms
      */
-    public static void encrypt(SeekableByteSource source, UUID fileId,
+    public static void encrypt(SeekableByteSource source, UUID itemId,
             Optional<String> originalName, ECPublicKey recovery,
             OutputStream sink) throws IOException
     {
@@ -162,7 +162,7 @@ public final class RecoveryEnvelope
             generator.initialize(recovery.getParams());
             KeyPair ephemeral = generator.generateKeyPair();
             byte[] ephemeralPublic = ephemeral.getPublic().getEncoded();
-            byte[] header = header(fileId, sha256(recovery.getEncoded()),
+            byte[] header = header(itemId, sha256(recovery.getEncoded()),
                     ephemeralPublic);
             SecretKey key = key(ephemeral.getPrivate(), recovery, header);
             byte[] headerHash = sha256(header);
@@ -170,7 +170,7 @@ public final class RecoveryEnvelope
             DataOutputStream output = new DataOutputStream(sink);
             output.write(header);
             Map<String, Object> metadata = new LinkedHashMap<>();
-            metadata.put(FILE_ID_FIELD, fileId.toString());
+            metadata.put(ITEM_ID_FIELD, itemId.toString());
             originalName.ifPresent(name -> metadata.put(NAME_FIELD, name));
             long size = source.size();
             metadata.put(SIZE_FIELD, size);
@@ -216,20 +216,20 @@ public final class RecoveryEnvelope
         {
             throw new IOException("Not a recovery envelope");
         }
-        byte[] fileIdBytes = input.readNBytes(FILE_ID_BYTES);
+        byte[] itemIdBytes = input.readNBytes(ITEM_ID_BYTES);
         byte[] recoveryKeyHash = input.readNBytes(HASH_BYTES);
         int ephemeralLength = input.readUnsignedShort();
         byte[] ephemeralPublic = input.readNBytes(ephemeralLength);
-        if (fileIdBytes.length != FILE_ID_BYTES
+        if (itemIdBytes.length != ITEM_ID_BYTES
                 || recoveryKeyHash.length != HASH_BYTES
                 || ephemeralPublic.length != ephemeralLength)
         {
             throw new EOFException("Truncated header");
         }
-        ByteBuffer fileIdBuffer = ByteBuffer.wrap(fileIdBytes);
-        UUID fileId =
-                new UUID(fileIdBuffer.getLong(), fileIdBuffer.getLong());
-        byte[] header = header(fileId, recoveryKeyHash, ephemeralPublic);
+        ByteBuffer itemIdBuffer = ByteBuffer.wrap(itemIdBytes);
+        UUID itemId =
+                new UUID(itemIdBuffer.getLong(), itemIdBuffer.getLong());
+        byte[] header = header(itemId, recoveryKeyHash, ephemeralPublic);
         byte[] headerHash = sha256(header);
         SecretKey key;
         try
@@ -267,7 +267,7 @@ public final class RecoveryEnvelope
         {
             throw new IOException("Size mismatch or trailing data");
         }
-        return new Metadata(fileId,
+        return new Metadata(itemId,
                 Optional.ofNullable((String) metadata.get(NAME_FIELD)), size);
     }
 
@@ -286,19 +286,19 @@ public final class RecoveryEnvelope
     /**
      * Builds an envelope's header.
      *
-     * @param fileId          the file's ID
+     * @param itemId          the file's ID
      * @param recoveryKeyHash the SHA-256 of the recovery public key
      * @param ephemeralPublic the ephemeral public key, X.509-encoded
      * @return the header's bytes
      */
-    private static byte[] header(UUID fileId, byte[] recoveryKeyHash,
+    private static byte[] header(UUID itemId, byte[] recoveryKeyHash,
             byte[] ephemeralPublic)
     {
-        return ByteBuffer.allocate(MAGIC.length + FILE_ID_BYTES + HASH_BYTES
+        return ByteBuffer.allocate(MAGIC.length + ITEM_ID_BYTES + HASH_BYTES
                 + Short.BYTES + ephemeralPublic.length)
                 .put(MAGIC)
-                .putLong(fileId.getMostSignificantBits())
-                .putLong(fileId.getLeastSignificantBits())
+                .putLong(itemId.getMostSignificantBits())
+                .putLong(itemId.getLeastSignificantBits())
                 .put(recoveryKeyHash)
                 .putShort((short) ephemeralPublic.length)
                 .put(ephemeralPublic)

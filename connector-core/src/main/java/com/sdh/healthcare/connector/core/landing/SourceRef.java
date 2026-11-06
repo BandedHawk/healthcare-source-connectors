@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.landing;
 
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -69,14 +69,14 @@ public record SourceRef(String hash, long size, String version)
      *                  it has none
      * @return the reference
      */
-    public static SourceRef of(SectionIds ids, String intake,
+    public static SourceRef of(RecordIds ids, String intake,
             String reference, long size, String version)
     {
         Mac mac = ids.newLabelledMac(LABEL);
         mac.update(intake.getBytes(StandardCharsets.UTF_8));
         mac.update((byte) 0);
         mac.update(reference.getBytes(StandardCharsets.UTF_8));
-        return new SourceRef(SectionIds.encode(mac.doFinal()), size, version);
+        return new SourceRef(RecordIds.encode(mac.doFinal()), size, version);
     }
 
     /**

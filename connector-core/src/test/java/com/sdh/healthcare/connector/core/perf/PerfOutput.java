@@ -170,8 +170,8 @@ public final class PerfOutput
             List<StageResult> results)
     {
         text.append("## Throughput\n\n");
-        text.append("| Stage | Workload | Intake | Items | MiB | Sections"
-                + " | Wall s | MiB/s | Items/s | Sections/s | Avg cores"
+        text.append("| Stage | Workload | Intake | Items | MiB | Records"
+                + " | Wall s | MiB/s | Items/s | Records/s | Avg cores"
                 + " | Busiest thread | Stored ÷ source |\n");
         text.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:"
                 + "|---|---:|\n");

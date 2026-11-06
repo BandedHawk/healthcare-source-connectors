@@ -13,9 +13,9 @@ import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
 
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.it.ItSupport.Received;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -36,7 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.kafka.KafkaContainer;
 
 /**
- * Design §10.3 kafka: record key = fileId, acks=all + idempotent producer,
+ * Design §10.3 kafka: record key = itemId, acks=all + idempotent producer,
  * metadata as record headers.
  *
  * @author Jonas Barnett
@@ -71,7 +71,7 @@ class KafkaIT
      * A record header's value.
      *
      * @param record the record
-     * @param name the header name
+     * @param name   the header name
      * @return its value as UTF-8, or null if absent
      */
     static String header(ConsumerRecord<String, String> record, String name)
@@ -94,7 +94,7 @@ class KafkaIT
         try (Admin admin =
                 Admin.create(Map.of("bootstrap.servers", bootstrap)))
         {
-            admin.createTopics(List.of(new NewTopic("sdh-sections", 3,
+            admin.createTopics(List.of(new NewTopic("sdh-records", 3,
                     (short) 1))).all().get();
         }
         List<OutboundMessage> sent =
@@ -103,7 +103,7 @@ class KafkaIT
         {
             camel.start();
             String uri = QueueType.KAFKA.effectiveUri(
-                    "kafka:sdh-sections?brokers=" + bootstrap);
+                    "kafka:sdh-records?brokers=" + bootstrap);
             try (ClosablePublisher publisher =
                     Publishers.create(camel, QueueType.KAFKA, uri))
             {
@@ -111,27 +111,27 @@ class KafkaIT
             }
         }
 
-        List<ConsumerRecord<String, String>> records = new ArrayList<>();
+        List<ConsumerRecord<String, String>> consumed = new ArrayList<>();
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(
                 Map.of("bootstrap.servers", bootstrap, "group.id", "it",
                         "auto.offset.reset", "earliest"),
                 new StringDeserializer(), new StringDeserializer()))
         {
-            consumer.subscribe(List.of("sdh-sections"));
+            consumer.subscribe(List.of("sdh-records"));
             long deadline = System.currentTimeMillis() + 60_000;
-            while (records.size() < sent.size()
+            while (consumed.size() < sent.size()
                     && System.currentTimeMillis() < deadline)
             {
-                consumer.poll(Duration.ofMillis(500)).forEach(records::add);
+                consumer.poll(Duration.ofMillis(500)).forEach(consumed::add);
             }
         }
-        records.sort(Comparator
+        consumed.sort(Comparator
                 .<ConsumerRecord<String, String>>comparingInt(
                         ConsumerRecord::partition)
                 .thenComparingLong(ConsumerRecord::offset));
-        List<Received> got = records.stream()
+        List<Received> got = consumed.stream()
                 .map(record -> new Received(header(record, "messageId"),
-                        header(record, "type"), header(record, "fileId"),
+                        header(record, "type"), header(record, "itemId"),
                         header(record, "contentType"), record.key(),
                         record.value()))
                 .toList();

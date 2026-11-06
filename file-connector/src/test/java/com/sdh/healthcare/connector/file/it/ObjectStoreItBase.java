@@ -13,8 +13,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
-import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
@@ -94,10 +94,10 @@ abstract class ObjectStoreItBase
      * Everything one store's test needs outside Spring: keys, Postgres and
      * the configuration.
      *
-     * @param keys the key files
+     * @param keys     the key files
      * @param postgres the lease database and catalog
-     * @param catalog the Iceberg catalog's properties
-     * @param queue the base name of the test's queues
+     * @param catalog  the Iceberg catalog's properties
+     * @param queue    the base name of the test's queues
      */
     record Fixture(TestKeys keys, PostgreSQLContainer postgres,
             Map<String, String> catalog, String queue)
@@ -106,7 +106,7 @@ abstract class ObjectStoreItBase
         /**
          * Starts Postgres and writes the keys.
          *
-         * @param name the store's name, for directories and queues
+         * @param name            the store's name, for directories and queues
          * @param storeProperties the FileIO settings and warehouse; the
          *        JDBC catalog settings are added here
          * @return the fixture
@@ -147,14 +147,14 @@ abstract class ObjectStoreItBase
             settings.put("sdh.storage.catalog-name", "sdh");
             catalog.forEach((key, value) -> settings.put(
                     "sdh.storage.catalog[" + key + "]", value));
-            settings.put("sdh.storage.commit.max-sections", "7");
+            settings.put("sdh.storage.commit.max-records", "7");
             settings.put("sdh.lease.jdbc.url", postgres.getJdbcUrl());
             settings.put("sdh.lease.jdbc.username", postgres.getUsername());
             settings.put("sdh.lease.jdbc.password", postgres.getPassword());
             settings.put("sdh.crypto.keystore.path", keys.keystore.toString());
             settings.put("sdh.crypto.keystore.password",
                     TestKeys.KS_PASSWORD);
-            settings.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
+            settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
             settings.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
             settings.put("sdh.crypto.keys.signing.kid", "connector-2026");
             settings.put("sdh.crypto.keys.signing.pem",
@@ -247,14 +247,14 @@ abstract class ObjectStoreItBase
     {
         Fixture fixture = fixture();
         String header = "id,name,note\n";
-        List<String> records = new ArrayList<>();
+        List<String> rows = new ArrayList<>();
         StringBuilder file = new StringBuilder(header);
         for (int index = 0; index < 30; index++)
         {
-            String record = index + "," + MARKER + "-" + index
+            String row = index + "," + MARKER + "-" + index
                     + ",\"multi\nline\"\n";
-            records.add(record);
-            file.append(record);
+            rows.add(row);
+            file.append(row);
         }
         TestLanding landing = new TestLanding(fixture.catalog(),
                 runtime.keys().wrap(), fixture.keys(), ItSupport.INTAKE);
@@ -284,22 +284,22 @@ abstract class ObjectStoreItBase
             {
                 messages.add(reader.decode(body.getBytes(UTF_8)));
             }
-            List<SectionStored> sections = messages.stream()
-                    .filter(SectionStored.class::isInstance)
-                    .map(SectionStored.class::cast).toList();
+            List<RecordStored> records = messages.stream()
+                    .filter(RecordStored.class::isInstance)
+                    .map(RecordStored.class::cast).toList();
             assertThat(messages.stream().filter(FileStarted.class::isInstance))
                     .hasSize(2);
-            assertThat(sections).hasSize(30);
-            for (SectionStored section : sections)
+            assertThat(records).hasSize(30);
+            for (RecordStored record : records)
             {
-                assertThat(new String(reader.readSection(section, 1 << 20),
+                assertThat(new String(reader.readRecord(record, 1 << 20),
                         UTF_8)).isEqualTo(ItSupport.csvRowJson(
-                                records.get((int) section.seq())));
+                                rows.get((int) record.seq())));
             }
             FileCompleted done = messages.stream()
                     .filter(FileCompleted.class::isInstance)
                     .map(FileCompleted.class::cast).findFirst().orElseThrow();
-            assertThat(new String(landing.restore(done.fileId()), UTF_8))
+            assertThat(new String(landing.restore(done.itemId()), UTF_8))
                     .isEqualTo(file.toString());
 
             // Maintenance, between files: compaction, orphan cleanup where
@@ -307,9 +307,9 @@ abstract class ObjectStoreItBase
             writerLock.lock();
             try
             {
-                FileIO io = runtime.tables().sections().io();
+                FileIO io = runtime.tables().records().io();
                 String dataPrefix =
-                        runtime.tables().sections().location() + "/data/";
+                        runtime.tables().records().location() + "/data/";
                 String stray = dataPrefix + "stray-crashed-batch.parquet";
                 boolean orphans = orphanCleanupSupported();
                 if (orphans)
@@ -328,27 +328,27 @@ abstract class ObjectStoreItBase
                         new MaintenanceSettings(Duration.ofDays(7), 10, true,
                                 0.75, 2, 8L << 30, Duration.ZERO),
                         Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
-                        .run(runtime.tables().sections(),
-                                SectionsTable.INGESTED_AT, Optional.empty(),
+                        .run(runtime.tables().records(),
+                                RecordsTable.INGESTED_AT, Optional.empty(),
                                 orphans);
                 assertThat(report.compactedFiles())
-                        .as("30 sections in batches of 7").isEqualTo(5);
+                        .as("30 records in batches of 7").isEqualTo(5);
                 if (orphans)
                 {
                     assertThat(report.orphansDeleted()).isEqualTo(1);
                     assertThat(list(dataPrefix)).doesNotContain(stray);
                 }
-                for (SectionStored section : sections)
+                for (RecordStored record : records)
                 {
-                    assertThat(new String(reader.readSection(section,
+                    assertThat(new String(reader.readRecord(record,
                             1 << 20), UTF_8)).isEqualTo(ItSupport.csvRowJson(
-                                    records.get((int) section.seq())));
+                                    rows.get((int) record.seq())));
                 }
                 TableMaintenance.Report purge = new TableMaintenance(
                         runtime.committer(), MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
-                        .run(runtime.tables().sections(),
-                                SectionsTable.INGESTED_AT,
+                        .run(runtime.tables().records(),
+                                RecordsTable.INGESTED_AT,
                                 Optional.of(Duration.ofDays(1)), false);
                 assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
                 assertThat(list(dataPrefix))
@@ -362,7 +362,7 @@ abstract class ObjectStoreItBase
 
         // Nothing the connector wrote is readable: data, manifests and
         // metadata alike.
-        FileIO io = runtime.tables().sections().io();
+        FileIO io = runtime.tables().records().io();
         String warehouse = fixture.catalog().get("warehouse");
         List<String> objects = list(warehouse);
         assertThat(objects).isNotEmpty();

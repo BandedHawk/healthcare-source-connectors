@@ -255,7 +255,7 @@ class PushOAuth2ApplicationTest extends PushTestSupport
                 receive(INTAKE, 1, Duration.ofSeconds(30));
         assertThat(landed).singleElement().satisfies(message ->
         {
-            assertThat(message.fileId().toString())
+            assertThat(message.itemId().toString())
                     .isEqualTo(field(receipt, "itemId"));
             assertThat(message.kind()).isEqualTo("push");
             assertThat(message.size()).isEqualTo(1_500_000L);

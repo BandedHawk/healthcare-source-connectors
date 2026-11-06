@@ -55,7 +55,7 @@ class FencedCommitterTest
     }
 
     /**
-     * The same new sections table, through two catalog clients.
+     * The same new records table, through two catalog clients.
      *
      * @param kind the catalog kind
      * @return the table for A, then for B
@@ -65,9 +65,9 @@ class FencedCommitterTest
         TestCatalogs.Backend backend = TestCatalogs.create(kind);
         String namespace = "ns_" + UUID.randomUUID().toString()
                 .replace("-", "");
-        Table first = IngestTables.sections(backend.newClient(), namespace);
+        Table first = IngestTables.records(backend.newClient(), namespace);
         Table second = backend.newClient()
-                .loadTable(TableIdentifier.of(namespace, "sections"));
+                .loadTable(TableIdentifier.of(namespace, "records"));
         return new Table[] {first, second};
     }
 

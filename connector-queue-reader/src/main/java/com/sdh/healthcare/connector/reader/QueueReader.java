@@ -10,8 +10,8 @@ import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionInStorage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import java.io.IOException;
 import java.io.InputStream;
@@ -34,7 +34,7 @@ import org.apache.iceberg.catalog.TableIdentifier;
  *     .recipientKey("downstream-2026", myPrivateKey)
  *     .trustedSigner("connector-2026", connectorPublicKey)
  *     .catalog(icebergCatalog)
- *     // Needs unwrap rights on the sections KEK only.
+ *     // Needs unwrap rights on the records KEK only.
  *     .keyProvider(kmsKeyProvider)
  *     .build();
  *
@@ -42,18 +42,18 @@ import org.apache.iceberg.catalog.TableIdentifier;
  * switch (message) {
  *     // JSON when stored.mapping() isn't null (csv-row/1, ccda/2, x12/1,
  *     // edifact/1).
- *     case SectionStored stored -> {
- *         try (InputStream input = reader.openSection(stored)) { ... }
+ *     case RecordStored stored -> {
+ *         try (InputStream input = reader.openRecord(stored)) { ... }
  *     }
  *     // Kept in its original format (failed.contentType()), for
  *     // remediation.
- *     case SectionFailed failed -> { ... }
+ *     case RecordFailed failed -> { ... }
  *     default -> { }
  * }
  * }</pre>
  * <p>
  * The message envelope, encryption, chunk layout and table layout are all
- * handled here. Consumers see only the message records and the section
+ * handled here. Consumers see only the message records and the record
  * bytes. Thread-safe.
  *
  * @author Jonas Barnett
@@ -65,7 +65,7 @@ public final class QueueReader implements AutoCloseable
     /** Decrypts messages and checks their signatures. */
     private final MessageOpener opener;
 
-    /** The catalog the sections' tables are in. */
+    /** The catalog the records' tables are in. */
     private final Catalog catalog;
 
     /** The only catalog name messages may refer to; null for any. */
@@ -121,41 +121,41 @@ public final class QueueReader implements AutoCloseable
     }
 
     /**
-     * Streams the plaintext of a stored section. Every chunk is authenticated
+     * Streams the plaintext of a stored record. Every chunk is authenticated
      * as it is read, and the stream fails if any chunk is missing,
      * duplicated, out of place or of the wrong length. It holds at most one
      * decrypted chunk (8 MiB) in memory, plus any chunks the scan returns
      * ahead of order.
      *
-     * @param message the message announcing the section
-     * @return a stream of the section's plaintext
-     * @throws SectionNotFoundException if the section is not (or no longer)
+     * @param message the message announcing the record
+     * @return a stream of the record's plaintext
+     * @throws RecordNotFoundException if the record is not (or no longer)
      *                                  in the table
      */
-    public InputStream openSection(SectionInStorage message)
+    public InputStream openRecord(RecordInStorage message)
     {
         Table table = table(message.storage());
-        return SectionInputStream.open(table, message, keys);
+        return RecordInputStream.open(table, message, keys);
     }
 
     /**
-     * Reads a whole section into memory.
+     * Reads a whole record into memory.
      *
-     * @param message  the message announcing the section
-     * @param maxBytes the largest section to read
-     * @return the section's plaintext
-     * @throws IllegalArgumentException if the section is larger than
+     * @param message  the message announcing the record
+     * @param maxBytes the largest record to read
+     * @return the record's plaintext
+     * @throws IllegalArgumentException if the record is larger than
      *                                  {@code maxBytes}
-     * @throws UncheckedIOException     if the section can't be read
+     * @throws UncheckedIOException     if the record can't be read
      */
-    public byte[] readSection(SectionInStorage message, int maxBytes)
+    public byte[] readRecord(RecordInStorage message, int maxBytes)
     {
         if (message.plaintextLength() > maxBytes)
         {
             throw new IllegalArgumentException(
-                    "Section is larger than maxBytes");
+                    "SplitRecord is larger than maxBytes");
         }
-        try (InputStream input = openSection(message))
+        try (InputStream input = openRecord(message))
         {
             return input.readAllBytes();
         }
@@ -168,7 +168,7 @@ public final class QueueReader implements AutoCloseable
     /**
      * Finds the table a message refers to, loading it the first time.
      *
-     * @param ref where the message says its section is stored
+     * @param ref where the message says its record is stored
      * @return the table, refreshed if it hasn't seen the message's snapshot
      * @throws IllegalArgumentException if the message names a catalog other
      *                                  than the expected one
@@ -210,7 +210,7 @@ public final class QueueReader implements AutoCloseable
         /** The connector signing keys to trust, by key id. */
         private final Map<String, ECPublicKey> signers = new HashMap<>();
 
-        /** The catalog the sections' tables are in. */
+        /** The catalog the records' tables are in. */
         private Catalog catalog;
 
         /** The only catalog name messages may refer to; null for any. */
@@ -259,7 +259,7 @@ public final class QueueReader implements AutoCloseable
         }
 
         /**
-         * Sets the catalog the sections' tables are in. Required.
+         * Sets the catalog the records' tables are in. Required.
          *
          * @param catalog the Iceberg catalog
          * @return this builder
@@ -284,7 +284,7 @@ public final class QueueReader implements AutoCloseable
 
         /**
          * Sets what unwraps batch data keys. It needs decrypt rights on the
-         * sections KEK only. Required.
+         * records KEK only. Required.
          *
          * @param provider the key provider
          * @return this builder

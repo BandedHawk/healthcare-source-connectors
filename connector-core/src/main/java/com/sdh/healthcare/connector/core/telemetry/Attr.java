@@ -23,10 +23,7 @@ import java.util.stream.Collectors;
 public enum Attr
 {
 
-    /** The file's ID, a UUID: never its name. */
-    FILE_ID("sdh.file_id"),
-
-    /** The file's format, such as {@code ccda} or {@code x12}. */
+    /** The item's format, such as {@code ccda} or {@code x12}. */
     FORMAT("sdh.format"),
 
     /** The state of a file's checkpoint, such as {@code ARCHIVING}. */
@@ -50,13 +47,13 @@ public enum Attr
      */
     REASON("sdh.reason"),
 
-    /** A section's sequence number in its file, from 0. */
+    /** A record's sequence number in its file, from 0. */
     SEQ("sdh.seq"),
 
     /** A byte offset in the file. */
     OFFSET("sdh.offset"),
 
-    /** How many of something, such as sections or messages. */
+    /** How many of something, such as records or messages. */
     COUNT("sdh.count"),
 
     /** A size in bytes. */
@@ -78,7 +75,7 @@ public enum Attr
     OPERATOR("sdh.operator"),
 
     /**
-     * A byte position within a section, such as where conversion failed
+     * A byte position within a record, such as where conversion failed
      * (design §6.4).
      */
     POSITION("sdh.position"),
@@ -89,7 +86,7 @@ public enum Attr
      */
     INTAKE("sdh.intake"),
 
-    /** A landed item's ID, a UUID: never its name or path. */
+    /** An item's ID, a UUID: never its name or path. */
     ITEM_ID("sdh.item_id"),
 
     /** What kind of item was landed, such as {@code file}. */
@@ -126,7 +123,7 @@ public enum Attr
     /**
      * The attribute's key, as exporters see it.
      *
-     * @return the key, such as {@code sdh.file_id}
+     * @return the key, such as {@code sdh.item_id}
      */
     public String key()
     {

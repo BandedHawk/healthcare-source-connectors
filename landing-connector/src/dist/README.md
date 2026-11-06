@@ -101,7 +101,7 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   changed since it was listed.
 - **Iceberg tables:** the table is read through its own catalog (`sdh.landing.source.table`), read-only, every
   `poll-interval`. Each Parquet data file that an append adds is landed as one item, exactly as it is; set the file
-  connector's format to `parquet` to split it into one JSON section per row. With `start: earliest` (the default),
+  connector's format to `parquet` to split it into one JSON record per row. With `start: earliest` (the default),
   the rows the table holds at the first start are landed first, then each append; with `latest`, only appends made
   after the first start. A compaction lands nothing. An overwrite or delete can't be landed as new items: it is
   reported as `intake.table_rewrite` and passed over, so tell the producer to append. Files that aren't Parquet, are

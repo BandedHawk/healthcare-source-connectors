@@ -8,7 +8,7 @@ package com.sdh.healthcare.connector.contract.crypto;
 
 /**
  * A stored chunk failed authentication, or didn't match the expected
- * section layout.
+ * record layout.
  *
  * @author Jonas Barnett
  * @since 0.1.0

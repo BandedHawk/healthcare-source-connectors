@@ -10,8 +10,8 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import com.sdh.healthcare.connector.core.split.Section;
-import com.sdh.healthcare.connector.core.split.SectionSplitter;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
+import com.sdh.healthcare.connector.core.split.RecordSplitter;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
@@ -29,17 +29,17 @@ import java.util.Set;
  * UN/EDIFACT splitter (design §6.2). Delimiters come from each
  * interchange's UNA service string advice, or the defaults
  * ({@code :+.? '}) without one; the release character ({@code ?}) is
- * honoured everywhere. Every section is a valid standalone interchange.
+ * honoured everywhere. Every record is a valid standalone interchange.
  * <p>
  * Boundary:
  * <ul>
- * <li>{@code UNH} (default): one message per section, as
+ * <li>{@code UNH} (default): one message per record, as
  * {@code [UNA] UNB [UNG] UNH…UNT [UNE] UNZ}, with the UNE and UNZ counts
  * rewritten to 1</li>
- * <li>{@code UNG}: one functional group per section, as
- * {@code [UNA] UNB UNG…UNE UNZ}; messages outside a group are one section
+ * <li>{@code UNG}: one functional group per record, as
+ * {@code [UNA] UNB UNG…UNE UNZ}; messages outside a group are one record
  * each, as for {@code UNH}</li>
- * <li>{@code UNB}: one whole interchange per section, unchanged</li>
+ * <li>{@code UNB}: one whole interchange per record, unchanged</li>
  * </ul>
  * Control references are checked (UNH/UNT 0062, UNG/UNE 0048, UNB/UNZ
  * 0020) to catch truncated or spliced input. Segment counts (UNT 0074)
@@ -48,7 +48,7 @@ import java.util.Set;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class EdifactSplitter implements SectionSplitter
+public final class EdifactSplitter implements RecordSplitter
 {
 
     /** The format's name. */
@@ -67,7 +67,7 @@ public final class EdifactSplitter implements SectionSplitter
     {
     }
 
-    /** What one section holds. */
+    /** What one record holds. */
     enum Level
     {
         /** One message. */
@@ -221,13 +221,13 @@ public final class EdifactSplitter implements SectionSplitter
         /** The file. */
         private final SeekableByteSource source;
 
-        /** What one section holds. */
+        /** What one record holds. */
         private final Level level;
 
         /** The split settings. */
         private final SplitConfig config;
 
-        /** The largest section allowed, in bytes. */
+        /** The largest record allowed, in bytes. */
         private final long max;
 
         /** Reads the file. */
@@ -249,7 +249,7 @@ public final class EdifactSplitter implements SectionSplitter
          * Creates a session.
          *
          * @param source the file
-         * @param level  what one section holds
+         * @param level  what one record holds
          * @param config the split settings
          */
         Session(SeekableByteSource source, Level level, SplitConfig config)
@@ -257,7 +257,7 @@ public final class EdifactSplitter implements SectionSplitter
             this.source = source;
             this.level = level;
             this.config = config;
-            this.max = config.limits().maxSectionBytes();
+            this.max = config.limits().maxRecordBytes();
         }
 
         /**
@@ -508,11 +508,11 @@ public final class EdifactSplitter implements SectionSplitter
          * {@inheritDoc}
          *
          * @throws SplitException if the envelopes don't balance, a control
-         *                        reference doesn't match, or a section is
+         *                        reference doesn't match, or a record is
          *                        too large
          */
         @Override
-        public Optional<Section> next() throws IOException, SplitException
+        public Optional<SplitRecord> next() throws IOException, SplitException
         {
             while (true)
             {
@@ -543,7 +543,7 @@ public final class EdifactSplitter implements SectionSplitter
                                 Set.of("UNA", "UNB"));
                         checkControl(unz, 2, opened.control());
                         delimiters = Delimiters.DEFAULT;
-                        return Optional.of(Section.ofRange(start,
+                        return Optional.of(SplitRecord.ofRange(start,
                                 unz.end() - start,
                                 ResumePoint.at(unz.end())));
                     }
@@ -571,7 +571,7 @@ public final class EdifactSplitter implements SectionSplitter
                                                 "UNG"));
                                 checkControl(une, 2,
                                         segment.element(5, delimiters));
-                                return Optional.of(section(segment.start(),
+                                return Optional.of(record(segment.start(),
                                         une.end(), unb.raw(), unz(),
                                         ResumePoint.at(une.end(),
                                                 unb.start())));
@@ -585,7 +585,7 @@ public final class EdifactSplitter implements SectionSplitter
                                             "UNH"));
                             checkControl(unt, 2,
                                     segment.element(1, delimiters));
-                            return Optional.of(section(segment.start(),
+                            return Optional.of(record(segment.start(),
                                     unt.end(), unb.raw(), unz(),
                                     ResumePoint.at(unt.end(), unb.start())));
                         }
@@ -609,7 +609,7 @@ public final class EdifactSplitter implements SectionSplitter
                                 Set.of("UNA", "UNB", "UNZ", "UNG", "UNE",
                                         "UNH"));
                         checkControl(unt, 2, segment.element(1, delimiters));
-                        return Optional.of(section(segment.start(),
+                        return Optional.of(record(segment.start(),
                                 unt.end(), concat(unb.raw(), ung.raw()),
                                 concat(segment("UNE", "1", ung.control()),
                                         unz()),
@@ -648,7 +648,7 @@ public final class EdifactSplitter implements SectionSplitter
                 }
                 if (segment.end() - from > max)
                 {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
+                    throw new SplitException(ErrorCode.LIMIT_RECORD_SIZE,
                             from);
                 }
                 if (segment.id().equals(endId))
@@ -711,23 +711,23 @@ public final class EdifactSplitter implements SectionSplitter
         }
 
         /**
-         * A section of a source range between a prefix and a suffix.
+         * A record of a source range between a prefix and a suffix.
          *
          * @param start  the range's source offset
          * @param end    the offset after it
          * @param prefix bytes before it
          * @param suffix bytes after it
          * @param resume where splitting continues
-         * @return the section
+         * @return the record
          */
-        private static Section section(long start, long end, byte[] prefix,
+        private static SplitRecord record(long start, long end, byte[] prefix,
                 byte[] suffix, ResumePoint resume)
         {
-            List<Section.Part> parts = new ArrayList<>(3);
-            parts.add(new Section.Literal(prefix));
-            parts.add(new Section.SourceRange(start, end - start));
-            parts.add(new Section.Literal(suffix));
-            return new Section(start, end - start, parts, resume);
+            List<SplitRecord.Part> parts = new ArrayList<>(3);
+            parts.add(new SplitRecord.Literal(prefix));
+            parts.add(new SplitRecord.SourceRange(start, end - start));
+            parts.add(new SplitRecord.Literal(suffix));
+            return new SplitRecord(start, end - start, parts, resume);
         }
 
         /**

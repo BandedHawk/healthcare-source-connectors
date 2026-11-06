@@ -1,6 +1,6 @@
 # Object storage (S3), holding the medallion layers in a bucket each (docs/SANDBOX.md):
 #   sdh-bronze  items as landed (landing nodes write; splitters read)
-#   sdh-silver  sections, split and converted (splitters write; the FHIR stage reads)
+#   sdh-silver  records, split and converted (splitters write; the FHIR stage reads)
 #   sdh-gold    FHIR resources (the FHIR stage writes, once built)
 # Each stage has its own access key, allowed only the buckets it needs: the secret seaweedfs (key s3.json), made
 # by scripts/sandbox.sh. One server, on one node, as a customer's single object store would be; SeaweedFS's

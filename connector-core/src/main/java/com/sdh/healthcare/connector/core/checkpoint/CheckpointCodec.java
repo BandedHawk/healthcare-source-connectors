@@ -8,7 +8,7 @@ package com.sdh.healthcare.connector.core.checkpoint;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.core.crypto.MacedJson;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.text.ParseException;
@@ -35,7 +35,7 @@ public final class CheckpointCodec
      *
      * @param ids makes the MACs with the ID key
      */
-    public CheckpointCodec(SectionIds ids)
+    public CheckpointCodec(RecordIds ids)
     {
         this.json = new MacedJson<>(ids, "sdh-checkpoint",
                 CheckpointCodec::canonical, CheckpointCodec::parse);
@@ -81,10 +81,10 @@ public final class CheckpointCodec
     private static Map<String, Object> canonical(Checkpoint checkpoint)
     {
         Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("fileId", checkpoint.fileId().toString());
+        fields.put("itemId", checkpoint.itemId().toString());
         fields.put("fingerprint", checkpoint.fingerprint());
         fields.put("format", checkpoint.format());
-        fields.put("fileSize", checkpoint.fileSize());
+        fields.put("itemSize", checkpoint.itemSize());
         fields.put("state", checkpoint.state().name());
         fields.put("resumeAt", checkpoint.resumeAt().encode());
         fields.put("nextSeq", checkpoint.nextSeq());
@@ -130,10 +130,10 @@ public final class CheckpointCodec
                     : null;
             return new Checkpoint(
                     UUID.fromString(
-                            JSONObjectUtils.getString(fields, "fileId")),
+                            JSONObjectUtils.getString(fields, "itemId")),
                     JSONObjectUtils.getString(fields, "fingerprint"),
                     JSONObjectUtils.getString(fields, "format"),
-                    JSONObjectUtils.getLong(fields, "fileSize"),
+                    JSONObjectUtils.getLong(fields, "itemSize"),
                     Checkpoint.State.valueOf(
                             JSONObjectUtils.getString(fields, "state")),
                     ResumePoint.parse(

@@ -11,7 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -68,7 +68,7 @@ class LandingLedgerTest
     AesKeyWrapProvider keys;
 
     /** Makes the hashes and MACs, with an all-zero ID key. */
-    final SectionIds ids = new SectionIds(new byte[32]);
+    final RecordIds ids = new RecordIds(new byte[32]);
 
     /** The last lease epoch handed out. */
     long epoch;
@@ -257,7 +257,7 @@ class LandingLedgerTest
                 .hash()).isEqualTo(ref.hash());
         assertThat(SourceRef.of(ids, "other", "jones/mrn-42.xml", 10, "1")
                 .hash()).isNotEqualTo(ref.hash());
-        assertThat(SourceRef.of(new SectionIds(new byte[] {
+        assertThat(SourceRef.of(new RecordIds(new byte[] {
             1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
                 INTAKE, "jones/mrn-42.xml", 10, "1").hash())
@@ -331,7 +331,7 @@ class LandingLedgerTest
             for (long value = 1; value <= 2_000; value++)
             {
                 index.add(new LedgerIndex.Key(value, value),
-                        SectionIds.encode(ByteBuffer.allocate(Long.BYTES)
+                        RecordIds.encode(ByteBuffer.allocate(Long.BYTES)
                                 .putLong(value << 4).array()));
             }
             assertThat(index.bytes()).isEqualTo(4 * smallest);
@@ -381,7 +381,7 @@ class LandingLedgerTest
             String path = UUID.randomUUID().toString();
             entries.add(new LandingLedger.Entry(INTAKE,
                     SourceRef.of(ids, INTAKE, path, 1, "1"),
-                    UUID.randomUUID(), SectionIds.encode(
+                    UUID.randomUUID(), RecordIds.encode(
                             ids.newLabelledMac("test").doFinal(
                                     path.getBytes())),
                     Instant.now(), 1, null));

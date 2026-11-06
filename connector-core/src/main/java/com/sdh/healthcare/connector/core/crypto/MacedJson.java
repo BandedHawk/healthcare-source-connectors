@@ -36,7 +36,7 @@ public final class MacedJson<T>
     private static final String MAC_KEY = "mac";
 
     /** Makes the MACs, with the ID key. */
-    private final SectionIds ids;
+    private final RecordIds ids;
 
     /**
      * What kind of value this is, fed to the MAC first, so a MAC made for
@@ -62,7 +62,7 @@ public final class MacedJson<T>
      * @param fromJson    rebuilds a value from its parsed fields; may throw
      *                    if a field is missing or malformed
      */
-    public MacedJson(SectionIds ids, String label,
+    public MacedJson(RecordIds ids, String label,
             Function<T, Map<String, Object>> toCanonical,
             Function<Map<String, Object>, T> fromJson)
     {

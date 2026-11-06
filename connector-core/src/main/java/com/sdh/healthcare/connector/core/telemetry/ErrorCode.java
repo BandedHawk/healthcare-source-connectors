@@ -9,7 +9,7 @@ package com.sdh.healthcare.connector.core.telemetry;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 
 /**
- * The reasons a file, a section or the connector itself can fail, as they
+ * The reasons a file, a record or the connector itself can fail, as they
  * appear in logs, telemetry and failure records (design §7.5). The names stay
  * the same from release to release, so alerts and dashboards can rely on
  * them, and they hold no PHI: a code says what went wrong, never what the
@@ -88,23 +88,23 @@ public enum ErrorCode
     // Limits (design §6.3)
 
     /**
-     * A file larger than {@code max-file-bytes}. It is rejected before
+     * A file larger than {@code max-item-bytes}. It is rejected before
      * ingestion and kept only in the encrypted local {@code failed/} folder.
      */
-    LIMIT_FILE_SIZE,
+    LIMIT_ITEM_SIZE,
 
-    /** A section larger than {@code max-section-bytes}. */
-    LIMIT_SECTION_SIZE,
+    /** A record larger than {@code max-record-bytes}. */
+    LIMIT_RECORD_SIZE,
 
-    /** A file with more sections than {@code max-sections-per-file}. */
-    LIMIT_SECTION_COUNT,
+    /** A file with more records than {@code max-records-per-item}. */
+    LIMIT_RECORD_COUNT,
 
     // File failures that aren't about content (design §11)
 
     /** The file couldn't be read. */
     SOURCE_READ_FAILED,
 
-    /** The sections or the archived file couldn't be written to storage. */
+    /** The records or the archived file couldn't be written to storage. */
     STORAGE_FAILED,
 
     /** The broker didn't acknowledge a message after all retries. */
@@ -119,7 +119,7 @@ public enum ErrorCode
     /**
      * Splitting was resumed {@link IngestPipeline#FAIL_AFTER_RESTARTS}
      * times in a row without committing anything. Something in the file keeps
-     * stopping the connector, such as a section that runs it out of memory
+     * stopping the connector, such as a record that runs it out of memory
      * even unconverted (design §9.2).
      */
     RESUME_NO_PROGRESS,
@@ -198,29 +198,29 @@ public enum ErrorCode
     /** An EDIFACT segment where the envelope structure doesn't allow one. */
     PARSE_EDIFACT_UNEXPECTED_SEGMENT,
 
-    // Converting a section to JSON (design §6.4). These fail the section
+    // Converting a record to JSON (design §6.4). These fail the record
     // only: it is stored in its original form.
 
-    /** Bytes that aren't valid in the section's character encoding. */
+    /** Bytes that aren't valid in the record's character encoding. */
     CONVERT_INVALID_ENCODING,
 
-    /** A CSV record with a different number of fields from the header. */
+    /** A CSV row with a different number of fields from the header. */
     CONVERT_CSV_FIELD_COUNT,
 
     /**
-     * A CSV record that breaks RFC 4180 quoting, such as text after a closing
+     * A CSV row that breaks RFC 4180 quoting, such as text after a closing
      * quote.
      */
     CONVERT_CSV_MALFORMED,
 
     /**
-     * An X12 section that doesn't start with an interchange header, or whose
+     * An X12 record that doesn't start with an interchange header, or whose
      * segments can't be read.
      */
     CONVERT_X12_MALFORMED,
 
     /**
-     * An EDIFACT section that doesn't start with an interchange header, or
+     * An EDIFACT record that doesn't start with an interchange header, or
      * whose segments can't be read.
      */
     CONVERT_EDIFACT_MALFORMED,
@@ -231,20 +231,20 @@ public enum ErrorCode
      */
     CONVERT_EDIFACT_CHARSET,
 
-    /** An XML section that isn't well-formed, or uses a DTD or entity. */
+    /** An XML record that isn't well-formed, or uses a DTD or entity. */
     CONVERT_XML_MALFORMED,
 
     /**
-     * A section larger than {@code split.convert-max-bytes}: converting it
+     * A record larger than {@code split.convert-max-bytes}: converting it
      * would need too much memory.
      */
     CONVERT_TOO_LARGE,
 
     /**
      * Not converted, because the connector stopped twice in a row while this
-     * section's batch was uncommitted, and converting one of the batch's
-     * sections may be what stops it (by running it out of memory, say).
-     * Every section of that batch is stored in its original form with this
+     * record's batch was uncommitted, and converting one of the batch's
+     * records may be what stops it (by running it out of memory, say).
+     * Every record of that batch is stored in its original form with this
      * code (design §9.2).
      */
     CONVERT_SKIPPED,
@@ -252,7 +252,7 @@ public enum ErrorCode
     /**
      * The converter failed in a way it doesn't report itself: an unexpected
      * exception, a bug in the converter rather than a problem it recognised
-     * in the section. The section is stored in its original form like any
+     * in the record. The record is stored in its original form like any
      * other conversion failure, and the file carries on (design §6.4).
      */
     CONVERT_FAILED

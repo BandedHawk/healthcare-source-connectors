@@ -101,7 +101,7 @@ class IcebergUpgradeGuardTest
     {
         String namespace = "ns_" + UUID.randomUUID().toString()
                 .replace("-", "");
-        Table table = IngestTables.sections(
+        Table table = IngestTables.records(
                 TestCatalogs.create(kind).newClient(), namespace);
         assertThat(table.newTransaction()).as(REVIEW)
                 .isInstanceOf(BaseTransaction.class);

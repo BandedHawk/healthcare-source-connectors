@@ -25,6 +25,7 @@
     <module>connector-core</module>
     <module>connector-queue-reader</module>
     <module>connector-kms</module>
+    <module>connector-broker</module>
     <module>connector-runtime</module>
     <!-- Before file-connector: its image tests (-Pit) run the landing node's packaged jar and kit. -->
     <module>landing-connector</module>
@@ -282,6 +283,11 @@
       <dependency>
         <groupId>com.sdh.healthcare</groupId>
         <artifactId>connector-queue-reader</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sdh.healthcare</groupId>
+        <artifactId>connector-broker</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>

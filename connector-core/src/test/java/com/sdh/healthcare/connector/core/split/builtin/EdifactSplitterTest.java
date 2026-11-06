@@ -15,8 +15,8 @@ import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link EdifactSplitter}. Every section must be a standalone
- * interchange; resume from every section is checked by
+ * Tests for {@link EdifactSplitter}. Every record must be a standalone
+ * interchange; resume from every record is checked by
  * {@code splitAndCheckResume}.
  *
  * @author Jonas Barnett
@@ -50,7 +50,7 @@ class EdifactSplitterTest
     private final EdifactSplitter splitter = new EdifactSplitter();
 
     /**
-     * Each message is a section, in its own interchange.
+     * Each message is a record, in its own interchange.
      *
      * @throws Exception if the test fails to run
      */
@@ -66,7 +66,7 @@ class EdifactSplitterTest
 
     /**
      * A message keeps its group around it; at the UNG boundary, a group
-     * is one section.
+     * is one record.
      *
      * @throws Exception if the test fails to run
      */
@@ -87,7 +87,7 @@ class EdifactSplitterTest
     }
 
     /**
-     * At the UNB boundary an interchange is one section, and each
+     * At the UNB boundary an interchange is one record, and each
      * interchange's UNA applies to it alone.
      *
      * @throws Exception if the test fails to run

@@ -39,12 +39,12 @@ class FlatConvertersTest
      * Converts text.
      *
      * @param converter the converter
-     * @param input     the section, as text
+     * @param input     the record, as text
      * @param config    the split settings
      * @return the JSON, as text
      * @throws Exception if conversion fails
      */
-    static String convert(SectionConverter converter, String input,
+    static String convert(RecordConverter converter, String input,
             SplitConfig config) throws Exception
     {
         return new String(converter.convert(input.getBytes(UTF_8), config),
@@ -55,12 +55,12 @@ class FlatConvertersTest
      * The code conversion fails with.
      *
      * @param converter the converter
-     * @param input     the section
+     * @param input     the record
      * @param config    the split settings
      * @return the error code
      * @throws AssertionError if conversion succeeds
      */
-    static ErrorCode failure(SectionConverter converter, byte[] input,
+    static ErrorCode failure(RecordConverter converter, byte[] input,
             SplitConfig config)
     {
         try
@@ -82,7 +82,7 @@ class FlatConvertersTest
      * @throws Exception if the test fails to run
      */
     @Test
-    void csvRecordBecomesAnArrayOfStringsByPositionWithoutTheHeader()
+    void csvRowBecomesAnArrayOfStringsByPositionWithoutTheHeader()
             throws Exception
     {
         CsvConverter converter = new CsvConverter();
@@ -106,9 +106,9 @@ class FlatConvertersTest
                 .isEqualTo("[\"José\"]");
     }
 
-    /** Wrong field counts, bad encoding and bad quoting fail the section. */
+    /** Wrong field counts, bad encoding and bad quoting fail the record. */
     @Test
-    void csvFieldCountMismatchEncodingAndQuotingFailTheSection()
+    void csvFieldCountMismatchEncodingAndQuotingFailTheRecord()
     {
         CsvConverter converter = new CsvConverter();
         assertThat(failure(converter, "a,b,c\n1,2\n".getBytes(UTF_8),
@@ -168,9 +168,9 @@ class FlatConvertersTest
                         + "[\"2\",\"0001\"]}");
     }
 
-    /** Malformed input and bad encoding fail the section. */
+    /** Malformed input and bad encoding fail the record. */
     @Test
-    void x12InvalidInputFailsTheSection()
+    void x12InvalidInputFailsTheRecord()
     {
         assertThat(failure(new X12Converter(), "GS*HC~".getBytes(UTF_8),
                 SplitConfig.defaults("x12")))
@@ -248,7 +248,7 @@ class FlatConvertersTest
     }
 
     /**
-     * An invalid byte is reported at its position in the section, also
+     * An invalid byte is reported at its position in the record, also
      * when release characters come before it in the same component: the
      * component is decoded without them, and the position is mapped back.
      */
@@ -278,15 +278,15 @@ class FlatConvertersTest
     }
 
     /**
-     * Sections from {@code JsonWriter.EXACT_SIZE_FROM} are written twice,
+     * Records from {@code JsonWriter.EXACT_SIZE_FROM} are written twice,
      * counting first. The result must be what the ordinary path gives: the
-     * same JSON for a section just under the size as for the same content
+     * same JSON for a record just under the size as for the same content
      * made larger.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void largeSectionsConvertTheSameWay() throws Exception
+    void largeRecordsConvertTheSameWay() throws Exception
     {
         String x12Body = "NM1*IL*1*MÜLLER*JOSÉ~\n";
         String x12 = ISA + x12Body.repeat(

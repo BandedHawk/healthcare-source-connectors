@@ -28,7 +28,7 @@ import java.util.Set;
  * two apps exported. The landing node and the splitter each trace an item
  * on their own, with no shared trace, so the report joins them by the item
  * ID that both put on their audit events ({@code item_id} on the landing
- * node, {@code file_id} on the splitter).
+ * node, {@code item_id} on the splitter).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -69,7 +69,7 @@ final class TelemetryReport
 
         text.append("## Items\n\n");
         text.append("| Pipeline | Item | Item ID | Landing | Splitter"
-                + " | Sections | Unconverted | Seconds | As expected |\n");
+                + " | Records | Unconverted | Seconds | As expected |\n");
         text.append("|---|---|---|---|---|---:|---:|---:|---|\n");
         for (Outcome outcome : outcomes)
         {
@@ -81,7 +81,7 @@ final class TelemetryReport
                             : "`" + outcome.itemId() + "`",
                     outcome.landing(), outcome.itemId() == null
                             ? "HTTP " + outcome.status() : outcome.status(),
-                    completed ? outcome.sections() : "–",
+                    completed ? outcome.records() : "–",
                     completed ? outcome.failed() : "–",
                     outcome.millis() / 1000.0,
                     outcome.asExpected() ? "yes" : "**NO**"));
@@ -109,7 +109,7 @@ final class TelemetryReport
                 + " item.\n\n");
         table(text, events.stream()
                 .filter(event -> event.get("item_id") == null
-                        && event.get("file_id") == null
+                        && event.get("item_id") == null
                         && !event.name().startsWith("push."))
                 .toList());
 
@@ -119,7 +119,7 @@ final class TelemetryReport
     }
 
     /**
-     * Appends one item's section: its events from both apps in time order,
+     * Appends one item's record: its events from both apps in time order,
      * then each trace they were part of.
      *
      * @param text    where to write
@@ -133,7 +133,7 @@ final class TelemetryReport
         String id = outcome.itemId().toString();
         List<AuditEvent> own = events.stream()
                 .filter(event -> id.equals(event.get("item_id"))
-                        || id.equals(event.get("file_id")))
+                        || id.equals(event.get("item_id")))
                 .sorted(Comparator.comparingLong(AuditEvent::nanos))
                 .toList();
         text.append("\n## ").append(outcome.pipeline()).append(": ")
@@ -149,7 +149,7 @@ final class TelemetryReport
                 .filter(trace -> !trace.isEmpty()).forEach(traces::add);
         spans.stream().filter(span -> id.equals(span.attributes()
                 .get("item_id")) || id.equals(span.attributes()
-                        .get("file_id")))
+                        .get("item_id")))
                 .map(SpanRecord::traceId).forEach(traces::add);
         for (String trace : traces)
         {

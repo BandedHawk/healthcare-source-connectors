@@ -8,8 +8,8 @@ package com.sdh.healthcare.connector.core.split.builtin;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import com.sdh.healthcare.connector.core.split.Section;
-import com.sdh.healthcare.connector.core.split.SectionSplitter;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
+import com.sdh.healthcare.connector.core.split.RecordSplitter;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
@@ -20,18 +20,18 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * One section per CSV record (RFC 4180; design §6.2). Newlines inside
+ * One record per CSV row (RFC 4180; design §6.2). Newlines inside
  * quoted fields are respected, and content is otherwise not interpreted.
  * <p>
- * Options: {@code csv.header} (default false) prepends the first record to
- * every section; {@code csv.delimiter} (default {@code ,}) is needed to
+ * Options: {@code csv.header} (default false) prepends the first row to
+ * every record; {@code csv.delimiter} (default {@code ,}) is needed to
  * know where a quoted field may start. Empty lines are skipped. A quote
  * that doesn't open a field is kept as an ordinary character.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class CsvSplitter implements SectionSplitter
+public final class CsvSplitter implements RecordSplitter
 {
 
     /** The format's name. */
@@ -97,55 +97,55 @@ public final class CsvSplitter implements SectionSplitter
             throws IOException, SplitException
     {
         byte delimiter = (byte) delimiter(config);
-        long max = config.limits().maxSectionBytes();
+        long max = config.limits().maxRecordBytes();
         byte[] header = null;
         long start = from.offset();
         if (config.booleanOption("csv.header", false))
         {
-            long[] headerRecord = nextRecord(new ByteScanner(source, 0,
+            long[] headerRow = nextRow(new ByteScanner(source, 0,
                     Math.min(config.readBufferBytes(), 64 << 10)),
                     delimiter, max);
-            if (headerRecord == null)
+            if (headerRow == null)
             {
                 return Optional::empty;
             }
-            header = source.readFully(headerRecord[0],
-                    (int) (headerRecord[1] - headerRecord[0]));
-            start = Math.max(start, headerRecord[1]);
+            header = source.readFully(headerRow[0],
+                    (int) (headerRow[1] - headerRow[0]));
+            start = Math.max(start, headerRow[1]);
         }
         ByteScanner scanner = new ByteScanner(source, start,
                 config.readBufferBytes());
         byte[] headerBytes = header;
         return () ->
         {
-            long[] record = nextRecord(scanner, delimiter, max);
-            if (record == null)
+            long[] row = nextRow(scanner, delimiter, max);
+            if (row == null)
             {
                 return Optional.empty();
             }
-            Section.SourceRange range = new Section.SourceRange(record[0],
-                    record[1] - record[0]);
-            List<Section.Part> parts = headerBytes == null
+            SplitRecord.SourceRange range = new SplitRecord.SourceRange(row[0],
+                    row[1] - row[0]);
+            List<SplitRecord.Part> parts = headerBytes == null
                     ? List.of(range)
-                    : List.of(new Section.Literal(headerBytes), range);
-            return Optional.of(new Section(record[0], record[1] - record[0],
-                    parts, ResumePoint.at(record[1])));
+                    : List.of(new SplitRecord.Literal(headerBytes), range);
+            return Optional.of(new SplitRecord(row[0], row[1] - row[0],
+                    parts, ResumePoint.at(row[1])));
         };
     }
 
     /**
-     * The next non-empty record.
+     * The next non-empty row.
      *
      * @param scanner   reads the file
      * @param delimiter the field delimiter
-     * @param max       the largest record allowed, in bytes
+     * @param max       the largest row allowed, in bytes
      * @return {start, end}, end being after its line terminator; null at
      *         the end
      * @throws IOException    if the file can't be read
-     * @throws SplitException if a record is too large, or a quote is never
+     * @throws SplitException if a row is too large, or a quote is never
      *                        closed
      */
-    static long[] nextRecord(ByteScanner scanner, byte delimiter, long max)
+    static long[] nextRow(ByteScanner scanner, byte delimiter, long max)
             throws IOException, SplitException
     {
         while (true)
@@ -199,7 +199,7 @@ public final class CsvSplitter implements SectionSplitter
                 }
                 if (scanner.position() - start > max)
                 {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
+                    throw new SplitException(ErrorCode.LIMIT_RECORD_SIZE,
                             start);
                 }
                 next = scanner.read();

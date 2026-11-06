@@ -42,7 +42,7 @@ class DelimitedSplitterTest
 
     /**
      * In START mode an HL7 batch splits at each MSH, and the lines before
-     * the first are kept as a section.
+     * the first are kept as a record.
      *
      * @throws Exception if the test fails to run
      */
@@ -62,7 +62,7 @@ class DelimitedSplitterTest
     }
 
     /**
-     * In END mode the matching line ends its section.
+     * In END mode the matching line ends its record.
      *
      * @throws Exception if the test fails to run
      */
@@ -77,12 +77,12 @@ class DelimitedSplitterTest
     }
 
     /**
-     * In SEPARATOR mode separators and empty sections are dropped.
+     * In SEPARATOR mode separators and empty records are dropped.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void separatorModeDropsSeparatorsAndEmptySections() throws Exception
+    void separatorModeDropsSeparatorsAndEmptyRecords() throws Exception
     {
         String input = "---\na\n---\n---\n\nb\nc\n---\n  \n";
         assertThat(splitAndCheckResume(splitter, input,

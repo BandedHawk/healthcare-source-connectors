@@ -9,7 +9,7 @@ package com.sdh.healthcare.connector.core.convert;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 
 /**
- * Labels the sections of a Parquet file (design §6.4). The Parquet
+ * Labels the records of a Parquet file (design §6.4). The Parquet
  * splitter already makes each row a JSON object
  * ({@link ParquetRowJson}), since a row isn't a stretch of the file's
  * bytes; this converter passes it on unchanged, so it is stored and
@@ -18,7 +18,7 @@ import com.sdh.healthcare.connector.core.split.SplitConfig;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class ParquetConverter implements SectionConverter
+public final class ParquetConverter implements RecordConverter
 {
 
     /**
@@ -41,7 +41,7 @@ public final class ParquetConverter implements SectionConverter
     }
 
     /**
-     * A copy needs the section twice.
+     * A copy needs the record twice.
      *
      * @return 2
      */
@@ -52,15 +52,15 @@ public final class ParquetConverter implements SectionConverter
     }
 
     /**
-     * Returns the section's JSON as it is, in a new array.
+     * Returns the record's JSON as it is, in a new array.
      *
-     * @param section the row as JSON
-     * @param config  not used
+     * @param record the row as JSON
+     * @param config not used
      * @return a copy of it
      */
     @Override
-    public byte[] convert(byte[] section, SplitConfig config)
+    public byte[] convert(byte[] record, SplitConfig config)
     {
-        return section.clone();
+        return record.clone();
     }
 }

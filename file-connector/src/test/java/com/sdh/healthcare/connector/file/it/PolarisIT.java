@@ -20,8 +20,8 @@ import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
-import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
@@ -314,11 +314,11 @@ class PolarisIT
     /**
      * Sends a JSON request to the management API and checks its status.
      *
-     * @param http the client
-     * @param bearer the Authorization header's value
-     * @param method the HTTP method
-     * @param url the URL
-     * @param body the request body, written as JSON
+     * @param http     the client
+     * @param bearer   the Authorization header's value
+     * @param method   the HTTP method
+     * @param url      the URL
+     * @param body     the request body, written as JSON
      * @param expected the status expected
      * @throws Exception if the request fails
      */
@@ -415,13 +415,13 @@ class PolarisIT
         CONFIG.put("sdh.storage.catalog-name", "sdh");
         catalogProperties().forEach((key, value) ->
                 CONFIG.put("sdh.storage.catalog[" + key + "]", value));
-        CONFIG.put("sdh.storage.commit.max-sections", "7");
+        CONFIG.put("sdh.storage.commit.max-records", "7");
         CONFIG.put("sdh.lease.jdbc.url", POSTGRES.getJdbcUrl());
         CONFIG.put("sdh.lease.jdbc.username", POSTGRES.getUsername());
         CONFIG.put("sdh.lease.jdbc.password", POSTGRES.getPassword());
         CONFIG.put("sdh.crypto.keystore.path", KEYS.keystore.toString());
         CONFIG.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
-        CONFIG.put("sdh.crypto.keys.sections-kek", TestKeys.SECTIONS);
+        CONFIG.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
         CONFIG.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
         CONFIG.put("sdh.crypto.keys.signing.kid", "connector-2026");
         CONFIG.put("sdh.crypto.keys.signing.pem", KEYS.signingPem.toString());
@@ -439,7 +439,7 @@ class PolarisIT
     }
 
     /**
-     * Two files are landed and split; downstream reads every section back
+     * Two files are landed and split; downstream reads every record back
      * with its own REST client, the admin status command reads the
      * checkpoint, maintenance runs through the REST catalog, and nothing
      * stored is readable.
@@ -450,14 +450,14 @@ class PolarisIT
     void ingestsReadsBackAndMaintainsTablesOnPolaris() throws Exception
     {
         String header = "id,name,note\n";
-        List<String> records = new ArrayList<>();
+        List<String> rows = new ArrayList<>();
         StringBuilder file = new StringBuilder(header);
         for (int index = 0; index < 30; index++)
         {
-            String record = index + "," + MARKER + "-" + index
+            String row = index + "," + MARKER + "-" + index
                     + ",\"multi\nline\"\n";
-            records.add(record);
-            file.append(record);
+            rows.add(row);
+            file.append(row);
         }
         TestLanding landing = new TestLanding(catalogProperties(),
                 runtime.keys().wrap(), KEYS, INTAKE);
@@ -487,22 +487,22 @@ class PolarisIT
             {
                 messages.add(reader.decode(body.getBytes(UTF_8)));
             }
-            List<SectionStored> sections = messages.stream()
-                    .filter(SectionStored.class::isInstance)
-                    .map(SectionStored.class::cast).toList();
+            List<RecordStored> records = messages.stream()
+                    .filter(RecordStored.class::isInstance)
+                    .map(RecordStored.class::cast).toList();
             assertThat(messages.stream().filter(FileStarted.class::isInstance))
                     .hasSize(2);
-            assertThat(sections).hasSize(30);
-            for (SectionStored section : sections)
+            assertThat(records).hasSize(30);
+            for (RecordStored record : records)
             {
-                assertThat(new String(reader.readSection(section, 1 << 20),
+                assertThat(new String(reader.readRecord(record, 1 << 20),
                         UTF_8)).isEqualTo(csvRowJson(
-                                records.get((int) section.seq())));
+                                rows.get((int) record.seq())));
             }
             FileCompleted done = messages.stream()
                     .filter(FileCompleted.class::isInstance)
                     .map(FileCompleted.class::cast).findFirst().orElseThrow();
-            assertThat(new String(landing.restore(done.fileId()), UTF_8))
+            assertThat(new String(landing.restore(done.itemId()), UTF_8))
                     .isEqualTo(file.toString());
 
             // Admin status reads the checkpoint through its own REST client,
@@ -523,7 +523,7 @@ class PolarisIT
             try
             {
                 String dataPrefix =
-                        keyOf(runtime.tables().sections().location())
+                        keyOf(runtime.tables().records().location())
                                 + "/data/";
                 String stray = dataPrefix + "stray-crashed-batch.parquet";
                 try (S3Client s3 = s3())
@@ -539,24 +539,24 @@ class PolarisIT
                         new MaintenanceSettings(Duration.ofDays(7), 10, true,
                                 0.75, 2, 8L << 30, Duration.ZERO),
                         Clock.offset(Clock.systemUTC(), Duration.ofMinutes(1)))
-                        .run(runtime.tables().sections(),
-                                SectionsTable.INGESTED_AT, Optional.empty(),
+                        .run(runtime.tables().records(),
+                                RecordsTable.INGESTED_AT, Optional.empty(),
                                 true);
                 assertThat(report.compactedFiles())
-                        .as("30 sections in batches of 7").isEqualTo(5);
+                        .as("30 records in batches of 7").isEqualTo(5);
                 assertThat(report.orphansDeleted()).isEqualTo(1);
                 assertThat(keys(dataPrefix)).doesNotContain(stray);
-                for (SectionStored section : sections)
+                for (RecordStored record : records)
                 {
-                    assertThat(new String(reader.readSection(section,
+                    assertThat(new String(reader.readRecord(record,
                             1 << 20), UTF_8)).isEqualTo(csvRowJson(
-                                    records.get((int) section.seq())));
+                                    rows.get((int) record.seq())));
                 }
                 Report purge = new TableMaintenance(runtime.committer(),
                         MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
-                        .run(runtime.tables().sections(),
-                                SectionsTable.INGESTED_AT,
+                        .run(runtime.tables().records(),
+                                RecordsTable.INGESTED_AT,
                                 Optional.of(Duration.ofDays(1)), false);
                 assertThat(purge.retentionDeletedFiles()).isEqualTo(1);
                 assertThat(keys(dataPrefix))
@@ -621,9 +621,9 @@ class PolarisIT
     {
         String namespace =
                 "fence_" + UUID.randomUUID().toString().replace("-", "");
-        Table first = IngestTables.sections(newClient(), namespace);
+        Table first = IngestTables.records(newClient(), namespace);
         Table second = newClient().loadTable(
-                TableIdentifier.of(namespace, SectionsTable.DEFAULT_NAME));
+                TableIdentifier.of(namespace, RecordsTable.DEFAULT_NAME));
         return new Table[] {first, second};
     }
 

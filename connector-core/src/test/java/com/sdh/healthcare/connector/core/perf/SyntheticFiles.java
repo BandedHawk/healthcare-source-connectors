@@ -18,7 +18,7 @@ import java.util.SplittableRandom;
 
 /**
  * Synthetic input for throughput tests (design §13, §15): C-CDA documents,
- * X12 837 claims and CSV records, written to a target size. Content is
+ * X12 837 claims and CSV rows, written to a target size. Content is
  * pseudo-random words from a large vocabulary, numbers and codes, so it
  * compresses roughly like real clinical text rather than collapsing to
  * nothing. Seeded, so runs are repeatable.
@@ -32,11 +32,11 @@ public final class SyntheticFiles
     /**
      * A generated file.
      *
-     * @param path where it was written
-     * @param bytes its size
-     * @param sections the number of sections it holds
+     * @param path    where it was written
+     * @param bytes   its size
+     * @param records the number of records it holds
      */
-    public record Generated(Path path, long bytes, long sections)
+    public record Generated(Path path, long bytes, long records)
     {
     }
 
@@ -63,7 +63,7 @@ public final class SyntheticFiles
      * doesn't compress unrealistically well.
      *
      * @param count the number of words
-     * @param seed the random seed
+     * @param seed  the random seed
      * @return the words
      */
     private static String[] vocabulary(int count, long seed)
@@ -86,9 +86,9 @@ public final class SyntheticFiles
     /**
      * Appends random words separated by spaces.
      *
-     * @param out where to append
+     * @param out    where to append
      * @param random the random source
-     * @param count the number of words
+     * @param count  the number of words
      * @throws IOException if appending fails
      */
     private static void words(Appendable out, SplittableRandom random,
@@ -108,7 +108,7 @@ public final class SyntheticFiles
      * Random decimal digits.
      *
      * @param random the random source
-     * @param count the number of digits
+     * @param count  the number of digits
      * @return the digits
      */
     private static String digits(SplittableRandom random, int count)
@@ -159,7 +159,7 @@ public final class SyntheticFiles
         /**
          * Writes and counts characters.
          *
-         * @param chars the characters
+         * @param chars  the characters
          * @param offset the first to write
          * @param length how many to write
          * @throws IOException if writing fails
@@ -175,7 +175,7 @@ public final class SyntheticFiles
         /**
          * Writes and counts part of a string.
          *
-         * @param text the string
+         * @param text   the string
          * @param offset the first character to write
          * @param length how many to write
          * @throws IOException if writing fails
@@ -225,15 +225,15 @@ public final class SyntheticFiles
         return new Counting(new BufferedWriter(writer, 1 << 20));
     }
 
-    // ---- C-CDA: one ClinicalDocument per section, 50–350 KB each, inside
+    // ---- C-CDA: one ClinicalDocument per record, 50–350 KB each, inside
     // a batch wrapper ----
 
     /**
      * Writes C-CDA documents inside a batch wrapper until the target size.
      *
-     * @param path the file to write
+     * @param path   the file to write
      * @param target the size to reach
-     * @param seed the random seed
+     * @param seed   the random seed
      * @return the file written
      * @throws IOException if writing fails
      */
@@ -287,7 +287,7 @@ public final class SyntheticFiles
      *
      * @param writer where to write
      * @param random the random source
-     * @param size the size to reach before closing the body
+     * @param size   the size to reach before closing the body
      * @throws IOException if writing fails
      */
     private static void clinicalDocument(Counting writer,
@@ -370,15 +370,15 @@ public final class SyntheticFiles
                 + "</ClinicalDocument>\n");
     }
 
-    // ---- X12 837P: one ST…SE claim per section, 1–6 KB each, 1000 per GS
+    // ---- X12 837P: one ST…SE claim per record, 1–6 KB each, 1000 per GS
     // group, one group per interchange ----
 
     /**
      * Writes X12 837P interchanges until the target size.
      *
-     * @param path the file to write
+     * @param path   the file to write
      * @param target the size to reach
-     * @param seed the random seed
+     * @param seed   the random seed
      * @return the file written
      * @throws IOException if writing fails
      */
@@ -417,8 +417,8 @@ public final class SyntheticFiles
     /**
      * Writes one ST…SE claim transaction.
      *
-     * @param writer where to write
-     * @param random the random source
+     * @param writer  where to write
+     * @param random  the random source
      * @param control the transaction control number
      * @throws IOException if writing fails
      */
@@ -487,15 +487,15 @@ public final class SyntheticFiles
         writer.write(out.toString());
     }
 
-    // ---- CSV: one record per section, ~150–400 bytes, header row; 1 in 10
+    // ---- CSV: one record per row, ~150–400 bytes, header row; 1 in 10
     // notes quoted with a newline ----
 
     /**
-     * Writes CSV records under a header row until the target size.
+     * Writes CSV rows under a header row until the target size.
      *
-     * @param path the file to write
+     * @param path   the file to write
      * @param target the size to reach
-     * @param seed the random seed
+     * @param seed   the random seed
      * @return the file written
      * @throws IOException if writing fails
      */
@@ -503,7 +503,7 @@ public final class SyntheticFiles
             throws IOException
     {
         SplittableRandom random = new SplittableRandom(seed);
-        long records = 0;
+        long rows = 0;
         try (Counting writer = open(path))
         {
             writer.write("patient_id,mrn,family,given,birth_date,sex,street,"
@@ -512,9 +512,9 @@ public final class SyntheticFiles
             StringBuilder out = new StringBuilder(512);
             while (writer.count < target)
             {
-                records++;
+                rows++;
                 out.setLength(0);
-                out.append(records).append(',').append(digits(random, 9))
+                out.append(rows).append(',').append(digits(random, 9))
                         .append(',')
                         .append(FAMILY[random.nextInt(FAMILY.length)])
                         .append(',')
@@ -550,7 +550,7 @@ public final class SyntheticFiles
                 writer.write(out.toString());
             }
             writer.flush();
-            return new Generated(path, writer.count, records);
+            return new Generated(path, writer.count, rows);
         }
     }
 }

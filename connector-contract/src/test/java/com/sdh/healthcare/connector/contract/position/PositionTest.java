@@ -14,7 +14,7 @@ import java.util.Random;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link SourcePosition}, {@link SectionOrigin} and
+ * Tests for {@link SourcePosition}, {@link RecordOrigin} and
  * {@link LineCounter}.
  *
  * @author Jonas Barnett
@@ -140,16 +140,16 @@ class PositionTest
      * the origin.
      */
     @Test
-    void anOriginTurnsSectionPositionsIntoFilePositions()
+    void anOriginTurnsRecordPositionsIntoFilePositions()
     {
-        SectionOrigin origin =
-                new SectionOrigin(position(2, 1), position(40, 9));
+        RecordOrigin origin =
+                new RecordOrigin(position(2, 1), position(40, 9));
         assertThat(origin.toFile(position(2, 1))).isEqualTo(position(40, 9));
         assertThat(origin.toFile(position(2, 5))).isEqualTo(position(40, 13));
         assertThat(origin.toFile(position(7, 3))).isEqualTo(position(45, 3));
         // In the XML declaration the splitter added: not in the file.
         assertThat(origin.toFile(position(1, 10))).isEqualTo(position(40, 9));
-        assertThat(SectionOrigin.WHOLE_FILE.toFile(position(12, 7)))
+        assertThat(RecordOrigin.WHOLE_FILE.toFile(position(12, 7)))
                 .isEqualTo(position(12, 7));
     }
 

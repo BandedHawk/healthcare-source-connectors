@@ -17,9 +17,9 @@ import com.azure.messaging.eventhubs.models.EventPosition;
 import com.azure.messaging.eventhubs.models.PartitionEvent;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.it.ItSupport.Received;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,7 +34,7 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.images.builder.Transferable;
 
 /**
- * Design §10.3 eventhubs: partitionKey = fileId keeps each file in one
+ * Design §10.3 eventhubs: partitionKey = itemId keeps each file in one
  * partition, in order. The adapter carries no metadata here (messageId is
  * inside the payload), so only key, order and body are checked.
  *

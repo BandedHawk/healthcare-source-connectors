@@ -13,9 +13,9 @@ import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
 
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.it.ItSupport.Received;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,7 +37,7 @@ import software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 
 /**
- * Design §10.3 sqs on a FIFO queue: MessageGroupId = fileId,
+ * Design §10.3 sqs on a FIFO queue: MessageGroupId = itemId,
  * MessageDeduplicationId = messageId. Runs against ElasticMQ, an
  * SQS-compatible server (no cloud account or LocalStack token needed).
  *
@@ -132,7 +132,7 @@ class SqsIT
                         message.messageAttributes();
                 got.add(new Received(value(attributes, "messageId"),
                         value(attributes, "type"),
-                        value(attributes, "fileId"),
+                        value(attributes, "itemId"),
                         value(attributes, "contentType"),
                         message.attributes().get(
                                 MessageSystemAttributeName.MESSAGE_GROUP_ID),
@@ -149,7 +149,7 @@ class SqsIT
      * A message attribute's text.
      *
      * @param attributes the message's attributes
-     * @param name the attribute name
+     * @param name       the attribute name
      * @return its text, or null if absent
      */
     static String value(Map<String, MessageAttributeValue> attributes,

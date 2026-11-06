@@ -8,7 +8,7 @@ package com.sdh.healthcare.connector.landing.intake;
 
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandingCheckpoint;
@@ -87,7 +87,7 @@ public final class IntakeService implements LandingIntake
      * @param ids    hashes source references with the ID key
      */
     public record Storage(ItemLander lander, LandingLedger ledger,
-            LedgerIndex index, SectionIds ids)
+            LedgerIndex index, RecordIds ids)
     {
     }
 
@@ -383,7 +383,7 @@ public final class IntakeService implements LandingIntake
             ensureRecovered();
             if (!source.reachable())
             {
-                health.unreachable(null);
+                health.unreachable((IntakeProblem) null);
                 return;
             }
             health.answered();

@@ -22,7 +22,7 @@ import org.apache.iceberg.types.Types;
  * as they were received, in a namespace of their own.
  * <p>
  * {@value #LANDED_ITEMS} holds each item encrypted in chunks, one row per
- * chunk, with the same envelope as sections. The values known only once the
+ * chunk, with the same envelope as records. The values known only once the
  * whole item is in (its size, chunk count and digest, and where it came
  * from) are on one summary row, {@code chunk_index = -1}, written in the
  * item's final commit. A summary row means the item is fully landed.
@@ -121,16 +121,16 @@ public final class LandingTables
     public static final String ITEM_SHA256 = "item_sha256";
 
     /**
-     * Where each message of a message batch starts ({@link RecordIndex});
+     * Where each message of a message batch starts ({@link MessageIndex});
      * null for other items.
      */
-    public static final String RECORD_OFFSETS = "record_offsets";
+    public static final String MESSAGE_OFFSETS = "message_offsets";
 
     /**
-     * The keyed hash of each message's broker ID ({@link RecordIndex}), to
+     * The keyed hash of each message's broker ID ({@link MessageIndex}), to
      * recognise one delivered again; null for other items.
      */
-    public static final String RECORD_KEYS = "record_keys";
+    public static final String MESSAGE_KEYS = "message_keys";
 
     /**
      * The broker ID of each message of a message batch, in order, as a JSON
@@ -138,13 +138,13 @@ public final class LandingTables
      * items. They are the producer's own references, so they go back to
      * the producer in its results (design §5.3.8), and may be PHI.
      */
-    public static final String RECORD_REFS_ENC = "record_refs_enc";
+    public static final String MESSAGE_REFS_ENC = "message_refs_enc";
 
     /**
-     * The seq the broker IDs of {@value #RECORD_REFS_ENC} are encrypted as;
+     * The seq the broker IDs of {@value #MESSAGE_REFS_ENC} are encrypted as;
      * the original name is -1, and chunks count up from 0.
      */
-    public static final long RECORD_REFS_SEQ = -2;
+    public static final long MESSAGE_REFS_SEQ = -2;
 
     /**
      * The earlier message each message of a message batch replaces, as its
@@ -153,10 +153,10 @@ public final class LandingTables
      * data key (seq -3); null for an item none of whose messages replaces
      * one. Links only: both messages are kept (design §5.3.8).
      */
-    public static final String RECORD_REPLACES_ENC = "record_replaces_enc";
+    public static final String MESSAGE_REPLACES_ENC = "message_replaces_enc";
 
-    /** The seq the links of {@value #RECORD_REPLACES_ENC} are encrypted as. */
-    public static final long RECORD_REPLACES_SEQ = -3;
+    /** The seq the links of {@value #MESSAGE_REPLACES_ENC} are encrypted as. */
+    public static final long MESSAGE_REPLACES_SEQ = -3;
 
     /** The columns of {@value #LANDED_ITEMS}. */
     public static final Schema LANDED_ITEMS_SCHEMA = new Schema(
@@ -185,15 +185,15 @@ public final class LandingTables
             optional(22, REPLACES_ITEM_ID, Types.UUIDType.get()),
             optional(23, ITEM_SHA256, Types.StringType.get(),
                     "SHA-256 of the item, in hex"),
-            optional(24, RECORD_OFFSETS,
+            optional(24, MESSAGE_OFFSETS,
                     Types.ListType.ofRequired(25, Types.LongType.get()),
                     "where each message of a batch starts"),
-            optional(26, RECORD_KEYS,
+            optional(26, MESSAGE_KEYS,
                     Types.ListType.ofOptional(27, Types.StringType.get()),
                     "keyed hashes of the messages' broker IDs"),
-            optional(28, RECORD_REFS_ENC, Types.BinaryType.get(),
+            optional(28, MESSAGE_REFS_ENC, Types.BinaryType.get(),
                     "encrypted broker IDs of the messages of a batch"),
-            optional(29, RECORD_REPLACES_ENC, Types.BinaryType.get(),
+            optional(29, MESSAGE_REPLACES_ENC, Types.BinaryType.get(),
                     "encrypted links to the messages its messages replace"));
 
     /** The columns of {@value #LEDGER}. */

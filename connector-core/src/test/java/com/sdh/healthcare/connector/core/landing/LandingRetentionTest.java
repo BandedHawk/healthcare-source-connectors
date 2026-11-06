@@ -11,7 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
@@ -73,7 +73,7 @@ class LandingRetentionTest
     AesKeyWrapProvider keys;
 
     /** Makes the digests and MACs, with an all-zero ID key. */
-    final SectionIds ids = new SectionIds(new byte[32]);
+    final RecordIds ids = new RecordIds(new byte[32]);
 
     /** Commits under epoch 1. */
     FencedCommitter committer;

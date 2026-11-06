@@ -26,7 +26,7 @@ import java.util.UUID;
 
 /**
  * {@code decrypt-fallback}: decrypts a local fallback file
- * {@code failed/<fileId>.enc} (design §11.3) with the recovery private key.
+ * {@code failed/<itemId>.enc} (design §11.3) with the recovery private key.
  * Needs no catalog, lease or KMS: it is for when those were what failed.
  *
  * @author Jonas Barnett
@@ -96,8 +96,8 @@ final class DecryptFallbackCommand implements AdminCommand
         {
             throw new AdminArgs.UsageException("--file does not exist");
         }
-        UUID fileId = peekFileId(file);
-        audit.add(Attr.FILE_ID, fileId);
+        UUID itemId = peekItemId(file);
+        audit.add(Attr.ITEM_ID, itemId);
         char[] passphraseChars = passphrase.toCharArray();
         PrivateKey key;
         try
@@ -110,7 +110,7 @@ final class DecryptFallbackCommand implements AdminCommand
         }
 
         RecoveryEnvelope.Metadata[] metadata = new RecoveryEnvelope.Metadata[1];
-        long written = OutputFiles.writeNew(directory, fileId.toString(),
+        long written = OutputFiles.writeNew(directory, itemId.toString(),
                 output ->
                 {
                     try (InputStream in = Files.newInputStream(file))
@@ -119,14 +119,14 @@ final class DecryptFallbackCommand implements AdminCommand
                     }
                 });
         audit.add(Attr.BYTES, written);
-        if (!metadata[0].fileId().equals(fileId)
+        if (!metadata[0].itemId().equals(itemId)
                 || metadata[0].size() != written)
         {
-            Files.deleteIfExists(directory.resolve(fileId.toString()));
+            Files.deleteIfExists(directory.resolve(itemId.toString()));
             throw new IOException(
                     "Fallback file is inconsistent with its own header");
         }
-        String where = directory.resolve(fileId.toString()).toString();
+        String where = directory.resolve(itemId.toString()).toString();
         if (arguments.flag("original-name"))
         {
             String name = OutputFiles.safeName(metadata[0].originalName()
@@ -139,12 +139,12 @@ final class DecryptFallbackCommand implements AdminCommand
                         "Output file already exists: " + target
                         + " (the decrypted file was kept as " + where + ")");
             }
-            Files.move(directory.resolve(fileId.toString()), target,
+            Files.move(directory.resolve(itemId.toString()), target,
                     StandardCopyOption.ATOMIC_MOVE);
             where = directory + " under its original name";
         }
         out.printf("decrypted %d bytes of file %s, integrity verified,"
-                + " to %s%n", written, fileId, where);
+                + " to %s%n", written, itemId, where);
     }
 
     /**
@@ -156,7 +156,7 @@ final class DecryptFallbackCommand implements AdminCommand
      * @throws IOException if the file isn't a recovery envelope or can't be
      *         read
      */
-    static UUID peekFileId(Path file) throws IOException
+    static UUID peekItemId(Path file) throws IOException
     {
         try (DataInputStream in =
                 new DataInputStream(Files.newInputStream(file)))

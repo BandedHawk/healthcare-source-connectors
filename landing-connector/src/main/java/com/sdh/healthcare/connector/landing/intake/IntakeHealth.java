@@ -6,6 +6,8 @@
  */
 package com.sdh.healthcare.connector.landing.intake;
 
+import com.sdh.healthcare.connector.broker.receive.BrokerHealth;
+import com.sdh.healthcare.connector.broker.receive.BrokerProblem;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
@@ -27,7 +29,7 @@ import java.util.function.LongSupplier;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class IntakeHealth
+public final class IntakeHealth implements BrokerHealth
 {
 
     /** The intake's name. */
@@ -65,6 +67,7 @@ public final class IntakeHealth
      * Notes that the source answered: a listing or poll worked. Ends an
      * outage, reporting {@code intake.reachable}.
      */
+    @Override
     public void answered()
     {
         boolean wasUnreachable;
@@ -80,6 +83,18 @@ public final class IntakeHealth
             Telemetry.get().audit("intake.reachable",
                     Fields.of(Attr.INTAKE, intake));
         }
+    }
+
+    /**
+     * Notes that a queue intake's broker couldn't be reached, as
+     * {@code connector-broker} tells it.
+     *
+     * @param reason why
+     */
+    @Override
+    public void unreachable(BrokerProblem reason)
+    {
+        unreachable(IntakeProblem.valueOf(reason.name()));
     }
 
     /**

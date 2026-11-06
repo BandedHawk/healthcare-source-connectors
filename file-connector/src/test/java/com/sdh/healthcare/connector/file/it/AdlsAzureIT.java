@@ -162,7 +162,7 @@ class AdlsAzureIT extends ObjectStoreItBase
     List<String> list(String location)
     {
         SupportsPrefixOperations io =
-                (SupportsPrefixOperations) runtime.tables().sections().io();
+                (SupportsPrefixOperations) runtime.tables().records().io();
         String root = "abfss://" + Azure.FILESYSTEM + "@" + Azure.HOST + "/";
         return StreamSupport.stream(io.listPrefix(location).spliterator(),
                         false)

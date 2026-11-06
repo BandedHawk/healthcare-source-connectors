@@ -12,7 +12,7 @@
   <artifactId>connector-queue-reader</artifactId>
   <name>connector-queue-reader</name>
   <description>
-    Consumer library: decrypts and verifies connector messages and streams section content from Iceberg.
+    Consumer library: decrypts and verifies connector messages and streams record content from Iceberg.
     Consumers depend on this artifact only, so connector internals can change without breaking them.
     Broker-neutral: pass in the message body from any client. Consumers add their catalog and FileIO
     (for example iceberg-aws) themselves.

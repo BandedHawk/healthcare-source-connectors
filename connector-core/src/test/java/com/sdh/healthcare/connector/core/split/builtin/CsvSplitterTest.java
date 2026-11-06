@@ -30,13 +30,13 @@ class CsvSplitterTest
     private final CsvSplitter splitter = new CsvSplitter();
 
     /**
-     * Each record is a section; quoted newlines, delimiters and quotes
+     * Each record is a record; quoted newlines, delimiters and quotes
      * stay inside it, and empty lines are skipped.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void oneSectionPerRecordRespectingQuotes() throws Exception
+    void oneRecordPerRowRespectingQuotes() throws Exception
     {
         String csv = "1,\"Smith, John\",\"line one\nline two\"\r\n"
                 + "\n"
@@ -52,12 +52,12 @@ class CsvSplitterTest
     }
 
     /**
-     * The header goes before every section, after a resume too.
+     * The header goes before every record, after a resume too.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void headerIsPrependedToEverySectionIncludingAfterResume()
+    void headerIsPrependedToEveryRecordIncludingAfterResume()
             throws Exception
     {
         String csv = "id,note\n1,\"a\nb\"\n2,c\n";
@@ -69,12 +69,12 @@ class CsvSplitterTest
     }
 
     /**
-     * A file of only a header, or nothing, has no sections.
+     * A file of only a header, or nothing, has no records.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void headerOnlyFileHasNoSections() throws Exception
+    void headerOnlyFileHasNoRecords() throws Exception
     {
         assertThat(splitAndCheckResume(splitter, "id,note\n",
                 config("csv").withOption("csv.header", "true"))).isEmpty();
@@ -113,6 +113,6 @@ class CsvSplitterTest
         SplitConfig settings = config("csv")
                 .withLimits(new SplitLimits(1 << 20, 8, 100));
         assertThat(splitError(splitter, "1,ok\n2,\"" + "x".repeat(1000),
-                settings).code()).isEqualTo(ErrorCode.LIMIT_SECTION_SIZE);
+                settings).code()).isEqualTo(ErrorCode.LIMIT_RECORD_SIZE);
     }
 }

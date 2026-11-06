@@ -83,7 +83,7 @@ public final class LineCounter
             return;
         }
         // The same counting as add(byte), done in bulk: a file is counted on
-        // the split thread, which limits large sections. Every CR ends a
+        // the split thread, which limits large records. Every CR ends a
         // line, and every LF that doesn't follow a CR.
         int breaks = 0;
         int crlfs = afterCarriageReturn && bytes[index] == '\n' ? 1 : 0;

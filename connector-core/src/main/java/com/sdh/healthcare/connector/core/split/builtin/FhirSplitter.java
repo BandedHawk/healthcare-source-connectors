@@ -10,8 +10,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.sdh.healthcare.connector.core.split.ByteScanner;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import com.sdh.healthcare.connector.core.split.Section;
-import com.sdh.healthcare.connector.core.split.SectionSplitter;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
+import com.sdh.healthcare.connector.core.split.RecordSplitter;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
@@ -25,12 +25,12 @@ import java.util.Optional;
 /**
  * FHIR JSON splitter (design §6.2). Accepts a single resource, a JSON array
  * of resources, or a stream of resources separated by whitespace (NDJSON).
- * Each top-level resource is one section, and its {@code resourceType} must
+ * Each top-level resource is one record, and its {@code resourceType} must
  * match the boundary (default {@code Bundle}; {@code *} accepts any).
  * <p>
- * {@code fhir.ndjson-group-size} = N &gt; 0 groups N resources per section,
+ * {@code fhir.ndjson-group-size} = N &gt; 0 groups N resources per record,
  * for bulk-export NDJSON. The boundary then defaults to {@code *}. Grouped
- * sections from an array are wrapped in {@code [ ]}.
+ * records from an array are wrapped in {@code [ ]}.
  * <p>
  * Uses a byte-level structural scanner rather than a full JSON parser: it
  * checks strings, escapes and bracket nesting, which is enough to find
@@ -40,7 +40,7 @@ import java.util.Optional;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class FhirSplitter implements SectionSplitter
+public final class FhirSplitter implements RecordSplitter
 {
 
     /** The format's name. */
@@ -132,7 +132,7 @@ public final class FhirSplitter implements SectionSplitter
             state = array ? State.ARRAY_NEXT : State.STREAM;
         }
         return new Session(scanner, state, Math.max(1, group), boundary,
-                config.limits().maxSectionBytes());
+                config.limits().maxRecordBytes());
     }
 
     /** Where a session is in the file. */
@@ -174,13 +174,13 @@ public final class FhirSplitter implements SectionSplitter
         /** Reads the file. */
         private final ByteScanner scanner;
 
-        /** How many resources go in one section. */
+        /** How many resources go in one record. */
         private final int group;
 
         /** The resource type required; {@code *} for any. */
         private final String boundary;
 
-        /** The largest section allowed, in bytes. */
+        /** The largest record allowed, in bytes. */
         private final long max;
 
         /** Where the session is in the file. */
@@ -194,9 +194,9 @@ public final class FhirSplitter implements SectionSplitter
          *
          * @param scanner  reads the file
          * @param state    where it starts
-         * @param group    how many resources go in one section
+         * @param group    how many resources go in one record
          * @param boundary the resource type required; {@code *} for any
-         * @param max      the largest section allowed
+         * @param max      the largest record allowed
          */
         Session(ByteScanner scanner, State state, int group, String boundary,
                 long max)
@@ -295,10 +295,10 @@ public final class FhirSplitter implements SectionSplitter
          * {@inheritDoc}
          *
          * @throws SplitException if the JSON is malformed, a resource has
-         *                        the wrong type, or a section is too large
+         *                        the wrong type, or a record is too large
          */
         @Override
-        public Optional<Section> next() throws IOException, SplitException
+        public Optional<SplitRecord> next() throws IOException, SplitException
         {
             if (!toNextValue())
             {
@@ -313,24 +313,24 @@ public final class FhirSplitter implements SectionSplitter
             ResumePoint resume = ResumePoint.at(end);
             if (group > 1 && state != State.STREAM)
             {
-                return Optional.of(new Section(start, end - start, List.of(
-                        new Section.Literal(new byte[] {'['}),
-                        new Section.SourceRange(start, end - start),
-                        new Section.Literal(new byte[] {']'})), resume));
+                return Optional.of(new SplitRecord(start, end - start, List.of(
+                        new SplitRecord.Literal(new byte[] {'['}),
+                        new SplitRecord.SourceRange(start, end - start),
+                        new SplitRecord.Literal(new byte[] {']'})), resume));
             }
-            return Optional.of(Section.ofRange(start, end - start, resume));
+            return Optional.of(SplitRecord.ofRange(start, end - start, resume));
         }
 
         /**
          * Scans one top-level object and checks its resourceType.
          *
-         * @param sectionStart where the section began, for the size limit
+         * @param recordStart where the record began, for the size limit
          * @return the offset just after it
          * @throws IOException    if the file can't be read
          * @throws SplitException if it is malformed, has the wrong type, or
-         *                        makes the section too large
+         *                        makes the record too large
          */
-        private long scanResource(long sectionStart)
+        private long scanResource(long recordStart)
                 throws IOException, SplitException
         {
             long start = scanner.position();
@@ -429,10 +429,10 @@ public final class FhirSplitter implements SectionSplitter
                     default ->
                         valueIsType = false;
                 }
-                if (scanner.position() - sectionStart > max)
+                if (scanner.position() - recordStart > max)
                 {
-                    throw new SplitException(ErrorCode.LIMIT_SECTION_SIZE,
-                            sectionStart);
+                    throw new SplitException(ErrorCode.LIMIT_RECORD_SIZE,
+                            recordStart);
                 }
             }
         }

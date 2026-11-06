@@ -86,14 +86,14 @@ public final class Telemetry
     /** Source bytes read, by stage. */
     private final LongCounter bytesRead;
 
-    /** Sections committed, by format. */
-    private final LongCounter sectionsStored;
+    /** Records committed, by format. */
+    private final LongCounter recordsStored;
 
-    /** {@code section.stored} messages the broker acknowledged. */
-    private final LongCounter sectionsPublished;
+    /** {@code record.stored} messages the broker acknowledged. */
+    private final LongCounter recordsPublished;
 
     /** Files processed to the end. */
-    private final LongCounter filesCompleted;
+    private final LongCounter itemsCompleted;
 
     /** Items landed and announced, by intake and kind. */
     private final LongCounter itemsLanded;
@@ -120,13 +120,13 @@ public final class Telemetry
     private final DoubleHistogram pushWait;
 
     /** Files that failed, by error code and stage. */
-    private final LongCounter filesFailed;
+    private final LongCounter itemsFailed;
 
     /**
-     * Sections stored in their original form after failing conversion, by
+     * Records stored in their original form after failing conversion, by
      * error code and format.
      */
-    private final LongCounter sectionsFailed;
+    private final LongCounter recordsFailed;
 
     /** How long commits take, in seconds, by table. */
     private final DoubleHistogram commitDuration;
@@ -135,7 +135,7 @@ public final class Telemetry
     private final DoubleHistogram publishDuration;
 
     /** How many files are being processed now. */
-    private final AtomicLong filesInProgress = new AtomicLong();
+    private final AtomicLong itemsInProgress = new AtomicLong();
 
     /**
      * How far the file being split has got, in parts per million of its
@@ -157,13 +157,13 @@ public final class Telemetry
         bytesRead = meter.counterBuilder("sdh.bytes.read").setUnit("By")
                 .setDescription("Source bytes read, by stage (split, archive)")
                 .build();
-        sectionsStored = meter.counterBuilder("sdh.sections.stored")
-                .setDescription("Sections committed").build();
-        sectionsPublished = meter.counterBuilder("sdh.sections.published")
+        recordsStored = meter.counterBuilder("sdh.records.stored")
+                .setDescription("Records committed").build();
+        recordsPublished = meter.counterBuilder("sdh.records.published")
                 .setDescription(
-                        "section.stored messages acknowledged by the broker")
+                        "record.stored messages acknowledged by the broker")
                 .build();
-        filesCompleted = meter.counterBuilder("sdh.files.completed").build();
+        itemsCompleted = meter.counterBuilder("sdh.items.completed").build();
         itemsLanded = meter.counterBuilder("sdh.landing.items")
                 .setUnit("{item}")
                 .setDescription("Items landed and announced, by intake and"
@@ -193,20 +193,20 @@ public final class Telemetry
                 .setDescription("How long a push waits for the intake, by"
                         + " intake")
                 .setExplicitBucketBoundariesAdvice(SECONDS_BUCKETS).build();
-        filesFailed = meter.counterBuilder("sdh.files.failed")
+        itemsFailed = meter.counterBuilder("sdh.items.failed")
                 .setDescription("By error code and stage").build();
-        sectionsFailed = meter.counterBuilder("sdh.sections.failed")
-                .setDescription("Sections stored in their original form after"
+        recordsFailed = meter.counterBuilder("sdh.records.failed")
+                .setDescription("Records stored in their original form after"
                         + " failing conversion, by error code")
                 .build();
         commitDuration = meter.histogramBuilder("sdh.commit.duration")
                 .setUnit("s").build();
         publishDuration = meter.histogramBuilder("sdh.publish.duration")
                 .setUnit("s").build();
-        meter.gaugeBuilder("sdh.files.in_progress").ofLongs()
+        meter.gaugeBuilder("sdh.items.in_progress").ofLongs()
                 .buildWithCallback(measurement ->
-                        measurement.record(filesInProgress.get()));
-        meter.gaugeBuilder("sdh.file.progress_ratio")
+                        measurement.record(itemsInProgress.get()));
+        meter.gaugeBuilder("sdh.item.progress_ratio")
                 .setDescription("Bytes split / file size of the current file")
                 .buildWithCallback(measurement -> measurement.record(
                         progressPerMillion.get() / (double) WHOLE_FILE));
@@ -308,7 +308,7 @@ public final class Telemetry
      * Records an audit event as a warning: something went wrong, but
      * processing carries on.
      *
-     * @param event  the event's name, such as {@code section.failed}
+     * @param event  the event's name, such as {@code record.failed}
      * @param fields its attributes
      */
     public void auditWarn(String event, Fields fields)
@@ -366,37 +366,37 @@ public final class Telemetry
     }
 
     /**
-     * Counts committed sections.
+     * Counts committed records.
      *
-     * @param sections how many were committed
-     * @param format   the format of their file
+     * @param records how many were committed
+     * @param format  the format of their file
      */
-    public void sectionsStored(long sections, String format)
+    public void recordsStored(long records, String format)
     {
-        sectionsStored.add(sections,
+        recordsStored.add(records,
                 Fields.of(Attr.FORMAT, format).toAttributes());
     }
 
     /**
-     * Counts {@code section.stored} messages the broker acknowledged.
+     * Counts {@code record.stored} messages the broker acknowledged.
      *
      * @param messages how many were acknowledged
      */
-    public void sectionsPublished(long messages)
+    public void recordsPublished(long messages)
     {
-        sectionsPublished.add(messages);
+        recordsPublished.add(messages);
     }
 
     /**
-     * Counts a section stored in its original form after failing
+     * Counts a record stored in its original form after failing
      * conversion.
      *
      * @param code   why conversion failed
      * @param format the format of its file
      */
-    public void sectionFailed(ErrorCode code, String format)
+    public void recordFailed(ErrorCode code, String format)
     {
-        sectionsFailed.add(1, Fields.of(Attr.ERROR_CODE, code)
+        recordsFailed.add(1, Fields.of(Attr.ERROR_CODE, code)
                 .with(Attr.FORMAT, format).toAttributes());
     }
 
@@ -473,9 +473,9 @@ public final class Telemetry
     }
 
     /** Counts a file processed to the end. */
-    public void fileCompleted()
+    public void itemCompleted()
     {
-        filesCompleted.add(1);
+        itemsCompleted.add(1);
     }
 
     /**
@@ -484,9 +484,9 @@ public final class Telemetry
      * @param code  why it failed
      * @param stage the stage it failed in, such as {@code split}
      */
-    public void fileFailed(ErrorCode code, String stage)
+    public void itemFailed(ErrorCode code, String stage)
     {
-        filesFailed.add(1, Fields.of(Attr.ERROR_CODE, code)
+        itemsFailed.add(1, Fields.of(Attr.ERROR_CODE, code)
                 .with(Attr.STAGE, stage).toAttributes());
     }
 
@@ -513,18 +513,18 @@ public final class Telemetry
     }
 
     /** Counts a file as being processed, until it is finished. */
-    public void fileStartedProcessing()
+    public void itemStartedProcessing()
     {
-        filesInProgress.incrementAndGet();
+        itemsInProgress.incrementAndGet();
     }
 
     /**
      * Counts a file as no longer being processed, and resets the progress
      * gauge to 0.
      */
-    public void fileFinishedProcessing()
+    public void itemFinishedProcessing()
     {
-        filesInProgress.decrementAndGet();
+        itemsInProgress.decrementAndGet();
         progressPerMillion.set(0);
     }
 

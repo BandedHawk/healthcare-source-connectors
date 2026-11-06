@@ -14,12 +14,12 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.core.pipeline.PipelineSettings;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
@@ -46,7 +46,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests the whole path end to end (design §15): the connector writes, sends
- * a message, and {@code connector-queue-reader} reads the section back.
+ * a message, and {@code connector-queue-reader} reads the record back.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -60,9 +60,9 @@ class PipelineToReaderTest
     }
 
     /**
-     * A file of 25 C-CDA documents is split into a section each. A reader
+     * A file of 25 C-CDA documents is split into a record each. A reader
      * downstream reads each document back from its message, as JSON with the
-     * element positions, and the section's origin leads to its place in the
+     * element positions, and the record's origin leads to its place in the
      * file.
      *
      * @throws Exception if a key can't be made or the file processed
@@ -81,7 +81,7 @@ class PipelineToReaderTest
             file.append("  ").append(document).append('\n');
             // Each document arrives as JSON in the C-CDA mapping (design
             // §6.4); ClinicalDocument has one id and title. Positions are in
-            // the section: line 1 is the XML declaration the splitter adds,
+            // the record: line 1 is the XML declaration the splitter adds,
             // and the root tag gains the batch's namespace, which moves the
             // id to column 42.
             expected.add(("{\"ClinicalDocument\":{\"#line\":2,\"#col\":1,"
@@ -93,11 +93,11 @@ class PipelineToReaderTest
         InMemoryCatalog catalog = new InMemoryCatalog();
         catalog.initialize("prod", Map.of(CatalogProperties.WAREHOUSE_LOCATION,
                 "memory://wh-" + UUID.randomUUID()));
-        Table table = IngestTables.sections(catalog, "sdh_ingest");
+        Table table = IngestTables.records(catalog, "sdh_ingest");
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(256);
         AesKeyWrapProvider kms = new AesKeyWrapProvider(
-                Map.of("sections-kek/1", generator.generateKey()));
+                Map.of("records-kek/1", generator.generateKey()));
         KeyPair signer = QueueReaderTest.ec();
         KeyPair recipient = QueueReaderTest.ec();
         FencedCommitter committer = new FencedCommitter(new LeaseToken()
@@ -115,13 +115,13 @@ class PipelineToReaderTest
             }
         });
         committer.establish(table);
-        SectionIds ids = new SectionIds(
-                IdKeys.loadOrCreate(table, committer, kms, "sections-kek/1"));
+        RecordIds ids = new RecordIds(
+                IdKeys.loadOrCreate(table, committer, kms, "records-kek/1"));
         List<OutboundMessage> sent =
                 Collections.synchronizedList(new ArrayList<>());
 
         PipelineSettings settings = PipelineSettings
-                .defaults("file-connector", "ccda", "prod", "sections-kek/1")
+                .defaults("file-connector", "ccda", "prod", "records-kek/1")
                 .withCommit(10, 1L << 30, Duration.ofHours(1))
                 .withSplit(SplitConfig.defaults("ccda"));
         MessageSealer sealer = new MessageSealer(
@@ -153,15 +153,15 @@ class PipelineToReaderTest
             assertThat(first).isInstanceOf(FileStarted.class);
             for (OutboundMessage message : sent.subList(1, sent.size()))
             {
-                SectionStored stored =
-                        (SectionStored) reader.decode(message.body());
+                RecordStored stored =
+                        (RecordStored) reader.decode(message.body());
                 assertThat(stored.contentType()).isEqualTo("application/json");
                 assertThat(stored.mapping()).isEqualTo("ccda/2");
                 // The id's place in the file: document i is on line 3 + i,
                 // its id after "  <ClinicalDocument>".
                 assertThat(stored.origin().toFile(new SourcePosition(2, 42)))
                         .isEqualTo(new SourcePosition(3 + stored.seq(), 21));
-                read.add(new String(reader.readSection(stored, 1 << 20),
+                read.add(new String(reader.readRecord(stored, 1 << 20),
                         UTF_8));
             }
             assertThat(read).containsExactlyElementsOf(expected);

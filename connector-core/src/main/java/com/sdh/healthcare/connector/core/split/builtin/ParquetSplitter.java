@@ -6,13 +6,13 @@
  */
 package com.sdh.healthcare.connector.core.split.builtin;
 
-import com.sdh.healthcare.connector.contract.position.SectionOrigin;
+import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.convert.ConversionException;
 import com.sdh.healthcare.connector.core.convert.ParquetRowJson;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
-import com.sdh.healthcare.connector.core.split.Section;
-import com.sdh.healthcare.connector.core.split.SectionSplitter;
+import com.sdh.healthcare.connector.core.split.SplitRecord;
+import com.sdh.healthcare.connector.core.split.RecordSplitter;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitException;
@@ -38,7 +38,7 @@ import org.apache.parquet.io.DelegatingSeekableInputStream;
 import org.apache.parquet.schema.MessageType;
 
 /**
- * One section per row of a Parquet file (design §6.2), as a JSON object
+ * One record per row of a Parquet file (design §6.2), as a JSON object
  * ({@link ParquetRowJson}, mapping {@value ParquetRowJson#MAPPING}). This
  * is how the data files of an Iceberg table intake are split (§5.3.18).
  * <p>
@@ -47,10 +47,10 @@ import org.apache.parquet.schema.MessageType;
  * position, so any Parquet file can be read. Columns keep the file's own
  * names.
  * <p>
- * A row isn't a stretch of the file's bytes, so each section is the row's
+ * A row isn't a stretch of the file's bytes, so each record is the row's
  * JSON alone. Its source offset is the start of its row group, and its
  * origin is its row number, counted from 1 across the file, as the line,
- * with column 1. A section's resume point is the start of its row group
+ * with column 1. A record's resume point is the start of its row group
  * and how many of the group's rows are done; after a group's last row, the
  * start of the next group (or the file's size after the last). A resume
  * reads from that row group and skips the rows done.
@@ -64,7 +64,7 @@ import org.apache.parquet.schema.MessageType;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class ParquetSplitter implements SectionSplitter
+public final class ParquetSplitter implements RecordSplitter
 {
 
     /**
@@ -211,7 +211,7 @@ public final class ParquetSplitter implements SectionSplitter
         }
 
         @Override
-        public Optional<Section> next() throws IOException, SplitException
+        public Optional<SplitRecord> next() throws IOException, SplitException
         {
             if (group >= groups.size())
             {
@@ -256,9 +256,9 @@ public final class ParquetSplitter implements SectionSplitter
                 resume = ResumePoint.at(group < groups.size()
                         ? groups.get(group).getStartingPos() : size);
             }
-            return Optional.of(new Section(start, 0,
-                    List.of(new Section.Literal(json)), resume,
-                    new SectionOrigin(SourcePosition.START,
+            return Optional.of(new SplitRecord(start, 0,
+                    List.of(new SplitRecord.Literal(json)), resume,
+                    new RecordOrigin(SourcePosition.START,
                             new SourcePosition(row, 1))));
         }
 

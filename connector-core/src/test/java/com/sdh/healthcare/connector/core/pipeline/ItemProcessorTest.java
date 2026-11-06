@@ -17,20 +17,20 @@ import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionFailed;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.landing.NewItem;
-import com.sdh.healthcare.connector.core.landing.RecordIndex;
+import com.sdh.healthcare.connector.core.landing.MessageIndex;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipelineTest.RecordingPublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
@@ -66,14 +66,14 @@ import org.junit.jupiter.api.Test;
 class ItemProcessorTest
 {
 
-    /** The sections KEK. */
-    static final String SECTIONS_KEK = "sections-kek/1";
+    /** The records KEK. */
+    static final String RECORDS_KEK = "records-kek/1";
 
     /** The landing KEK. */
     static final String LANDED_KEK = "landed-items-kek/1";
 
-    /** The sections table. */
-    Table sections;
+    /** The records table. */
+    Table records;
 
     /** The landed items table. */
     Table landed;
@@ -113,11 +113,11 @@ class ItemProcessorTest
         InMemoryCatalog catalog = new InMemoryCatalog();
         catalog.initialize("prod", Map.of(CatalogProperties.WAREHOUSE_LOCATION,
                 "memory://wh-" + UUID.randomUUID()));
-        sections = IngestTables.sections(catalog, "sdh_ingest");
+        records = IngestTables.records(catalog, "sdh_ingest");
         landed = LandingTables.landedItems(catalog, "sdh_landing");
         KeyGenerator generator = KeyGenerator.getInstance("AES");
         generator.init(256);
-        keys = new AesKeyWrapProvider(Map.of(SECTIONS_KEK,
+        keys = new AesKeyWrapProvider(Map.of(RECORDS_KEK,
                 generator.generateKey(), LANDED_KEK, generator.generateKey()));
         signer = IngestPipelineTest.ec();
         recipient = IngestPipelineTest.ec();
@@ -126,7 +126,7 @@ class ItemProcessorTest
         FencedCommitter landing = committer();
         landing.establish(landed);
         lander = new ItemLander(landed, landing, keys,
-                new SectionIds(new byte[32]),
+                new RecordIds(new byte[32]),
                 ItemLander.Settings.defaults("claims", LANDED_KEK)
                         .withSizes(64, 256, 256), Clock.systemUTC());
     }
@@ -170,15 +170,15 @@ class ItemProcessorTest
     ItemProcessor processor() throws Exception
     {
         FencedCommitter committer = committer();
-        committer.establish(sections);
-        SectionIds ids = new SectionIds(IdKeys.loadOrCreate(sections,
-                committer, keys, SECTIONS_KEK));
+        committer.establish(records);
+        RecordIds ids = new RecordIds(IdKeys.loadOrCreate(records,
+                committer, keys, RECORDS_KEK));
         PipelineSettings settings = PipelineSettings.defaults("splitter",
-                "csv", "prod", SECTIONS_KEK)
+                "csv", "prod", RECORDS_KEK)
                 .withCommit(3, 1L << 30, Duration.ofHours(1)).withWorkers(2)
                 .withRetry(new RetryPolicy(2, Duration.ofMillis(1),
                         Duration.ofMillis(2)));
-        IngestPipeline pipeline = new IngestPipeline(settings, sections,
+        IngestPipeline pipeline = new IngestPipeline(settings, records,
                 committer, keys, ids, SplitterRegistry.load(),
                 new MessageSealer(new ECDSASigner((ECPrivateKey) signer
                         .getPrivate()), "connector", recipient.getPublic(),
@@ -268,21 +268,21 @@ class ItemProcessorTest
         ItemProcessor processor = processor();
         ItemProcessor.Outcome outcome = process(processor, item);
         assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.COMPLETED);
-        assertThat(outcome.fileId()).isEqualTo(item.itemId());
-        assertThat(outcome.sectionCount()).isEqualTo(10);
+        assertThat(outcome.itemId()).isEqualTo(item.itemId());
+        assertThat(outcome.recordCount()).isEqualTo(10);
 
         List<ConnectorMessage> messages = messages();
         assertThat(messages.getFirst()).isInstanceOfSatisfying(
-                FileStarted.class, started -> assertThat(started.fileId())
+                FileStarted.class, started -> assertThat(started.itemId())
                         .isEqualTo(item.itemId()));
-        assertThat(messages.stream().filter(SectionStored.class::isInstance))
+        assertThat(messages.stream().filter(RecordStored.class::isInstance))
                 .hasSize(10);
         assertThat(messages.getLast()).isInstanceOfSatisfying(
                 FileCompleted.class, completed ->
                 {
-                    assertThat(completed.fileDigest())
+                    assertThat(completed.itemDigest())
                             .isEqualTo(item.digest());
-                    assertThat(completed.fileSize()).isEqualTo(item.size());
+                    assertThat(completed.itemSize()).isEqualTo(item.size());
                 });
 
         int sent = publisher.sent.size();
@@ -295,7 +295,7 @@ class ItemProcessorTest
 
     /**
      * A message batch is split message by message: a message that can't be
-     * split is announced as a failed section with the splitter's error, and
+     * split is announced as a failed record with the splitter's error, and
      * the item still completes, with the messages either side of it.
      *
      * @throws Exception if the test fails
@@ -315,19 +315,19 @@ class ItemProcessorTest
         LandedItem item = lander.land(new NewItem(
                 UuidV7.next(System.currentTimeMillis()),
                 ItemKind.MESSAGE_BATCH, null, null, null,
-                new RecordIndex(offsets, Arrays.asList(null, null, null))),
+                new MessageIndex(offsets, Arrays.asList(null, null, null))),
                 offset -> new ByteArrayInputStream(bytes, (int) offset,
                         bytes.length));
 
         ItemProcessor.Outcome outcome = process(processor(), item);
         assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.COMPLETED);
-        assertThat(outcome.sectionCount()).isEqualTo(3);
+        assertThat(outcome.recordCount()).isEqualTo(3);
         List<ConnectorMessage> published = messages();
-        assertThat(published.stream().filter(SectionStored.class::isInstance)
-                .map(m -> ((SectionStored) m).sourceOffset()))
+        assertThat(published.stream().filter(RecordStored.class::isInstance)
+                .map(m -> ((RecordStored) m).sourceOffset()))
                 .containsExactly(offsets.get(0), offsets.get(2));
-        assertThat(published.stream().filter(SectionFailed.class::isInstance))
-                .singleElement().isInstanceOfSatisfying(SectionFailed.class,
+        assertThat(published.stream().filter(RecordFailed.class::isInstance))
+                .singleElement().isInstanceOfSatisfying(RecordFailed.class,
                         failed ->
                         {
                             assertThat(failed.errorCode()).isEqualTo(
@@ -339,7 +339,7 @@ class ItemProcessorTest
                         });
         assertThat(published.getLast()).isInstanceOfSatisfying(
                 FileCompleted.class, completed -> assertThat(
-                        completed.failedSectionCount()).isEqualTo(1));
+                        completed.failedRecordCount()).isEqualTo(1));
     }
 
     /**
@@ -397,8 +397,8 @@ class ItemProcessorTest
         publisher.fail = call -> false;
         ItemProcessor.Outcome outcome = process(processor(), item);
         assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.COMPLETED);
-        assertThat(messages().stream().filter(SectionStored.class::isInstance)
-                .map(message -> ((SectionStored) message).seq()).distinct())
+        assertThat(messages().stream().filter(RecordStored.class::isInstance)
+                .map(message -> ((RecordStored) message).seq()).distinct())
                 .hasSize(10);
     }
 

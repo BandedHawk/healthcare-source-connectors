@@ -1,9 +1,9 @@
 # Reserved for the FHIR stage, not yet built (the healthcare-data-transformer project): it will read each
-# pipeline's sections from Kafka (<pipeline>.sections) and the silver bucket, map C-CDA JSON to FHIR (US Core
+# pipeline's records from Kafka (<pipeline>.records) and the silver bucket, map C-CDA JSON to FHIR (US Core
 # 6.1, fail-fast), write the resources as Iceberg tables (<pipeline>_fhir) in the gold bucket, and send what fails
 # to <pipeline>.fhir.dlq for the report mode. Everything it needs is made ready by scripts/sandbox.sh: its topics,
-# its bucket and access key (reads silver, writes gold), its Vault token (unwraps the sections KEK), the
-# private key the splitter seals sections to, and the ConfigMap fhir-<pipeline> naming them all.
+# its bucket and access key (reads silver, writes gold), its Vault token (unwraps the records KEK), the
+# private key the splitter seals records to, and the ConfigMap fhir-<pipeline> naming them all.
 apiVersion: v1
 kind: Namespace
 metadata:

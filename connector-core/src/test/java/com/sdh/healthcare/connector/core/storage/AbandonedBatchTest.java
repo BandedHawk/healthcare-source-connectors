@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
@@ -101,7 +101,7 @@ class AbandonedBatchTest
         });
         committer.establish(table);
         ItemLander lander = new ItemLander(table, committer, keys,
-                new SectionIds(new byte[32]),
+                new RecordIds(new byte[32]),
                 ItemLander.Settings.defaults("intake", "k")
                         .withSizes(1024, 4096, 4096)
                         .withRetry(new RetryPolicy(1, Duration.ofMillis(1),
@@ -114,15 +114,15 @@ class AbandonedBatchTest
                 .hasRootCauseMessage(FAILURE);
     }
 
-    /** Closing a section batch after its finish failed doesn't throw. */
+    /** Closing a record batch after its finish failed doesn't throw. */
     @Test
-    void sectionBatchCloseAfterFailedFinishDoesNotThrow()
+    void recordBatchCloseAfterFailedFinishDoesNotThrow()
     {
-        Table table = failingClose(IngestTables.sections(catalog,
+        Table table = failingClose(IngestTables.records(catalog,
                 "sdh_ingest"));
-        SectionBatchWriter writer = new SectionBatchWriter(table, keys, "k",
-                new SectionIds(new byte[32]), Instant.now());
-        writer.add(new SectionBatchWriter.SectionInput(UUID.randomUUID(), 0,
+        RecordBatchWriter writer = new RecordBatchWriter(table, keys, "k",
+                new RecordIds(new byte[32]), Instant.now());
+        writer.add(new RecordBatchWriter.RecordInput(UUID.randomUUID(), 0,
                 0, "csv", "a,b".getBytes()));
 
         assertThatThrownBy(writer::finish).hasRootCauseMessage(FAILURE);

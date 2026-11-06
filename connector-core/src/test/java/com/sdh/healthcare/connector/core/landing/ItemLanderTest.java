@@ -14,7 +14,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -73,7 +73,7 @@ class ItemLanderTest
     AesKeyWrapProvider keys;
 
     /** Makes the digests and MACs, with an all-zero ID key. */
-    final SectionIds ids = new SectionIds(new byte[32]);
+    final RecordIds ids = new RecordIds(new byte[32]);
 
     /** The last lease epoch handed out. */
     long epoch;
@@ -272,38 +272,38 @@ class ItemLanderTest
 
     /** No name or path appears in the table's clear columns. */
     /**
-     * A message batch keeps its record index on the summary row; the keys
+     * A message batch keeps its message index on the summary row; the keys
      * landed from a time on can be read back for the intake, and an index
      * that doesn't fit the item is refused.
      *
      * @throws Exception if the test fails
      */
     @Test
-    void keepsAMessageBatchsRecordIndex() throws Exception
+    void keepsAMessageBatchsMessageIndex() throws Exception
     {
         byte[] bytes = data(30);
-        RecordIndex records = new RecordIndex(List.of(0L, 10L, 25L),
+        MessageIndex messageIndex = new MessageIndex(List.of(0L, 10L, 25L),
                 Arrays.asList("k-0", null, "k-2"));
         NewItem item = new NewItem(UUID.randomUUID(), ItemKind.MESSAGE_BATCH,
-                null, null, null, records);
+                null, null, null, messageIndex);
         Instant before = Instant.now().minusSeconds(1);
         lander().land(item, opener(bytes));
 
         Record summary =
                 LandedItems.summary(table, item.itemId()).orElseThrow();
-        assertThat(LandedItems.records(summary)).contains(records);
-        assertThat(LandedItems.recordKeys(table, INTAKE, before))
+        assertThat(LandedItems.messageIndex(summary)).contains(messageIndex);
+        assertThat(LandedItems.messageKeys(table, INTAKE, before))
                 .containsExactlyInAnyOrder("k-0", "k-2");
-        assertThat(LandedItems.recordKeys(table, INTAKE,
+        assertThat(LandedItems.messageKeys(table, INTAKE,
                 Instant.now().plusSeconds(86_400))).isEmpty();
-        assertThat(LandedItems.recordKeys(table, "other", before)).isEmpty();
-        assertThat(LandedItems.records(LandedItems.summary(table,
+        assertThat(LandedItems.messageKeys(table, "other", before)).isEmpty();
+        assertThat(LandedItems.messageIndex(LandedItems.summary(table,
                 lander().land(fileItem(bytes, "f"), opener(bytes)).itemId())
                 .orElseThrow())).isEmpty();
 
         NewItem tooShort = new NewItem(UUID.randomUUID(),
                 ItemKind.MESSAGE_BATCH, null, null, null,
-                new RecordIndex(List.of(0L, 40L), Arrays.asList(null, null)));
+                new MessageIndex(List.of(0L, 40L), Arrays.asList(null, null)));
         assertThatThrownBy(() -> lander().land(tooShort, opener(bytes)))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
@@ -329,30 +329,30 @@ class ItemLanderTest
                 UUID.randomUUID() + "/smith-0");
         NewItem batch = new NewItem(UUID.randomUUID(),
                 ItemKind.MESSAGE_BATCH, null, null, null,
-                new RecordIndex(List.of(0L, 10L, 25L),
+                new MessageIndex(List.of(0L, 10L, 25L),
                         Arrays.asList("k-0", null, "k-2")), refs, links);
         lander().land(batch, opener(bytes));
         Record summary =
                 LandedItems.summary(table, batch.itemId()).orElseThrow();
         assertThat(LandedItems.messageRefs(summary, keys)).contains(refs);
         assertThat(new String(LandedItems.bytes(
-                summary.getField(LandingTables.RECORD_REFS_ENC)),
+                summary.getField(LandingTables.MESSAGE_REFS_ENC)),
                 StandardCharsets.ISO_8859_1))
                 .doesNotContain("smith");
         assertThat(LandedItems.messageReplaces(summary, keys))
                 .contains(links);
         assertThat(new String(LandedItems.bytes(
-                summary.getField(LandingTables.RECORD_REPLACES_ENC)),
+                summary.getField(LandingTables.MESSAGE_REPLACES_ENC)),
                 StandardCharsets.ISO_8859_1))
                 .doesNotContain("smith");
         assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
                 ItemKind.MESSAGE_BATCH, null, null, null,
-                new RecordIndex(List.of(0L), Arrays.asList("k")),
+                new MessageIndex(List.of(0L), Arrays.asList("k")),
                 List.of("a", "b"))).isInstanceOf(
                         IllegalArgumentException.class);
         assertThatThrownBy(() -> new NewItem(UUID.randomUUID(),
                 ItemKind.MESSAGE_BATCH, null, null, null,
-                new RecordIndex(List.of(0L), Arrays.asList("k")),
+                new MessageIndex(List.of(0L), Arrays.asList("k")),
                 List.of("a"), List.of("x", "y"))).isInstanceOf(
                         IllegalArgumentException.class);
 

@@ -6,6 +6,8 @@
  */
 package com.sdh.healthcare.connector.landing.intake;
 
+import com.sdh.healthcare.connector.broker.receive.BatchHandler;
+import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -14,12 +16,13 @@ import com.sdh.healthcare.connector.core.landing.LandingCheckpoint;
 import com.sdh.healthcare.connector.core.landing.LandingLedger;
 import com.sdh.healthcare.connector.core.landing.LedgerIndex;
 import com.sdh.healthcare.connector.core.landing.NewItem;
-import com.sdh.healthcare.connector.core.landing.RecordIndex;
+import com.sdh.healthcare.connector.core.landing.MessageIndex;
 import com.sdh.healthcare.connector.core.landing.SourceRef;
 import com.sdh.healthcare.connector.core.pipeline.UuidV7;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import com.sdh.healthcare.connector.landing.config.BrokerSettings;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -47,7 +50,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Lands batches of queue messages (design §5.3.16), one batch at a time.
  * Each batch becomes one item: its messages' bodies one after another, with
- * a record index saying where each starts and holding the keyed hash of
+ * a message index saying where each starts and holding the keyed hash of
  * each message's broker ID. The caller acknowledges the messages only once
  * this says the batch is landed; anything else and the broker delivers them
  * again.
@@ -67,7 +70,7 @@ import org.slf4j.LoggerFactory;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class BatchService implements LandingIntake
+public final class BatchService implements LandingIntake, BatchHandler
 {
 
     /** Logs progress and errors, never content or message IDs. */
@@ -79,7 +82,8 @@ public final class BatchService implements LandingIntake
      * earlier message a message replaces, as {@code <itemId>/<messageId>}
      * (design §5.3.8). It has no hyphen, since a JMS property name can't.
      */
-    public static final String REPLACES_HEADER = "sdh_replaces";
+    public static final String REPLACES_HEADER =
+            BrokerSettings.REPLACES_ATTRIBUTE;
 
     /** The longest broker message ID a link may name. */
     private static final int MAX_LINKED_ID = 255;
@@ -249,6 +253,34 @@ public final class BatchService implements LandingIntake
     }
 
     /**
+     * Lands a batch received through {@code connector-broker}: one that is
+     * landed or skipped is done; one that can't be landed now is tried
+     * again; a fatal error stops receiving.
+     *
+     * @param messages the messages, in the order the broker gave them
+     * @return what became of them
+     * @throws InterruptedException if waiting for maintenance to finish is
+     *                              interrupted
+     */
+    @Override
+    public Outcome handle(List<BrokerMessage> messages)
+            throws InterruptedException
+    {
+        List<Message> batch = new ArrayList<>(messages.size());
+        for (BrokerMessage message : messages)
+        {
+            batch.add(new Message(message.body(), message.messageId(),
+                    message.attribute(REPLACES_HEADER)));
+        }
+        return switch (land(batch).status())
+        {
+            case LANDED, SKIPPED -> Outcome.DONE;
+            case FAILED -> Outcome.RETRY;
+            case FATAL -> Outcome.FATAL;
+        };
+    }
+
+    /**
      * Lands a batch of messages as one item.
      *
      * @param messages the messages, in the order the broker gave them
@@ -334,7 +366,7 @@ public final class BatchService implements LandingIntake
                     "batch\u0000" + itemId, -1, "");
             landed = storage.lander().land(new NewItem(itemId,
                     ItemKind.MESSAGE_BATCH, ref, null, null,
-                    new RecordIndex(offsets, keys), refs,
+                    new MessageIndex(offsets, keys), refs,
                     linked ? links : null), offset ->
                     {
                         if (offset != 0)
@@ -509,7 +541,7 @@ public final class BatchService implements LandingIntake
     private void loadRecent(Instant lastLanded) throws IOException
     {
         Instant since = lastLanded.minus(recent.window());
-        recent.add(lastLanded, LandedItems.recordKeys(landedItems, intake,
+        recent.add(lastLanded, LandedItems.messageKeys(landedItems, intake,
                 since));
     }
 

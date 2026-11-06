@@ -12,7 +12,7 @@ import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
-import com.sdh.healthcare.connector.core.storage.CommittedSections;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
 import com.sdh.healthcare.connector.core.split.SplitException;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -30,7 +30,7 @@ import java.util.UUID;
  * Takes one landed item through the splitter (design §4.1, §5.3.6):
  * SPLITTING → COMPLETED, or FAILING → FAILED. The item ID is the file ID.
  * <p>
- * <b>Completing:</b> once every section is stored and published, the
+ * <b>Completing:</b> once every record is stored and published, the
  * checkpoint is {@code ARCHIVING} (the name is kept from when originals
  * were archived; it now means "split, finishing"); {@code file.completed}
  * is published, with the item's digest, and {@code COMPLETED} committed.
@@ -40,7 +40,7 @@ import java.util.UUID;
  * split, is over a limit, has stopped the splitter too often, or its
  * landed chunks are missing or altered. The decision is committed first
  * ({@code FAILING}, with stage, code and offset), so a restart finishes
- * failing rather than trying again. Sections already stored stay, and are
+ * failing rather than trying again. Records already stored stay, and are
  * announced. The item stays in landing.
  * <p>
  * Anything else (storage or the broker down, lease loss) is thrown, and
@@ -56,7 +56,7 @@ public final class ItemProcessor
     /** How an item ended. */
     public enum Result
     {
-        /** Every section was stored and published. */
+        /** Every record was stored and published. */
         COMPLETED,
 
         /** The item couldn't be split; see the failure. */
@@ -69,12 +69,12 @@ public final class ItemProcessor
     /**
      * What happened to an item.
      *
-     * @param fileId       the item's ID
-     * @param result       how it ended
-     * @param sectionCount the sections stored from it
-     * @param failure      why it failed; null otherwise
+     * @param itemId      the item's ID
+     * @param result      how it ended
+     * @param recordCount the records stored from it
+     * @param failure     why it failed; null otherwise
      */
-    public record Outcome(UUID fileId, Result result, long sectionCount,
+    public record Outcome(UUID itemId, Result result, long recordCount,
             Failure failure)
     {
     }
@@ -128,27 +128,27 @@ public final class ItemProcessor
     }
 
     /**
-     * Counts an item's stored sections that failed conversion and are kept
+     * Counts an item's stored records that failed conversion and are kept
      * in their original form.
      *
      * @param itemId the item
      * @return how many there are
      */
-    public long failedSectionCount(UUID itemId)
+    public long failedRecordCount(UUID itemId)
     {
-        return pipeline.failedSectionCount(itemId);
+        return pipeline.failedRecordCount(itemId);
     }
 
     /**
-     * Reads an item's stored sections that failed conversion, with where
+     * Reads an item's stored records that failed conversion, with where
      * each failed.
      *
      * @param itemId the item
      * @return them, in sequence order
      */
-    public List<CommittedSections.Failed> failedSections(UUID itemId)
+    public List<CommittedRecords.Failed> failedRecords(UUID itemId)
     {
-        return pipeline.failedSections(itemId);
+        return pipeline.failedRecords(itemId);
     }
 
     /**
@@ -168,9 +168,9 @@ public final class ItemProcessor
     {
         Telemetry telemetry = Telemetry.get();
         Span span = telemetry.span("ingest.item",
-                Fields.of(Attr.FILE_ID, itemId)
+                Fields.of(Attr.ITEM_ID, itemId)
                         .with(Attr.FORMAT, pipeline.settings().format()));
-        telemetry.fileStartedProcessing();
+        telemetry.itemStartedProcessing();
         try (Scope ignored = span.makeCurrent())
         {
             Outcome outcome = run(itemId, digest, opener);
@@ -191,13 +191,13 @@ public final class ItemProcessor
         finally
         {
             span.end();
-            telemetry.fileFinishedProcessing();
+            telemetry.itemFinishedProcessing();
         }
     }
 
     /**
      * Gives up an item in progress that won't be processed, such as a file
-     * from before landing (design §5.3.6). Sections already stored stay.
+     * from before landing (design §5.3.6). Records already stored stay.
      *
      * @param checkpoint the item's checkpoint
      * @return the outcome
@@ -207,12 +207,12 @@ public final class ItemProcessor
     {
         pipeline.commitCheckpoint(
                 checkpoint.withState(Checkpoint.State.ABANDONED));
-        Telemetry.get().auditWarn("file.abandoned",
-                Fields.of(Attr.FILE_ID, checkpoint.fileId())
+        Telemetry.get().auditWarn("item.abandoned",
+                Fields.of(Attr.ITEM_ID, checkpoint.itemId())
                         .with(Attr.STATE, checkpoint.state())
                         .with(Attr.SEQ, checkpoint.committedSeq()));
-        return new Outcome(checkpoint.fileId(), Result.ABANDONED,
-                checkpoint.sectionCount(), null);
+        return new Outcome(checkpoint.itemId(), Result.ABANDONED,
+                checkpoint.recordCount(), null);
     }
 
     /**
@@ -228,7 +228,7 @@ public final class ItemProcessor
             throws Exception
     {
         Optional<Checkpoint> stored = pipeline.checkpoint()
-                .filter(current -> current.fileId().equals(itemId));
+                .filter(current -> current.itemId().equals(itemId));
         if (stored.isPresent())
         {
             Checkpoint checkpoint = stored.get();
@@ -237,17 +237,17 @@ public final class ItemProcessor
                 case COMPLETED ->
                 {
                     return new Outcome(itemId, Result.COMPLETED,
-                            checkpoint.sectionCount(), null);
+                            checkpoint.recordCount(), null);
                 }
                 case FAILED ->
                 {
                     return new Outcome(itemId, Result.FAILED,
-                            checkpoint.sectionCount(), checkpoint.failure());
+                            checkpoint.recordCount(), checkpoint.failure());
                 }
                 case ABANDONED ->
                 {
                     return new Outcome(itemId, Result.ABANDONED,
-                            checkpoint.sectionCount(), null);
+                            checkpoint.recordCount(), null);
                 }
                 case FAILING ->
                 {
@@ -305,21 +305,21 @@ public final class ItemProcessor
     private Outcome finishCompletion(Checkpoint checkpoint, String digest)
             throws Exception
     {
-        UUID itemId = checkpoint.fileId();
-        long failedSections = pipeline.failedSectionCount(itemId);
+        UUID itemId = checkpoint.itemId();
+        long failedRecords = pipeline.failedRecordCount(itemId);
         Instant now = pipeline.clock().instant();
         pipeline.publishNow(List.of(new FileCompleted(itemId,
-                checkpoint.sectionCount(), failedSections,
-                checkpoint.fileSize(), digest, checkpoint.startedAt(), now)));
+                checkpoint.recordCount(), failedRecords,
+                checkpoint.itemSize(), digest, checkpoint.startedAt(), now)));
         pipeline.commitCheckpoint(
                 checkpoint.withState(Checkpoint.State.COMPLETED));
-        Telemetry.get().audit("file.completed",
-                Fields.of(Attr.FILE_ID, itemId)
-                        .with(Attr.COUNT, checkpoint.sectionCount())
-                        .with(Attr.BYTES, checkpoint.fileSize()));
-        Telemetry.get().fileCompleted();
+        Telemetry.get().audit("item.completed",
+                Fields.of(Attr.ITEM_ID, itemId)
+                        .with(Attr.COUNT, checkpoint.recordCount())
+                        .with(Attr.BYTES, checkpoint.itemSize()));
+        Telemetry.get().itemCompleted();
         return new Outcome(itemId, Result.COMPLETED,
-                checkpoint.sectionCount(), null);
+                checkpoint.recordCount(), null);
     }
 
     /**
@@ -336,7 +336,7 @@ public final class ItemProcessor
     {
         Instant now = pipeline.clock().instant();
         Checkpoint base = pipeline.checkpoint()
-                .filter(current -> current.fileId().equals(itemId)
+                .filter(current -> current.itemId().equals(itemId)
                         && current.state().inProgress())
                 .orElseGet(() -> Checkpoint.start(itemId,
                         IngestPipeline.itemFingerprint(itemId),
@@ -348,10 +348,10 @@ public final class ItemProcessor
         {
             code = split.code();
             offset = split.offset();
-            stage = code == ErrorCode.LIMIT_FILE_SIZE ? "intake" : "split";
+            stage = code == ErrorCode.LIMIT_ITEM_SIZE ? "intake" : "split";
         }
-        Telemetry.get().auditWarn("file.failing",
-                Fields.of(Attr.FILE_ID, itemId).with(Attr.STAGE, stage)
+        Telemetry.get().auditWarn("item.failing",
+                Fields.of(Attr.ITEM_ID, itemId).with(Attr.STAGE, stage)
                         .with(Attr.ERROR_CODE, code).with(Attr.OFFSET, offset)
                         .with(Attr.REASON, failure.getClass()
                                 .getSimpleName()));
@@ -372,7 +372,7 @@ public final class ItemProcessor
     }
 
     /**
-     * Announces sections stored before the failure, then commits
+     * Announces records stored before the failure, then commits
      * {@code FAILED}.
      *
      * @param failing the {@code FAILING} checkpoint
@@ -387,14 +387,14 @@ public final class ItemProcessor
         }
         Failure failure = failing.failure();
         pipeline.commitCheckpoint(failing.failed());
-        Telemetry.get().auditError("file.failed",
-                Fields.of(Attr.FILE_ID, failing.fileId())
+        Telemetry.get().auditError("item.failed",
+                Fields.of(Attr.ITEM_ID, failing.itemId())
                         .with(Attr.STAGE, failure.stage())
                         .with(Attr.ERROR_CODE, failure.code())
                         .with(Attr.OFFSET, failure.offset())
                         .with(Attr.SEQ, failing.committedSeq()));
-        Telemetry.get().fileFailed(failure.code(), failure.stage());
-        return new Outcome(failing.fileId(), Result.FAILED,
-                failing.sectionCount(), failure);
+        Telemetry.get().itemFailed(failure.code(), failure.stage());
+        return new Outcome(failing.itemId(), Result.FAILED,
+                failing.recordCount(), failure);
     }
 }

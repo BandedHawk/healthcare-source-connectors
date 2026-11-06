@@ -9,7 +9,7 @@ package com.sdh.healthcare.connector.core.checkpoint;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
 import java.time.Instant;
 import java.util.UUID;
@@ -26,7 +26,7 @@ class CheckpointCodecTest
 
     /** The codec under test, with an all-zero ID key. */
     private final CheckpointCodec codec =
-            new CheckpointCodec(new SectionIds(new byte[32]));
+            new CheckpointCodec(new RecordIds(new byte[32]));
 
     /**
      * A checkpoint after one batch.
@@ -98,7 +98,7 @@ class CheckpointCodecTest
         byte[] other = new byte[32];
         other[0] = 1;
         String json = codec.encode(sample());
-        assertThatThrownBy(() -> new CheckpointCodec(new SectionIds(other))
+        assertThatThrownBy(() -> new CheckpointCodec(new RecordIds(other))
                 .decode(json))
                 .isInstanceOf(CheckpointTamperedException.class);
     }
@@ -108,9 +108,9 @@ class CheckpointCodecTest
     void sequenceInvariantsAreEnforced()
     {
         Checkpoint checkpoint = sample();
-        assertThatThrownBy(() -> new Checkpoint(checkpoint.fileId(),
+        assertThatThrownBy(() -> new Checkpoint(checkpoint.itemId(),
                 checkpoint.fingerprint(), checkpoint.format(),
-                checkpoint.fileSize(), checkpoint.state(),
+                checkpoint.itemSize(), checkpoint.state(),
                 checkpoint.resumeAt(), 10, 9, 10, checkpoint.startedAt(),
                 null, 0))
                 .isInstanceOf(IllegalArgumentException.class);

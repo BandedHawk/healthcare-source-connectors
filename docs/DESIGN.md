@@ -4,9 +4,9 @@ Status: **Draft for review; one spike item open (§16)** · Date: 2026-11-05 · 
 
 Revision 2026-10-28 (b): added the `connector-queue-reader` consumer library and `connector-contract` (§3, §10.2). Replaced the Iceberg-property lease with a Postgres lease plus fencing tokens (§9.3). Folded publish marks into batch commits (§9.2). Made host disk capacity an operator responsibility (§17). Recorded the §16 spike results.
 
-Revision 2026-10-28 (c): built the splitters (§6). Resume uses a `ResumePoint` (offset plus PHI-free context offsets) instead of a bare offset, saved in the checkpoint as `resumeAt` (§6.1, §9.1). Sections are lists of literal parts and source ranges. The FHIR splitter uses a byte-level structural scanner instead of Jackson. Added X12 `GS`/`ISA` boundaries and TA1 handling.
+Revision 2026-10-28 (c): built the splitters (§6). Resume uses a `ResumePoint` (offset plus PHI-free context offsets) instead of a bare offset, saved in the checkpoint as `resumeAt` (§6.1, §9.1). Records are lists of literal parts and source ranges. The FHIR splitter uses a byte-level structural scanner instead of Jackson. Added X12 `GS`/`ISA` boundaries and TA1 handling.
 
-Revision 2026-10-28 (d): built the split phase of the pipeline (§9.4). Multi-chunk sections are read twice (hash, then encrypt) so memory stays at one chunk (§7.2). Commit retries check the checkpoint first so a batch is never appended twice (§9.2). The checkpoint gained `format`, `fileSize` and the `ABANDONED` state (§9.1). Fingerprints and checkpoint MACs use labelled HMACs (§5.1, §9.1). Archiving, failure handling and broker adapters are not built yet.
+Revision 2026-10-28 (d): built the split phase of the pipeline (§9.4). Multi-chunk records are read twice (hash, then encrypt) so memory stays at one chunk (§7.2). Commit retries check the checkpoint first so a batch is never appended twice (§9.2). The checkpoint gained `format`, `itemSize` and the `ABANDONED` state (§9.1). Fingerprints and checkpoint MACs use labelled HMACs (§5.1, §9.1). Archiving, failure handling and broker adapters are not built yet.
 
 Revision 2026-10-28 (e): built archiving and failure handling (§4.1, §11). Added the `FAILING` state, so the decision to fail a file is durable before anything else happens. Archive tables keep file-level values on a summary row (§8.2). The digest chain, the local fallback format and the completion order are now specified (§5.1, §11.1, §11.2). Broker adapters and the Camel wiring are not built yet.
 
@@ -17,7 +17,7 @@ Revision 2026-10-28 (g): added the Docker integration suite, which runs on minik
 - both Azure clients reorder sends that are in flight together;
 - `S3FileIO` needs the AWS `kms` module;
 - SeaweedFS 4.x needs S3 identities;
-- committed sections could go unannounced when a file failed mid-publish.
+- committed records could go unannounced when a file failed mid-publish.
 
 See §10.3, §8.1, §11.2 and §16. MinIO images are no longer published, so S3 is tested on SeaweedFS only.
 
@@ -33,37 +33,37 @@ Revision 2026-10-28 (l): built the operator commands `restore`, `decrypt-fallbac
 
 Revision 2026-10-28 (m): the connector now runs against a real Iceberg REST catalog, Apache Polaris 1.8.0, in `PolarisIT` (§8.1, §15.1). Fencing, ingest, downstream read-back, archive restore, maintenance and the admin `status` command all pass unchanged. The REST catalog settings in §14 now include OAuth and an explicit `rest.auth.type`.
 
-Revision 2026-10-29 (n): built the throughput tests (§13.1, `scripts/perf.sh`). Small sections are bound by per-message public-key crypto, about 0.55 ms of CPU each with a P-256 recipient. Fixed a queueing problem that stalled splitting while the previous batch was sealed: sealing now has its own pool (§13), which made small sections 25–40% faster.
+Revision 2026-10-29 (n): built the throughput tests (§13.1, `scripts/perf.sh`). Small records are bound by per-message public-key crypto, about 0.55 ms of CPU each with a P-256 recipient. Fixed a queueing problem that stalled splitting while the previous batch was sealed: sealing now has its own pool (§13), which made small records 25–40% faster.
 
-Revision 2026-10-29 (o): sections are now converted to JSON before they are stored (§6.4). The JSON shapes are:
+Revision 2026-10-29 (o): records are now converted to JSON before they are stored (§6.4). The JSON shapes are:
 - CSV: an array of fields by position, with the header dropped;
 - C-CDA: Google Data Harmonization's XmlToJson style, driven by the CDA schema and checked against Google's own published outputs;
 - X12 and EDIFACT: segment and element arrays, with every position kept.
 
-FHIR, generic XML and delimited sections are stored as split. A section that fails conversion is stored in its original form, marked with an error code, and announced with a new `section.failed` message; the file still completes. Also:
+FHIR, generic XML and delimited records are stored as split. A record that fails conversion is stored in its original form, marked with an error code, and announced with a new `record.failed` message; the file still completes. Also:
 - added an EDIFACT splitter (§6.2);
 - contract version 2.0 (§10.1);
-- three new `sections` columns (§8.2).
+- three new `records` columns (§8.2).
 
 Revision 2026-11-03 (av): built step 4 of landing, SFTP and SMB intakes (§5.3.14). They use JSch and smbj directly, polled by a Camel timer, with explicit settings in place of a Camel URI (§5.3.9). SMB is SMB 3 with encryption required and NTLMv2; a share that doesn't encrypt, and a guest or anonymous login, are refused. A problem reaching the source is reported once by reason as `intake.unreachable` (`NETWORK`, `AUTH`, `PERMISSION`, `HOST_KEY`, `NOT_FOUND`, `ENCRYPTION`) and `intake.reachable` when it ends; all but `NETWORK` are retried only every `auth-retry-interval`. An item cut off part way resumes from its checkpoint, which also fixes a crash after a read failed mid-item (§5.3.4). Tested against embedded SSHD, and against OpenSSH and Samba containers behind Toxiproxy. New dependencies: JSch, smbj and Bouncy Castle (§14.2).
 
 Revision 2026-11-04 (aw): built step 5 of landing, HTTP push (§5.3.15). `sdh.landing.source.type: http` starts a web server, and only then; the other intakes still run without one. Decided 2026-11-04: the endpoint is a Spring MVC controller on Spring Boot's Tomcat with Spring Security, not Camel's `platform-http`, because `platform-http` reads the whole request body before the route runs, into memory or a plaintext temporary file. A push is authenticated by OAuth2 (a JWT checked against the issuer's keys, audience and scope) or mTLS (a client certificate from a trusted CA, with a listed subject), streamed straight into landing, and answered `202` with a receipt that carries the SHA-256 of the body. An `Idempotency-Key` is scoped to its sender. A push waits up to `max-wait` for the one before it, then gets `503` with `Retry-After`. The ledger gained `item_size` and `item_sha256`, and `landed_items` gained `item_sha256` (§5.3.2). New dependencies: Spring Web MVC, Spring Security with the OAuth2 resource server, Tomcat and Nimbus JOSE + JWT (§14.2).
 
-Revision 2026-11-04 (ax): built step 6a of landing, queue intakes for Kafka, SQS, RabbitMQ and Artemis (§5.3.16), and the splitter's handling of message batches. `sdh.landing.source.type: queue` consumes `sdh.landing.broker`, and lands messages in batches, one item per batch, with a record index (each message's offset and the keyed hash of its broker ID) on the summary row (§5.3.2). A message is acknowledged only once its batch is committed. Decided 2026-11-04: Camel consumers, as for the other intakes, except Artemis, which uses the JMS client directly because both of Camel's JMS components acknowledge a message as soon as their listener returns. A message delivered again is recognised by its ID within `dedup-window` (1 hour) of the last landed batch, not 7 days as first said. The splitter splits a batch message by message; a message that can't be split, or holds a section over the limit, is stored raw as one `section.failed`, and the rest of the batch carries on. Pub/Sub, Service Bus and Event Hubs are step 6b. No new dependencies.
+Revision 2026-11-04 (ax): built step 6a of landing, queue intakes for Kafka, SQS, RabbitMQ and Artemis (§5.3.16), and the splitter's handling of message batches. `sdh.landing.source.type: queue` consumes `sdh.landing.broker`, and lands messages in batches, one item per batch, with a message index (each message's offset and the keyed hash of its broker ID) on the summary row (§5.3.2). A message is acknowledged only once its batch is committed. Decided 2026-11-04: Camel consumers, as for the other intakes, except Artemis, which uses the JMS client directly because both of Camel's JMS components acknowledge a message as soon as their listener returns. A message delivered again is recognised by its ID within `dedup-window` (1 hour) of the last landed batch, not 7 days as first said. The splitter splits a batch message by message; a message that can't be split, or holds a record over the limit, is stored raw as one `record.failed`, and the rest of the batch carries on. Pub/Sub, Service Bus and Event Hubs are step 6b. No new dependencies.
 
 Revision 2026-11-04 (ay): built step 6b of landing, queue intakes for Pub/Sub, Service Bus and Event Hubs (§5.3.16), all by Camel consumers. Pub/Sub uses `ackMode=NONE`: each exchange completes at once and carries an acknowledgement that is used once the batch is landed. Service Bus holds each exchange open in peek-lock mode, with Camel renewing the lock. Event Hubs holds each exchange open, with a blob checkpoint store and start positions the node supplies (`sdh.landing.broker.eventhubs`). Changed for every broker (decided 2026-11-04): a batch that can't be landed is now tried again in place, keeping its messages, instead of being handed back. Handing it back raised each message's delivery count, so on a broker with a delivery limit (Service Bus and Artemis, 10 by default; RabbitMQ 4 quorum queues, 20) a long storage outage would have dead-lettered messages. Messages are handed back only when the route stops, as soon as Camel prepares it for shutdown. After a fatal error the consumer is held back, rather than its messages handed back repeatedly until the node exits. Service Bus messages are identified by sequence number, Event Hubs events by partition and sequence number, and Pub/Sub messages by message ID.
 
 Revision 2026-11-04 (az): built step 7a of landing, bucket intakes for S3 (and S3-compatible stores), Azure Blob Storage and Google Cloud Storage (§5.3.17). Decided 2026-11-04: each store's SDK directly, polled by a Camel timer, as for SFTP and SMB, not Camel's `aws2-s3`, `azure-storage-blob` and `google-storage` consumers, so that a broken read resumes with a ranged read, every timeout is set, and no key is logged. Decided the same day: a bucket is found by listing its prefix every `poll-interval`; event notifications may be added later as an option. `path` and `move-to` are key prefixes. An object's version is its time and its ETag (S3, Azure) or generation (GCS), recorded as `<millis>:<tag>`, so an object written again with the same bytes is a new version, as a file would be. Reads, copies and deletes are conditional on the tag where the store allows. Bucket items are landed as kind `object`. Iceberg tables are step 7b. No new dependencies: the SDKs were already on the class path for Iceberg's file IO and the key providers.
 
-Revision 2026-11-04 (ba): built step 7b of landing, Iceberg table intakes (§5.3.18), and a `parquet` splitter (§6.2). `sdh.landing.source.type: iceberg` follows a table through its own catalog, read-only: each Parquet data file an `append` snapshot adds is landed as one item of kind `table-file`, its bytes as they are; a `replace` (compaction) is passed over; an `overwrite` or `delete` raises `intake.table_rewrite` and nothing is landed for it. Decided 2026-11-04: the splitter's `parquet` format makes one JSON section per row (mapping `parquet-row/1`), resuming by row group and row; the landed copy stays the original file. Decided the same day: on the first start the intake lands every data file of the current snapshot, then each later append (`start: earliest`, the default), or only later appends (`start: latest`). Progress is a snapshot ID kept, MAC'd, in a property of the ledger table and committed under the lease's fence, so a restart carries on and a compaction after snapshot expiry can't land rows again. Changed in `connector-core`: a resume point is now ordered by its offset, then its context (`ResumePoint.isAfter`), so several sections can share an offset; and a splitter may set a section's origin itself, which `SectionOrigins` then keeps. New error codes `PARSE_PARQUET_MALFORMED` and `PARSE_PARQUET_UNSUPPORTED_TYPE`. No new dependencies: `parquet-hadoop`, already there through Iceberg, is now declared by `connector-core`.
+Revision 2026-11-04 (ba): built step 7b of landing, Iceberg table intakes (§5.3.18), and a `parquet` splitter (§6.2). `sdh.landing.source.type: iceberg` follows a table through its own catalog, read-only: each Parquet data file an `append` snapshot adds is landed as one item of kind `table-file`, its bytes as they are; a `replace` (compaction) is passed over; an `overwrite` or `delete` raises `intake.table_rewrite` and nothing is landed for it. Decided 2026-11-04: the splitter's `parquet` format makes one JSON record per row (mapping `parquet-row/1`), resuming by row group and row; the landed copy stays the original file. Decided the same day: on the first start the intake lands every data file of the current snapshot, then each later append (`start: earliest`, the default), or only later appends (`start: latest`). Progress is a snapshot ID kept, MAC'd, in a property of the ledger table and committed under the lease's fence, so a restart carries on and a compaction after snapshot expiry can't land rows again. Changed in `connector-core`: a resume point is now ordered by its offset, then its context (`ResumePoint.isAfter`), so several records can share an offset; and a splitter may set a record's origin itself, which `RecordOrigins` then keeps. New error codes `PARSE_PARQUET_MALFORMED` and `PARSE_PARQUET_UNSUPPORTED_TYPE`. No new dependencies: `parquet-hadoop`, already there through Iceberg, is now declared by `connector-core`.
 
-Revision 2026-11-04 (bb): built step 8 of landing, producer feedback (§5.3.8). Decided 2026-11-04 with the user: producers are outside organisations, each seeing only its own items; results go to a results queue per intake, sealed to the producer's own key; a resubmission is recorded as a link only, and both items are kept in full, because landed data is PHI and nothing may be lost or replaced automatically. The landing node sends `item.received` when an item lands; the splitter sends `item.result` when it finishes one, completed or failed, with each problem's error code, section, byte offset, line, column and, for a message batch, the message and its broker ID, in parts. Both are sent before the step that follows is committed, so a crash means a resend with the same message ID, never a loss. Contract 2.3 (§10.1). An HTTP intake with results must admit one sender (`oauth2.subject`, or one `mtls.subjects` entry). Push takes `X-Correlation-Id` and `Replaces` headers; directory, SFTP, SMB and bucket intakes take a `<name>.sdh-replaces` marker. Queue and table intakes can't name an item they replace yet.
+Revision 2026-11-04 (bb): built step 8 of landing, producer feedback (§5.3.8). Decided 2026-11-04 with the user: producers are outside organisations, each seeing only its own items; results go to a results queue per intake, sealed to the producer's own key; a resubmission is recorded as a link only, and both items are kept in full, because landed data is PHI and nothing may be lost or replaced automatically. The landing node sends `item.received` when an item lands; the splitter sends `item.result` when it finishes one, completed or failed, with each problem's error code, record, byte offset, line, column and, for a message batch, the message and its broker ID, in parts. Both are sent before the step that follows is committed, so a crash means a resend with the same message ID, never a loss. Contract 2.3 (§10.1). An HTTP intake with results must admit one sender (`oauth2.subject`, or one `mtls.subjects` entry). Push takes `X-Correlation-Id` and `Replaces` headers; directory, SFTP, SMB and bucket intakes take a `<name>.sdh-replaces` marker. Queue and table intakes can't name an item they replace yet.
 
 Revision 2026-11-04 (bc): built the landing metrics (§5.3.7). Decided 2026-11-04 with the user: the first metrics are renamed to the planned names (`sdh.items.landed` is now `sdh.landing.items`; `sdh.landing.source_reachable` is now `sdh.intake.up`; `sdh.landing.items_waiting` is now `sdh.landing.backlog`), and the rest are added: bytes, duplicates, ledger size, batch size, listing time and size, oldest wait, push requests and lock wait, and the intake health gauges of §5.3.4 for listing intakes and Artemis. `IntakeHealth` now holds an intake's reachability for both; the Artemis route reports again when the reason changes, as §5.3.4 says. Directory polls are timed by a Camel poll strategy, which also replaces Camel's log of a failed poll. Left for a spike: how each Camel broker's consumer reports giving up, or losing and regaining its broker, so the health gauges can cover them.
 
 Revision 2026-11-04 (bd): built broker health for the Camel queue intakes (§5.3.16). A spike cut each broker off through Toxiproxy: all six consumers came back on their own, but only SQS told Camel, and Pub/Sub's consumer gave up for good on a deleted subscription while its route still said it had started. Decided 2026-11-04 with the user, broker by broker: SQS by a poll strategy; RabbitMQ by a connection listener and a passive queue check; Kafka, Pub/Sub, Service Bus and Event Hubs by a check through the broker's own client every `sdh.landing.broker.check-interval` (30 s), a fallback for want of a Camel hook. A Pub/Sub consumer that gave up is restarted once its subscription is found again. The intake health gauges now cover every queue intake. `IntakeHealth.problem()` gives the current reason. Pub/Sub's check needs `pubsub.subscriptions.get`.
 
-Revision 2026-11-04 (be): queue and table intakes can name what they replace (§5.3.8). Decided 2026-11-04 with the user: a queue message names the earlier message it replaces, item and message, in an `sdh_replaces` header (`<itemId>/<messageId>`), kept per message, encrypted, in `landed_items.record_replaces_enc` (§5.3.2), and reported per message in `item.received` and in each problem of `item.result`; a table append names the item its files replace in its snapshot property `sdh.replaces`. As for markers, a link that is malformed or names an item the intake never landed is ignored with `item.replaces_ignored`, and the data is landed without it. SQS consumers now ask for the `sdh_replaces` attribute. Contract 2.4 (§10.1). A status endpoint for producers stays unbuilt, until a producer needs one.
+Revision 2026-11-04 (be): queue and table intakes can name what they replace (§5.3.8). Decided 2026-11-04 with the user: a queue message names the earlier message it replaces, item and message, in an `sdh_replaces` header (`<itemId>/<messageId>`), kept per message, encrypted, in `landed_items.message_replaces_enc` (§5.3.2), and reported per message in `item.received` and in each problem of `item.result`; a table append names the item its files replace in its snapshot property `sdh.replaces`. As for markers, a link that is malformed or names an item the intake never landed is ignored with `item.replaces_ignored`, and the data is landed without it. SQS consumers now ask for the `sdh_replaces` attribute. Contract 2.4 (§10.1). A status endpoint for producers stays unbuilt, until a producer needs one.
 
 Revision 2026-11-04 (bf): items given up are cleaned up, and remote sources are claimed. Decided 2026-11-04 with the user: the chunks of an item given up part way are kept for a grace period, `sdh.maintenance.retention.given-up` (7 days, at least 1), then removed by maintenance and audited as `item.purged` (§5.3.13). Each give-up is recorded, MAC'd, in the commit that clears its checkpoint, so none is missed, and a landed item is never removed. `TableMaintenance` takes a purge step of the caller's, run before expiry so the removed files leave storage in the same run, and shares its row copying with compaction. Decided the same day: every read-write source is now claimed (§9.5), SFTP and SMB through their connections (§5.3.14) and buckets by a conditional write (§5.3.17), checked once per listing. `InboundDirectoryClaim` keeps its claim through a `ClaimFile`.
 
@@ -79,7 +79,7 @@ Revision 2026-11-05 (bk): the demonstration shows the whole current pipeline, la
 
 Revision 2026-11-05 (bl): the deployment shape and its rationale are written up in [DEPLOYMENT.md](DEPLOYMENT.md): separate images and deployments for the landing node and the splitter, with the queue between them on the customer's broker; the other shapes considered, and why not. Decided 2026-11-05 with the user, after testing what could strand an item: the splitter now reconciles its inbox with `landed_items` (§5.3.12), at startup and every 15 minutes, adding an item landed more than 10 minutes ago whose `item.landed` never arrived (`inbox.recovered`), because the landing node's resend at startup covers only its own crash, not a broker that lost a message. An `item.landed` of a contract major version the splitter can't read is no longer dropped but left unacknowledged until the splitter is upgraded (`inbox.unreadable_version`, §10.2), so the splitter is upgraded first. New `sdh.landing.reconcile` settings; new tests `ContractVersionTest`, two in `FileConnectorApplicationTest` and one in `IntakeServiceTest`; `MessageSealer.seal(Map)` for tests of other versions.
 
-Revision 2026-11-05 (bn): demo sandbox (§15.4, docs/SANDBOX.md). `scripts/sandbox.sh` runs a three-node minikube cluster laid out as a customer would run the pipeline: a 3-broker Kafka, SeaweedFS with a bucket per medallion layer (bronze landed, silver sections, gold reserved for the FHIR stage) and an S3 key per stage, Postgres, Vault Transit for every KEK and signing key, network policies (Calico), and OpenTelemetry to Grafana. Both stages are deployed from their READMEs' Deployments, by image digest from the cluster's registry, with the landing node's active and standby on different nodes. The FHIR stage's namespace, quota, topics, bucket, keys and credentials are made ready. The project's minikube profiles now live under `SDH_SANDBOX` (`scripts/minikube-home.sh`); `sdh-it` is 8 CPUs and 8 GB. The landing README now says a push intake's Deployment needs `Recreate`: a standby is never ready, so a rolling update stalls (found in the sandbox).
+Revision 2026-11-05 (bn): demo sandbox (§15.4, docs/SANDBOX.md). `scripts/sandbox.sh` runs a three-node minikube cluster laid out as a customer would run the pipeline: a 3-broker Kafka, SeaweedFS with a bucket per medallion layer (bronze landed, silver records, gold reserved for the FHIR stage) and an S3 key per stage, Postgres, Vault Transit for every KEK and signing key, network policies (Calico), and OpenTelemetry to Grafana. Both stages are deployed from their READMEs' Deployments, by image digest from the cluster's registry, with the landing node's active and standby on different nodes. The FHIR stage's namespace, quota, topics, bucket, keys and credentials are made ready. The project's minikube profiles now live under `SDH_SANDBOX` (`scripts/minikube-home.sh`); `sdh-it` is 8 CPUs and 8 GB. The landing README now says a push intake's Deployment needs `Recreate`: a standby is never ready, so a rolling update stalls (found in the sandbox).
 
 Revision 2026-11-05 (bm): third-party attribution made complete, and the images built from Maven (§14.1–§14.3). Every license, notice and copyright file a bundled jar ships is now in `THIRD-PARTY.txt`, Apache-2.0 components included, so the licenses and copyright lines of code that components bundle (jBCrypt in JSch, the SCRAM libraries in the PostgreSQL driver, BoringSSL in `grpc-netty-shaded`) are no longer left out. JSch's licenses are marked as all applying, not as a choice. Spring Boot's jar mode tools, which repackaging adds, are attributed. Distribution builds fail on a license text that couldn't be fetched. New `ThirdPartyAttributionIT` checks both jars against what they bundle, in `-Pit`, `-Pdist` and `-Pimages`. New `images` profile and NetBeans action build all four images into the VM; the tarball action builds both applications' tarballs.
 
@@ -96,10 +96,10 @@ Revision 2026-11-03 (aq): built step 1 of landing (§5.3.10), in `connector-core
 Revision 2026-11-03 (ap): documentation only. Ingestion becomes two stages (§5.3, not built), replacing the source-endpoint plan of revision an. A landing node per intake, with a standby, takes data from directories, SFTP, SMB, HTTP push, the seven queues, buckets and Iceberg tables through a fixed list of Camel components, and stores it as received in its own namespace, `sdh_landing`. It then signals the splitter with an `item.landed` message. Read-only sources are tracked with a ledger, so nothing is landed twice. The landed copy replaces `source_files`, and the splitter reads only from landing. How producers find the source of a problem in their data is still open (§5.3.8).
 
 Revision 2026-11-02 (ao): problems can be found by line and column, for remediation.
-- **C-CDA JSON is `ccda/2` (§6.4):** every element written as an object starts with `"#line"` and `"#col"`, where its start tag begins in the section. A mapping reports its issues there (the Whistle runtime's `check::at`), so an operator can go straight to the element, or to its nearest present parent when it is missing. The JSON is about 39% larger; the C-CDA memory factor goes from 5 to 6.
+- **C-CDA JSON is `ccda/2` (§6.4):** every element written as an object starts with `"#line"` and `"#col"`, where its start tag begins in the record. A mapping reports its issues there (the Whistle runtime's `check::at`), so an operator can go straight to the element, or to its nearest present parent when it is missing. The JSON is about 39% larger; the C-CDA memory factor goes from 5 to 6.
 - **The converter always uses Woodstox (§6.4),** chosen by name, so the connector and the command-line tools (`ccda-quickrun`) read a document the same way and report the same positions. Malformed XML is now reported at a byte position; it was a character count.
-- **Sections carry an origin (§6.1, §8.2, §10.1):** where their text starts in the section and in the file, as lines and columns, so a position in a section becomes one in the file (`SectionOrigin.toFile`, in `connector-contract`). A failed section also gives where in the file conversion failed.
-- **Contract 2.1 (§10.1):** `section.stored` and `section.failed` gain `origin`, and `section.failed` gains `errorLine` and `errorColumn`. Six optional `sections` columns, added to existing tables at startup (§8.2).
+- **Records carry an origin (§6.1, §8.2, §10.1):** where their text starts in the record and in the file, as lines and columns, so a position in a record becomes one in the file (`RecordOrigin.toFile`, in `connector-contract`). A failed record also gives where in the file conversion failed.
+- **Contract 2.1 (§10.1):** `record.stored` and `record.failed` gain `origin`, and `record.failed` gains `errorLine` and `errorColumn`. Six optional `records` columns, added to existing tables at startup (§8.2).
 
 Revision 2026-11-01 (an): documentation only. A plan for source endpoints chosen by configuration (§5.3, not built): local, S3-compatible, SFTP and Iceberg/Parquet sources as plugins behind a `SourceEndpoint` SPI, with splitting and conversion unaware of where files come from. One pipeline per pod, defined in a configuration file shipped with the pod; operator-defined pipelines are deferred to pipeline monitoring and management (§17).
 
@@ -109,17 +109,17 @@ Revision 2026-10-31 (al): C-CDA documents of structured entries need about 60% l
 - **C-CDA tree (§6.4):** each element is held in plain arrays instead of lists and maps, and with nothing at all for what it doesn't have. Grouping children by name moved to when the JSON is written. The text run being read is kept once by the reader, not in every element. Whitespace runs, and attribute values of up to 64 characters, are kept once per distinct value and shared (at most 1,024 and 16,384 per document, so a hostile document can't grow the tables without end). A 64 MB document of structured entries needs 231 MiB instead of 566; the memory factor goes from 10 to 5, which still covers a document whose values don't repeat at all (5.0 times its size). Conversion is about 5% faster. The JSON is byte-for-byte the same (680 documents: the test, mapping and Google Synthea samples, 650 mutated ones among them, and the 16 and 64 MB documents).
 
 Revision 2026-10-31 (ak): the conversion budget reserves enough for C-CDA documents of structured entries.
-- **C-CDA memory factor (§6.4):** 3.5 → 10. The 3.5 was measured on a document that was mostly a base64 PDF. A 64 MB document of structured entries needs 566 MiB, 8.8 times its size (9.6 at 16 MB), so the budget reserved 224 MiB for it and let other conversions use the rest. Several large structured sections at once could then run the heap out of memory, which the budget is there to prevent.
+- **C-CDA memory factor (§6.4):** 3.5 → 10. The 3.5 was measured on a document that was mostly a base64 PDF. A 64 MB document of structured entries needs 566 MiB, 8.8 times its size (9.6 at 16 MB), so the budget reserved 224 MiB for it and let other conversions use the rest. Several large structured records at once could then run the heap out of memory, which the budget is there to prevent.
 
 Revision 2026-10-31 (aj): the other converters need far less memory, conversions share a memory budget, and two gaps that a hostile or broken file could use are closed.
-- **Converter memory (§6.4):** X12, EDIFACT and CSV no longer decode a section into a string or build a tree; they write the JSON from the section's bytes. Large sections are written twice, counting first, so the JSON is held once at exactly its size. For a 64 MB section: EDIFACT about 2 GiB → 256 MiB, X12 512 → 224 MiB, CSV 384 → 160 MiB, C-CDA 224 → 208 MiB. Before, an EDIFACT section of about 30 MB ran a 1 GiB heap out of memory. The JSON is byte-for-byte unchanged (1,257 test inputs, 400 mutated ones per format among them).
-- **Conversion budget (§6.4):** conversions running at once share `split.convert-memory`, 40% of the heap by default. Each converter states its peak as a multiple of the section's size, and a section that doesn't fit waits.
-- **Converter bugs (§6.4):** an unexpected exception from a converter fails that section with `CONVERT_FAILED`. Before, it failed the whole file as `STORAGE_FAILED`.
+- **Converter memory (§6.4):** X12, EDIFACT and CSV no longer decode a record into a string or build a tree; they write the JSON from the record's bytes. Large records are written twice, counting first, so the JSON is held once at exactly its size. For a 64 MB record: EDIFACT about 2 GiB → 256 MiB, X12 512 → 224 MiB, CSV 384 → 160 MiB, C-CDA 224 → 208 MiB. Before, an EDIFACT record of about 30 MB ran a 1 GiB heap out of memory. The JSON is byte-for-byte unchanged (1,257 test inputs, 400 mutated ones per format among them).
+- **Conversion budget (§6.4):** conversions running at once share `split.convert-memory`, 40% of the heap by default. Each converter states its peak as a multiple of the record's size, and a record that doesn't fit waits.
+- **Converter bugs (§6.4):** an unexpected exception from a converter fails that record with `CONVERT_FAILED`. Before, it failed the whole file as `STORAGE_FAILED`.
 - **XML nesting (§6.3):** a boundary element may be nested at most 128 elements deep, and its ancestors' start tags may be at most 1 MiB (the most a resume re-reads). Before, there was no limit: 200,000 nested wrappers in a 600 KB file gave a 1.36 MB checkpoint, rewritten on every commit.
 - **Error positions:** CSV and X12 now report exact byte offsets; they were character offsets, which differ after non-ASCII text. An X12 separator that isn't ASCII is now `CONVERT_X12_MALFORMED` at the ISA.
 
 Revision 2026-10-31 (ai): a file that keeps stopping the connector no longer stops it forever, and C-CDA conversion needs less than half the memory.
-- **Restarts without progress (§9.2):** the checkpoint counts how often splitting resumed without a batch committing since (`restarts`, §9.1). At 2, the uncommitted batch is stored unconverted (`CONVERT_SKIPPED`), in case a conversion is what stops the connector; at 3, the file fails with `RESUME_NO_PROGRESS` (§11). Before, a section that ran the connector out of memory was retried on every restart, and nothing else was ever processed. `sdh-admin status` shows the count.
+- **Restarts without progress (§9.2):** the checkpoint counts how often splitting resumed without a batch committing since (`restarts`, §9.1). At 2, the uncommitted batch is stored unconverted (`CONVERT_SKIPPED`), in case a conversion is what stops the connector; at 3, the file fails with `RESUME_NO_PROGRESS` (§11). Before, a record that ran the connector out of memory was retried on every restart, and nothing else was ever processed. `sdh-admin status` shows the count.
 - **C-CDA memory (§6.4):** the parser no longer joins text into one string (it took about five times the text's size), the JSON is written straight to UTF-8 bytes, and the tree is released before the output is trimmed. A 64 MB document needed 512 MiB of heap with Woodstox and 640 MiB with the JDK's parser; it now needs 224 MiB with either. The JSON is byte-for-byte the same.
 
 Revision 2026-10-30 (ah): documentation only. The US Core 6.1 C-CDA mapping (the `mapping` repository) now reads `ccda/1` as stored, so no reshaping step sits between the connector and the mapping (§6.4). Its sample documents are the connector's conversions of the C-CDA test documents.
@@ -161,7 +161,7 @@ Revision 2026-10-29 (z): SBOMs and signing (§14.4, `scripts/sign-release.sh`). 
 
 Revision 2026-10-29 (y): license election for dual-licensed components (§14.2): permissive licenses (MIT, Apache-2.0, BSD, ISC, Creative Commons) are elected over any GPL or similar license. `THIRD-PARTY.txt` names the elected license for each of the ten components offered under a choice, and the image tests fail if one is missing or a GNU license is elected. Five components have no permissive option and are distributed under EPL-2.0 or CDDL-1.1.
 
-Revision 2026-10-29 (x): ran ADLS Gen2 orphan cleanup on a real Azure storage account (`AdlsAzureIT`, opt-in, §15.1). `ADLSFileIO.listPrefix` returns paths relative to the container, so every file of the `sections` table looked orphaned; the size-based safety stop refused the run, but a table of 20 files or fewer wasn't protected by it. Listed paths are now resolved against the table location, and any listed path outside the table location refuses the whole run (§8.4). Everything, orphan cleanup included, now passes on real ADLS.
+Revision 2026-10-29 (x): ran ADLS Gen2 orphan cleanup on a real Azure storage account (`AdlsAzureIT`, opt-in, §15.1). `ADLSFileIO.listPrefix` returns paths relative to the container, so every file of the `records` table looked orphaned; the size-based safety stop refused the run, but a table of 20 files or fewer wasn't protected by it. Listed paths are now resolved against the table location, and any listed path outside the table location refuses the whole run (§8.4). Everything, orphan cleanup included, now passes on real ADLS.
 
 Revision 2026-10-29 (w): ran the customer image on Kubernetes (§15.2, `scripts/k8s-minikube.sh`), deployed from the README's manifest in a namespace that enforces the restricted Pod Security Standard. Everything passes. The run found and fixed:
 - the README's Deployment, which passed only the lease password; all secrets now come through `envFrom`;
@@ -194,11 +194,11 @@ Revision 2026-10-29 (p): measured throughput with JSON conversion (§13.1): 4–
 
 ## 1. Purpose
 
-Ingest health information files (C-CDA, X12, FHIR, CSV, and proprietary formats) dropped into a directory, split each file into self-contained sections at a run-time-defined boundary, store every section encrypted in Apache Iceberg tables (Parquet data files), and announce each stored section on a run-time-selected message queue with an encrypted, signed message.
+Ingest health information files (C-CDA, X12, FHIR, CSV, and proprietary formats) dropped into a directory, split each file into self-contained records at a run-time-defined boundary, store every record encrypted in Apache Iceberg tables (Parquet data files), and announce each stored record on a run-time-selected message queue with an encrypted, signed message.
 
 The service must:
 
-- Resume after any crash or restart from the exact section where it stopped, including part-way through a file of up to ~1 TB.
+- Resume after any crash or restart from the exact record where it stopped, including part-way through a file of up to ~1 TB.
 - Process every file already in the directory, then keep picking up new ones.
 - Never expose PHI in file paths, object names, IDs, queue metadata, logs or telemetry.
 - Run as exactly one instance.
@@ -249,25 +249,31 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
 │   └── com.sdh.healthcare.connector.contract
 │       ├── message/      message records, payload codec, contract version
 │       ├── jose/         MessageSealer (sign + encrypt), MessageOpener (decrypt + verify)
-│       ├── crypto/       KeyProvider SPI, section key derivation, chunk encryption
-│       └── table/        sections table schema, partition spec, sort order
+│       ├── crypto/       KeyProvider SPI, record key derivation, chunk encryption
+│       └── table/        records table schema, partition spec, sort order
 ├── connector-queue-reader/              library jar for consumers (§10.2); depends on contract only
 ├── connector-kms/                       library jar: KMS KeyProviders (§7.4); used by the applications, optional for readers
 │   └── com.sdh.healthcare.connector.reader
 ├── connector-core/                      library jar (no main class)
 │   └── com.sdh.healthcare.connector.core
-│       ├── split/        SectionSplitter SPI + built-in splitters
-│       ├── convert/      SectionConverter SPI + JSON converters (csv, ccda, x12, edifact), CDA schema model
+│       ├── split/        RecordSplitter SPI + built-in splitters
+│       ├── convert/      RecordConverter SPI + JSON converters (csv, ccda, x12, edifact), CDA schema model
 │       ├── crypto/       KMS/local KeyProvider implementations, ID HMAC
 │       ├── storage/      Iceberg catalog/FileIO setup, writers, compaction, retention
 │       ├── checkpoint/   checkpoint model, lease store, lease keeper, fenced committer
-│       ├── publish/      MessagePublisher SPI, OutboundMessage (broker adapters live in the connector app, §10.3)
+│       ├── publish/      MessagePublisher SPI, OutboundMessage (broker adapters live in connector-broker, §10.3)
 │       ├── telemetry/    Telemetry facade (spans, audit events, metrics), Attr allow-list, Fields, error codes
 │       └── pipeline/     source-agnostic ingest pipeline (read → split → encrypt → write → commit → publish)
+├── connector-broker/                    library jar: every broker both ways, chosen at run time (§10.3, §5.3.16);
+│   │                                    shared with the stages and healthcare-data-transformer
+│   └── com.sdh.healthcare.connector.broker
+│       ├── receive/      ReceiveProperties, ReceiveSettings (checked), CamelReceiveRoute, ArtemisReceiveRoute,
+│       │                 HeldBatches, BatchHandler, BrokerMessage, BrokerWatch, BrokerHealth, per-broker checks
+│       └── send/         QueueType (broker adapters), Publishers, CamelMessagePublisher, ServiceBusPublisher
 ├── connector-runtime/                   library jar: what the two applications share
 │   └── com.sdh.healthcare.connector.runtime
 │       ├── config/       CommonSettings (shared sdh.* records), ConnectorSettings, KeyMaterial, PEM reading
-│       ├── publish/      QueueType (broker adapters), Publishers, CamelMessagePublisher, ServiceBusPublisher
+│       ├── publish/      ResultsChannel (item.result to producers)
 │       ├── maintenance/  MaintenanceScheduler (§8.4, §5.3.13)
 │       ├── telemetry/    OTLP exporters, AllowListSpanExporter, AuditOnlyLogRecordExporter
 │       └── FatalExit, InboundDirectoryClaim (§9.5), LeaseDatabase
@@ -304,14 +310,14 @@ flowchart LR
   B --> C[Resumable reader<br/>seek to checkpoint offset]
   C --> D[Format splitter<br/>byte-offset aware]
   D --> E[Encrypt workers<br/>zstd → AES-256-GCM]
-  E --> F[Iceberg writer<br/>sections table]
-  F -->|every N sections / T sec / B bytes| G[Fenced atomic commit<br/>data + checkpoint]
-  G --> H[Publish section messages<br/>JWS inside JWE]
+  E --> F[Iceberg writer<br/>records table]
+  F -->|every N records / T sec / B bytes| G[Fenced atomic commit<br/>data + checkpoint]
+  G --> H[Publish record messages<br/>JWS inside JWE]
   H --> I[Published seq recorded<br/>in the next commit]
   D -->|end of file| J[Archive original<br/>source_files table]
-  J --> K[file.completed message<br/>delete original<br/>write completed/&lt;fileId&gt;.json]
+  J --> K[file.completed message<br/>delete original<br/>write completed/&lt;itemId&gt;.json]
   D -. error .-> L[Archive to failed_files<br/>or encrypted local fallback]
-  L --> M[OTel failure event<br/>write failed/&lt;fileId&gt;.json]
+  L --> M[OTel failure event<br/>write failed/&lt;itemId&gt;.json]
 ```
 
 ### 4.1 File lifecycle (state machine)
@@ -323,17 +329,17 @@ DISCOVERED → SPLITTING → ARCHIVING → COMPLETED
    (source gone while SPLITTING, or ARCHIVING with the archive unfinished) → ABANDONED
 ```
 
-The state lives in the `sections` checkpoint (§9.1). `FileProcessor` (`connector-core` `pipeline/`) runs the whole lifecycle.
+The state lives in the `records` checkpoint (§9.1). `FileProcessor` (`connector-core` `pipeline/`) runs the whole lifecycle.
 
 | State | Durable record | Restart behaviour |
 |---|---|---|
 | DISCOVERED | none | The file is still in the inbound directory, so it is simply picked up again |
-| SPLITTING | `sections` checkpoint | Resume at `resumeAt` and continue at `nextSeq`. Republish any committed-but-unpublished sections first |
-| ARCHIVING | `sections` checkpoint + archive checkpoint on `source_files` | Continue archiving from the last archived block. If the archive is already done, finish without the source (§11.1) |
-| COMPLETED | `completed/<fileId>.json`; original deleted | Nothing to do |
-| FAILING | `sections` checkpoint with stage, error code and offset; archive checkpoint on `failed_files` | Finish failing the file; never retry splitting it |
-| FAILED | `failed/<fileId>.json` (+ `failed/<fileId>.enc` if fallback was used) | Nothing to do; operators take over |
-| ABANDONED | `sections` checkpoint | Nothing to do; `file.abandoned` was logged |
+| SPLITTING | `records` checkpoint | Resume at `resumeAt` and continue at `nextSeq`. Republish any committed-but-unpublished records first |
+| ARCHIVING | `records` checkpoint + archive checkpoint on `source_files` | Continue archiving from the last archived block. If the archive is already done, finish without the source (§11.1) |
+| COMPLETED | `completed/<itemId>.json`; original deleted | Nothing to do |
+| FAILING | `records` checkpoint with stage, error code and offset; archive checkpoint on `failed_files` | Finish failing the file; never retry splitting it |
+| FAILED | `failed/<itemId>.json` (+ `failed/<itemId>.enc` if fallback was used) | Nothing to do; operators take over |
+| ABANDONED | `records` checkpoint | Nothing to do; `file.abandoned` was logged |
 
 **Startup (for the file connector):** if `FileProcessor.inProgress()` returns a checkpoint, fingerprint the inbound files and `process()` the match first. If there is no match, call `recoverWithoutSource()`.
 
@@ -350,17 +356,17 @@ Files are processed **one at a time, oldest first**. This keeps ordering predict
 - **One connector per directory:** pickup takes no lock that another process would see, so the directory is claimed by one connector through a hidden `.sdh-owner` file, checked at startup and before every file (§9.5).
 - **Startup:** if a checkpoint records an in-progress file, that file is processed before anything else. It is matched by fingerprint, not name (size first, so only same-size files are hashed). If the file has disappeared, `FileProcessor.recoverWithoutSource()` finishes it if its archive is complete, or else raises `file.abandoned` and closes the checkpoint. The route is defined with `autoStartup(false)` and is started only after this recovery. The same check runs before every file, so a file left in progress by an earlier error is always finished first.
 - **Completion:** Camel's own move/delete options are switched off. The pipeline moves and deletes files itself, because a file is only finished once archiving has been committed.
-- **Finished-file records:** `completed/<fileId>.json` and `failed/<fileId>.json` contain no PHI: file ID, timestamps, section count, byte count, keyed file digest, and for failures the stage, offset and error code. The original filename never appears in either directory.
+- **Finished-file records:** `completed/<itemId>.json` and `failed/<itemId>.json` contain no PHI: file ID, timestamps, record count, byte count, keyed file digest, and for failures the stage, offset and error code. The original filename never appears in either directory.
 
 ### 5.1 File identity
 
 | Identifier | Definition | Purpose |
 |---|---|---|
-| `fileId` | UUIDv7, assigned at pickup and saved in the checkpoint | Correlates queue messages, telemetry and tables |
+| `itemId` | UUIDv7, assigned at pickup and saved in the checkpoint | Correlates queue messages, telemetry and tables |
 | fingerprint | size + `HMAC(idKey, "sdh-fingerprint" ‖ 0 ‖ first 1 MiB ‖ last 1 MiB)` | Recognises the same file after a restart without reading all of it |
-| `fileDigest` | `base32` of a chained HMAC-SHA-256 over fixed 64 MiB blocks, computed during archiving | Integrity value sent in `file.completed` |
+| `itemDigest` | `base32` of a chained HMAC-SHA-256 over fixed 64 MiB blocks, computed during archiving | Integrity value sent in `file.completed` |
 
-The digest is chained, `H_i = HMAC(idKey, "sdh-file-digest" ‖ 0 ‖ H_{i-1} ‖ block_i)` with `H_{-1}` = 32 zero bytes, so a restart only needs the last `H` value and the block number, both of which are saved in the archive checkpoint. An empty file is one empty block. The digest depends only on content, not on `fileId` or how the archive was committed.
+The digest is chained, `H_i = HMAC(idKey, "sdh-file-digest" ‖ 0 ‖ H_{i-1} ‖ block_i)` with `H_{-1}` = 32 zero bytes, so a restart only needs the last `H` value and the block number, both of which are saved in the archive checkpoint. An empty file is one empty block. The digest depends only on content, not on `itemId` or how the archive was committed.
 
 ### 5.2 Process lifecycle
 
@@ -388,7 +394,7 @@ Decided 2026-11-03. Steps 1 to 8 of §5.3.10 are built. Step 1: the landing tabl
 
 Ingestion becomes two stages:
 1. **Landing.** A landing node picks data up wherever it is, stores it exactly as received, encrypted, in landing tables, and sends an `item.landed` message saying where to find it. It lands anything; it never parses or judges content.
-2. **Splitting.** The connector as it is today (§4 onwards), but reading only from landing. It consumes `item.landed` messages, splits, converts and stores sections as now, and flags problems in the data. It no longer picks up files itself, and no longer archives originals: the landed copy is the archive.
+2. **Splitting.** The connector as it is today (§4 onwards), but reading only from landing. It consumes `item.landed` messages, splits, converts and stores records as now, and flags problems in the data. It no longer picks up files itself, and no longer archives originals: the landed copy is the archive.
 
 ```mermaid
 flowchart LR
@@ -400,8 +406,8 @@ flowchart LR
   L -->|item.landed| Q[Landing queue]
   Q --> S[Splitter<br/>one per intake]
   T -->|reads by chunk| S
-  S --> U[(sdh_ingest<br/>sections)]
-  S -->|section.stored, file.completed| D[Downstream queue]
+  S --> U[(sdh_ingest<br/>records)]
+  S -->|record.stored, file.completed| D[Downstream queue]
 ```
 
 **Decisions (2026-11-03):**
@@ -443,10 +449,10 @@ flowchart LR
 
 **Queues.**
 - Messages are landed in batches, so a stream of small messages doesn't become a stream of commits and `item.landed` messages. A batch closes at `batch.max-messages`, `batch.max-bytes` or `batch.max-wait`, whichever comes first (defaults 1,000, 64 MiB, 5 s).
-- A batch is one item. It keeps each message's offset, and the keyed hash of its broker message ID, in a record index, so the splitter can treat every message as its own unit, whatever the format.
+- A batch is one item. It keeps each message's offset, and the keyed hash of its broker message ID, in a message index, so the splitter can treat every message as its own unit, whatever the format.
 - Messages are acknowledged (or, for Kafka and Event Hubs, their offsets committed) only after the batch's commit. A crash before then means redelivery; redelivered messages already landed are recognised by message ID, if they come within `dedup-window` (1 hour) of the last landed batch, and acknowledged without landing them again.
 
-**Iceberg tables.** For each new snapshot that only adds data, each added data file becomes one item: its Parquet bytes, landed as they are. Data files never change, so the table UUID and file path identify them for good. A snapshot that deletes or overwrites rows can't be expressed as new items: it raises `intake.table_rewrite` and nothing is landed for it. A compaction (`replace`) only rewrites rows already landed and is passed over. Plain Parquet files in a bucket are bucket items. The splitter's `parquet` format splits either into one JSON section per row (§6.2).
+**Iceberg tables.** For each new snapshot that only adds data, each added data file becomes one item: its Parquet bytes, landed as they are. Data files never change, so the table UUID and file path identify them for good. A snapshot that deletes or overwrites rows can't be expressed as new items: it raises `intake.table_rewrite` and nothing is landed for it. A compaction (`replace`) only rewrites rows already landed and is passed over. Plain Parquet files in a bucket are bucket items. The splitter's `parquet` format splits either into one JSON record per row (§6.2).
 
 #### 5.3.2 Landing storage
 
@@ -454,17 +460,17 @@ Namespace `sdh_landing` (configurable), with its own catalog properties, so it c
 
 **`landed_items`** (`LandingTables`, written by `ItemLander`, read by `LandedItems`) is encrypted like `source_files` (§8.2): the item in 8 MiB chunks, one row per chunk, then a summary row (`chunk_index = -1`) written in the item's final commit. A summary row means the item is fully landed.
 - **Read as a stream,** because a push's size isn't known in advance. A chunk is known to be the last by reading one chunk ahead.
-- **Chunk rows** carry only `item_id`, `chunk_index`, `ciphertext`, `bdk_wrapped`, `kek_ref`, `batch_id` and `landed_at` (the partition). The chunk key is HKDF(BDK, itemId, seq 0) as for sections. The chunk count in the AAD is 0, because it isn't known when a chunk is written; the summary row's count and the digest catch a missing, extra or moved chunk instead.
+- **Chunk rows** carry only `item_id`, `chunk_index`, `ciphertext`, `bdk_wrapped`, `kek_ref`, `batch_id` and `landed_at` (the partition). The chunk key is HKDF(BDK, itemId, seq 0) as for records. The chunk count in the AAD is 0, because it isn't known when a chunk is written; the summary row's count and the digest catch a missing, extra or moved chunk instead.
 - **The summary row** holds `intake`, `kind` (`file`, `object`, `push`, `message-batch`, `table-file`), `item_size`, `chunk_count`, `chunk_size`, `item_digest` with `digest_block_size`, `started_at`, the source reference (`source_ref_hash`, `source_size`, `source_version`), the encrypted original name or path (`original_name_enc`, seq −1 as for archives), `replaces_item_id`, and `item_sha256`, the SHA-256 of the content (built in step 5; none for an item resumed after a restart, §5.3.15).
 - **`item_digest`** is the keyed chained digest of §5.1, with the same label and blocks, so a file's item digest equals the file digest the splitter reports for it. Tested.
 - **Size check:** when the source gave a size, the bytes read must match it exactly, or the landing stops with `ItemChangedException` and nothing is finished.
-- **Record index** (step 6a): a message batch's summary row also has `record_offsets` (where each message starts) and `record_keys` (the keyed hash of each message's broker ID, null for a message without one). `LandedItems.records` reads them, and `LandedItems.recordKeys` the keys landed since a time.
-- **The producer's references** (step 8, §5.3.8): the producer's own reference is `original_name_enc` (a file's path, a push's `X-Correlation-Id`); a message batch's broker message IDs are `record_refs_enc`, a JSON array in message order (null for a message without one), encrypted like the original name but at seq −2, read by `LandedItems.messageRefs`; the earlier message each replaces is `record_replaces_enc`, a JSON array the same way at seq −3, set only if one does, read by `LandedItems.messageReplaces`. `replaces_item_id` is set from a push's `Replaces` header, a `.sdh-replaces` marker or a table append's `sdh.replaces`. `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
+- **Record index** (step 6a): a message batch's summary row also has `message_offsets` (where each message starts) and `message_keys` (the keyed hash of each message's broker ID, null for a message without one). `LandedItems.messageIndex` reads them, and `LandedItems.messageKeys` the keys landed since a time.
+- **The producer's references** (step 8, §5.3.8): the producer's own reference is `original_name_enc` (a file's path, a push's `X-Correlation-Id`); a message batch's broker message IDs are `message_refs_enc`, a JSON array in message order (null for a message without one), encrypted like the original name but at seq −2, read by `LandedItems.messageRefs`; the earlier message each replaces is `message_replaces_enc`, a JSON array the same way at seq −3, set only if one does, read by `LandedItems.messageReplaces`. `replaces_item_id` is set from a push's `Replaces` header, a `.sdh-replaces` marker or a table append's `sdh.replaces`. `IngestTables.create` adds optional columns to existing tables, so adding them later is safe.
 
 Chunks committed without a summary row belong to an item that wasn't finished (a push that broke off, an item that changed while being read). Nothing reads them. For now they are removed only by retention, with the rest of their day (§5.3.13); removing them sooner needs their files rewritten, and isn't built.
 
 **`landing_ledger`** records what has been landed, with no PHI: hashes, sizes and times only.
-- **Key:** `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ path or key)`, plus size and modification time (or version ID or ETag; for a queue, one entry per batch, keyed by its item ID, with the message IDs' hashes in the record index), and the item's content digest.
+- **Key:** `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ path or key)`, plus size and modification time (or version ID or ETag; for a queue, one entry per batch, keyed by its item ID, with the message IDs' hashes in the message index), and the item's content digest.
 - **Size and SHA-256:** each entry also has `item_size` and `item_sha256` (step 5), so a push's receipt can be given again from the ledger alone.
 - **Kept longer than the data.** Retention purges `landed_items`, but a file that stays on a read-only source would then be landed again. The ledger has its own retention, by default forever.
 - **Written straight after the item's commit.** Iceberg has no multi-table commit (§8.2), so a crash in between leaves the last item without a ledger row. Items are landed one at a time, so only the last can be missing: at startup `LandingLedger.repair` adds it from the done checkpoint. An item is never landed twice for that reason. Tested.
@@ -514,9 +520,9 @@ Each reason is reported once, until the source is reachable again or the reason 
 
 #### 5.3.6 Signalling the splitter, and what changes in it
 
-**`item.landed`** (`ConnectorMessage.ItemLanded`, built) goes on the intake's landing queue, read only by its splitter, never by downstream consumers. It is sealed like every other message (§10.1). Payload: the item ID (in `fileId`), intake, kind, size, item digest, `landedAt`, and the storage reference (catalog, namespace, table, the day of the summary row, a snapshot that holds the item, KEK ref). Message ID `il-<itemId>`. `replaces_item_id` will be added as an optional field when its step needs it. The record index isn't in the message: the splitter reads it from the summary row (§5.3.16).
+**`item.landed`** (`ConnectorMessage.ItemLanded`, built) goes on the intake's landing queue, read only by its splitter, never by downstream consumers. It is sealed like every other message (§10.1). Payload: the item ID (in `itemId`), intake, kind, size, item digest, `landedAt`, and the storage reference (catalog, namespace, table, the day of the summary row, a snapshot that holds the item, KEK ref). Message ID `il-<itemId>`. `replaces_item_id` will be added as an optional field when its step needs it. The message index isn't in the message: the splitter reads it from the summary row (§5.3.16).
 
-**The item ID is the file ID.** The splitter processes an item under its item ID, so every section, `section.stored` and `file.completed` from it carries the item ID as its `fileId`, and downstream can go from any section back to the landed original with no extra field.
+**The item ID is the file ID.** The splitter processes an item under its item ID, so every record, `record.stored` and `file.completed` from it carries the item ID as its `itemId`, and downstream can go from any record back to the landed original with no extra field.
 
 **The splitter:**
 - records each `item.landed` in a durable inbox table and acknowledges the message once that commit is done, then splits the inbox's items one at a time, in order (decided 2026-11-03 over holding the message until the item is finished, which would tie a long split to the broker's redelivery timeout);
@@ -547,14 +553,14 @@ When the splitter flags a problem, the producer has to find it in their own data
 
 **`item.received`** (`Announcer`, landing node) carries the item ID, intake, kind, size, SHA-256 of the content as received, `landedAt`, the producer's reference, the item it replaces, and for a message batch the broker message IDs, in order, and the earlier message each replaces, if any does. With the SHA-256 the producer can find the exact file or message on their side. It is sent after `item.landed`, in the same retry and recovery path: if the results broker is down, landing waits, and the receipt is sent again after a restart (the last landed item is announced again, §5.3.11). Message ID `rc-<itemId>`.
 
-**`item.result`** (`ResultReporter`, splitter) carries the item ID, intake, `status` (`completed` or `failed`), the section and failed-section counts, the failure for a failed item (code, stage, byte offset), the problem count, and the problems: one per section that failed conversion, with its error code, stage `convert`, section number, byte offset, line and column (§6.1, §6.4), and for a message batch the message's index, broker ID and the earlier message it replaces. It also repeats the producer's reference and the item it replaces, and `finishedAt`. It is sent after the item is finished and before the inbox moves past it (§5.3.12), so a crash means it is sent again. Message IDs `rs-<itemId>-<part>`.
+**`item.result`** (`ResultReporter`, splitter) carries the item ID, intake, `status` (`completed` or `failed`), the record and failed-record counts, the failure for a failed item (code, stage, byte offset), the problem count, and the problems: one per record that failed conversion, with its error code, stage `convert`, record number, byte offset, line and column (§6.1, §6.4), and for a message batch the message's index, broker ID and the earlier message it replaces. It also repeats the producer's reference and the item it replaces, and `finishedAt`. It is sent after the item is finished and before the inbox moves past it (§5.3.12), so a crash means it is sent again. Message IDs `rs-<itemId>-<part>`.
 - **Parts:** problems are sent in parts of at most 1,000, and at most 96 KiB of them, so a sealed part stays under 256 KB (SQS and Service Bus) even with long broker IDs. Every part carries the totals and `part` and `partCount`, so any one of them says how the item ended.
-- **Which message:** the last message of the batch that starts at or before the problem's byte offset, from the record index (§5.3.16).
+- **Which message:** the last message of the batch that starts at or before the problem's byte offset, from the message index (§5.3.16).
 
 **The producer's reference:**
 - **Files and objects:** the path or key, as listed.
 - **Push:** the `X-Correlation-Id` header, 1 to 255 visible ASCII characters (`400` otherwise).
-- **Queues:** the broker message IDs, in `record_refs_enc`.
+- **Queues:** the broker message IDs, in `message_refs_enc`.
 - **Tables:** none.
 
 It is stored encrypted (§5.3.2), because a path can hold PHI, and only ever leaves the node sealed to the producer.
@@ -562,7 +568,7 @@ It is stored encrypted (§5.3.2), because a path can hold PHI, and only ever lea
 **Naming the item replaced:**
 - **Push:** a `Replaces: <itemId>` header. A malformed ID is `400`; an item this intake never landed is `400` with `{"error":"unknown-replaces"}` and `push.unknown_replaces`, and nothing is landed, so the producer can correct it and resend.
 - **Directory, SFTP, SMB and buckets:** a marker file `<name>.sdh-replaces` beside the item, holding the earlier item's ID. It is never landed itself, and must be in place before the item is ready. A marker that is malformed, too long (over 256 bytes) or names an item this intake never landed is ignored with `item.replaces_ignored` (`reason` `MALFORMED` or `UNKNOWN`), and the item is landed without the link: a file can't be refused back to its producer. A marker written after its item landed is ignored. On a read-write intake the marker is deleted after the item is landed, whatever `after` does to the item.
-- **Queues:** a message names the earlier message it replaces in an `sdh_replaces` header, attribute or property, as `<itemId>/<messageId>`: the item the earlier message landed in, as `item.received` gave it, and that message's broker ID (§5.3.16). Where it goes: a Kafka record header (UTF-8), an SQS message attribute (the node asks for it, §5.3.16), a RabbitMQ header, a Pub/Sub attribute, a Service Bus application property, an Event Hubs event property, or an Artemis JMS string property. The name has an underscore, not a hyphen, because a JMS property name can't hold one. The link is kept per message, encrypted in `record_replaces_enc` on the summary row (§5.3.2), since a broker ID can hold PHI. One whose item this intake never landed (`UNKNOWN`), or that isn't an item ID, a `/` and 1 to 255 visible ASCII characters (`MALFORMED`), is ignored with `item.replaces_ignored`, and the message is landed without it. The message ID isn't checked against the earlier item: it is the producer's word, passed on. Decided 2026-11-04 with the user: per message, item and message, since a batch is the node's grouping, not the producer's.
+- **Queues:** a message names the earlier message it replaces in an `sdh_replaces` header, attribute or property, as `<itemId>/<messageId>`: the item the earlier message landed in, as `item.received` gave it, and that message's broker ID (§5.3.16). Where it goes: a Kafka record header (UTF-8), an SQS message attribute (the node asks for it, §5.3.16), a RabbitMQ header, a Pub/Sub attribute, a Service Bus application property, an Event Hubs event property, or an Artemis JMS string property. The name has an underscore, not a hyphen, because a JMS property name can't hold one. The link is kept per message, encrypted in `message_replaces_enc` on the summary row (§5.3.2), since a broker ID can hold PHI. One whose item this intake never landed (`UNKNOWN`), or that isn't an item ID, a `/` and 1 to 255 visible ASCII characters (`MALFORMED`), is ignored with `item.replaces_ignored`, and the message is landed without it. The message ID isn't checked against the earlier item: it is the producer's word, passed on. Decided 2026-11-04 with the user: per message, item and message, since a batch is the node's grouping, not the producer's.
 - **Tables:** an `append` snapshot's summary property `sdh.replaces`, holding the earlier item's ID, names it for every data file the append added (§5.3.18). It is checked as a marker is. A backfill names none: the files of the snapshot it lands were added by many snapshots. Decided 2026-11-04 with the user.
 
 **Configuration** (`sdh.results`, both nodes): `enabled` (false), `queue` (`type`, `uri`, and `artemis` for an Artemis queue, which shares the node's JMS connection when `sdh.queue` is also Artemis on the same broker; a different broker is refused), and `recipient` (`kid`, `pem`, `sha256`). The landing node and the splitter of an intake use the same results queue and producer key.
@@ -579,7 +585,7 @@ It is stored encrypted (§5.3.2), because a path can hold PHI, and only ever lea
 - `PushMtlsApplicationTest`: receipts through the whole node; `PushWebConfigurationTest`: one sender.
 - `ResultReporterTest`: parts by count and bytes, each sealed part under 256 KB, problems placed in their messages, a failed item.
 - `FileConnectorApplicationTest`: results for two completed items and a failed one through the whole splitter, with the producer's references.
-- `IngestPipelineTest`: the failed sections, with their places.
+- `IngestPipelineTest`: the failed records, with their places.
 
 #### 5.3.9 Configuration
 
@@ -638,7 +644,7 @@ sdh:
 3. **The splitter reads from landing.** 3a (built, §5.3.12): an `item.landed` consumer and inbox, a chunk-backed source, archiving and the fallback removed, `restore` reading landing. 3b (built, revision (at)): an image for the landing node, the build and Kubernetes scripts, and the `-Pit` suite, the Kubernetes run (§15.2) and the demo rewritten for two stages, with failover of both stages.
 4. **SFTP and SMB (built),** with the failure cases of §5.3.4 tested against containers that are cut off, stalled, restarted and given wrong keys (§5.3.14). Left for later: Kerberos for SMB, and the planned events of §5.3.4. The intake metrics of §5.3.4 came later (revision (bc)), and claims on remote sources later still (revision (bf)).
 5. **HTTP push (built),** with OAuth2 and mTLS (§5.3.15). Correlation IDs came in step 8. Left for later: the status endpoint of §5.3.8, and an HTTP readiness probe.
-6. **Queue intakes (built, §5.3.16),** batched. 6a: Kafka, SQS, RabbitMQ and Artemis, the record index, and the splitter splitting a batch message by message. 6b: Pub/Sub, Service Bus and Event Hubs. Queue metrics and broker health came later (revisions (bc) and (bd)).
+6. **Queue intakes (built, §5.3.16),** batched. 6a: Kafka, SQS, RabbitMQ and Artemis, the message index, and the splitter splitting a batch message by message. 6b: Pub/Sub, Service Bus and Event Hubs. Queue metrics and broker health came later (revisions (bc) and (bd)).
 7. **Buckets and Iceberg tables.** 7a, buckets (built, §5.3.17): S3 and S3-compatible stores, Azure Blob and GCS, tested against SeaweedFS, Azurite and fake-gcs-server. Left for later: event notifications in place of listing, and conditional deletes on S3. 7b, Iceberg tables (built, §5.3.18), with the splitter's `parquet` format. Left for later: landing files that have row-level deletes, and rows from an overwrite.
 8. **Producer feedback (built, §5.3.8):** receipts and results on a results queue per intake, the producer's references, and links to the item replaced. Left for later: a status endpoint. Naming the item replaced for queues and tables came later (revision (be)).
 
@@ -717,28 +723,28 @@ flowchart LR
   I -->|next by seq| W[InboxWorker<br/>one item at a time]
   T[(sdh_landing.landed_items)] -->|LandedItemSource, by chunk| W
   W --> P[ItemProcessor → IngestPipeline]
-  P --> U[(sdh_ingest.sections)]
-  P -->|file.started, section.stored, file.completed| D[Downstream queue]
+  P --> U[(sdh_ingest.records)]
+  P -->|file.started, record.stored, file.completed| D[Downstream queue]
 ```
 
 **Inbox** (`connector-core` `inbox/`):
-- The `inbox` table sits in the splitter's namespace, beside `sections`, and is fenced with the same lease. It has one row per item: `seq` (from 1), `item_id`, `intake`, `kind`, `item_size`, `item_digest`, `landed_at`, `received_at`. There is no PHI.
+- The `inbox` table sits in the splitter's namespace, beside `records`, and is fenced with the same lease. It has one row per item: `seq` (from 1), `item_id`, `intake`, `kind`, `item_size`, `item_digest`, `landed_at`, `received_at`. There is no PHI.
 - **Receiving:** each message is opened with the splitter's own private key and verified against the landing node's public key. It must be `item.landed`, for the configured intake, and point at the configured landing catalog, namespace and `landed_items`. A message that fails a check is audited as `inbox.rejected` (`MESSAGE_REJECTED`, with a PHI-free reason) and dropped: delivering it again won't change it. The exception is a contract major version the splitter can't read (§10.2): that message is audited as `inbox.unreadable_version` and not acknowledged, so it is delivered again, with the route's growing pause, until the splitter is upgraded (`UnreadableVersionException`). The messages behind it wait; nothing is dropped, and the splitter keeps splitting what is already in its inbox.
 - **Recording:** one commit per message, then the message is acknowledged. A repeat (the same item ID, found in an in-memory set loaded at startup) is acknowledged without a new row. If the commit fails after its retries, the route tries again in place with a growing pause, and doesn't take the next message until it succeeds.
 - **Position:** a MAC'd table property `sdh.inbox.<connectorId>` holds the last finished `seq`. It is moved after each item is `COMPLETED` or `FAILED`. A tampered value stops startup.
 - **Consumer URI:** `sdh.landing.queue-uri` is a Camel endpoint URI, used as it is. It must acknowledge a message only once the route has handled it, never on receipt. For Kafka: `groupId=<splitter>&autoOffsetReset=earliest&maxPollRecords=1&breakOnFirstError=true`, with automatic commits (the default). The route handles each record before the next poll, and the client's automatic commit, made at a poll, covers only records returned by earlier polls, so it never covers one not yet handled. One record per poll keeps that true at shutdown too, when the client commits the position of everything it has returned. `breakOnFirstError` makes a failed record be fetched again rather than skipped, and `earliest` makes a new group start at the first message. Turning automatic commits off (`autoCommitEnable=false`) without committing in the route would commit nothing. A repeat after a crash is harmless: the inbox recognises it.
 
 **Worker** (`InboxWorker`): a single thread takes the next item after the position, waiting up to `sdh.landing.idle-wait` for one to arrive.
-- If the checkpoint holds a different item in progress (a file from before landing, or the last item of an inbox that was replaced), it is marked `ABANDONED` first. Sections already stored stay.
+- If the checkpoint holds a different item in progress (a file from before landing, or the last item of an inbox that was replaced), it is marked `ABANDONED` first. Records already stored stay.
 - The item is processed under its item ID (`ItemProcessor`): a new one is split; one in progress resumes from its checkpoint; one already finished is skipped without being read.
 - Only a problem with the item itself fails it: a split or limit error, too many restarts without progress (§9.2), or landed chunks that are missing or altered (`SOURCE_READ_FAILED`, stage `landing`). Anything else (storage, the broker or the KMS down) is retried from the checkpoint with a growing pause, up to 5 minutes, because the item is safe in landing. Lease loss, `CommitStateUnknownException`, a tampered checkpoint and broken invariants stop the process, as before.
-- The writer lock is held while an item is processed, so maintenance (now on `sections` and `inbox`) runs only between items. The inbox has no retention: its rows are how repeats are recognised.
+- The writer lock is held while an item is processed, so maintenance (now on `records` and `inbox`) runs only between items. The inbox has no retention: its rows are how repeats are recognised.
 
 **Reading items** (`LandedItemSource`): it implements `SeekableByteSource`, so the splitters work unchanged. Chunks are read four at a time and the last two windows are kept decrypted. Each chunk's GCM tag binds it to the item and its index, so a chunk that is missing, moved or altered is refused. The digest isn't worked out again here, because splitting needn't read in order; `file.completed` carries the digest recorded at landing, and `restore` checks it. `landed_items` is loaded when the first item needs it, never created by the splitter, and refreshed as each item is opened.
 
-**Checkpoint states:** `ARCHIVING` keeps its name but now means "split, finishing": `file.completed` is published, then `COMPLETED` committed. `FAILING` → `FAILED` announces any unannounced sections, as before (§11.2).
+**Checkpoint states:** `ARCHIVING` keeps its name but now means "split, finishing": `file.completed` is published, then `COMPLETED` committed. `FAILING` → `FAILED` announces any unannounced records, as before (§11.2).
 
-**Keys** (`sdh.crypto.keys`): `sections-kek` (wrap and unwrap, probed at startup), `landed-items-kek` (unwrap only, not probed; reading the landing ID key checks it), `inbox` (the splitter's own EC private key: an encrypted PEM for now, a KMS later) and `landing-signer` (the landing node's public key). The landing node's `recipient` is the splitter's inbox public key. `source-files-kek`, `failed-files-kek` and `recovery-public` are gone.
+**Keys** (`sdh.crypto.keys`): `records-kek` (wrap and unwrap, probed at startup), `landed-items-kek` (unwrap only, not probed; reading the landing ID key checks it), `inbox` (the splitter's own EC private key: an encrypted PEM for now, a KMS later) and `landing-signer` (the landing node's public key). The landing node's `recipient` is the splitter's inbox public key. `source-files-kek`, `failed-files-kek` and `recovery-public` are gone.
 
 **Reconciling** (`InboxReconciler`, built in revision (bl)): the landing node sends the last item's message again after a restart, which covers a crash between landing and announcing. It doesn't cover a broker that accepted a message and then lost it (a purged queue, a lost broker node, a retention limit passed while the splitter was down). So the worker, at startup and then every `interval`, between items, looks in `landed_items` for the intake's fully landed items (those with a summary row) landed more than `grace` ago and not in the inbox, and adds them in the order they were landed, each with an `inbox.recovered` warning (reason `MESSAGE_MISSING`). The first run looks at every landed item; later runs at those landed since the previous cutoff, less the grace again, in case the two nodes' clocks differ. A recovered item is split after those already in the inbox; if its message turns up later, it is a repeat. If a run fails, splitting carries on and the next run tries again from the same point. A new splitter against existing landing data therefore splits everything already landed for its intake.
 
@@ -750,7 +756,7 @@ flowchart LR
 
 #### 5.3.13 Landing maintenance and retention (built)
 
-The landing node runs the maintenance of §8.4 on `landed_items` and `landing_ledger`, through the shared `MaintenanceScheduler` (`connector-runtime` `maintenance/`). The splitter uses the same scheduler on `sections` and `inbox`.
+The landing node runs the maintenance of §8.4 on `landed_items` and `landing_ledger`, through the shared `MaintenanceScheduler` (`connector-runtime` `maintenance/`). The splitter uses the same scheduler on `records` and `inbox`.
 
 - **Between items:** `IntakeService` holds its writer lock while it recovers, while it handles each listed item and at the end of each listing, so a tick runs only between items. A busy tick is skipped.
 - **Errors,** fencing and the steps of each run are as §8.4: lease loss, an unknown commit outcome and a tampered checkpoint stop the process (status 70).
@@ -771,7 +777,7 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 - Maintenance must be on (`sdh.maintenance.enabled`, the default) for items given up to be removed.
 - Found while testing: Iceberg's filtered reads (1.12.0) can miss rows in a Parquet file holding UUIDs on both sides of the sign bit. Item IDs are UUIDv7, all starting `01` for millennia, so landing never meets it; tests use UUIDv7 IDs.
 
-**Settings:** as §14's `sdh.maintenance`, with `retention.landed-items` in place of `retention.sections`, and `retention.given-up` (above).
+**Settings:** as §14's `sdh.maintenance`, with `retention.landed-items` in place of `retention.records`, and `retention.given-up` (above).
 
 **Tests:** `LandingRetentionTest` lands an item a minute before midnight in 40-second batches. Retention keeps all of it and reads it back whole, and purges an older item completely. Without the guard, the same purge takes the item's first day. A checkpoint of an unfinished item keeps rows from its start. `MaintenanceSchedulerTest` checks the minimum. `LandingConnectorApplicationTest` runs a pass over both tables with retention set. `GivenUpItemsTest`: an item given up is recorded as its checkpoint is cleared, kept through the grace period, then removed with its files, which leave storage in the same run; a file shared with a landed item after compaction is rewritten without its rows; a landed item named in the record is never removed; a tampered record, or one copied from another intake, is refused.
 
@@ -889,7 +895,7 @@ After a purge, recovery still works: the last landed item is rebuilt from the ch
 
 Artemis is the exception: both of Camel's JMS components acknowledge a message as soon as their listener returns, before it could be landed. `camel-jms` runs on Spring's listener container, which (in Spring 7) treats any acknowledge mode but auto, transacted and dups-ok as client acknowledge, and acknowledges when the listener returns; `camel-sjms` does the same, and has no other mode. Holding the exchange open doesn't help with either. The plain JMS client does what is needed.
 
-**Batches** (`HeldBatches` for the Camel consumers but Kafka, the Kafka processor in `QueueIntakeRoute`, `ArtemisIntakeRoute`):
+**Batches** (in `connector-broker`: `HeldBatches` for the Camel consumers but Kafka, the Kafka processor in `CamelReceiveRoute`, `ArtemisReceiveRoute`; each hands a closed batch to a `BatchHandler`, here `BatchService`):
 - A batch closes at `max-messages` (1,000), `max-bytes` (64 MB) or `max-wait` (5 s) after its first message, whichever comes first. A single message larger than `max-bytes` is a batch of its own. Artemis learns a message's size only once it has received it, so its batches can pass `max-bytes` by one message.
 - Batches are landed one at a time. While one is landed, a consumer offering more than another batch's worth is held back.
 - **A batch that can't be landed** (storage or the landing queue down) is tried again in place, with the backoff of `sdh.retry`, keeping its messages; the consumer is held back meanwhile. Decided 2026-11-04 (step 6b), replacing handing the batch back: each redelivery raises a message's delivery count, and Service Bus and Artemis (10 by default), RabbitMQ 4 quorum queues (20) and Pub/Sub and SQS with a dead-letter policy move a message aside at their limit, so a long outage would have dead-lettered messages. Event Hubs and Kafka need it anyway: a checkpoint or offset can't go back for one batch. A Kafka consumer held longer than `max.poll.interval.ms` (5 min) leaves its group and its commit fails; the poll is delivered again and recognised by ID. A held Service Bus message keeps its lock for `maxAutoLockRenewDuration`; after that it comes again, and is recognised too.
@@ -897,30 +903,30 @@ Artemis is the exception: both of Camel's JMS components acknowledge a message a
 - **A fatal error** (§5.3.11) stops the node: nothing more is landed, settled or handed back, and the consumer is held back until the node stops, rather than taking and handing back messages until it exits.
 
 **Landing a batch** (`BatchService`, under the writer lock that maintenance also takes):
-- The batch is one item of kind `message-batch`: the message bodies one after another, with the record index (§5.3.2) on its summary row. A batch can't resume: a batch that fails part-way has its checkpoint cleared (`item.abandoned`), and its messages come again.
-- **One ledger entry per batch,** keyed by `"batch" ‖ 0 ‖ itemId`. A message's ID isn't stored: only its keyed hash, `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ "message" ‖ 0 ‖ messageId)`, in the record index.
-- **Duplicates.** A message whose ID is already in the batch, or was landed within `dedup-window` (1 hour) of the last landed batch, is skipped. The window is measured from the last batch, not from the clock, so a node that was down for a day still recognises what it landed just before. At startup the keys are read back from the summary rows landed in the window before the last batch (`LandedItems.recordKeys`), and are then held in memory, dropping those that fall out of the window. A batch of nothing but duplicates is acknowledged and lands nothing (`batch.skipped`). A redelivery later than the window is landed again.
+- The batch is one item of kind `message-batch`: the message bodies one after another, with the message index (§5.3.2) on its summary row. A batch can't resume: a batch that fails part-way has its checkpoint cleared (`item.abandoned`), and its messages come again.
+- **One ledger entry per batch,** keyed by `"batch" ‖ 0 ‖ itemId`. A message's ID isn't stored: only its keyed hash, `HMAC(idKey, "sdh-source-ref" ‖ 0 ‖ intake ‖ "message" ‖ 0 ‖ messageId)`, in the message index.
+- **Duplicates.** A message whose ID is already in the batch, or was landed within `dedup-window` (1 hour) of the last landed batch, is skipped. The window is measured from the last batch, not from the clock, so a node that was down for a day still recognises what it landed just before. At startup the keys are read back from the summary rows landed in the window before the last batch (`LandedItems.messageKeys`), and are then held in memory, dropping those that fall out of the window. A batch of nothing but duplicates is acknowledged and lands nothing (`batch.skipped`). A redelivery later than the window is landed again.
 - **Message IDs:** Kafka, `topic/partition/offset`; SQS and Pub/Sub, the message ID; Service Bus, the sequence number (a producer's `messageId` is optional); Event Hubs, `partition/sequenceNumber`; RabbitMQ, the producer's `message_id`, if set (without one, a message can't be recognised, and is landed again if it comes again); Artemis, `JMSMessageID`. All stay the same when a message is delivered again.
 - **After the commit,** the ledger entry and `item.landed` are written. If either fails, the batch is still acknowledged (it is committed), and they are finished before the next batch lands (`batch.finish_deferred` in the log), so no item is announced behind a newer one. Startup repairs the ledger, clears an unfinished batch and announces the last landed item again, as for the other intakes.
 - **Artemis message types:** text is landed as UTF-8, bytes as they are. Other types have no byte form: they are landed empty and reported (`message.unsupported_type`); object messages are never deserialised.
 - **Broker outages:** Camel's consumers reconnect on their own, except Pub/Sub's on an error it can't retry; how each is watched is under **Broker health** below. The Artemis route reports a lost or refused connection once, as `intake.unreachable` (`NETWORK` or `AUTH`), drops it, which returns any unacknowledged messages, and reconnects with backoff, then reports `intake.reachable`.
 
-**Splitting a batch** (in `connector-core`). `LandedItemSource` carries the record index, and `IngestPipeline` opens such an item with `SplitterRegistry.openRecords`: a `RecordSession` runs the format's splitter over each message on its own, with offsets, resume points and line numbers moved to the message's place in the item. Empty messages are skipped. A message the splitter can't parse, or that holds a section over the size limit, becomes one failed section from that point to the message's end (`Section.Failure`, with the error code and its offset), stored raw and announced with `section.failed`; the rest of the batch is split as usual and the item completes. So one bad message fails only itself.
+**Splitting a batch** (in `connector-core`). `LandedItemSource` carries the message index, and `IngestPipeline` opens such an item with `SplitterRegistry.openMessages`: a `MessageSession` runs the format's splitter over each message on its own, with offsets, resume points and line numbers moved to the message's place in the item. Empty messages are skipped. A message the splitter can't parse, or that holds a record over the size limit, becomes one failed record from that point to the message's end (`SplitRecord.Failure`, with the error code and its offset), stored raw and announced with `record.failed`; the rest of the batch is split as usual and the item completes. So one bad message fails only itself.
 
-**Broker health** (`BrokerWatch`; decided 2026-11-04 with the user, after a spike). Each queue intake reports `intake.unreachable` once per reason, `intake.reachable` when its broker is back, and the gauges of §5.3.4. The spike cut each Camel consumer's broker off, stalled it, and broke it each broker's own way, through Toxiproxy: every consumer came back on its own, but Camel's health checks said UP throughout, and only SQS told Camel's exception handler. So each broker is watched its own way, preferring a Camel or Spring hook, and otherwise checking through the broker's own client (a fallback, agreed with the user), made from the consumer endpoint's own settings and credentials. No check receives, locks or settles a message.
+**Broker health** (`BrokerWatch` in `connector-broker`, telling the intake's `IntakeHealth` through `BrokerHealth`; decided 2026-11-04 with the user, after a spike). Each queue intake reports `intake.unreachable` once per reason, `intake.reachable` when its broker is back, and the gauges of §5.3.4. The spike cut each Camel consumer's broker off, stalled it, and broke it each broker's own way, through Toxiproxy: every consumer came back on its own, but Camel's health checks said UP throughout, and only SQS told Camel's exception handler. So each broker is watched its own way, preferring a Camel or Spring hook, and otherwise checking through the broker's own client (a fallback, agreed with the user), made from the consumer endpoint's own settings and credentials. No check receives, locks or settles a message.
 
 | Broker | Outage seen by | Back seen by | Reasons |
 |---|---|---|---|
 | SQS | a poll strategy (`pollStrategy=#sdhIntakePolls`): each failed poll | each completed poll, even an empty one | `AUTH`, `PERMISSION`, `NOT_FOUND`, `NETWORK`; a stalled poll reports nothing, so shows only as a growing `last_poll_age` |
 | RabbitMQ | a Spring AMQP connection listener on the node's factory: each failed connection, or one the broker dropped; and a passive declare of each queue, every `check-interval` | each new connection, and the queues found | `AUTH` (a refused login), `NOT_FOUND` (a deleted queue, which the consumer takes up again once it is back), `NETWORK` |
 | Kafka | `describeTopics` (or `listTopics` for a pattern) with Kafka's admin client, every `check-interval`; it needs only the Describe permission the consumer has | the topics described | `AUTH`, `PERMISSION`, `NOT_FOUND`, `NETWORK` |
-| Pub/Sub | the subscription looked up with the component's own admin client, every `check-interval`; and each subscriber watched (`WatchedPubsubComponent`), since Camel's consumer gives up for good on an error it can't retry, while its route still says it has started | the subscription found; a consumer that gave up is restarted then (`intake.consumer_restarted`) | `AUTH`, `PERMISSION`, `NOT_FOUND`, `NETWORK`. The account needs `pubsub.subscriptions.get`, which `roles/pubsub.subscriber` lacks; without it every check reports `PERMISSION` |
+| Pub/Sub | the subscription looked up with the component's own admin client, every `check-interval`; and each subscriber watched (`WatchedPubsubComponent`), since Camel's consumer gives up for good on an error it can't retry, while its route still says it has started | the subscription found; a consumer that gave up is restarted then (`broker.consumer_restarted`) | `AUTH`, `PERMISSION`, `NOT_FOUND`, `NETWORK`. The account needs `pubsub.subscriptions.get`, which `roles/pubsub.subscriber` lacks; without it every check reports `PERMISSION` |
 | Service Bus | a peek from the last possible sequence number, by a receiver made as Camel makes the consumer's, every `check-interval`: it needs only Listen, and takes, locks and reads no message | the peek answered | `AUTH`, `NOT_FOUND`, `NETWORK` |
 | Event Hubs | the hub's properties, by a consumer client made as Camel makes the consumer's, and the checkpoint container's existence, every `check-interval` | both answered | `AUTH`, `PERMISSION`, `NOT_FOUND` (the hub or the container), `NETWORK` |
 
 A check waits up to 20 s; the next starts `check-interval` after it ends. The Pub/Sub component replaces Camel's, and takes the same `camel.component.google-pubsub.*` settings. Restarting the route hands back held messages, which come again and are recognised by their IDs (§5.3.16), so nothing is lost or landed twice.
 
-**Settings** (`sdh.landing.broker`, checked by `BrokerSettings`):
+**Settings** (`sdh.landing.broker`, checked by `ReceiveSettings` in `connector-broker`, which names them by this prefix in its errors; `BrokerSettings` adds `dedup-window` and the `sdh_replaces` attribute):
 - `type`: `kafka`, `sqs`, `rabbitmq`, `artemis`, `pubsub`, `servicebus` or `eventhubs`.
 - `uri`: the Camel consumer URI, for all but Artemis. It must use the broker's component. The options above are added, and one set to anything else is refused, since it could acknowledge a message before it is landed. Also added if absent: Kafka `maxPollRecords` and `batchingIntervalMs` from the batch limits, `valueDeserializer` for bytes, and `autoOffsetReset=earliest`; SQS `visibilityTimeout=60`, `maxMessagesPerPoll=10`, `waitTimeSeconds=20`, and `sdh_replaces` in `messageAttributeNames` (added to any names given, unless they are `All`; §5.3.8) (and `pollStrategy=#sdhIntakePolls` is required); RabbitMQ `autoDeclare=false`, `prefetchCount` from `max-messages`, and the node's own connection factory. Kafka needs a `groupId`, and RabbitMQ `queues`. An option holding a password, key, secret, token or JAAS configuration must be a `{{...}}` placeholder; a value is refused. The URI is rebuilt without encoding, so placeholders reach Camel intact.
 - `batch.max-messages`, `batch.max-bytes`, `batch.max-wait`, `dedup-window` (1h), and `check-interval` (30s), how often a broker is checked (above).
@@ -937,14 +943,14 @@ A check waits up to 20 s; the next starts `check-interval` after it ends. The Pu
 **Not built:** detecting a stalled SQS poll other than by `last_poll_age`.
 
 **Tests:**
-- `BatchServiceTest`: a batch landed as one item with its record index and content; duplicates within a batch, across batches and after a restart; keys forgotten outside the window; a landing queue outage; an unfinished batch cleared at startup; a fatal error; links to replaced messages kept, and malformed or unknown ones ignored.
-- `HeldBatchesTest`: batches closed by count, bytes and time; a failed batch tried again in place; everything held after a fatal error until the stop; held exchanges released on stop; a broker that settles later (Pub/Sub).
-- `BrokerSettingsTest`: the options added for each broker; options that would acknowledge early, secrets written in the URI, Event Hubs `blob*` options, and missing settings, refused; placeholders and bean references kept.
-- `RecordSessionTest`, `ItemLanderTest` and `ItemProcessorTest` (`connector-core`): splitting by message, a resume inside a message, the record index stored and read, and a batch in which one message fails alone.
+- `BatchServiceTest`: a batch landed as one item with its message index and content; duplicates within a batch, across batches and after a restart; keys forgotten outside the window; a landing queue outage; an unfinished batch cleared at startup; a fatal error; links to replaced messages kept, and malformed or unknown ones ignored.
+- `HeldBatchesTest` (`connector-broker`): batches closed by count, bytes and time; a failed batch tried again in place; everything held after a fatal error until the stop; held exchanges released on stop; a broker that settles later (Pub/Sub).
+- `ReceiveSettingsTest` (`connector-broker`): the options added for each broker; settings named by their prefix in errors; options that would acknowledge early, secrets written in the URI, Event Hubs `blob*` options, and missing settings, refused; placeholders and bean references kept. `BrokerSettingsTest`: the `sdh_replaces` attribute added, the landing prefix in errors, and a negative `dedup-window` refused.
+- `MessageSessionTest`, `ItemLanderTest` and `ItemProcessorTest` (`connector-core`): splitting by message, a resume inside a message, the message index stored and read, and a batch in which one message fails alone.
 - `QueueIntakeIT` (`-Pit`; Kafka, ElasticMQ for SQS, RabbitMQ, Artemis, and the Pub/Sub, Service Bus (with SQL Server) and Event Hubs (with Azurite) emulators): a node lands a batch and crashes before acknowledging it; a new node lands all 30 messages exactly once, recognising the redelivered batch, each with the link its `sdh_replaces` header gave. For Event Hubs, two partitions and the node's blob checkpoint store on Azurite.
 - `RabbitLandingApplicationIT` (`-Pit`): the whole node on RabbitMQ, from settings to `item.landed`, leaving the queue empty.
-- `BrokerWatchTest` and `BrokerChecksTest`: each check's answer told to the intake's health; a consumer that gave up restarted once, when its broker answers, and again if the restart fails; what each broker needs bound; each broker's failures read as their reasons.
-- `BrokerHealthIT` (`-Pit`; the same brokers but Artemis, each behind Toxiproxy): the broker cut off is reported as `NETWORK`, and its return, after which messages arrive; a refused RabbitMQ login (`AUTH`), deleted RabbitMQ and SQS queues and a deleted Pub/Sub subscription (`NOT_FOUND`), each reported and recovered from, the Pub/Sub consumer by a restart.
+- `BrokerWatchTest` and `BrokerChecksTest` (`connector-broker`): each check's answer told to the broker's health; a consumer that gave up restarted once, when its broker answers, and again if the restart fails; what each broker needs bound; each broker's failures read as their reasons.
+- `BrokerHealthIT` (`connector-broker`, `-Pit`; the same brokers but Artemis, each behind Toxiproxy): the broker cut off is reported as `NETWORK`, and its return, after which messages arrive; a refused RabbitMQ login (`AUTH`), deleted RabbitMQ and SQS queues and a deleted Pub/Sub subscription (`NOT_FOUND`), each reported and recovered from, the Pub/Sub consumer by a restart.
 
 #### 5.3.17 Buckets as built (step 7a)
 
@@ -992,14 +998,14 @@ A check waits up to 20 s; the next starts `check-interval` after it ends. The Pu
 
 `sdh.landing.source.type: iceberg` makes the node a table intake. `IcebergTableSource` implements `RemoteSource` (§5.3.14), so it is polled every `poll-interval` by `RemoteIntakeRoute`, reports `intake.unreachable` with the same reasons, and waits `auth-retry-interval` after a slow-retry reason. The source is always `read-only`, with no `after`, `settle` or marker: a committed snapshot is complete, and a table's files are never changed.
 
-**Decided 2026-11-04: land the files, split by row.** Each data file is landed as it is, so the landed copy is the original, and its digest matches the producer's file. The splitter's `parquet` format (§6.2) makes one JSON section per row, so a table's rows are mapped like any other record format. **Decided the same day: all current rows, then appends.** With `start: earliest` (the default), the first start lands every data file of the current snapshot (a backfill), then follows appends. With `start: latest`, the first start only notes the current snapshot. A table with no snapshot at the first start is followed from its first append, either way.
+**Decided 2026-11-04: land the files, split by row.** Each data file is landed as it is, so the landed copy is the original, and its digest matches the producer's file. The splitter's `parquet` format (§6.2) makes one JSON record per row, so a table's rows are mapped like any other record format. **Decided the same day: all current rows, then appends.** With `start: earliest` (the default), the first start lands every data file of the current snapshot (a backfill), then follows appends. With `start: latest`, the first start only notes the current snapshot. A table with no snapshot at the first start is followed from its first append, either way.
 
 **Following the table.** The intake keeps a mark: the snapshot it has landed everything up to, and whether it is still in the backfill. At each poll it refreshes the table and walks the current snapshot's ancestry back to the mark. Each snapshot in between is a step, oldest first:
 - `append`: its added data files are items, in location order; its summary property `sdh.replaces` names the item they replace (§5.3.8);
 - `replace` (a compaction): passed over, as it only rewrites rows already landed;
 - `overwrite` or `delete`: `intake.table_rewrite` (with the operation as `reason`), and nothing landed.
 
-The mark moves past a step once all its items are landed (`afterLanding`, which the node also calls for an item the ledger already has), and is saved in the ledger table's property `sdh.landing.table.<intake>`: the snapshot ID and the backfill flag, MAC'd with the section-ID key like every checkpoint, committed through the lease's fence (`TableProgress`). A commit that changes only a property still makes a snapshot of the ledger. The mark matters because the ledger alone can't tell a compacted file from new data: after the snapshots before a compaction expire, its new files would look like appends.
+The mark moves past a step once all its items are landed (`afterLanding`, which the node also calls for an item the ledger already has), and is saved in the ledger table's property `sdh.landing.table.<intake>`: the snapshot ID and the backfill flag, MAC'd with the record-ID key like every checkpoint, committed through the lease's fence (`TableProgress`). A commit that changes only a property still makes a snapshot of the ledger. The mark matters because the ledger alone can't tell a compacted file from new data: after the snapshots before a compaction expire, its new files would look like appends.
 
 **Ledger keys.** An item's reference is the data file's location, its size the file's, and its version `0:<table UUID>` (data files never change; the UUID tells a table recreated at the same location apart). Items are kind `table-file`. A file is read through the table's own `FileIO`, seeked to the item's checkpoint, so a broken read resumes where it stopped.
 
@@ -1029,25 +1035,25 @@ The mark moves past a step once all its items are landed (`afterLanding`, which 
 Package `com.sdh.healthcare.connector.core.split`; built-ins in `split.builtin`.
 
 ```java
-public interface SectionSplitter {
+public interface RecordSplitter {
     String format();                                  // e.g. "ccda"
     default void validate(SplitConfig cfg) {}         // called at startup: bad config fails the service, not a file
     SplitSession open(SeekableByteSource src, ResumePoint from, SplitConfig cfg) throws IOException, SplitException;
 }
 public interface SplitSession extends AutoCloseable {
-    Optional<Section> next() throws IOException, SplitException;
+    Optional<SplitRecord> next() throws IOException, SplitException;
 }
-record Section(long sourceOffset, long sourceLength, List<Part> parts, ResumePoint resume, SectionOrigin origin)  // Part = Literal(bytes) | SourceRange(offset, length)
+record SplitRecord(long sourceOffset, long sourceLength, List<Part> parts, ResumePoint resume, RecordOrigin origin)  // Part = Literal(bytes) | SourceRange(offset, length)
 record ResumePoint(long offset, List<Long> context)
 ```
 
-- **Byte ranges:** a section is a list of **parts**: source byte ranges plus small synthesised literals (a CSV header, an X12 envelope, an XML declaration or a rewritten root start tag) that make it self-contained. Splitters never hold section bytes in memory; `Section.open(src)` streams the plaintext. Sections are capped by `max-section-bytes`.
-- **Resume:** every section carries the `ResumePoint` after it, and `open` must accept `ResumePoint.START` or any of these and produce exactly the sections that followed. `context` holds **source offsets only** of structures the splitter re-reads on resume: the enclosing ISA and GS segments for X12, and the open ancestor start tags for XML (for in-scope namespaces). Offsets carry no PHI, so the resume point can live in the checkpoint (§9.1). File-start context (CSV header, XML declaration, FHIR array-or-stream) is re-read from offset 0.
+- **Byte ranges:** a record is a list of **parts**: source byte ranges plus small synthesised literals (a CSV header, an X12 envelope, an XML declaration or a rewritten root start tag) that make it self-contained. Splitters never hold record bytes in memory; `SplitRecord.open(src)` streams the plaintext. Records are capped by `max-record-bytes`.
+- **Resume:** every record carries the `ResumePoint` after it, and `open` must accept `ResumePoint.START` or any of these and produce exactly the records that followed. `context` holds **source offsets only** of structures the splitter re-reads on resume: the enclosing ISA and GS segments for X12, and the open ancestor start tags for XML (for in-scope namespaces). Offsets carry no PHI, so the resume point can live in the checkpoint (§9.1). File-start context (CSV header, XML declaration, FHIR array-or-stream) is re-read from offset 0.
 - **Order:** each resume point must be after the one before: a later offset, or the same offset with a later context (`ResumePoint.isAfter`), so the Parquet splitter's rows within a row group share its offset.
-- **Limits:** `SplitterRegistry.open(format, src, from, nextSeq, cfg)` wraps the session and enforces §6.3, counting sections from `nextSeq` so the per-file count survives a resume. Splitters also stop scanning early once a section passes `max-section-bytes`.
+- **Limits:** `SplitterRegistry.open(format, src, from, nextSeq, cfg)` wraps the session and enforces §6.3, counting records from `nextSeq` so the per-file count survives a resume. Splitters also stop scanning early once a record passes `max-record-bytes`.
 - **Errors:** `SplitException` carries only an `ErrorCode` and a byte offset. Codes: `PARSE_UNTERMINATED_QUOTE`, `PARSE_UNBALANCED_ELEMENT`, `PARSE_XML_MALFORMED`, `PARSE_XML_UNSUPPORTED_ENCODING`, `PARSE_X12_INVALID_ENVELOPE`, `PARSE_X12_UNBALANCED`, `PARSE_X12_CONTROL_MISMATCH`, `PARSE_X12_UNEXPECTED_SEGMENT`, `PARSE_JSON_MALFORMED`, `PARSE_FHIR_UNEXPECTED_RESOURCE`, `PARSE_PARQUET_MALFORMED`, `PARSE_PARQUET_UNSUPPORTED_TYPE`, `RESUME_INVALID`, `LIMIT_*`.
 - **Plug-ins:** new formats are discovered via `ServiceLoader` (proprietary formats can be dropped in as a jar).
-- **Origin (lines and columns):** splitters deal in bytes. The pipeline gives each section its `SectionOrigin` as it comes from the splitter (`SectionOrigins`): where its first source range starts in the section (after any literal the splitter added, such as the XML declaration: usually line 2) and where it starts in the file. It counts the file's lines once, on from the last section, a 64 KiB block at a time; a background thread (`sdh-lines`) counts ahead and leaves a mark every block, so the split thread counts only from the last mark before a section (§13.1). Lines end at LF, CRLF or CR and columns are UTF-8 characters, as XML counts them (`LineCounter`); in a single-byte character set other than ASCII, a column after a byte from 0x80 to 0xBF can be early. A splitter of a binary format sets the origin itself and `SectionOrigins` keeps it (Parquet: line = the row's number in the file, from 1; column 1); lines are counted only if a section comes without one.
+- **Origin (lines and columns):** splitters deal in bytes. The pipeline gives each record its `RecordOrigin` as it comes from the splitter (`RecordOrigins`): where its first source range starts in the record (after any literal the splitter added, such as the XML declaration: usually line 2) and where it starts in the file. It counts the file's lines once, on from the last record, a 64 KiB block at a time; a background thread (`sdh-lines`) counts ahead and leaves a mark every block, so the split thread counts only from the last mark before a record (§13.1). Lines end at LF, CRLF or CR and columns are UTF-8 characters, as XML counts them (`LineCounter`); in a single-byte character set other than ASCII, a column after a byte from 0x80 to 0xBF can be early. A splitter of a binary format sets the origin itself and `RecordOrigins` keeps it (Parquet: line = the row's number in the file, from 1; column 1); lines are counted only if a record comes without one.
 
 ### 6.2 Built-in splitters
 
@@ -1055,13 +1061,13 @@ The format and boundary are both set at run time.
 
 | `format` | Default boundary | Behaviour |
 |---|---|---|
-| `ccda` / `xml` | `ccda`: element `ClinicalDocument`, ns `urn:hl7-org:v3`. `xml`: boundary required, `namespace` defaults to `*` (any) | Byte-level streaming XML tokenizer that ignores comments, CDATA, processing instructions and DOCTYPE. A section runs from the boundary start tag to its matching end tag; a nested boundary element stays inside the outer section. Namespace declarations in scope from ancestor elements are copied onto the section's root element, and the file's XML declaration is prepended, so every section is a valid standalone document. End tags are checked against start tags. Input must be ASCII-compatible (UTF-8, ISO-8859-x); UTF-16 fails with `PARSE_XML_UNSUPPORTED_ENCODING`. Entities from a DOCTYPE internal subset are not carried into sections. |
-| `x12` | segment `ST` (also `GS` or `ISA`) | Delimiters are read from each ISA segment. `ST`: each section is `ISA + GS + ST…SE + GE + IEA`, with GE01 and IEA01 rewritten to 1. `GS`: `ISA + GS…GE + IEA`, IEA01 = 1. `ISA`: the interchange unchanged. A TA1 between ISA and GS becomes `ISA + TA1 + IEA` (IEA01 = 0), so nothing is dropped. Control numbers ST02/SE02, GS06/GE02 and ISA13/IEA02 are checked. BIN segments are not supported. |
-| `fhir` | `Bundle` (`*` = any `resourceType`) | Byte-level structural JSON scanner (strings, escapes, bracket nesting) that checks each top-level object's `resourceType`. Jackson was dropped because it can't restart mid-array at a byte offset; full JSON validation is left downstream. Accepts a single resource, a JSON array, or NDJSON / whitespace-separated objects. Optional `fhir.ndjson-group-size` = N groups N resources per section (boundary then defaults to `*`); grouped array sections are wrapped in `[ ]`. |
-| `edifact` | message `UNH` (also `UNG` or `UNB`) | Delimiters come from each interchange's `UNA` service string advice, or the ISO 9735 defaults; the release character is honoured. `UNH`: each section is `[UNA] UNB [UNG] UNH…UNT [UNE] UNZ`, with the UNE and UNZ counts rewritten to 1. `UNG`: one functional group per section; messages outside a group are one section each. `UNB`: the interchange unchanged. Control references UNH/UNT, UNG/UNE and UNB/UNZ are checked; segment counts aren't. |
-| `csv` | record | RFC 4180 record boundary (newlines inside quotes are respected). `csv.header=true` prepends the first record to every section; `csv.delimiter` (default `,`). Empty lines are skipped. Content is otherwise not interpreted. |
-| `parquet` | row | One section per row: the row as JSON (`parquet-row/1`, §6.4), made by the splitter with Iceberg's Parquet reader, so `sourceOffset` is the row group's start and `sourceLength` is 0. The schema comes from the file's footer; a file without Iceberg field IDs is given them by position. A resume point is the row group's start and the rows done in it. Rows are read a row group at a time, so memory is about one row group's column chunks. A file that can't be read is `PARSE_PARQUET_MALFORMED`; a variant, geometry or geography column anywhere in the schema is `PARSE_PARQUET_UNSUPPORTED_TYPE`, checked before any row. |
-| `delimited` | regex (`delimited.pattern`, or `delimited.literal=true`) | Generic fallback for proprietary formats. `mode = START \| END \| SEPARATOR` controls whether a matching line begins a section, ends one, or is dropped. Each line is decoded (`delimited.charset`, default UTF-8) and tested with `find()` on its first `delimited.match-window` bytes (default 4096). Blank lines never start a section. In START mode, lines before the first match form their own section. |
+| `ccda` / `xml` | `ccda`: element `ClinicalDocument`, ns `urn:hl7-org:v3`. `xml`: boundary required, `namespace` defaults to `*` (any) | Byte-level streaming XML tokenizer that ignores comments, CDATA, processing instructions and DOCTYPE. A record runs from the boundary start tag to its matching end tag; a nested boundary element stays inside the outer record. Namespace declarations in scope from ancestor elements are copied onto the record's root element, and the file's XML declaration is prepended, so every record is a valid standalone document. End tags are checked against start tags. Input must be ASCII-compatible (UTF-8, ISO-8859-x); UTF-16 fails with `PARSE_XML_UNSUPPORTED_ENCODING`. Entities from a DOCTYPE internal subset are not carried into records. |
+| `x12` | segment `ST` (also `GS` or `ISA`) | Delimiters are read from each ISA segment. `ST`: each record is `ISA + GS + ST…SE + GE + IEA`, with GE01 and IEA01 rewritten to 1. `GS`: `ISA + GS…GE + IEA`, IEA01 = 1. `ISA`: the interchange unchanged. A TA1 between ISA and GS becomes `ISA + TA1 + IEA` (IEA01 = 0), so nothing is dropped. Control numbers ST02/SE02, GS06/GE02 and ISA13/IEA02 are checked. BIN segments are not supported. |
+| `fhir` | `Bundle` (`*` = any `resourceType`) | Byte-level structural JSON scanner (strings, escapes, bracket nesting) that checks each top-level object's `resourceType`. Jackson was dropped because it can't restart mid-array at a byte offset; full JSON validation is left downstream. Accepts a single resource, a JSON array, or NDJSON / whitespace-separated objects. Optional `fhir.ndjson-group-size` = N groups N resources per record (boundary then defaults to `*`); grouped array records are wrapped in `[ ]`. |
+| `edifact` | message `UNH` (also `UNG` or `UNB`) | Delimiters come from each interchange's `UNA` service string advice, or the ISO 9735 defaults; the release character is honoured. `UNH`: each record is `[UNA] UNB [UNG] UNH…UNT [UNE] UNZ`, with the UNE and UNZ counts rewritten to 1. `UNG`: one functional group per record; messages outside a group are one record each. `UNB`: the interchange unchanged. Control references UNH/UNT, UNG/UNE and UNB/UNZ are checked; segment counts aren't. |
+| `csv` | record | RFC 4180 record boundary (newlines inside quotes are respected). `csv.header=true` prepends the first record to every record; `csv.delimiter` (default `,`). Empty lines are skipped. Content is otherwise not interpreted. |
+| `parquet` | row | One record per row: the row as JSON (`parquet-row/1`, §6.4), made by the splitter with Iceberg's Parquet reader, so `sourceOffset` is the row group's start and `sourceLength` is 0. The schema comes from the file's footer; a file without Iceberg field IDs is given them by position. A resume point is the row group's start and the rows done in it. Rows are read a row group at a time, so memory is about one row group's column chunks. A file that can't be read is `PARSE_PARQUET_MALFORMED`; a variant, geometry or geography column anywhere in the schema is `PARSE_PARQUET_UNSUPPORTED_TYPE`, checked before any row. |
+| `delimited` | regex (`delimited.pattern`, or `delimited.literal=true`) | Generic fallback for proprietary formats. `mode = START \| END \| SEPARATOR` controls whether a matching line begins a record, ends one, or is dropped. Each line is decoded (`delimited.charset`, default UTF-8) and tested with `find()` on its first `delimited.match-window` bytes (default 4096). Blank lines never start a record. In START mode, lines before the first match form their own record. |
 
 ### 6.3 Limits
 
@@ -1069,17 +1075,17 @@ These are configurable per format. A violation fails the file with error code `L
 
 | Limit | Default |
 |---|---|
-| `max-file-bytes` | csv 10 GiB; others 1 TiB |
-| `max-section-bytes` | 512 MiB (well under Parquet's 2 GiB value limit) |
-| `max-sections-per-file` | unlimited |
+| `max-item-bytes` | csv 10 GiB; others 1 TiB |
+| `max-record-bytes` | 512 MiB (well under Parquet's 2 GiB value limit) |
+| `max-records-per-item` | unlimited |
 
-**Nesting (XML formats):** a boundary element may be nested at most 128 elements deep (`XmlSplitter.MAX_DEPTH`), and each ancestor's start tag may be at most 1 MiB. Every open ancestor is held in memory and its offset saved in each resume point, so a file of nested wrappers would otherwise grow both without limit. Deeper nesting is `PARSE_XML_MALFORMED`; a larger ancestor tag is `LIMIT_SECTION_SIZE`, since a resume couldn't re-read it. Real documents nest their boundary one to three deep. FHIR is limited to 4,096 levels of JSON nesting in the same way.
+**Nesting (XML formats):** a boundary element may be nested at most 128 elements deep (`XmlSplitter.MAX_DEPTH`), and each ancestor's start tag may be at most 1 MiB. Every open ancestor is held in memory and its offset saved in each resume point, so a file of nested wrappers would otherwise grow both without limit. Deeper nesting is `PARSE_XML_MALFORMED`; a larger ancestor tag is `LIMIT_RECORD_SIZE`, since a resume couldn't re-read it. Real documents nest their boundary one to three deep. FHIR is limited to 4,096 levels of JSON nesting in the same way.
 
-A file over `max-file-bytes` is rejected **before ingestion**. It is moved to the encrypted local `failed/` fallback and is not stored in Iceberg.
+A file over `max-item-bytes` is rejected **before ingestion**. It is moved to the encrypted local `failed/` fallback and is not stored in Iceberg.
 
 ### 6.4 Conversion to JSON (built)
 
-After splitting, each section is converted to JSON and the JSON is what is stored, encrypted and announced. Converters are found by format (`SectionConverter`, loaded with `ServiceLoader` like the splitters) and run on the encrypt worker pool. `sdh.split.convert: false` turns conversion off.
+After splitting, each record is converted to JSON and the JSON is what is stored, encrypted and announced. Converters are found by format (`RecordConverter`, loaded with `ServiceLoader` like the splitters) and run on the encrypt worker pool. `sdh.split.convert: false` turns conversion off.
 
 | Format | Mapping | JSON |
 |---|---|---|
@@ -1106,11 +1112,11 @@ The X12 and EDIFACT shape follows common EDI-to-JSON converters (hub.actionedi.c
 - **SDTC extensions keep their prefix** (`"sdtc:raceCode"`), as they sit beside CDA elements of the same name.
 - **Keys come in document order**, so the output is deterministic.
 - **Not data, so left out:** `xmlns` declarations and `xsi:schemaLocation`.
-- **Element positions (`ccda/2`):** every element written as an object starts with `"#line"` and `"#col"`: the line and column (from 1, in characters) of its start tag's `<` in the section. No XML name starts with `#`, so they never clash with an attribute or child. An element written as a string, or as an empty `{}` (which a mapping reads as absent), has none; its parent's is the nearest. They add about 39% to the JSON. Positions are in the section, so the same section gives the same JSON in any file; the section's origin (§6.1) turns them into file positions.
+- **Element positions (`ccda/2`):** every element written as an object starts with `"#line"` and `"#col"`: the line and column (from 1, in characters) of its start tag's `<` in the record. No XML name starts with `#`, so they never clash with an attribute or child. An element written as a string, or as an empty `{}` (which a mapping reads as absent), has none; its parent's is the nearest. They add about 39% to the JSON. Positions are in the record, so the same record gives the same JSON in any file; the record's origin (§6.1) turns them into file positions.
 
 As in Google's output, mixed content loses the interleaving of text and child elements: text parts are listed under `"value"`, child elements under their own keys.
 
-**Who reads it.** The US Core 6.1 C-CDA mapping (`ccda-us-core-6.1` in the `mapping` repository) reads `ccda/2` as stored; it is not reshaped for the mapping, since the stored sections are the durable record, read by other consumers and used for remediation. It passes elements to the Whistle runtime's `check::at`, so each issue it reports gives the element's line and column, or its nearest present parent's. Google's own Whistle C-CDA mappings read the same style and ignore the position keys. The keys make two copies of the same element differ, so a consumer that compares or hashes elements by content must leave them out: the mapping makes ids for elements with no identifier from `check::withoutLocations(element)`, so its resources and their ids are the same as from `ccda/1`. The mapping also reads `ccda/1` sections stored before this change; their issues have no line and column. A change to the converter's output is a change to the mapping's input: it needs a new mapping version (§8.2, §10.1).
+**Who reads it.** The US Core 6.1 C-CDA mapping (`ccda-us-core-6.1` in the `mapping` repository) reads `ccda/2` as stored; it is not reshaped for the mapping, since the stored records are the durable record, read by other consumers and used for remediation. It passes elements to the Whistle runtime's `check::at`, so each issue it reports gives the element's line and column, or its nearest present parent's. Google's own Whistle C-CDA mappings read the same style and ignore the position keys. The keys make two copies of the same element differ, so a consumer that compares or hashes elements by content must leave them out: the mapping makes ids for elements with no identifier from `check::withoutLocations(element)`, so its resources and their ids are the same as from `ccda/1`. The mapping also reads `ccda/1` records stored before this change; their issues have no line and column. A change to the converter's output is a change to the mapping's input: it needs a new mapping version (§8.2, §10.1).
 
 **The parser is always Woodstox,** chosen by name (`WstxInputFactory`), not found on the class path. The command-line tools bundle the converter without the connector's other dependencies, and found the JDK's parser instead, which reports where a start tag ends rather than where it starts; with Woodstox everywhere, a document gives the same JSON and the same positions in the connector and in `ccda-quickrun`. A parse error's line and column are turned into the byte position a `ConversionException` gives (they were a character count, wrong after non-ASCII text).
 
@@ -1120,26 +1126,26 @@ As in Google's output, mixed content loses the interleaving of text and child el
 - DTDs and external entities are refused.
 - An undeclared entity (such as `&nbsp;`) is `CONVERT_XML_MALFORMED`. Woodstox reports some errors only when the text is read, as an unchecked `WstxLazyException`; the converter treats that like any other XML error. Before this fix, found by the demo (§15.3), such a document failed its whole file with `STORAGE_FAILED` instead of being stored unconverted (`CcdaConverterTest.undeclaredEntityIsAConversionFailure`).
 
-**Failures stay with the section, not the file.** A section that can't be converted is stored in its original form (as split), in the same `sections` table and commit, with `error_code` set. It is announced with `section.failed` (§10.1), and the file carries on and completes. Codes:
+**Failures stay with the record, not the file.** A record that can't be converted is stored in its original form (as split), in the same `records` table and commit, with `error_code` set. It is announced with `record.failed` (§10.1), and the file carries on and completes. Codes:
 - `CONVERT_CSV_FIELD_COUNT`: the record's field count differs from the header's;
 - `CONVERT_CSV_MALFORMED`: text after a closing quote;
 - `CONVERT_INVALID_ENCODING`: bytes that aren't valid UTF-8, or not valid in the declared EDIFACT character set;
 - `CONVERT_EDIFACT_CHARSET`: an unsupported syntax identifier;
 - `CONVERT_X12_MALFORMED`, `CONVERT_EDIFACT_MALFORMED`, `CONVERT_XML_MALFORMED`;
-- `CONVERT_TOO_LARGE`: over `split.convert-max-bytes`, 64 MiB by default; converting needs the whole section in memory (see below);
-- `CONVERT_SKIPPED`: the connector stopped twice in a row while the section's batch was uncommitted, so the whole batch was stored unconverted (§9.2);
-- `CONVERT_FAILED`: the converter threw an exception it doesn't use for problems with the section, which means a bug in the converter. Only the exception's class name is logged (`convert.unexpected`), as its message could quote the section.
+- `CONVERT_TOO_LARGE`: over `split.convert-max-bytes`, 64 MiB by default; converting needs the whole record in memory (see below);
+- `CONVERT_SKIPPED`: the connector stopped twice in a row while the record's batch was uncommitted, so the whole batch was stored unconverted (§9.2);
+- `CONVERT_FAILED`: the converter threw an exception it doesn't use for problems with the record, which means a bug in the converter. Only the exception's class name is logged (`convert.unexpected`), as its message could quote the record.
 
-Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offset, byte position within the section, code), emitted once its batch commits, and the `sdh.sections.failed` metric. Its place in the file, as a line and column, is stored (`error_line`, `error_column`) and sent with `section.failed` (`errorLine`, `errorColumn`): the byte position's line and column in the section, moved by the section's origin. A section stored unconverted for its size or a restart (`CONVERT_TOO_LARGE`, `CONVERT_SKIPPED`), or after a converter bug (`CONVERT_FAILED`), has none. Errors in splitting itself, such as an unterminated quote or broken XML, still fail the whole file (§11), because the file can't be divided into sections.
+Each failure gets a `sdh.audit.record.failed` event (file ID, seq, source offset, byte position within the record, code), emitted once its batch commits, and the `sdh.records.failed` metric. Its place in the file, as a line and column, is stored (`error_line`, `error_column`) and sent with `record.failed` (`errorLine`, `errorColumn`): the byte position's line and column in the record, moved by the record's origin. A record stored unconverted for its size or a restart (`CONVERT_TOO_LARGE`, `CONVERT_SKIPPED`), or after a converter bug (`CONVERT_FAILED`), has none. Errors in splitting itself, such as an unterminated quote or broken XML, still fail the whole file (§11), because the file can't be divided into records.
 
-**Lineage:** `source_offset`/`source_length` (and the message's `sourceOffset`/`sourceLength`) always locate the section in the original, unsplit file, converted or not, and its origin (§6.1) does so in lines and columns. Remediation (review, correction, resubmission) is a later piece of work with its own console; failed sections can already be found with `error_code IS NOT NULL` and read with `connector-queue-reader`.
+**Lineage:** `source_offset`/`source_length` (and the message's `sourceOffset`/`sourceLength`) always locate the record in the original, unsplit file, converted or not, and its origin (§6.1) does so in lines and columns. Remediation (review, correction, resubmission) is a later piece of work with its own console; failed records can already be found with `error_code IS NOT NULL` and read with `connector-queue-reader`.
 
 **Memory and speed:**
-- Single-chunk sections (up to 8 MiB) are converted on the worker pool.
+- Single-chunk records (up to 8 MiB) are converted on the worker pool.
 - Larger ones are converted on the writer thread, one at a time, and JSON over one chunk is chunked as usual.
-- **Peak heap per conversion,** measured on 64 MB sections, the section included:
+- **Peak heap per conversion,** measured on 64 MB records, the record included:
 
-  | Converter | Heap | × section | JSON size |
+  | Converter | Heap | × record | JSON size |
   |---|---|---|---|
   | C-CDA, structured entries | 169–229 MiB | 2.8–3.7 (4.0 at 16 MB) | 0.55–0.9 × |
   | C-CDA, mostly a base64 file | 247 MiB | 3.8 | about the same |
@@ -1149,8 +1155,8 @@ Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offse
 
   C-CDA's figure depends on how many elements a document has, not only its size: it holds the document as a tree before writing the JSON, about 40 bytes per element plus its attributes and text (the structured rows are the master CCD and Epic inpatient test documents, their bodies repeated). Repeated attribute values are shared, and real documents repeat 72–82% of them; with none shared, the structured figure is at most about 5.5, which `memoryFactor` (6) covers. The element positions of `ccda/2` (revision ao) added 6–11% (the Epic document: 206 to 229 MiB). Writing the JSON while reading would bring a structured document down to about 110–150 MiB and a base64 one to about 200, but it isn't planned: large documents are usually embedded files, where it saves about 20%, and mapping a C-CDA document needs about 12 times its size anyway.
 
-  None decodes a whole section into a string. CSV, X12 and EDIFACT write the JSON from the section's bytes (UTF-8 is copied as it is, escaping only what JSON requires; EDIFACT decodes one component at a time). C-CDA keeps long text in the pieces the parser delivers. From 1 MiB, the JSON is written twice, counting first, so it is held once, in an array of exactly its size (`JsonWriter.build`).
-- **Conversion budget:** conversions running at once share `split.convert-memory` (default 40% of the maximum heap). Each converter states its peak as a multiple of the section's size (`SectionConverter.memoryFactor`: the figures above, rounded up), and a worker takes that much before reading and converting a section, and gives it back once the section is ready to write. A section that doesn't fit waits, first come, first served; one bigger than the whole budget runs alone. Small sections need next to nothing, so only large ones ever wait.
+  None decodes a whole record into a string. CSV, X12 and EDIFACT write the JSON from the record's bytes (UTF-8 is copied as it is, escaping only what JSON requires; EDIFACT decodes one component at a time). C-CDA keeps long text in the pieces the parser delivers. From 1 MiB, the JSON is written twice, counting first, so it is held once, in an array of exactly its size (`JsonWriter.build`).
+- **Conversion budget:** conversions running at once share `split.convert-memory` (default 40% of the maximum heap). Each converter states its peak as a multiple of the record's size (`RecordConverter.memoryFactor`: the figures above, rounded up), and a worker takes that much before reading and converting a record, and gives it back once the record is ready to write. A record that doesn't fit waits, first come, first served; one bigger than the whole budget runs alone. Small records need next to nothing, so only large ones ever wait.
 - Conversion costs 4–15% of throughput: least for CSV, where message sealing dominates, most for C-CDA (§13.1).
 
 ## 7. Encryption and identifiers
@@ -1159,30 +1165,30 @@ Each failure gets a `sdh.audit.section.failed` event (file ID, seq, source offse
 
 | Key | Type | Held by | Used for |
 |---|---|---|---|
-| Sections KEK | AES-256 or RSA/EC wrap key | KMS or local keystore | wrapping batch data keys for `sections` |
+| Records KEK | AES-256 or RSA/EC wrap key | KMS or local keystore | wrapping batch data keys for `records` |
 | Source-files KEK | separate key | KMS or local keystore | `source_files` table |
 | Failed-files KEK | separate key | KMS or local keystore | `failed_files` table |
-| ID key | 256-bit HMAC secret | generated at first start, stored **wrapped** in a table property, unwrapped into memory at startup | section IDs, fingerprints, digests |
+| ID key | 256-bit HMAC secret | generated at first start, stored **wrapped** in a table property, unwrapped into memory at startup | record IDs, fingerprints, digests |
 | Signing key | EC P-256 | KMS (sign API) or passphrase-protected PEM | signing queue messages (ES256) |
 | Recipient public key(s) | EC P-256 / RSA | PEM files, SHA-256 fingerprint pinned in config | encrypting queue messages |
 | Recovery public key | EC P-256 | PEM file | encrypting the local `failed/` fallback when storage or KMS is unreachable |
 
-Using a separate KEK per table lets the retrieving system be given decrypt rights on `sections` only.
+Using a separate KEK per table lets the retrieving system be given decrypt rights on `records` only.
 
-### 7.2 Section encryption (envelope)
+### 7.2 Record encryption (envelope)
 
-1. One random 256-bit **batch data key (BDK)** per commit batch, wrapped once by the KEK. This means one KMS call per batch, not per section, which matters for millions of CSV rows.
-2. A per-section key is derived as `HKDF-SHA256(BDK, info = "sdh-section" ‖ fileId ‖ seq)`. Exposing one section's key exposes nothing else.
-3. The section plaintext is cut into **8 MiB chunks**. The chunk count is known up front, because the splitter reports the section's byte length.
-4. Each chunk is **zstd-compressed, then encrypted** with AES-256-GCM, using a random 96-bit nonce and AAD = `fileId ‖ seq ‖ chunkIndex ‖ chunkCount`. The AAD prevents chunks being reordered, swapped between sections, or truncated.
-   - The section ID is not part of the AAD, because it isn't known until the whole section has been hashed, yet every chunk row carries it. A single-chunk section (the common case) is read once into memory, hashed and encrypted. A larger section is read **twice**: one pass computes the ID, the second encrypts and writes each chunk, and re-checks the hash so a source that changed in between fails the batch. Memory stays at one 8 MiB chunk per section in flight, whatever `max-section-bytes` is.
+1. One random 256-bit **batch data key (BDK)** per commit batch, wrapped once by the KEK. This means one KMS call per batch, not per record, which matters for millions of CSV rows.
+2. A per-record key is derived as `HKDF-SHA256(BDK, info = "sdh-record" ‖ itemId ‖ seq)`. Exposing one record's key exposes nothing else.
+3. The record plaintext is cut into **8 MiB chunks**. The chunk count is known up front, because the splitter reports the record's byte length.
+4. Each chunk is **zstd-compressed, then encrypted** with AES-256-GCM, using a random 96-bit nonce and AAD = `itemId ‖ seq ‖ chunkIndex ‖ chunkCount`. The AAD prevents chunks being reordered, swapped between records, or truncated.
+   - The record ID is not part of the AAD, because it isn't known until the whole record has been hashed, yet every chunk row carries it. A single-chunk record (the common case) is read once into memory, hashed and encrypted. A larger record is read **twice**: one pass computes the ID, the second encrypts and writes each chunk, and re-checks the hash so a source that changed in between fails the batch. Memory stays at one 8 MiB chunk per record in flight, whatever `max-record-bytes` is.
    - Compressing before encrypting is required, because ciphertext doesn't compress. It is safe here because no attacker-controlled input is mixed into the plaintext.
 
-### 7.3 Section ID
+### 7.3 Record ID
 
-`sectionId = base32(HMAC-SHA-256(idKey, storedBytes))`: the JSON for a converted section, or the section as split (including prefix/suffix bytes) for one stored in its original form (§6.4). Converters are deterministic, so the same section always gets the same ID. For CSV the header is no longer part of what is hashed, so identical records in files with different headers get the same ID.
+`recordId = base32(HMAC-SHA-256(idKey, storedBytes))`: the JSON for a converted record, or the record as split (including prefix/suffix bytes) for one stored in its original form (§6.4). Converters are deterministic, so the same record always gets the same ID. For CSV the header is no longer part of what is hashed, so identical records in files with different headers get the same ID.
 
-- The ID is deterministic from content, so a repaired file resubmitted later produces the same IDs for unchanged sections. This is what downstream dedup relies on.
+- The ID is deterministic from content, so a repaired file resubmitted later produces the same IDs for unchanged records. This is what downstream dedup relies on.
 - It is keyed, so it cannot be used to guess low-entropy PHI such as a CSV row.
 - Identical content in different files gets the same ID and is treated by downstream as a duplicate. This is accepted, and documented for CSV providers.
 - The `idKey` is never rotated: rotating it would break dedup. Losing it breaks dedup only, not decryption.
@@ -1219,7 +1225,7 @@ Wrapping (the three KEKs) and signing are configured independently (`sdh.crypto.
 **Startup checks** (`KeyMaterial`):
 - **KEKs:** every KEK is probed with a wrap and unwrap of a throwaway key, so a missing key or permission stops startup with a message naming the KEK.
 - **Signing key:** a KMS signing key must be EC P-256. A probe JWS is signed through the KMS and verified with the key's public half. Its SHA-256 fingerprint is logged (`crypto.signing_key`) for configuring readers.
-- **Separate KEKs:** the sections KEK must differ from the archive KEKs.
+- **Separate KEKs:** the records KEK must differ from the archive KEKs.
 - **Client lifecycle:** KMS clients are closed on shutdown.
 
 **Signing through a KMS:** `KmsJwsSigner` (a Nimbus `JWSSigner`) sends the SHA-256 digest of the JWS signing input to `KeyProvider.sign`, so the private key never leaves the KMS. `MessageSealer` uses it like any other signer.
@@ -1238,7 +1244,7 @@ Wrapping (the three KEKs) and signing are configured independently (`sdh.crypto.
 
 ### 7.5 PHI hygiene
 
-- **Logging:** no PHI, filenames or exception messages from parsers are ever logged. Exceptions are mapped to stable error codes (`PARSE_UNBALANCED_ELEMENT`, `LIMIT_SECTION_SIZE`, …), and only the code, exception class, offset and seq are emitted.
+- **Logging:** no PHI, filenames or exception messages from parsers are ever logged. Exceptions are mapped to stable error codes (`PARSE_UNBALANCED_ELEMENT`, `LIMIT_RECORD_SIZE`, …), and only the code, exception class, offset and seq are emitted.
 - **Camel:** body logging, tracing, message history and dead-letter body dumps are disabled.
 - **Temp files:** no plaintext is ever written to temporary files.
 - **Container:** runs as non-root with a read-only root filesystem; no heap dumps, core dumps, crash logs or JVM attach; and TLS everywhere (object store, catalog, KMS, brokers). See §14.1.
@@ -1286,16 +1292,16 @@ These are selected at run time.
 
 The namespace is `sdh_ingest` (configurable). There are three tables, each with its own KEK and access policy.
 
-**`sections`** has one row per chunk. A single table keeps commits atomic: Iceberg does not offer multi-table transactions on every catalog, so data and checkpoint must live in one table.
+**`records`** has one row per chunk. A single table keeps commits atomic: Iceberg does not offer multi-table transactions on every catalog, so data and checkpoint must live in one table.
 
 | Column | Type | Notes |
 |---|---|---|
-| section_id | string | keyed content hash |
-| file_id | uuid | |
-| seq | long | 0-based section sequence within file |
+| record_id | string | keyed content hash |
+| item_id | uuid | |
+| seq | long | 0-based record sequence within file |
 | chunk_index | int | |
 | chunk_count | int | |
-| source_offset | long | byte offset of section in source file |
+| source_offset | long | byte offset of record in source file |
 | source_length | long | |
 | format | string | |
 | plaintext_length | long | before compression |
@@ -1306,31 +1312,31 @@ The namespace is `sdh_ingest` (configurable). There are three tables, each with 
 | ingested_at | timestamptz | |
 | content_type | string | what the stored bytes are: `application/json` when converted, else the original media type (`text/csv`, `application/xml`, `application/edi-x12`, `application/edifact`, `application/fhir+json`) |
 | mapping | string, optional | the JSON mapping and version (`csv-row/1`, `ccda/2`, `x12/1`, `edifact/1`); null when stored as split |
-| error_code | string, optional | set when conversion failed and the section is stored in its original form (§6.4) |
-| section_line, section_column | long, int, optional | the section's origin (§6.1): where the text copied from the file starts in the section |
+| error_code | string, optional | set when conversion failed and the record is stored in its original form (§6.4) |
+| record_line, record_column | long, int, optional | the record's origin (§6.1): where the text copied from the file starts in the record |
 | source_line, source_column | long, int, optional | where the same text starts in the file |
 | error_line, error_column | long, int, optional | where in the file conversion failed (§6.4) |
 
 - **New columns:** the six line and column columns came with contract 2.1. A table made earlier gets them when the connector starts (`IngestTables.addMissingColumns`): only optional columns are ever added, rows written before read them as null, and a connector that loses the schema commit to another one reloads the table and finds them there.
 
-- **Partitioning:** `day(ingested_at)`. Sort order `file_id, seq, chunk_index`, so readers prune files using min/max statistics.
+- **Partitioning:** `day(ingested_at)`. Sort order `item_id, seq, chunk_index`, so readers prune files using min/max statistics.
 - **Parquet settings:** zstd level 1 for the whole table. Row group 128 MiB, target file size 512 MiB. The earlier plan to leave `ciphertext` uncompressed isn't possible: Iceberg sets the Parquet codec per table, not per column (spike finding). zstd passes incompressible ciphertext through at a small CPU cost and almost no size overhead.
-- **Retired in step 3a (§5.3.12):** `source_files` and `failed_files` are no longer written; the landed copy in `landed_items` is the original. The splitter's namespace now has `sections` and `inbox`. What follows is kept as a record of the old layout.
-- **`source_files`** holds the raw original in 8 MiB chunks, one row per chunk: `file_id`, `chunk_index`, `chunk_count`, `chunk_size`, `file_size`, `ciphertext`, `bdk_wrapped`, `kek_ref`, `batch_id`, `archived_at` (partition `day(archived_at)`, sort `file_id, chunk_index`). Chunk key = HKDF(BDK, fileId, seq 0); AAD = fileId ‖ 0 ‖ chunkIndex ‖ chunkCount.
-- **Summary row:** values known only at the end go on one row with `chunk_index = -1`, written in the final archive commit: `original_name_enc` (the filename, encrypted with seq −1), `file_digest`, `digest_block_size`, `section_count`, `started_at` and `completed_at`. A file with a summary row is fully archived.
+- **Retired in step 3a (§5.3.12):** `source_files` and `failed_files` are no longer written; the landed copy in `landed_items` is the original. The splitter's namespace now has `records` and `inbox`. What follows is kept as a record of the old layout.
+- **`source_files`** holds the raw original in 8 MiB chunks, one row per chunk: `item_id`, `chunk_index`, `chunk_count`, `chunk_size`, `file_size`, `ciphertext`, `bdk_wrapped`, `kek_ref`, `batch_id`, `archived_at` (partition `day(archived_at)`, sort `item_id, chunk_index`). Chunk key = HKDF(BDK, itemId, seq 0); AAD = itemId ‖ 0 ‖ chunkIndex ‖ chunkCount.
+- **Summary row:** values known only at the end go on one row with `chunk_index = -1`, written in the final archive commit: `original_name_enc` (the filename, encrypted with seq −1), `file_digest`, `digest_block_size`, `record_count`, `started_at` and `completed_at`. A file with a summary row is fully archived.
 - **`failed_files`** has the same layout. Its summary row adds `failure_stage`, `failure_offset`, `failure_seq`, `error_code`, `failed_at` and `replaces_file_id`. `replaces_file_id` is not filled in yet; it waits for the admin resubmit flow.
-- **Archive progress:** commits happen every `archive.commit-bytes` (default 512 MiB, whole blocks). Each one carries the archive checkpoint `sdh.archive.<connectorId>` = {fileId, nextBlock, chainHash, done, digest, finishedAt}, MAC'd like the main checkpoint. `ArchiveReader` restores a file (or its tail from an offset) a few chunks at a time and re-checks the digest.
+- **Archive progress:** commits happen every `archive.commit-bytes` (default 512 MiB, whole blocks). Each one carries the archive checkpoint `sdh.archive.<connectorId>` = {itemId, nextBlock, chainHash, done, digest, finishedAt}, MAC'd like the main checkpoint. `ArchiveReader` restores a file (or its tail from an offset) a few chunks at a time and re-checks the digest.
 
 ### 8.3 Commit batching
 
 A commit happens when the first of these thresholds is reached (all configurable):
 
-- `commit.max-sections` (default 10,000)
+- `commit.max-records` (default 10,000)
 - `commit.max-bytes` (default 512 MiB)
 - `commit.max-interval` (default 30 s)
 - end of file
 
-Committing per section would create a snapshot per section and does not scale.
+Committing per record would create a snapshot per record and does not scale.
 
 Each commit is **one fenced Iceberg commit** (§9.3) containing:
 1. an `append` of the batch's data files;
@@ -1340,7 +1346,7 @@ The fenced committer checks the lease epoch and commits with a strict compare-an
 
 ### 8.4 Maintenance (built)
 
-Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintains one table without it, and `MaintenanceScheduler` (`connector-runtime` `maintenance/`) runs it every `maintenance.interval` (1 h): in the splitter on `sections` and `inbox`, in the landing node on `landed_items` and `landing_ledger` (§5.3.13).
+Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintains one table without it, and `MaintenanceScheduler` (`connector-runtime` `maintenance/`) runs it every `maintenance.interval` (1 h): in the splitter on `records` and `inbox`, in the landing node on `landed_items` and `landing_ledger` (§5.3.13).
 
 **Scheduling:**
 - **Between items only:** the scheduler runs only if it can take the writer lock without waiting. The splitter's worker holds that lock for each item, and the landing node's intake for each listed item, so maintenance never overlaps with writing; a busy tick is skipped.
@@ -1349,7 +1355,7 @@ Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintain
 - **Fencing:** every run starts with `FencedCommitter.verifyCurrent` (lease held, table epoch ours). Every maintenance commit goes through the fenced committer except snapshot expiry.
 
 **Each run, per table:**
-1. **Retention** (per table, off by default, at least 1 day; 7 for `landed_items`). It deletes whole UTC days older than `now − retention`, using `deleteFromRowFilter` on the partition source column (`ingested_at` for `sections`, `landed_at` for `landed_items`). A table can move the cutoff back to keep rows that belong together (`landed_items`, §5.3.13). That is metadata-only, because whole partitions match. Nothing to delete means no commit, so there are no empty snapshots. The PHI is then purged in the same run: Iceberg deletes a removed file only once the snapshot that removed it has expired, and the current snapshot never expires. So a fenced marker commit follows the delete, and every snapshot before the marker is expired, which deletes the files. Trade-off: no time travel to before a retention delete.
+1. **Retention** (per table, off by default, at least 1 day; 7 for `landed_items`). It deletes whole UTC days older than `now − retention`, using `deleteFromRowFilter` on the partition source column (`ingested_at` for `records`, `landed_at` for `landed_items`). A table can move the cutoff back to keep rows that belong together (`landed_items`, §5.3.13). That is metadata-only, because whole partitions match. Nothing to delete means no commit, so there are no empty snapshots. The PHI is then purged in the same run: Iceberg deletes a removed file only once the snapshot that removed it has expired, and the current snapshot never expires. So a fenced marker commit follows the delete, and every snapshot before the marker is expired, which deletes the files. Trade-off: no time travel to before a retention delete.
 2. **Compaction (bin-pack):**
    - **What counts as small:** data files below `small-file-fraction` (0.75) of the table's target size (512 MiB), grouped by partition; a partition needs at least `min-input-files` (5) of them.
    - **Packing:** first-fit decreasing into bins of at most the target size.
@@ -1361,14 +1367,14 @@ Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintain
    - Files replaced by compaction are deleted when the compaction snapshot itself ages out, normally 7 days later.
 4. **Orphan-file cleanup** (every `orphans.interval`, 24 h):
    - **Listing:** files under the table location are listed through the FileIO's prefix listing (`S3FileIO`, `GCSFileIO` and `ADLSFileIO` support it; the in-memory FileIO doesn't, so cleanup is skipped there).
-   - **Path form:** `ADLSFileIO.listPrefix` (Iceberg 1.12) returns paths relative to the container (`wh/t/data/x.parquet`), while the table and the other FileIOs use full locations (`abfss://fs@account.dfs.core.windows.net/wh/t/data/x.parquet`). A listed path without a scheme is resolved against the scheme and authority of the table location. Found on a real storage account (`AdlsAzureIT`, §15.1): before the fix, every file of the `sections` table looked orphaned, and only the safety stop below prevented deletion.
+   - **Path form:** `ADLSFileIO.listPrefix` (Iceberg 1.12) returns paths relative to the container (`wh/t/data/x.parquet`), while the table and the other FileIOs use full locations (`abfss://fs@account.dfs.core.windows.net/wh/t/data/x.parquet`). A listed path without a scheme is resolved against the scheme and authority of the table location. Found on a real storage account (`AdlsAzureIT`, §15.1): before the fix, every file of the `records` table looked orphaned, and only the safety stop below prevented deletion.
    - **Reachability:** listed files are compared with everything reachable: metadata files and their log, manifest lists, manifests, data and delete files of every snapshot, and statistics files.
    - **Deletion:** unreferenced files older than `orphans.min-age` (3 days, at least 1 hour) are deleted.
    - **Safety stops:** both refuse the whole run and log `maintenance.orphans_refused`.
      - Any listed path outside the table location after resolving: a path-form mismatch (scheme, bucket alias) would make every file look orphaned, however small the table. This check was added after the ADLS finding: the size-based stop alone wouldn't have protected a table of 20 files or fewer, such as `failed_files`.
      - More than half of what's listed (and more than 20 files) looks orphaned.
 
-**Readers:** expiry doesn't break `connector-queue-reader` for older messages. When a message's snapshot has been expired, the reader refreshes and reads the current table, where compacted rows are unchanged; after a retention delete it reports the section as not found. One cost: a reader working through a backlog older than the snapshot window refreshes on every such message.
+**Readers:** expiry doesn't break `connector-queue-reader` for older messages. When a message's snapshot has been expired, the reader refreshes and reads the current table, where compacted rows are unchanged; after a retention delete it reports the record as not found. One cost: a reader working through a backlog older than the snapshot window refreshes on every such message.
 
 **Tests:** `TableMaintenanceTest` uses a JDBC catalog on embedded Postgres with a local-disk FileIO, so physical deletion is checked. It covers:
 - compaction preserves every row byte-for-byte;
@@ -1389,18 +1395,18 @@ Progress is stored in **Iceberg table properties**, written in the same atomic c
 
 ```json
 sdh.checkpoint.file-connector = {
-  "fileId": "...", "fingerprint": "...", "state": "SPLITTING",
+  "itemId": "...", "fingerprint": "...", "state": "SPLITTING",
   "resumeAt": "123456789:1024,5120", "nextSeq": 40211,
   "committedSeq": 40210, "publishedSeq": 39000,
-  "format": "ccda", "fileSize": 987654321,
+  "format": "ccda", "itemSize": 987654321,
   "startedAt": "...", "restarts": 1, "mac": "HMAC(idKey, \"sdh-checkpoint\" ‖ 0 ‖ canonical JSON without mac)"
 }
 ```
 
-- **`resumeAt`:** the encoded `ResumePoint` of the last committed section (§6.1): the next offset, then any context offsets. Offsets only, no content.
+- **`resumeAt`:** the encoded `ResumePoint` of the last committed record (§6.1): the next offset, then any context offsets. Offsets only, no content.
 - **`restarts`:** how many times splitting has resumed from this checkpoint without a batch committing since (§9.2). Every batch commit resets it, and it is left out while 0, so checkpoints written before it existed still verify.
 - **States:** see §4.1. A `FAILING` or `FAILED` checkpoint also carries `failureStage`, `errorCode`, `failureOffset` and `failedAt`. The pipeline refuses a new file while another is `SPLITTING`, `ARCHIVING` or `FAILING`.
-- **Labelled MACs:** checkpoint MACs and fingerprints prefix a label, so neither can ever equal a section ID made with the same key.
+- **Labelled MACs:** checkpoint MACs and fingerprints prefix a label, so neither can ever equal a record ID made with the same key.
 - **Tamper detection:** the checkpoint is MAC'd with the ID key. If it fails verification, the service stops with `CHECKPOINT_TAMPERED` rather than guessing.
 - **Archive phase:** uses an equivalent property on `source_files`, recording `nextBlock`, `chainHash` and `bytesArchived`.
 
@@ -1422,9 +1428,9 @@ On restart:
 2. Rebuild messages for any committed-but-unpublished seq range from table metadata columns. Decryption isn't needed for this.
 3. Republish those messages, then resume splitting at `resumeAt`.
 
-**Restarts without progress:** a section that stops the connector, by running it out of memory (the JVM runs with `-XX:+ExitOnOutOfMemoryError`, §14.1) or crashing it some other way, would stop it again on every restart, since the restart resumes at the same section, and no other file would ever be processed. So before resuming, the pipeline adds one to the checkpoint's `restarts` and commits it; a crash in that attempt can't record anything itself. The count is reset by every batch commit, so restarts only count while the connector makes no progress:
+**Restarts without progress:** a record that stops the connector, by running it out of memory (the JVM runs with `-XX:+ExitOnOutOfMemoryError`, §14.1) or crashing it some other way, would stop it again on every restart, since the restart resumes at the same record, and no other file would ever be processed. So before resuming, the pipeline adds one to the checkpoint's `restarts` and commits it; a crash in that attempt can't record anything itself. The count is reset by every batch commit, so restarts only count while the connector makes no progress:
 - **1:** resumed as usual. One restart is allowed for anything else, such as a redeployment or a lost lease.
-- **2:** resumed, but the batch is stored without converting any of it. Each of its sections is stored in its original form and announced as failed, `CONVERT_SKIPPED`, in case converting one of them is what stops the connector. Which section it is isn't known, so the whole batch (up to `commitMaxSections`) goes unconverted; the batches after it are converted again. `file.conversion_skipped` is audited.
+- **2:** resumed, but the batch is stored without converting any of it. Each of its records is stored in its original form and announced as failed, `CONVERT_SKIPPED`, in case converting one of them is what stops the connector. Which record it is isn't known, so the whole batch (up to `commitMaxRecords`) goes unconverted; the batches after it are converted again. `file.conversion_skipped` is audited.
 - **3:** the file is failed, `RESUME_NO_PROGRESS`, at stage `split` and the resume offset (§11), and archived to `failed_files` like any other failed file.
 
 The limits are `IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS` and `FAIL_AFTER_RESTARTS`. A connector that keeps losing its lease within one batch (§9.3) also reaches them, which fails a file that has nothing wrong with it; an operator can restore it from `failed_files` and deliver it again.
@@ -1437,11 +1443,11 @@ The limits are `IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS` and `FAIL_AFTER_R
 
 ### 9.4 Pipeline (`connector-core` `pipeline/`, built)
 
-`IngestPipeline.split(source)` runs the split phase for one file and returns once every section is committed and published, with the checkpoint in `ARCHIVING`. The connector app supplies the source, the sections table, the `FencedCommitter`, keys, the sealer and a `MessagePublisher`.
+`IngestPipeline.split(source)` runs the split phase for one file and returns once every record is committed and published, with the checkpoint in `ARCHIVING`. The connector app supplies the source, the records table, the `FencedCommitter`, keys, the sealer and a `MessagePublisher`.
 
 1. **Identify:** fingerprint the source. If it matches a `SPLITTING` checkpoint, resume; if it matches an `ARCHIVING` one, return straight away; otherwise assign a UUIDv7 and commit a fresh checkpoint before anything else.
 2. **Announce:** publish `file.started` (again on resume; message ID dedup handles the repeat), then republish any committed-but-unpublished range.
-3. **Split and encrypt:** single-chunk sections are hashed and encrypted on the worker pool, with at most `4 × workers` in flight; larger sections are processed inline (§7.2). Rows are written in seq order.
+3. **Split and encrypt:** single-chunk records are hashed and encrypted on the worker pool, with at most `4 × workers` in flight; larger records are processed inline (§7.2). Rows are written in seq order.
 4. **Commit:** at the first threshold (§8.3), data file + checkpoint in one fenced commit. The commit first waits for the previous batch's publishing and records its last seq as `publishedSeq`.
 5. **Publish:** the batch's messages are sealed on the worker pool and sent in seq order on a background thread while the next batch is split. Failed sends are retried one by one.
 6. **End of file:** wait for publishing, then a data-free commit to `ARCHIVING`.
@@ -1458,7 +1464,7 @@ The design follows the standard pattern for single-writer leases:
 
 Self-fencing alone isn't enough. A process can pause (GC, VM suspend, container freeze) between checking its lease and committing, so the storage commit must also reject a stale holder.
 
-The earlier draft kept the lease in `sections` table properties, renewed every 30 s. That meant a metadata commit (a new `metadata.json`) every 30 s, around the clock, mixed in with the PHI data. It was replaced as follows.
+The earlier draft kept the lease in `records` table properties, renewed every 30 s. That meant a metadata commit (a new `metadata.json`) every 30 s, around the clock, mixed in with the PHI data. It was replaced as follows.
 
 **Two parts:**
 
@@ -1510,9 +1516,9 @@ Two connector instances must never watch the same inbound directory. Nothing in 
 - **The pipeline moves and deletes files itself** (§5), so one instance could delete an original while the other is still splitting or archiving it.
 - **One checkpoint per connector** (§9.1) records a single in-progress file, so two instances sharing tables would overwrite each other's progress.
 
-The result would be duplicate sections and duplicate `section.stored` messages for the same file, under two different file IDs, and files abandoned part-way.
+The result would be duplicate records and duplicate `record.stored` messages for the same file, under two different file IDs, and files abandoned part-way.
 
-**How it is prevented:** the lease (§9.3). A second instance with the same `sdh.lease.name` fails at startup with `LEASE_HELD`, once it has waited TTL + safety margin in case the holder had crashed (§9.3). An old instance that paused and lost its lease is rejected by fencing on its next commit. The lease is held for the life of the process, not taken per file, so it costs one Postgres renewal every 15 s and nothing per file or section; it doesn't slow ingest. A per-file mutex shared between instances would be needed only for several instances working one directory, which is out of scope (§17).
+**How it is prevented:** the lease (§9.3). A second instance with the same `sdh.lease.name` fails at startup with `LEASE_HELD`, once it has waited TTL + safety margin in case the holder had crashed (§9.3). An old instance that paused and lost its lease is rejected by fencing on its next commit. The lease is held for the life of the process, not taken per file, so it costs one Postgres renewal every 15 s and nothing per file or record; it doesn't slow ingest. A per-file mutex shared between instances would be needed only for several instances working one directory, which is out of scope (§17).
 
 **Why the lease alone isn't enough:** it is keyed on `sdh.lease.name`, not on the directory. Two connectors with different lease names but the same `inbound-dir` would both get a lease:
 - with the same tables, fencing makes whichever has the higher epoch win, and the other exits with status 70 on its next commit and keeps restarting, but by then both may have picked up the same file;
@@ -1536,24 +1542,24 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 
 | Type | When | Payload (inside encryption) |
 |---|---|---|
-| `file.started` | file picked up (or resumed with a new run) | fileId, format, fileSize, startedAt, connectorId |
-| `section.stored` | after batch commit | messageId, fileId, sectionId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef), origin (sectionLine, sectionColumn, sourceLine, sourceColumn) |
-| `section.failed` | after batch commit, in seq order with the others | as `section.stored`, with errorCode instead of mapping, and errorLine and errorColumn when the failure has a place; the section is stored in its original form (§6.4) |
-| `file.completed` | after archive commit | fileId, sectionCount (failed included), failedSectionCount, fileSize, fileDigest, startedAt, completedAt |
-| `item.landed` | landing node to its splitter, after the item's commit (§5.3.6) | fileId, intake, kind, size, itemDigest, landedAt, storage, replaces (if set) |
-| `item.received` | landing node to the producer, after `item.landed` (§5.3.8) | fileId, intake, kind, size, sha256, landedAt, producerRef, replaces, messageIds and messageReplaces (each if set) |
-| `item.result` | splitter to the producer, when an item is finished (§5.3.8) | fileId, intake, status, sectionCount, failedSectionCount, failure, problemCount, part, partCount, problems (code, stage, seq, offset, line, column, message, messageRef, messageReplaces), producerRef, replaces, finishedAt |
+| `file.started` | file picked up (or resumed with a new run) | itemId, format, itemSize, startedAt, connectorId |
+| `record.stored` | after batch commit | messageId, itemId, recordId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef), origin (recordLine, recordColumn, sourceLine, sourceColumn) |
+| `record.failed` | after batch commit, in seq order with the others | as `record.stored`, with errorCode instead of mapping, and errorLine and errorColumn when the failure has a place; the record is stored in its original form (§6.4) |
+| `file.completed` | after archive commit | itemId, recordCount (failed included), failedRecordCount, itemSize, itemDigest, startedAt, completedAt |
+| `item.landed` | landing node to its splitter, after the item's commit (§5.3.6) | itemId, intake, kind, size, itemDigest, landedAt, storage, replaces (if set) |
+| `item.received` | landing node to the producer, after `item.landed` (§5.3.8) | itemId, intake, kind, size, sha256, landedAt, producerRef, replaces, messageIds and messageReplaces (each if set) |
+| `item.result` | splitter to the producer, when an item is finished (§5.3.8) | itemId, intake, status, recordCount, failedRecordCount, failure, problemCount, part, partCount, problems (code, stage, seq, offset, line, column, message, messageRef, messageReplaces), producerRef, replaces, finishedAt |
 
 - **No `file.failed` message:** failure is reported through OpenTelemetry only, as agreed. Downstream can detect an unfinished file as a `file.started` with no matching `file.completed`.
-- **Change from earlier discussion:** the "duplicates skipped" count is **not** included in `file.completed`. Counting it would require checking every section against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
-- **Unencrypted broker metadata** is limited to: `messageId`, `type`, `fileId` (used for ordering), and the content type `application/jose`.
+- **Change from earlier discussion:** the "duplicates skipped" count is **not** included in `file.completed`. Counting it would require checking every record against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
+- **Unencrypted broker metadata** is limited to: `messageId`, `type`, `itemId` (used for ordering), and the content type `application/jose`.
 - **Message IDs:**
-  - `section.stored` and `section.failed`: `messageId = sectionId`.
-  - `file.started`: `fs-<fileId>`.
-  - `file.completed`: `fc-<fileId>`.
+  - `record.stored` and `record.failed`: `messageId = recordId`.
+  - `file.started`: `fs-<itemId>`.
+  - `file.completed`: `fc-<itemId>`.
   - `item.landed`: `il-<itemId>`; `item.received`: `rc-<itemId>`; `item.result`: `rs-<itemId>-<part>`.
-- **Contract 2.0** (from 1.0): added `contentType`, `mapping`, `section.failed` and `failedSectionCount`. It's a major version because a 1.x reader can't handle the new message type.
-- **Contract 2.1:** added `origin`, `errorLine` and `errorColumn`, all optional, so 2.0 readers ignore them. A reader turns a position in the section (such as one a mapping reports from `ccda/2`) into one in the file with `SectionOrigin.toFile`.
+- **Contract 2.0** (from 1.0): added `contentType`, `mapping`, `record.failed` and `failedRecordCount`. It's a major version because a 1.x reader can't handle the new message type.
+- **Contract 2.1:** added `origin`, `errorLine` and `errorColumn`, all optional, so 2.0 readers ignore them. A reader turns a position in the record (such as one a mapping reports from `ccda/2`) into one in the file with `RecordOrigin.toFile`.
 - **Contract 2.2:** added `item.landed`, which a landing node sends to its splitter (§5.3.6). Downstream readers never receive it, so it is a minor version; a 2.1 reader given one would reject it as an unknown type.
 - **Contract 2.3:** added `item.received` and `item.result`, which go to an intake's producer (§5.3.8), and `replaces` on `item.landed`. Downstream readers never receive them, so it is a minor version.
 - **Contract 2.4:** added `messageReplaces` to `item.received` (a list, one entry per message, null for one that replaces none) and to each problem of `item.result`, each `<itemId>/<messageId>` (§5.3.8). Both are optional and go only to producers.
@@ -1568,20 +1574,20 @@ QueueReader reader = QueueReader.builder()
     .trustedSigner("connector-2026", connectorSigningPublicKey)
     .catalog(icebergCatalog)                                     // consumer supplies catalog + FileIO
     .expectedCatalogName("prod")                                 // optional
-    .keyProvider(kmsKeyProvider)                                 // unwrap rights on the sections KEK only
+    .keyProvider(kmsKeyProvider)                                 // unwrap rights on the records KEK only
     .build();
 
-ConnectorMessage m = reader.decode(brokerMessageBody);           // FileStarted | SectionStored | FileCompleted
-if (m instanceof SectionStored s) {
-    try (InputStream in = reader.openSection(s)) { ... }         // or reader.readSection(s, maxBytes)
+ConnectorMessage m = reader.decode(brokerMessageBody);           // FileStarted | RecordStored | FileCompleted
+if (m instanceof RecordStored s) {
+    try (InputStream in = reader.openRecord(s)) { ... }         // or reader.readRecord(s, maxBytes)
 }
 ```
 
 **What the library does:**
 - **Decoding:** decrypts and verifies messages. Only the algorithms listed in §10.1 are accepted, and keys are chosen by `kid` from fixed lists, so a message header can't pick a weaker algorithm or key. Rejections give a `MessageRejectedException.Reason`, never payload content.
-- **Section lookup:** queries `sections` for the section's `file_id`, `seq` and `ingested_at` day, which allows partition pruning. It refreshes its cached table if the message names a snapshot it hasn't seen yet.
-- **Keys:** unwraps each batch data key once and caches it by `batch_id`, then derives the section key.
-- **Streaming:** decrypts chunk by chunk, holding one 8 MiB chunk in memory plus any chunks the scan returns early. Each row is checked against the message (section ID, chunk count, length). The stream fails if a chunk is missing, duplicated, out of range, from another batch, or the wrong length.
+- **Record lookup:** queries `records` for the record's `item_id`, `seq` and `ingested_at` day, which allows partition pruning. It refreshes its cached table if the message names a snapshot it hasn't seen yet.
+- **Keys:** unwraps each batch data key once and caches it by `batch_id`, then derives the record key.
+- **Streaming:** decrypts chunk by chunk, holding one 8 MiB chunk in memory plus any chunks the scan returns early. Each row is checked against the message (record ID, chunk count, length). The stream fails if a chunk is missing, duplicated, out of range, from another batch, or the wrong length.
 - **Broker-neutral:** the consumer passes in the message body from whatever broker client it uses.
 
 **Versioning:** a reader accepts any message with the same contract major version and ignores unknown fields, so minor versions only add optional fields. A new major version is rejected with `UNSUPPORTED_VERSION`. Before the connector starts writing a new major version, consumers must upgrade to a reader that supports it. The same holds between the stages: the splitter is upgraded before the landing node, and an `item.landed` of a major version the splitter can't read waits on its queue, unacknowledged, rather than being dropped (§5.3.12, [DEPLOYMENT.md](DEPLOYMENT.md)). Tested by `ContractVersionTest`.
@@ -1594,22 +1600,22 @@ if (m instanceof SectionStored s) {
 
 | `type` | Camel component | Ordering key | Broker-side dedup |
 |---|---|---|---|
-| `kafka` | camel-kafka | record key = fileId | idempotent + transactional producer |
-| `sqs` | camel-aws2-sqs | MessageGroupId = fileId (FIFO) | MessageDeduplicationId (FIFO queues, 5 min) |
-| `pubsub` | camel-google-pubsub | orderingKey = fileId | none; `messageId` attribute |
-| `servicebus` | camel-azure-servicebus | SessionId = fileId | duplicate detection on MessageId |
-| `eventhubs` | camel-azure-eventhubs | partitionKey = fileId | none; `messageId` property |
-| `artemis` | camel-jms + Artemis JMS client | JMSXGroupID = fileId | `_AMQ_DUPL_ID` |
+| `kafka` | camel-kafka | record key = itemId | idempotent + transactional producer |
+| `sqs` | camel-aws2-sqs | MessageGroupId = itemId (FIFO) | MessageDeduplicationId (FIFO queues, 5 min) |
+| `pubsub` | camel-google-pubsub | orderingKey = itemId | none; `messageId` attribute |
+| `servicebus` | camel-azure-servicebus | SessionId = itemId | duplicate detection on MessageId |
+| `eventhubs` | camel-azure-eventhubs | partitionKey = itemId | none; `messageId` property |
+| `artemis` | camel-jms + Artemis JMS client | JMSXGroupID = itemId | `_AMQ_DUPL_ID` |
 | `rabbitmq` | camel-spring-rabbitmq | single queue / consistent-hash exchange | `message_id`; optional `x-deduplication-header` for the dedup plugin |
 
 **What each adapter sets** (`QueueType`):
-- **Common metadata, every adapter:** `messageId`, `type`, `fileId` and `contentType` (`application/jose`). These are the only unencrypted values; the body is the JWE compact serialisation, sent as ASCII text.
-- **`kafka`:** header `CamelKafkaKey` = fileId.
-- **`sqs`:** exchange property `CamelAwsMessageGroupId` = fileId, and the exchange ID = messageId.
-- **`pubsub`:** `CamelGooglePubsubOrderingKey` = fileId; the metadata travels as attributes.
+- **Common metadata, every adapter:** `messageId`, `type`, `itemId` and `contentType` (`application/jose`). These are the only unencrypted values; the body is the JWE compact serialisation, sent as ASCII text.
+- **`kafka`:** header `CamelKafkaKey` = itemId.
+- **`sqs`:** exchange property `CamelAwsMessageGroupId` = itemId, and the exchange ID = messageId.
+- **`pubsub`:** `CamelGooglePubsubOrderingKey` = itemId; the metadata travels as attributes.
 - **`servicebus`:** `SessionId`, `MessageId`, `ContentType`, and the metadata as application properties.
-- **`eventhubs`:** `PartitionKey` = fileId; the metadata isn't carried.
-- **`artemis`:** `JMSXGroupID` = fileId and `_AMQ_DUPL_ID` = messageId.
+- **`eventhubs`:** `PartitionKey` = itemId; the metadata isn't carried.
+- **`artemis`:** `JMSXGroupID` = itemId and `_AMQ_DUPL_ID` = messageId.
 - **`rabbitmq`:** `MessageId` and `ContentType`.
 - **`camel`:** any endpoint with the common metadata only. Used for tests and for components without an adapter.
 
@@ -1648,7 +1654,7 @@ if (m instanceof SectionStored s) {
 
 | Cause | Stage | Error code |
 |---|---|---|
-| File over `max-file-bytes` (checked before any checkpoint or `file.started`) | `intake` | `LIMIT_FILE_SIZE` |
+| File over `max-item-bytes` (checked before any checkpoint or `file.started`) | `intake` | `LIMIT_ITEM_SIZE` |
 | Splitter error | `split` | the splitter's `PARSE_*` / `LIMIT_*` code and offset |
 | The connector stopped three times in a row without committing a batch (§9.2) | `split` | `RESUME_NO_PROGRESS`, at the resume offset |
 | Broker didn't acknowledge after retries | `publish` | `PUBLISH_FAILED` |
@@ -1659,26 +1665,26 @@ These never fail a file. They stop the process, which then restarts from the che
 
 ### 11.1 Completing a file
 
-**Since step 3a:** after the split phase, `file.completed` is published with the digest recorded at landing, then `COMPLETED` committed. There is no archive step and no original to delete; the inbox position then moves past the item (§5.3.12). Before step 3a: archive the original to `source_files`, publish `file.completed`, write `completed/<fileId>.json`, delete the original, then commit `COMPLETED`. The original is deleted only after its archive is committed, and every step can be repeated (message ID dedup, records overwritten, deleting a missing file is fine). So a crash anywhere just repeats the remaining steps, and once the archive is done the source is no longer needed. A failure while archiving fails the file through §11.2, which archives it to `failed_files` instead.
+**Since step 3a:** after the split phase, `file.completed` is published with the digest recorded at landing, then `COMPLETED` committed. There is no archive step and no original to delete; the inbox position then moves past the item (§5.3.12). Before step 3a: archive the original to `source_files`, publish `file.completed`, write `completed/<itemId>.json`, delete the original, then commit `COMPLETED`. The original is deleted only after its archive is committed, and every step can be repeated (message ID dedup, records overwritten, deleting a missing file is fine). So a crash anywhere just repeats the remaining steps, and once the archive is done the source is no longer needed. A failure while archiving fails the file through §11.2, which archives it to `failed_files` instead.
 
 ### 11.2 Failing a file
 
 **Since step 3a,** steps 1, 2 and 4 are as below. There is no archive (step 3) and no record or original to delete (step 5): the failed item stays in landing, and `restore` reads it from there. Only a problem with the item itself fails it (§5.3.12).
 
 1. Commit the decision: checkpoint `FAILING` with stage, code and offset. If storage is down this can't be recorded; the file still goes to the local fallback.
-2. Already-committed and published sections stay where they are, each tied to its `file_id`.
-3. The whole original is archived into `failed_files`. It goes to the local fallback `failed/<fileId>.enc` instead (§11.3) when the file is over `max-file-bytes`, when `FAILING` couldn't be recorded, or when the archive fails (storage or KMS unreachable). If even the fallback can't be written, the original is kept and the error propagates.
-4. Announce every committed section: publish `section.stored` for any committed section not yet acknowledged. Once a file is `FAILED` no restart will republish it, so it must happen here. This is skipped when the broker itself is the failure, and a `publish.unannounced` range is logged instead. Also, when splitting stops, the in-flight publish of the last committed batch is now awaited rather than cancelled. A test that forces this race shows that, without the fix, the last batch was stored but never announced.
-5. Write `failed/<fileId>.json`, delete the original, log `file.failed` (fileId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the `sdh.audit.file.failed` event and `sdh.files.failed` metric report it (§12). Attempt count isn't recorded yet.
+2. Already-committed and published records stay where they are, each tied to its `item_id`.
+3. The whole original is archived into `failed_files`. It goes to the local fallback `failed/<itemId>.enc` instead (§11.3) when the file is over `max-item-bytes`, when `FAILING` couldn't be recorded, or when the archive fails (storage or KMS unreachable). If even the fallback can't be written, the original is kept and the error propagates.
+4. Announce every committed record: publish `record.stored` for any committed record not yet acknowledged. Once a file is `FAILED` no restart will republish it, so it must happen here. This is skipped when the broker itself is the failure, and a `publish.unannounced` range is logged instead. Also, when splitting stops, the in-flight publish of the last committed batch is now awaited rather than cancelled. A test that forces this race shows that, without the fix, the last batch was stored but never announced.
+5. Write `failed/<itemId>.json`, delete the original, log `file.failed` (itemId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the `sdh.audit.file.failed` event and `sdh.items.failed` metric report it (§12). Attempt count isn't recorded yet.
 
 ### 11.3 Local fallback format
 
 **Retired in step 3a:** neither stage writes fallback files any more (§5.3.6). `RecoveryEnvelope` stays so `decrypt-fallback` can open files written before.
 
 `RecoveryEnvelope` (`connector-core` `crypto/`), streaming and any size:
-- **Header:** `"SDHFB1"` ‖ fileId ‖ SHA-256(recovery public key) ‖ an ephemeral EC public key.
+- **Header:** `"SDHFB1"` ‖ itemId ‖ SHA-256(recovery public key) ‖ an ephemeral EC public key.
 - **Key:** HKDF-SHA256 over the ECDH of the ephemeral and recovery keys, salted with the header hash.
-- **Records:** each is `u32 length ‖ nonce ‖ AES-256-GCM(zstd(plaintext)) ‖ tag`, with AAD = header hash ‖ record index ‖ last-record flag.
+- **Records:** each is `u32 length ‖ nonce ‖ AES-256-GCM(zstd(plaintext)) ‖ tag`, with AAD = header hash ‖ message index ‖ last-record flag.
 - **Contents:** record 0 is JSON metadata (original name, size). The data follows in 8 MiB records.
 - **Integrity:** truncation, reordering, splicing and the wrong key are all detected.
 
@@ -1690,14 +1696,14 @@ These never fail a file. They stop the process, which then restarts from the che
 
 | Command | Does |
 |---|---|
-| `restore --file-id X --to <dir> [--from-offset N \| --unprocessed] [--original-name]` | Decrypts a landed item from `landed_items` (step 3a; before that, from the archive tables). `--unprocessed` starts at the end of the item's last stored section, found from `sections`: the part that never reached downstream. A tail repeats no headers or envelopes before that point (an X12 interchange header, a CSV header row), so it may need them added before resubmission. The landing ID key, unwrapped with `landed-items-kek`, checks the digest over the whole item |
+| `restore --file-id X --to <dir> [--from-offset N \| --unprocessed] [--original-name]` | Decrypts a landed item from `landed_items` (step 3a; before that, from the archive tables). `--unprocessed` starts at the end of the item's last stored record, found from `records`: the part that never reached downstream. A tail repeats no headers or envelopes before that point (an X12 interchange header, a CSV header row), so it may need them added before resubmission. The landing ID key, unwrapped with `landed-items-kek`, checks the digest over the whole item |
 | `decrypt-fallback --file failed/<id>.enc --key <recovery.pem> --to <dir> [--original-name]` | Decrypts a local fallback file (§11.3). The recovery private key must be an encrypted PKCS#8 PEM, with owner-only or group-read permissions as for the signing key (§7.4); its passphrase comes from `$SDH_RECOVERY_PASSPHRASE`, never an argument. Needs no catalog, lease or KMS |
-| `status` | Shows the lease (holder, epoch, time left, read with the database clock), the checkpoint (item in progress, state, percentage split, sections committed and published, failure details), and the inbox backlog. Each part is shown on its own, so an unreachable KMS still leaves the lease visible; the exit status is 1 if any part couldn't be read |
+| `status` | Shows the lease (holder, epoch, time left, read with the database clock), the checkpoint (item in progress, state, percentage split, records committed and published, failure details), and the inbox backlog. Each part is shown on its own, so an unreachable KMS still leaves the lease visible; the exit status is 1 if any part couldn't be read |
 
 **Output safety:**
 - Decrypted output goes to a hidden temporary file with owner-only permissions. It is renamed into place only after the digest (restore) or envelope integrity (fallback) has been verified, and deleted otherwise, so no unverified plaintext is left behind.
 - An existing file is never overwritten.
-- Output is named `<fileId>` (or `<fileId>.from-<offset>`). `--original-name` uses the archived name instead, reduced to its last path element so it can't write outside the directory. The command then doesn't print that name, because command output may end up in logs.
+- Output is named `<itemId>` (or `<itemId>.from-<offset>`). `--original-name` uses the archived name instead, reduced to its last path element so it can't write outside the directory. The command then doesn't print that name, because command output may end up in logs.
 - Every restore checks the digest, including partial ones: all chunks are decrypted either way.
 
 **Audit:**
@@ -1727,7 +1733,7 @@ Other spans:
 - `ingest.recover` is the root when finishing a file without its source.
 - `maintenance` (table) runs per table and pass (§8.4).
 
-Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has status ERROR with `sdh.error_code` and `sdh.stage`. **Exceptions are never recorded on spans:** their messages could hold PHI, so only the exception class name (`sdh.reason`) is kept. Sampling is 100%: one trace per file is cheap.
+Root spans carry `sdh.item_id` and `sdh.result`. A failed file's root span has status ERROR with `sdh.error_code` and `sdh.stage`. **Exceptions are never recorded on spans:** their messages could hold PHI, so only the exception class name (`sdh.reason`) is kept. Sampling is 100%: one trace per file is cheap.
 
 **Audit events:** OTel log records with `event.name = sdh.audit.<event>`, also written to the console log (`sdh.audit` logger).
 - **File events:**
@@ -1738,7 +1744,7 @@ Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has s
   - `publish.republish`;
   - `file.split`;
   - `file.archived` (table, bytes);
-  - `file.completed` (sections, bytes);
+  - `file.completed` (records, bytes);
   - `file.failing` and `file.failed` (stage, error code, offset, last seq, where archived);
   - `archive.unavailable`, `publish.unannounced`, `file.failed_unarchived`, `file.abandoned`.
 - **Lease and process events:**
@@ -1751,19 +1757,19 @@ Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has s
 
 | Metric | Type | Attributes |
 |---|---|---|
-| `sdh.files.in_progress` | gauge | |
-| `sdh.file.progress_ratio` | gauge | bytes split / file size of the current file |
+| `sdh.items.in_progress` | gauge | |
+| `sdh.item.progress_ratio` | gauge | bytes split / file size of the current file |
 | `sdh.inbound.oldest_file_age` | gauge (s) | waiting files only (not hidden files or `.done` markers) |
 | `sdh.bytes.read` | counter (By) | stage: `split`, `archive` |
-| `sdh.sections.stored` | counter | format |
-| `sdh.sections.published` | counter | |
-| `sdh.files.completed` | counter | |
-| `sdh.files.failed` | counter | error code, stage |
+| `sdh.records.stored` | counter | format |
+| `sdh.records.published` | counter | |
+| `sdh.items.completed` | counter | |
+| `sdh.items.failed` | counter | error code, stage |
 | `sdh.commit.duration` | histogram (s) | table |
 | `sdh.publish.duration` | histogram (s) | |
 
 **PHI defence, two layers:**
-1. **At the source:** every attribute goes through `Fields`, which only accepts keys from the `Attr` enum (`sdh.file_id`, `sdh.format`, `sdh.state`, `sdh.stage`, `sdh.error_code`, `sdh.result`, `sdh.reason`, `sdh.seq`, `sdh.offset`, `sdh.count`, `sdh.bytes`, `sdh.epoch`, `sdh.table`, `sdh.archive`), with strings or numbers. There is no way to attach a filename or content.
+1. **At the source:** every attribute goes through `Fields`, which only accepts keys from the `Attr` enum (`sdh.item_id`, `sdh.format`, `sdh.state`, `sdh.stage`, `sdh.error_code`, `sdh.result`, `sdh.reason`, `sdh.seq`, `sdh.offset`, `sdh.count`, `sdh.bytes`, `sdh.epoch`, `sdh.table`, `sdh.archive`), with strings or numbers. There is no way to attach a filename or content.
 2. **At export:**
    - `AllowListSpanExporter` keeps only those keys, whatever produced the span, and drops span events (exception events) and link attributes.
    - `AuditOnlyLogRecordExporter` exports only `sdh.audit.*` records, with allow-listed attributes, and replaces the body with the event name. Free-text log lines from any library never leave the host.
@@ -1786,13 +1792,13 @@ Root spans carry `sdh.file_id` and `sdh.result`. A failed file's root span has s
 |---|---|
 | Reader | 1 thread, sequential; `FileChannel` with 4 MiB direct buffers |
 | Splitter | 1 thread |
-| Hash, compress, encrypt | worker pool sized to CPU cores, at most 4 × workers sections in flight; sections over one chunk run inline on the writer thread |
+| Hash, compress, encrypt | worker pool sized to CPU cores, at most 4 × workers records in flight; records over one chunk run inline on the writer thread |
 | Iceberg writer | 1 thread (the splitter's), writes in seq order |
 | Sealing messages | its own pool, also sized to CPU cores. It used to share the encrypt pool, so a batch's 10,000 sealing jobs queued ahead of the next batch's encryption and splitting stalled (§13.1) |
 | Publishing | one background thread per pipeline sends in seq order; the adapter's futures carry concurrency |
 
 - **Reads per file:** each file is read **twice**, once to split and once to archive. This trade keeps both phases simply resumable, and the second read is sequential I/O.
-- **Throughput:** measured in §13.1. The original expectation (disk or object-store bound for large files, HMAC and encryption bound for small records) was wrong on both counts: large sections are bound by the single split-and-write thread, and small ones by per-message public-key crypto.
+- **Throughput:** measured in §13.1. The original expectation (disk or object-store bound for large files, HMAC and encryption bound for small records) was wrong on both counts: large records are bound by the single split-and-write thread, and small ones by per-message public-key crypto.
 
 ### 13.1 Measured throughput (built)
 
@@ -1813,7 +1819,7 @@ The performance tests measure throughput, per-item latency and memory use of eac
   - end to end: the two added, so it includes queueing in both apps;
   - core: a single file, so its latency is its wall time and isn't given.
   Reported as p50, p95, p99 and max (nearest rank).
-- **Throughput and cost:** wall time from the first item available to the last done; MiB/s, items/s and sections/s; average cores used and the busiest thread's share of wall time; stored bytes against source bytes (core only).
+- **Throughput and cost:** wall time from the first item available to the last done; MiB/s, items/s and records/s; average cores used and the busiest thread's share of wall time; stored bytes against source bytes (core only).
 - **Memory:**
   - heap after GC, peak: the most heap still in use right after a collection, from the collectors' notifications. This is the closest measure of need; it is an upper bound, because a young collection leaves old garbage in place;
   - heap in use, peak, sampled every 50 ms; G1 grows towards the maximum, so this shows the heap given more than the heap needed;
@@ -1822,7 +1828,7 @@ The performance tests measure throughput, per-item latency and memory use of eac
   - bytes allocated and the allocation rate;
   - the share of wall time in GC pauses, and the number of full collections.
   For the landing and split stages these cover the whole JVM: the app with its Spring and Camel, plus the test's own feeding, which is small.
-- **What they check:** every item is announced and completed, with no fatal exit; the core stage also checks each file's section and message counts, and that every section converts to JSON (none falls back to raw).
+- **What they check:** every item is announced and completed, with no fatal exit; the core stage also checks each file's record and message counts, and that every record converts to JSON (none falls back to raw).
 - **Brokers** are stand-ins that take each message at once, so broker latency isn't included; every message is still sealed and signed.
 - **How to run them:** `scripts/perf.sh` wraps the profile and prints the summary. NetBeans has six custom actions (`nbactions.xml`, root project > Run Maven):
   - **Performance test (pipeline: core, landing, split):** every stage at the defaults, 1 GiB heap (as in a 2 GiB Kubernetes container, §14.1);
@@ -1866,7 +1872,7 @@ The performance tests measure throughput, per-item latency and memory use of eac
 
 **Results, 2026-10-29:** 1 GiB per format; AMD Ryzen 9 8945HX (16 cores, 32 threads), Java 25.0.4. Iceberg on local disk, JDBC catalog. After the sealing-pool fix, before JSON conversion (§6.4); the conversion run follows the table.
 
-| Recipient key | Format | Sections | MiB/s | Sections/s | Split phase MiB/s | Archive MiB/s | Avg cores | Busiest thread | Stored ÷ source |
+| Recipient key | Format | Records | MiB/s | Records/s | Split phase MiB/s | Archive MiB/s | Avg cores | Busiest thread | Stored ÷ source |
 |---|---|---:|---:|---:|---:|---:|---:|---|---:|
 | P-256 | C-CDA | 5,259 | 118 | 604 | 273 | 206 | 3.6 | main 93% | 0.50 |
 | P-256 | X12 | 475,907 | 40 | 18,795 | 52 | 177 | 18.5 | main 59% | 0.93 |
@@ -1877,17 +1883,17 @@ The performance tests measure throughput, per-item latency and memory use of eac
 
 **With JSON conversion (§6.4), P-256, same machine, single run:**
 
-| Format | MiB/s | Sections/s | Split phase MiB/s | Avg cores | Busiest thread | Stored ÷ source | Change in sections/s |
+| Format | MiB/s | Records/s | Split phase MiB/s | Avg cores | Busiest thread | Stored ÷ source | Change in records/s |
 |---|---:|---:|---:|---:|---|---:|---:|
 | C-CDA | 100 | 514 | 204 | 5.8 | main 88% | 0.49 | −15% |
 | X12 | 36 | 16,808 | 45 | 18.0 | main 55% | 1.01 | −11% |
 | CSV | 6 | 23,490 | 7 | 22.8 | sdh-seal 68% | 1.58 | −4% |
 
-C-CDA pays most: the schema-driven XML conversion cuts the split phase from about 275 to about 205 MiB/s and spreads work onto the encrypt workers (5.8 cores against 3.6). For X12 and CSV, message sealing still dominates, so conversion is a small share. CSV now stores 1.6× its size instead of 1.8×, because the header is no longer prepended to each section; X12 grows from 0.93 to 1.01 because JSON is wordier than segment text. Archive speed is unchanged.
+C-CDA pays most: the schema-driven XML conversion cuts the split phase from about 275 to about 205 MiB/s and spreads work onto the encrypt workers (5.8 cores against 3.6). For X12 and CSV, message sealing still dominates, so conversion is a small share. CSV now stores 1.6× its size instead of 1.8×, because the header is no longer prepended to each record; X12 grows from 0.93 to 1.01 because JSON is wordier than segment text. Archive speed is unchanged.
 
 **Full matrix with conversion, 2026-10-29** (after the security overrides and the Azure HTTP client change, revisions ab and ac; same machine, single runs, so differences under about 5% are noise):
 
-| Run | C-CDA MiB/s | X12 sections/s | CSV sections/s |
+| Run | C-CDA MiB/s | X12 records/s | CSV records/s |
 |---|---:|---:|---:|
 | P-256, local disk | 105 | 16,922 | 23,884 |
 | RSA-3072, local disk | 100 | 25,778 | 46,187 |
@@ -1899,7 +1905,7 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 
 **Heap sizing, 2026-10-29** (P-256, local disk, with the row-group fix below):
 
-| Heap | C-CDA MiB/s | X12 sections/s | CSV sections/s | GC pause % (C-CDA / X12 / CSV) | Full GCs |
+| Heap | C-CDA MiB/s | X12 records/s | CSV records/s | GC pause % (C-CDA / X12 / CSV) | Full GCs |
 |---|---:|---:|---:|---|---:|
 | 1536 MiB | 109 | 17,362 | 23,863 | 4.7 / 3.7 / 3.7 | 0 |
 | 1024 MiB | 98 | 15,481 | 22,465 | 4.7 / 5.4 / 4.9 | 0 |
@@ -1912,7 +1918,7 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 
 **Memory use, 2026-10-30** (the NetBeans actions' settings: 1 GiB each of C-CDA and X12, P-256, local disk):
 
-| Max heap | Format | MiB/s | Sections/s | Heap after GC, peak MiB | Heap in use, peak MiB | Process RSS, peak MiB | Allocated GiB | GC pause % |
+| Max heap | Format | MiB/s | Records/s | Heap after GC, peak MiB | Heap in use, peak MiB | Process RSS, peak MiB | Allocated GiB | GC pause % |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | 1536 MiB | C-CDA | 100 | 516 | 686 | 1,471 | 1,798 | 35.6 | 5.2 |
 | 1536 MiB | X12 | 34 | 15,992 | 290 | 1,484 | 2,041 | 91.8 | 3.8 |
@@ -1922,10 +1928,10 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 - **What the pipeline needs:** with a tight heap, at most about 360 MiB is still in use after a collection for C-CDA and 200 MiB for X12. With more room, G1 collects later, so the same run shows 690 MiB.
 - **Process memory is well above the heap.** RSS is the heap plus about 350–650 MiB: metaspace, JIT code, a thread stack per encrypt worker (32 here) and native libraries. Direct buffers stayed at 0.
 - **The Kubernetes sizing is tight.** The README's manifest gave the container 2 GiB with the heap at 75% of it (§14.1, `MaxRAMPercentage=75`), which is 1.5 GiB. At that heap this test's JVM already reaches 2.0 GiB RSS on X12. The real app adds Spring, Camel and the broker clients, and `sdh-admin` (`-Xmx512m`) is meant to run beside it in the same container. A large file could take the pod over its limit, and Kubernetes would kill it. **Changed (revision af):** the heap is now half the limit, `MaxRAMPercentage=50`, so 1 GiB in the same 2 GiB container. That costs under 10% (above) and leaves about 1 GiB for the JVM's own memory and an operator command.
-- **Allocation:** the run allocates about 35 times the input for C-CDA and 90 times for X12, mostly short-lived buffers per section. G1 copes (under 8% in pauses even at 512 MiB), but it is the place to look if GC time grows.
+- **Allocation:** the run allocates about 35 times the input for C-CDA and 90 times for X12, mostly short-lived buffers per record. G1 copes (under 8% in pauses even at 512 MiB), but it is the place to look if GC time grows.
 - **What the first heap trial found** (two fixes, revision ad):
   - **The archive buffered far more than a row group.** The first trial failed at 768 and 512 MiB, and even at 1536 MiB every run had 2–6 full collections. Each archive row is an 8 MiB ciphertext chunk, and Iceberg's Parquet writer first checks the row group's size after 100 rows: about 800 MiB in memory before the 128 MiB limit is checked. The writers now check after every row (`IngestTables.WRITE_OVERRIDES`, set at write time so existing tables get it too). After that, full collections are gone at every size, and throughput at 1536 MiB is unchanged.
-  - **The out-of-memory error was hidden.** The runs reported Parquet's "Cannot return unfinished footer" instead. When a batch's Parquet file failed part-way, the cleanup closed it again, and Parquet refuses a second close of a failed writer; that error replaced the real one. Both cleanup paths (`Archiver` and `SectionBatchWriter`) now never throw, and `AbandonedBatchTest` checks that the original error is the one reported. In production this would have shown a misleading Parquet error for any write failure part-way through a file.
+  - **The out-of-memory error was hidden.** The runs reported Parquet's "Cannot return unfinished footer" instead. When a batch's Parquet file failed part-way, the cleanup closed it again, and Parquet refuses a second close of a failed writer; that error replaced the real one. Both cleanup paths (`Archiver` and `RecordBatchWriter`) now never throw, and `AbandonedBatchTest` checks that the original error is the one reported. In production this would have shown a misleading Parquet error for any write failure part-way through a file.
 
 **C-CDA tree, 2026-11-01** (revision al; 1 GiB of C-CDA, P-256, local disk, Java 26.0.2, same machine). Before is `b9fda58`, after is `ddae8a2`, each in its own worktree on the same disk, run alternately:
 
@@ -1940,10 +1946,10 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 
 - **Speed is unchanged:** the medians are 3% apart, within the noise. The 103 is one slow split phase (5.6 s against about 4.0 s).
 - **Less allocation and GC:** 8% less allocated (the same in every run), and about 40% less time in GC pauses at either heap (the memory rows are one run each). The heap still in use after a collection is 10–17% lower.
-- **A small gain here, a large one for large documents:** these sections are 50–350 KB, where the tree was a small part of the pipeline's memory. A 64 MB document of structured entries needs 60% less to convert (§6.4).
+- **A small gain here, a large one for large documents:** these records are 50–350 KB, where the tree was a small part of the pipeline's memory. A 64 MB document of structured entries needs 60% less to convert (§6.4).
 - **Run comparisons from the same filesystem.** The first comparison ran the old code from a worktree under `/tmp` (ext4) and the new code from the project folder, which is on an encrypted home directory (ecryptfs). The new code then looked 10% slower in both phases, even archiving, which doesn't use the converter. The warehouse is written under the checkout's `target/perf`, so its disk is part of the result.
 
-**Source positions, 2026-11-02** (1 GiB of C-CDA and of X12, P-256, local disk, Java 26.0.2, same machine). Before is `a8049fe`, positions is `89284da` (line and column on C-CDA elements and on section origins), and fixed is `89284da` with the two fixes below. Each is a copy under `/tmp`, run alternately; the rows come from the same session, so compare within a row:
+**Source positions, 2026-11-02** (1 GiB of C-CDA and of X12, P-256, local disk, Java 26.0.2, same machine). Before is `a8049fe`, positions is `89284da` (line and column on C-CDA elements and on record origins), and fixed is `89284da` with the two fixes below. Each is a copy under `/tmp`, run alternately; the rows come from the same session, so compare within a row:
 
 | | Before | Positions | Fixed |
 |---|---:|---:|---:|
@@ -1954,18 +1960,18 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 | C-CDA allocated GiB | 30.3 | 33.9 | 33.9 |
 | C-CDA heap after GC, peak MiB (1 GiB / 512 MiB heap) | 397–431 / 261–272 | 467 / 241 | 459–477 / 260–315 |
 | C-CDA process RSS, peak MiB (1 GiB / 512 MiB heap) | 1,393–1,429 / 886–902 | 1,400 / 894 | 1,400–1,442 / 880–884 |
-| X12 sections/s | 19,526–19,931 | 19,115 | 19,135–19,372 |
+| X12 records/s | 19,526–19,931 | 19,115 | 19,135–19,372 |
 | Stored ÷ source (C-CDA) | 0.49 | 0.54 | 0.54 |
 
 - **Positions cost C-CDA 9–12%, all in the split phase** (about 1.2 s more per GiB). The archive phase is unchanged, as are X12 (−3%, the noise level) and CSV.
-- **Most of it was counting lines on the split thread.** `SectionOrigins` reads the file a second time to find each section's line and column. It ran on the split thread, the one that bounds C-CDA, and `LineCounter` counted a byte at a time (0.6–1.0 s per GiB). With origins turned off, the split phase was 4.1–4.4 s. Two fixes:
+- **Most of it was counting lines on the split thread.** `RecordOrigins` reads the file a second time to find each record's line and column. It ran on the split thread, the one that bounds C-CDA, and `LineCounter` counted a byte at a time (0.6–1.0 s per GiB). With origins turned off, the split phase was 4.1–4.4 s. Two fixes:
   - `LineCounter` counts a block with local variables: 0.45 s per GiB;
-  - a background thread (`sdh-lines`) counts the file ahead of the split thread and leaves a mark every 64 KiB, for at most 64 MiB ahead. The split thread starts from the last mark before each section, so for C-CDA it counts at most 64 KiB a section instead of the whole file. Positions are the same whether the marks are ahead or not (`SectionOriginsTest`).
+  - a background thread (`sdh-lines`) counts the file ahead of the split thread and leaves a mark every 64 KiB, for at most 64 MiB ahead. The split thread starts from the last mark before each record, so for C-CDA it counts at most 64 KiB a record instead of the whole file. Positions are the same whether the marks are ahead or not (`RecordOriginsTest`).
 - **What's left, about 7%, is the positions themselves.** Every element gains `#line` and `#col`, so the JSON is 10% larger and allocation 12% higher, and the encrypt, zstd and Parquet work grows with it. Dropping them would change mapping `ccda/2`; not worth it for 7%.
 - **Memory:** RSS is unchanged at both heaps; the heap still in use after a collection is up to about 10% higher. 512 MiB stays comfortable. The background count adds one thread, a 64 KiB buffer and at most 1,024 small marks.
 - **The 82** is one slow run (split phase 8.5 s, main thread 61% busy, so waiting rather than working); it didn't recur in three more runs.
 
-**In the cluster** (`scripts/k8s-minikube.sh`, then a 400 MiB C-CDA file, 2,073 sections, through the README's Deployment with its 2 GiB limit; 4 CPUs, SeaweedFS and Kafka in the same VM; runs alternated):
+**In the cluster** (`scripts/k8s-minikube.sh`, then a 400 MiB C-CDA file, 2,073 records, through the README's Deployment with its 2 GiB limit; 4 CPUs, SeaweedFS and Kafka in the same VM; runs alternated):
 
 | Image | Time, s | Container memory, peak MiB | Restarts |
 |---|---:|---:|---:|
@@ -1974,24 +1980,24 @@ C-CDA pays most: the schema-driven XML conversion cuts the split phase from abou
 
 The cluster is bound by its 4 CPUs and its in-VM storage, so it shows no difference in speed, and memory stays well within the limit. All of the deployment checks pass.
 
-On S3 (SeaweedFS inside the minikube VM, P-256) the results were close to local disk: C-CDA 103 MiB/s, X12 15,298 and CSV 19,490 sections/s. Uploads are not the limit, and SeaweedFS's own CPU use in the VM takes from the same host. Before the sealing-pool fix, P-256 gave X12 15,048 and CSV 19,859 sections/s.
+On S3 (SeaweedFS inside the minikube VM, P-256) the results were close to local disk: C-CDA 103 MiB/s, X12 15,298 and CSV 19,490 records/s. Uploads are not the limit, and SeaweedFS's own CPU use in the VM takes from the same host. Before the sealing-pool fix, P-256 gave X12 15,048 and CSV 19,859 records/s.
 
 **What bounds each case:**
-- **Large sections (C-CDA): the single split-and-write thread**, busy 93% at about 270 MiB/s. Splitting, Parquet writing and multi-chunk section encryption all run on it; the workers are mostly idle. The archive pass runs at about 200 MiB/s. Neither is near disk speed. Input files were in the page cache, so disk reads weren't measured.
-- **Small sections (X12, CSV): public-key crypto for every message.** A CPU profile of the CSV run put about 90% of CPU in P-256 arithmetic. Timed separately on one core:
+- **Large records (C-CDA): the single split-and-write thread**, busy 93% at about 270 MiB/s. Splitting, Parquet writing and multi-chunk record encryption all run on it; the workers are mostly idle. The archive pass runs at about 200 MiB/s. Neither is near disk speed. Input files were in the page cache, so disk reads weren't measured.
+- **Small records (X12, CSV): public-key crypto for every message.** A CPU profile of the CSV run put about 90% of CPU in P-256 arithmetic. Timed separately on one core:
   - ECDH key agreement: 390 µs;
   - ES256 signature: 95 µs;
   - ephemeral key generation: 70 µs.
 
-  That's about 0.55 ms per message: the ECDH-ES encryption about 85%, the signature about 15%. Splitting, hashing, section encryption, zstd and Parquet are a few percent together.
+  That's about 0.55 ms per message: the ECDH-ES encryption about 85%, the signature about 15%. Splitting, hashing, record encryption, zstd and Parquet are a few percent together.
 - **RSA-3072 recipients** (already supported by the contract, §10) cost the connector about 55 µs per message to encrypt instead of about 460 µs: CSV is 2× faster, X12 1.5×. Readers pay the difference: RSA-3072 decryption is about 2.1 ms per message against about 0.4 ms for ECDH. With RSA, CSV is no longer CPU-bound (15 of 32 cores, no thread saturated), so the next limit is coordination between stages.
-- **Stored ÷ source:** CSV stores 1.8× its size, because the header is prepended to every section and each row carries an ID, keys and GCM overhead. X12 is 0.93, with an envelope added to every transaction. C-CDA compresses to 0.5.
+- **Stored ÷ source:** CSV stores 1.8× its size, because the header is prepended to every record and each row carries an ID, keys and GCM overhead. X12 is 0.93, with an envelope added to every transaction. C-CDA compresses to 0.5.
 - **Peak heap:** G1 uses what it is given, so peak heap in use doesn't show need; the heap-sizing table above does. In-flight data is bounded (§13).
 
-**Ways to go faster on small sections** (not decided; §16 item 8):
+**Ways to go faster on small records** (not decided; §16 item 8):
 1. RSA-3072 recipient keys: configuration only, about 2× for CSV, but readers pay about 5× more per message to decrypt.
 2. A native crypto provider for P-256 (for example Amazon Corretto Crypto Provider, built on AWS-LC). Likely several times faster for ECDH and signing; not tried.
-3. One message per committed batch instead of per section. This cuts sealing by up to 10,000× but changes the contract and how downstream consumers work.
+3. One message per committed batch instead of per record. This cuts sealing by up to 10,000× but changes the contract and how downstream consumers work.
 4. Reusing the ephemeral ECDH key across messages would remove most of the cost. It breaks RFC 7518's rule that each key agreement uses a new ephemeral key, so it's not recommended.
 
 ## 14. Configuration
@@ -2016,9 +2022,9 @@ sdh:
       csv: { header: true }       # → csv.header
       fhir: { ndjson-group-size: 0 }
       delimited: { pattern: "^MSH\\|", mode: START }
-    limits: { max-file-bytes: 1TB, max-section-bytes: 512MB }   # omitted = format defaults
+    limits: { max-item-bytes: 1TB, max-record-bytes: 512MB }   # omitted = format defaults
     convert: true                 # JSON conversion where the format has a converter (§6.4)
-    convert-max-bytes: 64MB       # larger sections are stored in their original form, as failed
+    convert-max-bytes: 64MB       # larger records are stored in their original form, as failed
     convert-memory: 400MB         # heap conversions running at once may share; default 40% of the heap
   storage:
     catalog-name: sdh             # also sent in messages
@@ -2034,7 +2040,7 @@ sdh:
       io-impl: org.apache.iceberg.aws.s3.S3FileIO   # or ...gcp.gcs.GCSFileIO, ...azure.adlsv2.ADLSFileIO (§8.1)
       s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
       client: { region: us-east-1 }
-    commit: { max-sections: 10000, max-bytes: 512MB, max-interval: 30s }
+    commit: { max-records: 10000, max-bytes: 512MB, max-interval: 30s }
   lease:
     name: file-connector
     jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
@@ -2046,7 +2052,7 @@ sdh:
     sign-provider: local          # same choices, independently
     keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
     keys:
-      sections-kek: sections-kek/1                          # keystore alias, or the KMS key ref
+      records-kek: records-kek/1                          # keystore alias, or the KMS key ref
       landed-items-kek: landed-items-kek/1                  # unwrap only
       inbox: { kid: splitter-2026, pem: /run/secrets/inbox.pem }   # opens item.landed; passphrase: env
       landing-signer: { kid: landing-2026, pem: /run/secrets/landing-signer.pem }   # public key
@@ -2058,7 +2064,7 @@ sdh:
       recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
   queue:
     type: kafka                   # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
-    uri: "kafka:sdh.sections?brokers=kafka:9093&securityProtocol=SSL"
+    uri: "kafka:sdh.records?brokers=kafka:9093&securityProtocol=SSL"
     artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
   retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
   telemetry:                      # §12.1; unset endpoint = no export
@@ -2071,7 +2077,7 @@ sdh:
     min-snapshots: 10
     compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
     orphans: { enabled: true, interval: 24h, min-age: 3d }
-    retention: { sections: 30d }   # unset = keep forever (default); landed items: the landing node's settings
+    retention: { records: 30d }   # unset = keep forever (default); landed items: the landing node's settings
 ```
 
 Compared with the earlier sketch:
@@ -2110,14 +2116,14 @@ Each application, the splitter (`file-connector`) and the landing node (`landing
 | `-XX:-UsePerfData` | No `hsperfdata` file in `/tmp` |
 | `-XX:MaxRAMPercentage=50` | Heap sized from the container memory limit: half of it. The rest is for the JVM's own memory (about 350–650 MiB: code, metaspace, thread stacks, native libraries) and for an operator command's JVM in the same container. A 2 GiB limit gives a 1 GiB heap (§13.1) |
 | `--enable-native-access=ALL-UNNAMED` | Java 25 otherwise warns when libraries load native code |
-| `-DZstdNativePath=…`, `-Dorg.xerial.snappy.lib.path/name=…` | zstd-jni (section and Parquet compression) and snappy-java (an optional Kafka codec) load from `/app/native`, unpacked at build time, instead of unpacking themselves into `/tmp`. So `/tmp` can be `noexec`. Other native code (Netty, lz4) falls back to Java when it can't load |
+| `-DZstdNativePath=…`, `-Dorg.xerial.snappy.lib.path/name=…` | zstd-jni (record and Parquet compression) and snappy-java (an optional Kafka codec) load from `/app/native`, unpacked at build time, instead of unpacking themselves into `/tmp`. So `/tmp` can be `noexec`. Other native code (Netty, lz4) falls back to Java when it can't load |
 
 **What the container needs at runtime:**
 
 | Path | Mount | Contents |
 |---|---|---|
 | `/data/intake` | landing only: the intake directory, shared with whatever delivers files; writable for a read-write source | Files to land (§5.3.11) |
-| `/tmp` | writable `emptyDir`/tmpfs; `noexec` is fine | `S3FileIO` stages multipart uploads here before sending them: the same bytes as the object store gets, with section payloads already encrypted. Allow about 1 GiB |
+| `/tmp` | writable `emptyDir`/tmpfs; `noexec` is fine | `S3FileIO` stages multipart uploads here before sending them: the same bytes as the object store gets, with record payloads already encrypted. Allow about 1 GiB |
 | `/run/secrets` | read-only secret volume | Local mode: the splitter's `keks.p12`, `signing.pem`, `recipient.pem`, `inbox.pem`, `landing-signer.pem`; the landing node's `keks.p12`, `signing.pem` and the splitter's inbox public key (paths are configuration, §14). Mode 0400 or 0440 |
 | configuration | ConfigMap via `SPRING_CONFIG_ADDITIONAL_LOCATION`, or `SPRING_APPLICATION_JSON` | `sdh.*` (§14). Passwords and passphrases come from environment variables or a `configtree:` mount |
 
@@ -2401,12 +2407,12 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 
 | Level | Coverage |
 |---|---|
-| Conversion | `FlatConvertersTest` (CSV, X12, EDIFACT edge cases and failure codes), `CcdaConverterTest` (parity with Google's XmlToJson outputs, DTDs refused), `CcdaSamplesTest` (four real-world C-CDA documents, nothing lost), `IngestPipelineTest` (JSON stored, failed sections kept raw with lineage, rebuilt after a restart, size limit, chunked JSON) |
+| Conversion | `FlatConvertersTest` (CSV, X12, EDIFACT edge cases and failure codes), `CcdaConverterTest` (parity with Google's XmlToJson outputs, DTDs refused), `CcdaSamplesTest` (four real-world C-CDA documents, nothing lost), `IngestPipelineTest` (JSON stored, failed records kept raw with lineage, rebuilt after a restart, size limit, chunked JSON) |
 | Unit | Each splitter, including boundaries spanning buffer edges, resume from every reported offset, malformed input and limits; crypto round-trips and AAD tamper detection; checkpoint MAC; message JOSE round-trip; lease keeper timing with a fake clock |
 | Integration without Docker (default build) | Embedded PostgreSQL binaries (`io.zonky.test:embedded-postgres`) for the lease store and JDBC catalog. Iceberg's `RESTCatalogAdapter` for REST catalog commit rules, in-process. `InMemoryFileIO`. Fencing tests run against both catalog types. End-to-end write → message → `connector-queue-reader`. The whole Spring Boot app with a SEDA queue (`FileConnectorApplicationTest`). The admin commands against data the running app wrote, while it holds the lease (`AdminCommandsTest`) |
 | Integration with Docker (`-Pit`) | See §15.1 |
 | Crash and resume | Fault-injection points at every stage (after write, after commit, mid-publish, before end of file, mid-archive, after delete, while failing), then a restart. The test checks that there are no gaps, no lost or duplicated rows, and duplicate messages only within one batch |
-| Performance | `-Pperf` / `scripts/perf.sh` (§13.1): the split micro-benchmark (synthetic multi-GB C-CDA, X12 and CSV), the real landing node and the real splitter, and end to end by replay; bulk files and many small documents, through a directory and HTTP push; on local disk or SeaweedFS; MiB/s, items/s, sections/s, latency per item (p50–max), cores used, busiest thread, memory, stored ÷ source |
+| Performance | `-Pperf` / `scripts/perf.sh` (§13.1): the split micro-benchmark (synthetic multi-GB C-CDA, X12 and CSV), the real landing node and the real splitter, and end to end by replay; bulk files and many small documents, through a directory and HTTP push; on local disk or SeaweedFS; MiB/s, items/s, records/s, latency per item (p50–max), cores used, busiest thread, memory, stored ÷ source |
 
 ### 15.1 Docker integration suite (`-Pit`)
 
@@ -2414,8 +2420,8 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 
 | Test | Containers | Verifies |
 |---|---|---|
-| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The splitter as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. `TestLanding` lands a good and a bad file in the same catalog and announces them (§5.3.12). The good file has one record with a missing field: that section arrives as `section.failed` and reads back in its original form, and the file still completes with `failedSectionCount` 1; the others read back as JSON rows. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every section back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. A second connector with a different lease name on the same directory is refused by the directory claim (§9.5) and the running one carries on. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every section; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every sections data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
-| `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = fileId, metadata headers, per-file order, `acks=all` + idempotence |
+| `FullStackIT` | `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2` | The splitter as deployed: Postgres for the lease and JDBC catalog, SeaweedFS through `S3FileIO`, Kafka. `TestLanding` lands a good and a bad file in the same catalog and announces them (§5.3.12). The good file has one record with a missing field: that record arrives as `record.failed` and reads back in its original form, and the file still completes with `failedRecordCount` 1; the others read back as JSON rows. Downstream, `connector-queue-reader` decodes the Kafka messages and reads every record back out of S3. The archive restores byte-for-byte. No object in the bucket (data, manifests or metadata) contains plaintext or a filename. A second connector with a different lease name on the same directory is refused by the directory claim (§9.5) and the running one carries on. Then maintenance on S3: compacts the 5 batch files into 1 and downstream still reads every record; a planted stray object is found by `S3FileIO` listing and deleted; retention three days on removes every records data object from the bucket. Telemetry is exported over OTLP to `otel/opentelemetry-collector-contrib:0.162.0` (distroless: its output file is copied in) and must contain the traces, metrics and audit events, with no PHI marker or filename |
+| `KafkaIT` | `apache/kafka:4.2.2` (3 partitions) | Record key = itemId, metadata headers, per-file order, `acks=all` + idempotence |
 | `RabbitMqIT` | `rabbitmq:4.2.9-management-alpine` | `message_id`, content type, headers, publisher confirms (`CORRELATED`) |
 | `ArtemisIT` | `apache/activemq-artemis:2.44.0-alpine` | `JMSXGroupID`, and duplicates dropped by `_AMQ_DUPL_ID` |
 | `SqsIT` | `softwaremill/elasticmq-native:1.7.1` | FIFO MessageGroupId, and duplicates dropped by MessageDeduplicationId. ElasticMQ replaces LocalStack: it is SQS-compatible, light, and needs no account token |
@@ -2427,8 +2433,8 @@ Before merging an update: `scripts/it-minikube.sh -Dit.test='*ImageIT' -Dfailsaf
 | `GcsIT` | `fsouza/fake-gcs-server:1.56.1`, `postgres:18.4` | Google Cloud Storage through `GCSFileIO` and a JDBC catalog (§8.1): ingest, downstream read-back with its own catalog client, archive restore, compaction, orphan cleanup (a planted stray object is found by listing and deleted), retention purge, and no plaintext or filename in any object. The emulator's external URL is set after start, because resumable uploads return URLs built from it. Shares its test body with `AdlsIT` (`ObjectStoreItBase`) |
 | `AdlsIT` | `mcr.microsoft.com/azure-storage/azurite:3.35.0`, `postgres:18.4` | Azure Data Lake Storage Gen2 through `ADLSFileIO`: the same checks as `GcsIT`, except orphan cleanup, which Azurite can't support (no Data Lake directory listing). The test lists objects through the Blob API instead |
 | `AdlsAzureIT` | a real ADLS Gen2 storage account (opt-in), `postgres:18.4` | The `GcsIT` checks, orphan cleanup included, on Azure itself: listing goes through `ADLSFileIO.listPrefix`, as orphan cleanup's does. Skipped unless `SDH_ADLS_ACCOUNT` is set. Credentials: `SDH_ADLS_KEY` (account key), `SDH_ADLS_SAS`, or the default Azure credential chain; the identity needs Storage Blob Data Contributor. Each run creates a filesystem `sdh-it-<random>`, writes only synthetic data, and deletes it. Run: `set -a; source <env file>; set +a; scripts/it-minikube.sh -pl file-connector -am -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dit.test=AdlsAzureIT -Dfailsafe.failIfNoSpecifiedTests=false`. First run (2026-10-29, account in a new subscription, Standard LRS, hierarchical namespace): found the relative-path listing (§8.4); passes after the fix |
-| `PolarisIT` | `apache/polaris:1.8.0`, `chrislusf/seaweedfs:4.48`, `postgres:18.4` | The connector on a real Iceberg REST catalog (§8.1). The test creates the Polaris catalog through the management API (S3 storage with `stsUnavailable`, since SeaweedFS has no STS). It runs the `FullStackIT` flow on Polaris: ingest a good and a bad file, read every section back with a separate REST client, restore the archive, compact, delete a stray object, purge by retention, and check that no object holds plaintext or a filename. It also runs admin `status` against the same catalog. Fencing (§9.3) with two separate REST clients: a properties-only checkpoint commits as a marker snapshot; a stale holder is fenced after its successor establishes; the race between building and committing is rejected by the server (`assert-ref-snapshot-id`); and the control case shows a plain Iceberg transaction is not fenced. The SEDA queue stands in for the broker, which is covered elsewhere |
-| `ServiceImageIT`, `CustomerImageIT` | both applications' service images (each `Dockerfile`) or customer images (each kit's `container/Dockerfile` on distroless, plus the inventory step) + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | Both stages as deployed (§14.1, §14.3), sharing one test body (`ContainerImageItBase`): two landing nodes for one intake (active and standby, with a 15 s lease) and the splitter, each with a read-only root filesystem, a `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges` and a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the intake directory is a volume that a busybox container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`; `item.landed` goes over Kafka. It checks that each process runs as 10001 and can't write outside its volumes; that a good and a bad file are landed (moved to `landed/`), announced and split, and downstream reads every section back from the host; that `sdh-admin status` and `restore --to /tmp` work inside the running splitter without taking the lease, and the restored item, read the way the README describes (a busybox container sharing the splitter's process namespace reads `/proc/1/root/tmp/<id>`), matches what was delivered; that when the active landing node is killed, the standby takes the lease and lands the next file; that the splitter, restarted, takes the lease at epoch 2 and splits another; that no container's log has a PHI marker or filename; that nothing native or `hs_err` was written to `/tmp`; and, in both images, that `/app/legal/` holds our notice (the splitter's with the HL7 attribution), a complete `THIRD-PARTY.txt` (including zstd-jni and snappy-java, whose native libraries are unpacked), the license texts, and `os-packages.txt` with every OS package and its copyright file, and that the JRE's notices are present. The logs are saved to `target/<variant>-image-it.log` and `target/<variant>-landing-image-it.log` |
+| `PolarisIT` | `apache/polaris:1.8.0`, `chrislusf/seaweedfs:4.48`, `postgres:18.4` | The connector on a real Iceberg REST catalog (§8.1). The test creates the Polaris catalog through the management API (S3 storage with `stsUnavailable`, since SeaweedFS has no STS). It runs the `FullStackIT` flow on Polaris: ingest a good and a bad file, read every record back with a separate REST client, restore the archive, compact, delete a stray object, purge by retention, and check that no object holds plaintext or a filename. It also runs admin `status` against the same catalog. Fencing (§9.3) with two separate REST clients: a properties-only checkpoint commits as a marker snapshot; a stale holder is fenced after its successor establishes; the race between building and committing is rejected by the server (`assert-ref-snapshot-id`); and the control case shows a plain Iceberg transaction is not fenced. The SEDA queue stands in for the broker, which is covered elsewhere |
+| `ServiceImageIT`, `CustomerImageIT` | both applications' service images (each `Dockerfile`) or customer images (each kit's `container/Dockerfile` on distroless, plus the inventory step) + `postgres:18.4`, `chrislusf/seaweedfs:4.48`, `apache/kafka:4.2.2`, `busybox:1.37.0` | Both stages as deployed (§14.1, §14.3), sharing one test body (`ContainerImageItBase`): two landing nodes for one intake (active and standby, with a 15 s lease) and the splitter, each with a read-only root filesystem, a `noexec` tmpfs `/tmp`, all capabilities dropped, `no-new-privileges` and a 1.5 GB memory limit. Secrets are a volume shaped like a Kubernetes secret with an `fsGroup` (root:10001, 0440); the intake directory is a volume that a busybox container (standing in for the file delivery) drops files into, because Docker won't copy into a container with a read-only root filesystem. Services are reached by network alias, configured through `SPRING_APPLICATION_JSON`; `item.landed` goes over Kafka. It checks that each process runs as 10001 and can't write outside its volumes; that a good and a bad file are landed (moved to `landed/`), announced and split, and downstream reads every record back from the host; that `sdh-admin status` and `restore --to /tmp` work inside the running splitter without taking the lease, and the restored item, read the way the README describes (a busybox container sharing the splitter's process namespace reads `/proc/1/root/tmp/<id>`), matches what was delivered; that when the active landing node is killed, the standby takes the lease and lands the next file; that the splitter, restarted, takes the lease at epoch 2 and splits another; that no container's log has a PHI marker or filename; that nothing native or `hs_err` was written to `/tmp`; and, in both images, that `/app/legal/` holds our notice (the splitter's with the HL7 attribution), a complete `THIRD-PARTY.txt` (including zstd-jni and snappy-java, whose native libraries are unpacked), the license texts, and `os-packages.txt` with every OS package and its copyright file, and that the JRE's notices are present. The logs are saved to `target/<variant>-image-it.log` and `target/<variant>-landing-image-it.log` |
 | `VaultTransitIT` | `hashicorp/vault:2.1.1` (dev mode) | `vault-transit` built purely from connector settings (address, token file): wrap with associated data, ES256 signing, message round trip; a wrong token fails startup naming the KEK and HTTP 403 |
 
 **Running it on minikube with KVM2:** use `scripts/it-minikube.sh`, which needs no local Docker daemon. The script:
@@ -2507,18 +2513,18 @@ A demonstration of the pipeline at work, for showing people rather than testing.
 - **`demo-files`, a watched directory:** each file is written to an outbox, moved into the intake directory, and marked ready with a `.done` file; a resubmission also gets a `.sdh-replaces` file holding the earlier item's ID. The landing node moves a landed file to `landed/`.
 - **`demo-push`, HTTP push with mTLS:** the landing node listens on a free port with a server certificate from a CA made for the run (`DemoPki`), trusts clients from that CA, and lists one producer subject. Resubmissions name the earlier item in a `Replaces` header; the 202 receipt gives the item ID.
 
-**The items** (`DemoFiles`), built from the synthetic and de-identified samples in `connector-core/src/test/resources/ccda/`, so no PHI. A sample used in more than one item gets a tag in its title in each, because section IDs are keyed hashes of the content (§7.3): the same document in two items would be one section to a consumer. Files 8 and 9 repeat content on purpose.
+**The items** (`DemoFiles`), built from the synthetic and de-identified samples in `connector-core/src/test/resources/ccda/`, so no PHI. A sample used in more than one item gets a tag in its title in each, because record IDs are keyed hashes of the content (§7.3): the same document in two items would be one record to a consumer. Files 8 and 9 repeat content on purpose.
 
 | Item | Content | Outcome |
 |---|---|---|
-| `01-synthea-patient.xml`, `02-alice-newman.xml` | one document each | completed, 1 section |
-| `03-clinic-batch.xml` | 3 documents in a `<batch>` wrapper | completed, 3 sections |
-| `04-batch-with-bad-document.xml` | 3 documents; the middle one has an undeclared `&nbsp;` | completed, 3 sections, 1 stored unconverted (`CONVERT_XML_MALFORMED`) |
+| `01-synthea-patient.xml`, `02-alice-newman.xml` | one document each | completed, 1 record |
+| `03-clinic-batch.xml` | 3 documents in a `<batch>` wrapper | completed, 3 records |
+| `04-batch-with-bad-document.xml` | 3 documents; the middle one has an undeclared `&nbsp;` | completed, 3 records, 1 stored unconverted (`CONVERT_XML_MALFORMED`) |
 | `05-truncated-batch.xml` | a complete document, then one cut off part-way | failed, `PARSE_UNBALANCED_ELEMENT`; the first document stays stored (one commit per document in the demo) |
 | `06-utf16-document.xml` | a document in UTF-16 | failed at byte 0, `PARSE_XML_UNSUPPORTED_ENCODING` |
 | `07-epic-inpatient.xml` | one document | completed: the pipeline carries on after failures |
-| `08-synthea-patient-again.xml` | file 1's bytes again | landed as an item of its own with an `item.duplicate_content` warning naming file 1's item; completed, and its section has file 1's section ID |
-| `09-truncated-batch-corrected.xml` | file 5, corrected, naming file 5's item | landed and linked to it (`replaces_item_id` in `landed_items`), never in its place; completed, 2 sections |
+| `08-synthea-patient-again.xml` | file 1's bytes again | landed as an item of its own with an `item.duplicate_content` warning naming file 1's item; completed, and its record has file 1's record ID |
+| `09-truncated-batch-corrected.xml` | file 5, corrected, naming file 5's item | landed and linked to it (`replaces_item_id` in `landed_items`), never in its place; completed, 2 records |
 | `p1-referral.xml`, `p2-discharge-batch.xml` | pushed: one document, then two | completed |
 | `p3-unlisted-client.xml` | pushed with a certificate from the CA whose subject isn't listed | refused, 403, before it reaches the intake |
 | `p4-too-large.xml` | pushed, over `max-item-bytes` (2 MiB) | refused, 413 |
@@ -2530,12 +2536,12 @@ A demonstration of the pipeline at work, for showing people rather than testing.
 - the item's name and what should happen;
 - `[landing]` and `[splitter]`: each app's own log, its audit events included;
 - the landing result: the item ID, a duplicate warning or resubmission link (checked in `landed_items`), or the HTTP refusal;
-- the splitter's result: its state, section counts or failure, the time from delivery to finished, and whether it was as expected;
+- the splitter's result: its state, record counts or failure, the time from delivery to finished, and whether it was as expected;
 - `[otel trace]`: each trace as a tree with durations and attributes, `[otel log]`: the audit events as OpenTelemetry log records, and `[otel metrics]` every 15 s: the `sdh.*` metrics as running totals.
 
 The apps export over OTLP/HTTP, through the production filters, to a receiver in the demo's JVM (`OtlpReceiver`), so what is shown is exactly what a collector would get. The demo follows each item by its audit events: the landing node's `item.landed` and `item.announced`, then the splitter's `file.completed` or `file.failed`. The two apps trace an item separately, with no shared trace; the item ID joins them.
 
-**At the end:** a summary table, then the downstream read-back for each pipeline. Every message is decoded with `connector-queue-reader` (decrypted, signature checked), and every section is read back out of the Iceberg tables. Converted documents are pretty-printed to `target/demo/output/<pipeline>/<item>/section-<n>.json`, with a 16-line excerpt of each on the console; unconverted ones are kept in their original form. Repeated message IDs are dropped, as a consumer would: a failing item re-announces its committed sections (`publish.republish`), which is at-least-once delivery working as designed. A section with the same content as an earlier one has the same message ID (`messageId = sectionId`, §10.1) and reaches downstream once: Artemis drops the repeat by `_AMQ_DUPL_ID`; Kafka delivers it and the consumer drops it. The count of distinct messages is checked against what the items should send.
+**At the end:** a summary table, then the downstream read-back for each pipeline. Every message is decoded with `connector-queue-reader` (decrypted, signature checked), and every record is read back out of the Iceberg tables. Converted documents are pretty-printed to `target/demo/output/<pipeline>/<item>/record-<n>.json`, with a 16-line excerpt of each on the console; unconverted ones are kept in their original form. Repeated message IDs are dropped, as a consumer would: a failing item re-announces its committed records (`publish.republish`), which is at-least-once delivery working as designed. A record with the same content as an earlier one has the same message ID (`messageId = recordId`, §10.1) and reaches downstream once: Artemis drops the repeat by `_AMQ_DUPL_ID`; Kafka delivers it and the consumer drops it. The count of distinct messages is checked against what the items should send.
 
 **Kept for later review,** under `file-connector/target/demo/`:
 - `telemetry/report.md`: every item through the pipeline, from its telemetry: a table of items, then for each item its audit events from both apps in time order and its traces as trees; the refused pushes; and the apps' own events (starting, leases);
@@ -2562,7 +2568,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 | 5 | Metadata growth | **Resolved** | Lease renewals no longer touch Iceberg (§9.3), and publish marks ride along with batch commits (§9.2). Commits are now roughly one per batch. Test: after 130 commits, at most 100 previous metadata files are kept, and the oldest is deleted (JDBC catalog; a REST server applies its own policy) |
 | 6 | New: fencing on REST and JDBC catalogs | **Passed** | Plain Iceberg transactions are not fenced, which the control test demonstrates. The compare-and-swap committer with snapshot markers is (§9.3). Confirmed on a real REST server, Apache Polaris 1.8.0, in `PolarisIT` |
 | 7 | New: Testcontainers suite | **Passed (partly)** | §15.1: SeaweedFS + `S3FileIO`, Postgres, and all seven brokers pass on minikube. KMS providers: AWS (local-kms), Azure (Lowkey Vault) and Vault pass; GCP runs against a fake only, and stays untested against the real service until customer demand requires it (§7.4). Apache Polaris (REST catalog) passes, including fencing. Google Cloud Storage (fake-gcs-server) and ADLS Gen2 (Azurite) pass; orphan cleanup on ADLS, which Azurite can't run, passes on a real storage account (`AdlsAzureIT`) once relative listed paths are resolved (§8.4). MinIO is not supported unless a customer pays for it (§8.1) |
-| 8 | New: throughput on small sections | **Open** | §13.1: about 24,000 sections/s (CSV ≈ 7 MiB/s) with a P-256 recipient on 16 cores, bound by public-key crypto for every message. A 1 GiB CSV takes about 2.5 minutes. Whether that's enough depends on expected volumes; the options are in §13.1 |
+| 8 | New: throughput on small records | **Open** | §13.1: about 24,000 records/s (CSV ≈ 7 MiB/s) with a P-256 recipient on 16 cores, bound by public-key crypto for every message. A 1 GiB CSV takes about 2.5 minutes. Whether that's enough depends on expected volumes; the options are in §13.1 |
 | 9 | New: Kubernetes deployment | **Passed** | §15.2: the customer image, deployed from the README's manifest on Kubernetes 1.37 under the restricted Pod Security Standard, ingests, runs operator commands, fails over and refuses a second instance. The run found five README and configuration problems, and slow takeover after a crash (the restart delays of `CrashLoopBackOff` on top of the lease TTL); all fixed. Managed clusters (EKS, AKS, GKE) aren't covered |
 
 **Spike follow-ups:** checking the Iceberg internals used by the fenced committer on every Iceberg upgrade is enforced by `IcebergUpgradeGuardTest` (§9.3).
@@ -2573,7 +2579,7 @@ These are checked first, in a build spike before the full implementation. Spike 
 - **Operator-defined pipelines:** defining the source type, endpoint and handling through a console or API, without editing configuration by hand. Planned with pipeline monitoring, management and remediation. It will need versioned definitions that apply between files, roles with approval for changes that redirect PHI, audit events for every change, secrets by reference only, and per-environment allow-lists of endpoints, destinations and queues (§5.3).
 - **Several types of content in one pipeline,** or in one landing or splitter namespace (§5.3): each type gets its own pipeline.
 - **Several landing nodes for one intake at once:** each intake has one active node and a standby (§5.3.5).
-- **Host disk capacity:** space for the inbound directory, `completed/` and `failed/` records, and the encrypted local `failed/<fileId>.enc` fallback is the operators' responsibility, through normal system monitoring. The service doesn't reserve, measure or predict disk space.
+- **Host disk capacity:** space for the inbound directory, `completed/` and `failed/` records, and the encrypted local `failed/<itemId>.enc` fallback is the operators' responsibility, through normal system monitoring. The service doesn't reserve, measure or predict disk space.
 - **MinIO:** not supported or tested. Support only if a customer pays for it, including the development and testing it needs (§8.1).
 - **GCP Cloud KMS against the real service:** untested until customer demand requires it (§7.4).
 - Re-keying existing data after a KEK compromise. KEK rotation for new data is supported through `kek_ref`.

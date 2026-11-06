@@ -11,15 +11,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
-import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
-import com.sdh.healthcare.connector.contract.position.SectionOrigin;
+import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.SectionStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
@@ -75,9 +75,9 @@ class ContractRoundTripTest
         KeyPair signer = ec();
         KeyPair recipient = ec();
         KeyPair stranger = ec();
-        SectionStored message = new SectionStored("ABC", UUID.randomUUID(),
+        RecordStored message = new RecordStored("ABC", UUID.randomUUID(),
                 7, 100, 50, "ccda", "application/json", "ccda/1", 50, 1,
-                new StorageRef("cat", "sdh_ingest", "sections",
+                new StorageRef("cat", "sdh_ingest", "records",
                         LocalDate.of(2026, 10, 28), 42L, "kek-1"));
 
         byte[] body = new MessageSealer(
@@ -107,70 +107,70 @@ class ContractRoundTripTest
     @Test
     void everyMessageTypeRoundTrips()
     {
-        UUID fileId = UUID.randomUUID();
-        StorageRef ref = new StorageRef("cat", "sdh_ingest", "sections",
+        UUID itemId = UUID.randomUUID();
+        StorageRef ref = new StorageRef("cat", "sdh_ingest", "records",
                 LocalDate.of(2026, 10, 28), 42L, "kek-1");
         for (ConnectorMessage message : java.util.List.of(
-                new ConnectorMessage.FileStarted(fileId, "csv", 999,
+                new ConnectorMessage.FileStarted(itemId, "csv", 999,
                         java.time.Instant.EPOCH, "file-connector"),
-                new SectionStored("ID1", fileId, 0, 10, 20, "csv",
+                new RecordStored("ID1", itemId, 0, 10, 20, "csv",
                         "application/json", "csv-row/1", 30, 1, ref),
-                new SectionStored("ID2", fileId, 1, 30, 20, "fhir",
+                new RecordStored("ID2", itemId, 1, 30, 20, "fhir",
                         "application/fhir+json", null, 20, 1, ref),
-                new ConnectorMessage.SectionFailed("ID3", fileId, 2, 50, 20,
+                new ConnectorMessage.RecordFailed("ID3", itemId, 2, 50, 20,
                         "csv", "text/csv", "CONVERT_CSV_FIELD_COUNT", 40, 1,
                         ref),
-                new SectionStored("ID4", fileId, 3, 70, 20, "ccda",
+                new RecordStored("ID4", itemId, 3, 70, 20, "ccda",
                         "application/json", "ccda/2", 30, 1, ref,
-                        new SectionOrigin(new SourcePosition(2, 1),
+                        new RecordOrigin(new SourcePosition(2, 1),
                                 new SourcePosition(41, 5))),
-                new ConnectorMessage.SectionFailed("ID5", fileId, 4, 90, 20,
+                new ConnectorMessage.RecordFailed("ID5", itemId, 4, 90, 20,
                         "ccda", "application/xml", "CONVERT_XML_MALFORMED",
                         40, 1, ref,
-                        new SectionOrigin(new SourcePosition(2, 1),
+                        new RecordOrigin(new SourcePosition(2, 1),
                                 new SourcePosition(60, 1)),
                         new SourcePosition(75, 12)),
-                new ConnectorMessage.FileCompleted(fileId, 3, 1, 999,
+                new ConnectorMessage.FileCompleted(itemId, 3, 1, 999,
                         "digest", java.time.Instant.EPOCH,
                         java.time.Instant.EPOCH),
-                new ConnectorMessage.ItemLanded(fileId, "claims-sftp", "file",
+                new ConnectorMessage.ItemLanded(itemId, "claims-sftp", "file",
                         999, "digest", java.time.Instant.EPOCH,
                         new StorageRef("cat", "sdh_landing", "landed_items",
                                 LocalDate.of(2026, 11, 3), 43L, "kek-2")),
-                new ConnectorMessage.ItemLanded(fileId, "claims-sftp", "file",
+                new ConnectorMessage.ItemLanded(itemId, "claims-sftp", "file",
                         999, "digest", java.time.Instant.EPOCH,
                         new StorageRef("cat", "sdh_landing", "landed_items",
                                 LocalDate.of(2026, 11, 3), 43L, "kek-2"),
                         UUID.randomUUID()),
-                new ConnectorMessage.ItemReceived(fileId, "claims", "file",
+                new ConnectorMessage.ItemReceived(itemId, "claims", "file",
                         999, "ab12", java.time.Instant.EPOCH,
                         "/out/claims.csv", UUID.randomUUID(), null, null),
-                new ConnectorMessage.ItemReceived(fileId, "adt",
+                new ConnectorMessage.ItemReceived(itemId, "adt",
                         "message-batch", 99, null, java.time.Instant.EPOCH,
                         null, null, java.util.Arrays.asList("m-1", null),
-                        java.util.Arrays.asList(null, fileId + "/m-0")),
-                new ConnectorMessage.ItemResult(fileId, "claims",
+                        java.util.Arrays.asList(null, itemId + "/m-0")),
+                new ConnectorMessage.ItemResult(itemId, "claims",
                         ConnectorMessage.ItemResult.COMPLETED, 3, 1, null, 1,
                         1, 1, java.util.List.of(new ConnectorMessage.Problem(
                                 "CONVERT_CSV_FIELD_COUNT", "convert", 2, 50,
                                 new SourcePosition(4, 1), -1, null, null)),
                         "/out/claims.csv", null, java.time.Instant.EPOCH),
-                new ConnectorMessage.ItemResult(fileId, "adt",
+                new ConnectorMessage.ItemResult(itemId, "adt",
                         ConnectorMessage.ItemResult.FAILED, 0, 0,
                         new ConnectorMessage.Problem("PARSE_JSON_MALFORMED",
                                 "split", -1, 7, null, 2, "m-3",
-                                fileId + "/m-1"),
+                                itemId + "/m-1"),
                         3, 2, 2, java.util.List.of(), null,
                         UUID.randomUUID(), java.time.Instant.EPOCH)))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
                     .isEqualTo(message);
         }
-        assertThat(PayloadCodec.toJson(new SectionStored("ID2", fileId, 1, 30,
+        assertThat(PayloadCodec.toJson(new RecordStored("ID2", itemId, 1, 30,
                 20, "fhir", "application/fhir+json", null, 20, 1, ref)))
                 .doesNotContainKey("mapping");
         assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemReceived(
-                fileId, "claims", "push", 1, null, java.time.Instant.EPOCH,
+                itemId, "claims", "push", 1, null, java.time.Instant.EPOCH,
                 null, null, null, null)))
                 .doesNotContainKeys("sha256", "producerRef", "replaces",
                         "messageIds", "messageReplaces");
@@ -178,29 +178,29 @@ class ContractRoundTripTest
 
     /**
      * An encrypted chunk decrypts to what was encrypted, and only as the
-     * chunk and section it was encrypted as.
+     * chunk and record it was encrypted as.
      */
     @Test
     void chunkRoundTripAndAadBinding()
     {
         byte[] batchDataKey = new byte[32];
-        UUID fileId = UUID.randomUUID();
-        SecretKey key = SectionCrypto.sectionKey(batchDataKey, fileId, 3);
+        UUID itemId = UUID.randomUUID();
+        SecretKey key = RecordCrypto.recordKey(batchDataKey, itemId, 3);
         byte[] plaintext = "<ClinicalDocument/>"
                 .getBytes(StandardCharsets.UTF_8);
 
-        byte[] stored = SectionCrypto.encryptChunk(key, fileId, 3, 0, 1,
+        byte[] stored = RecordCrypto.encryptChunk(key, itemId, 3, 0, 1,
                 plaintext);
-        assertThat(SectionCrypto.decryptChunk(key, fileId, 3, 0, 1,
+        assertThat(RecordCrypto.decryptChunk(key, itemId, 3, 0, 1,
                 plaintext.length, stored)).isEqualTo(plaintext);
 
         // The same bytes presented as another chunk position or another
-        // section are rejected.
-        assertThatThrownBy(() -> SectionCrypto.decryptChunk(key, fileId, 3, 1,
+        // record are rejected.
+        assertThatThrownBy(() -> RecordCrypto.decryptChunk(key, itemId, 3, 1,
                 2, plaintext.length, stored))
                 .isInstanceOf(ChunkIntegrityException.class);
-        assertThatThrownBy(() -> SectionCrypto.decryptChunk(
-                SectionCrypto.sectionKey(batchDataKey, fileId, 4), fileId, 4,
+        assertThatThrownBy(() -> RecordCrypto.decryptChunk(
+                RecordCrypto.recordKey(batchDataKey, itemId, 4), itemId, 4,
                 0, 1, plaintext.length, stored))
                 .isInstanceOf(ChunkIntegrityException.class);
     }

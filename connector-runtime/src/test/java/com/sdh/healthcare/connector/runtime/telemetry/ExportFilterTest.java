@@ -42,7 +42,7 @@ class ExportFilterTest
                 .build())
         {
             Span started = tracers.get("t").spanBuilder("ingest.file")
-                    .setAttribute("sdh.file_id", "01a1")
+                    .setAttribute("sdh.item_id", "01a1")
                     .setAttribute("sdh.seq", 7L)
                     .setAttribute("file.name", "smith-john.csv")
                     .setAttribute("code.stacktrace", "at parse(…)")
@@ -55,7 +55,7 @@ class ExportFilterTest
             SpanData span = out.getFinishedSpanItems().getFirst();
             assertThat(span.getAttributes().asMap().keySet())
                     .extracting(AttributeKey::getKey)
-                    .containsExactlyInAnyOrder("sdh.file_id", "sdh.seq");
+                    .containsExactlyInAnyOrder("sdh.item_id", "sdh.seq");
             assertThat(span.getEvents()).isEmpty();
             assertThat(span.toString()).doesNotContain("Smith")
                     .doesNotContain("smith");
@@ -80,7 +80,7 @@ class ExportFilterTest
                     .setBody("smith").emit();
             log.logRecordBuilder().setEventName("sdh.audit.file.completed")
                     .setBody("anything")
-                    .setAttribute("sdh.file_id", "01a1")
+                    .setAttribute("sdh.item_id", "01a1")
                     .setAttribute("file.path", "/data/inbound/smith-john.csv")
                     .emit();
             assertThat(out.getFinishedLogRecordItems()).singleElement()
@@ -90,7 +90,7 @@ class ExportFilterTest
                                 .isEqualTo("sdh.audit.file.completed");
                         assertThat(record.getAttributes().asMap().keySet())
                                 .extracting(AttributeKey::getKey)
-                                .containsExactly("sdh.file_id");
+                                .containsExactly("sdh.item_id");
                         assertThat(record.getBodyValue().asString())
                                 .isEqualTo("file.completed");
                     });

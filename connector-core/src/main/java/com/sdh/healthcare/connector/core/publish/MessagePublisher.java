@@ -15,7 +15,7 @@ import java.util.concurrent.CompletableFuture;
  * The pipeline calls {@link #publish} in seq order and waits for every future.
  * A future completes only when the broker has acknowledged the message durably
  * (Kafka acks=all, publisher confirms, and so on). Adapters must keep
- * per-{@code fileId} order for messages sent in sequence and should use
+ * per-{@code itemId} order for messages sent in sequence and should use
  * {@code messageId} for broker-side dedup where the broker supports it.
  * Failures are retried by the pipeline.
  *

@@ -10,12 +10,12 @@ import static com.sdh.healthcare.connector.core.landing.LandingTables.*;
 
 import com.nimbusds.jose.util.JSONArrayUtils;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
-import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.crypto.MacedJson;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
@@ -60,7 +60,7 @@ import org.apache.iceberg.parquet.Parquet;
  * stores each one exactly as received, encrypted in chunks, resumably.
  * <ul>
  *   <li>The item is read as a stream, so its size needn't be known in
- *       advance, as for an HTTP push. Each chunk (8 MiB) has the section
+ *       advance, as for an HTTP push. Each chunk (8 MiB) has the record
  *       envelope: one batch data key per commit, chunk key
  *       HKDF(BDK, itemId, seq 0), and AAD itemId ‖ 0 ‖ chunkIndex ‖ 0. The
  *       chunk count in the AAD is 0, because it isn't known when a chunk is
@@ -151,7 +151,7 @@ public final class ItemLander
         public static Settings defaults(String intake, String kekRef)
         {
             return new Settings(intake, kekRef, DEFAULT_COMMIT_BYTES,
-                    RetryPolicy.DEFAULT, SectionCrypto.CHUNK_SIZE,
+                    RetryPolicy.DEFAULT, RecordCrypto.CHUNK_SIZE,
                     DEFAULT_BLOCK);
         }
 
@@ -226,7 +226,7 @@ public final class ItemLander
     private final KeyProvider keys;
 
     /** Makes the digests and the checkpoint MACs, with the ID key. */
-    private final SectionIds ids;
+    private final RecordIds ids;
 
     /** How the intake lands its items. */
     private final Settings settings;
@@ -256,7 +256,7 @@ public final class ItemLander
      * @param clock     gives the times recorded with items
      */
     public ItemLander(Table table, FencedCommitter committer,
-            KeyProvider keys, SectionIds ids, Settings settings, Clock clock)
+            KeyProvider keys, RecordIds ids, Settings settings, Clock clock)
     {
         this.table = table;
         this.committer = committer;
@@ -493,7 +493,7 @@ public final class ItemLander
                 }
                 if (last)
                 {
-                    String digest = SectionIds.encode(chain);
+                    String digest = RecordIds.encode(chain);
                     int chunkCount = (int) (chunkIndex + 1);
                     String plainHash = sha256 == null ? null
                             : HexFormat.of().formatHex(sha256.digest());
@@ -734,8 +734,8 @@ public final class ItemLander
          */
         void chunk(UUID itemId, int chunkIndex, byte[] plaintext)
         {
-            byte[] ciphertext = SectionCrypto.encryptChunk(
-                    SectionCrypto.sectionKey(dataKey, itemId, 0), itemId, 0,
+            byte[] ciphertext = RecordCrypto.encryptChunk(
+                    RecordCrypto.recordKey(dataKey, itemId, 0), itemId, 0,
                     chunkIndex, 0, plaintext);
             writer.write(row(itemId, chunkIndex, ciphertext));
             bytes += plaintext.length;
@@ -774,39 +774,39 @@ public final class ItemLander
             if (item.originalName() != null)
             {
                 row.setField(ORIGINAL_NAME_ENC, ByteBuffer.wrap(
-                        SectionCrypto.encryptChunk(SectionCrypto.sectionKey(
+                        RecordCrypto.encryptChunk(RecordCrypto.recordKey(
                                 dataKey, item.itemId(), -1), item.itemId(),
                                 -1, 0, 1, item.originalName().getBytes(
                                         StandardCharsets.UTF_8))));
             }
             row.setField(REPLACES_ITEM_ID, item.replaces());
-            if (item.records() != null)
+            if (item.messageIndex() != null)
             {
-                RecordIndex records = item.records();
-                if (records.offsets().get(records.count() - 1) > size)
+                MessageIndex messageIndex = item.messageIndex();
+                if (messageIndex.offsets().get(messageIndex.count() - 1) > size)
                 {
                     throw new IllegalArgumentException(
-                            "A record starts after the end of the item");
+                            "A message starts after the end of the item");
                 }
-                row.setField(RECORD_OFFSETS, records.offsets());
-                row.setField(RECORD_KEYS, records.keys());
+                row.setField(MESSAGE_OFFSETS, messageIndex.offsets());
+                row.setField(MESSAGE_KEYS, messageIndex.keys());
             }
             if (item.messageRefs() != null)
             {
-                row.setField(RECORD_REFS_ENC, ByteBuffer.wrap(
-                        SectionCrypto.encryptChunk(SectionCrypto.sectionKey(
-                                dataKey, item.itemId(), RECORD_REFS_SEQ),
-                                item.itemId(), RECORD_REFS_SEQ, 0, 1,
+                row.setField(MESSAGE_REFS_ENC, ByteBuffer.wrap(
+                        RecordCrypto.encryptChunk(RecordCrypto.recordKey(
+                                dataKey, item.itemId(), MESSAGE_REFS_SEQ),
+                                item.itemId(), MESSAGE_REFS_SEQ, 0, 1,
                                 JSONArrayUtils.toJSONString(
                                         item.messageRefs()).getBytes(
                                                 StandardCharsets.UTF_8))));
             }
             if (item.messageReplaces() != null)
             {
-                row.setField(RECORD_REPLACES_ENC, ByteBuffer.wrap(
-                        SectionCrypto.encryptChunk(SectionCrypto.sectionKey(
-                                dataKey, item.itemId(), RECORD_REPLACES_SEQ),
-                                item.itemId(), RECORD_REPLACES_SEQ, 0, 1,
+                row.setField(MESSAGE_REPLACES_ENC, ByteBuffer.wrap(
+                        RecordCrypto.encryptChunk(RecordCrypto.recordKey(
+                                dataKey, item.itemId(), MESSAGE_REPLACES_SEQ),
+                                item.itemId(), MESSAGE_REPLACES_SEQ, 0, 1,
                                 JSONArrayUtils.toJSONString(
                                         item.messageReplaces()).getBytes(
                                                 StandardCharsets.UTF_8))));

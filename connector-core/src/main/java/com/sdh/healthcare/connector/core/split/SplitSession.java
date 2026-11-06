@@ -10,7 +10,7 @@ import java.io.IOException;
 import java.util.Optional;
 
 /**
- * Produces the sections of one file, in order. Not thread-safe.
+ * Produces the records of one file, in order. Not thread-safe.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -19,13 +19,13 @@ public interface SplitSession extends AutoCloseable
 {
 
     /**
-     * The next section.
+     * The next record.
      *
-     * @return the section, or empty when the file is finished
+     * @return the record, or empty when the file is finished
      * @throws IOException    if the file can't be read
      * @throws SplitException if the file can't be split further
      */
-    Optional<Section> next() throws IOException, SplitException;
+    Optional<SplitRecord> next() throws IOException, SplitException;
 
     /**
      * Ends the session. Does nothing unless overridden.

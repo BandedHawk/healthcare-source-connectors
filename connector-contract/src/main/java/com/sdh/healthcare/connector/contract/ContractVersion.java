@@ -21,27 +21,27 @@ public final class ContractVersion
 {
 
     /**
-     * The major version. 2: sections carry their content type and mapping,
-     * there is a {@code section.failed} message, and {@code file.completed}
-     * counts the failed sections.
+     * The major version. 3: what was a section is a record
+     * ({@code record.stored}, {@code record.failed}, the {@code records}
+     * table), and what was a file's ID is an item's ({@code itemId}).
+     * Nothing was released under 2, so 3 doesn't read 2.x messages.
+     * <p>
+     * Under 2 (2.0 to 2.4), the contract gained: each record's content type
+     * and mapping; the {@code record.failed} message and the failed-record
+     * count in {@code file.completed}; each record's origin (where its text
+     * starts, as a line and column in the record and in the item), and
+     * where in the item a failed record failed; the {@code item.landed}
+     * message, which a landing node sends to its splitter, with the item it
+     * replaces; and the {@code item.received} and {@code item.result}
+     * messages, which only an intake's producer receives, with the earlier
+     * message each message replaces. All of it is part of 3.0.
      */
-    public static final int MAJOR = 2;
+    public static final int MAJOR = 3;
 
-    /**
-     * The minor version. 1: sections carry their origin (where their text
-     * starts, as a line and column in the section and in the file), and
-     * failed sections where in the file they failed. 2: the
-     * {@code item.landed} message, which a landing node sends to its
-     * splitter. Downstream readers never receive it, so it doesn't need a
-     * new major version. 3: {@code item.landed} may name the item it
-     * replaces, and the {@code item.received} and {@code item.result}
-     * messages, which only an intake's producer receives. 4: a message in
-     * {@code item.received}, or a problem's message in {@code item.result},
-     * may name the earlier message it replaces.
-     */
-    public static final int MINOR = 4;
+    /** The minor version, from 0 for each major version. */
+    public static final int MINOR = 0;
 
-    /** The version this build writes, as "major.minor", such as "2.1". */
+    /** The version this build writes, as "major.minor", such as "3.0". */
     public static final String CURRENT = MAJOR + "." + MINOR;
 
     /** Not instantiated: this class only holds constants. */

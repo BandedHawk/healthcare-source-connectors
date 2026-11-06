@@ -6,7 +6,7 @@
  */
 package com.sdh.healthcare.connector.file.admin;
 
-import com.sdh.healthcare.connector.contract.table.SectionsTable;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
@@ -43,7 +43,7 @@ final class RestoreCommand implements AdminCommand
                     [--from-offset <n> | --unprocessed] [--original-name]
                 Decrypts a landed item into <dir>, checking its digest.
                 --from-offset   start at this byte offset instead of 0
-                --unprocessed   start after the item's last stored section:
+                --unprocessed   start after the item's last stored record:
                                 only its unprocessed tail (headers and
                                 envelopes before that point aren't repeated)
                 --original-name name the output after the original file
@@ -78,7 +78,7 @@ final class RestoreCommand implements AdminCommand
             AuditRecord audit, PrintStream out) throws Exception
     {
         UUID itemId = parseId(arguments.required("file-id"));
-        audit.add(Attr.FILE_ID, itemId);
+        audit.add(Attr.ITEM_ID, itemId);
         Path directory = OutputFiles.directory(arguments.required("to"));
         if (arguments.option("from-offset").isPresent()
                 && arguments.flag("unprocessed"))
@@ -95,7 +95,7 @@ final class RestoreCommand implements AdminCommand
         long size = (Long) summary.getField(LandingTables.ITEM_SIZE);
 
         long from = arguments.flag("unprocessed")
-                ? unprocessedFrom(context.sections(), itemId)
+                ? unprocessedFrom(context.records(), itemId)
                 : arguments.option("from-offset")
                         .map(RestoreCommand::parseOffset).orElse(0L);
         if (from > size)
@@ -136,31 +136,31 @@ final class RestoreCommand implements AdminCommand
 
     /**
      * Where an item's unprocessed tail starts: the end of its last stored
-     * section.
+     * record.
      *
-     * @param sections the {@code sections} table
-     * @param itemId   the item
-     * @return the offset; 0 if no section of it is stored
+     * @param records the {@code records} table
+     * @param itemId  the item
+     * @return the offset; 0 if no record of it is stored
      * @throws IOException if the table can't be read
      */
-    static long unprocessedFrom(Table sections, UUID itemId)
+    static long unprocessedFrom(Table records, UUID itemId)
             throws IOException
     {
         long end = 0;
-        try (CloseableIterable<Record> rows = IcebergGenerics.read(sections)
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(records)
                 .where(Expressions.and(
-                        Expressions.equal(SectionsTable.FILE_ID, itemId),
-                        Expressions.equal(SectionsTable.CHUNK_INDEX, 0)))
-                .select(SectionsTable.SOURCE_OFFSET,
-                        SectionsTable.SOURCE_LENGTH)
+                        Expressions.equal(RecordsTable.ITEM_ID, itemId),
+                        Expressions.equal(RecordsTable.CHUNK_INDEX, 0)))
+                .select(RecordsTable.SOURCE_OFFSET,
+                        RecordsTable.SOURCE_LENGTH)
                 .build())
         {
             for (Record row : rows)
             {
                 end = Math.max(end,
-                        (Long) row.getField(SectionsTable.SOURCE_OFFSET)
+                        (Long) row.getField(RecordsTable.SOURCE_OFFSET)
                                 + (Long) row.getField(
-                                        SectionsTable.SOURCE_LENGTH));
+                                        RecordsTable.SOURCE_LENGTH));
             }
         }
         return end;

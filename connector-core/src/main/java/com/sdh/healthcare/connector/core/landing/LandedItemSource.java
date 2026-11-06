@@ -19,7 +19,7 @@ import static com.sdh.healthcare.connector.core.landing.LandingTables.KEK_REF;
 
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
-import com.sdh.healthcare.connector.contract.crypto.SectionCrypto;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -96,7 +96,7 @@ public final class LandedItemSource implements SeekableByteSource
     private final String digest;
 
     /** Where each message starts, for a message batch; or null. */
-    private final RecordIndex records;
+    private final MessageIndex messageIndex;
 
     /** Unwrapped data keys, by batch. */
     private final Map<UUID, byte[]> dataKeys = new HashMap<>();
@@ -133,7 +133,7 @@ public final class LandedItemSource implements SeekableByteSource
         this.chunkCount = (Integer) summary.getField(CHUNK_COUNT);
         this.chunkSize = (Integer) summary.getField(CHUNK_SIZE);
         this.digest = (String) summary.getField(ITEM_DIGEST);
-        this.records = LandedItems.records(summary).orElse(null);
+        this.messageIndex = LandedItems.messageIndex(summary).orElse(null);
     }
 
     /**
@@ -175,11 +175,11 @@ public final class LandedItemSource implements SeekableByteSource
     /**
      * Where each message starts, if the item is a message batch.
      *
-     * @return the record index; empty for other items
+     * @return the message index; empty for other items
      */
-    public Optional<RecordIndex> records()
+    public Optional<MessageIndex> messageIndex()
     {
-        return Optional.ofNullable(records);
+        return Optional.ofNullable(messageIndex);
     }
 
     @Override
@@ -269,8 +269,8 @@ public final class LandedItemSource implements SeekableByteSource
                             LandedItems.bytes(row.getField(BDK_WRAPPED)))));
             int length = (int) Math.min(chunkSize,
                     size - (long) chunkIndex * chunkSize);
-            chunks[offset] = SectionCrypto.decryptChunk(
-                    SectionCrypto.sectionKey(dataKey, itemId, 0), itemId, 0,
+            chunks[offset] = RecordCrypto.decryptChunk(
+                    RecordCrypto.recordKey(dataKey, itemId, 0), itemId, 0,
                     chunkIndex, 0, length,
                     LandedItems.bytes(row.getField(CIPHERTEXT)));
             bytes += length;

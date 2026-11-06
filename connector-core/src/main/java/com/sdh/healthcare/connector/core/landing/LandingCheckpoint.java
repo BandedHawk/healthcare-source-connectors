@@ -8,7 +8,7 @@ package com.sdh.healthcare.connector.core.landing;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.core.crypto.MacedJson;
-import com.sdh.healthcare.connector.core.crypto.SectionIds;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import java.text.ParseException;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -66,7 +66,7 @@ public record LandingCheckpoint(UUID itemId, ItemKind kind, SourceRef source,
      * @param ids makes the MACs, with the ID key
      * @return the codec
      */
-    public static MacedJson<LandingCheckpoint> codec(SectionIds ids)
+    public static MacedJson<LandingCheckpoint> codec(RecordIds ids)
     {
         return new MacedJson<>(ids, LABEL, LandingCheckpoint::canonical,
                 LandingCheckpoint::parse);

@@ -96,9 +96,9 @@ class GcsIT extends ObjectStoreItBase
     /**
      * Sends a JSON request to the emulator and checks the status.
      *
-     * @param method the HTTP method
-     * @param path the path
-     * @param json the body
+     * @param method   the HTTP method
+     * @param path     the path
+     * @param json     the body
      * @param expected the status expected
      * @throws Exception if the request fails
      */
@@ -144,7 +144,7 @@ class GcsIT extends ObjectStoreItBase
     List<String> list(String location)
     {
         SupportsPrefixOperations io =
-                (SupportsPrefixOperations) runtime.tables().sections().io();
+                (SupportsPrefixOperations) runtime.tables().records().io();
         return StreamSupport.stream(io.listPrefix(location).spliterator(),
                 false).map(FileInfo::location).toList();
     }

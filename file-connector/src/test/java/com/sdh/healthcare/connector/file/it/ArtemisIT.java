@@ -14,9 +14,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.it.ItSupport.Received;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import jakarta.jms.Connection;
 import jakarta.jms.Message;
 import jakarta.jms.MessageConsumer;
@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.activemq.ArtemisContainer;
 
 /**
- * Design §10.3 artemis: JMSXGroupID = fileId, duplicate detection via
+ * Design §10.3 artemis: JMSXGroupID = itemId, duplicate detection via
  * _AMQ_DUPL_ID = messageId.
  *
  * @author Jonas Barnett
@@ -111,7 +111,7 @@ class ArtemisIT
                         .isEqualTo(message.getStringProperty("messageId"));
                 got.add(new Received(message.getStringProperty("messageId"),
                         message.getStringProperty("type"),
-                        message.getStringProperty("fileId"),
+                        message.getStringProperty("itemId"),
                         message.getStringProperty("contentType"),
                         message.getStringProperty("JMSXGroupID"),
                         ((TextMessage) message).getText()));

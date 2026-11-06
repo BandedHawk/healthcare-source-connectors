@@ -87,13 +87,13 @@ class AwsKmsIT
     @Test
     void wrapsWithSymmetricKeysAndSignsWithAnEccKey() throws Exception
     {
-        String sections;
+        String records;
         String landed;
         String signing;
         try (KmsClient admin = client())
         {
-            sections = admin.createKey(request ->
-                    request.description("sections-kek")).keyMetadata().arn();
+            records = admin.createKey(request ->
+                    request.description("records-kek")).keyMetadata().arn();
             landed = admin.createKey(request ->
                     request.description("landed-items-kek")).keyMetadata()
                     .arn();
@@ -101,22 +101,22 @@ class AwsKmsIT
                     .keySpec(KeySpec.ECC_NIST_P256)
                     .keyUsage(KeyUsageType.SIGN_VERIFY)).keyMetadata().arn();
             admin.createAlias(request -> request
-                    .aliasName("alias/sdh-sections").targetKeyId(sections));
+                    .aliasName("alias/sdh-records").targetKeyId(records));
         }
         TestKeys keys = localKeys();
-        // The sections KEK is referenced by alias; the wrapped key must
+        // The records KEK is referenced by alias; the wrapped key must
         // record the real key ARN.
         CommonSettings.Crypto crypto = crypto(keys, "aws-kms",
-                "alias/sdh-sections", landed, signing,
+                "alias/sdh-records", landed, signing,
                 new CommonSettings.Aws("us-east-1", null),
                 new CommonSettings.Vault(null, null, null, "transit", null));
         AwsKmsKeyProvider provider = new AwsKmsKeyProvider(client());
         try (KeyMaterial material =
                 KeyMaterial.load(crypto, (name, settings) -> provider))
         {
-            assertThat(material.wrap().wrap("alias/sdh-sections",
-                    new byte[32]).keyRef()).isEqualTo(sections);
-            assertUsable(material, keys, "alias/sdh-sections",
+            assertThat(material.wrap().wrap("alias/sdh-records",
+                    new byte[32]).keyRef()).isEqualTo(records);
+            assertUsable(material, keys, "alias/sdh-records",
                     provider.publicKey(signing));
         }
     }

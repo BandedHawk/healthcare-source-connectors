@@ -125,7 +125,7 @@ public final class Fields
      * Writes the attributes for the console log: {@code key=value} pairs,
      * each after a space, with the key's {@code sdh.} prefix left off.
      *
-     * @return the pairs, such as {@code " file_id=... seq=3"}; empty if
+     * @return the pairs, such as {@code " item_id=... seq=3"}; empty if
      *         there are none
      */
     String toLogString()

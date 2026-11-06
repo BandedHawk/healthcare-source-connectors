@@ -9,16 +9,16 @@ package com.sdh.healthcare.connector.core.pipeline;
 import java.util.concurrent.Semaphore;
 
 /**
- * Heap set aside for converting sections, shared by the pipeline's workers
- * (design §6.4). Before a section is read and converted, its worker takes
+ * Heap set aside for converting records, shared by the pipeline's workers
+ * (design §6.4). Before a record is read and converted, its worker takes
  * what the conversion will need at its peak, and gives it back once the
- * section is ready to write; a conversion that doesn't fit waits for
- * others to finish. Small sections need next to nothing, so only large
- * ones ever wait, and several large sections can't run the connector out
+ * record is ready to write; a conversion that doesn't fit waits for
+ * others to finish. Small records need next to nothing, so only large
+ * ones ever wait, and several large records can't run the connector out
  * of memory together.
  * <p>
- * Counted in KiB. Waiting is first come, first served, so a large section
- * isn't starved by a stream of small ones. A section needing more than the
+ * Counted in KiB. Waiting is first come, first served, so a large record
+ * isn't starved by a stream of small ones. A record needing more than the
  * whole budget takes all of it and runs alone.
  *
  * @author Jonas Barnett

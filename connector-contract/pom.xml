@@ -13,7 +13,7 @@
   <name>connector-contract</name>
   <description>
     The wire contract shared by connectors (writers) and connector-queue-reader (consumers):
-    message types, JOSE sealing, section chunk encryption and the sections table schema.
+    message types, JOSE sealing, record chunk encryption and the records table schema.
     Internal module: consumers use connector-queue-reader, never this directly.
   </description>
 

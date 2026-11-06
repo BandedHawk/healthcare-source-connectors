@@ -53,24 +53,24 @@ final class KmsItSupport
     /**
      * Key settings with the KEKs and signing key in a KMS.
      *
-     * @param keys the local key files
-     * @param provider the KMS provider, for both wrapping and signing
-     * @param sectionsKek the sections KEK's reference
-     * @param landedKek the landed items KEK's reference
+     * @param keys          the local key files
+     * @param provider      the KMS provider, for both wrapping and signing
+     * @param recordsKek    the records KEK's reference
+     * @param landedKek     the landed items KEK's reference
      * @param signingKeyRef the signing key's reference
-     * @param aws the AWS settings
-     * @param vault the Vault settings
+     * @param aws           the AWS settings
+     * @param vault         the Vault settings
      * @return the settings
      * @throws Exception if the recipient key's fingerprint can't be made
      */
     static CommonSettings.Crypto crypto(TestKeys keys, String provider,
-            String sectionsKek, String landedKek, String signingKeyRef,
+            String recordsKek, String landedKek, String signingKeyRef,
             CommonSettings.Aws aws, CommonSettings.Vault vault)
             throws Exception
     {
         return new CommonSettings.Crypto(provider, provider,
                 new CommonSettings.Keystore(null, null),
-                new CommonSettings.Keys(sectionsKek, landedKek,
+                new CommonSettings.Keys(recordsKek, landedKek,
                         new CommonSettings.Signing("connector-kms", null,
                                 null, signingKeyRef),
                         new CommonSettings.Recipient("downstream-2026",
@@ -88,9 +88,9 @@ final class KmsItSupport
      * already probed each), tampering is refused, and messages signed
      * through the KMS verify with the KMS's public key.
      *
-     * @param material the loaded key material
-     * @param keys the local key files
-     * @param kek the KEK to wrap with
+     * @param material      the loaded key material
+     * @param keys          the local key files
+     * @param kek           the KEK to wrap with
      * @param signingPublic the KMS signing key's public half
      * @throws Exception if a key operation fails unexpectedly
      */
@@ -110,16 +110,16 @@ final class KmsItSupport
                 new WrappedKey(wrapped.keyRef(), bad)))
                 .isInstanceOf(RuntimeException.class);
 
-        UUID fileId = UUID.randomUUID();
+        UUID itemId = UUID.randomUUID();
         byte[] body = new MessageSealer(material.signer(),
                 material.signerKid(), material.recipient(),
                 material.recipientKid())
-                .seal(new ConnectorMessage.FileStarted(fileId, "csv", 42,
+                .seal(new ConnectorMessage.FileStarted(itemId, "csv", 42,
                         Instant.now(), "file-connector"));
         ConnectorMessage opened = new MessageOpener(
                 Map.of("downstream-2026", keys.recipient.getPrivate()),
                 Map.of("connector-kms", (ECPublicKey) signingPublic))
                 .open(body);
-        assertThat(opened.fileId()).isEqualTo(fileId);
+        assertThat(opened.itemId()).isEqualTo(itemId);
     }
 }

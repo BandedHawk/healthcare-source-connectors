@@ -18,9 +18,9 @@ import com.azure.messaging.servicebus.ServiceBusSessionReceiverClient;
 import com.azure.messaging.servicebus.models.ServiceBusReceiveMode;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.it.ItSupport.Received;
-import com.sdh.healthcare.connector.runtime.publish.ClosablePublisher;
-import com.sdh.healthcare.connector.runtime.publish.Publishers;
-import com.sdh.healthcare.connector.runtime.publish.QueueType;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +36,7 @@ import org.testcontainers.images.builder.Transferable;
 import org.testcontainers.mssqlserver.MSSQLServerContainer;
 
 /**
- * Design §10.3 servicebus: SessionId = fileId, MessageId = messageId with
+ * Design §10.3 servicebus: SessionId = itemId, MessageId = messageId with
  * duplicate detection, metadata as application properties. Microsoft's
  * emulator, backed by SQL Server; config is copied in (no host mounts).
  * The emulator caps the duplicate-detection window at 5 minutes.
@@ -154,7 +154,7 @@ class ServiceBusIT
                             message.getApplicationProperties();
                     got.add(new Received(message.getMessageId(),
                             text(properties.get("type")),
-                            text(properties.get("fileId")),
+                            text(properties.get("itemId")),
                             message.getContentType(), message.getSessionId(),
                             message.getBody().toString()));
                 }

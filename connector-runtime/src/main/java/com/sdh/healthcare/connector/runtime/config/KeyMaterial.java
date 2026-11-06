@@ -167,7 +167,7 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
     }
 
     /**
-     * The splitter's keys: the sections KEK, the landing KEK (unwrap only),
+     * The splitter's keys: the records KEK, the landing KEK (unwrap only),
      * and the signing, recipient and inbox keys.
      *
      * @param crypto the key settings
@@ -184,7 +184,7 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
 
     /**
      * The splitter's keys, with KMS providers from {@code providers}. The
-     * sections KEK is probed with a wrap and unwrap. The landing KEK is only
+     * records KEK is probed with a wrap and unwrap. The landing KEK is only
      * ever unwrapped with, so it isn't probed: reading the landing ID key
      * at startup checks it.
      *
@@ -200,16 +200,16 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
             throws IOException, GeneralSecurityException, JOSEException
     {
         CommonSettings.Keys keys = crypto.keys();
-        String sections = require(keys.sectionsKek(),
-                "sdh.crypto.keys.sections-kek");
+        String records = require(keys.recordsKek(),
+                "sdh.crypto.keys.records-kek");
         String landed = require(keys.landedItemsKek(),
                 "sdh.crypto.keys.landed-items-kek");
-        if (sections.equals(landed))
+        if (records.equals(landed))
         {
-            throw new IllegalArgumentException("The sections KEK must differ"
+            throw new IllegalArgumentException("The records KEK must differ"
                     + " from the landing KEK (design §7.1)");
         }
-        return load(crypto, providers, List.of(sections), List.of(landed),
+        return load(crypto, providers, List.of(records), List.of(landed),
                 true);
     }
 
