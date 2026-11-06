@@ -133,6 +133,14 @@ public final class ConvertProcessor
             long memoryBytes, String catalogName, String namespace,
             String build)
     {
+
+        /**
+         * No options is none, not null.
+         */
+        public Settings
+        {
+            options = options == null ? Map.of() : Map.copyOf(options);
+        }
     }
 
     /**

@@ -90,19 +90,21 @@ class CustomerImageIT extends ContainerImageItBase
      * SDH_OPERATOR set for the exec.
      */
     @Override
-    String admin(String... args) throws Exception
+    String admin(GenericContainer<?> container, String... args)
+            throws Exception
     {
-        assertThat(app.isRunning())
-                .as("connector still running; its log:\n%s",
-                        APP_LOG.toUtf8String())
+        assertThat(container.isRunning())
+                .as("stage still running; its log:\n%s",
+                        container.getLogs())
                 .isTrue();
         List<String> command = new ArrayList<>(List.of("java",
                 "@/app/jvm.options", "@/app/container.options",
                 "@/app/admin.args"));
         command.addAll(List.of(args));
-        ExecResult result = app.execInContainer(UTF_8, ExecConfig.builder()
-                .command(command.toArray(String[]::new))
-                .envVars(Map.of("SDH_OPERATOR", "it-operator")).build());
+        ExecResult result = container.execInContainer(UTF_8,
+                ExecConfig.builder().command(command.toArray(String[]::new))
+                        .envVars(Map.of("SDH_OPERATOR", "it-operator"))
+                        .build());
         return result.getExitCode() + ":" + result.getStdout().strip()
                 + result.getStderr().strip();
     }

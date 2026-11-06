@@ -1,10 +1,11 @@
-# file-connector SERVICE image: for our own hosted service only, NOT for customer distribution (design §14.1, §14.3).
-# It is a full Ubuntu/Temurin image with a shell and sdh-admin for operators. The image distributed to customers is
-# built from the distribution kit instead (container/Dockerfile in target/file-connector-*-dist-dir; scripts/
-# build-image.sh customer). Build the jar first, then build from this directory:
+# Split stage (file-connector) SERVICE image: for our own hosted service only, NOT for customer distribution
+# (design §14.1, §14.3). It is a full Ubuntu/Temurin image with a shell and sdh-admin for operators. The image
+# distributed to customers is built from the distribution kit instead (container/Dockerfile in
+# target/file-connector-*-dist-dir; scripts/build-image.sh customer). Build the jar first, then build from this
+# directory:
 #
 #   ./mvnw -pl file-connector -am package -DskipTests
-#   docker build -t sdh/file-connector-service:0.1.0-SNAPSHOT file-connector
+#   docker build -t sdh/split-stage-service:0.1.0-SNAPSHOT file-connector
 #
 # or use scripts/build-image.sh, which does both against the minikube VM's Docker daemon.
 #

@@ -8,15 +8,28 @@ package com.sdh.healthcare.connector.file.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.sdh.healthcare.connector.broker.receive.BatchHandler.Outcome;
+import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
+import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
+import com.sdh.healthcare.connector.core.landing.LandedItem;
+import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.TestKeys;
+import com.sdh.healthcare.connector.file.TestLanding;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
+import com.sdh.healthcare.connector.file.split.SplitHandler;
+import com.sdh.healthcare.connector.reader.QueueReader;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.security.interfaces.ECPublicKey;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -25,6 +38,10 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import org.apache.camel.CamelContext;
+import org.apache.camel.ConsumerTemplate;
+import org.apache.iceberg.catalog.Catalog;
 import org.junit.jupiter.api.Assertions;
 import org.testcontainers.DockerClientFactory;
 
@@ -64,6 +81,251 @@ final class ItSupport
         settings.put("sdh.crypto.keys.landing-signer.pem",
                 keys.landingSignerPem.toString());
         return settings;
+    }
+
+    /**
+     * The split stage's settings, for a test that hands it its
+     * {@code item.landed} messages itself: the input route is never
+     * started ({@code sdh.split.autostart=false}), and nothing listens at
+     * its address. Items are CSV with a header, committed in batches of
+     * 7 records, and the stage runs no maintenance of its own.
+     *
+     * @param keys     the key files
+     * @param catalog  the Iceberg catalog's properties
+     * @param jdbcUrl  the lease database
+     * @param user     its user
+     * @param password its password
+     * @param output   the Camel endpoint the stage's messages go to
+     * @return the settings, by Spring property name
+     */
+    static Map<String, String> splitStage(TestKeys keys,
+            Map<String, String> catalog, String jdbcUrl, String user,
+            String password, String output)
+    {
+        Map<String, String> settings = new LinkedHashMap<>();
+        settings.put("sdh.landing.intake", INTAKE);
+        settings.put("sdh.stage.input.type", "kafka");
+        settings.put("sdh.stage.input.uri",
+                "kafka:sdh.landed?brokers=localhost:1&groupId=split");
+        settings.put("sdh.stage.registry-schema", "sdh_split");
+        settings.put("sdh.stage.output.type", "camel");
+        settings.put("sdh.stage.output.uri", output);
+        settings.put("sdh.split.format", "csv");
+        settings.put("sdh.split.options.csv.header", "true");
+        settings.put("sdh.storage.catalog-name", TestLanding.CATALOG);
+        catalog.forEach((key, value) -> settings.put(
+                "sdh.storage.catalog[" + key + "]", value));
+        settings.put("sdh.storage.commit.max-records", "7");
+        // The tests run maintenance themselves, between items.
+        settings.put("sdh.maintenance.enabled", "false");
+        settings.put("sdh.lease.jdbc.url", jdbcUrl);
+        settings.put("sdh.lease.jdbc.username", user);
+        settings.put("sdh.lease.jdbc.password", password);
+        settings.put("sdh.crypto.keystore.path", keys.keystore.toString());
+        settings.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
+        settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
+        settings.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
+        settings.put("sdh.crypto.keys.signing.kid", "connector-2026");
+        settings.put("sdh.crypto.keys.signing.pem",
+                keys.signingPem.toString());
+        settings.put("sdh.crypto.keys.signing.passphrase",
+                TestKeys.SIGNING_PASSPHRASE);
+        settings.put("sdh.crypto.keys.recipient.kid", "downstream-2026");
+        settings.put("sdh.crypto.keys.recipient.pem",
+                keys.recipientPem.toString());
+        try
+        {
+            settings.put("sdh.crypto.keys.recipient.sha256",
+                    KeyMaterial.fingerprint(keys.recipient.getPublic()));
+        }
+        catch (Exception failure)
+        {
+            throw new IllegalStateException(failure);
+        }
+        settings.putAll(splitterKeys(keys));
+        return settings;
+    }
+
+    /**
+     * The convert stage's settings, as its {@code application.yml} would
+     * hold them, flat: it reads the split stage's messages from Kafka and
+     * stores and announces each record, with keys that follow on from the
+     * split stage's (the split stage's recipient is its inbox). Secrets are
+     * left out, for the environment, unless asked for.
+     *
+     * @param keys     the key files
+     * @param keyPath  where the stage finds a key file, such as a path in
+     *        a mounted secret
+     * @param catalog  the Iceberg catalog's properties, as the stage
+     *        reaches the catalog
+     * @param lease    the lease database's URL, user and password
+     * @param brokers  the Kafka bootstrap servers, as the stage reaches them
+     * @param input    the topic the split stage sends to
+     * @param output   the topic for downstream readers
+     * @param secrets  whether to add the keystore password and key
+     *        passphrases
+     * @return the settings, by Spring property name
+     * @throws Exception if the readers' key's fingerprint can't be made
+     */
+    static Map<String, String> convertStage(TestKeys keys,
+            Function<Path, String> keyPath, Map<String, String> catalog,
+            List<String> lease, String brokers, String input, String output,
+            boolean secrets) throws Exception
+    {
+        Map<String, String> settings = new LinkedHashMap<>();
+        settings.put("sdh.stage.input.type", "kafka");
+        settings.put("sdh.stage.input.uri", "kafka:" + input + "?brokers="
+                + brokers + "&groupId=convert-stage");
+        settings.put("sdh.stage.output.type", "kafka");
+        settings.put("sdh.stage.output.uri",
+                "kafka:" + output + "?brokers=" + brokers);
+        settings.put("sdh.stage.dlq.type", "kafka");
+        settings.put("sdh.stage.dlq.uri",
+                "kafka:sdh-convert-dlq?brokers=" + brokers);
+        settings.put("sdh.stage.registry-schema", "sdh_convert");
+        settings.put("sdh.convert.options[csv.header]", "true");
+        settings.put("sdh.storage.catalog-name", TestLanding.CATALOG);
+        catalog.forEach((key, value) -> settings.put(
+                "sdh.storage.catalog[" + key + "]", value));
+        settings.put("sdh.lease.jdbc.url", lease.get(0));
+        settings.put("sdh.lease.jdbc.username", lease.get(1));
+        settings.put("sdh.lease.jdbc.password", lease.get(2));
+        settings.put("sdh.crypto.keystore.path", keyPath.apply(keys.keystore));
+        settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
+        settings.put("sdh.crypto.keys.signing.kid",
+                TestKeys.CONVERT_SIGNER_KID);
+        settings.put("sdh.crypto.keys.signing.pem",
+                keyPath.apply(keys.convertSigningPem));
+        settings.put("sdh.crypto.keys.recipient.kid", TestKeys.READER_KID);
+        settings.put("sdh.crypto.keys.recipient.pem",
+                keyPath.apply(keys.readerPem));
+        settings.put("sdh.crypto.keys.recipient.sha256",
+                KeyMaterial.fingerprint(keys.reader.getPublic()));
+        settings.put("sdh.crypto.keys.inbox.kid", TestKeys.CONVERT_INBOX_KID);
+        settings.put("sdh.crypto.keys.inbox.pem",
+                keyPath.apply(keys.convertInboxPem));
+        settings.put("sdh.crypto.keys.landing-signer.kid",
+                TestKeys.SPLIT_SIGNER_KID);
+        settings.put("sdh.crypto.keys.landing-signer.pem",
+                keyPath.apply(keys.splitSignerPem));
+        if (secrets)
+        {
+            settings.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
+            settings.put("sdh.crypto.keys.signing.passphrase",
+                    TestKeys.SIGNING_PASSPHRASE);
+            settings.put("sdh.crypto.keys.inbox.passphrase",
+                    TestKeys.INBOX_PASSPHRASE);
+        }
+        return settings;
+    }
+
+    /**
+     * A reader of the convert stage's messages, as downstream has one.
+     *
+     * @param keys    the key files
+     * @param catalog the catalog the records are in
+     * @param wrap    unwraps the records' keys
+     * @return the reader
+     */
+    static QueueReader convertReader(TestKeys keys, Catalog catalog,
+            KeyProvider wrap)
+    {
+        return QueueReader.builder()
+                .recipientKey(TestKeys.READER_KID, keys.reader.getPrivate())
+                .trustedSigner(TestKeys.CONVERT_SIGNER_KID,
+                        (ECPublicKey) keys.convertSigning.getPublic())
+                .catalog(catalog)
+                .expectedCatalogName(TestLanding.CATALOG)
+                .keyProvider(wrap)
+                .build();
+    }
+
+    /**
+     * Hands items' {@code item.landed} messages to the split stage, one
+     * batch each, as its input route would; each is split, or fails, by
+     * the time this returns.
+     *
+     * @param runtime the running stage
+     * @param landing the landing node that landed them
+     * @param fatal   collects fatal exits
+     * @param items   the items
+     * @throws InterruptedException if interrupted
+     */
+    static void split(ConnectorRuntime runtime, TestLanding landing,
+            List<String> fatal, LandedItem... items)
+            throws InterruptedException
+    {
+        SplitHandler handler = new SplitHandler(runtime.splitter(),
+                runtime.keys().inbox(), INTAKE, TestLanding.CATALOG,
+                LandingTables.DEFAULT_NAMESPACE, fatal::add);
+        for (LandedItem item : items)
+        {
+            assertThat(handler.handle(List.of(new BrokerMessage(
+                    landing.announcement(item), UUID.randomUUID().toString(),
+                    Map.of())))).as("item " + item.itemId())
+                    .isEqualTo(Outcome.DONE);
+        }
+    }
+
+    /**
+     * Decodes what a stage has sent to an in-memory queue so far.
+     *
+     * @param camel  the Camel context the queue is in
+     * @param queue  the queue's endpoint
+     * @param reader decodes the messages
+     * @return the messages, in the order sent
+     * @throws Exception if one can't be opened
+     */
+    static List<ConnectorMessage> drain(CamelContext camel, String queue,
+            QueueReader reader) throws Exception
+    {
+        ConsumerTemplate consumer = camel.createConsumerTemplate();
+        List<ConnectorMessage> messages = new ArrayList<>();
+        String body;
+        while ((body = consumer.receiveBody(queue, 1000, String.class))
+                != null)
+        {
+            messages.add(reader.decode(
+                    body.getBytes(StandardCharsets.UTF_8)));
+        }
+        return messages;
+    }
+
+    /**
+     * Each split record reads back downstream as it was cut: the CSV
+     * header, then its row.
+     *
+     * @param reader  reads the records
+     * @param records the records' messages
+     * @param header  the header row, with its line end
+     * @param rows    the rows, by sequence number
+     * @throws Exception if a record can't be read
+     */
+    static void assertSplitRecords(QueueReader reader,
+            List<RecordSplit> records, String header, List<String> rows)
+            throws Exception
+    {
+        for (RecordSplit record : records)
+        {
+            assertThat(new String(reader.readRecord(record, 1 << 20),
+                    StandardCharsets.UTF_8)).as("record " + record.seq())
+                    .isEqualTo(header + rows.get((int) record.seq()));
+        }
+    }
+
+    /**
+     * The messages of a type.
+     *
+     * @param <T>      the type
+     * @param messages the messages
+     * @param type     the type
+     * @return those of the type, in order
+     */
+    static <T extends ConnectorMessage> List<T> of(
+            List<ConnectorMessage> messages, Class<T> type)
+    {
+        return messages.stream().filter(type::isInstance).map(type::cast)
+                .toList();
     }
 
     /**

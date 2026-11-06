@@ -17,9 +17,10 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * A message a connector publishes (design §10.1): a file was started, a
- * record is in storage, or a file was completed. A landing node publishes
- * one more, to its splitter only: an item was landed (design §5.3.6). Two
+ * A message a connector publishes (design §10.1): a record is in storage,
+ * an item was split or converted, or a record's output conflicts with what
+ * was stored (STAGES.md §4). A landing node publishes one more, to the
+ * split stage only: an item was landed (design §5.3.6). Two
  * go to an intake's producer only, on its results queue (design §5.3.8):
  * an item was received, and what came of it. The payload is always
  * sealed: signed, then encrypted.
@@ -27,11 +28,11 @@ import java.util.UUID;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
-        ConnectorMessage.RecordInStorage, ConnectorMessage.FileCompleted,
-        ConnectorMessage.ItemLanded, ConnectorMessage.ItemReceived,
-        ConnectorMessage.ItemResult, ConnectorMessage.RecordConflict,
-        ConnectorMessage.ItemSplit, ConnectorMessage.ItemConverted
+public sealed interface ConnectorMessage permits
+        ConnectorMessage.RecordInStorage, ConnectorMessage.ItemLanded,
+        ConnectorMessage.ItemReceived, ConnectorMessage.ItemResult,
+        ConnectorMessage.RecordConflict, ConnectorMessage.ItemSplit,
+        ConnectorMessage.ItemConverted
 {
 
     /**
@@ -68,43 +69,6 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
     default String orderingKey()
     {
         return itemId().toString();
-    }
-
-    /**
-     * A file was picked up, or resumed in a new run.
-     *
-     * @param itemId      the file's id
-     * @param format      the name of the file's format, such as {@code csv}
-     * @param itemSize    the file's size, in bytes
-     * @param startedAt   when the connector started on the file
-     * @param connectorId the id of the connector that picked it up
-     */
-    record FileStarted(UUID itemId, String format, long itemSize,
-            Instant startedAt, String connectorId)
-            implements ConnectorMessage
-    {
-
-        /**
-         * {@inheritDoc}
-         *
-         * @return {@link MessageType#FILE_STARTED}
-         */
-        @Override
-        public MessageType type()
-        {
-            return MessageType.FILE_STARTED;
-        }
-
-        /**
-         * {@inheritDoc}
-         *
-         * @return "fs-" and the file id
-         */
-        @Override
-        public String messageId()
-        {
-            return "fs-" + itemId;
-        }
     }
 
     /**
@@ -196,8 +160,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
          * columns, to turn a position in the record (such as one a mapping
          * reports) into one in the file ({@link RecordOrigin#toFile}).
          *
-         * @return the origin; null in messages from connectors before
-         *         contract 2.1
+         * @return the origin; null if the splitter gave none
          */
         RecordOrigin origin();
     }
@@ -223,7 +186,7 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * @param chunkCount      how many encrypted chunks it is stored in
      * @param storage         where it is stored
      * @param origin          where the record's text came from in the file;
-     *                        null before contract 2.1
+     *                        null if the splitter gave none
      */
     record RecordStored(
             String recordId,
@@ -242,8 +205,8 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
     {
 
         /**
-         * A message without an origin, as connectors before contract 2.1
-         * sent.
+         * A message without an origin, for a record the splitter gave
+         * none.
          *
          * @param recordId        the record's id
          * @param itemId          the id of its file
@@ -313,9 +276,9 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * @param chunkCount      how many encrypted chunks it is stored in
      * @param storage         where it is stored
      * @param origin          where the record's text came from in the file;
-     *                        null before contract 2.1
+     *                        null if the splitter gave none
      * @param errorAt         where in the file conversion failed, as a line
-     *                        and column; null before contract 2.1
+     *                        and column; null if not known
      */
     record RecordFailed(
             String recordId,
@@ -335,8 +298,8 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
     {
 
         /**
-         * A message without positions, as connectors before contract 2.1
-         * sent.
+         * A message without positions, for a record the splitter gave
+         * none.
          *
          * @param recordId        the record's id
          * @param itemId          the id of its file
@@ -386,49 +349,6 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
     }
 
     /**
-     * Every record of a file was stored and published. The original is
-     * the landed item with the same ID (design §5.3.6).
-     *
-     * @param itemId            the file's id
-     * @param recordCount       all its records, failed ones included
-     * @param failedRecordCount the records that failed conversion and were
-     *                           stored in their original form
-     * @param itemSize          the file's size, in bytes
-     * @param itemDigest        the keyed digest of the original, as
-     *                          landed
-     * @param startedAt         when the connector started on the file
-     * @param completedAt       when it finished
-     */
-    record FileCompleted(UUID itemId, long recordCount,
-            long failedRecordCount, long itemSize, String itemDigest,
-            Instant startedAt, Instant completedAt)
-            implements ConnectorMessage
-    {
-
-        /**
-         * {@inheritDoc}
-         *
-         * @return {@link MessageType#FILE_COMPLETED}
-         */
-        @Override
-        public MessageType type()
-        {
-            return MessageType.FILE_COMPLETED;
-        }
-
-        /**
-         * {@inheritDoc}
-         *
-         * @return "fc-" and the file id
-         */
-        @Override
-        public String messageId()
-        {
-            return "fc-" + itemId;
-        }
-    }
-
-    /**
      * An item was landed: stored exactly as received, encrypted, in the
      * landing tables (design §5.3). Sent by a landing node to its splitter
      * only, never to downstream readers. The splitter processes the item
@@ -440,8 +360,8 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      * @param kind       what it is, such as {@code file} or
      *                   {@code message-batch}
      * @param size       its size, in bytes
-     * @param itemDigest its keyed digest, as {@code file.completed} reports
-     *                   a file's
+     * @param itemDigest its keyed digest, as {@code item.split} reports
+     *                   it
      * @param landedAt   when its landing was committed
      * @param storage    where it is stored; the date is the day it was
      *                   landed, the table's partition

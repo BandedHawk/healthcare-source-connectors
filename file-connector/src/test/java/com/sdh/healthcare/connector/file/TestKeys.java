@@ -60,6 +60,21 @@ public final class TestKeys
     /** The splitter's inbox key ID. */
     public static final String INBOX_KID = "splitter-2026";
 
+    /** The split stage's signing key ID. */
+    public static final String SPLIT_SIGNER_KID = "connector-2026";
+
+    /**
+     * The convert stage's inbox key ID: the split stage's recipient, whose
+     * key it holds.
+     */
+    public static final String CONVERT_INBOX_KID = "downstream-2026";
+
+    /** The convert stage's signing key ID. */
+    public static final String CONVERT_SIGNER_KID = "convert-2026";
+
+    /** The ID of the key downstream readers of the convert stage hold. */
+    public static final String READER_KID = "reader-2026";
+
     /** The directory the files are in. */
     public final Path dir;
 
@@ -71,9 +86,6 @@ public final class TestKeys
 
     /** The downstream recipient's public key. */
     public final Path recipientPem;
-
-    /** The recovery public key. */
-    public final Path recoveryPem;
 
     /**
      * The splitter's own private key, which {@code item.landed} messages
@@ -99,14 +111,32 @@ public final class TestKeys
     /** The downstream recipient's key pair. */
     public final KeyPair recipient;
 
-    /** The recovery key pair. */
-    public final KeyPair recovery;
-
     /** The splitter's inbox key pair. */
     public final KeyPair inbox;
 
     /** The landing node's signing key pair. */
     public final KeyPair landingSigning;
+
+    /**
+     * The convert stage's own private key: the split stage's recipient,
+     * encrypted with {@link #INBOX_PASSPHRASE}.
+     */
+    public final Path convertInboxPem;
+
+    /** The public half of the split stage's signing key. */
+    public final Path splitSignerPem;
+
+    /** The convert stage's encrypted signing key. */
+    public final Path convertSigningPem;
+
+    /** The public key the convert stage seals to, for its readers. */
+    public final Path readerPem;
+
+    /** The convert stage's signing key pair. */
+    public final KeyPair convertSigning;
+
+    /** The convert stage's readers' key pair. */
+    public final KeyPair reader;
 
     /**
      * Generates every key and writes the files.
@@ -119,9 +149,10 @@ public final class TestKeys
         this.dir = dir;
         signing = ec();
         recipient = ec();
-        recovery = ec();
         inbox = ec();
         landingSigning = ec();
+        convertSigning = ec();
+        reader = ec();
 
         KeyStore store = KeyStore.getInstance("PKCS12");
         store.load(null, null);
@@ -144,8 +175,6 @@ public final class TestKeys
                 encrypt(signing.getPrivate(), SIGNING_PASSPHRASE)));
         recipientPem = Files.writeString(dir.resolve("recipient.pem"),
                 publicPem(recipient.getPublic()));
-        recoveryPem = Files.writeString(dir.resolve("recovery-public.pem"),
-                publicPem(recovery.getPublic()));
         inboxPem = encryptedPrivatePem(dir.resolve("inbox.pem"),
                 inbox.getPrivate(), INBOX_PASSPHRASE);
         inboxPublicPem = Files.writeString(dir.resolve("inbox-public.pem"),
@@ -156,6 +185,16 @@ public final class TestKeys
         landingSignerPem = Files.writeString(
                 dir.resolve("landing-signer.pem"),
                 publicPem(landingSigning.getPublic()));
+        convertInboxPem = encryptedPrivatePem(
+                dir.resolve("convert-inbox.pem"), recipient.getPrivate(),
+                INBOX_PASSPHRASE);
+        splitSignerPem = Files.writeString(dir.resolve("split-signer.pem"),
+                publicPem(signing.getPublic()));
+        convertSigningPem = encryptedPrivatePem(
+                dir.resolve("convert-signing.pem"),
+                convertSigning.getPrivate(), SIGNING_PASSPHRASE);
+        readerPem = Files.writeString(dir.resolve("reader.pem"),
+                publicPem(reader.getPublic()));
     }
 
     /**

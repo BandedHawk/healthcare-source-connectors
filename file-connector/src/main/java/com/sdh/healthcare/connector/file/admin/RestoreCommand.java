@@ -10,6 +10,9 @@ import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.stage.admin.AdminArgs;
+import com.sdh.healthcare.connector.stage.admin.AdminCommand;
+import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -34,16 +37,16 @@ import org.apache.iceberg.io.CloseableIterable;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class RestoreCommand implements AdminCommand
+final class RestoreCommand implements AdminCommand<SplitAdminContext>
 {
 
     /** The command's help. */
     static final String USAGE = """
-            restore --file-id <id> --to <dir>
+            restore --item-id <id> --to <dir>
                     [--from-offset <n> | --unprocessed] [--original-name]
                 Decrypts a landed item into <dir>, checking its digest.
                 --from-offset   start at this byte offset instead of 0
-                --unprocessed   start after the item's last stored record:
+                --unprocessed   start after the item's last split record:
                                 only its unprocessed tail (headers and
                                 envelopes before that point aren't repeated)
                 --original-name name the output after the original file
@@ -61,6 +64,12 @@ final class RestoreCommand implements AdminCommand
     }
 
     @Override
+    public String usage()
+    {
+        return USAGE;
+    }
+
+    @Override
     public Set<String> flags()
     {
         return Set.of("unprocessed", "original-name");
@@ -69,15 +78,14 @@ final class RestoreCommand implements AdminCommand
     @Override
     public Set<String> options()
     {
-        return Set.of("file-id", "to", "from-offset", "unprocessed",
-                "original-name");
+        return Set.of("item-id", "to", "from-offset");
     }
 
     @Override
-    public void run(AdminArgs arguments, AdminContext context,
+    public void run(AdminArgs arguments, SplitAdminContext context,
             AuditRecord audit, PrintStream out) throws Exception
     {
-        UUID itemId = parseId(arguments.required("file-id"));
+        UUID itemId = parseId(arguments.required("item-id"));
         audit.add(Attr.ITEM_ID, itemId);
         Path directory = OutputFiles.directory(arguments.required("to"));
         if (arguments.option("from-offset").isPresent()
@@ -95,7 +103,7 @@ final class RestoreCommand implements AdminCommand
         long size = (Long) summary.getField(LandingTables.ITEM_SIZE);
 
         long from = arguments.flag("unprocessed")
-                ? unprocessedFrom(context.records(), itemId)
+                ? unprocessedFrom(context.splitRecords(), itemId)
                 : arguments.option("from-offset")
                         .map(RestoreCommand::parseOffset).orElse(0L);
         if (from > size)
@@ -135,12 +143,12 @@ final class RestoreCommand implements AdminCommand
     }
 
     /**
-     * Where an item's unprocessed tail starts: the end of its last stored
+     * Where an item's unprocessed tail starts: the end of its last split
      * record.
      *
-     * @param records the {@code records} table
+     * @param records the stage's {@code split_records}
      * @param itemId  the item
-     * @return the offset; 0 if no record of it is stored
+     * @return the offset; 0 if no record of it was split
      * @throws IOException if the table can't be read
      */
     static long unprocessedFrom(Table records, UUID itemId)
@@ -181,7 +189,7 @@ final class RestoreCommand implements AdminCommand
         }
         catch (IllegalArgumentException notUuid)
         {
-            throw new AdminArgs.UsageException("--file-id must be a UUID");
+            throw new AdminArgs.UsageException("--item-id must be a UUID");
         }
     }
 

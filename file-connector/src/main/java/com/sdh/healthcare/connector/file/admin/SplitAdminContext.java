@@ -6,17 +6,17 @@
  */
 package com.sdh.healthcare.connector.file.admin;
 
-import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
+import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
+import com.sdh.healthcare.connector.core.checkpoint.SplitItemReport;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
-import com.sdh.healthcare.connector.core.inbox.InboxTables;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
+import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import java.time.Duration;
 import java.util.Map;
 import org.apache.iceberg.CatalogUtil;
@@ -26,51 +26,53 @@ import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 
 /**
- * What the admin commands read from, opened only when a command needs it.
- * Strictly read-only: tables are loaded, never created; the ID key is never
- * created; the lease is inspected, never taken (design §11.4).
+ * What the split stage's admin commands read from, each part opened only
+ * when a command needs it. Strictly read-only: tables are loaded, never
+ * created; ID keys are never created; leases are inspected, never taken;
+ * the database connection is read-only (design §11.4).
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class AdminContext implements AutoCloseable
+final class SplitAdminContext implements AutoCloseable
 {
 
-    /** The connector configuration. */
+    /** The stage's settings. */
     private final ConnectorProperties properties;
 
-    /** The KEKs, once loaded. */
+    /** The lease database. */
+    private final AdminDatabase database;
+
+    /** The keys, once loaded. */
     private KeyMaterial keys;
 
-    /** The splitter's catalog, once built. */
+    /** The stage's catalog, once built. */
     private Catalog catalog;
 
-    /** The landing catalog, once built; may be {@link #catalog}. */
+    /** Landing's catalog, once built; the stage's if it is the same. */
     private Catalog landingCatalog;
 
-    /** The splitter's ID key, once loaded. */
-    private RecordIds ids;
+    /** The ID keys of {@code split_records}, once loaded. */
+    private RecordIds splitIds;
 
-    /** The landing node's ID key, once loaded. */
+    /** Landing's ID keys, once loaded. */
     private RecordIds landingIds;
 
-    /** The read-only lease database pool, once opened. */
-    private HikariDataSource leaseDb;
-
     /**
-     * Opens nothing yet.
+     * Creates the context; nothing is opened yet.
      *
-     * @param properties the connector configuration
+     * @param properties the stage's settings
      */
-    AdminContext(ConnectorProperties properties)
+    SplitAdminContext(ConnectorProperties properties)
     {
         this.properties = properties;
+        this.database = new AdminDatabase(properties.lease());
     }
 
     /**
-     * The connector configuration.
+     * The stage's settings.
      *
-     * @return the configuration
+     * @return the settings
      */
     ConnectorProperties properties()
     {
@@ -78,10 +80,10 @@ final class AdminContext implements AutoCloseable
     }
 
     /**
-     * The KEKs, loaded on first use.
+     * The keys, loaded on first use.
      *
-     * @return the key material
-     * @throws Exception if the keys can't be loaded
+     * @return the keys
+     * @throws Exception if they can't be loaded
      */
     KeyMaterial keys() throws Exception
     {
@@ -93,7 +95,7 @@ final class AdminContext implements AutoCloseable
     }
 
     /**
-     * The splitter's catalog, built on first use.
+     * The stage's catalog, built on first use.
      *
      * @return the catalog
      * @throws IllegalArgumentException if no catalog is configured
@@ -115,8 +117,7 @@ final class AdminContext implements AutoCloseable
     }
 
     /**
-     * The landing catalog: {@code sdh.landing.storage.catalog}, or the
-     * splitter's own when that is unset.
+     * Landing's catalog: its own if configured, else the stage's.
      *
      * @return the catalog
      */
@@ -136,25 +137,13 @@ final class AdminContext implements AutoCloseable
     }
 
     /**
-     * A table in the splitter's namespace.
-     *
-     * @param name the table name
-     * @return the table
-     * @throws IllegalStateException if the table doesn't exist
-     */
-    Table table(String name)
-    {
-        return load(catalog(), properties.storage().namespace(), name);
-    }
-
-    /**
-     * Loads a table, never creating it.
+     * Loads a table, which must exist.
      *
      * @param catalog   the catalog
      * @param namespace the namespace
-     * @param name      the table name
+     * @param name      the table
      * @return the table
-     * @throws IllegalStateException if the table doesn't exist
+     * @throws IllegalStateException if it doesn't exist
      */
     private static Table load(Catalog catalog, String namespace, String name)
     {
@@ -165,32 +154,23 @@ final class AdminContext implements AutoCloseable
         catch (NoSuchTableException failure)
         {
             throw new IllegalStateException("Table " + name
-                    + " does not exist: the connector has never run here");
+                    + " does not exist: the stage has never run here");
         }
     }
 
     /**
-     * The records table.
+     * The stage's {@code split_records}.
      *
      * @return the table
      */
-    Table records()
+    Table splitRecords()
     {
-        return table(RecordsTable.DEFAULT_NAME);
+        return load(catalog(), properties.storage().namespace(),
+                IngestTables.SPLIT_RECORDS);
     }
 
     /**
-     * The inbox table.
-     *
-     * @return the table
-     */
-    Table inbox()
-    {
-        return table(InboxTables.INBOX);
-    }
-
-    /**
-     * The landing node's landed items table.
+     * Landing's {@code landed_items}.
      *
      * @return the table
      */
@@ -201,11 +181,10 @@ final class AdminContext implements AutoCloseable
     }
 
     /**
-     * The landing node's ID key, for checking a landed item's digest;
-     * unwrapped with the landed-items KEK.
+     * Landing's ID keys, which name a landed item's chunks.
      *
-     * @return the ID key
-     * @throws Exception if the key can't be loaded or unwrapped
+     * @return the keys
+     * @throws Exception if they can't be loaded
      */
     RecordIds landingIds() throws Exception
     {
@@ -218,51 +197,45 @@ final class AdminContext implements AutoCloseable
     }
 
     /**
-     * The splitter's ID key.
+     * The checkpoints of the stage's items, to load: they are MAC'd with
+     * the ID key of {@code split_records}.
      *
-     * @return the ID key
-     * @throws Exception if the key can't be loaded or unwrapped
+     * @return the checkpoints
+     * @throws Exception if the ID key can't be loaded
      */
-    RecordIds ids() throws Exception
+    ItemCheckpoints checkpoints() throws Exception
     {
-        if (ids == null)
+        if (splitIds == null)
         {
-            ids = new RecordIds(IdKeys.load(records(), keys().wrap()));
+            splitIds = new RecordIds(
+                    IdKeys.load(splitRecords(), keys().wrap()));
         }
-        return ids;
+        return new ItemCheckpoints(database.dataSource(),
+                properties.stage().registrySchema(),
+                new CheckpointCodec(splitIds), Duration.ofSeconds(10));
     }
 
     /**
-     * The lease store, through a read-only pool of one connection.
+     * The stage's item rows, without their checkpoints: needs no keys.
      *
-     * @return the lease store
-     * @throws IllegalArgumentException if no lease database is configured
+     * @return the report
      */
-    JdbcLeaseStore leaseStore()
+    SplitItemReport items()
     {
-        if (leaseDb == null)
-        {
-            CommonSettings.Jdbc jdbc = properties.lease().jdbc();
-            if (jdbc.url() == null || jdbc.url().isBlank())
-            {
-                throw new IllegalArgumentException(
-                        "sdh.lease.jdbc.url is required");
-            }
-            HikariConfig pool = new HikariConfig();
-            pool.setJdbcUrl(jdbc.url());
-            pool.setUsername(jdbc.username());
-            pool.setPassword(jdbc.password());
-            pool.setMaximumPoolSize(1);
-            pool.setConnectionTimeout(10_000);
-            pool.setReadOnly(true);
-            pool.setPoolName("sdh-admin");
-            leaseDb = new HikariDataSource(pool);
-        }
-        return new JdbcLeaseStore(leaseDb, properties.lease().jdbc().table(),
-                Duration.ofSeconds(10));
+        return new SplitItemReport(database.dataSource(),
+                properties.stage().registrySchema());
     }
 
-    /** Closes whatever was opened, ignoring catalog close failures. */
+    /**
+     * The leases, to inspect.
+     *
+     * @return the lease store
+     */
+    JdbcLeaseStore leases()
+    {
+        return database.leases();
+    }
+
     @Override
     public void close()
     {
@@ -270,18 +243,21 @@ final class AdminContext implements AutoCloseable
         {
             keys.close();
         }
-        if (landingCatalog != catalog
-                && landingCatalog instanceof AutoCloseable closeable)
+        if (landingCatalog != catalog)
         {
-            try
-            {
-                closeable.close();
-            }
-            catch (Exception ignored)
-            {
-                // exiting
-            }
+            closeQuietly(landingCatalog);
         }
+        closeQuietly(catalog);
+        database.close();
+    }
+
+    /**
+     * Closes a catalog, if it holds anything to close.
+     *
+     * @param catalog the catalog, or null
+     */
+    private static void closeQuietly(Catalog catalog)
+    {
         if (catalog instanceof AutoCloseable closeable)
         {
             try
@@ -292,10 +268,6 @@ final class AdminContext implements AutoCloseable
             {
                 // exiting
             }
-        }
-        if (leaseDb != null)
-        {
-            leaseDb.close();
         }
     }
 }

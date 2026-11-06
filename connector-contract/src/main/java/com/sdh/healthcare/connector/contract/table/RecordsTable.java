@@ -91,8 +91,8 @@ public final class RecordsTable
     /**
      * The line of the record's origin (design §8.2, {@code RecordOrigin}):
      * where the text copied from the file starts in the record. Usually 1;
-     * 2 after an XML declaration the splitter added. Null in rows written
-     * before contract 2.1.
+     * 2 after an XML declaration the splitter added. Null if the splitter gave
+     * none.
      */
     public static final String RECORD_LINE = "record_line";
 
@@ -100,8 +100,8 @@ public final class RecordsTable
     public static final String RECORD_COLUMN = "record_column";
 
     /**
-     * The line in the file where the same text starts. Null in rows written
-     * before contract 2.1.
+     * The line in the file where the same text starts. Null if the splitter
+     * gave none.
      */
     public static final String SOURCE_LINE = "source_line";
 
@@ -110,7 +110,7 @@ public final class RecordsTable
 
     /**
      * The line in the file where conversion failed; null when it didn't
-     * fail, and in rows written before contract 2.1.
+     * fail, or the place isn't known.
      */
     public static final String ERROR_LINE = "error_line";
 

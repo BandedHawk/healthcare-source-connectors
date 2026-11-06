@@ -13,7 +13,7 @@ import com.sdh.healthcare.connector.broker.receive.BatchHandler;
 import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
 import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordConflict;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
@@ -162,11 +162,11 @@ class StageWorkerTest
      *
      * @return the messages, in order
      */
-    List<FileCompleted> sentItems()
+    List<ItemConverted> sentItems()
     {
         return output.opened().stream()
-                .filter(FileCompleted.class::isInstance)
-                .map(FileCompleted.class::cast).toList();
+                .filter(ItemConverted.class::isInstance)
+                .map(ItemConverted.class::cast).toList();
     }
 
     /**
@@ -508,7 +508,7 @@ class StageWorkerTest
         {
             assertThat(done.done()).isEqualTo(2);
             assertThat(done.total()).isInstanceOfSatisfying(
-                    FileCompleted.class, total ->
+                    ItemConverted.class, total ->
                     {
                         assertThat(total.itemId()).isEqualTo(item);
                         assertThat(total.recordCount()).isEqualTo(2);
@@ -545,8 +545,8 @@ class StageWorkerTest
                 "stage.message_unwanted");
 
         Map<String, Object> later = PayloadCodec.toJson(
-                (ConnectorMessage) new FileCompleted(item, 1, 0, 1, "d",
-                        Instant.EPOCH, Instant.EPOCH));
+                (ConnectorMessage) new ItemConverted(item, "test", 1, 0,
+                        Instant.EPOCH));
         later.put("v", (ContractVersion.MAJOR + 1) + ".0");
         BrokerMessage newer = new BrokerMessage(
                 StageTestSupport.upstreamSealer().seal(later), "y",

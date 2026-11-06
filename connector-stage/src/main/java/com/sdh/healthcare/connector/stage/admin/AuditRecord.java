@@ -4,20 +4,20 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.file.admin;
+package com.sdh.healthcare.connector.stage.admin;
 
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 
 /**
  * The audit event for one admin command, filled in as the command learns
- * things (file ID, offset, bytes), so a failure is still reported with
+ * things (item ID, offset, bytes), so a failure is still reported with
  * whatever was known. Allow-listed {@link Attr} keys only.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class AuditRecord
+public final class AuditRecord
 {
 
     /** The fields known so far. */
@@ -28,7 +28,7 @@ final class AuditRecord
      *
      * @param operator who ran the command
      */
-    AuditRecord(String operator)
+    public AuditRecord(String operator)
     {
         this.fields = Fields.of(Attr.OPERATOR, operator);
     }
@@ -39,7 +39,7 @@ final class AuditRecord
      * @param key the allow-listed key
      * @param value the value
      */
-    void add(Attr key, Object value)
+    public void add(Attr key, Object value)
     {
         fields = fields.with(key, value);
     }
@@ -49,7 +49,7 @@ final class AuditRecord
      *
      * @return the fields
      */
-    Fields fields()
+    public Fields fields()
     {
         return fields;
     }

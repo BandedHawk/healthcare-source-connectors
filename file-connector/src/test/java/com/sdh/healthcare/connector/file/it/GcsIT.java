@@ -36,7 +36,8 @@ import org.testcontainers.containers.wait.strategy.Wait;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-@SpringBootTest(properties = "camel.main.run-controller=false")
+@SpringBootTest(properties = {"camel.main.run-controller=false",
+        "sdh.split.autostart=false"})
 @Import(ObjectStoreItBase.Overrides.class)
 class GcsIT extends ObjectStoreItBase
 {

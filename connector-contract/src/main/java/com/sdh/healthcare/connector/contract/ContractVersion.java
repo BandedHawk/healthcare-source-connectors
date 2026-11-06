@@ -34,7 +34,10 @@ public final class ContractVersion
      * message, which a landing node sends to its splitter, with the item it
      * replaces; and the {@code item.received} and {@code item.result}
      * messages, which only an intake's producer receives, with the earlier
-     * message each message replaces. All of it is part of 3.0.
+     * message each message replaces. All of it is part of 3.0, except
+     * {@code file.started} and {@code file.completed}: under 3 the stages
+     * send {@code item.split} and {@code item.converted} instead
+     * (STAGES.md §4).
      */
     public static final int MAJOR = 3;
 

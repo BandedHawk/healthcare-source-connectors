@@ -57,11 +57,11 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
 /**
- * A demonstration of the consolidated pipeline (design §15.3): the landing
- * node and the splitter, each run as a process of its own from the JAR the
- * build made, connected by a broker as they are deployed. Two pipelines
- * run one after the other, each an intake with its own landing node and
- * splitter:
+ * A demonstration of the consolidated pipeline (design §15.3; STAGES.md
+ * §3): the landing node, the split stage and the convert stage, each run as
+ * a process of its own from the JAR the build made, connected by a broker
+ * as they are deployed. Two pipelines run one after the other, each an
+ * intake with its own landing node and stages:
  * <ol>
  *   <li>{@code demo-files}: C-CDA files dropped one by one into a watched
  *       directory, each followed by its {@code .done} marker. Among them
@@ -72,14 +72,14 @@ import org.slf4j.LoggerFactory;
  *       large, and one replacing an item that doesn't exist.
  * </ol>
  * The console shows each item's way through: the demo's own commentary
- * ({@code [demo]}), each app's log ({@code [landing]}, {@code [splitter]})
- * with its errors and warnings, and the telemetry both apps export over
- * OTLP to the demo's {@link OtlpReceiver}: audit events
+ * ({@code [demo]}), each app's log ({@code [landing]}, {@code [split]},
+ * {@code [convert]}) with its errors and warnings, and the telemetry every
+ * app exports over OTLP to the demo's {@link OtlpReceiver}: audit events
  * ({@code [otel log]}), traces ({@code [otel trace]}) and metrics
  * ({@code [otel metrics]}). The demo follows each item by the audit
- * events: landed and announced by the landing node, then split, and
- * completed or failed by the splitter. At the end of each pipeline a
- * downstream consumer reads the converted documents back.
+ * events: landed and announced by the landing node, split or failed by
+ * the split stage, then converted by the convert stage. At the end of
+ * each pipeline a downstream consumer reads the converted documents back.
  * <p>
  * Everything is kept in {@code file-connector/target/demo/}: the apps'
  * logs ({@code logs/}), their telemetry as OTLP JSON
@@ -88,8 +88,9 @@ import org.slf4j.LoggerFactory;
  * converted documents ({@code output/}).
  * <p>
  * Run with {@code -Pdemo} ({@code ./mvnw -Pdemo -pl
- * landing-connector,file-connector -am verify}), or from NetBeans (Run
- * Maven &gt; Demo). Never part of a normal build or the integration tests.
+ * landing-connector,convert-stage,file-connector -am verify}), or from
+ * NetBeans (Run Maven &gt; Demo). Never part of a normal build or the
+ * integration tests.
  * Settings: {@code demo.stack} {@code local} (default: no Docker) or
  * {@code vm} (Postgres, SeaweedFS and Kafka in the minikube VM);
  * {@code demo.pause} between items (default 3s);
@@ -130,8 +131,11 @@ class PipelineDemo
     /** The landing node's service name, in its telemetry. */
     static final String LANDING = "landing-connector";
 
-    /** The splitter's service name, in its telemetry. */
+    /** The split stage's service name, in its telemetry. */
     static final String SPLITTER = "file-connector";
+
+    /** The convert stage's service name, in its telemetry. */
+    static final String CONVERTER = "convert-stage";
 
     /** The producer the HTTP intake lists. */
     static final String PRODUCER = "CN=claims-producer,O=Example";
@@ -149,7 +153,7 @@ class PipelineDemo
      * @param file         the item, and what was expected
      * @param itemId       its item ID; null if it wasn't landed
      * @param landing      what the landing node did
-     * @param status       the splitter's final status, or the HTTP
+     * @param status       the split stage's final status, or the HTTP
      *                     status of a refused push
      * @param records      the records it stored
      * @param failed       how many of those weren't converted
@@ -176,11 +180,11 @@ class PipelineDemo
         }
 
         /**
-         * The distinct messages a downstream consumer gets for it:
-         * file.started, each committed record, and file.completed if it
-         * completed. A record an earlier item already sent has the same
-         * message ID, so it doesn't count again: Artemis drops it by
-         * {@code _AMQ_DUPL_ID}, and a consumer would drop it anyway.
+         * The distinct messages a downstream consumer gets for it: each
+         * record the convert stage stored, and its item.converted. The same
+         * content in two items is a record of each, with message IDs of
+         * its own, so it counts in both. A failed item's records split
+         * before it failed are converted too.
          *
          * @return how many
          */
@@ -191,7 +195,7 @@ class PipelineDemo
                 return 0;
             }
             return status.equals("COMPLETED")
-                    ? (int) records - file.repeats() + 2
+                    ? (int) records + 1
                     : 1 + (int) Math.max(0, committedSeq + 1);
         }
     }
@@ -211,6 +215,9 @@ class PipelineDemo
     /** Every item's outcome, in order. */
     final List<Outcome> outcomes = new ArrayList<>();
 
+    /** What didn't go as expected; the demo fails at the end if any. */
+    final List<String> problems = new ArrayList<>();
+
     /**
      * Runs both pipelines, then the summary and the telemetry report.
      *
@@ -225,13 +232,14 @@ class PipelineDemo
         keys = new TestKeys(Files.createDirectories(WORK.resolve("keys")));
         banner("Healthcare source connectors: pipeline demo");
         say("Two pipelines, one after the other. Each is an intake with its"
-                + " own landing node and splitter, run as separate processes"
-                + " from their JARs and joined by a broker:");
+                + " own landing node, split stage and convert stage, run as"
+                + " separate processes from their JARs and joined by a"
+                + " broker:");
         say("  " + FILES + ": files dropped into a watched directory");
         say("  " + PUSH + ": documents pushed over HTTPS with mTLS");
-        say("Console tags: [demo] this commentary; [landing] and [splitter]"
-                + " each app's log; [otel log] audit events, [otel trace]"
-                + " traces and [otel metrics] metrics (every "
+        say("Console tags: [demo] this commentary; [landing], [split] and"
+                + " [convert] each app's log; [otel log] audit events,"
+                + " [otel trace] traces and [otel metrics] metrics (every "
                 + METRIC_INTERVAL.toSeconds() + " s), as the apps exported"
                 + " them over OTLP.");
         try (DemoStack running = DemoStack.create(
@@ -258,6 +266,11 @@ class PipelineDemo
             say("Converted documents: " + OUTPUT);
         }
         banner("Demo finished");
+        if (!problems.isEmpty())
+        {
+            throw new AssertionError("Not as expected: "
+                    + String.join("; ", problems));
+        }
     }
 
     // ---- the directory pipeline ----
@@ -290,7 +303,8 @@ class PipelineDemo
         landing.put("sdh.landing.source.move-to", landed.toString());
         landing.put("sdh.landing.source.ready", "marker");
         landing.put("sdh.landing.source.poll-interval", "200ms");
-        try (DemoApp splitter = startSplitter(FILES);
+        try (DemoApp converter = startConverter(FILES);
+                DemoApp splitter = startSplitter(FILES);
                 DemoApp node = startLanding(FILES, landing))
         {
             Map<String, UUID> items = new LinkedHashMap<>();
@@ -415,7 +429,8 @@ class PipelineDemo
         landing.put("sdh.landing.http.mtls.subjects[0]", PRODUCER);
         landing.put("sdh.landing.http.max-item-bytes",
                 Integer.toString(DemoFiles.MAX_PUSH_BYTES));
-        try (DemoApp splitter = startSplitter(PUSH);
+        try (DemoApp converter = startConverter(PUSH);
+                DemoApp splitter = startSplitter(PUSH);
                 DemoApp node = startLanding(PUSH, landing))
         {
             Matcher port = Pattern.compile("started on port (\\d+)")
@@ -495,7 +510,7 @@ class PipelineDemo
 
     /**
      * Follows a landed item through the rest of the pipeline: its
-     * announcement, then the splitter's outcome.
+     * announcement, the split stage's outcome, then the convert stage's.
      *
      * @param pipeline the pipeline
      * @param file     the item
@@ -512,21 +527,24 @@ class PipelineDemo
         String id = itemId.toString();
         otlp.await(LANDING, "item.announced",
                 event -> id.equals(event.get("item_id")), from, ITEM_LIMIT);
-        say("Landed as item " + id + " and announced to the splitter");
-        AuditEvent done = otlp.await(SPLITTER,
+        say("Landed as item " + id + " and announced to the split stage");
+        AuditEvent split = otlp.await(SPLITTER,
                 Set.of("item.completed", "item.failed"),
                 event -> id.equals(event.get("item_id")), from, ITEM_LIMIT);
+        boolean completed = split.name().equals("item.completed");
+        say(completed ? "Split into " + split.get("count") + " record(s),"
+                + " each sent on to the convert stage"
+                : "The split stage failed it; the records split before"
+                        + " the failure go on to the convert stage");
+        AuditEvent converted = otlp.await(CONVERTER, "stage.item_completed",
+                event -> id.equals(event.get("item_id")), from, ITEM_LIMIT);
         long millis = System.currentTimeMillis() - start;
-        long failed = otlp.events().stream()
-                .filter(event -> event.service().equals(SPLITTER)
-                        && event.name().equals("record.failed")
-                        && id.equals(event.get("item_id")))
-                .count();
+        long records = Long.parseLong(converted.get("count"));
+        long failed = Long.parseLong(converted.get("failed_count"));
         Outcome outcome;
         String detail;
-        if (done.name().equals("item.completed"))
+        if (completed)
         {
-            long records = Long.parseLong(done.get("count"));
             outcome = new Outcome(pipeline, file, itemId, landing,
                     "COMPLETED", records, failed, records - 1, millis);
             detail = records + " record(s), " + failed
@@ -534,12 +552,13 @@ class PipelineDemo
         }
         else
         {
-            long seq = Long.parseLong(done.get("seq"));
+            long seq = Long.parseLong(split.get("seq"));
             outcome = new Outcome(pipeline, file, itemId, landing, "FAILED",
                     0, failed, seq, millis);
-            detail = done.get("error_code") + " at byte "
-                    + done.get("offset") + " in stage " + done.get("stage")
-                    + "; " + (seq + 1) + " record(s) stored before it;"
+            detail = split.get("error_code") + " at byte "
+                    + split.get("offset") + " in stage "
+                    + split.get("stage") + "; " + (seq + 1)
+                    + " record(s) split before it, and converted;"
                     + " the original stays in landing";
         }
         say(String.format(Locale.ROOT,
@@ -584,7 +603,7 @@ class PipelineDemo
     // ---- the apps ----
 
     /**
-     * Starts a pipeline's splitter and waits until it is ready.
+     * Starts a pipeline's split stage and waits until it is ready.
      *
      * @param pipeline the pipeline
      * @return the running app
@@ -593,21 +612,23 @@ class PipelineDemo
     DemoApp startSplitter(String pipeline) throws Exception
     {
         Map<String, String> settings = common(pipeline);
+        settings.put("sdh.connector-id", "split-" + pipeline);
         settings.put("sdh.landing.intake", pipeline);
-        settings.put("sdh.landing.idle-wait", "200ms");
         settings.put("sdh.landing.storage.namespace",
                 landingNamespace(pipeline));
         settings.put("sdh.split.format", "ccda");
         settings.put("sdh.storage.namespace", pipeline.replace('-', '_'));
-        // A commit per document, so each one is stored (and announced) as
-        // soon as it's split: a file that fails part-way keeps what came
+        // A commit per document, so each one goes on to the convert stage
+        // as soon as it's split: a file that fails part-way keeps what came
         // before the failure.
         settings.put("sdh.storage.commit.max-records", "1");
         settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
-        settings.put("sdh.crypto.keys.signing.kid", "connector-2026");
+        settings.put("sdh.crypto.keys.signing.kid",
+                TestKeys.SPLIT_SIGNER_KID);
         settings.put("sdh.crypto.keys.signing.pem",
                 keys.signingPem.toString());
-        settings.put("sdh.crypto.keys.recipient.kid", "downstream-2026");
+        settings.put("sdh.crypto.keys.recipient.kid",
+                TestKeys.CONVERT_INBOX_KID);
         settings.put("sdh.crypto.keys.recipient.pem",
                 keys.recipientPem.toString());
         settings.put("sdh.crypto.keys.recipient.sha256",
@@ -620,13 +641,56 @@ class PipelineDemo
                 TestKeys.LANDING_SIGNER_KID);
         settings.put("sdh.crypto.keys.landing-signer.pem",
                 keys.landingSignerPem.toString());
-        settings.putAll(stack.splitterQueues(pipeline));
-        say("Starting the " + pipeline + " splitter ("
+        settings.putAll(stack.splitQueues(pipeline));
+        say("Starting the " + pipeline + " split stage ("
                 + DemoApp.jar("file-connector").getFileName() + ")");
-        DemoApp app = new DemoApp("splitter", DemoApp.jar("file-connector"),
+        DemoApp app = new DemoApp("split", DemoApp.jar("file-connector"),
                 extras, settings, WORK.resolve("logs")
-                        .resolve(pipeline + "-splitter.log"));
+                        .resolve(pipeline + "-split.log"));
         app.await("Started FileConnectorApplication", Duration.ofMinutes(2));
+        return app;
+    }
+
+    /**
+     * Starts a pipeline's convert stage and waits until it is ready. It
+     * holds the private key the split stage seals to, and trusts the split
+     * stage's signing key; downstream holds the private key it seals to.
+     *
+     * @param pipeline the pipeline
+     * @return the running app
+     * @throws Exception if it can't start
+     */
+    DemoApp startConverter(String pipeline) throws Exception
+    {
+        Map<String, String> settings = common(pipeline);
+        settings.put("sdh.connector-id", "convert-" + pipeline);
+        settings.put("sdh.storage.namespace", pipeline.replace('-', '_'));
+        settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
+        settings.put("sdh.crypto.keys.signing.kid",
+                TestKeys.CONVERT_SIGNER_KID);
+        settings.put("sdh.crypto.keys.signing.pem",
+                keys.convertSigningPem.toString());
+        settings.put("sdh.crypto.keys.recipient.kid", TestKeys.READER_KID);
+        settings.put("sdh.crypto.keys.recipient.pem",
+                keys.readerPem.toString());
+        settings.put("sdh.crypto.keys.recipient.sha256",
+                KeyMaterial.fingerprint(keys.reader.getPublic()));
+        settings.put("sdh.crypto.keys.inbox.kid", TestKeys.CONVERT_INBOX_KID);
+        settings.put("sdh.crypto.keys.inbox.pem",
+                keys.convertInboxPem.toString());
+        settings.put("sdh.crypto.keys.inbox.passphrase",
+                TestKeys.INBOX_PASSPHRASE);
+        settings.put("sdh.crypto.keys.landing-signer.kid",
+                TestKeys.SPLIT_SIGNER_KID);
+        settings.put("sdh.crypto.keys.landing-signer.pem",
+                keys.splitSignerPem.toString());
+        settings.putAll(stack.convertQueues(pipeline));
+        say("Starting the " + pipeline + " convert stage ("
+                + DemoApp.jar("convert-stage").getFileName() + ")");
+        DemoApp app = new DemoApp("convert", DemoApp.jar("convert-stage"),
+                extras, settings, WORK.resolve("logs")
+                        .resolve(pipeline + "-convert.log"));
+        app.await("Started ConvertStageApplication", Duration.ofMinutes(2));
         return app;
     }
 
@@ -667,7 +731,7 @@ class PipelineDemo
     }
 
     /**
-     * The settings both apps of a pipeline share: storage, lease, the
+     * The settings every app of a pipeline shares: storage, lease, the
      * landed-items KEK, telemetry and logging.
      *
      * @param pipeline the pipeline
@@ -765,7 +829,7 @@ class PipelineDemo
         say(bodies.size() + " messages received (" + expected
                 + " distinct expected), each a signed JWS inside a JWE:"
                 + " decrypted with the downstream key and checked against"
-                + " the splitter's signing key");
+                + " the convert stage's signing key");
         CommonSettings.Crypto crypto = new CommonSettings.Crypto("local",
                 "local", new CommonSettings.Keystore(keys.keystore,
                         TestKeys.KS_PASSWORD),
@@ -776,9 +840,9 @@ class PipelineDemo
                 new CommonSettings.Gcp(null),
                 new CommonSettings.Vault(null, null, null, "transit", null));
         try (QueueReader reader = QueueReader.builder()
-                .recipientKey("downstream-2026", keys.recipient.getPrivate())
-                .trustedSigner("connector-2026",
-                        (ECPublicKey) keys.signing.getPublic())
+                .recipientKey(TestKeys.READER_KID, keys.reader.getPrivate())
+                .trustedSigner(TestKeys.CONVERT_SIGNER_KID,
+                        (ECPublicKey) keys.convertSigning.getPublic())
                 .catalog(stack.newCatalogClient())
                 .expectedCatalogName("sdh")
                 .keyProvider(KeyMaterial.load(crypto).wrap())
@@ -809,27 +873,20 @@ class PipelineDemo
             if (repeats > 0)
             {
                 say(repeats + " repeated message ID(s) dropped. Delivery is"
-                        + " at least once: a file that fails announces its"
-                        + " committed records again (publish.republish) in"
-                        + " case the first send was lost, and a record with"
-                        + " the same content as an earlier one has the same"
-                        + " ID. Consumers ignore an ID they've already"
-                        + " handled.");
+                        + " at least once: a message whose send can't be"
+                        + " confirmed is sent again. Consumers ignore an ID"
+                        + " they've already handled.");
             }
             int distinct = seen.size();
-            int shared = byId.values().stream()
-                    .mapToInt(outcome -> outcome.file().repeats()).sum();
+            if (distinct != expected)
+            {
+                problems.add(pipeline + ": " + distinct
+                        + " distinct messages, " + expected + " expected");
+            }
             say(distinct != expected
                     ? "MISMATCH: " + distinct + " distinct messages, "
                             + expected + " expected"
-                    : shared == 0 ? distinct + " distinct messages, as"
-                            + " expected"
-                    : distinct + " distinct messages, as expected: " + shared
-                            + " record(s) had the same content as an"
-                            + " earlier item's, so the same ID, and came"
-                            + " once. Artemis drops such a repeat by its"
-                            + " message ID; Kafka delivers it, and the"
-                            + " consumer drops it.");
+                    : distinct + " distinct messages, as expected");
             List<UUID> order = new ArrayList<>(byId.keySet());
             records.sort(Comparator.comparing((RecordInStorage record) ->
                     order.indexOf(record.itemId()))
@@ -894,7 +951,7 @@ class PipelineDemo
         banner("Summary");
         String format = "  %-10s %-34s %-36s %-30s %-9s %8s %5s %s";
         say(String.format(Locale.ROOT, format, "Pipeline", "Item", "Item ID",
-                "Landing", "Splitter", "Records", "Raw", "As expected"));
+                "Landing", "Split", "Records", "Raw", "As expected"));
         for (Outcome outcome : outcomes)
         {
             boolean completed = outcome.status().equals("COMPLETED");
@@ -911,6 +968,9 @@ class PipelineDemo
                 .filter(outcome -> !outcome.asExpected()).count();
         say(unexpected == 0 ? "Every item ended as expected."
                 : unexpected + " item(s) did NOT end as expected.");
+        outcomes.stream().filter(outcome -> !outcome.asExpected())
+                .forEach(outcome -> problems.add(outcome.pipeline() + " "
+                        + outcome.file().name() + " didn't end as expected"));
     }
 
     // ---- console ----

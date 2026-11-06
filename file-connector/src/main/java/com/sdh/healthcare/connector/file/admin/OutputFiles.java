@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.file.admin;
 
+import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;

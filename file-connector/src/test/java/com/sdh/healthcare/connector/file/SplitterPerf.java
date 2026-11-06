@@ -8,6 +8,8 @@ package com.sdh.healthcare.connector.file;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.sdh.healthcare.connector.broker.receive.BatchHandler.Outcome;
+import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.TestPostgres;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -20,7 +22,9 @@ import com.sdh.healthcare.connector.core.perf.ResourceMonitor;
 import com.sdh.healthcare.connector.core.perf.StageResult;
 import com.sdh.healthcare.connector.core.perf.Timeline;
 import com.sdh.healthcare.connector.core.perf.Workload;
+import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
+import com.sdh.healthcare.connector.file.split.SplitHandler;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import java.io.IOException;
@@ -36,10 +40,11 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
-import org.apache.camel.CamelContext;
-import org.apache.camel.ProducerTemplate;
 import org.apache.camel.builder.RouteBuilder;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
@@ -52,17 +57,19 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
 /**
- * The splitting stage's performance, and the pipeline's end to end (design
- * §13.1): the real splitter, in process, on embedded Postgres and the
- * {@code perf.storage} tables, with Camel queues standing in for the
- * brokers.
+ * The split stage's performance, and the pipeline's end to end (design
+ * §13.1): the real split stage, in process, on embedded Postgres and the
+ * {@code perf.storage} tables, with a Camel queue standing in for its
+ * output broker. Each {@code item.landed} goes to the stage's handler as
+ * its input route would hand it over, as many items at once as the
+ * stage's concurrency.
  * <p>
  * Each workload, and each intake it landed through, runs on a splitter of
  * its own. The test lands the same items the landing stage did, untimed,
  * then sends their {@code item.landed} messages with the gaps between them
  * that the landing stage's timeline recorded, the first at once, so that
  * the splitter sees the arrivals the landing node made. An item's
- * splitting latency is from its message sent to its {@code file.completed}
+ * splitting latency is from its message sent to its {@code item.split}
  * published. End to end is each item's landing latency plus its splitting
  * latency. Without a timeline, from a landing stage that didn't run, the
  * messages go at the workload's own schedule and there is no end to end.
@@ -75,9 +82,6 @@ import org.springframework.context.annotation.Primary;
  */
 class SplitterPerf
 {
-
-    /** Where {@code item.landed} messages arrive. */
-    static final String LANDED_QUEUE = "seda:perf-landed?size=100000";
 
     /**
      * Where the splitter's messages go: a bounded queue that holds the
@@ -92,10 +96,10 @@ class SplitterPerf
     /** How long a run may take, at most. */
     static final Duration RUN_LIMIT = Duration.ofMinutes(60);
 
-    /** When each item's {@code file.completed} was published, by item. */
+    /** When each item's {@code item.split} was published, by item. */
     static final Map<UUID, Long> COMPLETED = new ConcurrentHashMap<>();
 
-    /** The records stored in the current run, failed ones included. */
+    /** The records split in the current run. */
     static final AtomicLong RECORDS = new AtomicLong();
 
     /** The reasons given to the exit hook. */
@@ -135,8 +139,8 @@ class SplitterPerf
 
         /**
          * The broker stand-in: counts records and notes when each item's
-         * {@code file.completed} came, by the unencrypted headers, and
-         * drops the messages.
+         * {@code item.split} came, by the unencrypted headers, and drops
+         * the messages.
          *
          * @return the route
          */
@@ -153,16 +157,14 @@ class SplitterPerf
                         long at = System.nanoTime();
                         String type = exchange.getIn().getHeader("type",
                                 String.class);
-                        if (MessageType.FILE_COMPLETED.wireName()
+                        if (MessageType.ITEM_SPLIT.wireName()
                                 .equals(type))
                         {
                             COMPLETED.put(UUID.fromString(exchange.getIn()
                                     .getHeader("itemId", String.class)), at);
                         }
-                        else if (MessageType.RECORD_STORED.wireName()
-                                .equals(type)
-                                || MessageType.RECORD_FAILED.wireName()
-                                        .equals(type))
+                        else if (MessageType.RECORD_SPLIT.wireName()
+                                .equals(type))
                         {
                             RECORDS.incrementAndGet();
                         }
@@ -207,10 +209,10 @@ class SplitterPerf
             if (!RESULTS.isEmpty())
             {
                 NOTES.add("Storage: " + storage.describe() + ".");
-                NOTES.add("Splitting latency is from an item.landed sent to"
-                        + " the item's file.completed; end to end adds the"
-                        + " item's landing latency from the landing"
-                        + " stage's timeline.");
+                NOTES.add("Splitting latency is from an item.landed handed"
+                        + " to the stage to the item's item.split; end to"
+                        + " end adds the item's landing latency from the"
+                        + " landing stage's timeline.");
                 PerfOutput.record(PerfSettings.SPLIT, RESULTS, NOTES);
             }
         }
@@ -282,8 +284,14 @@ class SplitterPerf
             List<byte[]> announcements = items.stream()
                     .map(landing::announcement).toList();
 
-            ProducerTemplate producer = splitter.getBean(CamelContext.class)
-                    .createProducerTemplate();
+            ConnectorRuntime runtime =
+                    splitter.getBean(ConnectorRuntime.class);
+            SplitHandler handler = new SplitHandler(runtime.splitter(),
+                    runtime.keys().inbox(), name, TestLanding.CATALOG,
+                    LandingTables.DEFAULT_NAMESPACE, FATAL::add);
+            ExecutorService input = Executors.newFixedThreadPool(
+                    splitter.getBean(ConnectorProperties.class).stage()
+                            .concurrency());
             long[] sent = new long[items.size()];
             // The first announcement goes at once: the splitter's time
             // starts there, not at the landing run's start.
@@ -291,12 +299,15 @@ class SplitterPerf
                     .mapToLong(Timeline.Entry::announced).min().orElse(0);
             ResourceMonitor monitor = ResourceMonitor.start();
             long start = System.nanoTime();
+            List<Future<Outcome>> outcomes = new ArrayList<>();
             for (Timeline.Entry entry : timeline)
             {
                 awaitDue(start + entry.announced() - first);
                 sent[entry.seq()] = System.nanoTime();
-                producer.sendBody(LANDED_QUEUE,
-                        announcements.get(entry.seq()));
+                byte[] body = announcements.get(entry.seq());
+                outcomes.add(input.submit(() -> handler.handle(List.of(
+                        new BrokerMessage(body, UUID.randomUUID().toString(),
+                                Map.of())))));
             }
             long deadline = System.nanoTime() + RUN_LIMIT.toNanos();
             while (COMPLETED.size() < items.size()
@@ -304,9 +315,17 @@ class SplitterPerf
             {
                 Thread.sleep(5);
             }
+            input.shutdownNow();
+            for (Future<Outcome> outcome : outcomes)
+            {
+                if (outcome.isDone())
+                {
+                    assertThat(outcome.get()).isEqualTo(Outcome.DONE);
+                }
+            }
             ResourceMonitor.Resources resources = monitor.stop();
             assertThat(FATAL).as("fatal exits").isEmpty();
-            assertThat(COMPLETED.keySet()).as("file.completed messages")
+            assertThat(COMPLETED.keySet()).as("item.split messages")
                     .containsExactlyInAnyOrderElementsOf(bySeq.keySet());
 
             Latencies split = new Latencies();
@@ -410,7 +429,7 @@ class SplitterPerf
     }
 
     /**
-     * The splitter's settings for a run, as command-line arguments so that
+     * The split stage's settings for a run, as command-line arguments so that
      * they win over {@code application.yml}.
      *
      * @param workload the workload
@@ -424,9 +443,14 @@ class SplitterPerf
         String jdbc = TestPostgres.jdbcUrl();
         Map<String, String> settings = new LinkedHashMap<>();
         settings.put("camel.main.run-controller", "false");
+        settings.put("sdh.split.autostart", "false");
         settings.put("sdh.landing.intake", intake);
-        settings.put("sdh.landing.queue-uri", LANDED_QUEUE);
-        settings.put("sdh.landing.idle-wait", "200ms");
+        // Never started: the test hands the stage its messages.
+        settings.put("sdh.stage.input.type", "kafka");
+        settings.put("sdh.stage.input.uri",
+                "kafka:sdh.landed?brokers=localhost:1&groupId=split");
+        settings.put("sdh.stage.output.type", "camel");
+        settings.put("sdh.stage.output.uri", OUT_QUEUE);
         settings.put("sdh.split.format", Workload.format(workload));
         settings.put("sdh.split.limits.max-item-bytes", "64GB");
         settings.putAll(storage.applicationSettings());
@@ -457,9 +481,6 @@ class SplitterPerf
                 TestKeys.LANDING_SIGNER_KID);
         settings.put("sdh.crypto.keys.landing-signer.pem",
                 keys.landingSignerPem.toString());
-        settings.put("sdh.queue.type", "camel");
-        settings.put("sdh.queue.uri", OUT_QUEUE);
-        settings.put("sdh.results.enabled", "false");
         settings.put("sdh.maintenance.enabled", "false");
         return settings.entrySet().stream()
                 .map(entry -> "--" + entry.getKey() + "=" + entry.getValue())

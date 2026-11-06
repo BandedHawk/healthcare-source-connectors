@@ -25,10 +25,9 @@ import java.util.Set;
 /**
  * The demo's telemetry, for review after the run (design §15.3): a
  * Markdown report that follows each item through the pipeline by what the
- * two apps exported. The landing node and the splitter each trace an item
- * on their own, with no shared trace, so the report joins them by the item
- * ID that both put on their audit events ({@code item_id} on the landing
- * node, {@code item_id} on the splitter).
+ * apps exported. The landing node and the two stages each trace an item on
+ * their own, with no shared trace, so the report joins them by the item ID
+ * that each puts on its audit events ({@code item_id}).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -59,10 +58,11 @@ final class TelemetryReport
         text.append("# Pipeline demo: telemetry report\n\n")
                 .append("Written ").append(Instant.now()).append(". Each")
                 .append(" item through the pipeline, from the audit events")
-                .append(" and traces the landing node (`landing-connector`)")
-                .append(" and the splitter (`file-connector`) exported over")
-                .append(" OTLP. The two apps trace an item separately; the")
-                .append(" item ID joins them. Times are from the item's")
+                .append(" and traces the landing node (`landing-connector`),")
+                .append(" the split stage (`file-connector`) and the convert")
+                .append(" stage (`convert-stage`) exported over OTLP. The")
+                .append(" apps trace an item separately; the item ID joins")
+                .append(" them. Times are from the item's")
                 .append(" first event. The raw telemetry is beside this")
                 .append(" file, as OTLP JSON: `<service>/traces.jsonl`,")
                 .append(" `logs.jsonl` and `metrics.jsonl`.\n\n");

@@ -86,7 +86,8 @@ class ThirdPartyAttributionIT
      * @throws Exception if the jar can't be read
      */
     @ParameterizedTest
-    @ValueSource(strings = {"file-connector", "landing-connector"})
+    @ValueSource(strings = {"file-connector", "landing-connector",
+            "convert-stage"})
     void everyBundledComponentIsAttributedInFull(String module)
             throws Exception
     {
@@ -183,6 +184,7 @@ class ThirdPartyAttributionIT
      * The landing node's jar holds JSch, whose bundled jBCrypt is under
      * ISC: all of JSch's licenses apply, and jBCrypt's copyright is given.
      *
+     * @param module the app's module
      * @throws Exception if the jar can't be read
      */
     @ParameterizedTest
@@ -202,8 +204,8 @@ class ThirdPartyAttributionIT
 
     /**
      * An application's packaged jar. A build of file-connector alone (as
-     * {@code -Pdist -pl file-connector}) hasn't packaged the landing node,
-     * so its check is skipped then, rather than failed.
+     * {@code -Pdist -pl file-connector}) hasn't packaged the other
+     * applications, so their checks are skipped then, rather than failed.
      *
      * @param module the application's module
      * @return the jar

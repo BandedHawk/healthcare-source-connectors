@@ -1,0 +1,5 @@
+#!/bin/sh
+# Operator commands inside a running service container (design §11.4):
+#   kubectl exec -it <pod> -- env SDH_OPERATOR=alice sdh-admin status
+# Same JVM options as the stage, with a small heap so it fits beside the running stage's JVM.
+exec java @/app/jvm.options @/app/container.options @/app/admin.args "$@"

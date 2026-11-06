@@ -17,6 +17,7 @@ import java.sql.PreparedStatement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
@@ -108,6 +109,32 @@ class ItemCheckpointsTest
                 new ItemCheckpoints.Stored(next, null, null));
         assertThat(checkpoints.known(List.of(item, UUID.randomUUID())))
                 .containsExactly(item);
+    }
+
+    /**
+     * The report counts the items by state and lists those not finished,
+     * from the plain columns, without the codec.
+     */
+    @Test
+    void reportsTheItemsByStateAndThoseNotFinished()
+    {
+        UUID done = UUID.randomUUID();
+        checkpoints.save(start(item), new Held(2));
+        checkpoints.save(start(done).withState(Checkpoint.State.COMPLETED),
+                new Held(1));
+        SplitItemReport report = new SplitItemReport(database, schema);
+        assertThat(report.countsByState()).containsExactly(
+                Map.entry("COMPLETED", 1L), Map.entry("SPLITTING", 1L));
+        assertThat(report.unfinished(10)).singleElement().satisfies(row ->
+        {
+            assertThat(row.itemId()).isEqualTo(item);
+            assertThat(row.state()).isEqualTo("SPLITTING");
+            assertThat(row.epoch()).isEqualTo(2);
+            assertThat(row.updatedAt()).isNotNull();
+        });
+        assertThat(report.unfinished(0)).isEmpty();
+        assertThatThrownBy(() -> new SplitItemReport(database, "x; y"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     /**

@@ -1,0 +1,90 @@
+# Example configuration for the convert stage (Smile Digital Health Inc.). Copy to application.yml in this
+# directory and adjust. Values shown are defaults where they exist; remove what you don't need.
+# Secrets don't belong here: use environment variables (SDH_CRYPTO_KEYSTORE_PASSWORD,
+# SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE, SDH_CRYPTO_KEYS_INBOX_PASSPHRASE, SDH_LEASE_JDBC_PASSWORD, ...) or a configtree:
+# mount.
+sdh:
+  connector-id: convert-stage     # names the duties lease (convert/<connector-id>/duties)
+  stage:
+    input:                        # where the split stage sends record.split and item.split
+      type: kafka                 # kafka | sqs | rabbitmq | artemis | pubsub | servicebus | eventhubs
+      # A Camel consumer URI (not for artemis). The options that hold a message until its record is stored are
+      # added, and any set otherwise refused. Secrets must be placeholders, such as {{env:KAFKA_JAAS}}, never values.
+      uri: "kafka:sdh.split.claims?brokers=kafka:9093&groupId=convert-stage&securityProtocol=SSL"
+      batch: { max-messages: 100 }   # the default here: records are claimed, converted and committed together
+      artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }   # artemis only
+    output:                       # where record.stored, record.failed and item.converted go: downstream readers
+      type: kafka                 # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
+      uri: "kafka:sdh.records.claims?brokers=kafka:9093&securityProtocol=SSL"
+    dlq:                          # where record.conflict goes: a record stored before, now with other output
+      type: kafka
+      uri: "kafka:sdh.convert.dlq?brokers=kafka:9093&securityProtocol=SSL"
+    concurrency: 4                # records a pod converts at once
+    claim: { ttl: 60s, renew-interval: 15s, busy-poll: 1s }
+    registry-schema: sdh_stage    # Postgres schema of the stage's registry, in the lease database
+    send-timeout: 30s
+  convert:
+    options:                      # format options as for the split stage (sdh.split.options), for every format
+      namespace: urn:hl7-org:v3
+    max-bytes: 64MB               # a larger record is stored as split, CONVERT_TOO_LARGE
+    # memory: 1GB                 # heap the conversions running at once may share; unset = a share of the heap
+  storage:
+    catalog-name: sdh             # also sent in messages; a record.split naming another catalog is refused
+    namespace: sdh_ingest         # holds records, which every pod appends to
+    # split-namespace: sdh_split  # where split_records is, if not in the same namespace
+    catalog:                      # Iceberg catalog properties, passed through unchanged
+      type: rest                  # rest | jdbc
+      uri: https://polaris:8181/api/catalog
+      warehouse: sdh              # the Polaris catalog name
+      rest.auth.type: oauth2
+      credential: "sdh-convert:${POLARIS_CLIENT_SECRET}"   # client id:secret, secret from the environment
+      scope: PRINCIPAL_ROLE:ALL
+      oauth2-server-uri: https://polaris:8181/api/catalog/v1/oauth/tokens
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO   # or ...gcp.gcs.GCSFileIO, ...azure.adlsv2.ADLSFileIO
+      s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
+      client: { region: us-east-1 }
+  reconcile:                      # split records whose record.split was lost are converted anyway, by one pod
+    enabled: true
+    grace: 10m
+    lookback: 2d
+    interval: 15m
+  lease:                          # the duties lease; the registry is in the same database
+    jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
+    ttl: 60s
+    renew-interval: 15s
+    safety-margin: 10s
+  crypto:
+    wrap-provider: local          # local | aws-kms | gcp-kms | azure-keyvault | vault-transit
+    sign-provider: local          # same choices, independently
+    keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
+    keys:
+      records-kek: records-kek/1  # reads split_records and writes records; no landing KEK
+      signing: { kid: convert-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
+      # signing: { kid: convert-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
+      recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }   # downstream readers
+      inbox: { kid: convert-inbox-2026, pem: /run/secrets/inbox.pem }   # the split stage seals to this; passphrase: env
+      landing-signer: { kid: split-2026, pem: /run/secrets/split-signer.pem }   # the split stage's public key
+    aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
+    gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC
+    vault: { address: "https://vault:8200", token-file: /vault/secrets/token, mount: transit }   # vault-transit
+  results:                        # item.result for the producer (design §5.3.8); off by default
+    enabled: false
+    queue:                        # the producer's own queue, the landing node's for the same intake
+      type: kafka
+      uri: "kafka:sdh.results.claims?brokers=kafka:9093&securityProtocol=SSL"
+    recipient:                    # the producer's public key; results are sealed to it
+      kid: claims-producer-2026
+      pem: /run/secrets/claims-producer.pub.pem
+      sha256: "<hex SHA-256 of the key's DER form>"
+  retry: { max-attempts: 8, initial-backoff: 200ms, max-backoff: 30s }
+  telemetry:                      # unset endpoint = no export
+    otlp: { endpoint: "https://otel-collector:4318", timeout: 10s }   # headers: { Authorization: ... } from env
+    metric-interval: 60s
+  maintenance:                    # run by the pod that holds the duties lease
+    enabled: true
+    interval: 1h
+    snapshot-retention: 7d
+    min-snapshots: 10
+    compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
+    orphans: { enabled: true, interval: 24h, min-age: 3d }
+    # retention: 30d              # records; unset = keep forever (default)

@@ -64,7 +64,7 @@ public final class ItemProcessor
 {
 
     /** The stage's name in {@code stage.item_completed}, as for the others. */
-    static final String STAGE = "split";
+    public static final String STAGE = "split";
 
     /** How an item ended. */
     public enum Result

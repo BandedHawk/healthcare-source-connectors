@@ -19,8 +19,7 @@ import com.github.dockerjava.api.model.Capability;
 import com.github.dockerjava.api.model.Volume;
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.reader.QueueReader;
@@ -64,10 +63,11 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * Both stages as deployed (design §5.3.11, §5.3.12, §7.5, §14.1, §14.3):
- * two landing nodes for one intake (active and standby) and the splitter,
- * each run with a read-only root filesystem, a noexec /tmp, all
- * capabilities dropped, no-new-privileges and a memory limit. Subclasses
+ * The pipeline as deployed (design §5.3.11, §5.3.12, §7.5, §14.1, §14.3;
+ * STAGES.md §3): two landing nodes for one intake (active and standby),
+ * the split stage and the convert stage, each run with a read-only root
+ * filesystem, a noexec /tmp, all capabilities dropped, no-new-privileges
+ * and a memory limit. Subclasses
  * build the service images or the customer images; checks that need a
  * shell inside a container run only where there is one.
  *
@@ -75,9 +75,9 @@ import software.amazon.awssdk.services.s3.S3Client;
  * fsGroup (root:10001, 0440), and the intake directory is a volume shared
  * by an upstream container and both landing nodes. Postgres, SeaweedFS and
  * Kafka are reached by network alias. A good and a bad CSV file are
- * landed, announced on Kafka and split, and a downstream reader reads
- * every record back. Then the active landing node is killed and the
- * standby lands the next file, and the splitter is restarted and splits
+ * landed, announced on Kafka, split and converted, and a downstream reader
+ * reads every record back. Then the active landing node is killed and the
+ * standby lands the next file, and the split stage is restarted and splits
  * another.
  *
  * @author Jonas Barnett
@@ -109,8 +109,11 @@ abstract class ContainerImageItBase
     /** The images' non-root user and group ID. */
     static final String APP_UID = "10001";
 
-    /** The splitter's module. */
+    /** The split stage's module. */
     static final String SPLITTER = "file-connector";
+
+    /** The convert stage's module. */
+    static final String CONVERTER = "convert-stage";
 
     /** The landing node's module. */
     static final String LANDING = "landing-connector";
@@ -124,7 +127,10 @@ abstract class ContainerImageItBase
     /** The topic landing announces items on. */
     static final String LANDING_TOPIC = "sdh-landing";
 
-    /** The topic the splitter publishes to. */
+    /** The topic the split stage sends to, for the convert stage. */
+    static final String SPLIT_TOPIC = "sdh-split";
+
+    /** The topic the convert stage sends to, for downstream readers. */
     static final String RECORDS_TOPIC = "sdh-records";
 
     /** The test files' header row. */
@@ -142,8 +148,11 @@ abstract class ContainerImageItBase
     /** The broker. */
     static KafkaContainer kafka;
 
-    /** The splitter. */
+    /** The split stage. */
     static GenericContainer<?> app;
+
+    /** The convert stage. */
+    static GenericContainer<?> convert;
 
     /** The landing node that starts active. */
     static GenericContainer<?> landingActive;
@@ -162,6 +171,9 @@ abstract class ContainerImageItBase
      * in one JVM.
      */
     static ToStringConsumer APP_LOG;
+
+    /** The convert stage's console output. */
+    static ToStringConsumer CONVERT_LOG;
 
     /** The active landing node's console output. */
     static ToStringConsumer ACTIVE_LOG;
@@ -185,19 +197,20 @@ abstract class ContainerImageItBase
     static KeyMaterial downstreamKeys;
 
     /**
-     * Downstream: reads the splitter's records from SeaweedFS.
+     * Downstream: reads the convert stage's records from SeaweedFS.
      */
     static QueueReader reader;
 
-    /** Downstream: reads the splitter's messages from Kafka. */
+    /** Downstream: reads the convert stage's messages from Kafka. */
     static KafkaConsumer<String, String> consumer;
 
     /** The messages downstream has read so far. */
     static final List<ConnectorMessage> MESSAGES = new ArrayList<>();
 
     /**
-     * An application's image under test ({@value #SPLITTER} or
-     * {@value #LANDING}), built from what Maven packaged.
+     * An application's image under test ({@value #LANDING},
+     * {@value #SPLITTER} or {@value #CONVERTER}), built from what Maven
+     * packaged.
      *
      * @param module the application's module
      * @return the image
@@ -214,14 +227,16 @@ abstract class ContainerImageItBase
     abstract boolean hasShell();
 
     /**
-     * Runs a splitter operator command (design §11.4) inside the running
+     * Runs a stage's operator command (design §11.4) inside its running
      * container, as {@code it-operator}.
      *
-     * @param args the command and its options
+     * @param container the stage's container
+     * @param args      the command and its options
      * @return the exit status, a colon, and the output
      * @throws Exception if the command can't be run
      */
-    abstract String admin(String... args) throws Exception;
+    abstract String admin(GenericContainer<?> container, String... args)
+            throws Exception;
 
     /**
      * Short name for the saved logs.
@@ -242,7 +257,7 @@ abstract class ContainerImageItBase
 
     /**
      * Starts the infrastructure, builds the images, and starts both
-     * landing nodes, the splitter and the downstream reader.
+     * landing nodes, both stages and the downstream reader.
      *
      * @throws Exception if anything fails to start
      */
@@ -251,6 +266,7 @@ abstract class ContainerImageItBase
     {
         requireDocker();
         APP_LOG = new ToStringConsumer();
+        CONVERT_LOG = new ToStringConsumer();
         ACTIVE_LOG = new ToStringConsumer();
         STANDBY_LOG = new ToStringConsumer();
         MESSAGES.clear();
@@ -288,12 +304,14 @@ abstract class ContainerImageItBase
                         .withBinds(new Bind(intake, new Volume(INTAKE_DIR))));
         upstream.start();
 
-        // Both images are built first, so the startup timeouts below don't
+        // The images are built first, so the startup timeouts below don't
         // include a build.
         ImageFromDockerfile landingImage = image(LANDING);
         landingImage.get();
         ImageFromDockerfile splitterImage = image(SPLITTER);
         splitterImage.get();
+        ImageFromDockerfile converterImage = image(CONVERTER);
+        converterImage.get();
 
         landingActive = lockedDown(new GenericContainer<>(landingImage),
                 landingConfig(false), ACTIVE_LOG,
@@ -317,6 +335,21 @@ abstract class ContainerImageItBase
                         ".*Started FileConnectorApplication.*", 1)
                         .withStartupTimeout(Duration.ofMinutes(3)));
         app.start();
+        convert = lockedDown(new GenericContainer<>(converterImage),
+                new LinkedHashMap<>(ItSupport.convertStage(keys,
+                        file -> "/run/secrets/" + file.getFileName(),
+                        catalogProperties("http://seaweed:8333",
+                                containerJdbcUrl()),
+                        List.of(containerJdbcUrl(), postgres.getUsername(),
+                                postgres.getPassword()),
+                        "kafka:19092", SPLIT_TOPIC, RECORDS_TOPIC, false)),
+                CONVERT_LOG)
+                .withEnv("SDH_CRYPTO_KEYS_INBOX_PASSPHRASE",
+                        TestKeys.INBOX_PASSPHRASE)
+                .waitingFor(Wait.forLogMessage(
+                        ".*Started ConvertStageApplication.*", 1)
+                        .withStartupTimeout(Duration.ofMinutes(3)));
+        convert.start();
 
         CommonSettings.Crypto hostCrypto = new CommonSettings.Crypto("local",
                 "local",
@@ -329,16 +362,11 @@ abstract class ContainerImageItBase
                 new CommonSettings.Gcp(null),
                 new CommonSettings.Vault(null, null, null, "transit", null));
         downstreamKeys = KeyMaterial.load(hostCrypto);
-        reader = QueueReader.builder()
-                .recipientKey("downstream-2026", keys.recipient.getPrivate())
-                .trustedSigner("connector-2026",
-                        (ECPublicKey) keys.signing.getPublic())
-                .catalog(CatalogUtil.buildIcebergCatalog("sdh",
+        reader = ItSupport.convertReader(keys,
+                CatalogUtil.buildIcebergCatalog("sdh",
                         catalogProperties(hostS3(), postgres.getJdbcUrl()),
-                        null))
-                .expectedCatalogName("sdh")
-                .keyProvider(downstreamKeys.wrap())
-                .build();
+                        null),
+                downstreamKeys.wrap());
         consumer = new KafkaConsumer<>(Map.of(
                 "bootstrap.servers", kafka.getBootstrapServers(),
                 "group.id", "downstream", "auto.offset.reset", "earliest"),
@@ -359,6 +387,9 @@ abstract class ContainerImageItBase
         Files.writeString(Path.of("target", variant() + "-image-it.log"),
                 splitterLog());
         Files.writeString(
+                Path.of("target", variant() + "-convert-image-it.log"),
+                convertLog());
+        Files.writeString(
                 Path.of("target", variant() + "-landing-image-it.log"),
                 ACTIVE_LOG.toUtf8String() + "\n---- standby ----\n"
                         + STANDBY_LOG.toUtf8String());
@@ -370,7 +401,7 @@ abstract class ContainerImageItBase
                 closeable.close();
             }
         }
-        Stream.of(app, landingStandby, landingActive, upstream, kafka,
+        Stream.of(convert, app, landingStandby, landingActive, upstream, kafka,
                         seaweed, postgres)
                 .filter(container -> container != null)
                 .forEach(GenericContainer::stop);
@@ -610,29 +641,43 @@ abstract class ContainerImageItBase
             }
         }
         assertThat(until.test(MESSAGES)).as("downstream messages %s"
-                + "\nsplitter:\n%s", MESSAGES, splitterLog()).isTrue();
+                + "\nsplit stage:\n%s\nconvert stage:\n%s", MESSAGES,
+                splitterLog(), convertLog()).isTrue();
     }
 
     /**
-     * How many items the splitter has completed, by downstream message.
+     * How many items the convert stage has completed, by downstream
+     * message: every item, a failed one too, ends with
+     * {@code item.converted}.
      *
      * @param messages the messages read
-     * @return the number of {@code file.completed} messages
+     * @return the number of items
      */
     static long completed(List<ConnectorMessage> messages)
     {
-        return messages.stream().filter(FileCompleted.class::isInstance)
+        return messages.stream().filter(ItemConverted.class::isInstance)
                 .count();
     }
 
     /**
-     * The splitter's whole console output, across restarts.
+     * The split stage's whole console output, across restarts.
      *
      * @return the output
      */
     static String splitterLog()
     {
         return app == null ? APP_LOG.toUtf8String() : app.getLogs();
+    }
+
+    /**
+     * The convert stage's whole console output.
+     *
+     * @return the output
+     */
+    static String convertLog()
+    {
+        return convert == null ? CONVERT_LOG.toUtf8String()
+                : convert.getLogs();
     }
 
     /**
@@ -671,6 +716,11 @@ abstract class ContainerImageItBase
         files.put("landing-signer.pem", keys.landingSignerPem);
         files.put("landing-signing.pem", keys.landingSigningPem);
         files.put("inbox-public.pem", keys.inboxPublicPem);
+        for (Path file : List.of(keys.convertInboxPem, keys.splitSignerPem,
+                keys.convertSigningPem, keys.readerPem))
+        {
+            files.put(file.getFileName().toString(), file);
+        }
         GenericContainer<?> init = new GenericContainer<>("busybox:1.37.0");
         for (Map.Entry<String, Path> file : files.entrySet())
         {
@@ -734,7 +784,7 @@ abstract class ContainerImageItBase
     }
 
     /**
-     * The settings a deployment would put in the splitter's
+     * The settings a deployment would put in the split stage's
      * application.yml, addressed by network alias.
      *
      * @return the settings
@@ -743,14 +793,13 @@ abstract class ContainerImageItBase
     static Map<String, Object> splitterConfig() throws Exception
     {
         Map<String, Object> sdh = new LinkedHashMap<>();
-        // Offsets are committed automatically, one message per poll, so
-        // only for messages already handled; breakOnFirstError keeps a
-        // failed message from being skipped (design §5.3.12).
-        sdh.put("landing", Map.of("intake", INTAKE,
-                "queue-uri", "kafka:" + LANDING_TOPIC
-                        + "?brokers=kafka:19092&groupId=file-connector"
-                        + "&autoOffsetReset=earliest&maxPollRecords=1"
-                        + "&breakOnFirstError=true"));
+        sdh.put("landing", Map.of("intake", INTAKE));
+        sdh.put("stage", Map.of(
+                "input", Map.of("type", "kafka", "uri", "kafka:"
+                        + LANDING_TOPIC + "?brokers=kafka:19092"
+                        + "&groupId=file-connector"),
+                "output", Map.of("type", "kafka", "uri",
+                        "kafka:" + SPLIT_TOPIC + "?brokers=kafka:19092")));
         sdh.put("split", Map.of("format", "csv",
                 "options", Map.of("csv", Map.of("header", "true"))));
         sdh.put("storage", Map.of("catalog-name", "sdh",
@@ -772,8 +821,6 @@ abstract class ContainerImageItBase
                         "landing-signer", Map.of(
                                 "kid", TestKeys.LANDING_SIGNER_KID,
                                 "pem", "/run/secrets/landing-signer.pem"))));
-        sdh.put("queue", Map.of("type", "kafka",
-                "uri", "kafka:" + RECORDS_TOPIC + "?brokers=kafka:19092"));
         return Map.of("sdh", sdh);
     }
 
@@ -784,10 +831,19 @@ abstract class ContainerImageItBase
      */
     static Map<String, Object> leaseJdbc()
     {
-        return Map.of("url", "jdbc:postgresql://postgres:5432/"
-                        + postgres.getDatabaseName(),
+        return Map.of("url", containerJdbcUrl(),
                 "username", postgres.getUsername(),
                 "password", postgres.getPassword());
+    }
+
+    /**
+     * The database's URL, by network alias.
+     *
+     * @return the URL
+     */
+    static String containerJdbcUrl()
+    {
+        return "jdbc:postgresql://postgres:5432/" + postgres.getDatabaseName();
     }
 
     /**
@@ -798,8 +854,7 @@ abstract class ContainerImageItBase
     static Map<String, Object> containerCatalog()
     {
         return new LinkedHashMap<>(catalogProperties("http://seaweed:8333",
-                "jdbc:postgresql://postgres:5432/"
-                        + postgres.getDatabaseName()));
+                containerJdbcUrl()));
     }
 
     /**
@@ -893,16 +948,17 @@ abstract class ContainerImageItBase
     }
 
     /**
-     * Both stages run locked down, land, split, restore and survive the
-     * loss of the active landing node and a splitter restart, without PHI
-     * in any log.
+     * Every stage runs locked down; items are landed, split, converted
+     * and restored, and the pipeline survives the loss of the active
+     * landing node and a split stage restart, without PHI in any log.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void bothStagesRunLockedDownAndSurviveFailover() throws Exception
+    void everyStageRunsLockedDownAndSurvivesFailover() throws Exception
     {
-        for (GenericContainer<?> container : List.of(app, landingActive))
+        for (GenericContainer<?> container :
+                List.of(app, convert, landingActive))
         {
             // Runs as the image's non-root user.
             assertThat(DockerClientFactory.lazyClient()
@@ -925,44 +981,53 @@ abstract class ContainerImageItBase
             }
         }
 
-        // 1. Landing, announcing and splitting: a good file and a bad one.
+        // 1. Landing, announcing, splitting and converting: a good file
+        // and a bad one.
         List<String> rows = new ArrayList<>();
         deliver("good.csv", csv("a", 20, rows));
         String bad = HEADER + "1," + MARKER + ",\"never closed\n";
         deliver("bad.csv", bad);
         awaitLanded(2);
-        // 2 × file.started, 20 × record.stored, 1 × file.completed (the bad
-        // file stores nothing).
-        awaitMessages(messages -> messages.stream()
-                .filter(FileStarted.class::isInstance).count() == 2
-                && completed(messages) == 1
+        // 2 × item.converted (the bad file's has no records), 20 records.
+        awaitMessages(messages -> completed(messages) == 2
                 && messages.stream().filter(RecordStored.class::isInstance)
                         .count() == 20);
-        UUID goodId = MESSAGES.stream().filter(FileCompleted.class::isInstance)
+        List<ItemConverted> items = MESSAGES.stream()
+                .filter(ItemConverted.class::isInstance)
+                .map(ItemConverted.class::cast).toList();
+        UUID goodId = items.stream().filter(item -> item.recordCount() == 20)
                 .findFirst().orElseThrow().itemId();
-        UUID badId = MESSAGES.stream().filter(FileStarted.class::isInstance)
-                .map(ConnectorMessage::itemId)
-                .filter(id -> !id.equals(goodId)).findFirst().orElseThrow();
+        UUID badId = items.stream().filter(item -> item.recordCount() == 0)
+                .findFirst().orElseThrow().itemId();
         for (RecordStored record : MESSAGES.stream()
                 .filter(RecordStored.class::isInstance)
                 .map(RecordStored.class::cast).toList())
         {
+            assertThat(record.itemId()).isEqualTo(goodId);
             assertThat(new String(reader.readRecord(record, 1 << 20), UTF_8))
                     .isEqualTo(csvRowJson(
                             rows.get((int) record.seq())));
         }
 
-        // 2. Operator commands inside the running splitter (design §11.4),
+        // 2. Operator commands inside the running stages (design §11.4),
         // as `kubectl exec` would run them: same configuration from the
         // environment, same JVM options, no lease taken. The bad item is
         // restored from landing into /tmp and read out the way the README
         // describes.
-        assertThat(admin("status")).startsWith("0:")
-                .containsPattern("lease: +file-connector held by .+, epoch 1,")
+        assertThat(admin(app, "status")).startsWith("0:")
+                .containsPattern(
+                        "duties: +split/file-connector/duties held by .+,"
+                        + " epoch 1,")
+                .containsPattern("items: +1 COMPLETED, 1 FAILED")
                 .contains("admin.status operator=it-operator");
-        assertThat(admin("restore", "--file-id", badId.toString(), "--to",
-                "/tmp")).startsWith("0:").contains("digest verified");
+        assertThat(admin(app, "restore", "--item-id", badId.toString(),
+                "--to", "/tmp")).startsWith("0:").contains("digest verified");
         assertThat(debugRead("/tmp/" + badId)).isEqualTo(bad);
+        assertThat(admin(convert, "status")).startsWith("0:")
+                .containsPattern("duties: +convert/convert-stage/duties held"
+                        + " by .+, epoch 1,")
+                .containsPattern("items: +0 in progress, 2 complete")
+                .contains("admin.status operator=it-operator");
 
         // 3. Landing failover: the active node dies (SIGKILL, no lease
         // release); the standby takes the lease once it lapses and lands
@@ -974,10 +1039,10 @@ abstract class ContainerImageItBase
         awaitLanded(3);
         assertThat(STANDBY_LOG.toUtf8String())
                 .contains("Started LandingConnectorApplication");
-        awaitMessages(messages -> completed(messages) == 2);
+        awaitMessages(messages -> completed(messages) == 3);
 
-        // 4. The splitter restarts (as a pod restart would) and splits the
-        // next file.
+        // 4. The split stage restarts (as a pod restart would) and splits
+        // the next file, which the convert stage converts.
         DockerClientFactory.lazyClient()
                 .restartContainerCmd(app.getContainerId()).withTimeout(30)
                 .exec();
@@ -989,17 +1054,19 @@ abstract class ContainerImageItBase
             Thread.sleep(500);
         }
         assertThat(splitterLog().split("Started FileConnectorApplication", -1))
-                .as("splitter restarted").hasSize(3);
+                .as("split stage restarted").hasSize(3);
         deliver("last.csv", csv("c", 2, new ArrayList<>()));
         awaitLanded(4);
-        awaitMessages(messages -> completed(messages) == 3);
-        assertThat(admin("status")).startsWith("0:")
-                .containsPattern("lease: +file-connector held by .+, epoch 2,");
+        awaitMessages(messages -> completed(messages) == 4);
+        assertThat(admin(app, "status")).startsWith("0:")
+                .containsPattern(
+                        "duties: +split/file-connector/duties held by .+,"
+                        + " epoch 2,");
 
         // 5. No container's console output (what a log shipper would
         // collect) holds PHI or filenames.
-        for (String log : List.of(splitterLog(), ACTIVE_LOG.toUtf8String(),
-                STANDBY_LOG.toUtf8String()))
+        for (String log : List.of(splitterLog(), convertLog(),
+                ACTIVE_LOG.toUtf8String(), STANDBY_LOG.toUtf8String()))
         {
             assertThat(log).doesNotContain(MARKER).doesNotContain(".csv");
         }
@@ -1012,7 +1079,7 @@ abstract class ContainerImageItBase
         if (hasShell())
         {
             for (GenericContainer<?> container :
-                    List.of(app, landingStandby))
+                    List.of(app, convert, landingStandby))
             {
                 assertThat(exec(container, "sh", "-c",
                         "ls -A /tmp | grep -ci 'zstd\\|snappy\\|hs_err'"))
@@ -1020,8 +1087,9 @@ abstract class ContainerImageItBase
             }
         }
 
-        // 6. Third-party attribution ships in both images (design §14.2).
+        // 6. Third-party attribution ships in every image (design §14.2).
         checkAttribution(app);
+        checkAttribution(convert);
         checkAttribution(landingStandby);
     }
 
@@ -1039,7 +1107,7 @@ abstract class ContainerImageItBase
                 .contains("Smile Digital Health Inc.");
         assertThat(read(container, "/app/legal/NOTICE"))
                 .contains("Smile Digital Health Inc.");
-        if (container == app)
+        if (container != landingStandby)
         {
             assertThat(read(container, "/app/legal/NOTICE"))
                     .contains("derived from the HL7 CDA Release 2");

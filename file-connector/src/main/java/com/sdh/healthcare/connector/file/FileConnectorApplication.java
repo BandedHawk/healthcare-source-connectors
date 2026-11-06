@@ -6,14 +6,14 @@
  */
 package com.sdh.healthcare.connector.file;
 
-import com.sdh.healthcare.connector.file.admin.AdminCli;
+import com.sdh.healthcare.connector.file.admin.SplitAdmin;
 import java.util.Arrays;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * The file connector's Spring Boot entry point. Started normally, it runs
- * the connector; started as {@code admin <command> ...}, it runs that
+ * The split stage's Spring Boot entry point. Started normally, it runs
+ * the stage; started as {@code admin <command> ...}, it runs that
  * operator command instead and exits.
  *
  * @author Jonas Barnett
@@ -29,7 +29,7 @@ public class FileConnectorApplication
     }
 
     /**
-     * Runs the connector, or with {@code admin <command> …} an operator
+     * Runs the stage, or with {@code admin <command> …} an operator
      * command instead (design §11.4).
      *
      * @param args the command line
@@ -38,7 +38,7 @@ public class FileConnectorApplication
     {
         if (args.length > 0 && args[0].equals("admin"))
         {
-            System.exit(AdminCli.run(
+            System.exit(SplitAdmin.cli().run(
                     Arrays.asList(args).subList(1, args.length), System.out,
                     System.err, System.getenv()));
         }

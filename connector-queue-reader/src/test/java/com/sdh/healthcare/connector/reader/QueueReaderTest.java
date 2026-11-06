@@ -26,7 +26,7 @@ import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
@@ -306,7 +306,7 @@ class QueueReaderTest
                         .keyID("connector-2026")
                         .type(MessageSealer.JWS_TYPE).build(),
                 new Payload(Map.of("v", (ContractVersion.MAJOR + 1) + ".0",
-                        "type", "file.started",
+                        "type", "item.landed",
                         "messageId", "x",
                         "itemId", UUID.randomUUID().toString())));
         jws.sign(new ECDSASigner((ECPrivateKey) signer.getPrivate()));
@@ -339,14 +339,14 @@ class QueueReaderTest
     void otherMessageTypesDecode() throws Exception
     {
         UUID itemId = UUID.randomUUID();
-        byte[] body = sealer.seal(new FileCompleted(itemId, 3, 0, 999,
-                "digest", Instant.EPOCH, Instant.EPOCH.plusSeconds(5)));
+        byte[] body = sealer.seal(new ItemConverted(itemId, "claims", 3, 0,
+                Instant.EPOCH.plusSeconds(5)));
         try (QueueReader reader = reader())
         {
             assertThat(reader.decode(body))
-                    .isInstanceOf(FileCompleted.class)
+                    .isInstanceOf(ItemConverted.class)
                     .extracting(ConnectorMessage::messageId)
-                    .isEqualTo("fc-" + itemId);
+                    .isEqualTo("ic-convert-" + itemId);
         }
     }
 

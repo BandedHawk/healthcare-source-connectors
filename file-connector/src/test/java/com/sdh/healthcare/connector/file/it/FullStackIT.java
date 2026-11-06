@@ -7,17 +7,14 @@
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.ItSupport.INTAKE;
-import static com.sdh.healthcare.connector.file.it.ItSupport.awaitSplit;
 import static com.sdh.healthcare.connector.file.it.ItSupport.csvRowJson;
 import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
-import static com.sdh.healthcare.connector.file.it.ItSupport.splitterKeys;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
@@ -27,11 +24,10 @@ import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance.Report;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.file.TestLanding;
-import com.sdh.healthcare.connector.file.config.ConnectorProperties;
+import com.sdh.healthcare.connector.file.demo.DemoApp;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.FatalExit;
-import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,12 +40,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
-import org.apache.camel.CamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -71,9 +69,12 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
- * The deployed shape (design §8.1, §10.2): the Spring Boot app with
- * Postgres (lease + JDBC catalog), SeaweedFS through Iceberg's S3FileIO,
- * and Kafka. A downstream consumer then reads every record back with
+ * The deployed shape (design §8.1, §10.2; STAGES.md §3): the split stage
+ * in this JVM and the convert stage as a process of its own, run from the
+ * JAR its build made, with Postgres (leases, registries and the JDBC
+ * catalog), SeaweedFS through Iceberg's S3FileIO, and Kafka between them.
+ * The test plays the landing node and announces items on Kafka. A
+ * downstream consumer then reads every converted record back with
  * connector-queue-reader, and no stored object may contain plaintext.
  *
  * @author Jonas Barnett
@@ -143,8 +144,14 @@ class FullStackIT
     /** The reasons the app asked to exit, if any. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
-    /** The in-memory queue landed items are announced on. */
-    static final String LANDED_QUEUE = "seda:sdh-fullstack-landed?size=1000";
+    /** The topic landed items are announced on. */
+    static final String LANDED_TOPIC = "sdh-landed";
+
+    /** The topic the split stage sends to, for the convert stage. */
+    static final String SPLIT_TOPIC = "sdh-split";
+
+    /** The topic the convert stage sends to, for downstream readers. */
+    static final String RECORDS_TOPIC = "sdh-records";
 
     static
     {
@@ -185,18 +192,9 @@ class FullStackIT
         KAFKA.start();
     }
 
-    /** The running connector. */
+    /** The running split stage. */
     @Autowired
     ConnectorRuntime runtime;
-
-
-    /** The connector's settings. */
-    @Autowired
-    ConnectorProperties connectorProperties;
-
-    /** The app's Camel context. */
-    @Autowired
-    CamelContext camel;
 
     /**
      * The object store's endpoint as this JVM reaches it.
@@ -280,42 +278,60 @@ class FullStackIT
         {
             s3.createBucket(request -> request.bucket(BUCKET));
         }
-        registry.add("sdh.landing.intake", () -> INTAKE);
-        registry.add("sdh.landing.queue-uri", () -> LANDED_QUEUE);
-        registry.add("sdh.landing.idle-wait", () -> "200ms");
-        registry.add("sdh.split.format", () -> "csv");
-        registry.add("sdh.split.options.csv.header", () -> "true");
-        registry.add("sdh.storage.catalog-name", () -> "sdh");
-        catalogProperties().forEach((key, value) -> registry.add(
-                "sdh.storage.catalog[" + key + "]", () -> value));
-        registry.add("sdh.storage.commit.max-records", () -> "7");
-        registry.add("sdh.lease.jdbc.url", POSTGRES::getJdbcUrl);
-        registry.add("sdh.lease.jdbc.username", POSTGRES::getUsername);
-        registry.add("sdh.lease.jdbc.password", POSTGRES::getPassword);
-        registry.add("sdh.crypto.keystore.path", KEYS.keystore::toString);
-        registry.add("sdh.crypto.keystore.password",
-                () -> TestKeys.KS_PASSWORD);
-        registry.add("sdh.crypto.keys.records-kek", () -> TestKeys.RECORDS);
-        registry.add("sdh.crypto.keys.landed-items-kek",
-                () -> TestKeys.LANDED);
-        registry.add("sdh.crypto.keys.signing.kid", () -> "connector-2026");
-        registry.add("sdh.crypto.keys.signing.pem", KEYS.signingPem::toString);
-        registry.add("sdh.crypto.keys.signing.passphrase",
-                () -> TestKeys.SIGNING_PASSPHRASE);
-        registry.add("sdh.crypto.keys.recipient.kid", () -> "downstream-2026");
-        registry.add("sdh.crypto.keys.recipient.pem",
-                KEYS.recipientPem::toString);
-        String pin = KeyMaterial.fingerprint(KEYS.recipient.getPublic());
-        registry.add("sdh.crypto.keys.recipient.sha256", () -> pin);
-        splitterKeys(KEYS).forEach((key, value) -> registry.add(key,
-                () -> value));
-        registry.add("sdh.telemetry.otlp.endpoint",
-                () -> "http://" + COLLECTOR.getHost() + ":"
-                        + COLLECTOR.getMappedPort(4318));
-        registry.add("sdh.telemetry.metric-interval", () -> "1s");
-        registry.add("sdh.queue.type", () -> "kafka");
-        registry.add("sdh.queue.uri", () -> "kafka:sdh-records?brokers="
-                + KAFKA.getBootstrapServers());
+        Map<String, String> settings = ItSupport.splitStage(KEYS,
+                catalogProperties(), POSTGRES.getJdbcUrl(),
+                POSTGRES.getUsername(), POSTGRES.getPassword(), null);
+        settings.put("sdh.stage.input.uri", "kafka:" + LANDED_TOPIC
+                + "?brokers=" + KAFKA.getBootstrapServers()
+                + "&groupId=split-stage");
+        settings.put("sdh.stage.output.type", "kafka");
+        settings.put("sdh.stage.output.uri", "kafka:" + SPLIT_TOPIC
+                + "?brokers=" + KAFKA.getBootstrapServers());
+        settings.putAll(telemetry());
+        settings.forEach((key, value) -> registry.add(key, () -> value));
+    }
+
+    /**
+     * Where both stages export their telemetry.
+     *
+     * @return the settings
+     */
+    static Map<String, String> telemetry()
+    {
+        return Map.of("sdh.telemetry.otlp.endpoint", "http://"
+                        + COLLECTOR.getHost() + ":"
+                        + COLLECTOR.getMappedPort(4318),
+                "sdh.telemetry.metric-interval", "1s");
+    }
+
+    /**
+     * Starts the convert stage from its JAR, on the same containers.
+     *
+     * @return the running stage
+     * @throws Exception if it can't be started
+     */
+    static DemoApp convertStage() throws Exception
+    {
+        Map<String, String> settings = new HashMap<>(ItSupport.convertStage(
+                KEYS, Path::toString, catalogProperties(),
+                List.of(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(),
+                        POSTGRES.getPassword()),
+                KAFKA.getBootstrapServers(), SPLIT_TOPIC, RECORDS_TOPIC,
+                true));
+        settings.putAll(telemetry());
+        DemoApp app = new DemoApp("convert", DemoApp.jar("convert-stage"),
+                null, settings, Path.of("target", "fullstack-convert.log"));
+        try
+        {
+            app.await("Started ConvertStageApplication",
+                    Duration.ofMinutes(3));
+        }
+        catch (Exception failure)
+        {
+            app.close();
+            throw failure;
+        }
+        return app;
     }
 
     /**
@@ -348,9 +364,10 @@ class FullStackIT
     }
 
     /**
-     * Two files are landed and split; downstream reads every record back,
-     * maintenance compacts and purges on real S3, nothing stored is
-     * readable, and telemetry reaches the collector without PHI.
+     * Two files are landed, split and converted; downstream reads every
+     * record back, maintenance compacts and purges on real S3, nothing
+     * stored is readable, and both stages' telemetry reaches the collector
+     * without PHI.
      *
      * @throws Exception if the test fails to run
      */
@@ -367,9 +384,9 @@ class FullStackIT
             rows.add(row);
             file.append(row);
         }
-        // One record with a missing field: that record fails conversion and
-        // is stored in its original form, while the file still completes
-        // (design §6.4).
+        // One record with a missing field: the split stage passes it on,
+        // and the convert stage stores it in its original form, while the
+        // file still completes (design §6.4).
         String shortRow = "30," + MARKER + "-short\n";
         file.append(shortRow);
         TestLanding landing = new TestLanding(catalogProperties(),
@@ -377,23 +394,17 @@ class FullStackIT
         LandedItem good = landing.land(file.toString(), "good.csv");
         LandedItem bad = landing.land(
                 header + "1," + MARKER + ",\"never closed\n", "bad.csv");
-        landing.announce(camel, LANDED_QUEUE, good);
-        landing.announce(camel, LANDED_QUEUE, bad);
-        awaitSplit(runtime, 2, Duration.ofMinutes(2));
-        assertThat(FATAL).isEmpty();
 
-        // Downstream: Kafka → connector-queue-reader → records from S3.
-        List<ConnectorMessage> messages = new ArrayList<>();
         Catalog catalog = CatalogUtil.buildIcebergCatalog("sdh",
                 catalogProperties(), null);
-        try (QueueReader reader = QueueReader.builder()
-                .recipientKey("downstream-2026", KEYS.recipient.getPrivate())
-                .trustedSigner("connector-2026",
-                        (ECPublicKey) KEYS.signing.getPublic())
-                .catalog(catalog)
-                .expectedCatalogName("sdh")
-                .keyProvider(runtime.keys().wrap())
-                .build();
+        List<ConnectorMessage> messages = new ArrayList<>();
+        try (DemoApp convert = convertStage();
+                KafkaProducer<String, String> producer = new KafkaProducer<>(
+                        Map.of("bootstrap.servers",
+                                KAFKA.getBootstrapServers()),
+                        new StringSerializer(), new StringSerializer());
+                QueueReader reader = ItSupport.convertReader(KEYS, catalog,
+                        runtime.keys().wrap());
                 KafkaConsumer<String, String> consumer = new KafkaConsumer<>(
                         Map.of("bootstrap.servers",
                                 KAFKA.getBootstrapServers(),
@@ -401,11 +412,19 @@ class FullStackIT
                                 "auto.offset.reset", "earliest"),
                         new StringDeserializer(), new StringDeserializer()))
         {
-            consumer.subscribe(List.of("sdh-records"));
-            // 2 × file.started, 30 × record.stored, 1 × record.failed,
-            // 1 × file.completed (the bad file stores nothing).
-            long until = System.currentTimeMillis() + 60_000;
-            while (messages.size() < 34
+            for (LandedItem item : List.of(good, bad))
+            {
+                producer.send(new ProducerRecord<>(LANDED_TOPIC,
+                        item.itemId().toString(), new String(
+                                landing.announcement(item), UTF_8))).get();
+            }
+
+            // Downstream: Kafka → connector-queue-reader → records from S3.
+            // 30 × record.stored, 1 × record.failed, 2 × item.converted
+            // (the bad file's has no records).
+            consumer.subscribe(List.of(RECORDS_TOPIC));
+            long until = System.currentTimeMillis() + 180_000;
+            while (messages.size() < 33
                     && System.currentTimeMillis() < until)
             {
                 for (ConsumerRecord<String, String> consumed :
@@ -415,12 +434,10 @@ class FullStackIT
                             reader.decode(consumed.value().getBytes(UTF_8)));
                 }
             }
-            List<RecordStored> records = messages.stream()
-                    .filter(RecordStored.class::isInstance)
-                    .map(RecordStored.class::cast).toList();
-            assertThat(messages.stream().filter(FileStarted.class::isInstance))
-                    .hasSize(2);
-            assertThat(records).hasSize(30);
+            assertThat(FATAL).isEmpty();
+            List<RecordStored> records =
+                    ItSupport.of(messages, RecordStored.class);
+            assertThat(records).as("%s", messages).hasSize(30);
             for (RecordStored record : records)
             {
                 assertThat(new String(reader.readRecord(record, 1 << 20),
@@ -429,24 +446,26 @@ class FullStackIT
             }
             assertThat(records).allSatisfy(record ->
                     assertThat(record.mapping()).isEqualTo("csv-row/1"));
-            RecordFailed failed = messages.stream()
-                    .filter(RecordFailed.class::isInstance)
-                    .map(RecordFailed.class::cast).findFirst().orElseThrow();
+            RecordFailed failed = ItSupport.of(messages, RecordFailed.class)
+                    .getFirst();
             assertThat(failed.errorCode()).isEqualTo("CONVERT_CSV_FIELD_COUNT");
             assertThat(failed.seq()).isEqualTo(30);
-            assertThat(failed.sourceLength()).isEqualTo(shortRow.length());
             assertThat(new String(reader.readRecord(failed, 1 << 20), UTF_8))
                     .isEqualTo(header + shortRow);
-            FileCompleted done = messages.stream()
-                    .filter(FileCompleted.class::isInstance)
-                    .map(FileCompleted.class::cast).findFirst().orElseThrow();
+            List<ItemConverted> items =
+                    ItSupport.of(messages, ItemConverted.class);
+            assertThat(items).extracting(ItemConverted::itemId)
+                    .containsExactlyInAnyOrder(good.itemId(), bad.itemId());
+            ItemConverted done = items.stream()
+                    .filter(item -> item.itemId().equals(good.itemId()))
+                    .findFirst().orElseThrow();
             assertThat(done.recordCount()).isEqualTo(31);
             assertThat(done.failedRecordCount()).isEqualTo(1);
             assertThat(new String(landing.restore(done.itemId()), UTF_8))
                     .isEqualTo(file.toString());
 
-            // Maintenance on real S3, between files (route idle, writer lock
-            // held).
+            // Maintenance on real S3, on the split stage's table, once both
+            // stages are done with it.
             {
                 String dataPrefix =
                         keyOf(runtime.tables().splitRecords().location())
@@ -472,7 +491,8 @@ class FullStackIT
                         .as("31 records in batches of 7").isEqualTo(5);
                 assertThat(report.orphansDeleted()).isEqualTo(1);
                 assertThat(keys(dataPrefix)).doesNotContain(stray);
-                // Downstream still reads every record after compaction.
+                // Downstream still reads every record: compacting what was
+                // split leaves what was converted alone.
                 for (RecordStored record : records)
                 {
                     assertThat(new String(reader.readRecord(record,
@@ -515,8 +535,8 @@ class FullStackIT
             }
         }
 
-        // Telemetry reached the collector over OTLP: traces, metrics and
-        // audit events, and none of it holds PHI.
+        // Both stages' telemetry reached the collector over OTLP: traces,
+        // metrics and audit events, and none of it holds PHI.
         String exported = "";
         long until = System.currentTimeMillis() + 60_000;
         while (System.currentTimeMillis() < until)
@@ -535,6 +555,8 @@ class FullStackIT
             // every second here: wait for the last of each.
             if (exported.contains("\"maintenance\"")
                     && exported.contains("sdh.audit.maintenance.retention")
+                    && exported.contains("sdh.audit.stage.item_completed")
+                    && exported.contains("sdh.audit.record.failed")
                     && exported.contains("sdh.items.failed"))
             {
                 break;
@@ -543,10 +565,11 @@ class FullStackIT
         }
         assertThat(exported).contains("\"ingest.item\"", "\"split.batch\"",
                 "\"storage.commit\"", "\"publish.batch\"", "\"maintenance\"",
-                "sdh.audit.inbox.added", "sdh.audit.item.started",
-                "sdh.audit.batch.committed", "sdh.audit.item.completed",
-                "sdh.audit.item.failed", "sdh.audit.lease.acquired",
-                "sdh.audit.maintenance.retention",
+                "sdh.audit.item.started", "sdh.audit.batch.committed",
+                "sdh.audit.item.completed", "sdh.audit.item.failed",
+                "sdh.audit.lease.acquired", "sdh.audit.maintenance.retention",
+                "\"stringValue\":\"convert-stage\"",
+                "sdh.audit.record.failed", "sdh.audit.stage.item_completed",
                 "sdh.records.stored", "sdh.items.completed",
                 "sdh.items.failed", "sdh.commit.duration");
         assertThat(exported).as("no PHI or filenames in exported telemetry")

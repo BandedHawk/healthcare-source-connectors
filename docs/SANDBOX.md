@@ -20,7 +20,7 @@ SDH_SANDBOX=/mnt/sandbox
 | Path | What |
 |---|---|
 | `$SDH_SANDBOX/minikube/.minikube` | minikube's home for this project's profiles: `sdh-it` (the Docker VM for builds and integration tests), `sdh-k8s` (the single-node Kubernetes test, §15.2) and `sdh-demo` (this cluster). VM disks, ISO and caches. |
-| `$SDH_SANDBOX/sdh-demo/state` | The sandbox's secrets (mode 700): database and S3 credentials, Vault's unseal key and root token, the stages' Vault tokens, the inbox and FHIR-stage key pairs, the sandbox CA. Made once and reused. **Never delete it while the cluster holds data**: what is stored can't be read without it. |
+| `$SDH_SANDBOX/sdh-demo/state` | The sandbox's secrets (mode 700): database and S3 credentials, Vault's unseal key and root token, the stages' Vault tokens, the stages' inbox key pairs and the FHIR stage's, the sandbox CA. Made once and reused. **Never delete it while the cluster holds data**: what is stored can't be read without it. |
 | `$SDH_SANDBOX/minikube/kube` | The profiles' kubeconfigs, one file each (`sdh-demo`, `sdh-k8s`). |
 
 The scripts set `MINIKUBE_HOME` themselves (`scripts/minikube-home.sh`). For minikube used by hand, and for
@@ -57,8 +57,8 @@ test, with the others stopped. The cluster's settings apply when it is first mad
 
 ```sh
 scripts/sandbox.sh up        # make or start the cluster and the shared services (about 10 minutes the first time)
-scripts/sandbox.sh images    # build both customer images in sdh-it, push them to the cluster's registry
-scripts/sandbox.sh deploy    # deploy each pipeline's landing node and splitter
+scripts/sandbox.sh images    # build the three customer images in sdh-it, push them to the cluster's registry
+scripts/sandbox.sh deploy    # deploy each pipeline's landing node, split stage and convert stage
 scripts/sandbox.sh check     # push the sample C-CDA documents through, and check the result
 scripts/sandbox.sh push ccda-push some.xml   # push your own files (synthetic or de-identified only)
 scripts/sandbox.sh status    # nodes, pods, topic counts
@@ -73,16 +73,16 @@ afterwards unless `SDH_IT_STOP=0`.
 ## Layout
 
 ```
- sdh-producers           sdh-ccda-push (one namespace per pipeline)            sdh-fhir (reserved)
- ┌──────────┐  mTLS   ┌──────────────────────┐ item.landed ┌──────────┐ records ┌──────────────────┐
- │ producer ├────────►│ landing (active)     ├────────────►│ splitter ├─────────►│ FHIR stage, not  │
- └──────────┘  push   │ landing (standby)    │  Kafka      └────┬─────┘  Kafka   │ yet built        │
-                      └──────────┬───────────┘                  │                └────────┬─────────┘
-                                 │ bronze                       │ silver                  │ gold
- sdh-infra   ┌───────────────────▼──────────────────────────────▼─────────────────────────▼─────────┐
-             │ SeaweedFS (S3)   Postgres (catalog, leases)   Kafka ×3   Vault (Transit)              │
-             │ OpenTelemetry collector → Grafana LGTM                                                │
-             └──────────────────────────────────────────────────────────────────────────────────────┘
+ sdh-producers         sdh-ccda-push (one namespace per pipeline)                         sdh-fhir (reserved)
+ ┌──────────┐ mTLS  ┌───────────────────┐ item.landed ┌──────────┐ split ┌─────────┐ records ┌──────────────┐
+ │ producer ├──────►│ landing (active)  ├────────────►│ splitter ├──────►│ convert ├────────►│ FHIR stage,  │
+ └──────────┘ push  │ landing (standby) │  Kafka      └────┬─────┘ Kafka └────┬────┘  Kafka  │ not yet built│
+                    └─────────┬─────────┘                  │ silver           │ silver       └──────┬───────┘
+                              │ bronze                     │                  │                     │ gold
+ sdh-infra   ┌────────────────▼────────────────────────────▼──────────────────▼─────────────────────▼───────┐
+             │ SeaweedFS (S3)   Postgres (catalog, leases, stage registries)   Kafka ×3   Vault (Transit)   │
+             │ OpenTelemetry collector → Grafana LGTM                                                       │
+             └──────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Nodes and storage.** Three nodes, Calico for networking (minikube's default network doesn't enforce network
@@ -91,8 +91,9 @@ sandbox disk; a pod with a volume runs on its volume's node, as with local disks
 when their claim is deleted (`Retain`).
 
 **Shared services** (`sdh-infra`, `deploy/sandbox/infra/`):
-- **Postgres:** the Iceberg JDBC catalog and the leases. Each stage logs in as its own role, but all act as
-  `sdh_catalog`, because a JDBC catalog keeps every namespace in the same tables.
+- **Postgres:** the Iceberg JDBC catalog, the leases, and each stage's registry of its items and records (a schema
+  per stage and pipeline: `split_<pipeline>`, `convert_<pipeline>`). Each stage logs in as its own role, but all
+  act as `sdh_catalog`, because a JDBC catalog keeps every namespace in the same tables.
 - **Kafka:** three nodes (KRaft), one per cluster node; every topic has three replicas and needs two for a write.
   Topics are made by the script, as a customer's broker team would; brokers don't create them.
 - **SeaweedFS:** S3 object storage, a bucket per medallion layer (below).
@@ -104,7 +105,9 @@ when their claim is deleted (`Retain`).
 **A pipeline** (`sdh-<pipeline>`, `deploy/sandbox/pipeline/`): each stage is deployed from the Deployment in its
 README, as customers get it, with the image by digest from the cluster's registry, and with what a production
 cluster adds around it (kustomize patches): requests equal to limits, the push port and its Service, a TCP
-readiness probe, and the two landing replicas on different nodes, so that losing a node fails over. The default
+readiness probe, and the two landing replicas on different nodes, so that losing a node fails over. The split
+stage (Deployment `splitter`) and the convert stage (`convert`) run two replicas each, which share the work. The
+convert stage has 1 GB rather than its README's 2 GB, so that a pipeline fits on the nodes. The default
 pipeline is `ccda-push`: C-CDA documents pushed over HTTPS with mTLS.
 
 **Producers** (`sdh-producers`): a pod with its own client certificate from the sandbox CA, which pushes files.
@@ -119,12 +122,14 @@ Each layer has its own bucket and Iceberg namespace, and each stage's S3 key may
 
 | Layer | Bucket | Iceberg namespace | Written by | Read by |
 |---|---|---|---|---|
-| Bronze: items as landed | `sdh-bronze` | `<pipeline>_landing` | landing node | splitter |
-| Silver: records, split and converted | `sdh-silver` | `<pipeline>` | splitter | FHIR stage |
+| Bronze: items as landed | `sdh-bronze` | `<pipeline>_landing` | landing node | split stage |
+| Silver: records as split (`split_records`) | `sdh-silver` | `<pipeline>` | split stage | convert stage |
+| Silver: records converted (`records`) | `sdh-silver` | `<pipeline>` | convert stage | FHIR stage |
 | Gold: FHIR resources | `sdh-gold` | `<pipeline>_fhir` | FHIR stage | consumers |
 
 Everything is Iceberg tables of Parquet files. Items and records are encrypted under the pipeline's KEKs in
-Vault; the splitter seals its messages to the FHIR stage's key.
+Vault. Each stage seals its messages to the next one's key: the landing node to the split stage's inbox, the split
+stage to the convert stage's, and the convert stage to the FHIR stage's.
 
 ## The FHIR stage
 
@@ -134,7 +139,8 @@ what fails to a dead-letter topic for its report mode. The sandbox has its place
 - the namespace `sdh-fhir`, with a quota (3 CPUs, 4 GB) the pipelines can't take, and the same network policies;
 - per pipeline: the topics `<pipeline>.records` (its input) and `<pipeline>.fhir.dlq`; the gold bucket and an S3
   key that reads silver and writes gold; a database role; a Vault token that unwraps the records KEK and uses
-  its own gold KEK (`<pipeline>-fhir`); the private key the splitter seals records to;
+  its own gold KEK (`<pipeline>-fhir`); the private key the convert stage seals records to, and the convert
+  stage's signing public key (`convert-signer.pem`), which its messages are checked against;
 - the secret and ConfigMap `fhir-<pipeline>` in `sdh-fhir`, naming all of these.
 
 Deploying it is then one more Deployment in `sdh-fhir`.
@@ -160,7 +166,8 @@ Deploying it is then one more Deployment in `sdh-fhir`.
 
 ## Checked
 
-On 2026-11-05, with the `ccda-push` pipeline:
+On 2026-11-05, with the `ccda-push` pipeline, before the stages (STAGES.md): a splitter that also converted.
+Checked again since: see the end of this section.
 - `check`: five synthetic and de-identified C-CDA documents pushed over mTLS, each landed with a receipt, five
   `item.landed` messages, all split (`file.completed`), 15 messages on `ccda-push.records`, and no document
   content or filenames in any pod's log.

@@ -19,7 +19,7 @@
      files through a watched directory and pushes over HTTPS; both apps' logs and OpenTelemetry output in the Output
      window, kept in file-connector/target/demo/ (logs/, telemetry/ with report.md, output/). Without Docker, or
      against containers in the minikube VM. Only these actions or -Pdemo run it.
-     Distribution (design §14): both apps' customer tarballs (-Pdist), or their service and customer images built into
+     Distribution (design §14): every app's customer tarballs (-Pdist), or their service and customer images built into
      the minikube VM (-Pimages, the VM stopped afterwards). Both fail if third-party attribution is incomplete. -->
 <actions>
     <action>
@@ -181,13 +181,14 @@
     <action>
         <actionName>CUSTOM-demo</actionName>
         <displayName>Demo (pipeline, no Docker)</displayName>
-        <!-- Demonstration (design §15.3): two pipelines, each a landing node and a splitter run from their JARs. Files
-             dropped into a watched directory, then pushes over HTTPS with mTLS, with failures in both apps; each
-             item's way through on the console, then the converted documents read back. Embedded Postgres, tables on
-             local disk and an embedded Artemis broker; a few minutes. Output: file-connector/target/demo/. -->
+        <!-- Demonstration (design §15.3): two pipelines, each a landing node, a split stage and a convert stage
+             run from their JARs. Files dropped into a watched directory, then pushes over HTTPS with mTLS, with
+             failures along the way; each item's way through on the console, then the converted documents read
+             back. Embedded Postgres, tables on local disk and an embedded Artemis broker; a few minutes. Output:
+             file-connector/target/demo/. -->
         <goals>
             <goal>-pl</goal>
-            <goal>landing-connector,file-connector</goal>
+            <goal>landing-connector,convert-stage,file-connector</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>
@@ -206,7 +207,7 @@
              started if needed and stopped afterwards (demo.stop-vm=false keeps it running). A few minutes. -->
         <goals>
             <goal>-pl</goal>
-            <goal>landing-connector,file-connector</goal>
+            <goal>landing-connector,convert-stage,file-connector</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>
@@ -221,13 +222,13 @@
     </action>
     <action>
         <actionName>CUSTOM-distribution-tarball</actionName>
-        <displayName>Build distribution tarballs (both apps)</displayName>
-        <!-- <app>/target/<app>-<version>-dist.tar.gz for the landing node and the splitter, for customers (design
+        <displayName>Build distribution tarballs (all apps)</displayName>
+        <!-- <app>/target/<app>-<version>-dist.tar.gz for each app, for customers (design
              §14.3). Fails if a license text can't be fetched, or THIRD-PARTY.txt misses anything the jars bundle
              (ThirdPartyAttributionIT, §14.2). -->
         <goals>
             <goal>-pl</goal>
-            <goal>landing-connector,file-connector</goal>
+            <goal>landing-connector,file-connector,convert-stage</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>
@@ -240,14 +241,14 @@
     </action>
     <action>
         <actionName>CUSTOM-images</actionName>
-        <displayName>Build container images (both apps, into the VM)</displayName>
-        <!-- The service and customer images of the landing node and the splitter, built by scripts/build-image.sh
+        <displayName>Build container images (all apps, into the VM)</displayName>
+        <!-- The service and customer images of each app, built by scripts/build-image.sh
              into the sdh-it VM's Docker from what this build packaged (design §14.1, §14.3), after the same
              attribution checks as the tarballs. The VM is stopped afterwards. Signing and pushing a release is
              scripts/sign-release.sh (§14.4). -->
         <goals>
             <goal>-pl</goal>
-            <goal>landing-connector,file-connector</goal>
+            <goal>landing-connector,file-connector,convert-stage</goal>
             <goal>-am</goal>
             <goal>verify</goal>
         </goals>

@@ -8,7 +8,7 @@ A pipeline is one intake, its landing node and its splitter, and carries one typ
 
 **Run the landing node and the splitter as separate images and deployments, with the queue between them on an external broker.** Use the broker the customer already runs for the splitter's output, with a queue or topic of its own.
 
-- Each stage has its own image (`sdh/landing-connector`, `sdh/file-connector`), its own deployment, its own active/standby lease (§9) and its own keys (§7.4).
+- Each stage has its own image (`sdh/landing-connector`, `sdh/split-stage`, `sdh/convert-stage`), its own deployment, its own active/standby lease (§9) and its own keys (§7.4).
 - `item.landed` goes over its own queue or topic on the broker, separate from the output (`record.stored` and the rest).
 - For trials and small sites, ship a single bundle (a Compose file or Helm chart) that runs the two images and a small broker. That makes installation simple without supporting a second shape of the product.
 

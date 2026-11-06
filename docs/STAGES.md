@@ -40,7 +40,7 @@ The unit the splitter cuts an item into was called a section, which in C-CDA mea
 → `sdh.records.stored`), audit events and documents. A C-CDA record is one `ClinicalDocument`; an X12 record one
 transaction set; a CSV record one row (§6.2). The same goes for "file" where it means an item (`fileId` →
 `itemId`, `sdh.files.failed` → `sdh.items.failed`, the `file.failed` audit event → `item.failed`);
-`file.started` and `file.completed` stay until step 4 replaces them with the item-complete messages.
+`file.started` and `file.completed` stayed until step 4d removed them; the item-complete messages replace them.
 
 To keep one meaning per word, the other uses of "record" were renamed first: where a message batch's messages
 start is a **message index** (`MessageIndex`, the `message_offsets` and `message_keys` columns), and a CSV line
@@ -74,9 +74,9 @@ rows are encrypted under its own KEK; the split stage gets the split-records KEK
 | `record.conflict` | any stage → its dead-letter queue | the record's ID, the stage, both output digests (§6) |
 | `item.received`, `item.result` | landing / convert → producer | as now; `item.result` moves to the convert stage, after `item.converted` |
 
-`file.started` and `file.completed` go: the item-complete messages replace them. The ordering key (Kafka key,
-SQS group, Service Bus session, Pub/Sub ordering key, Artemis group) becomes the **record ID** for record
-messages, so records spread over partitions, and stays the item ID for item messages.
+`file.started` and `file.completed` are gone (removed in 4d): the item-complete messages replace them. The
+ordering key (Kafka key, SQS group, Service Bus session, Pub/Sub ordering key, Artemis group) becomes the
+**record ID** for record messages, so records spread over partitions, and stays the item ID for item messages.
 
 ## 5. Item complete
 
@@ -396,6 +396,30 @@ Each step builds and passes its tests before the next.
    - **4d:** `file.started` and `file.completed` removed; the demo, sandbox, images, integration tests and docs
      moved to the stages; the admin commands (`restore`, `decrypt-fallback`, `status`) adapted to the per-item
      rows and `split_records` (decided).
+     **Built 2026-11-06, in parts:**
+     - `file.started` and `file.completed` removed from the contract (still 3.0: nothing released), with the
+       "before contract 2.1" notes; a null origin now means the splitter gave none.
+     - The admin commands (decided 2026-11-06 with the user): the CLI moved to `connector-stage` (`stage.admin`), so
+       every stage has one. The split stage has `restore --item-id` (the unprocessed tail from `split_records`)
+       and a `status` of its duties lease, items by state and item leases, with `--item` for a checkpoint; the
+       convert stage has the shared `status` of its registry. `decrypt-fallback` and `RecoveryEnvelope` are
+       removed: nothing writes fallback files since step 3a, and none exist. The old inbox is removed.
+     - The convert stage's images (`sdh/convert-stage`, `sdh/convert-stage-service`) and distribution kit, built
+       like the others, with its attribution checked. The split stage's images are renamed `sdh/split-stage`; its
+       module and kit keep the name `file-connector`. The kits' key settings keep the names `inbox` and
+       `landing-signer`: for each stage, its own key pair and the previous stage's signing key.
+     - The integration tests on the stages: the storage tests (S3, GCS, ADLS, Polaris) feed the split stage
+       directly and check `split_records`; `FullStackIT` runs the split stage in its JVM and the convert stage from
+       its JAR, over Kafka, and reads the records back downstream; the image tests run all three apps as images,
+       locked down, through failover. All pass. They found a bug: retention's purge marker was an empty commit,
+       which the stages' committer (`LeasedCommitter`) doesn't record, so expired records' files stayed on
+       storage until the next snapshot expiry. The marker is now an empty append, which every committer records.
+     - The demo runs the convert stage as a third app per pipeline, and follows each item to its
+       `stage.item_completed`. It found a second bug: the convert stage failed to start with no format options
+       set (the tests always set one); none is now an empty set. The sandbox deploys a convert stage per pipeline
+       (its own Vault signing key, inbox key pair, S3 key, database role and registry schema, and the topics
+       `<pipeline>.split` and `<pipeline>.convert.dlq`); the FHIR stage's handover names the convert stage's
+       signing key. Design §11, §14, §15.3 and SANDBOX.md describe the stages.
 5. **KEDA** in the sandbox, with a scaling demonstration (a large batch spread across workers).
 6. **The transformer** in `healthcare-data-transformer`, on the published library.
 

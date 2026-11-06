@@ -8,7 +8,8 @@
 #   SDH_SKIP_BUILD=1 ...                            # reuse the tarball and images already built
 #   SDH_ALLOW_STALE_BASE=1 ...                      # sign although a pinned base image has a newer build (warns)
 #
-# Covers both applications, the splitter (file-connector) and the landing node (landing-connector). Signs:
+# Covers the three applications: the landing node (landing-connector), the split stage (file-connector, images
+# sdh/split-stage) and the convert stage (convert-stage). Signs:
 #   - each distribution tarball: a detached signature (<app>-<v>-dist.tar.gz.sig), verifiable with cosign or with
 #     openssl alone;
 #   - each customer image and service image: cosign signatures in the registry, next to each image, plus a signed
@@ -37,7 +38,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COSIGN_IMAGE="gcr.io/projectsigstore/cosign:v2.4.1"
 SYFT_IMAGE="anchore/syft:v1.54.1"
 REGISTRY_IMAGE="registry:2.8.3"
-APPS=(file-connector landing-connector)
+APPS=(landing-connector file-connector convert-stage)
 OUT="$ROOT/target/release"
 
 echo ">> Base images (docker/base-images.env)"
@@ -51,7 +52,7 @@ if ! "$ROOT/scripts/base-images.sh"; then
 fi
 
 if [[ "${SDH_SKIP_BUILD:-0}" != "1" ]]; then
-  (cd "$ROOT" && ./mvnw -q -pl landing-connector,file-connector -am -Pdist verify -DskipTests)
+  (cd "$ROOT" && ./mvnw -q -pl landing-connector,file-connector,convert-stage -am -Pdist verify -DskipTests)
 fi
 VERSION="$(cd "$ROOT" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
 for app in "${APPS[@]}"; do
@@ -139,7 +140,8 @@ for app in "${APPS[@]}"; do
 done
 
 : > "$OUT/image-digests.txt"
-for name in file-connector file-connector-service landing-connector landing-connector-service; do
+for name in landing-connector landing-connector-service split-stage split-stage-service \
+  convert-stage convert-stage-service; do
   local_tag="sdh/$name:$VERSION"
   remote_tag="$REGISTRY/$name:$VERSION"
   echo ">> Image $local_tag"

@@ -30,8 +30,9 @@
     <module>connector-stage</module>
     <!-- Before file-connector: its image tests (-Pit) run the landing node's packaged jar and kit. -->
     <module>landing-connector</module>
-    <module>file-connector</module>
+    <!-- Before file-connector, whose ThirdPartyAttributionIT checks every application's packaged jar. -->
     <module>convert-stage</module>
+    <module>file-connector</module>
   </modules>
 
   <properties>
@@ -985,12 +986,12 @@
       </build>
     </profile>
     <profile>
-      <!-- A demonstration of the pipeline (design §15.3): the landing node and the splitter as processes of their own,
+      <!-- A demonstration of the pipeline (design §15.3): the landing node and both stages as processes of their own,
            from the JARs this build makes, joined by a broker. C-CDA files through a watched directory and pushes over
-           HTTPS, with failures in both apps; their logs and OTLP telemetry on the console, kept in
+           HTTPS, with failures along the way; their logs and OTLP telemetry on the console, kept in
            file-connector/target/demo/ with a report per item; then the converted documents read back. Only this
            profile runs *Demo.java; unit tests are skipped.
-           ./mvnw -Pdemo -pl landing-connector,file-connector -am verify [-Ddemo.stack=vm] -->
+           ./mvnw -Pdemo -pl landing-connector,convert-stage,file-connector -am verify [-Ddemo.stack=vm] -->
       <id>demo</id>
       <build>
         <plugins>

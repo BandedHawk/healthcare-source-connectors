@@ -4,10 +4,9 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.file.admin;
+package com.sdh.healthcare.connector.stage.admin;
 
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
-import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.telemetry.AuditOnlyLogRecordExporter;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
@@ -24,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Audit events from admin commands reach the same places as the
- * connector's (design §12): always the console ({@code sdh.audit} logger),
+ * stage's (design §12): always the console ({@code sdh.audit} logger),
  * and the OTLP collector when {@code sdh.telemetry.otlp.endpoint} is set. A
  * short-lived command can't wait for batches, so events are exported one
  * by one and flushed before exit.
@@ -32,7 +31,7 @@ import java.util.concurrent.TimeUnit;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class AdminTelemetry implements AutoCloseable
+public final class AdminTelemetry implements AutoCloseable
 {
 
     /** The OTLP log provider, or null when only the console is used. */
@@ -51,12 +50,15 @@ final class AdminTelemetry implements AutoCloseable
     /**
      * Installs OTLP export of audit events when an endpoint is configured.
      *
-     * @param properties the connector configuration
+     * @param telemetry the stage's telemetry settings
+     * @param service   the service name the events are sent under, such as
+     *                  {@code file-connector}
      * @return the telemetry, to close before exit
      */
-    static AdminTelemetry install(ConnectorProperties properties)
+    public static AdminTelemetry install(CommonSettings.Telemetry telemetry,
+            String service)
     {
-        CommonSettings.Otlp otlp = properties.telemetry().otlp();
+        CommonSettings.Otlp otlp = telemetry.otlp();
         if (otlp.endpoint() == null || otlp.endpoint().isBlank())
         {
             return new AdminTelemetry(null);
@@ -70,7 +72,7 @@ final class AdminTelemetry implements AutoCloseable
         SdkLoggerProvider logs = SdkLoggerProvider.builder()
                 .setResource(Resource.getDefault().merge(Resource.create(
                         Attributes.of(AttributeKey.stringKey("service.name"),
-                                "file-connector"))))
+                                service))))
                 .addLogRecordProcessor(SimpleLogRecordProcessor.create(
                         new AuditOnlyLogRecordExporter(exporter.build())))
                 .build();

@@ -87,6 +87,8 @@ Revision 2026-11-05 (bo): steps 1–3 of the parallel-stages refactor ([STAGES.m
 
 Revision 2026-11-06 (bp): producer results are not guaranteed (§5.3.8). Decided 2026-11-06 with the user: problems in a producer's data are found by our operators, from what the pipeline records, and resolved with the producer by steps both organisations agree; `item.received` and `item.result` help, but a producer must not rely on them being complete. A result can name no message for a failed record that reached its stage by reconciling (audited `convert.placement_unknown`), isn't sent again on a replay unless an operator asks, and an item lost between stages has none until it is recovered ([STAGES.md](STAGES.md) §13). An operator's problem report, which works out placement from landing, is planned.
 
+Revision 2026-11-06 (bq): step 4d of the parallel-stages refactor ([STAGES.md](STAGES.md) §11). `file.started` and `file.completed` are removed from the contract (still 3.0); the stages' `item.split` and `item.converted` replace them (§10.1). The operator commands moved to `connector-stage`, so every stage has them (§11.4): the split stage's `restore --item-id` and `status`, the convert stage's `status`; `decrypt-fallback` and the local fallback format are removed (§11.3). The convert stage ships like the others, as a distribution kit and tarball (`convert-stage-<v>`) and images `sdh/convert-stage` and `sdh/convert-stage-service`; the split stage's images are renamed `sdh/split-stage` and `sdh/split-stage-service` (§14.1, §14.3). The integration tests run the stages: the storage tests on the split stage alone, `FullStackIT` and the image tests on both. Running them found that retention on a stage's tables didn't purge at once: the marker commit added no snapshot under the stages' committer, so the deleted files stayed until the delete expired. The marker is now an empty append of its own (§8.4). The demo and the sandbox run both stages, the convert stage as a third app per pipeline (§15.3, §15.4); the demo found that the convert stage didn't start with no format options set. Sections that describe the single splitter before the stages are marked as such.
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -304,7 +306,7 @@ healthcare-source-connectors/            groupId com.sdh.healthcare
         ├── ingest/       InboundService (per-file handling, in-progress recovery, backoff)
         ├── telemetry/    InboundGauge (inbound age gauge)
         ├── source/       LocalSourceFile, DirectoryOutcomeRecorder (completed/ and failed/ records, local fallback)
-        └── admin/        operator commands: AdminCli (restore, decrypt-fallback, status), §11.4
+        └── admin/        operator commands: SplitAdmin (restore, status) on connector-stage's AdminCli, §11.4
 ```
 
 Each module has its own `.gitignore` for module-specific output.
@@ -312,6 +314,8 @@ Each module has its own `.gitignore` for module-specific output.
 **Why `connector-contract` exists:** the message format, chunk encryption and table layout are written by `connector-core` and read by `connector-queue-reader`. Keeping them in one small module means both sides use the same code, and the reader doesn't pull in Camel, splitters or the pipeline. Consumers depend on `connector-queue-reader` only. They treat `connector-contract` as internal, apart from the message records it defines.
 
 ## 4. End-to-end flow
+
+*Before the stages.* Since step 4 ([STAGES.md](STAGES.md) §3), the split stage (`file-connector`) splits landed items into `split_records`, and the convert stage (`convert-stage`) converts and stores each record in `records`, with records worked on in parallel across pods. This section and §4.1 describe the single splitter before landing, and are kept as background.
 
 ```mermaid
 flowchart LR
@@ -373,7 +377,7 @@ Files are processed **one at a time, oldest first**. This keeps ordering predict
 |---|---|---|
 | `itemId` | UUIDv7, assigned at pickup and saved in the checkpoint | Correlates queue messages, telemetry and tables |
 | fingerprint | size + `HMAC(idKey, "sdh-fingerprint" ‖ 0 ‖ first 1 MiB ‖ last 1 MiB)` | Recognises the same file after a restart without reading all of it |
-| `itemDigest` | `base32` of a chained HMAC-SHA-256 over fixed 64 MiB blocks, computed during archiving | Integrity value sent in `file.completed` |
+| `itemDigest` | `base32` of a chained HMAC-SHA-256 over fixed 64 MiB blocks, computed during archiving | Integrity value sent in `item.landed` and `item.split` |
 
 The digest is chained, `H_i = HMAC(idKey, "sdh-file-digest" ‖ 0 ‖ H_{i-1} ‖ block_i)` with `H_{-1}` = 32 zero bytes, so a restart only needs the last `H` value and the block number, both of which are saved in the archive checkpoint. An empty file is one empty block. The digest depends only on content, not on `itemId` or how the archive was committed.
 
@@ -413,11 +417,16 @@ flowchart LR
   P4[Buckets / Iceberg tables] --> L
   L[Landing node<br/>one per intake, plus standby] -->|chunks + summary row| T[(sdh_landing<br/>landed_items, landing_ledger)]
   L -->|item.landed| Q[Landing queue]
-  Q --> S[Splitter<br/>one per intake]
+  Q --> S[Split stage<br/>items in parallel]
   T -->|reads by chunk| S
-  S --> U[(sdh_ingest<br/>records)]
-  S -->|record.stored, file.completed| D[Downstream queue]
+  S --> V[(sdh_ingest<br/>split_records)]
+  S -->|record.split, item.split| C[Convert stage<br/>records in parallel]
+  V --> C
+  C --> U[(sdh_ingest<br/>records)]
+  C -->|record.stored, record.failed, item.converted| D[Downstream queue]
 ```
+
+As built since step 4 ([STAGES.md](STAGES.md)): the second stage below is two, the split stage and the convert stage, each a set of pods that work in parallel. The decisions below are as they were taken.
 
 **Decisions (2026-11-03):**
 - **Two stages,** signalled by queue, as above. Push and queue senders need an answer in seconds, which they couldn't get while a large file was being split.
@@ -531,7 +540,7 @@ Each reason is reported once, until the source is reachable again or the reason 
 
 **`item.landed`** (`ConnectorMessage.ItemLanded`, built) goes on the intake's landing queue, read only by its splitter, never by downstream consumers. It is sealed like every other message (§10.1). Payload: the item ID (in `itemId`), intake, kind, size, item digest, `landedAt`, and the storage reference (catalog, namespace, table, the day of the summary row, a snapshot that holds the item, KEK ref). Message ID `il-<itemId>`. `replaces_item_id` will be added as an optional field when its step needs it. The message index isn't in the message: the splitter reads it from the summary row (§5.3.16).
 
-**The item ID is the file ID.** The splitter processes an item under its item ID, so every record, `record.stored` and `file.completed` from it carries the item ID as its `itemId`, and downstream can go from any record back to the landed original with no extra field.
+**The item ID is the file ID.** The splitter processes an item under its item ID, so every record, and every message about it (`record.split`, `record.stored`, the item-complete messages), carries the item ID as its `itemId`, and downstream can go from any record back to the landed original with no extra field.
 
 **The splitter:**
 - records each `item.landed` in a durable inbox table and acknowledges the message once that commit is done, then splits the inbox's items one at a time, in order (decided 2026-11-03 over holding the message until the item is finished, which would tie a long split to the broker's redelivery timeout);
@@ -727,6 +736,8 @@ The broader shape in §5.3.9 (`type`, `uri`, `batch`, `http`) comes with the lat
 **Tests:** `IntakeServiceTest` (settling, read-only and read-write sources, a rewritten file, duplicate content, a failed send, a failed after-action, resuming after a crash, giving up a vanished item, an unreachable source), `LocalDirectorySourceTest`, `ReadinessTest`, `SourceSettingsTest`, and `LandingConnectorApplicationTest`: the whole node on embedded Postgres, a JDBC catalog, key files and a SEDA queue.
 
 #### 5.3.12 The splitter as built (step 3a)
+
+*Superseded by step 4* ([STAGES.md](STAGES.md) §8, §11): the inbox, `InboxWorker` and `file.started`/`file.completed` are removed. The split stage takes each `item.landed` from its input route, splits the item under the item's lease with its checkpoint in `split_item`, and sends `record.split` and `item.split`; reading landed items and the keys are as below. Kept as the record of step 3a.
 
 The splitter (`file-connector`) now reads only from landing.
 
@@ -1247,14 +1258,14 @@ Wrapping (the three KEKs) and signing are configured independently (`sdh.crypto.
 **Failures:** KMS errors carry the KMS's own message, which names keys and requests, never data. During ingest they count as storage failures (§11). If the failed-files KEK is unreachable, the file goes to the local fallback.
 
 **Local mode:**
-- **Keystore:** a PKCS#12 keystore whose entries are AES-256 secret keys, with entry aliases as the KEK refs. Plus PEM files for the signing key, the recipient key and the recovery key.
+- **Keystore:** a PKCS#12 keystore whose entries are AES-256 secret keys, with entry aliases as the KEK refs. Plus PEM files for the signing key and the recipient key.
 - **Encrypted PEMs:** encrypted PKCS#8 is read with the JDK alone, using PBES2 as written by `openssl pkcs8 -topk8 -v2 aes-256-cbc`; a test checks this against a real OpenSSL-generated key.
 - **Protections:**
   - The service refuses to start if the keystore or signing key file is accessible by others, or writable or executable by group. Group read is allowed because Kubernetes secret volumes with an `fsGroup` are always at least 0440. Public key files are not checked.
   - Private PEMs must be encrypted PKCS#8, with the passphrase supplied from an environment variable or mounted secret.
   - Recipient PEM fingerprints must match the pinned values.
 
-**Recipients:** messages are sealed to a single configured recipient. Rotation means switching `kid`; readers accept several keys meanwhile (§10.2). The recipient and recovery keys are always public PEMs: the connector only encrypts to them.
+**Recipients:** messages are sealed to a single configured recipient. Rotation means switching `kid`; readers accept several keys meanwhile (§10.2). The recipient key is always a public PEM: the connector only encrypts to it.
 
 ### 7.5 PHI hygiene
 
@@ -1369,7 +1380,7 @@ Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintain
 - **Fencing:** every run starts with `FencedCommitter.verifyCurrent` (lease held, table epoch ours). Every maintenance commit goes through the fenced committer except snapshot expiry.
 
 **Each run, per table:**
-1. **Retention** (per table, off by default, at least 1 day; 7 for `landed_items`). It deletes whole UTC days older than `now − retention`, using `deleteFromRowFilter` on the partition source column (`ingested_at` for `records`, `landed_at` for `landed_items`). A table can move the cutoff back to keep rows that belong together (`landed_items`, §5.3.13). That is metadata-only, because whole partitions match. Nothing to delete means no commit, so there are no empty snapshots. The PHI is then purged in the same run: Iceberg deletes a removed file only once the snapshot that removed it has expired, and the current snapshot never expires. So a fenced marker commit follows the delete, and every snapshot before the marker is expired, which deletes the files. Trade-off: no time travel to before a retention delete.
+1. **Retention** (per table, off by default, at least 1 day; 7 for `landed_items`). It deletes whole UTC days older than `now − retention`, using `deleteFromRowFilter` on the partition source column (`ingested_at` for `records`, `landed_at` for `landed_items`). A table can move the cutoff back to keep rows that belong together (`landed_items`, §5.3.13). That is metadata-only, because whole partitions match. Nothing to delete means no commit, so there are no empty snapshots. The PHI is then purged in the same run: Iceberg deletes a removed file only once the snapshot that removed it has expired, and the current snapshot never expires. So a marker commit follows the delete: an empty append of its own (summary `sdh.purge-marker`), since a stage's committer adds no snapshot for an empty change (fixed in step 4d; until then a stage's table kept the files until the delete expired), and every snapshot before the marker is expired, which deletes the files. Trade-off: no time travel to before a retention delete.
 2. **Compaction (bin-pack):**
    - **What counts as small:** data files below `small-file-fraction` (0.75) of the table's target size (512 MiB), grouped by partition; a partition needs at least `min-input-files` (5) of them.
    - **Packing:** first-fit decreasing into bins of at most the target size.
@@ -1394,12 +1405,12 @@ Spark is not used. `TableMaintenance` (`connector-core` `maintenance/`) maintain
 - compaction preserves every row byte-for-byte;
 - only partitions with enough small files are compacted, within budget;
 - replaced files are deleted once their snapshot ages out;
-- retention drops only whole old days and removes their files at once, with no empty snapshot when there's nothing to delete;
+- retention drops only whole old days and removes their files at once, with no empty snapshot when there's nothing to delete, under the fenced committer and the stages' committer alike;
 - retention works on `landed_items`, by `landed_at`;
 - orphan cleanup deletes old strays but not recent ones or anything referenced;
 - a fenced-out instance changes nothing.
 
-`FullStackIT` repeats compaction, orphan cleanup and retention purging against SeaweedFS, and `GcsIT` against a GCS emulator. `AdlsIT` repeats compaction and retention purging on Azurite, but not orphan cleanup; `AdlsAzureIT` repeats all three on a real ADLS Gen2 account (§15.1).
+`FullStackIT` repeats compaction, orphan cleanup and retention purging on the split stage's `split_records` against SeaweedFS, `PolarisIT` through Polaris, and `GcsIT` against a GCS emulator. `AdlsIT` repeats compaction and retention purging on Azurite, but not orphan cleanup; `AdlsAzureIT` repeats all three on a real ADLS Gen2 account (§15.1).
 
 ## 9. Checkpointing, resume and single instance
 
@@ -1460,7 +1471,7 @@ The limits are `IngestPipeline.SKIP_CONVERSION_AFTER_RESTARTS` and `FAIL_AFTER_R
 `IngestPipeline.split(source)` runs the split phase for one file and returns once every record is committed and published, with the checkpoint in `ARCHIVING`. The connector app supplies the source, the records table, the `FencedCommitter`, keys, the sealer and a `MessagePublisher`.
 
 1. **Identify:** fingerprint the source. If it matches a `SPLITTING` checkpoint, resume; if it matches an `ARCHIVING` one, return straight away; otherwise assign a UUIDv7 and commit a fresh checkpoint before anything else.
-2. **Announce:** publish `file.started` (again on resume; message ID dedup handles the repeat), then republish any committed-but-unpublished range.
+2. **Announce:** on resume, republish any committed-but-unpublished range. (Before step 4d, `file.started` was published here too.)
 3. **Split and encrypt:** single-chunk records are hashed and encrypted on the worker pool, with at most `4 × workers` in flight; larger records are processed inline (§7.2). Rows are written in seq order.
 4. **Commit:** at the first threshold (§8.3), data file + checkpoint in one fenced commit. The commit first waits for the previous batch's publishing and records its last seq as `publishedSeq`.
 5. **Publish:** the batch's messages are sealed on the worker pool and sent in seq order on a background thread while the next batch is split. Failed sends are retried one by one.
@@ -1556,10 +1567,8 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 
 | Type | When | Payload (inside encryption) |
 |---|---|---|
-| `file.started` | file picked up (or resumed with a new run) | itemId, format, itemSize, startedAt, connectorId |
 | `record.stored` | after batch commit | messageId, itemId, recordId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef), origin (recordLine, recordColumn, sourceLine, sourceColumn) |
 | `record.failed` | after batch commit; like `record.stored`, keyed by record ID, so no order between records (STAGES.md §1) | as `record.stored`, with errorCode instead of mapping, and errorLine and errorColumn when the failure has a place; the record is stored in its original form (§6.4) |
-| `file.completed` | after archive commit | itemId, recordCount (failed included), failedRecordCount, itemSize, itemDigest, startedAt, completedAt |
 | `item.landed` | landing node to its splitter, after the item's commit (§5.3.6) | itemId, intake, kind, size, itemDigest, landedAt, storage, replaces (if set) |
 | `item.received` | landing node to the producer, after `item.landed` (§5.3.8) | itemId, intake, kind, size, sha256, landedAt, producerRef, replaces, messageIds and messageReplaces (each if set) |
 | `record.split` | split stage to the convert stage, after the record's commit (STAGES.md §4) | as `record.stored`, without mapping, with errorCode (and errorLine and errorColumn) for a piece the splitter couldn't parse, stored as it was |
@@ -1568,20 +1577,19 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 | `record.conflict` | a stage to its dead-letter queue, when a record it stored comes again with different output (STAGES.md §6) | itemId, recordId, stage, storedDigest, newDigest, foundAt; no content |
 | `item.result` | splitter to the producer, when an item is finished (§5.3.8) | itemId, intake, status, recordCount, failedRecordCount, failure, problemCount, part, partCount, problems (code, stage, seq, offset, line, column, message, messageRef, messageReplaces), producerRef, replaces, finishedAt |
 
-- **No `file.failed` message:** failure is reported through OpenTelemetry only, as agreed. Downstream can detect an unfinished file as a `file.started` with no matching `file.completed`.
-- **Change from earlier discussion:** the "duplicates skipped" count is **not** included in `file.completed`. Counting it would require checking every record against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
+- **No `item.failed` message:** a failed record is `record.failed`, and an item's failures are counted in its item-complete message; anything more is reported through OpenTelemetry only, as agreed. An item that never finishes a stage has no item-complete message from it (STAGES.md §13.2).
+- **Change from earlier discussion:** the "duplicates skipped" count is **not** included in the item-complete messages. Counting it would require checking every record against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
 - **Unencrypted broker metadata** is limited to: `messageId`, `type`, `itemId`, and the content type `application/jose`.
 - **Message IDs:**
   - `record.stored` and `record.failed`: `rec-<itemId>-<recordId>`; `record.split`: `sp-<itemId>-<recordId>`. The item is part of the ID because a record ID comes from the content alone (§7.3): the same document in two items is a record of each, and must reach the next stage for both, past the brokers' duplicate detection (decided 2026-11-05). A reader that wants each document once drops repeats by `recordId`.
   - `item.split`: `is-<itemId>`; `item.converted`: `ic-convert-<itemId>`; `record.conflict`: `rc-` and a SHA-256 of the stage, item ID, record ID and new digest, so the ID fits every broker's limit (128 characters on SQS and Service Bus).
-  - `file.started`: `fs-<itemId>`.
-  - `file.completed`: `fc-<itemId>`.
   - `item.landed`: `il-<itemId>`; `item.received`: `rc-<itemId>`; `item.result`: `rs-<itemId>-<part>`.
 - **Contract 2.0** (from 1.0): added `contentType`, `mapping`, `record.failed` and `failedRecordCount`. It's a major version because a 1.x reader can't handle the new message type.
 - **Contract 2.1:** added `origin`, `errorLine` and `errorColumn`, all optional, so 2.0 readers ignore them. A reader turns a position in the record (such as one a mapping reports from `ccda/2`) into one in the file with `RecordOrigin.toFile`.
 - **Contract 2.2:** added `item.landed`, which a landing node sends to its splitter (§5.3.6). Downstream readers never receive it, so it is a minor version; a 2.1 reader given one would reject it as an unknown type.
 - **Contract 2.3:** added `item.received` and `item.result`, which go to an intake's producer (§5.3.8), and `replaces` on `item.landed`. Downstream readers never receive them, so it is a minor version.
 - **Contract 2.4:** added `messageReplaces` to `item.received` (a list, one entry per message, null for one that replaces none) and to each problem of `item.result`, each `<itemId>/<messageId>` (§5.3.8). Both are optional and go only to producers.
+- **Contract 3.0:** "section" became "record" and a file's ID an item's (STAGES.md §2); `record.split`, `item.split`, `item.converted` and `record.conflict` added for the stages; `file.started` and `file.completed` removed, since the stages' item-complete messages replace them (decided 2026-11-05). Nothing was released under 2, so 3 doesn't read 2.x messages.
 
 ### 10.2 Consuming messages: `connector-queue-reader`
 
@@ -1596,7 +1604,7 @@ QueueReader reader = QueueReader.builder()
     .keyProvider(kmsKeyProvider)                                 // unwrap rights on the records KEK only
     .build();
 
-ConnectorMessage m = reader.decode(brokerMessageBody);           // FileStarted | RecordStored | FileCompleted
+ConnectorMessage m = reader.decode(brokerMessageBody);           // RecordStored | RecordFailed | ItemConverted
 if (m instanceof RecordStored s) {
     try (InputStream in = reader.openRecord(s)) { ... }         // or reader.readRecord(s, maxBytes)
 }
@@ -1675,7 +1683,7 @@ The **key** each adapter orders and partitions by is the record's ID for a messa
 
 | Cause | Stage | Error code |
 |---|---|---|
-| File over `max-item-bytes` (checked before any checkpoint or `file.started`) | `intake` | `LIMIT_ITEM_SIZE` |
+| File over `max-item-bytes` (checked before any checkpoint) | `intake` | `LIMIT_ITEM_SIZE` |
 | Splitter error | `split` | the splitter's `PARSE_*` / `LIMIT_*` code and offset |
 | The connector stopped three times in a row without committing a batch (§9.2) | `split` | `RESUME_NO_PROGRESS`, at the resume offset |
 | Broker didn't acknowledge after retries | `publish` | `PUBLISH_FAILED` |
@@ -1686,7 +1694,7 @@ These never fail a file. They stop the process, which then restarts from the che
 
 ### 11.1 Completing a file
 
-**Since step 3a:** after the split phase, `file.completed` is published with the digest recorded at landing, then `COMPLETED` committed. There is no archive step and no original to delete; the inbox position then moves past the item (§5.3.12). Before step 3a: archive the original to `source_files`, publish `file.completed`, write `completed/<itemId>.json`, delete the original, then commit `COMPLETED`. The original is deleted only after its archive is committed, and every step can be repeated (message ID dedup, records overwritten, deleting a missing file is fine). So a crash anywhere just repeats the remaining steps, and once the archive is done the source is no longer needed. A failure while archiving fails the file through §11.2, which archives it to `failed_files` instead.
+**Since step 4d:** after the split phase, `item.split` is sent with the digest recorded at landing, then `COMPLETED` committed; the convert stage sends `item.converted` once every record is stored. **Steps 3a to 4c:** after the split phase, `file.completed` is published with the digest recorded at landing, then `COMPLETED` committed. There is no archive step and no original to delete; the inbox position then moves past the item (§5.3.12). Before step 3a: archive the original to `source_files`, publish `file.completed`, write `completed/<itemId>.json`, delete the original, then commit `COMPLETED`. The original is deleted only after its archive is committed, and every step can be repeated (message ID dedup, records overwritten, deleting a missing file is fine). So a crash anywhere just repeats the remaining steps, and once the archive is done the source is no longer needed. A failure while archiving fails the file through §11.2, which archives it to `failed_files` instead.
 
 ### 11.2 Failing a file
 
@@ -1698,38 +1706,32 @@ These never fail a file. They stop the process, which then restarts from the che
 4. Announce every committed record: publish `record.stored` for any committed record not yet acknowledged. Once a file is `FAILED` no restart will republish it, so it must happen here. This is skipped when the broker itself is the failure, and a `publish.unannounced` range is logged instead. Also, when splitting stops, the in-flight publish of the last committed batch is now awaited rather than cancelled. A test that forces this race shows that, without the fix, the last batch was stored but never announced.
 5. Write `failed/<itemId>.json`, delete the original, log `item.failed` (itemId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the `sdh.audit.item.failed` event and `sdh.items.failed` metric report it (§12). Attempt count isn't recorded yet.
 
-### 11.3 Local fallback format
+### 11.3 Local fallback format (removed)
 
-**Retired in step 3a:** neither stage writes fallback files any more (§5.3.6). `RecoveryEnvelope` stays so `decrypt-fallback` can open files written before.
-
-`RecoveryEnvelope` (`connector-core` `crypto/`), streaming and any size:
-- **Header:** `"SDHFB1"` ‖ itemId ‖ SHA-256(recovery public key) ‖ an ephemeral EC public key.
-- **Key:** HKDF-SHA256 over the ECDH of the ephemeral and recovery keys, salted with the header hash.
-- **Records:** each is `u32 length ‖ nonce ‖ AES-256-GCM(zstd(plaintext)) ‖ tag`, with AAD = header hash ‖ message index ‖ last-record flag.
-- **Contents:** record 0 is JSON metadata (original name, size). The data follows in 8 MiB records.
-- **Integrity:** truncation, reordering, splicing and the wrong key are all detected.
-
-`DirectoryOutcomeRecorder` writes it to a hidden temp file and renames it into place only after a successful write and sync. Records are written the same way, with owner-only permissions.
+**Retired in step 3a, removed in step 4d** (decided 2026-11-06 with the user): neither stage writes fallback files since step 3a (§5.3.6), because a landed item is already in storage, and nothing was released before then, so no fallback file exists anywhere. `RecoveryEnvelope` and `decrypt-fallback` are gone. Git history before step 4d has the format.
 
 ### 11.4 Operator tools (built)
 
-`java -jar file-connector.jar admin <command> …`; in the image, `sdh-admin <command>` (§14.1). The commands use the connector's own configuration (application.yml, environment, `SPRING_APPLICATION_JSON`; `--a.b=c` arguments override it) but start none of the connector: no Camel, no lease, and nothing is written to the tables or the lease store. Tables are loaded, never created, and the ID key is read, never created. So they are safe to run beside the running connector.
+`java -jar <stage>.jar admin <command> …` for the split stage (`file-connector.jar`) and the convert stage (`convert-stage.jar`); in the image, `sdh-admin <command>` (§14.1). The commands use the stage's own configuration (application.yml, environment, `SPRING_APPLICATION_JSON`; `--a.b=c` arguments override it) but start none of the stage: no Camel, no lease, and nothing is written to the tables or the lease database, whose connection is read-only. Tables are loaded, never created, and ID keys are read, never created. So they are safe to run beside the running stage.
+
+**Shared** (step 4d, decided 2026-11-06 with the user): the CLI, its arguments, audit and telemetry are in `connector-stage` (`stage.admin`), with a `status` for any stage on the shared worker (`StageStatusCommand`, read from the registry by `RegistryReport`). Each stage gives the CLI its settings and what its commands read from; the transform stage gets the same status.
 
 | Command | Does |
 |---|---|
-| `restore --file-id X --to <dir> [--from-offset N \| --unprocessed] [--original-name]` | Decrypts a landed item from `landed_items` (step 3a; before that, from the archive tables). `--unprocessed` starts at the end of the item's last stored record, found from `records`: the part that never reached downstream. A tail repeats no headers or envelopes before that point (an X12 interchange header, a CSV header row), so it may need them added before resubmission. The landing ID key, unwrapped with `landed-items-kek`, checks the digest over the whole item |
-| `decrypt-fallback --file failed/<id>.enc --key <recovery.pem> --to <dir> [--original-name]` | Decrypts a local fallback file (§11.3). The recovery private key must be an encrypted PKCS#8 PEM, with owner-only or group-read permissions as for the signing key (§7.4); its passphrase comes from `$SDH_RECOVERY_PASSPHRASE`, never an argument. Needs no catalog, lease or KMS |
-| `status` | Shows the lease (holder, epoch, time left, read with the database clock), the checkpoint (item in progress, state, percentage split, records committed and published, failure details), and the inbox backlog. Each part is shown on its own, so an unreachable KMS still leaves the lease visible; the exit status is 1 if any part couldn't be read |
+| `restore --item-id X --to <dir> [--from-offset N \| --unprocessed] [--original-name]` (split stage) | Decrypts a landed item from `landed_items`. `--unprocessed` starts at the end of the item's last split record, found from `split_records`: the part the split stage never reached. A tail repeats no headers or envelopes before that point (an X12 interchange header, a CSV header row), so it may need them added before resubmission. The landing ID key, unwrapped with `landed-items-kek`, checks the digest over the whole item |
+| `status [--item X]` (split stage) | Shows the duties lease (holder, epoch, time left, read with the database clock), the items counted by state, and the 20 longest untouched of those not finished, each with who holds its item lease (`split/<id>/<itemId>`), all from `split_item`'s plain columns, so without keys. With `--item`, that item's lease and checkpoint: state, percentage split, records committed and sent, when it ended, the failure, a batch being committed, restarts without progress. The checkpoint is MAC'd with the ID key of `split_records`, so it needs the keys and the catalog |
+| `status [--item X]` (convert stage, and any stage on the shared worker) | Shows the duties lease, the items not yet complete (records stored, of how many, failed; or that the item message hasn't arrived) and the records claimed now, with those past their claim. With `--item`, that item and its records by state, and the most attempts. Reads only the lease database: no keys, no tables, no queue |
+| | Each part is shown on its own, so an unreachable KMS still leaves the lease visible; the exit status is 1 if any part couldn't be read |
 
 **Output safety:**
-- Decrypted output goes to a hidden temporary file with owner-only permissions. It is renamed into place only after the digest (restore) or envelope integrity (fallback) has been verified, and deleted otherwise, so no unverified plaintext is left behind.
+- Decrypted output goes to a hidden temporary file with owner-only permissions. It is renamed into place only after the digest has been verified, and deleted otherwise, so no unverified plaintext is left behind.
 - An existing file is never overwritten.
-- Output is named `<itemId>` (or `<itemId>.from-<offset>`). `--original-name` uses the archived name instead, reduced to its last path element so it can't write outside the directory. The command then doesn't print that name, because command output may end up in logs.
+- Output is named `<itemId>` (or `<itemId>.from-<offset>`). `--original-name` uses the landed original name instead, reduced to its last path element so it can't write outside the directory. The command then doesn't print that name, because command output may end up in logs.
 - Every restore checks the digest, including partial ones: all chunks are decrypted either way.
 
 **Audit:**
 - The operator's name is required (letters, digits, `. _ @ + -`): `--operator <name>` or `$SDH_OPERATOR`; the option wins. The option exists for `kubectl exec`, which can't set an environment variable, into the customer image, which has no `env` (§14.3).
-- Every run emits `sdh.audit.admin.<command>` with `sdh.operator`, plus the file ID, table, offset and bytes as they become known, and `result=ok|failed` with the exception class.
+- Every run emits `sdh.audit.admin.<command>` with `sdh.operator`, plus the stage, item ID, table, offset, bytes, state or count as they become known, and `result=ok|failed` with the exception class.
 - Events go to the console and, when `sdh.telemetry.otlp.endpoint` is set, to the collector. Each event is exported straight away and flushed before exit.
 - `sdh.operator` was added to the attribute allow-list (§12).
 
@@ -1748,7 +1750,7 @@ These never fail a file. They stop the process, which then restarts from the che
   - `storage.commit` (table, count);
   - `publish.batch` (count). This runs on the publishing thread, and its trace context is carried across, so it stays a child of its batch.
 - **`archive`** (file ID, table).
-- **`publish.batch`** for `file.started` and `file.completed`.
+- **`publish.batch`** for `item.split` (before step 4d, for `file.started` and `file.completed`).
 
 Other spans:
 - `ingest.recover` is the root when finishing a file without its source.
@@ -1836,7 +1838,7 @@ The performance tests measure throughput, per-item latency and memory use of eac
 - **The intakes:** a read-write directory with `ready: marker`, each item moved in and then its `.done` marker written; and HTTP push with mTLS, at most 32 pushes in flight, a 503 sent again. HTTP push takes small items only, so bulk files go through the directory.
 - **Latency per item:**
   - landing: from available (marker written, or push sent) to its `item.landed` at the broker;
-  - split: from its `item.landed` sent to its `file.completed` at the broker;
+  - split: from its `item.landed` sent to its `item.split` at the broker (`file.completed` before step 4d);
   - end to end: the two added, so it includes queueing in both apps;
   - core: a single file, so its latency is its wall time and isn't given.
   Reported as p50, p95, p99 and max (nearest rank).
@@ -2109,16 +2111,16 @@ Compared with the earlier sketch:
 
 ### 14.1 Container images (built)
 
-Each application, the splitter (`file-connector`) and the landing node (`landing-connector`), has two images, built from its jar and the same JVM options. They are deployed separately, with the queue between them on the customer's broker; [DEPLOYMENT.md](DEPLOYMENT.md) gives the reasons and the shapes considered.
+Each application has two images, built from its jar and the same JVM options: the landing node (`landing-connector`), the split stage (module `file-connector`, images `sdh/split-stage`) and the convert stage (`convert-stage`). They are deployed separately, with the queues between them on the customer's broker; [DEPLOYMENT.md](DEPLOYMENT.md) gives the reasons and the shapes considered.
 
 | Image | For | Built from | Base | Shell | Size |
 |---|---|---|---|---|---|
-| **Service** (`sdh/file-connector-service`, `sdh/landing-connector-service`) | our own hosted service only; never given to customers | `<module>/Dockerfile` | `eclipse-temurin:25-jre-noble` (Ubuntu) | yes; the splitter's has `sdh-admin` | about 513 MB |
-| **Customer** (`sdh/file-connector`, `sdh/landing-connector`) | distribution to customers | the distribution kit's `container/Dockerfile` plus the OS inventory step (§14.3) | `gcr.io/distroless/java25-debian13:nonroot`, pinned by digest (§14.5) | no | about 437 MB |
+| **Service** (`sdh/landing-connector-service`, `sdh/split-stage-service`, `sdh/convert-stage-service`) | our own hosted service only; never given to customers | `<module>/Dockerfile` | `eclipse-temurin:25-jre-noble` (Ubuntu) | yes; the stages' have `sdh-admin` | about 513 MB |
+| **Customer** (`sdh/landing-connector`, `sdh/split-stage`, `sdh/convert-stage`) | distribution to customers | the distribution kit's `container/Dockerfile` plus the OS inventory step (§14.3) | `gcr.io/distroless/java25-debian13:nonroot`, pinned by digest (§14.5) | no | about 437 MB |
 
-**From Maven:** `./mvnw -Pimages -pl landing-connector,file-connector -am verify -DskipTests`, or the NetBeans action **Build container images (both apps, into the VM)**, builds all four images into the minikube VM from what that build packaged, after the attribution checks of §14.2, and stops the VM afterwards (`-Dimages.stop-vm=false` keeps it). Each application's `images` profile runs `scripts/build-image.sh <app> customer` and then `service`, with `SDH_SKIP_MAVEN=1`. Signing and pushing a release is `scripts/sign-release.sh` (§14.4).
+**From Maven:** `./mvnw -Pimages -pl landing-connector,file-connector,convert-stage -am verify -DskipTests`, or the NetBeans action **Build container images (all apps, into the VM)**, builds all six images into the minikube VM from what that build packaged, after the attribution checks of §14.2, and stops the VM afterwards (`-Dimages.stop-vm=false` keeps it). Each application's `images` profile runs `scripts/build-image.sh <app> customer` and then `service`, with `SDH_SKIP_MAVEN=1`. Signing and pushing a release is `scripts/sign-release.sh` (§14.4).
 
-`scripts/build-image.sh [file-connector|landing-connector] [service|customer]` runs Maven and then `docker build` against the minikube VM's Docker daemon (the application defaults to `file-connector`, also called `splitter`, and `landing` names the landing node; override the tag with `SDH_IMAGE`, the customer base with `SDH_JAVA_IMAGE`; extra arguments go to `docker build`). The landing images differ from the splitter's only in the jar, the labels, the intake mount point `/data/intake`, and having no operator commands. Both images run as uid/gid 10001 with a read-only root filesystem and the same mounts, so the Kubernetes settings below apply to both. What follows describes the service image; §14.3 describes the customer image's differences.
+`scripts/build-image.sh [file-connector|landing-connector|convert-stage] [service|customer]` runs Maven and then `docker build` against the minikube VM's Docker daemon (the application defaults to `file-connector`, also called `split` or `splitter`, `landing` names the landing node and `convert` the convert stage; override the tag with `SDH_IMAGE`, the customer base with `SDH_JAVA_IMAGE`; extra arguments go to `docker build`). The landing images differ from the split stage's only in the jar, the labels, the intake mount point `/data/intake`, and having no operator commands; the convert stage's differ only in the jar, the labels and its operator commands (`status` alone). Both images run as uid/gid 10001 with a read-only root filesystem and the same mounts, so the Kubernetes settings below apply to both. What follows describes the service image; §14.3 describes the customer image's differences.
 
 - **Base:** `eclipse-temurin:25-jre-noble`, with `25-jdk-noble` for the build stage, both pinned by digest in `docker/base-images.env` (§14.5). The Dockerfile's own defaults are the bare tags, for a plain `docker build`.
 - **Layers:** Spring Boot's `-Djarmode=tools extract --layers`, copied as four layers with dependencies first, so a code change rebuilds a few hundred KB rather than 200 MB. The image is about 513 MB.
@@ -2164,7 +2166,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: file-connector
-          image: sdh/file-connector:0.1.0         # or sdh/file-connector-service for our own service
+          image: sdh/split-stage:0.1.0            # or sdh/split-stage-service for our own service
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -2193,7 +2195,7 @@ The project is proprietary: `Copyright (c) 2026 Smile Digital Health Inc. All ri
 | Artifact | Bundles | Carries |
 |---|---|---|
 | Library jars (`connector-contract`, `connector-core`, `connector-kms`, `connector-queue-reader`) | only our classes; dependencies are declared in the POM and fetched by the user's build | `META-INF/LICENSE`, `META-INF/NOTICE` (ours, with the HL7 attribution). A list of dependencies here would describe things the jar doesn't contain, and could be wrong for the versions a consumer resolves; their own bundling step attributes what they ship |
-| `file-connector` and `landing-connector` jars | every runtime dependency, plus Spring Boot's jar mode tools, which repackaging adds (355 and 390 components at present) | the above, plus `META-INF/THIRD-PARTY.txt` and `META-INF/licenses/` |
+| `landing-connector`, `file-connector` and `convert-stage` jars | every runtime dependency, plus Spring Boot's jar mode tools, which repackaging adds (between 350 and 400 components each at present) | the above, plus `META-INF/THIRD-PARTY.txt` and `META-INF/licenses/` |
 | Distribution tarball (§14.3) | the jar, the zstd and snappy native libraries; no JRE | `legal/`: `LICENSE`, `NOTICE`, `THIRD-PARTY.txt`, `licenses/`, copied from the jar's build |
 | Customer image (§14.3) | the tarball's contents, plus the distroless base: the Temurin JRE as a Debian package, glibc, the GCC runtime libraries and a few data and font libraries (25 packages) | `/app/legal/`: the tarball's `legal/` files, and `os-packages.txt`, generated by the inventory step: each package's version, source package and source version, and its copyright file in `/usr/share/doc/` |
 | Service image (§14.1; not distributed) | the jar's contents, native libraries, the Temurin JRE, Ubuntu packages | the same `/app/legal/` files, with `os-packages.txt` generated by `dpkg-query`; the JRE's notices are in `/opt/java/openjdk/legal/` |
@@ -2233,7 +2235,7 @@ Our `LICENSE` and `NOTICE` are added to every jar as Maven resources from the re
 
 **Failing the build:** a dependency with no license in its POM fails `add-third-party` (`failOnMissing`); add it to the override file. A component that isn't offered under Apache-2.0 and has neither a license file in its jar nor a line in `copyrights.properties` fails the Groovy step. So a new MIT, BSD or EPL dependency gets a human look. With `license.strict` (set by `-Pdist` and `-Pimages`), a license text that couldn't be fetched fails the build too; otherwise it leaves a placeholder sentence and a warning, which suits development builds only.
 
-**Checked against the jars** (`ThirdPartyAttributionIT`, in file-connector; no Docker; run by `-Pit`, and by `-Pdist` and `-Pimages` even with `-DskipTests`): for both applications' packaged jars, every bundled jar but our own modules has an entry; every license, notice or copyright file in it is in that entry by its path; every choice has an election that isn't a GNU license, or an `All apply` line; and every license text referenced is present and not a placeholder. It found Spring Boot's jar mode tools unattributed when first run. `ServiceImageIT` and `CustomerImageIT` check the same files reach `/app/legal/` in each image.
+**Checked against the jars** (`ThirdPartyAttributionIT`, in file-connector; no Docker; run by `-Pit`, and by `-Pdist` and `-Pimages` even with `-DskipTests`): for every application's packaged jar, every bundled jar but our own modules has an entry; every license, notice or copyright file in it is in that entry by its path; every choice has an election that isn't a GNU license, or an `All apply` line; and every license text referenced is present and not a placeholder. It found Spring Boot's jar mode tools unattributed when first run. `ServiceImageIT` and `CustomerImageIT` check the same files reach `/app/legal/` in each image.
 
 **License election** (Smile Digital Health policy, 2026-10-29): for a component offered under a choice of licenses, permissive licenses come first, in this order: MIT (and MIT-0), Apache-2.0, BSD, ISC, Creative Commons. They are elected over any GNU General Public License or similar license. Where no permissive option is offered, a weak-copyleft license that isn't GPL (EPL, MPL, CDDL) comes next; the GPL family (LGPL, GPL, GPL with the Classpath Exception, AGPL) comes last. The order is a list in `src/license/third-party.ftl`, which writes the `Elected license:` line; a license outside the list is written as `NONE (… review needed)`. `ServiceImageIT` and `CustomerImageIT` fail if a component under a choice has no election, a `NONE`, or a GNU license elected. Current elections:
 
@@ -2263,8 +2265,8 @@ None forces GPL terms on the connector, because every GPL or LGPL option has a p
 
 ### 14.3 Distribution tarball and customer image (built)
 
-Customers get each application, the splitter and the landing node, in two forms, both built from its distribution kit. What follows describes the splitter's; the landing node's (`landing-connector/src/dist/`, `landing-connector-<version>`) has the same layout, with `bin/landing-connector` and no `bin/sdh-admin` or `admin.args`, an intake mount point instead of none, and its own README and `application.yml.example`.
-- **The tarball**, `<app>/target/<app>-<version>-dist.tar.gz` for each application (`./mvnw -Pdist -pl landing-connector,file-connector -am verify -DskipTests`, or the NetBeans action **Build distribution tarballs (both apps)**; `verify` runs the attribution checks of §14.2). It has no Java runtime: customers run it on a host with Java 25, or build their own image from it. Either way they receive nothing from us under the GPL.
+Customers get each application, the landing node, the split stage and the convert stage, in two forms, both built from its distribution kit. What follows describes the split stage's; the landing node's (`landing-connector/src/dist/`, `landing-connector-<version>`) has the same layout, with `bin/landing-connector` and no `bin/sdh-admin` or `admin.args`, an intake mount point instead of none, and its own README and `application.yml.example`. The convert stage's (`convert-stage/src/dist/`, `convert-stage-<version>`) has the same layout too, with `bin/convert-stage`, and its own README and `application.yml.example`.
+- **The tarball**, `<app>/target/<app>-<version>-dist.tar.gz` for each application (`./mvnw -Pdist -pl landing-connector,file-connector,convert-stage -am verify -DskipTests`, or the NetBeans action **Build distribution tarballs (all apps)**; `verify` runs the attribution checks of §14.2). It has no Java runtime: customers run it on a host with Java 25, or build their own image from it. Either way they receive nothing from us under the GPL.
 - **The customer image**, which we build from the same kit on the distroless Java 25 base.
 
 The kit is also built as a directory on every `package` (`target/file-connector-<version>-dist-dir/`), which is what the customer image and `CustomerImageIT` build from. The assembly is `src/assembly/` (one component descriptor, a directory format and a tarball format); the sources are `src/dist/`.
@@ -2288,7 +2290,7 @@ The kit is also built as a directory on every `package` (`target/file-connector-
 - **User:** a numeric uid/gid 10001 with no account entry, so `-Duser.home=/tmp` is set in `container.options`.
 - **Labels:** the vendor and license, as on the service image.
 
-**Customer image** (`scripts/build-image.sh [landing] customer`, tag `sdh/file-connector:<version>` or `sdh/landing-connector:<version>`):
+**Customer image** (`scripts/build-image.sh [landing] customer`, tag `sdh/landing-connector:<version>`, `sdh/split-stage:<version>` or `sdh/convert-stage:<version>`):
 1. `container/Dockerfile`, built from the kit directory on `gcr.io/distroless/java25-debian13:nonroot`, pinned by digest in `docker/base-images.env` (§14.5).
 2. `docker/customer-inventory.Dockerfile` adds `/app/legal/os-packages.txt`. The image has no shell, so a `busybox` build stage reads the base's package records (`/var/lib/dpkg/status.d/`) and resolves each package's copyright file. `busybox` isn't in the result. This step is our build tooling and isn't in the kit.
 
@@ -2301,7 +2303,7 @@ The base holds 25 Debian packages: the Temurin 25 JRE (as `temurin-25-jre`), gli
 | Base | Ubuntu 24.04 with Temurin (`eclipse-temurin:25-jre-noble`) | distroless Debian 13 with Temurin as a package |
 | Layers | Spring Boot layers, so a code change rebuilds a few hundred KB | the jar as one layer; the kit build has no extraction step |
 | Account | `sdh` (10001) in `/etc/passwd` | numeric 10001 |
-| Operator commands (splitter) | `sdh-admin <command>` | `kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args <command> --operator <name>`; a restored item in `/tmp` is read through `kubectl debug` at `/proc/1/root/tmp/<id>`, because `kubectl cp` needs `tar` |
+| Operator commands (split and convert stages) | `sdh-admin <command>` | `kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args <command> --operator <name>`; a restored item in `/tmp` is read through `kubectl debug` at `/proc/1/root/tmp/<id>`, because `kubectl cp` needs `tar` |
 | Troubleshooting | `kubectl exec -- sh` | `kubectl debug -it <pod> --image=busybox --target=file-connector --profile=restricted` (an ephemeral container; kubectl 1.27 or later). The profile is needed where the namespace enforces the restricted Pod Security Standard. The connector's files are under `/proc/1/root/` |
 
 Both images use the same JVM options files and the same Kubernetes settings (§14.1).
@@ -2320,7 +2322,7 @@ Customers' security teams need to know what is in what we ship, and that it came
 
 | SBOM | Made by | Covers | Where |
 |---|---|---|---|
-| Application jar | `cyclonedx-maven-plugin` 2.9.1 at `package` (parent `pluginManagement`, bound in `file-connector` and `landing-connector`) | the runtime dependencies bundled in `app.jar` (380 components in the splitter's, each with its POM's licenses) | `<module>/target/sbom.cdx.json`; in the kit and tarball as `legal/sbom.cdx.json` |
+| Application jar | `cyclonedx-maven-plugin` 2.9.1 at `package` (parent `pluginManagement`, bound in each application's module) | the runtime dependencies bundled in `app.jar` (380 components in the split stage's, 364 in the convert stage's, each with its POM's licenses) | `<module>/target/sbom.cdx.json`; in the kit and tarball as `legal/sbom.cdx.json` |
 | Customer image | syft 1.54.1, from the pushed image | the OS packages (25 Debian packages, the Temurin JRE among them) and the Java components found in `app.jar` (399, more than the jar SBOM's 380 because syft also finds copies bundled inside other jars) | a signed attestation on the image in the registry; a copy in `target/release/` |
 | Service image | the same | the same for the Ubuntu base (108 packages) | the same |
 
@@ -2522,15 +2524,15 @@ The splitter's log is saved to `file-connector/target/k8s-minikube.log` and the 
 
 ### 15.3 Demonstration (`-Pdemo`)
 
-A demonstration of the pipeline at work, for showing people rather than testing. The landing node and the splitter run as two processes, started from the JARs the build made, as they are deployed. Items go in through two pipelines, one after the other, and the console shows each item's passage: the landing node's log, the splitter's log, and the telemetry both export. Errors and refusals are shown as they happen, beside the successes. At the end, a downstream consumer reads the converted documents back, and the telemetry is kept for later review.
+A demonstration of the pipeline at work, for showing people rather than testing. The landing node, the split stage and the convert stage run as three processes, started from the JARs the build made, as they are deployed. Items go in through two pipelines, one after the other, and the console shows each item's passage: each app's log, and the telemetry they export. Errors and refusals are shown as they happen, beside the successes. At the end, a downstream consumer reads the converted documents back, and the telemetry is kept for later review.
 
-**Running it:** `./mvnw -Pdemo -pl landing-connector,file-connector -am verify`, or the NetBeans actions (root project > Run Maven). Only `-Pdemo` includes `*Demo.java`, so no normal build, `-Pit` or `-Pperf` run runs it. The test itself (`PipelineDemo`) is plain JUnit; it starts the stack, the two apps and an OTLP receiver.
+**Running it:** `./mvnw -Pdemo -pl landing-connector,convert-stage,file-connector -am verify`, or the NetBeans actions (root project > Run Maven). Only `-Pdemo` includes `*Demo.java`, so no normal build, `-Pit` or `-Pperf` run runs it. The test itself (`PipelineDemo`) is plain JUnit; it starts the stack, the three apps and an OTLP receiver.
 - **Demo (pipeline, no Docker):** about two minutes. Embedded Postgres for the leases and the JDBC catalog, Iceberg tables on local disk under `file-connector/target/demo/warehouse/`, and an embedded Artemis broker. The apps are started through Spring Boot's `PropertiesLauncher` with `loader.path` set to a directory holding only the demo's `DemoLocalFileIO`, for the local disk tables.
 - **Demo (pipeline, full stack in the VM):** `-Ddemo.stack=vm`. Postgres, SeaweedFS (through `S3FileIO`) and Kafka as containers in the `sdh-it` minikube VM, which is stopped afterwards (`-Ddemo.stop-vm=false` keeps it).
   - **From NetBeans:** NetBeans starts Maven without the VM's `DOCKER_HOST`, and Testcontainers only reads that from the environment or `~/.testcontainers.properties`. So the demo asks `scripts/minikube-env.sh` for the address and certificates (starting the VM if needed), and passes them to its own Testcontainers strategy, `MinikubeDockerStrategy`. It is registered through `META-INF/services` in the test resources, and applies only when the demo has set its system properties, so the integration tests don't see it.
 - **Settings:** `demo.pause` between items (3 s), `demo.metric-interval` (15 s). The apps' settings go in as `SPRING_APPLICATION_JSON`, as in a container.
 
-**The pipelines.** Each has its own landing node, splitter, queues and namespaces (`<pipeline>_landing` and `<pipeline>`), since a pipeline carries one type of content (§5.3).
+**The pipelines.** Each has its own landing node, split stage, convert stage, queues (`<pipeline>-landed`, `-split`, `-records`, `-dlq`) and namespaces (`<pipeline>_landing` and `<pipeline>`), since a pipeline carries one type of content (§5.3).
 - **`demo-files`, a watched directory:** each file is written to an outbox, moved into the intake directory, and marked ready with a `.done` file; a resubmission also gets a `.sdh-replaces` file holding the earlier item's ID. The landing node moves a landed file to `landed/`.
 - **`demo-push`, HTTP push with mTLS:** the landing node listens on a free port with a server certificate from a CA made for the run (`DemoPki`), trusts clients from that CA, and lists one producer subject. Resubmissions name the earlier item in a `Replaces` header; the 202 receipt gives the item ID.
 
@@ -2555,19 +2557,19 @@ A demonstration of the pipeline at work, for showing people rather than testing.
 
 **What the console shows,** for each item:
 - the item's name and what should happen;
-- `[landing]` and `[splitter]`: each app's own log, its audit events included;
+- `[landing]`, `[split]` and `[convert]`: each app's own log, its audit events included;
 - the landing result: the item ID, a duplicate warning or resubmission link (checked in `landed_items`), or the HTTP refusal;
-- the splitter's result: its state, record counts or failure, the time from delivery to finished, and whether it was as expected;
+- the stages' result: the split stage's state and record count or failure, the convert stage's records and how many failed, the time from delivery to finished, and whether it was as expected;
 - `[otel trace]`: each trace as a tree with durations and attributes, `[otel log]`: the audit events as OpenTelemetry log records, and `[otel metrics]` every 15 s: the `sdh.*` metrics as running totals.
 
-The apps export over OTLP/HTTP, through the production filters, to a receiver in the demo's JVM (`OtlpReceiver`), so what is shown is exactly what a collector would get. The demo follows each item by its audit events: the landing node's `item.landed` and `item.announced`, then the splitter's `item.completed` or `item.failed`. The two apps trace an item separately, with no shared trace; the item ID joins them.
+The apps export over OTLP/HTTP, through the production filters, to a receiver in the demo's JVM (`OtlpReceiver`), so what is shown is exactly what a collector would get. The demo follows each item by its audit events: the landing node's `item.landed` and `item.announced`, the split stage's `item.completed` or `item.failed`, then the convert stage's `stage.item_completed`. The apps trace an item separately, with no shared trace; the item ID joins them.
 
 **At the end:** a summary table, then the downstream read-back for each pipeline. Every message is decoded with `connector-queue-reader` (decrypted, signature checked), and every record is read back out of the Iceberg tables. Converted documents are pretty-printed to `target/demo/output/<pipeline>/<item>/record-<n>.json`, with a 16-line excerpt of each on the console; unconverted ones are kept in their original form. Repeated message IDs are dropped, as a consumer would: a failing item re-announces its committed records (`publish.republish`), which is at-least-once delivery working as designed. A record with the same content as an earlier one has the same message ID (`messageId = recordId`, §10.1) and reaches downstream once: Artemis drops the repeat by `_AMQ_DUPL_ID`; Kafka delivers it and the consumer drops it. The count of distinct messages is checked against what the items should send.
 
 **Kept for later review,** under `file-connector/target/demo/`:
-- `telemetry/report.md`: every item through the pipeline, from its telemetry: a table of items, then for each item its audit events from both apps in time order and its traces as trees; the refused pushes; and the apps' own events (starting, leases);
+- `telemetry/report.md`: every item through the pipeline, from its telemetry: a table of items, then for each item its audit events from every app in time order and its traces as trees; the refused pushes; and the apps' own events (starting, leases);
 - `telemetry/<service>/traces.jsonl`, `logs.jsonl` and `metrics.jsonl`: the raw telemetry, as OTLP JSON;
-- `logs/<pipeline>-landing.log` and `logs/<pipeline>-splitter.log`: each app's console output;
+- `logs/<pipeline>-landing.log`, `logs/<pipeline>-split.log` and `logs/<pipeline>-convert.log`: each app's console output;
 - `output/`: the converted documents.
 
 **What it found:** a document with an undeclared entity failed its whole file instead of being stored unconverted (§6.4); fixed.

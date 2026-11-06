@@ -41,10 +41,11 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * What the demo's two apps run against (design §15.3): Postgres for their
- * leases and the JDBC catalog, somewhere for the Iceberg tables, and a
- * broker between them and on to the downstream consumer. Both apps run as
- * processes of their own, so the broker is a real one in both kinds.
+ * What the demo's apps run against (design §15.3): Postgres for their
+ * leases, the stages' registries and the JDBC catalog, somewhere for the
+ * Iceberg tables, and a broker between them and on to the downstream
+ * consumer. Every app runs as a process of its own, so the broker is a
+ * real one in both kinds.
  *
  * <ul>
  *   <li>{@code local} (default): no Docker. Embedded Postgres, tables on
@@ -55,9 +56,11 @@ import software.amazon.awssdk.services.s3.S3Client;
  *       minikube VM, which is started if needed and stopped afterwards
  *       ({@code -Ddemo.stop-vm=false} keeps it running).
  * </ul>
- * Each pipeline has two queues: {@code <pipeline>-landed}, from its landing
- * node to its splitter, and {@code <pipeline>-records}, from the splitter
- * to the downstream consumer.
+ * Each pipeline has three queues: {@code <pipeline>-landed}, from its
+ * landing node to its split stage, {@code <pipeline>-split}, from the split
+ * stage to its convert stage, and {@code <pipeline>-records}, from the
+ * convert stage to the downstream consumer; and the convert stage's
+ * dead-letter queue, {@code <pipeline>-dlq}.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -100,7 +103,7 @@ interface DemoStack extends AutoCloseable
     boolean localDisk();
 
     /**
-     * The Iceberg catalog's properties, the same for both apps and the
+     * The Iceberg catalog's properties, the same for every app and the
      * downstream consumer.
      *
      * @return the properties
@@ -108,7 +111,7 @@ interface DemoStack extends AutoCloseable
     Map<String, String> catalog();
 
     /**
-     * The catalog and lease settings both apps get.
+     * The catalog and lease settings every app gets.
      *
      * @return the settings, as flat Spring property names
      */
@@ -137,13 +140,22 @@ interface DemoStack extends AutoCloseable
     Map<String, String> landingQueue(String pipeline);
 
     /**
-     * Where a pipeline's splitter takes items from, and publishes to.
+     * Where a pipeline's split stage takes items from, and sends to.
      *
      * @param pipeline the pipeline
-     * @return its {@code sdh.landing.queue-uri} and {@code sdh.queue}
+     * @return its {@code sdh.stage.input} and {@code sdh.stage.output}
      *         settings
      */
-    Map<String, String> splitterQueues(String pipeline);
+    Map<String, String> splitQueues(String pipeline);
+
+    /**
+     * Where a pipeline's convert stage takes records from, and sends to.
+     *
+     * @param pipeline the pipeline
+     * @return its {@code sdh.stage.input}, {@code sdh.stage.output} and
+     *         {@code sdh.stage.dlq} settings
+     */
+    Map<String, String> convertQueues(String pipeline);
 
     /**
      * A separate catalog client, as a downstream process would have.
@@ -156,7 +168,7 @@ interface DemoStack extends AutoCloseable
     }
 
     /**
-     * Every message a pipeline's splitter published, as a downstream
+     * Every message a pipeline's convert stage sent, as a downstream
      * consumer receives them.
      *
      * @param pipeline the pipeline
@@ -301,20 +313,62 @@ interface DemoStack extends AutoCloseable
         }
 
         /**
-         * The splitter's queues on the broker. The JMS component the
-         * splitter's publisher is given serves its inbox route too.
+         * The split stage's queues on the broker.
          *
          * @param pipeline the pipeline
          * @return the settings
          */
         @Override
-        public Map<String, String> splitterQueues(String pipeline)
+        public Map<String, String> splitQueues(String pipeline)
         {
-            return Map.of("sdh.landing.queue-uri",
-                    "jms:queue:" + pipeline + "-landed",
-                    "sdh.queue.type", "artemis",
-                    "sdh.queue.uri", "jms:queue:" + pipeline + "-records",
-                    "sdh.queue.artemis.broker-url", brokerUrl);
+            Map<String, String> settings = new LinkedHashMap<>(
+                    input(pipeline + "-landed"));
+            settings.putAll(output("output", pipeline + "-split"));
+            return settings;
+        }
+
+        /**
+         * The convert stage's queues on the broker.
+         *
+         * @param pipeline the pipeline
+         * @return the settings
+         */
+        @Override
+        public Map<String, String> convertQueues(String pipeline)
+        {
+            Map<String, String> settings = new LinkedHashMap<>(
+                    input(pipeline + "-split"));
+            settings.putAll(output("output", pipeline + "-records"));
+            settings.putAll(output("dlq", pipeline + "-dlq"));
+            return settings;
+        }
+
+        /**
+         * A stage's input from a queue on the broker.
+         *
+         * @param queue the queue
+         * @return the settings
+         */
+        private Map<String, String> input(String queue)
+        {
+            return Map.of("sdh.stage.input.type", "artemis",
+                    "sdh.stage.input.artemis.broker-url", brokerUrl,
+                    "sdh.stage.input.artemis.queue", queue);
+        }
+
+        /**
+         * Where a stage sends, to a queue on the broker.
+         *
+         * @param name  {@code output} or {@code dlq}
+         * @param queue the queue
+         * @return the settings
+         */
+        private Map<String, String> output(String name, String queue)
+        {
+            String prefix = "sdh.stage." + name + ".";
+            return Map.of(prefix + "type", "artemis",
+                    prefix + "uri", "jms:queue:" + queue,
+                    prefix + "artemis.broker-url", brokerUrl);
         }
 
         /**
@@ -522,26 +576,64 @@ interface DemoStack extends AutoCloseable
         }
 
         /**
-         * The splitter's topics. Offsets are committed automatically, one
-         * message per poll, so only for messages already handled;
-         * {@code breakOnFirstError} keeps a failed message from being
-         * skipped (design §5.3.12).
+         * The split stage's topics. The stage's input adds the consumer
+         * options that hold a message until its item is split.
          *
          * @param pipeline the pipeline
          * @return the settings
          */
         @Override
-        public Map<String, String> splitterQueues(String pipeline)
+        public Map<String, String> splitQueues(String pipeline)
         {
-            return Map.of("sdh.landing.queue-uri", "kafka:" + pipeline
-                    + "-landed?brokers=" + kafka.getBootstrapServers()
-                    + "&groupId=" + pipeline + "-splitter"
-                    + "&autoOffsetReset=earliest&maxPollRecords=1"
-                    + "&breakOnFirstError=true",
-                    "sdh.queue.type", "kafka",
-                    "sdh.queue.uri", "kafka:" + pipeline
-                            + "-records?brokers="
-                            + kafka.getBootstrapServers());
+            Map<String, String> settings = new LinkedHashMap<>(
+                    input(pipeline + "-landed", pipeline + "-split-stage"));
+            settings.putAll(output("output", pipeline + "-split"));
+            return settings;
+        }
+
+        /**
+         * The convert stage's topics.
+         *
+         * @param pipeline the pipeline
+         * @return the settings
+         */
+        @Override
+        public Map<String, String> convertQueues(String pipeline)
+        {
+            Map<String, String> settings = new LinkedHashMap<>(
+                    input(pipeline + "-split", pipeline + "-convert-stage"));
+            settings.putAll(output("output", pipeline + "-records"));
+            settings.putAll(output("dlq", pipeline + "-dlq"));
+            return settings;
+        }
+
+        /**
+         * A stage's input from a topic.
+         *
+         * @param topic the topic
+         * @param group the stage's consumer group
+         * @return the settings
+         */
+        private Map<String, String> input(String topic, String group)
+        {
+            return Map.of("sdh.stage.input.type", "kafka",
+                    "sdh.stage.input.uri", "kafka:" + topic + "?brokers="
+                            + kafka.getBootstrapServers() + "&groupId="
+                            + group);
+        }
+
+        /**
+         * Where a stage sends, to a topic.
+         *
+         * @param name  {@code output} or {@code dlq}
+         * @param topic the topic
+         * @return the settings
+         */
+        private Map<String, String> output(String name, String topic)
+        {
+            String prefix = "sdh.stage." + name + ".";
+            return Map.of(prefix + "type", "kafka", prefix + "uri", "kafka:"
+                    + topic + "?brokers=" + kafka.getBootstrapServers());
         }
 
         /**

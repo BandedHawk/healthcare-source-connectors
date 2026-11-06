@@ -18,7 +18,7 @@ import java.util.List;
  * The demo's input: C-CDA files built from the synthetic and de-identified
  * samples in {@code connector-core/src/test/resources/ccda/} (no PHI).
  * Some hold one document, some a batch of several, and three are broken in
- * the ways the splitter refuses. The files go through the directory
+ * the ways the split stage refuses. The files go through the directory
  * pipeline; the pushes, some of which the landing node refuses, through
  * the HTTP push pipeline.
  *
@@ -33,7 +33,7 @@ final class DemoFiles
      *
      * @param name          the file name
      * @param content       the item's bytes
-     * @param status        the splitter's final status, {@code COMPLETED}
+     * @param status        the split stage's final status, {@code COMPLETED}
      *                      or {@code FAILED}; for a push the landing node
      *                      refuses, its HTTP status, such as {@code 413}
      * @param records       how many records it should store
@@ -43,14 +43,10 @@ final class DemoFiles
      *                      resubmission of it; null if not
      * @param duplicateOf   the earlier item with the same bytes, which the
      *                      landing node warns of; null if none
-     * @param repeats       how many of its records an earlier item
-     *                      already sent: the same content has the same
-     *                      record ID (§7.3), so the same message ID, and
-     *                      downstream gets it once
      */
     record DemoFile(String name, byte[] content, String status, int records,
             int failedRecords, String expected, String replaces,
-            String duplicateOf, int repeats)
+            String duplicateOf)
     {
 
         /**
@@ -68,27 +64,6 @@ final class DemoFiles
         {
             this(name, content, status, records, failedRecords, expected,
                     null, null);
-        }
-
-        /**
-         * An item none of whose records an earlier item sent.
-         *
-         * @param name          the file name
-         * @param content       the item's bytes
-         * @param status        the final status
-         * @param records       how many records it should store
-         * @param failedRecords how many of those can't be converted
-         * @param expected      what should happen, and why
-         * @param replaces      the earlier item it resubmits; null if none
-         * @param duplicateOf   the earlier item with the same bytes; null
-         *                      if none
-         */
-        DemoFile(String name, byte[] content, String status, int records,
-                int failedRecords, String expected, String replaces,
-                String duplicateOf)
-        {
-            this(name, content, status, records, failedRecords, expected,
-                    replaces, duplicateOf, 0);
         }
 
         /**
@@ -160,7 +135,7 @@ final class DemoFiles
         String uscdi4 = tagged(uscdi, "file 4");
         String epic5 = tagged(epic, "file 5");
         String epic7 = tagged(epic, "file 7");
-        // Splits fine (the splitter only finds element boundaries) but
+        // Splits fine (the split stage only finds element boundaries) but
         // isn't well-formed XML: &nbsp; is an HTML entity that a C-CDA
         // document can't use without declaring it, so the converter rejects
         // it.
@@ -209,18 +184,19 @@ final class DemoFiles
                                 + " item of its own, with an"
                                 + " item.duplicate_content warning naming"
                                 + " file 1's item; nothing is dropped, and"
-                                + " it splits to the same record ID, so"
-                                + " downstream gets that record once",
-                        null, "01-synthea-patient.xml", 1),
+                                + " its record is a record of its own, so"
+                                + " downstream gets it again, under this"
+                                + " item",
+                        null, "01-synthea-patient.xml"),
                 new DemoFile("09-truncated-batch-corrected.xml",
                         batch(epic5, tagged(master, "file 9")), "COMPLETED",
                         2, 0,
                         "file 5 corrected and sent again, naming file 5's"
                                 + " item in a .sdh-replaces file: landed and"
                                 + " linked to it, never in its place; both"
-                                + " documents complete, and the first,"
-                                + " unchanged, has file 5's record ID",
-                        "05-truncated-batch.xml", null, 1));
+                                + " documents complete, each a record of"
+                                + " this item",
+                        "05-truncated-batch.xml", null));
     }
 
     /**
@@ -284,7 +260,7 @@ final class DemoFiles
                         utf16(document("alice-newman-uscdi-v3.xml")),
                         "FAILED", 0, 0,
                         "202 Accepted: landing takes any bytes; the"
-                                + " splitter then fails it"
+                                + " split stage then fails it"
                                 + " (PARSE_XML_UNSUPPORTED_ENCODING)"),
                         true, null));
     }

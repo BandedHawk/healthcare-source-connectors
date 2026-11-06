@@ -25,9 +25,11 @@ import java.util.stream.Stream;
 
 /**
  * One of the pipeline's apps, run as a process of its own from the JAR
- * the build made, as it is deployed (design §15.3). Its settings go in as
- * {@code SPRING_APPLICATION_JSON}, as in a container. Its console output
- * is shown with a tag, such as {@code [landing]}, and kept in a log file.
+ * the build made, as it is deployed (design §15.3): the demo's apps, and
+ * the stages an integration test doesn't run in its own JVM. Its settings
+ * go in as {@code SPRING_APPLICATION_JSON}, as in a container. Its console
+ * output is shown with a tag, such as {@code [landing]}, and kept in a log
+ * file.
  * <p>
  * It is started through Spring Boot's {@code PropertiesLauncher}, from the
  * same JAR, so that one extra directory can join its class path: the
@@ -37,7 +39,7 @@ import java.util.stream.Stream;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class DemoApp implements AutoCloseable
+public final class DemoApp implements AutoCloseable
 {
 
     /** The tag on the app's console lines, such as {@code landing}. */
@@ -62,8 +64,8 @@ final class DemoApp implements AutoCloseable
      * @param log      where to keep its console output
      * @throws IOException if it can't be started
      */
-    DemoApp(String tag, Path jar, Path extras, Map<String, String> settings,
-            Path log) throws IOException
+    public DemoApp(String tag, Path jar, Path extras,
+            Map<String, String> settings, Path log) throws IOException
     {
         this.tag = tag;
         String java = ProcessHandle.current().info().command()
@@ -125,7 +127,7 @@ final class DemoApp implements AutoCloseable
      * @return the JAR
      * @throws IOException if the module hasn't been packaged
      */
-    static Path jar(String module) throws IOException
+    public static Path jar(String module) throws IOException
     {
         Path target = Path.of("..", module, "target").toAbsolutePath()
                 .normalize();
@@ -152,7 +154,7 @@ final class DemoApp implements AutoCloseable
      * @return the line
      * @throws Exception if the app ends, or the line doesn't come in time
      */
-    String await(String pattern, Duration timeout) throws Exception
+    public String await(String pattern, Duration timeout) throws Exception
     {
         Pattern wanted = Pattern.compile(pattern);
         long until = System.currentTimeMillis() + timeout.toMillis();

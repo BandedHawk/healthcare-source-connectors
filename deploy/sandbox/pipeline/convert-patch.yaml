@@ -1,0 +1,13 @@
+# The convert stage README's Deployment, with requests: its memory is reserved on the node, as its limit. 1 GiB,
+# not the README's 2 GiB, so a pipeline fits on the sandbox's nodes; the sample documents are small.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: convert }
+spec:
+  template:
+    spec:
+      containers:
+        - name: convert-stage
+          resources:
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { memory: 1Gi }

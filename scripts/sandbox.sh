@@ -4,12 +4,14 @@
 # minikube-home.sh).
 #
 #   scripts/sandbox.sh up          create or start the cluster, and the services every pipeline uses
-#   scripts/sandbox.sh images      build both stages' customer images (in the sdh-it VM) and push them to the
-#                                  cluster's registry
-#   scripts/sandbox.sh deploy      deploy each pipeline's landing node and splitter (after up and images)
+#   scripts/sandbox.sh images      build the landing node's and both stages' customer images (in the sdh-it VM)
+#                                  and push them to the cluster's registry
+#   scripts/sandbox.sh deploy      deploy each pipeline's landing node, split stage and convert stage (after up
+#                                  and images)
 #   scripts/sandbox.sh push <pipeline> <file>...
 #                                  push files to a pipeline's landing node, as its producer
-#   scripts/sandbox.sh check       push the sample C-CDA documents and check they are landed, split and sent on
+#   scripts/sandbox.sh check       push the sample C-CDA documents and check they are landed, split, converted and
+#                                  sent on
 #   scripts/sandbox.sh status      pods, nodes, topics
 #   scripts/sandbox.sh grafana     port-forward Grafana to http://localhost:3000 (until interrupted)
 #   scripts/sandbox.sh stop        stop the cluster's VMs; `up` starts them again, with everything kept
@@ -21,8 +23,8 @@
 #
 # Kept in $SDH_SANDBOX/sdh-demo/state (mode 700), made once and reused, since data encrypted or stored under them
 # can't be read without them: the database and S3 credentials, Vault's unseal key and root token, the stages'
-# Vault tokens, the inbox and FHIR-stage key pairs, and the sandbox CA. Never delete it while the cluster's
-# volumes hold data.
+# Vault tokens, the stages' inbox key pairs and the FHIR stage's, and the sandbox CA. Never delete it while the
+# cluster's volumes hold data.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -99,6 +101,8 @@ s3_config() {
     identities+=("$(s3_identity "landing-$p" "$(secret "s3-landing-$p")" \
       Read:sdh-bronze Write:sdh-bronze List:sdh-bronze Tagging:sdh-bronze)")
     identities+=("$(s3_identity "splitter-$p" "$(secret "s3-splitter-$p")" Read:sdh-bronze List:sdh-bronze \
+      Read:sdh-silver Write:sdh-silver List:sdh-silver Tagging:sdh-silver)")
+    identities+=("$(s3_identity "convert-$p" "$(secret "s3-convert-$p")" \
       Read:sdh-silver Write:sdh-silver List:sdh-silver Tagging:sdh-silver)")
     identities+=("$(s3_identity "fhir-$p" "$(secret "s3-fhir-$p")" Read:sdh-silver List:sdh-silver \
       Read:sdh-gold Write:sdh-gold List:sdh-gold Tagging:sdh-gold)")
@@ -183,7 +187,7 @@ setup_vault() {
       for k in $p-landed-items $p-records $p-fhir; do
         vault read transit/keys/\$k >/dev/null 2>&1 || vault write -f transit/keys/\$k type=aes256-gcm96
       done
-      for k in $p-landing-signing $p-splitter-signing; do
+      for k in $p-landing-signing $p-splitter-signing $p-convert-signing; do
         vault read transit/keys/\$k >/dev/null 2>&1 || vault write -f transit/keys/\$k type=ecdsa-p256
       done" >/dev/null
     vault_policy "landing-$p" "
@@ -198,17 +202,23 @@ setup_vault() {
       path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
       path \"transit/sign/$p-splitter-signing/*\" { capabilities = [\"update\"] }
       path \"transit/keys/$p-splitter-signing\" { capabilities = [\"read\"] }"
+    vault_policy "convert-$p" "
+      path \"transit/encrypt/$p-records\" { capabilities = [\"update\"] }
+      path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
+      path \"transit/sign/$p-convert-signing/*\" { capabilities = [\"update\"] }
+      path \"transit/keys/$p-convert-signing\" { capabilities = [\"read\"] }"
     vault_policy "fhir-$p" "
       path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
       path \"transit/encrypt/$p-fhir\" { capabilities = [\"update\"] }
       path \"transit/decrypt/$p-fhir\" { capabilities = [\"update\"] }
-      path \"transit/keys/$p-splitter-signing\" { capabilities = [\"read\"] }"
+      path \"transit/keys/$p-convert-signing\" { capabilities = [\"read\"] }"
     local role
-    for role in landing splitter fhir; do
+    for role in landing splitter convert fhir; do
       vault_token "$role-$p"
     done
     vault_public_key "$p-landing-signing" > "$STATE/keys/$p-landing-signing-public.pem"
     vault_public_key "$p-splitter-signing" > "$STATE/keys/$p-splitter-signing-public.pem"
+    vault_public_key "$p-convert-signing" > "$STATE/keys/$p-convert-signing-public.pem"
   done
 }
 
@@ -260,8 +270,8 @@ setup_buckets() {
 setup_topics() {
   local p topic
   for p in $PIPELINES; do
-    # One partition each: the splitter takes a pipeline's items in order, and its output keeps their order.
-    for topic in "$p.landed" "$p.records" "$p.fhir.dlq"; do
+    # One partition each: a pipeline's items and records stay in the order they were landed.
+    for topic in "$p.landed" "$p.split" "$p.records" "$p.convert.dlq" "$p.fhir.dlq"; do
       infra exec kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create \
         --if-not-exists --topic "$topic" --partitions 1 --replication-factor 3 \
         --config min.insync.replicas=2 >/dev/null
@@ -269,14 +279,16 @@ setup_topics() {
   done
 }
 
-# setup_database: a login role per stage, all acting as sdh_catalog, which owns the catalog's and leases' tables.
+# setup_database: a login role per stage, all acting as sdh_catalog, which owns the catalog's and leases' tables
+# and the stages' registries (a schema per stage and pipeline, which the stage makes).
 setup_database() {
   local p role sql
   sql="SELECT 'CREATE ROLE sdh_catalog NOLOGIN' WHERE NOT EXISTS
          (SELECT FROM pg_roles WHERE rolname = 'sdh_catalog')\\gexec
-       GRANT ALL ON SCHEMA public TO sdh_catalog;"
+       GRANT ALL ON SCHEMA public TO sdh_catalog;
+       GRANT CREATE ON DATABASE sdh TO sdh_catalog;"
   for p in $PIPELINES; do
-    for role in landing splitter fhir; do
+    for role in landing splitter convert fhir; do
       local name="${role}_$(prefix "$p")"
       sql+="
        SELECT 'CREATE ROLE $name LOGIN IN ROLE sdh_catalog' WHERE NOT EXISTS
@@ -338,20 +350,23 @@ build_images() {
   local version
   version="$(cd "$ROOT" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
   say "Building the customer images ($version) in the sdh-it VM"
-  (cd "$ROOT" && ./mvnw -q -pl file-connector,landing-connector -am package -DskipTests)
-  local app
-  for app in landing-connector file-connector; do
-    SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 SDH_IMAGE="sdh/$app:$version" "$ROOT/scripts/build-image.sh" "$app" customer
+  (cd "$ROOT" && ./mvnw -q -pl landing-connector,file-connector,convert-stage -am package -DskipTests)
+  # module=image: the split stage kept its module's name, file-connector.
+  local apps=(landing-connector=landing-connector file-connector=split-stage convert-stage=convert-stage) app
+  for app in "${apps[@]}"; do
+    SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 SDH_IMAGE="sdh/${app#*=}:$version" "$ROOT/scripts/build-image.sh" \
+      "${app%%=*}" customer
   done
   start_cluster
   say "Copying them to the cluster's registry ($REGISTRY on every node)"
   # Loaded into the first node's Docker and pushed from there: the registry addon answers on localhost:5000 on
   # every node, and the VMs' networks can't reach each other.
   (source "$ROOT/scripts/minikube-env.sh" >/dev/null
-   docker save "sdh/landing-connector:$version" "sdh/file-connector:$version") \
+   docker save "sdh/landing-connector:$version" "sdh/split-stage:$version" "sdh/convert-stage:$version") \
     | minikube -p "$PROFILE" ssh --native-ssh=false -- docker load >/dev/null
   : > "$STATE/images.env.tmp"
-  for app in landing-connector file-connector; do
+  for app in "${apps[@]}"; do
+    app="${app#*=}"
     minikube -p "$PROFILE" ssh -- "docker tag sdh/$app:$version $REGISTRY/sdh/$app:$version \
       && docker push -q $REGISTRY/sdh/$app:$version >/dev/null"
     # Deployed by digest, so a rebuild under the same SNAPSHOT version is a new image to Kubernetes.
@@ -374,6 +389,8 @@ deploy_pipelines() {
   [[ -s "$STATE/images.env" ]] || { echo "No images yet: run scripts/sandbox.sh images" >&2; exit 1; }
   # shellcheck source=/dev/null
   source "$STATE/images.env"
+  [[ -n "${split_stage:-}" && -n "${convert_stage:-}" ]] || { echo "No split and convert stage images (made" \
+    "before the stages): run scripts/sandbox.sh images" >&2; exit 1; }
   pki
   kc apply -f "$DEPLOY/producers/producer.yaml" >/dev/null
   kc -n sdh-producers create secret generic producer --from-file=ca.crt="$STATE/pki/ca.crt" \
@@ -399,16 +416,21 @@ deploy_pipeline() {
     SPLIT_FORMAT="ccda"
   envsubst '$PIPELINE $K8S_NS' < "$DEPLOY/pipeline/namespace.yaml" | kc apply -f - >/dev/null
 
-  # The splitter's inbox key pair, and the FHIR stage's, which the splitter seals records to.
+  # Each stage's inbox key pair, which the stage before it seals its messages to, and the FHIR stage's, which the
+  # convert stage seals records to.
   ec_key "$STATE/keys/$p-inbox" "$(secret "inbox-passphrase-$p")"
+  ec_key "$STATE/keys/$p-convert-inbox" "$(secret "convert-inbox-passphrase-$p")"
   ec_key "$STATE/keys/$p-fhir-recipient" "$(secret "fhir-recipient-passphrase-$p")"
-  export INBOX_SHA256 RECIPIENT_SHA256
+  export INBOX_SHA256 CONVERT_INBOX_SHA256 RECIPIENT_SHA256
   INBOX_SHA256="$(fingerprint "$STATE/keys/$p-inbox-public.pem")"
+  CONVERT_INBOX_SHA256="$(fingerprint "$STATE/keys/$p-convert-inbox-public.pem")"
   RECIPIENT_SHA256="$(fingerprint "$STATE/keys/$p-fhir-recipient-public.pem")"
-  local vars='$PIPELINE $ICEBERG_PREFIX $PRODUCER_SUBJECT $INBOX_SHA256 $RECIPIENT_SHA256 $KAFKA_BROKERS'
-  vars+=' $SPLIT_FORMAT'
-  envsubst "$vars" < "$DEPLOY/pipeline/landing-application.yml" > "$work/landing-application.yml"
-  envsubst "$vars" < "$DEPLOY/pipeline/splitter-application.yml" > "$work/splitter-application.yml"
+  local vars='$PIPELINE $ICEBERG_PREFIX $PRODUCER_SUBJECT $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256'
+  vars+=' $KAFKA_BROKERS $SPLIT_FORMAT'
+  local stage
+  for stage in landing splitter convert; do
+    envsubst "$vars" < "$DEPLOY/pipeline/$stage-application.yml" > "$work/$stage-application.yml"
+  done
 
   apply_secret "$n" landing-keys --from-file=tls.crt="$STATE/pki/landing-$p.crt" \
     --from-file=tls.key="$STATE/pki/landing-$p.key" --from-file=producers-ca.pem="$STATE/pki/ca.crt" \
@@ -419,7 +441,7 @@ deploy_pipeline() {
   kc -n "$n" create configmap landing-config --from-file=application.yml="$work/landing-application.yml" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
   apply_secret "$n" splitter-keys --from-file=inbox.pem="$STATE/keys/$p-inbox.pem" \
-    --from-file=recipient.pem="$STATE/keys/$p-fhir-recipient-public.pem" \
+    --from-file=recipient.pem="$STATE/keys/$p-convert-inbox-public.pem" \
     --from-file=landing-signer.pem="$STATE/keys/$p-landing-signing-public.pem" \
     --from-file=vault-token="$STATE/secrets/vault-token-splitter-$p"
   apply_secret "$n" splitter-env --from-literal=S3_SECRET_ACCESS_KEY="$(secret "s3-splitter-$p")" \
@@ -427,25 +449,42 @@ deploy_pipeline() {
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "inbox-passphrase-$p")"
   kc -n "$n" create configmap splitter-config --from-file=application.yml="$work/splitter-application.yml" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
+  apply_secret "$n" convert-keys --from-file=inbox.pem="$STATE/keys/$p-convert-inbox.pem" \
+    --from-file=recipient.pem="$STATE/keys/$p-fhir-recipient-public.pem" \
+    --from-file=split-signer.pem="$STATE/keys/$p-splitter-signing-public.pem" \
+    --from-file=vault-token="$STATE/secrets/vault-token-convert-$p"
+  apply_secret "$n" convert-env --from-literal=S3_SECRET_ACCESS_KEY="$(secret "s3-convert-$p")" \
+    --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-convert-$p")" \
+    --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "convert-inbox-passphrase-$p")"
+  kc -n "$n" create configmap convert-config --from-file=application.yml="$work/convert-application.yml" \
+    --dry-run=client -o yaml | kc apply -f - >/dev/null
   fhir_handover "$p"
 
   # Each stage from the Deployment in its README, renamed for the pipeline's namespace, by digest.
-  mkdir -p "$work/landing" "$work/splitter"
+  mkdir -p "$work/landing" "$work/splitter" "$work/convert"
   readme_yaml "$ROOT/landing-connector/src/dist/README.md" \
     | sed -e "s#<registry>/landing-connector:<version>#$landing_connector#" -e 's/landing-claims/landing/g' \
     > "$work/landing/landing.yaml"
   readme_yaml "$ROOT/file-connector/src/dist/README.md" \
-    | sed -e "s#<registry>/file-connector:<version>#$file_connector#" \
+    | sed -e "s#<registry>/split-stage:<version>#$split_stage#" \
           -e 's/file-connector-\(env\|keys\|config\)/splitter-\1/g' \
           -e 's/name: file-connector }/name: splitter }/' -e 's/app: file-connector }/app: splitter }/g' \
     > "$work/splitter/splitter.yaml"
+  readme_yaml "$ROOT/convert-stage/src/dist/README.md" \
+    | sed -e "s#<registry>/convert-stage:<version>#$convert_stage#" \
+          -e 's/convert-stage-\(env\|keys\|config\)/convert-\1/g' \
+          -e 's/name: convert-stage }/name: convert }/' -e 's/app: convert-stage }/app: convert }/g' \
+    > "$work/convert/convert.yaml"
   cp "$DEPLOY/pipeline/landing-patch.yaml" "$DEPLOY/pipeline/landing-service.yaml" "$work/landing/"
   cp "$DEPLOY/pipeline/splitter-patch.yaml" "$work/splitter/"
+  cp "$DEPLOY/pipeline/convert-patch.yaml" "$work/convert/"
   stage_kustomization landing "landing.yaml, landing-service.yaml" landing-patch.yaml \
     > "$work/landing/kustomization.yaml"
   stage_kustomization splitter "splitter.yaml" splitter-patch.yaml > "$work/splitter/kustomization.yaml"
+  stage_kustomization convert "convert.yaml" convert-patch.yaml > "$work/convert/kustomization.yaml"
 
-  # The landing node first: it makes the landing tables, which the splitter may only read.
+  # The landing node first: it makes the landing tables, which the split stage may only read. The split stage
+  # before the convert stage: it makes split_records.
   kc apply -k "$work/landing" >/dev/null
   if ! wait_for 300 landing_active "$n"; then
     kc -n "$n" get pods -o wide; kc -n "$n" logs deploy/landing --tail=40; exit 1
@@ -455,7 +494,12 @@ deploy_pipeline() {
       || ! wait_for 300 logged "$n" deploy/splitter "Started FileConnectorApplication"; then
     kc -n "$n" get pods -o wide; kc -n "$n" logs deploy/splitter --tail=60; exit 1
   fi
-  say "  landing (active and standby) and splitter running"
+  kc apply -k "$work/convert" >/dev/null
+  if ! kc -n "$n" rollout status deploy/convert --timeout=300s >/dev/null \
+      || ! wait_for 300 logged "$n" deploy/convert "Started ConvertStageApplication"; then
+    kc -n "$n" get pods -o wide; kc -n "$n" logs deploy/convert --tail=60; exit 1
+  fi
+  say "  landing (active and standby), split stage and convert stage running"
 }
 
 # apply_secret <namespace> <name> <kubectl create secret args>...
@@ -472,7 +516,7 @@ fhir_handover() {
     --from-literal=S3_SECRET_ACCESS_KEY="$(secret "s3-fhir-$p")" \
     --from-literal=JDBC_PASSWORD="$(secret "db-fhir-$p")" \
     --from-file=vault-token="$STATE/secrets/vault-token-fhir-$p" \
-    --from-file=splitter-signer.pem="$STATE/keys/$p-splitter-signing-public.pem"
+    --from-file=convert-signer.pem="$STATE/keys/$p-convert-signing-public.pem"
   kc -n sdh-fhir create configmap "fhir-$p" \
     --from-literal=pipeline="$p" \
     --from-literal=records-topic="$p.records" \
@@ -489,7 +533,7 @@ fhir_handover() {
     --from-literal=records-kek="$p-records" \
     --from-literal=fhir-kek="$p-fhir" \
     --from-literal=recipient-kid="fhir-$p" \
-    --from-literal=splitter-signer-kid="splitter-$p" \
+    --from-literal=convert-signer-kid="convert-$p" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
 }
 
@@ -548,6 +592,12 @@ push() {
   done
 }
 
+# audited <namespace> <app> <event pattern>: how many times the app's pods, all of them, have logged an audit
+# event since they started.
+audited() {
+  kc -n "$1" logs -l "app=$2" --tail=-1 --max-log-requests=10 2>/dev/null | grep -cE "(^|[] ])$3( |$)" || true
+}
+
 # topic_count <topic>: messages on a topic.
 topic_count() {
   infra exec kafka-0 -- /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic "$1" \
@@ -560,24 +610,29 @@ check() {
   for file in "$ROOT"/connector-core/src/test/resources/ccda/*.xml; do
     samples+=("$file")
   done
-  local landed_before records_before completed_before
+  local landed_before split_before records_before split_done converted
   landed_before="$(topic_count "$p.landed")"
+  split_before="$(topic_count "$p.split")"
   records_before="$(topic_count "$p.records")"
-  completed_before="$(kc -n "$n" logs deploy/splitter 2>/dev/null | grep -c "file\.completed" || true)"
+  split_done="$(audited "$n" splitter "item\.completed")"
+  converted="$(audited "$n" convert "stage\.item_completed")"
   say "Pushing ${#samples[@]} synthetic and de-identified C-CDA documents to $p"
   push "$p" "${samples[@]}" | sed 's/^/   /'
-  completed() {
-    [[ "$(kc -n "$n" logs deploy/splitter 2>/dev/null | grep -c "file\.completed")" \
-      -ge $((completed_before + ${#samples[@]})) ]]
-  }
+  done_by() { [[ "$(audited "$n" "$1" "$2")" -ge $(($3 + ${#samples[@]})) ]]; }
   local failures=0
-  if wait_for 300 completed; then
-    say "  all ${#samples[@]} split (file.completed)"
+  if wait_for 300 done_by splitter "item\.completed" "$split_done"; then
+    say "  all ${#samples[@]} split (item.completed)"
   else
     say "  FAIL: not all split"; failures=1
   fi
+  if wait_for 300 done_by convert "stage\.item_completed" "$converted"; then
+    say "  all ${#samples[@]} converted (stage.item_completed)"
+  else
+    say "  FAIL: not all converted"; failures=1
+  fi
   say "  item.landed messages: $(($(topic_count "$p.landed") - landed_before)) more on $p.landed"
-  say "  splitter messages: $(($(topic_count "$p.records") - records_before)) more on $p.records"
+  say "  split stage messages: $(($(topic_count "$p.split") - split_before)) more on $p.split"
+  say "  convert stage messages: $(($(topic_count "$p.records") - records_before)) more on $p.records"
   local pod
   for pod in $(kc -n "$n" get pods -o name); do
     if kc -n "$n" logs "$pod" --all-containers 2>/dev/null | grep -qE "ClinicalDocument|Newman|\.xml"; then
@@ -597,7 +652,8 @@ status() {
   local p
   for p in $PIPELINES; do
     echo
-    echo "$p: $(topic_count "$p.landed") on $p.landed, $(topic_count "$p.records") on $p.records," \
+    echo "$p: $(topic_count "$p.landed") on $p.landed, $(topic_count "$p.split") on $p.split," \
+      "$(topic_count "$p.records") on $p.records, $(topic_count "$p.convert.dlq") on $p.convert.dlq," \
       "$(topic_count "$p.fhir.dlq") on $p.fhir.dlq"
   done
 }
@@ -634,5 +690,5 @@ case "${1:-}" in
       exit 2; }
     minikube delete -p "$PROFILE"
     ;;
-  *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

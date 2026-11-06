@@ -111,8 +111,6 @@ class ContractRoundTripTest
         StorageRef ref = new StorageRef("cat", "sdh_ingest", "records",
                 LocalDate.of(2026, 10, 28), 42L, "kek-1");
         for (ConnectorMessage message : java.util.List.of(
-                new ConnectorMessage.FileStarted(itemId, "csv", 999,
-                        java.time.Instant.EPOCH, "file-connector"),
                 new RecordStored("ID1", itemId, 0, 10, 20, "csv",
                         "application/json", "csv-row/1", 30, 1, ref),
                 new RecordStored("ID2", itemId, 1, 30, 20, "fhir",
@@ -130,9 +128,6 @@ class ContractRoundTripTest
                         new RecordOrigin(new SourcePosition(2, 1),
                                 new SourcePosition(60, 1)),
                         new SourcePosition(75, 12)),
-                new ConnectorMessage.FileCompleted(itemId, 3, 1, 999,
-                        "digest", java.time.Instant.EPOCH,
-                        java.time.Instant.EPOCH),
                 new ConnectorMessage.ItemLanded(itemId, "claims-sftp", "file",
                         999, "digest", java.time.Instant.EPOCH,
                         new StorageRef("cat", "sdh_landing", "landed_items",

@@ -4,7 +4,7 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.file.admin;
+package com.sdh.healthcare.connector.stage.admin;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -23,7 +23,7 @@ import java.util.Set;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class AdminArgs
+public final class AdminArgs
 {
 
     /** The command name. */
@@ -64,7 +64,7 @@ final class AdminArgs
      * @throws UsageException if the command is missing or an argument is
      *         malformed, repeated or lacks its value
      */
-    static AdminArgs parse(List<String> args, Set<String> flagNames)
+    public static AdminArgs parse(List<String> args, Set<String> flagNames)
     {
         if (args.isEmpty() || args.getFirst().startsWith("-"))
         {
@@ -112,7 +112,7 @@ final class AdminArgs
      *
      * @return the name
      */
-    String command()
+    public String command()
     {
         return command;
     }
@@ -122,7 +122,7 @@ final class AdminArgs
      *
      * @return the arguments of the form {@code --a.b=c}
      */
-    List<String> configArgs()
+    public List<String> configArgs()
     {
         return configArgs;
     }
@@ -133,7 +133,7 @@ final class AdminArgs
      * @param name the option name, without {@code --}
      * @return the value, if given
      */
-    Optional<String> option(String name)
+    public Optional<String> option(String name)
     {
         return Optional.ofNullable(options.get(name));
     }
@@ -145,7 +145,7 @@ final class AdminArgs
      * @return the value
      * @throws UsageException if the option wasn't given
      */
-    String required(String name)
+    public String required(String name)
     {
         return option(name).orElseThrow(
                 () -> new UsageException("--" + name + " is required"));
@@ -157,7 +157,7 @@ final class AdminArgs
      * @param name the flag name, without {@code --}
      * @return true if given
      */
-    boolean flag(String name)
+    public boolean flag(String name)
     {
         return flags.contains(name);
     }
@@ -169,7 +169,7 @@ final class AdminArgs
      * @param names the options and flags the command accepts
      * @throws UsageException for the first unknown one
      */
-    void allowOnly(Set<String> names)
+    public void allowOnly(Set<String> names)
     {
         for (String name : options.keySet())
         {
@@ -190,7 +190,7 @@ final class AdminArgs
     }
 
     /** A usage mistake: exit status 2 and the usage text. */
-    static final class UsageException extends RuntimeException
+    public static final class UsageException extends RuntimeException
     {
 
         /**
@@ -198,7 +198,7 @@ final class AdminArgs
          *
          * @param message what was wrong
          */
-        UsageException(String message)
+        public UsageException(String message)
         {
             super(message);
         }

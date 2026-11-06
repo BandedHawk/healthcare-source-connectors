@@ -42,7 +42,7 @@ import com.sdh.healthcare.connector.broker.receive.CamelReceiveRoute;
 import com.sdh.healthcare.connector.broker.receive.EventHubsSupport;
 import com.sdh.healthcare.connector.broker.receive.ReceiveProperties;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import io.grpc.ManagedChannel;
@@ -653,11 +653,11 @@ class StageWorkerIT
      *
      * @return the messages
      */
-    List<FileCompleted> completions()
+    List<ItemConverted> completions()
     {
         return output.opened().stream()
-                .filter(FileCompleted.class::isInstance)
-                .map(FileCompleted.class::cast).toList();
+                .filter(ItemConverted.class::isInstance)
+                .map(ItemConverted.class::cast).toList();
     }
 
     /**

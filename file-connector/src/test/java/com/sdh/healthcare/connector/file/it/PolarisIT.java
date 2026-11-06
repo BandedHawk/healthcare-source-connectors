@@ -7,10 +7,7 @@
 package com.sdh.healthcare.connector.file.it;
 
 import static com.sdh.healthcare.connector.file.it.ItSupport.INTAKE;
-import static com.sdh.healthcare.connector.file.it.ItSupport.awaitSplit;
-import static com.sdh.healthcare.connector.file.it.ItSupport.csvRowJson;
 import static com.sdh.healthcare.connector.file.it.ItSupport.requireDocker;
-import static com.sdh.healthcare.connector.file.it.ItSupport.splitterKeys;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -18,9 +15,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
@@ -32,11 +28,11 @@ import com.sdh.healthcare.connector.core.maintenance.TableMaintenance.Report;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.file.TestLanding;
-import com.sdh.healthcare.connector.file.admin.AdminCli;
+import com.sdh.healthcare.connector.file.admin.SplitAdmin;
+import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.FatalExit;
-import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.net.URI;
@@ -58,7 +54,6 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.camel.CamelContext;
-import org.apache.camel.ConsumerTemplate;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
@@ -86,7 +81,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
- * The connector on an Iceberg REST catalog, as the reference configuration
+ * The split stage on an Iceberg REST catalog, as the reference configuration
  * deploys it (design §8.1, §14): Apache Polaris with SeaweedFS storage,
  * plus Postgres for the lease. Covers what depends on the catalog: fencing
  * (§9.3) with two separate REST clients, ingest and downstream read-back,
@@ -98,7 +93,8 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-@SpringBootTest(properties = "camel.main.run-controller=false")
+@SpringBootTest(properties = {"camel.main.run-controller=false",
+        "sdh.split.autostart=false"})
 class PolarisIT
 {
 
@@ -151,8 +147,8 @@ class PolarisIT
     /** The reasons the app asked to exit, if any. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
-    /** The in-memory queue landed items are announced on. */
-    static final String LANDED_QUEUE = "seda:sdh-polaris-landed?size=1000";
+    /** Where the split stage's messages go. */
+    static final String OUTPUT = "seda:sdh-polaris?size=100000";
 
     static
     {
@@ -403,41 +399,16 @@ class PolarisIT
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) throws Exception
     {
-        CONFIG.put("sdh.landing.intake", INTAKE);
-        CONFIG.put("sdh.landing.queue-uri", LANDED_QUEUE);
-        CONFIG.put("sdh.landing.idle-wait", "200ms");
-        CONFIG.put("sdh.split.format", "csv");
-        CONFIG.put("sdh.split.options.csv.header", "true");
-        CONFIG.put("sdh.storage.catalog-name", "sdh");
-        catalogProperties().forEach((key, value) ->
-                CONFIG.put("sdh.storage.catalog[" + key + "]", value));
-        CONFIG.put("sdh.storage.commit.max-records", "7");
-        CONFIG.put("sdh.lease.jdbc.url", POSTGRES.getJdbcUrl());
-        CONFIG.put("sdh.lease.jdbc.username", POSTGRES.getUsername());
-        CONFIG.put("sdh.lease.jdbc.password", POSTGRES.getPassword());
-        CONFIG.put("sdh.crypto.keystore.path", KEYS.keystore.toString());
-        CONFIG.put("sdh.crypto.keystore.password", TestKeys.KS_PASSWORD);
-        CONFIG.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
-        CONFIG.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
-        CONFIG.put("sdh.crypto.keys.signing.kid", "connector-2026");
-        CONFIG.put("sdh.crypto.keys.signing.pem", KEYS.signingPem.toString());
-        CONFIG.put("sdh.crypto.keys.signing.passphrase",
-                TestKeys.SIGNING_PASSPHRASE);
-        CONFIG.put("sdh.crypto.keys.recipient.kid", "downstream-2026");
-        CONFIG.put("sdh.crypto.keys.recipient.pem",
-                KEYS.recipientPem.toString());
-        CONFIG.put("sdh.crypto.keys.recipient.sha256",
-                KeyMaterial.fingerprint(KEYS.recipient.getPublic()));
-        CONFIG.putAll(splitterKeys(KEYS));
-        CONFIG.put("sdh.queue.type", "camel");
-        CONFIG.put("sdh.queue.uri", "seda:sdh-polaris?size=100000");
+        CONFIG.putAll(ItSupport.splitStage(KEYS, catalogProperties(),
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(),
+                POSTGRES.getPassword(), OUTPUT));
         CONFIG.forEach((key, value) -> registry.add(key, () -> value));
     }
 
     /**
-     * Two files are landed and split; downstream reads every record back
-     * with its own REST client, the admin status command reads the
-     * checkpoint, maintenance runs through the REST catalog, and nothing
+     * Two files are landed and split; downstream reads every split record
+     * back with its own REST client, the admin status command reads the
+     * items' rows, maintenance runs through the REST catalog, and nothing
      * stored is readable.
      *
      * @throws Exception if the test fails to run
@@ -460,15 +431,10 @@ class PolarisIT
         LandedItem good = landing.land(file.toString(), "good.csv");
         LandedItem bad = landing.land(
                 header + "1," + MARKER + ",\"never closed\n", "bad.csv");
-        landing.announce(camel, LANDED_QUEUE, good);
-        landing.announce(camel, LANDED_QUEUE, bad);
-        awaitSplit(runtime, 2, Duration.ofMinutes(2));
+        ItSupport.split(runtime, landing, FATAL, good, bad);
         assertThat(FATAL).isEmpty();
 
         // Downstream, with its own REST client.
-        List<ConnectorMessage> messages = new ArrayList<>();
-        ConsumerTemplate consumer = camel.createConsumerTemplate();
-        String body;
         try (QueueReader reader = QueueReader.builder()
                 .recipientKey("downstream-2026", KEYS.recipient.getPrivate())
                 .trustedSigner("connector-2026",
@@ -478,41 +444,29 @@ class PolarisIT
                 .keyProvider(runtime.keys().wrap())
                 .build())
         {
-            while ((body = consumer.receiveBody("seda:sdh-polaris", 1000,
-                    String.class)) != null)
-            {
-                messages.add(reader.decode(body.getBytes(UTF_8)));
-            }
-            List<RecordStored> records = messages.stream()
-                    .filter(RecordStored.class::isInstance)
-                    .map(RecordStored.class::cast).toList();
-            assertThat(messages.stream().filter(FileStarted.class::isInstance))
-                    .hasSize(2);
+            List<ConnectorMessage> messages =
+                    ItSupport.drain(camel, OUTPUT, reader);
+            List<RecordSplit> records = ItSupport.of(messages,
+                    RecordSplit.class);
+            assertThat(ItSupport.of(messages, ItemSplit.class))
+                    .extracting(ItemSplit::itemId)
+                    .containsExactly(good.itemId(), bad.itemId());
             assertThat(records).hasSize(30);
-            for (RecordStored record : records)
-            {
-                assertThat(new String(reader.readRecord(record, 1 << 20),
-                        UTF_8)).isEqualTo(csvRowJson(
-                                rows.get((int) record.seq())));
-            }
-            FileCompleted done = messages.stream()
-                    .filter(FileCompleted.class::isInstance)
-                    .map(FileCompleted.class::cast).findFirst().orElseThrow();
-            assertThat(new String(landing.restore(done.itemId()), UTF_8))
+            ItSupport.assertSplitRecords(reader, records, header, rows);
+            assertThat(new String(landing.restore(good.itemId()), UTF_8))
                     .isEqualTo(file.toString());
 
-            // Admin status reads the checkpoint through its own REST client,
-            // while the connector holds the lease.
+            // Admin status reads the item rows, while the stage runs.
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             List<String> args = new ArrayList<>(List.of("status"));
             CONFIG.forEach((key, value) -> args.add("--" + key + "=" + value));
-            int status = AdminCli.run(args, new PrintStream(out, true, UTF_8),
+            int status = SplitAdmin.cli().run(args,
+                    new PrintStream(out, true, UTF_8),
                     new PrintStream(out, true, UTF_8),
                     Map.of(AdminCli.OPERATOR_ENV, "polaris-it"));
             assertThat(status).as(out.toString(UTF_8)).isZero();
             assertThat(out.toString(UTF_8))
-                    .containsPattern("checkpoint: +item .+ FAILED \\(csv\\)")
-                    .containsPattern("inbox: +no items waiting");
+                    .containsPattern("items: +.*1 FAILED");
 
             // Maintenance through the REST catalog, between files.
             {
@@ -540,12 +494,7 @@ class PolarisIT
                         .as("30 records in batches of 7").isEqualTo(5);
                 assertThat(report.orphansDeleted()).isEqualTo(1);
                 assertThat(keys(dataPrefix)).doesNotContain(stray);
-                for (RecordStored record : records)
-                {
-                    assertThat(new String(reader.readRecord(record,
-                            1 << 20), UTF_8)).isEqualTo(csvRowJson(
-                                    rows.get((int) record.seq())));
-                }
+                ItSupport.assertSplitRecords(reader, records, header, rows);
                 Report purge = new TableMaintenance(ItSupport.committer(),
                         MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))

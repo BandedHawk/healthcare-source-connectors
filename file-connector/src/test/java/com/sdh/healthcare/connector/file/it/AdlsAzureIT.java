@@ -49,7 +49,8 @@ import org.springframework.test.context.DynamicPropertySource;
  * @since 0.1.0
  */
 @EnabledIfEnvironmentVariable(named = "SDH_ADLS_ACCOUNT", matches = ".+")
-@SpringBootTest(properties = "camel.main.run-controller=false")
+@SpringBootTest(properties = {"camel.main.run-controller=false",
+        "sdh.split.autostart=false"})
 @Import(ObjectStoreItBase.Overrides.class)
 class AdlsAzureIT extends ObjectStoreItBase
 {

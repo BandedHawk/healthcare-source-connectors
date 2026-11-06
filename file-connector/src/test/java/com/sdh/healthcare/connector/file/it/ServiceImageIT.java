@@ -18,7 +18,7 @@ import org.testcontainers.images.builder.ImageFromDockerfile;
 /**
  * The service images (design §14.1): each application's {@code Dockerfile}
  * from its packaged jar. Full Ubuntu/Temurin images for our own hosted
- * service, with a shell (and, for the splitter, {@code sdh-admin}); not
+ * service, with a shell (and, for the stages, {@code sdh-admin}); not
  * distributed to customers.
  *
  * @author Jonas Barnett
@@ -65,12 +65,13 @@ class ServiceImageIT extends ContainerImageItBase
      * {@inheritDoc}
      */
     @Override
-    String admin(String... args) throws Exception
+    String admin(GenericContainer<?> container, String... args)
+            throws Exception
     {
         List<String> command = new ArrayList<>(
                 List.of("env", "SDH_OPERATOR=it-operator", "sdh-admin"));
         command.addAll(List.of(args));
-        return exec(app, command.toArray(String[]::new));
+        return exec(container, command.toArray(String[]::new));
     }
 
     /**

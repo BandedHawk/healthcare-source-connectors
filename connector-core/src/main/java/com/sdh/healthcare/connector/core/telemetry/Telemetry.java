@@ -158,6 +158,7 @@ public final class Telemetry
      * Creates the tracer, the event logger and the metrics.
      *
      * @param openTelemetry the OpenTelemetry instance to record with
+     * @param flush         exports what is buffered
      */
     private Telemetry(OpenTelemetry openTelemetry, Runnable flush)
     {

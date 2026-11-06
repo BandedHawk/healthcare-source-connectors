@@ -83,7 +83,7 @@ class CamelMessagePublisherTest
                     camel, QueueType.CAMEL, "direct:broken"))
             {
                 CompletableFuture<Void> sent = broken.publish(
-                        new OutboundMessage("x", MessageType.FILE_STARTED,
+                        new OutboundMessage("x", MessageType.ITEM_LANDED,
                                 file, file.toString(), new byte[0]));
                 assertThatThrownBy(sent::get)
                         .isInstanceOf(ExecutionException.class)

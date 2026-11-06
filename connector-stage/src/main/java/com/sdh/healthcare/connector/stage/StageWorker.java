@@ -179,6 +179,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * @param stored   the registry's row, when stored before
      * @param version  the processor's version for it, when claimed or
      *                 stored before by another worker
+     * @param <O>      the processor's output
      */
     private record Result<O>(Pending pending, Found found,
             StageOutput<O> output, StageRegistry.Stored stored,

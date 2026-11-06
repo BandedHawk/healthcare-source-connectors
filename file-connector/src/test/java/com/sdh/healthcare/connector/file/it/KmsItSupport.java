@@ -114,8 +114,8 @@ final class KmsItSupport
         byte[] body = new MessageSealer(material.signer(),
                 material.signerKid(), material.recipient(),
                 material.recipientKid())
-                .seal(new ConnectorMessage.FileStarted(itemId, "csv", 42,
-                        Instant.now(), "file-connector"));
+                .seal(new ConnectorMessage.ItemConverted(itemId, "claims",
+                        42, 0, Instant.now()));
         ConnectorMessage opened = new MessageOpener(
                 Map.of("downstream-2026", keys.recipient.getPrivate()),
                 Map.of("connector-kms", (ECPublicKey) signingPublic))

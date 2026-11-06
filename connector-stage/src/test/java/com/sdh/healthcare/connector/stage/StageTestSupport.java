@@ -12,7 +12,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
@@ -241,8 +241,8 @@ final class StageTestSupport
      */
     static BrokerMessage total(UUID itemId, long records)
     {
-        return received(new FileCompleted(itemId, records, 0, 100, "digest",
-                Instant.EPOCH, Instant.EPOCH));
+        return received(new ItemConverted(itemId, "test", records, 0,
+                Instant.EPOCH));
     }
 
     /**
@@ -317,7 +317,7 @@ final class StageTestSupport
             {
                 case RecordStored stored -> new StageInput.RecordInput(
                         stored.recordId(), stored.itemId(), stored.seq());
-                case FileCompleted completed -> new StageInput.ItemTotal(
+                case ItemConverted completed -> new StageInput.ItemTotal(
                         completed.itemId(), completed.recordCount());
                 default -> new StageInput.Unwanted("wrong_type");
             };
@@ -368,9 +368,8 @@ final class StageTestSupport
         @Override
         public ConnectorMessage itemComplete(ItemProgress progress)
         {
-            return new FileCompleted(progress.itemId(), progress.done(),
-                    progress.failed(), 0, "digest", Instant.EPOCH,
-                    Instant.EPOCH);
+            return new ItemConverted(progress.itemId(), "test",
+                    progress.done(), progress.failed(), Instant.EPOCH);
         }
 
         @Override

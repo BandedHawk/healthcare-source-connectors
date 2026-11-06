@@ -4,43 +4,45 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.file.admin;
+package com.sdh.healthcare.connector.stage.admin;
 
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
-import com.sdh.healthcare.connector.file.config.ConnectorProperties;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import java.io.PrintStream;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.ConfigurableApplicationContext;
 
 /**
- * Operator commands: {@code java -jar file-connector.jar admin <command> …}
- * (design §11.4).
+ * A stage's operator commands: {@code java -jar <stage>.jar admin <command>
+ * …} (design §11.4).
  *
- * <p>Uses the connector's own configuration (application.yml, environment,
+ * <p>Uses the stage's own configuration (application.yml, environment,
  * {@code SPRING_APPLICATION_JSON}, {@code --a.b=c} overrides) but starts
- * none of the connector: no Camel, no lease, no writes. Every command emits
- * an {@code sdh.audit.admin.<command>} event naming the operator, which is
+ * none of the stage: no Camel, no lease, no writes. Every command emits an
+ * {@code sdh.audit.admin.<command>} event naming the operator, which is
  * required: {@code --operator <name>} or {@code $SDH_OPERATOR}. The option
  * is for {@code kubectl exec}, which can't set an environment variable,
  * into an image with no shell or {@code env} (design §14.3).
  *
  * <p>Exit status: 0 done, 1 failed, 2 usage error.
  *
+ * @param <P> the stage's settings
+ * @param <C> what its commands read from
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class AdminCli
+public final class AdminCli<P, C extends AutoCloseable>
 {
 
     /** The environment variable naming the operator. */
@@ -59,42 +61,64 @@ public final class AdminCli
     private static final Pattern OPERATOR =
             Pattern.compile("[A-Za-z0-9._@+-]{1,128}");
 
-    /** Not instantiable. */
-    private AdminCli()
+    /** What the stage is, for usage and telemetry. */
+    private final Stage<P, C> stage;
+
+    /** The commands, by name. */
+    private final Map<String, AdminCommand<C>> commands =
+            new LinkedHashMap<>();
+
+    /**
+     * What a stage gives its CLI.
+     *
+     * @param jar           the stage's jar, for the usage text, such as
+     *                      {@code file-connector.jar}
+     * @param service       the service name audit events are sent under
+     * @param configuration a class that binds the stage's settings
+     *                      ({@code @EnableConfigurationProperties}) and
+     *                      nothing else
+     * @param settings      the settings' class
+     * @param telemetry     the telemetry settings within them
+     * @param context       opens what the commands read from
+     * @param <P>           the stage's settings
+     * @param <C>           what its commands read from
+     */
+    public record Stage<P, C>(String jar, String service,
+            Class<?> configuration, Class<P> settings,
+            Function<P, CommonSettings.Telemetry> telemetry,
+            Function<P, C> context)
     {
     }
 
     /**
-     * Runs a command and exits with its status.
+     * Creates the CLI.
      *
-     * @param args the command and its options
+     * @param stage    what the stage is
+     * @param commands its commands
      */
-    public static void main(String[] args)
+    public AdminCli(Stage<P, C> stage, List<AdminCommand<C>> commands)
     {
-        System.exit(run(Arrays.asList(args), System.out, System.err,
-                System.getenv()));
+        this.stage = stage;
+        for (AdminCommand<C> command : commands)
+        {
+            this.commands.put(command.name(), command);
+        }
     }
 
     /**
      * Runs a command.
      *
-     * @param args the command and its options
-     * @param out where results go
-     * @param err where errors and usage go
-     * @param env the environment
+     * @param args the command and its options, after {@code admin}
+     * @param out  where results go
+     * @param err  where errors and usage go
+     * @param env  the environment
      * @return the exit status: 0 done, 1 failed, 2 usage error
      */
-    public static int run(List<String> args, PrintStream out,
-            PrintStream err, Map<String, String> env)
+    public int run(List<String> args, PrintStream out, PrintStream err,
+            Map<String, String> env)
     {
-        Map<String, AdminCommand> commands = new LinkedHashMap<>();
-        for (AdminCommand known : List.of(new RestoreCommand(),
-                new DecryptFallbackCommand(env), new StatusCommand()))
-        {
-            commands.put(known.name(), known);
-        }
         AdminArgs parsed;
-        AdminCommand command;
+        AdminCommand<C> command;
         String operator;
         try
         {
@@ -112,6 +136,7 @@ public final class AdminCli
             }
             parsed = AdminArgs.parse(args, command.flags());
             Set<String> allowed = new HashSet<>(command.options());
+            allowed.addAll(command.flags());
             allowed.add(OPERATOR_OPTION);
             parsed.allowOnly(allowed);
             operator = parsed.option(OPERATOR_OPTION)
@@ -137,9 +162,9 @@ public final class AdminCli
         try (ConfigurableApplicationContext spring =
                         configuration(parsed.configArgs());
                 AdminTelemetry telemetry = AdminTelemetry.install(
-                        spring.getBean(ConnectorProperties.class));
-                AdminContext context = new AdminContext(
-                        spring.getBean(ConnectorProperties.class)))
+                        stage.telemetry().apply(settings(spring)),
+                        stage.service());
+                C context = stage.context().apply(settings(spring)))
         {
             try
             {
@@ -159,7 +184,7 @@ public final class AdminCli
                         .with(Attr.RESULT, "failed")
                         .with(Attr.REASON,
                                 failure.getClass().getSimpleName()));
-                if (!(failure instanceof StatusCommand.PartialStatusException))
+                if (!(failure instanceof StatusParts.Unavailable))
                 {
                     err.println("error: " + failure.getClass().getSimpleName()
                             + ": " + failure.getMessage());
@@ -177,18 +202,29 @@ public final class AdminCli
     }
 
     /**
-     * The connector's configuration, bound exactly as the connector binds
-     * it, in a context that contains nothing else. Logging is quiet apart
-     * from audit events, so command output stays readable.
+     * The stage's settings, from the configuration.
+     *
+     * @param spring the configuration
+     * @return the settings
+     */
+    private P settings(ConfigurableApplicationContext spring)
+    {
+        return spring.getBean(stage.settings());
+    }
+
+    /**
+     * The stage's configuration, bound exactly as the stage binds it, in a
+     * context that contains nothing else. Logging is quiet apart from audit
+     * events, so command output stays readable.
      *
      * @param configArgs the {@code --a.b=c} overrides
      * @return the running context
      */
-    static ConfigurableApplicationContext configuration(
+    private ConfigurableApplicationContext configuration(
             List<String> configArgs)
     {
         SpringApplication application =
-                new SpringApplication(AdminConfiguration.class);
+                new SpringApplication(stage.configuration());
         application.setWebApplicationType(WebApplicationType.NONE);
         application.setBannerMode(Banner.Mode.OFF);
         application.setLogStartupInfo(false);
@@ -207,32 +243,17 @@ public final class AdminCli
      *
      * @return the text
      */
-    static String usage()
+    public String usage()
     {
-        return String.join("\n\n",
-                "usage: java -jar file-connector.jar admin <command>"
-                        + " [options] [--sdh.some.setting=value ...]\n"
-                        + "Requires --" + OPERATOR_OPTION + " <name> or $"
-                        + OPERATOR_ENV
-                        + " (who is running it; recorded in the audit"
-                        + " event).\n"
-                        + "Uses the connector's configuration; --a.b=c"
-                        + " arguments override it.",
-                RestoreCommand.USAGE, DecryptFallbackCommand.USAGE,
-                StatusCommand.USAGE);
-    }
-
-    /**
-     * Binds {@code sdh.*} and nothing else: not a component, so the
-     * connector's own scan never picks it up.
-     */
-    @EnableConfigurationProperties(ConnectorProperties.class)
-    static class AdminConfiguration
-    {
-
-        /** Created by Spring. */
-        AdminConfiguration()
-        {
-        }
+        List<String> parts = new ArrayList<>();
+        parts.add("usage: java -jar " + stage.jar() + " admin <command>"
+                + " [options] [--sdh.some.setting=value ...]\n"
+                + "Requires --" + OPERATOR_OPTION + " <name> or $"
+                + OPERATOR_ENV
+                + " (who is running it; recorded in the audit event).\n"
+                + "Uses the stage's configuration; --a.b=c arguments"
+                + " override it.");
+        commands.values().forEach(command -> parts.add(command.usage()));
+        return String.join("\n\n", parts);
     }
 }

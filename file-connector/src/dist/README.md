@@ -39,9 +39,9 @@ The container image is signed in its registry, and its software bill of material
 is attached as a signed attestation:
 
 ```sh
-cosign verify --key cosign.pub --insecure-ignore-tlog=true <registry>/file-connector@sha256:<digest>
+cosign verify --key cosign.pub --insecure-ignore-tlog=true <registry>/split-stage@sha256:<digest>
 cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --type cyclonedx \
-  <registry>/file-connector@sha256:<digest>
+  <registry>/split-stage@sha256:<digest>
 ```
 
 Signatures aren't recorded in Sigstore's public transparency log, so `--insecure-ignore-tlog=true` is expected; the
@@ -81,14 +81,14 @@ variables, never in the file:
 Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` becomes `SDH_LEASE_JDBC_URL`) or as an argument (`--sdh.lease.jdbc.url=…`).
 
 Records are stored as split, in their original form. Conversion to JSON and the producer's final results
-(`sdh.results`) move to the convert stage, which follows in a later release.
+(`sdh.results`) are the convert stage's (the `convert-stage` distribution), which reads what this stage sends.
 
 ## Run on a host
 
 ```sh
 bin/file-connector                         # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/file-connector        # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, decrypt-fallback
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The connector exits with
@@ -99,7 +99,7 @@ status 70 on conditions it can't safely continue from, and resumes where it stop
 From this directory:
 
 ```sh
-docker build -f container/Dockerfile -t <registry>/file-connector:<version> .
+docker build -f container/Dockerfile -t <registry>/split-stage:<version> .
 ```
 
 The default base image is `gcr.io/distroless/java25-debian13:nonroot`, a Java 25 runtime with no shell or package
@@ -140,8 +140,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: file-connector }
 spec:
-  replicas: 1                          # one connector per intake
-  strategy: { type: Recreate }
+  replicas: 2                          # any number: items are split in parallel
+  strategy: { type: Recreate }         # no two builds at once: a record received again under another is checked again
   selector: { matchLabels: { app: file-connector } }
   template:
     metadata: { labels: { app: file-connector } }
@@ -154,7 +154,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: file-connector
-          image: <registry>/file-connector:<version>
+          image: <registry>/split-stage:<version>
           env:
             - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/" }
           envFrom:
@@ -186,7 +186,8 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 ```
 
 `--operator` names who is running the command, for the audit log; on a host, `$SDH_OPERATOR` does the same.
-`restore --file-id <id> --to /tmp` decrypts a landed item into the pod's `/tmp`. `kubectl cp` can't copy out of this
+`status` shows the duties lease and the items by state; `status --item <id>` shows one item's checkpoint.
+`restore --item-id <id> --to /tmp` decrypts a landed item into the pod's `/tmp`. `kubectl cp` can't copy out of this
 image, because it needs `tar`; read it through a debug container instead (below), from `/proc/1/root/tmp/<id>`,
 and delete it when you're done.
 

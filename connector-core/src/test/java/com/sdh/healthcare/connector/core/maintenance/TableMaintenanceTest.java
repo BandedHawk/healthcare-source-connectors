@@ -20,6 +20,7 @@ import com.sdh.healthcare.connector.core.TestPostgres;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
+import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
@@ -393,6 +394,53 @@ class TableMaintenanceTest
         assertThat(snapshots(table))
                 .as("nothing to delete → no empty snapshot")
                 .isEqualTo(snapshotCount);
+    }
+
+    /**
+     * Retention removes the files at once on a table the stages share too,
+     * whose maintenance commits through a {@link LeasedCommitter}: that
+     * committer adds no snapshot for an empty change, so the marker that
+     * lets the delete expire must be a snapshot of its own.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void retentionRemovesTheFilesAtOnceUnderTheStagesCommitter()
+            throws Exception
+    {
+        Table table = records();
+        batch(table, OLD_DAY, 2);
+        batch(table, RECENT_DAY, 2);
+        int oldDay = (int) OLD_DAY.atOffset(ZoneOffset.UTC).toLocalDate()
+                .toEpochDay();
+        String oldFile = files(table).stream()
+                .filter(file -> day(file) == oldDay).findFirst().orElseThrow()
+                .location();
+        LeasedCommitter stages = new LeasedCommitter(new LeaseToken()
+        {
+            @Override
+            public long epoch()
+            {
+                return epoch;
+            }
+
+            @Override
+            public void checkHeld()
+            {
+            }
+        });
+
+        TableMaintenance.Report report = new TableMaintenance(stages,
+                settings(Duration.ofDays(7), 10, 5, 8L << 30,
+                        Duration.ofDays(3)), Clock.systemUTC())
+                .run(table, INGESTED_AT, Optional.of(Duration.ofDays(5)),
+                        false);
+
+        assertThat(report.retentionDeletedFiles()).isEqualTo(1);
+        assertThat(rows(table)).hasSize(2);
+        assertThat(Path.of(oldFile))
+                .as("PHI removed physically, not only from metadata")
+                .doesNotExist();
     }
 
     /**

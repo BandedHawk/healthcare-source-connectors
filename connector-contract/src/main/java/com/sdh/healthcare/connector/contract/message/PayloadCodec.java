@@ -8,8 +8,6 @@ package com.sdh.healthcare.connector.contract.message;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.ContractVersion;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReceived;
@@ -64,13 +62,6 @@ public final class PayloadCodec
         payload.put("itemId", message.itemId().toString());
         switch (message)
         {
-            case FileStarted started ->
-            {
-                payload.put("format", started.format());
-                payload.put("itemSize", started.itemSize());
-                payload.put("startedAt", started.startedAt().toString());
-                payload.put("connectorId", started.connectorId());
-            }
             case RecordInStorage record ->
             {
                 payload.put("recordId", record.recordId());
@@ -118,17 +109,6 @@ public final class PayloadCodec
                     putIfSet(payload, "messageReplaces",
                             split.messageReplaces());
                 }
-            }
-            case FileCompleted completed ->
-            {
-                payload.put("recordCount", completed.recordCount());
-                payload.put("failedRecordCount",
-                        completed.failedRecordCount());
-                payload.put("itemSize", completed.itemSize());
-                payload.put("itemDigest", completed.itemDigest());
-                payload.put("startedAt", completed.startedAt().toString());
-                payload.put("completedAt",
-                        completed.completedAt().toString());
             }
             case ItemLanded landed ->
             {
@@ -239,12 +219,6 @@ public final class PayloadCodec
         ConnectorMessage message =
                 switch (type)
                 {
-                    case FILE_STARTED -> new FileStarted(
-                            itemId,
-                            text(payload, "format"),
-                            number(payload, "itemSize"),
-                            Instant.parse(text(payload, "startedAt")),
-                            text(payload, "connectorId"));
                     case RECORD_STORED -> new RecordStored(
                             text(payload, "recordId"),
                             itemId,
@@ -272,14 +246,6 @@ public final class PayloadCodec
                             storage(payload),
                             origin(payload),
                             position(payload, "errorLine", "errorColumn"));
-                    case FILE_COMPLETED -> new FileCompleted(
-                            itemId,
-                            number(payload, "recordCount"),
-                            number(payload, "failedRecordCount"),
-                            number(payload, "itemSize"),
-                            text(payload, "itemDigest"),
-                            Instant.parse(text(payload, "startedAt")),
-                            Instant.parse(text(payload, "completedAt")));
                     case ITEM_LANDED -> new ItemLanded(
                             itemId,
                             text(payload, "intake"),
@@ -547,8 +513,8 @@ public final class PayloadCodec
      * Reads a record's origin from the payload's {@code origin} field.
      *
      * @param payload the payload's fields
-     * @return the origin; null if the message has none (a connector before
-     *         contract 2.1) or it is incomplete
+     * @return the origin; null if the message has none (the splitter gave
+     *         none) or it is incomplete
      */
     @SuppressWarnings("unchecked")
     private static RecordOrigin origin(Map<String, Object> payload)

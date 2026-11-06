@@ -84,6 +84,12 @@ import org.slf4j.LoggerFactory;
 public final class TableMaintenance
 {
 
+    /**
+     * The snapshot summary key on the marker snapshot a purge commits, for
+     * audit.
+     */
+    public static final String PURGE_MARKER = "sdh.purge-marker";
+
     /** Logs what each run did, without PHI. */
     private static final Logger LOG = LoggerFactory.getLogger(
             TableMaintenance.class);
@@ -276,12 +282,13 @@ public final class TableMaintenance
         {
             // Iceberg's expiry deletes a file only once the snapshot that
             // removed it has expired, and the current snapshot never
-            // expires. A fenced marker commit makes the delete non-current,
-            // so it (and every snapshot before it) can be expired now and
-            // the PHI files deleted in this run.
-            committer.commit(table, transaction ->
-            {
-            });
+            // expires. A marker snapshot makes the delete non-current, so
+            // it (and every snapshot before it) can be expired now and the
+            // PHI files deleted in this run. The marker is an empty append
+            // of its own: a stage's committer adds no snapshot for an empty
+            // change, as the fenced one does.
+            committer.commit(table, transaction -> transaction
+                    .newFastAppend().set(PURGE_MARKER, "retention").commit());
             purgeBefore = table.currentSnapshot().timestampMillis() + 1;
         }
 

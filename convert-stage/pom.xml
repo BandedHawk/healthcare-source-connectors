@@ -94,6 +94,147 @@
           </execution>
         </executions>
       </plugin>
+      <!-- Distribution kit (design §14.3), as for file-connector: the jar, attribution, configuration, the start
+           and admin scripts, the customer Dockerfile and the zstd/snappy native libraries for both architectures.
+           Built as a directory on every package (the customer image is built from it); -Pdist adds the tarball. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>packaging-extras</id>
+            <phase>generate-resources</phase>
+            <goals><goal>copy</goal></goals>
+            <configuration>
+              <!-- What repackaging adds that isn't a dependency: Spring Boot's jar mode tools (the service image's
+                   Dockerfile extracts its layers with them). Copied here only so the attribution step can read
+                   their license files (design §14.2); src/license/bundled-by-packaging.properties names them. -->
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.springframework.boot</groupId>
+                  <artifactId>spring-boot-jarmode-tools</artifactId>
+                  <version>${spring-boot.version}</version>
+                </artifactItem>
+              </artifactItems>
+              <outputDirectory>${project.build.directory}/packaging-extras</outputDirectory>
+            </configuration>
+          </execution>
+          <execution>
+            <id>dist-native-libraries</id>
+            <phase>prepare-package</phase>
+            <goals><goal>unpack-dependencies</goal></goals>
+            <configuration>
+              <includeArtifactIds>zstd-jni,snappy-java</includeArtifactIds>
+              <includes>linux/amd64/*.so,linux/aarch64/*.so,org/xerial/snappy/native/Linux/x86_64/*.so,org/xerial/snappy/native/Linux/aarch64/*.so</includes>
+              <outputDirectory>${project.build.directory}/dist-native</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <!-- SBOM of the jar (design §14.4), declared before the assembly so the kit can include it. -->
+      <plugin>
+        <groupId>org.cyclonedx</groupId>
+        <artifactId>cyclonedx-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>dist-dir</id>
+            <phase>package</phase>
+            <goals><goal>single</goal></goals>
+            <configuration>
+              <descriptors><descriptor>src/assembly/dist-dir.xml</descriptor></descriptors>
+              <attach>false</attach>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!-- The customer distribution tarball: target/convert-stage-<version>-dist.tar.gz (design §14.3). -->
+    <profile>
+      <id>dist</id>
+      <properties>
+        <!-- A license text that couldn't be fetched fails the build (design §14.2). -->
+        <license.strict>true</license.strict>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-assembly-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>dist-tarball</id>
+                <phase>package</phase>
+                <goals><goal>single</goal></goals>
+                <configuration>
+                  <descriptors><descriptor>src/assembly/dist.xml</descriptor></descriptors>
+                  <attach>false</attach>
+                  <tarLongFileMode>posix</tarLongFileMode>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <!-- The service and customer images, built into the sdh-it VM's Docker by scripts/build-image.sh from what this
+         build packaged (design §14.1, §14.3):
+         ./mvnw -Pimages -pl landing-connector,file-connector,convert-stage -am verify -DskipTests.
+         The VM is stopped afterwards unless -Dimages.stop-vm=false. For a release, scripts/sign-release.sh builds,
+         signs and pushes them (§14.4). -->
+    <profile>
+      <id>images</id>
+      <properties>
+        <license.strict>true</license.strict>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>customer-image</id>
+                <phase>verify</phase>
+                <goals><goal>exec</goal></goals>
+                <configuration>
+                  <executable>${maven.multiModuleProjectDirectory}/scripts/build-image.sh</executable>
+                  <arguments>
+                    <argument>${project.artifactId}</argument>
+                    <argument>customer</argument>
+                  </arguments>
+                  <environmentVariables>
+                    <SDH_SKIP_MAVEN>1</SDH_SKIP_MAVEN>
+                    <SDH_IT_STOP>false</SDH_IT_STOP>
+                  </environmentVariables>
+                </configuration>
+              </execution>
+              <execution>
+                <id>service-image</id>
+                <phase>verify</phase>
+                <goals><goal>exec</goal></goals>
+                <configuration>
+                  <executable>${maven.multiModuleProjectDirectory}/scripts/build-image.sh</executable>
+                  <arguments>
+                    <argument>${project.artifactId}</argument>
+                    <argument>service</argument>
+                  </arguments>
+                  <environmentVariables>
+                    <SDH_SKIP_MAVEN>1</SDH_SKIP_MAVEN>
+                    <SDH_IT_STOP>${images.stop-vm}</SDH_IT_STOP>
+                  </environmentVariables>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

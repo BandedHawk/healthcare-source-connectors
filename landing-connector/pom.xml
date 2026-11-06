@@ -267,9 +267,10 @@
       </build>
     </profile>
     <!-- The service and customer images, built into the sdh-it VM's Docker by scripts/build-image.sh from what this
-         build packaged (design §14.1, §14.3): ./mvnw -Pimages -pl landing-connector,file-connector -am verify
-         -DskipTests. The VM is stopped afterwards unless -Dimages.stop-vm=false. For a release, scripts/sign-release.sh
-         builds, signs and pushes them (§14.4). -->
+         build packaged (design §14.1, §14.3):
+         ./mvnw -Pimages -pl landing-connector,file-connector,convert-stage -am verify -DskipTests.
+         The VM is stopped afterwards unless -Dimages.stop-vm=false. For a release, scripts/sign-release.sh builds,
+         signs and pushes them (§14.4). -->
     <profile>
       <id>images</id>
       <properties>

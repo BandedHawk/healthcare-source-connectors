@@ -92,6 +92,14 @@ public record ConvertProperties(
             @DefaultValue("64MB") DataSize maxBytes, DataSize memory,
             @DefaultValue("true") boolean autostart)
     {
+
+        /**
+         * No options set is none, not null.
+         */
+        public Convert
+        {
+            options = options == null ? Map.of() : Map.copyOf(options);
+        }
     }
 
     /**

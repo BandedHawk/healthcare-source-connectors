@@ -1,0 +1,48 @@
+# A pipeline's convert stage: reads the split stage's records from split_records in the silver bucket, converts
+# each to JSON, stores it in records in the same bucket, sealed to the FHIR stage (the recipient), and announces it
+# on <pipeline>.records. Mounted from the ConfigMap convert-config, as the convert stage's README describes. ${...}
+# in capitals with a prefix are filled in by scripts/sandbox.sh; ${S3_SECRET_ACCESS_KEY} and
+# ${SDH_LEASE_JDBC_PASSWORD} are left for Spring, from the secret convert-env. Keys are in the secret
+# convert-keys, at /run/secrets.
+sdh:
+  connector-id: convert-${PIPELINE}
+  stage:
+    input:
+      type: kafka
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}&groupId=convert-${PIPELINE}"
+    output:
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}"
+    dlq:
+      type: kafka
+      uri: "kafka:${PIPELINE}.convert.dlq?brokers=${KAFKA_BROKERS}"
+    registry-schema: convert_${ICEBERG_PREFIX}
+  storage:
+    catalog-name: sdh
+    namespace: ${ICEBERG_PREFIX}
+    catalog:
+      type: jdbc
+      uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+      jdbc.user: convert_${ICEBERG_PREFIX}
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://sdh-silver/warehouse
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      # The convert stage's key may use only the silver bucket.
+      s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
+            access-key-id: convert-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+      client: { region: us-east-1 }
+  lease:
+    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: convert_${ICEBERG_PREFIX} }
+  crypto:
+    wrap-provider: vault-transit
+    sign-provider: vault-transit
+    vault: { address: "http://vault.sdh-infra.svc:8200", token-file: /run/secrets/vault-token }
+    keys:
+      records-kek: ${PIPELINE}-records
+      signing: { kid: convert-${PIPELINE}, key-ref: ${PIPELINE}-convert-signing }
+      recipient: { kid: fhir-${PIPELINE}, pem: /run/secrets/recipient.pem, sha256: "${RECIPIENT_SHA256}" }
+      inbox: { kid: convert-${PIPELINE}-inbox, pem: /run/secrets/inbox.pem }
+      landing-signer: { kid: splitter-${PIPELINE}, pem: /run/secrets/split-signer.pem }
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }

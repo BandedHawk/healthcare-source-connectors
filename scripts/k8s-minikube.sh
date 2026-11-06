@@ -65,10 +65,10 @@ k() { minikube -p "$PROFILE" kubectl -- -n "$NS" "$@"; }
 
 VERSION="$(cd "$ROOT" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
 if [[ "$VARIANT" == "service" ]]; then
-  IMAGE="sdh/file-connector-service:$VERSION"
+  IMAGE="sdh/split-stage-service:$VERSION"
   LANDING_IMAGE="sdh/landing-connector-service:$VERSION"
 else
-  IMAGE="sdh/file-connector:$VERSION"
+  IMAGE="sdh/split-stage:$VERSION"
   LANDING_IMAGE="sdh/landing-connector:$VERSION"
 fi
 if [[ "${SDH_K8S_SKIP_BUILD:-0}" != "1" ]]; then
@@ -178,7 +178,7 @@ k create secret generic file-connector-env \
   --from-literal=SDH_LEASE_JDBC_PASSWORD="sdh-k8s-postgres" \
   --from-literal=S3_SECRET_ACCESS_KEY="sdh-k8s-secret-key-0123456789" >/dev/null
 k create configmap file-connector-config --from-file=application.yml="$WORK/application.yml" >/dev/null
-yaml_block "$README" "<registry>/file-connector:<version>" "$IMAGE" > "$WORK/deployment.yaml"
+yaml_block "$README" "<registry>/split-stage:<version>" "$IMAGE" > "$WORK/deployment.yaml"
 [[ -s "$WORK/deployment.yaml" ]] || { echo "No yaml block in $README" >&2; exit 1; }
 if ! k apply -f "$WORK/deployment.yaml"; then
   fail "splitter README Deployment accepted under the restricted Pod Security Standard"
@@ -269,14 +269,14 @@ for p in "$POD" $(landing_pods); do no_phi "$p"; done
 echo ">> Operator commands through kubectl exec (README)"
 ADMIN=(java @/app/jvm.options @/app/container.options @/app/admin.args)
 status="$(k exec "$POD" -- "${ADMIN[@]}" status --operator k8s-operator 2>&1)"
-if grep -qE "lease: +file-connector held by .+, epoch 1," <<<"$status"; then
-  pass "admin status (lease held, epoch 1)"
+if grep -qE "duties: +split/file-connector/duties held by .+, epoch 1," <<<"$status"; then
+  pass "admin status (duties lease held, epoch 1)"
 else
   fail "admin status"; echo "$status" | tail -20
 fi
 bad_id="$(k logs "$POD" | sed -n 's/.*item\.failed item_id=\([0-9a-f-]*\).*/\1/p' | head -n 1)"
 [[ -n "$bad_id" ]] || bad_id="none"
-restore="$(k exec "$POD" -- "${ADMIN[@]}" restore --operator k8s-operator --file-id "$bad_id" --to /tmp 2>&1)"
+restore="$(k exec "$POD" -- "${ADMIN[@]}" restore --operator k8s-operator --item-id "$bad_id" --to /tmp 2>&1)"
 if grep -q "digest verified" <<<"$restore"; then pass "admin restore from landing"; else
   fail "admin restore from landing"; echo "$restore" | tail -20; fi
 k logs "$POD" | grep "admin.status operator=k8s-operator" >/dev/null \

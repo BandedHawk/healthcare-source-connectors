@@ -9,9 +9,9 @@ package com.sdh.healthcare.connector.contract.message;
 import java.util.Arrays;
 
 /**
- * The kinds of message the connectors publish. About a file, in the order
- * they happen: the file started, a record was stored or failed, and the
- * file completed. From a landing node to its splitter: an item was landed.
+ * The kinds of message the connectors publish. From a landing node to the
+ * split stage: an item was landed. Between the stages (STAGES.md §4): a
+ * record was split, stored or failed, and an item was split or converted.
  * To an intake's producer: an item was received, and its result. Each has
  * a fixed name used on the queue ({@link #wireName()}).
  *
@@ -21,17 +21,11 @@ import java.util.Arrays;
 public enum MessageType
 {
 
-    /** A file was picked up, or resumed with a new run. */
-    FILE_STARTED("file.started"),
-
     /** A record was stored. */
     RECORD_STORED("record.stored"),
 
     /** A record failed conversion, and was stored as split. */
     RECORD_FAILED("record.failed"),
-
-    /** Every record of a file was stored and published. */
-    FILE_COMPLETED("file.completed"),
 
     /** A landing node landed an item, for its splitter. */
     ITEM_LANDED("item.landed"),
@@ -73,7 +67,7 @@ public enum MessageType
     /**
      * The name used on the queue.
      *
-     * @return the name, such as {@code file.started}
+     * @return the name, such as {@code record.stored}
      */
     public String wireName()
     {

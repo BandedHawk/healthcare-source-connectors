@@ -11,9 +11,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileCompleted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.FileStarted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
@@ -23,7 +22,6 @@ import com.sdh.healthcare.connector.file.TestLanding;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.FatalExit;
-import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -39,7 +37,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.camel.CamelContext;
-import org.apache.camel.ConsumerTemplate;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.io.FileIO;
@@ -52,7 +49,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * The splitter on an object store other than S3 (design §8.1), with a
+ * The split stage on an object store other than S3 (design §8.1), with a
  * JDBC catalog and Postgres for the lease: items landed in the same store
  * are split, read back downstream through the store's own FileIO, restored
  * from landing, maintained, and no plaintext is anywhere in the bucket.
@@ -131,61 +128,25 @@ abstract class ObjectStoreItBase
         }
 
         /**
-         * Gives the connector its settings.
+         * Gives the split stage its settings.
          *
          * @param registry the Spring property registry
          */
         void register(DynamicPropertyRegistry registry)
         {
-            Map<String, String> settings = new LinkedHashMap<>();
-            settings.put("sdh.landing.intake", ItSupport.INTAKE);
-            settings.put("sdh.landing.queue-uri", landedQueue());
-            settings.put("sdh.landing.idle-wait", "200ms");
-            settings.put("sdh.split.format", "csv");
-            settings.put("sdh.split.options.csv.header", "true");
-            settings.put("sdh.storage.catalog-name", "sdh");
-            catalog.forEach((key, value) -> settings.put(
-                    "sdh.storage.catalog[" + key + "]", value));
-            settings.put("sdh.storage.commit.max-records", "7");
-            settings.put("sdh.lease.jdbc.url", postgres.getJdbcUrl());
-            settings.put("sdh.lease.jdbc.username", postgres.getUsername());
-            settings.put("sdh.lease.jdbc.password", postgres.getPassword());
-            settings.put("sdh.crypto.keystore.path", keys.keystore.toString());
-            settings.put("sdh.crypto.keystore.password",
-                    TestKeys.KS_PASSWORD);
-            settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
-            settings.put("sdh.crypto.keys.landed-items-kek", TestKeys.LANDED);
-            settings.put("sdh.crypto.keys.signing.kid", "connector-2026");
-            settings.put("sdh.crypto.keys.signing.pem",
-                    keys.signingPem.toString());
-            settings.put("sdh.crypto.keys.signing.passphrase",
-                    TestKeys.SIGNING_PASSPHRASE);
-            settings.put("sdh.crypto.keys.recipient.kid", "downstream-2026");
-            settings.put("sdh.crypto.keys.recipient.pem",
-                    keys.recipientPem.toString());
-            try
-            {
-                settings.put("sdh.crypto.keys.recipient.sha256",
-                        KeyMaterial.fingerprint(keys.recipient.getPublic()));
-            }
-            catch (Exception failure)
-            {
-                throw new IllegalStateException(failure);
-            }
-            ItSupport.splitterKeys(keys).forEach(settings::put);
-            settings.put("sdh.queue.type", "camel");
-            settings.put("sdh.queue.uri", "seda:" + queue + "?size=100000");
-            settings.forEach((key, value) -> registry.add(key, () -> value));
+            ItSupport.splitStage(keys, catalog, postgres.getJdbcUrl(),
+                    postgres.getUsername(), postgres.getPassword(), output())
+                    .forEach((key, value) -> registry.add(key, () -> value));
         }
 
         /**
-         * Where the splitter takes {@code item.landed} messages from.
+         * Where the split stage's messages go.
          *
-         * @return the queue URI
+         * @return the queue's endpoint
          */
-        String landedQueue()
+        String output()
         {
-            return "seda:" + queue + "-landed?size=1000";
+            return "seda:" + queue + "?size=100000";
         }
 
         /**
@@ -257,14 +218,9 @@ abstract class ObjectStoreItBase
         LandedItem good = landing.land(file.toString(), "good.csv");
         LandedItem bad = landing.land(header + "1," + MARKER
                 + ",\"never closed\n", "bad.csv");
-        landing.announce(camel, fixture.landedQueue(), good);
-        landing.announce(camel, fixture.landedQueue(), bad);
-        ItSupport.awaitSplit(runtime, 2, Duration.ofMinutes(2));
+        ItSupport.split(runtime, landing, FATAL, good, bad);
         assertThat(FATAL).isEmpty();
 
-        List<ConnectorMessage> messages = new ArrayList<>();
-        ConsumerTemplate consumer = camel.createConsumerTemplate();
-        String body;
         try (QueueReader reader = QueueReader.builder()
                 .recipientKey("downstream-2026",
                         fixture.keys().recipient.getPrivate())
@@ -275,27 +231,18 @@ abstract class ObjectStoreItBase
                 .keyProvider(runtime.keys().wrap())
                 .build())
         {
-            while ((body = consumer.receiveBody("seda:" + fixture.queue(),
-                    1000, String.class)) != null)
-            {
-                messages.add(reader.decode(body.getBytes(UTF_8)));
-            }
-            List<RecordStored> records = messages.stream()
-                    .filter(RecordStored.class::isInstance)
-                    .map(RecordStored.class::cast).toList();
-            assertThat(messages.stream().filter(FileStarted.class::isInstance))
-                    .hasSize(2);
+            List<ConnectorMessage> messages =
+                    ItSupport.drain(camel, fixture.output(), reader);
+            List<RecordSplit> records = ItSupport.of(messages,
+                    RecordSplit.class);
+            List<ItemSplit> items = ItSupport.of(messages, ItemSplit.class);
+            assertThat(items).extracting(ItemSplit::itemId)
+                    .containsExactly(good.itemId(), bad.itemId());
+            assertThat(items.get(1).failure().code())
+                    .isEqualTo("PARSE_UNTERMINATED_QUOTE");
             assertThat(records).hasSize(30);
-            for (RecordStored record : records)
-            {
-                assertThat(new String(reader.readRecord(record, 1 << 20),
-                        UTF_8)).isEqualTo(ItSupport.csvRowJson(
-                                rows.get((int) record.seq())));
-            }
-            FileCompleted done = messages.stream()
-                    .filter(FileCompleted.class::isInstance)
-                    .map(FileCompleted.class::cast).findFirst().orElseThrow();
-            assertThat(new String(landing.restore(done.itemId()), UTF_8))
+            ItSupport.assertSplitRecords(reader, records, header, rows);
+            assertThat(new String(landing.restore(good.itemId()), UTF_8))
                     .isEqualTo(file.toString());
 
             // Maintenance, between files: compaction, orphan cleanup where
@@ -332,12 +279,7 @@ abstract class ObjectStoreItBase
                     assertThat(report.orphansDeleted()).isEqualTo(1);
                     assertThat(list(dataPrefix)).doesNotContain(stray);
                 }
-                for (RecordStored record : records)
-                {
-                    assertThat(new String(reader.readRecord(record,
-                            1 << 20), UTF_8)).isEqualTo(ItSupport.csvRowJson(
-                                    rows.get((int) record.seq())));
-                }
+                ItSupport.assertSplitRecords(reader, records, header, rows);
                 TableMaintenance.Report purge = new TableMaintenance(
                         ItSupport.committer(), MaintenanceSettings.DEFAULT,
                         Clock.offset(Clock.systemUTC(), Duration.ofDays(3)))
