@@ -514,7 +514,7 @@ class PipelineDemo
                 event -> id.equals(event.get("item_id")), from, ITEM_LIMIT);
         say("Landed as item " + id + " and announced to the splitter");
         AuditEvent done = otlp.await(SPLITTER,
-                Set.of("file.completed", "item.failed"),
+                Set.of("item.completed", "item.failed"),
                 event -> id.equals(event.get("item_id")), from, ITEM_LIMIT);
         long millis = System.currentTimeMillis() - start;
         long failed = otlp.events().stream()

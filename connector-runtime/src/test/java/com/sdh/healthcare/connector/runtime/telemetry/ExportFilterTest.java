@@ -78,7 +78,7 @@ class ExportFilterTest
                     .emit();
             log.logRecordBuilder().setEventName("library.event")
                     .setBody("smith").emit();
-            log.logRecordBuilder().setEventName("sdh.audit.file.completed")
+            log.logRecordBuilder().setEventName("sdh.audit.item.completed")
                     .setBody("anything")
                     .setAttribute("sdh.item_id", "01a1")
                     .setAttribute("file.path", "/data/inbound/smith-john.csv")
@@ -87,12 +87,12 @@ class ExportFilterTest
                     .satisfies(record ->
                     {
                         assertThat(record.getEventName())
-                                .isEqualTo("sdh.audit.file.completed");
+                                .isEqualTo("sdh.audit.item.completed");
                         assertThat(record.getAttributes().asMap().keySet())
                                 .extracting(AttributeKey::getKey)
                                 .containsExactly("sdh.item_id");
                         assertThat(record.getBodyValue().asString())
-                                .isEqualTo("file.completed");
+                                .isEqualTo("item.completed");
                     });
         }
     }

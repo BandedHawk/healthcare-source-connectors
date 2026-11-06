@@ -1675,7 +1675,7 @@ These never fail a file. They stop the process, which then restarts from the che
 2. Already-committed and published records stay where they are, each tied to its `item_id`.
 3. The whole original is archived into `failed_files`. It goes to the local fallback `failed/<itemId>.enc` instead (§11.3) when the file is over `max-item-bytes`, when `FAILING` couldn't be recorded, or when the archive fails (storage or KMS unreachable). If even the fallback can't be written, the original is kept and the error propagates.
 4. Announce every committed record: publish `record.stored` for any committed record not yet acknowledged. Once a file is `FAILED` no restart will republish it, so it must happen here. This is skipped when the broker itself is the failure, and a `publish.unannounced` range is logged instead. Also, when splitting stops, the in-flight publish of the last committed batch is now awaited rather than cancelled. A test that forces this race shows that, without the fix, the last batch was stored but never announced.
-5. Write `failed/<itemId>.json`, delete the original, log `file.failed` (itemId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the `sdh.audit.file.failed` event and `sdh.items.failed` metric report it (§12). Attempt count isn't recorded yet.
+5. Write `failed/<itemId>.json`, delete the original, log `item.failed` (itemId, stage, offset, last committed seq, error code, where it was archived), and commit `FAILED`. No `file.failed` message is published (§10.1); the `sdh.audit.item.failed` event and `sdh.items.failed` metric report it (§12). Attempt count isn't recorded yet.
 
 ### 11.3 Local fallback format
 
@@ -1736,17 +1736,17 @@ Other spans:
 Root spans carry `sdh.item_id` and `sdh.result`. A failed file's root span has status ERROR with `sdh.error_code` and `sdh.stage`. **Exceptions are never recorded on spans:** their messages could hold PHI, so only the exception class name (`sdh.reason`) is kept. Sampling is 100%: one trace per file is cheap.
 
 **Audit events:** OTel log records with `event.name = sdh.audit.<event>`, also written to the console log (`sdh.audit` logger).
-- **File events:**
+- **Item events:**
   - `file.discovered` (bytes);
-  - `file.started` (file ID, format, bytes);
-  - `file.resumed` (next seq, offset);
+  - `item.started` (item ID, format, bytes);
+  - `item.resumed` (next seq, offset);
   - `batch.committed` (last seq, offset, count);
   - `publish.republish`;
-  - `file.split`;
+  - `item.split`;
   - `file.archived` (table, bytes);
-  - `file.completed` (records, bytes);
-  - `file.failing` and `file.failed` (stage, error code, offset, last seq, where archived);
-  - `archive.unavailable`, `publish.unannounced`, `file.failed_unarchived`, `file.abandoned`.
+  - `item.completed` (records, bytes);
+  - `item.failing` and `item.failed` (stage, error code, offset, last seq, where archived);
+  - `archive.unavailable`, `publish.unannounced`, `file.failed_unarchived`, `item.abandoned`.
 - **Lease and process events:**
   - `lease.acquired`, `lease.fenced_table` (epoch, table), `lease.lost` (reason `EXPIRED`, `TAKEN_OVER` or `FENCED`), `lease.released`;
   - `connector.started`, `connector.fatal` (reason).
@@ -2539,7 +2539,7 @@ A demonstration of the pipeline at work, for showing people rather than testing.
 - the splitter's result: its state, record counts or failure, the time from delivery to finished, and whether it was as expected;
 - `[otel trace]`: each trace as a tree with durations and attributes, `[otel log]`: the audit events as OpenTelemetry log records, and `[otel metrics]` every 15 s: the `sdh.*` metrics as running totals.
 
-The apps export over OTLP/HTTP, through the production filters, to a receiver in the demo's JVM (`OtlpReceiver`), so what is shown is exactly what a collector would get. The demo follows each item by its audit events: the landing node's `item.landed` and `item.announced`, then the splitter's `file.completed` or `file.failed`. The two apps trace an item separately, with no shared trace; the item ID joins them.
+The apps export over OTLP/HTTP, through the production filters, to a receiver in the demo's JVM (`OtlpReceiver`), so what is shown is exactly what a collector would get. The demo follows each item by its audit events: the landing node's `item.landed` and `item.announced`, then the splitter's `item.completed` or `item.failed`. The two apps trace an item separately, with no shared trace; the item ID joins them.
 
 **At the end:** a summary table, then the downstream read-back for each pipeline. Every message is decoded with `connector-queue-reader` (decrypted, signature checked), and every record is read back out of the Iceberg tables. Converted documents are pretty-printed to `target/demo/output/<pipeline>/<item>/record-<n>.json`, with a 16-line excerpt of each on the console; unconverted ones are kept in their original form. Repeated message IDs are dropped, as a consumer would: a failing item re-announces its committed records (`publish.republish`), which is at-least-once delivery working as designed. A record with the same content as an earlier one has the same message ID (`messageId = recordId`, §10.1) and reaches downstream once: Artemis drops the repeat by `_AMQ_DUPL_ID`; Kafka delivers it and the consumer drops it. The count of distinct messages is checked against what the items should send.
 

@@ -553,9 +553,9 @@ class FullStackIT
         }
         assertThat(exported).contains("\"ingest.item\"", "\"split.batch\"",
                 "\"storage.commit\"", "\"publish.batch\"", "\"maintenance\"",
-                "sdh.audit.inbox.added", "sdh.audit.file.started",
-                "sdh.audit.batch.committed", "sdh.audit.file.completed",
-                "sdh.audit.file.failed", "sdh.audit.lease.acquired",
+                "sdh.audit.inbox.added", "sdh.audit.item.started",
+                "sdh.audit.batch.committed", "sdh.audit.item.completed",
+                "sdh.audit.item.failed", "sdh.audit.lease.acquired",
                 "sdh.audit.maintenance.retention",
                 "sdh.records.stored", "sdh.items.completed",
                 "sdh.items.failed", "sdh.commit.duration");
