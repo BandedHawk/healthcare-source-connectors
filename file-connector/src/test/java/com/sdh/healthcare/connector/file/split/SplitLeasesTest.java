@@ -16,6 +16,7 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
+import com.sdh.healthcare.connector.stage.StageDuties;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.time.Clock;
 import java.time.Duration;
@@ -31,7 +32,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests for the split stage's leases, on a real Postgres: one pod per item
- * ({@link ItemSplitter}) and one pod for the duties ({@link SplitDuties}).
+ * ({@link ItemSplitter}) and one pod for the duties ({@link StageDuties}).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -122,8 +123,8 @@ class SplitLeasesTest
     @Test
     void oneDutiesPodAtATimeWithTakeOver() throws Exception
     {
-        SplitDuties first = duties("pod-a");
-        SplitDuties second = duties("pod-b");
+        StageDuties first = duties("pod-a");
+        StageDuties second = duties("pod-b");
         first.start();
         awaitStarted(1);
         second.start();
@@ -160,9 +161,9 @@ class SplitLeasesTest
      * @param pod the pod's name
      * @return the duties, not started
      */
-    SplitDuties duties(String pod)
+    StageDuties duties(String pod)
     {
-        return new SplitDuties(leases, "test", TIMINGS, null,
+        return new StageDuties(leases, "split", "test", TIMINGS, null,
                 Duration.ofMillis(100), (committer, exit) ->
                 {
                     started.add(pod);

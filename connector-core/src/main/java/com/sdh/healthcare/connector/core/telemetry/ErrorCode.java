@@ -126,6 +126,13 @@ public enum ErrorCode
 
     // Splitting (design §6)
 
+    /**
+     * A record the splitter couldn't parse, with a code this version
+     * doesn't know: sent by a newer splitter. The record is stored as split
+     * and reported as failed like any other (STAGES.md §9).
+     */
+    PARSE_UNRECOGNISED,
+
     /** A CSV quoted field that is never closed. */
     PARSE_UNTERMINATED_QUOTE,
 
@@ -235,17 +242,16 @@ public enum ErrorCode
     CONVERT_XML_MALFORMED,
 
     /**
-     * A record larger than {@code split.convert-max-bytes}: converting it
-     * would need too much memory.
+     * A record larger than {@code sdh.convert.max-bytes}: converting it
+     * would need too much memory. It is stored as split (STAGES.md §9).
      */
     CONVERT_TOO_LARGE,
 
     /**
-     * Not converted, because the connector stopped twice in a row while this
-     * record's batch was uncommitted, and converting one of the batch's
-     * records may be what stops it (by running it out of memory, say).
-     * Every record of that batch is stored in its original form with this
-     * code (design §9.2).
+     * Not converted, because two convert workers stopped part-way through
+     * this record (it is on its third claim), and converting it may be what
+     * stops them (by running them out of memory, say). It is stored as
+     * split with this code (STAGES.md §9).
      */
     CONVERT_SKIPPED,
 

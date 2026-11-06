@@ -31,6 +31,7 @@
     <!-- Before file-connector: its image tests (-Pit) run the landing node's packaged jar and kit. -->
     <module>landing-connector</module>
     <module>file-connector</module>
+    <module>convert-stage</module>
   </modules>
 
   <properties>

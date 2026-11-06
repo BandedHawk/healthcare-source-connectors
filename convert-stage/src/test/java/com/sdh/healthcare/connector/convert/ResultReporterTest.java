@@ -4,34 +4,28 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.file.inbox;
+package com.sdh.healthcare.connector.convert;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
-
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
-import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
-import com.sdh.healthcare.connector.core.landing.MessageIndex;
-import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
-import com.sdh.healthcare.connector.core.pipeline.ItemProcessor.Outcome;
 import com.sdh.healthcare.connector.core.storage.CommittedRecords.Failed;
-import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.ECPrivateKey;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for how {@link ResultReporter} builds results.
+ * Tests for {@link ResultReporter}'s parts.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -43,53 +37,54 @@ class ResultReporterTest
     static final UUID ITEM = UUID.randomUUID();
 
     /** When it finished. */
-    static final Instant AT = Instant.parse("2026-11-04T12:00:00Z");
+    static final Instant AT = Instant.parse("2026-11-06T12:00:00Z");
 
-    /** An earlier item that one message replaces part of. */
-    static final UUID EARLIER = UUID.randomUUID();
-
-    /** A batch of four messages; the third is empty. */
-    static final MessageIndex BATCH = new MessageIndex(
-            List.of(0L, 100L, 250L, 250L), Arrays.asList("k0", "k1", null,
-                    "k3"));
-
-    /** Finds the message that holds an offset. */
-    @Test
-    void placesAnOffsetInItsMessage()
+    /** Creates the tests. */
+    ResultReporterTest()
     {
-        assertThat(ResultReporter.message(null, 50)).isEqualTo(-1);
-        assertThat(ResultReporter.message(BATCH, 0)).isZero();
-        assertThat(ResultReporter.message(BATCH, 99)).isZero();
-        assertThat(ResultReporter.message(BATCH, 100)).isEqualTo(1);
-        assertThat(ResultReporter.message(BATCH, 249)).isEqualTo(1);
-        assertThat(ResultReporter.message(BATCH, 250)).isEqualTo(3);
-        assertThat(ResultReporter.message(BATCH, 9_999)).isEqualTo(3);
     }
 
     /**
-     * Problems are split into parts, each carrying the totals, and placed
-     * in their messages with the broker IDs and the messages they
-     * replace.
+     * The item's {@code item.split}.
+     *
+     * @param records     how many records it has
+     * @param failed      how many of them failed
+     * @param producerRef the producer's reference; null if none
+     * @param replaces    the item it replaces; null if none
+     * @param failure     the item's own failure; null if it was split
+     * @return the message
+     */
+    static ItemSplit total(long records, long failed, String producerRef,
+            UUID replaces, Problem failure)
+    {
+        return new ItemSplit(ITEM, "claims", records, failed, 100, "digest",
+                producerRef, replaces, failure, AT, AT);
+    }
+
+    /**
+     * Problems are split into parts, each carrying the totals, put down to
+     * the stage that found them, and placed in their messages with the
+     * broker IDs and the messages they replace, as kept on their rows.
      */
     @Test
     void splitsProblemsIntoPartsWithTheTotals()
     {
         List<Failed> failed = List.of(
-                new Failed(0, 10, "CONVERT_A", new SourcePosition(1, 5)),
-                new Failed(2, 120, "CONVERT_B", null),
-                new Failed(5, 300, "CONVERT_C", new SourcePosition(9, 1)));
-        ResultReporter.Landed landed = new ResultReporter.Landed("ref-1",
-                null, BATCH, Arrays.asList("m0", "m1", "m2", null),
-                Arrays.asList(null, EARLIER + "/m9", null, null));
+                new Failed(0, 10, "CONVERT_A", new SourcePosition(1, 5), 0,
+                        "m0", null),
+                new Failed(2, 120, "PARSE_B", null, 1, "m1", "old/m9"),
+                new Failed(5, 300, "CONVERT_C", new SourcePosition(9, 1), 3,
+                        null, null));
         List<ItemResult> parts = ResultReporter.parts(
-                new Outcome(ITEM, ItemProcessor.Result.COMPLETED, 6, null),
-                "claims", failed, landed, AT, 2, Integer.MAX_VALUE);
+                total(6, 1, "ref-1", null, null), failed, AT, 2,
+                Integer.MAX_VALUE);
 
         assertThat(parts).hasSize(2);
         assertThat(parts).extracting(ItemResult::part).containsExactly(1, 2);
         assertThat(parts).allSatisfy(part ->
         {
             assertThat(part.status()).isEqualTo(ItemResult.COMPLETED);
+            assertThat(part.intake()).isEqualTo("claims");
             assertThat(part.partCount()).isEqualTo(2);
             assertThat(part.problemCount()).isEqualTo(3);
             assertThat(part.failedRecordCount()).isEqualTo(3);
@@ -101,8 +96,8 @@ class ResultReporterTest
         assertThat(parts.get(0).problems()).containsExactly(
                 new Problem("CONVERT_A", "convert", 0, 10,
                         new SourcePosition(1, 5), 0, "m0", null),
-                new Problem("CONVERT_B", "convert", 2, 120, null, 1, "m1",
-                        EARLIER + "/m9"));
+                new Problem("PARSE_B", "split", 2, 120, null, 1, "m1",
+                        "old/m9"));
         assertThat(parts.get(1).problems()).containsExactly(
                 new Problem("CONVERT_C", "convert", 5, 300,
                         new SourcePosition(9, 1), 3, null, null));
@@ -110,17 +105,18 @@ class ResultReporterTest
                 .isEqualTo("rs-" + ITEM + "-2");
     }
 
-    /** A failed item has one part, with the failure and no problems. */
+    /**
+     * An item that failed as a whole has one part, with its failure as the
+     * split stage placed it, and the item it replaces.
+     */
     @Test
     void reportsAFailedItemInOnePart()
     {
         UUID earlier = UUID.randomUUID();
-        Failure failure = new Failure("split",
-                ErrorCode.values()[0], 42, AT);
+        Problem failure = new Problem("LIMIT_ITEM_SIZE", "split", -1, 42,
+                null, 0, "m0", null);
         List<ItemResult> parts = ResultReporter.parts(
-                new Outcome(ITEM, ItemProcessor.Result.FAILED, 0, failure),
-                "claims", List.of(),
-                new ResultReporter.Landed(null, earlier, null, null, null), AT,
+                total(0, 0, null, earlier, failure), List.of(), AT,
                 ResultReporter.PART_SIZE, ResultReporter.PART_BYTES);
 
         assertThat(parts).singleElement().satisfies(part ->
@@ -130,9 +126,7 @@ class ResultReporterTest
             assertThat(part.problems()).isEmpty();
             assertThat(part.problemCount()).isZero();
             assertThat(part.replaces()).isEqualTo(earlier);
-            assertThat(part.failure()).isEqualTo(new Problem(
-                    ErrorCode.values()[0].name(), "split", -1, 42, null, -1,
-                    null, null));
+            assertThat(part.failure()).isEqualTo(failure);
         });
     }
 
@@ -155,27 +149,18 @@ class ResultReporterTest
                 "connector-2026", producer.getPublic(), "producer-2026");
 
         int count = 5_000;
-        List<Long> offsets = new ArrayList<>();
-        List<String> keys = new ArrayList<>();
-        List<String> refs = new ArrayList<>();
-        List<String> links = new ArrayList<>();
         List<Failed> failed = new ArrayList<>();
         for (int index = 0; index < count; index++)
         {
-            offsets.add(index * 1_000_000_000L);
-            keys.add(null);
-            refs.add("\"".repeat(255));
-            links.add(UUID.randomUUID() + "/" + "\"".repeat(255));
             failed.add(new Failed(index, index * 1_000_000_000L + 7,
                     "CONVERT_CSV_FIELD_COUNT",
-                    new SourcePosition(Long.MAX_VALUE, Integer.MAX_VALUE)));
+                    new SourcePosition(Long.MAX_VALUE, Integer.MAX_VALUE),
+                    index, "\"".repeat(255),
+                    UUID.randomUUID() + "/" + "\"".repeat(255)));
         }
-        ResultReporter.Landed landed = new ResultReporter.Landed("x".repeat(
-                1_000), UUID.randomUUID(), new MessageIndex(offsets, keys),
-                refs, links);
         List<ItemResult> parts = ResultReporter.parts(
-                new Outcome(ITEM, ItemProcessor.Result.COMPLETED, count, null),
-                "claims", failed, landed, AT, ResultReporter.PART_SIZE,
+                total(count, count, "x".repeat(1_000), UUID.randomUUID(),
+                        null), failed, AT, ResultReporter.PART_SIZE,
                 ResultReporter.PART_BYTES);
 
         assertThat(parts.size())
@@ -187,12 +172,11 @@ class ResultReporterTest
 
         // Short problems are cut by count.
         List<ItemResult> small = ResultReporter.parts(
-                new Outcome(ITEM, ItemProcessor.Result.COMPLETED, 2_500, null),
-                "claims", failed.subList(0, 2_500).stream()
+                total(2_500, 2_500, null, null, null),
+                failed.subList(0, 2_500).stream()
                         .map(f -> new Failed(f.seq(), 0, "C", null))
                         .toList(),
-                ResultReporter.Landed.NONE, AT, ResultReporter.PART_SIZE,
-                ResultReporter.PART_BYTES);
+                AT, ResultReporter.PART_SIZE, ResultReporter.PART_BYTES);
         assertThat(small).extracting(part -> part.problems().size())
                 .containsExactly(1_000, 1_000, 500);
     }

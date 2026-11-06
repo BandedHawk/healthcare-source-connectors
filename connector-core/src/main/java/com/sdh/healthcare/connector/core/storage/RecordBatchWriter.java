@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import static com.sdh.healthcare.connector.contract.table.RecordsTable.*;
 
+import com.nimbusds.jose.util.JSONArrayUtils;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
@@ -23,6 +24,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Instant;
@@ -31,7 +33,9 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import javax.crypto.Mac;
 import javax.crypto.SecretKey;
@@ -113,6 +117,29 @@ public final class RecordBatchWriter implements AutoCloseable
     {
     }
 
+    /**
+     * The queue message of a batch that a failed record starts in, for its
+     * producer's result (STAGES.md §9). It may hold PHI.
+     *
+     * @param message         the message's number, from 0
+     * @param messageRef      its broker ID; null if none was kept
+     * @param messageReplaces the earlier message it replaces; null if none
+     */
+    public record MessagePlace(int message, String messageRef,
+            String messageReplaces)
+    {
+    }
+
+    /**
+     * A record of the batch, by item and number.
+     *
+     * @param itemId its item
+     * @param seq    its number in the item
+     */
+    private record Placed(UUID itemId, long seq)
+    {
+    }
+
     /** The {@code records} table the batch is written for. */
     private final Table table;
 
@@ -139,6 +166,12 @@ public final class RecordBatchWriter implements AutoCloseable
 
     /** The records written so far, in order. */
     private final List<WrittenRecord> written = new ArrayList<>();
+
+    /**
+     * The queue messages failed records start in, by item and seq, noted
+     * before they are written (STAGES.md §9).
+     */
+    private final Map<Placed, MessagePlace> places = new HashMap<>();
 
     /** The total plaintext length of the records written so far. */
     private long plaintextBytes;
@@ -378,6 +411,21 @@ public final class RecordBatchWriter implements AutoCloseable
     }
 
     /**
+     * Notes the queue message a record starts in, before it is written. If
+     * the record is written failed, its first row carries the message's
+     * number, and its broker IDs encrypted with the record's own key
+     * ({@code message_refs_enc}). Writer thread only.
+     *
+     * @param itemId the record's item
+     * @param seq    its number in the item
+     * @param place  the message
+     */
+    public void place(UUID itemId, long seq, MessagePlace place)
+    {
+        places.put(new Placed(itemId, seq), place);
+    }
+
+    /**
      * Writes an encrypted record's rows. Writer thread only; records must
      * arrive in sequence order.
      *
@@ -572,6 +620,23 @@ public final class RecordBatchWriter implements AutoCloseable
         {
             row.setField(ERROR_LINE, record.errorAt().line());
             row.setField(ERROR_COLUMN, record.errorAt().column());
+        }
+        MessagePlace place =
+                places.remove(new Placed(record.itemId(), record.seq()));
+        if (place != null && chunkIndex == 0 && record.error() != null)
+        {
+            row.setField(MESSAGE_INDEX, place.message());
+            if (place.messageRef() != null || place.messageReplaces() != null)
+            {
+                byte[] refs = JSONArrayUtils.toJSONString(Arrays.asList(
+                        place.messageRef(), place.messageReplaces()))
+                        .getBytes(StandardCharsets.UTF_8);
+                SecretKey key = RecordCrypto.recordKey(batchDataKey,
+                        record.itemId(), record.seq());
+                row.setField(MESSAGE_REFS_ENC, ByteBuffer.wrap(
+                        RecordCrypto.encryptChunk(key, record.itemId(),
+                                record.seq(), MESSAGE_REFS_CHUNK, 1, refs)));
+            }
         }
         writer.write(row);
     }

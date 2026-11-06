@@ -117,6 +117,28 @@ public final class RecordsTable
     /** The column that goes with {@link #ERROR_LINE}. */
     public static final String ERROR_COLUMN = "error_column";
 
+    /**
+     * For a failed record of an item that is a batch of queue messages, the
+     * number of the message it starts in, from 0 (STAGES.md §9); null
+     * otherwise. A position, not PHI.
+     */
+    public static final String MESSAGE_INDEX = "message_index";
+
+    /**
+     * With {@link #MESSAGE_INDEX}, that message's broker ID and the earlier
+     * message it replaces, as a JSON array of two (either may be null),
+     * encrypted with the record's own key like a chunk at index
+     * {@value #MESSAGE_REFS_CHUNK} of one; on the record's first chunk row
+     * only.
+     */
+    public static final String MESSAGE_REFS_ENC = "message_refs_enc";
+
+    /**
+     * The chunk index {@link #MESSAGE_REFS_ENC} is encrypted at: never a
+     * chunk's, so it can't be read as one.
+     */
+    public static final int MESSAGE_REFS_CHUNK = -1;
+
     /** The table's columns, with their Iceberg field ids. */
     public static final Schema SCHEMA = new Schema(
             required(1, RECORD_ID, Types.StringType.get()),
@@ -147,7 +169,11 @@ public final class RecordsTable
             optional(21, SOURCE_COLUMN, Types.IntegerType.get()),
             optional(22, ERROR_LINE, Types.LongType.get(),
                     "where in the file conversion failed"),
-            optional(23, ERROR_COLUMN, Types.IntegerType.get()));
+            optional(23, ERROR_COLUMN, Types.IntegerType.get()),
+            optional(24, MESSAGE_INDEX, Types.IntegerType.get(),
+                    "the queue message a failed record starts in"),
+            optional(25, MESSAGE_REFS_ENC, Types.BinaryType.get(),
+                    "that message's broker IDs, encrypted"));
 
     /** The partitioning: by the day each row was written. */
     public static final PartitionSpec SPEC =

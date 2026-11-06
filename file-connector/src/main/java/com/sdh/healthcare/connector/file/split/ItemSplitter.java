@@ -11,9 +11,12 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseStore;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
+import com.sdh.healthcare.connector.core.landing.LandedItems;
+import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
+import org.apache.iceberg.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -108,9 +111,17 @@ public final class ItemSplitter
                 lost -> LOG.warn("split.item_lease_lost reason={}",
                         lost.reason())))
         {
+            // What the producer's result names, passed on so later stages
+            // need no landing key (STAGES.md §9). Refreshed first: the item
+            // landed after the table was last read.
+            Table landed = landedItems.get();
+            landed.refresh();
+            LandedRefs refs = LandedItems.summary(landed, itemId)
+                    .map(summary -> LandedRefs.of(summary, keys))
+                    .orElse(LandedRefs.NONE);
             ItemProcessor.Outcome outcome = processor.process(itemId, digest,
                     () -> LandedItemSource.open(landedItems.get(), itemId,
-                            keys), lease);
+                            keys), lease, refs);
             LOG.info("split.item_done result={} records={}",
                     outcome.result(), outcome.recordCount());
             return outcome;

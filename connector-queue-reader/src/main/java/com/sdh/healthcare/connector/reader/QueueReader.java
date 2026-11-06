@@ -62,7 +62,10 @@ import org.apache.iceberg.catalog.TableIdentifier;
 public final class QueueReader implements AutoCloseable
 {
 
-    /** Decrypts messages and checks their signatures. */
+    /**
+     * Decrypts messages and checks their signatures; null for a reader
+     * built without message keys, which only reads records.
+     */
     private final MessageOpener opener;
 
     /** The catalog the records' tables are in. */
@@ -86,7 +89,9 @@ public final class QueueReader implements AutoCloseable
      */
     private QueueReader(Builder builder)
     {
-        this.opener = new MessageOpener(builder.recipients, builder.signers);
+        this.opener = builder.recipients.isEmpty()
+                && builder.signers.isEmpty() ? null
+                : new MessageOpener(builder.recipients, builder.signers);
         this.catalog = Objects.requireNonNull(builder.catalog, "catalog");
         this.expectedCatalogName = builder.expectedCatalogName;
         this.keys = new BatchKeyCache(
@@ -114,9 +119,16 @@ public final class QueueReader implements AutoCloseable
      * @throws MessageRejectedException if the message can't be trusted or
      *                                  uses an unsupported contract major
      *                                  version
+     * @throws IllegalStateException    if the reader was built without
+     *                                  message keys
      */
     public ConnectorMessage decode(byte[] body) throws MessageRejectedException
     {
+        if (opener == null)
+        {
+            throw new IllegalStateException(
+                    "This reader was built to read records only");
+        }
         return opener.open(body);
     }
 
@@ -309,11 +321,15 @@ public final class QueueReader implements AutoCloseable
         }
 
         /**
-         * Builds the reader.
+         * Builds the reader. Without a recipient key or trusted signer it
+         * only reads records, for a stage whose own worker opens the
+         * messages; {@link QueueReader#decode} then refuses.
          *
          * @return the reader
-         * @throws NullPointerException if the catalog or key provider is
-         *                              missing
+         * @throws NullPointerException     if the catalog or key provider
+         *                                  is missing
+         * @throws IllegalArgumentException if only one of a recipient key
+         *                                  and a trusted signer is given
          */
         public QueueReader build()
         {

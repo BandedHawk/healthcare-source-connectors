@@ -117,6 +117,25 @@ public final class IngestTables
     }
 
     /**
+     * Creates or loads the {@code records} table that every convert worker
+     * appends to (STAGES.md §9): the usual columns, with more commit
+     * retries, as for {@code split_records}.
+     *
+     * @param catalog   the Iceberg catalog
+     * @param namespace the namespace the table is in, created if missing
+     * @return the table
+     */
+    public static Table sharedRecords(Catalog catalog, String namespace)
+    {
+        Map<String, String> properties = new HashMap<>(PROPERTIES);
+        properties.put(TableProperties.COMMIT_NUM_RETRIES,
+                SHARED_COMMIT_RETRIES);
+        return create(catalog, namespace, RecordsTable.DEFAULT_NAME,
+                RecordsTable.SCHEMA, RecordsTable.SPEC,
+                RecordsTable.SORT_ORDER, properties);
+    }
+
+    /**
      * Adds to an existing table the optional columns of a schema it doesn't
      * have yet, so a table made by an earlier version takes the columns a
      * later contract adds (such as the line and column ones of 2.1). Rows

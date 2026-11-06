@@ -24,6 +24,7 @@ import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
+import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.split.SplitRecord;
@@ -250,6 +251,23 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
+     * Runs the split phase for an item with nothing kept by landing, such
+     * as one that isn't a batch of queue messages.
+     *
+     * @param source the item's bytes
+     * @param itemId the item's ID
+     * @param lease  the item's lease, held by the caller
+     * @return the outcome
+     * @throws Exception as {@link #split(SeekableByteSource, UUID,
+     *                   LeaseToken, LandedRefs)} does
+     */
+    public SplitResult split(SeekableByteSource source, UUID itemId,
+            LeaseToken lease) throws Exception
+    {
+        return split(source, itemId, lease, LandedRefs.NONE);
+    }
+
+    /**
      * Runs the split phase for a landed item (design §5.3.6, STAGES.md
      * §8): from the start for a new item, or from its checkpoint. Returns
      * once every record is committed and published.
@@ -257,6 +275,8 @@ public final class IngestPipeline implements AutoCloseable
      * @param source the item's bytes
      * @param itemId the item's ID
      * @param lease  the item's lease, held by the caller
+     * @param refs   what landing kept about the item, to place each
+     *               record in its message of a batch
      * @return the outcome
      * @throws IllegalStateException if the item is archiving or failing,
      *                               which the caller finishes instead
@@ -266,7 +286,7 @@ public final class IngestPipeline implements AutoCloseable
      *                               retrying
      */
     public SplitResult split(SeekableByteSource source, UUID itemId,
-            LeaseToken lease) throws Exception
+            LeaseToken lease, LandedRefs refs) throws Exception
     {
         Checkpoint current = resume(itemId, lease).orElse(null);
         if (current != null && current.state() == Checkpoint.State.ARCHIVING)
@@ -316,7 +336,7 @@ public final class IngestPipeline implements AutoCloseable
                             .with(Attr.FORMAT, current.format())
                             .with(Attr.BYTES, current.itemSize()));
         }
-        return run(current, source, lease);
+        return run(current, source, lease, refs);
     }
 
     /**
@@ -372,13 +392,14 @@ public final class IngestPipeline implements AutoCloseable
      * @param start  the checkpoint to start from
      * @param source the item
      * @param lease  the item's lease
+     * @param refs   what landing kept about the item
      * @return the outcome
      * @throws Exception if splitting, storage or the broker fails
      */
     private SplitResult run(Checkpoint start, SeekableByteSource source,
-            LeaseToken lease) throws Exception
+            LeaseToken lease, LandedRefs refs) throws Exception
     {
-        republish(start);
+        republish(start, refs);
         Checkpoint current = start.published(start.committedSeq());
 
         Batch batch = null;
@@ -394,7 +415,8 @@ public final class IngestPipeline implements AutoCloseable
             {
                 if (batch == null)
                 {
-                    batch = new Batch(current.itemId(), current.format());
+                    batch = new Batch(current.itemId(), current.format(),
+                            refs);
                 }
                 batch.add(seq++, origins.withOrigin(next.get()), source);
                 if (batch.full())
@@ -535,16 +557,21 @@ public final class IngestPipeline implements AutoCloseable
         /** The last record added, whose resume point the checkpoint takes. */
         private SplitRecord last;
 
+        /** What landing kept about the item, to place its records. */
+        private final LandedRefs refs;
+
         /**
          * Starts a batch and its trace span.
          *
          * @param itemId the id of the item being split
          * @param format the name of its format
+         * @param refs   what landing kept about the item
          */
-        Batch(UUID itemId, String format)
+        Batch(UUID itemId, String format, LandedRefs refs)
         {
             this.itemId = itemId;
             this.format = format;
+            this.refs = refs;
             this.span = Telemetry.get().span("split.batch",
                     Fields.of(Attr.ITEM_ID, itemId).with(Attr.FORMAT, format));
         }
@@ -798,7 +825,7 @@ public final class IngestPipeline implements AutoCloseable
             List<ConnectorMessage> messages = new ArrayList<>(batch.count);
             for (WrittenRecord record : batch.writer.written())
             {
-                messages.add(message(record, ref));
+                messages.add(message(record, ref, batch.refs));
                 if (record.error() != null)
                 {
                     // Audited once committed, so a restart doesn't report it
@@ -877,11 +904,13 @@ public final class IngestPipeline implements AutoCloseable
      * readers drop them by message id.
      *
      * @param current the checkpoint
+     * @param refs    what landing kept about the item
      * @throws Exception if the records can't be read or published
      */
-    void announceCommitted(Checkpoint current) throws Exception
+    void announceCommitted(Checkpoint current, LandedRefs refs)
+            throws Exception
     {
-        republish(current);
+        republish(current, refs);
     }
 
     /**
@@ -914,21 +943,26 @@ public final class IngestPipeline implements AutoCloseable
     /**
      * The message announcing a record written in a batch: a
      * {@code record.split}, with the error code of a piece the splitter
-     * couldn't parse (STAGES.md §8).
+     * couldn't parse (STAGES.md §8), placed in its message for a batch
+     * (§9).
      *
      * @param record the record
      * @param ref    where it is stored
+     * @param refs   what landing kept about its item
      * @return the message
      */
-    private static RecordSplit message(WrittenRecord record, StorageRef ref)
+    private static RecordSplit message(WrittenRecord record, StorageRef ref,
+            LandedRefs refs)
     {
+        int message = refs.message(record.sourceOffset());
         return new RecordSplit(record.recordId(), record.itemId(),
                 record.seq(), record.sourceOffset(), record.sourceLength(),
                 record.format(), record.representation().contentType(),
                 record.plaintextLength(), record.chunkCount(), ref,
                 record.origin(),
                 record.error() == null ? null : record.error().name(),
-                record.errorAt());
+                record.errorAt(), message, refs.messageRef(message),
+                refs.messageReplaced(message));
     }
 
     /**
@@ -961,9 +995,11 @@ public final class IngestPipeline implements AutoCloseable
      * not acknowledged before a restart.
      *
      * @param current the checkpoint
+     * @param refs    what landing kept about the item
      * @throws Exception if the records can't be read or published
      */
-    private void republish(Checkpoint current) throws Exception
+    private void republish(Checkpoint current, LandedRefs refs)
+            throws Exception
     {
         if (current.committedSeq() <= current.publishedSeq())
         {
@@ -977,11 +1013,13 @@ public final class IngestPipeline implements AutoCloseable
         {
             StorageRef ref = new StorageRef(settings.catalogName(), namespace,
                     tableName, row.ingestedDate(), snapshotId, row.kekRef());
+            int message = refs.message(row.sourceOffset());
             messages.add(new RecordSplit(row.recordId(), current.itemId(),
                     row.seq(), row.sourceOffset(), row.sourceLength(),
                     row.format(), row.contentType(), row.plaintextLength(),
                     row.chunkCount(), ref, row.origin(), row.errorCode(),
-                    row.errorAt()));
+                    row.errorAt(), message, refs.messageRef(message),
+                    refs.messageReplaced(message)));
         }
         Telemetry.get().audit("publish.republish",
                 Fields.of(Attr.ITEM_ID, current.itemId())

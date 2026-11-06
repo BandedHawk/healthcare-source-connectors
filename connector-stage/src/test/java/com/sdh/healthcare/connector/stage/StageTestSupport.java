@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
 
@@ -282,6 +283,12 @@ final class StageTestSupport
         /** How many commits were tried. */
         final AtomicInteger commits = new AtomicInteger();
 
+        /** Each item-completed step run, in order. */
+        final List<ItemProgress> completed = new CopyOnWriteArrayList<>();
+
+        /** How many more item-completed steps are to fail. */
+        final AtomicInteger completedFailures = new AtomicInteger();
+
         /**
          * Creates a processor.
          *
@@ -354,6 +361,17 @@ final class StageTestSupport
             return new FileCompleted(progress.itemId(), progress.done(),
                     progress.failed(), 0, "digest", Instant.EPOCH,
                     Instant.EPOCH);
+        }
+
+        @Override
+        public void itemCompleted(ItemProgress progress)
+        {
+            if (completedFailures.getAndUpdate(left -> Math.max(0, left - 1))
+                    > 0)
+            {
+                throw new IllegalStateException("Results are down");
+            }
+            completed.add(progress);
         }
     }
 

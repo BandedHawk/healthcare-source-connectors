@@ -50,6 +50,9 @@ import org.apache.iceberg.io.CloseableIterable;
 final class RecordInputStream extends InputStream
 {
 
+    /** What {@link #check} returns for a row of another copy. */
+    private static final int OTHER_COPY = -1;
+
     /** The message announcing the record. */
     private final RecordInStorage message;
 
@@ -205,6 +208,10 @@ final class RecordInputStream extends InputStream
                 Record row = rowIterator.next();
                 sawRows = true;
                 int index = check(row);
+                if (index == OTHER_COPY)
+                {
+                    continue;
+                }
                 byte[] ciphertext =
                         bytes((ByteBuffer) row.getField(CIPHERTEXT));
                 if (index == nextIndex)
@@ -231,12 +238,17 @@ final class RecordInputStream extends InputStream
 
     /**
      * Checks a row against the message and sets up the record key on the
-     * first row.
+     * first row. The record's chunks are read from the batch of the first
+     * row: a row of the same record in another batch is a second copy of
+     * it, appended by a stage worker that lost its claim (STAGES.md §6), and
+     * is skipped. Every append holds whole records, so each copy is
+     * complete, and the same record ID means the same bytes.
      *
      * @param row the row
-     * @return the row's chunk index
-     * @throws ChunkIntegrityException if the row doesn't match the message
-     *         or the first row's batch, or its index is out of range
+     * @return the row's chunk index; {@link #OTHER_COPY} for a row of
+     *         another copy
+     * @throws ChunkIntegrityException if the row doesn't match the message,
+     *         or its index is out of range
      */
     private int check(Record row)
     {
@@ -266,8 +278,7 @@ final class RecordInputStream extends InputStream
         }
         else if (!batchId.equals(rowBatch))
         {
-            throw new ChunkIntegrityException(
-                    "Chunks from different batches");
+            return OTHER_COPY;
         }
         int index = (Integer) row.getField(CHUNK_INDEX);
         if (index < 0 || index >= message.chunkCount())

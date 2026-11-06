@@ -4,7 +4,7 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.file.split;
+package com.sdh.healthcare.connector.stage;
 
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
@@ -21,15 +21,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * The split stage's work that one pod does for all (STAGES.md §8): finding
- * landed items whose messages were lost, and table maintenance. Every pod
- * waits for the duties lease, {@code split/<connector>/duties}, as a
- * standby; the one that holds it does the duties, and the next takes over
- * within one TTL if it stops. Losing the lease stops the duties on that
- * pod, which goes back to waiting; splitting carries on.
+ * A stage's work that one pod does for all (STAGES.md §8, §9): reconciling,
+ * that is finding work whose messages were lost, and table maintenance.
+ * Every pod waits for the duties lease, {@code <stage>/<connector>/duties},
+ * as a standby; the one that holds it does the duties, and the next takes
+ * over within one TTL if it stops. Losing the lease stops the duties on
+ * that pod, which goes back to waiting; the stage's own work carries on.
  * <p>
  * Maintenance commits through a {@link LeasedCommitter} on the duties
- * lease. It runs while other pods append to {@code split_records}:
+ * lease. It runs while other pods append to the stage's shared table:
  * Iceberg checks each append and rewrite against the other, and orphan
  * cleanup leaves files younger than its minimum age, which covers any
  * append in flight.
@@ -37,7 +37,7 @@ import org.slf4j.LoggerFactory;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class SplitDuties implements AutoCloseable
+public final class StageDuties implements AutoCloseable
 {
 
     /** How long to wait before taking the lease again after an error. */
@@ -48,7 +48,23 @@ public final class SplitDuties implements AutoCloseable
 
     /** Logs taking and losing the duties, without PHI. */
     private static final Logger LOG =
-            LoggerFactory.getLogger(SplitDuties.class);
+            LoggerFactory.getLogger(StageDuties.class);
+
+    /** Finds work whose messages were lost, on the holder of the lease. */
+    @FunctionalInterface
+    public interface Reconciler
+    {
+
+        /**
+         * Looks once.
+         *
+         * @throws InterruptedException if interrupted: the duties are
+         *                              closing
+         * @throws Exception            if it fails; it runs again at the
+         *                              next interval
+         */
+        void reconcile() throws Exception;
+    }
 
     /** Makes the maintenance scheduler for a holder of the lease. */
     @FunctionalInterface
@@ -69,14 +85,17 @@ public final class SplitDuties implements AutoCloseable
     /** Where the lease is kept. */
     private final LeaseStore leases;
 
+    /** The stage's name, which starts the lease's and the log events'. */
+    private final String stage;
+
     /** The lease's name. */
     private final String leaseName;
 
     /** The lease timings. */
     private final LeaseKeeper.Settings leaseSettings;
 
-    /** Finds lost items; null if that is off. */
-    private final SplitReconciler reconciler;
+    /** Finds lost work; null if that is off. */
+    private final Reconciler reconciler;
 
     /** How often the reconciler runs. */
     private final Duration reconcileInterval;
@@ -97,20 +116,23 @@ public final class SplitDuties implements AutoCloseable
      * Creates the duties; {@link #start} starts them.
      *
      * @param leases            where the lease is kept
-     * @param connectorId       the split stage's ID, naming the lease
+     * @param stage             the stage's name, such as {@code split}
+     * @param connectorId       the stage's ID; with the name, it names the
+     *                          lease
      * @param leaseSettings     the lease timings
-     * @param reconciler        finds lost items; null if that is off
+     * @param reconciler        finds lost work; null if that is off
      * @param reconcileInterval how often the reconciler runs
      * @param maintenance       makes the maintenance scheduler
      * @param fatal             stops the process on a fatal error
      */
-    public SplitDuties(LeaseStore leases, String connectorId,
-            LeaseKeeper.Settings leaseSettings, SplitReconciler reconciler,
+    public StageDuties(LeaseStore leases, String stage, String connectorId,
+            LeaseKeeper.Settings leaseSettings, Reconciler reconciler,
             Duration reconcileInterval, Maintenance maintenance,
             FatalExit fatal)
     {
         this.leases = leases;
-        this.leaseName = "split/" + connectorId + "/duties";
+        this.stage = stage;
+        this.leaseName = stage + "/" + connectorId + "/duties";
         this.leaseSettings = leaseSettings;
         this.reconciler = reconciler;
         this.reconcileInterval = reconcileInterval;
@@ -121,7 +143,8 @@ public final class SplitDuties implements AutoCloseable
     /** Starts waiting for the lease, on a thread of its own. */
     public synchronized void start()
     {
-        thread = Thread.ofPlatform().name("sdh-split-duties").start(this::run);
+        thread = Thread.ofPlatform().name("sdh-" + stage + "-duties")
+                .start(this::run);
     }
 
     /** The thread's loop: take the lease, do the duties, until closed. */
@@ -139,8 +162,8 @@ public final class SplitDuties implements AutoCloseable
             }
             catch (RuntimeException failure)
             {
-                LOG.warn("split.duties_failed error={} retry_in_s={}",
-                        failure.getClass().getSimpleName(),
+                LOG.warn("stage.duties_failed stage={} error={} retry_in_s={}",
+                        stage, failure.getClass().getSimpleName(),
                         ERROR_PAUSE.toSeconds());
                 if (!pause())
                 {
@@ -165,8 +188,8 @@ public final class SplitDuties implements AutoCloseable
             lease = LeaseKeeper.acquireAsStandby(leases, leaseName,
                     LeaseKeeper.defaultOwner(), leaseSettings, failure ->
                     {
-                        LOG.warn("split.duties_lost reason={}",
-                                failure.reason());
+                        LOG.warn("stage.duties_lost stage={} reason={}",
+                                stage, failure.reason());
                         lost.countDown();
                     });
         }
@@ -177,7 +200,7 @@ public final class SplitDuties implements AutoCloseable
         }
         try (lease)
         {
-            LOG.info("split.duties_taken");
+            LOG.info("stage.duties_taken stage={}", stage);
             MaintenanceScheduler scheduler = maintenance.create(
                     new LeasedCommitter(lease), reason ->
                     {
@@ -228,15 +251,16 @@ public final class SplitDuties implements AutoCloseable
         }
         catch (Exception | Error failure)
         {
-            Optional<String> reason = SplitHandler.fatalReason(failure);
+            Optional<String> reason = StageFailures.fatalReason(failure);
             if (reason.isPresent())
             {
-                LOG.error("split.fatal reason={}", reason.get());
+                LOG.error("stage.fatal stage={} reason={}", stage,
+                        reason.get());
                 fatal.exit(reason.get());
                 throw new InterruptedException();
             }
-            LOG.warn("split.reconcile_failed error={} next_in_s={}",
-                    failure.getClass().getSimpleName(),
+            LOG.warn("stage.reconcile_failed stage={} error={} next_in_s={}",
+                    stage, failure.getClass().getSimpleName(),
                     reconcileInterval.toSeconds());
         }
     }
@@ -261,7 +285,7 @@ public final class SplitDuties implements AutoCloseable
 
     /**
      * Stops the duties and gives up the lease. A reconciler run is
-     * interrupted; an item it was splitting resumes from its checkpoint.
+     * interrupted; what it was doing is taken up again later.
      */
     @Override
     public void close()
@@ -285,6 +309,6 @@ public final class SplitDuties implements AutoCloseable
         {
             Thread.currentThread().interrupt();
         }
-        LOG.info("split.duties_stopped");
+        LOG.info("stage.duties_stopped stage={}", stage);
     }
 }

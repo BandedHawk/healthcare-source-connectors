@@ -14,7 +14,6 @@ import com.sdh.healthcare.connector.contract.jose.MessageRejectedException.Reaso
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
-import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
@@ -22,9 +21,9 @@ import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.runtime.FatalExit;
+import com.sdh.healthcare.connector.stage.StageFailures;
 import java.util.List;
 import java.util.Optional;
-import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -205,29 +204,16 @@ public final class SplitHandler implements BatchHandler
     }
 
     /**
-     * Tells whether an error must stop the process, and why. A lost item
-     * lease is not one: only that item stops. Nor is the lease database
-     * being down ({@link IllegalStateException}): the batch is held until
-     * it is back, rather than every pod restarting.
+     * Tells whether an error must stop the process, and why
+     * ({@link StageFailures#fatalReason}). A lost item lease is not one:
+     * only that item stops.
      *
      * @param failure the error
      * @return the reason, for the exit; empty if the error can be retried
      */
     public static Optional<String> fatalReason(Throwable failure)
     {
-        if (failure instanceof CheckpointTamperedException)
-        {
-            return Optional.of("CHECKPOINT_TAMPERED");
-        }
-        if (failure instanceof CommitStateUnknownException)
-        {
-            return Optional.of("COMMIT_STATE_UNKNOWN");
-        }
-        if (failure instanceof Error)
-        {
-            return Optional.of(failure.getClass().getSimpleName());
-        }
-        return Optional.empty();
+        return StageFailures.fatalReason(failure);
     }
 
     /**

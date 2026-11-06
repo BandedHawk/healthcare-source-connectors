@@ -33,7 +33,6 @@ import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.split.ItemSplitter;
 import com.sdh.healthcare.connector.file.split.LandedItemsTable;
-import com.sdh.healthcare.connector.file.split.SplitDuties;
 import com.sdh.healthcare.connector.file.split.SplitHandler;
 import com.sdh.healthcare.connector.file.split.SplitReconciler;
 import com.sdh.healthcare.connector.runtime.FatalExit;
@@ -41,6 +40,7 @@ import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
+import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
 import com.sdh.healthcare.connector.stage.StageProperties;
 import com.sdh.healthcare.connector.stage.StageReceiver;
@@ -113,7 +113,7 @@ public final class ConnectorRuntime implements AutoCloseable
     private final StageHealth health;
 
     /** The reconciler and maintenance, on one pod. */
-    private final SplitDuties duties;
+    private final StageDuties duties;
 
     /** The tables the runtime uses. */
     private final Tables tables;
@@ -158,7 +158,7 @@ public final class ConnectorRuntime implements AutoCloseable
             Catalog landingCatalog, ClosablePublisher publisher,
             IngestPipeline pipeline, ItemProcessor processor,
             ItemSplitter splitter, StageReceiver receiver, StageHealth health,
-            SplitDuties duties, Tables tables, KeyMaterial keys,
+            StageDuties duties, Tables tables, KeyMaterial keys,
             RecordIds ids)
     {
     }
@@ -301,8 +301,9 @@ public final class ConnectorRuntime implements AutoCloseable
                     ? new SplitReconciler(checkpoints, splitter, landedItems,
                             intake, reconcile.grace(), clock)
                     : null;
-            SplitDuties duties = new SplitDuties(leases,
-                    properties.connectorId(), leaseSettings, reconciler,
+            StageDuties duties = new StageDuties(leases, "split",
+                    properties.connectorId(), leaseSettings,
+                    reconciler == null ? null : reconciler::reconcile,
                     reconcile.interval(),
                     (committer, dutiesFatal) -> new MaintenanceScheduler(
                             committer, maintenanceSettings,

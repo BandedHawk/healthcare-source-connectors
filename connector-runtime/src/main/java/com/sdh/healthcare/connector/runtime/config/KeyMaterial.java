@@ -214,6 +214,28 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
     }
 
     /**
+     * The keys of a stage after the splitter, such as the convert stage
+     * (STAGES.md §9): the records KEK, probed, and the signing, recipient
+     * and inbox keys. It holds no landing KEK; the inbox key opens the
+     * previous stage's messages.
+     *
+     * @param crypto    the key settings
+     * @param providers builds KMS providers
+     * @return the keys
+     * @throws IOException              if a key file can't be read
+     * @throws GeneralSecurityException if a key is wrong or unusable
+     * @throws JOSEException            if the KMS signing probe fails
+     */
+    public static KeyMaterial forStage(CommonSettings.Crypto crypto,
+            Providers providers)
+            throws IOException, GeneralSecurityException, JOSEException
+    {
+        String records = require(crypto.keys().recordsKek(),
+                "sdh.crypto.keys.records-kek");
+        return load(crypto, providers, List.of(records), List.of(), true);
+    }
+
+    /**
      * A landing node's keys (design §5.3): the {@code landed_items} KEK,
      * and the signing and recipient keys for {@code item.landed}. It opens
      * no messages, so {@link #inbox()} is null.

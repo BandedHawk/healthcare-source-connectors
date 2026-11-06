@@ -288,6 +288,8 @@ class FileConnectorApplicationTest
                 .isEqualTo("PARSE_UNTERMINATED_QUOTE");
         assertThat(split).allSatisfy(item ->
                 assertThat(item.intake()).isEqualTo(INTAKE));
+        // The producer's reference, from landing, is passed on.
+        assertThat(split.getFirst().producerRef()).isEqualTo("b-smith.csv");
         assertThat(of(messages, RecordSplit.class))
                 .hasSizeGreaterThanOrEqualTo(15)
                 .allSatisfy(record ->

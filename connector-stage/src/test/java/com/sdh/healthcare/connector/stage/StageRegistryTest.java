@@ -183,29 +183,35 @@ class StageRegistryTest
 
     /**
      * An item is due once its total is known and all its records are
-     * stored, until its message is marked sent; the first total is kept.
+     * stored, until its message is marked sent; the first total, and the
+     * message that gave it, are kept.
      */
     @Test
     void anItemIsDueOnceItsRecordsAreAllStored()
     {
         UUID other = UUID.randomUUID();
-        first.expect(item, 2);
+        byte[] firstTotal = {1, 2, 3};
+        first.expect(item, 2, firstTotal);
         first.expect(other, 0);
         first.claim("r1", item, LONG);
         first.store(List.of(entry("r1", false)));
-        assertThat(first.due(List.of(item, other))).containsExactly(
-                new ItemProgress(other, 0, 0, 0));
+        assertThat(first.due(List.of(item, other)))
+                .extracting(StageRegistry.DueItem::progress)
+                .containsExactly(new ItemProgress(other, 0, 0, 0));
 
         first.claim("r2", item, LONG);
         first.store(List.of(entry("r2", true)));
-        first.expect(item, 5);
-        assertThat(first.due(List.of(item))).containsExactly(
-                new ItemProgress(item, 2, 2, 1));
+        first.expect(item, 5, new byte[] {9});
+        List<StageRegistry.DueItem> due = first.due(List.of(item));
+        assertThat(due).extracting(StageRegistry.DueItem::progress)
+                .containsExactly(new ItemProgress(item, 2, 2, 1));
+        assertThat(due.get(0).total()).isEqualTo(firstTotal);
         assertThat(second.due(List.of(item))).hasSize(1);
 
         first.markCompleted(item);
-        assertThat(first.due(List.of(item, other))).containsExactly(
-                new ItemProgress(other, 0, 0, 0));
+        assertThat(first.due(List.of(item, other)))
+                .extracting(StageRegistry.DueItem::progress)
+                .containsExactly(new ItemProgress(other, 0, 0, 0));
         assertThat(first.due(List.of())).isEmpty();
     }
 

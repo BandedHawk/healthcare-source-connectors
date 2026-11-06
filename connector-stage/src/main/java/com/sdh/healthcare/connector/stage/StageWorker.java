@@ -259,36 +259,84 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     public Outcome handle(List<BrokerMessage> batch)
             throws InterruptedException
     {
+        List<Opened> opened = new ArrayList<>(batch.size());
+        for (BrokerMessage received : batch)
+        {
+            try
+            {
+                opened.add(new Opened(opener.open(received.body()),
+                        received.body()));
+            }
+            catch (MessageRejectedException rejected)
+            {
+                if (rejected.reason()
+                        == MessageRejectedException.Reason.UNSUPPORTED_VERSION)
+                {
+                    // Dropping it would strand its record; it waits on the
+                    // queue until this stage is upgraded.
+                    Telemetry.get().auditError("stage.unreadable_version",
+                            stageFields(ErrorCode.MESSAGE_REJECTED));
+                    return Outcome.RETRY;
+                }
+                Telemetry.get().auditError("stage.message_rejected",
+                        stageFields(ErrorCode.MESSAGE_REJECTED)
+                                .with(Attr.REASON, rejected.reason().name()));
+            }
+        }
+        return run(opened);
+    }
+
+    /**
+     * Handles messages that are already open, as if received: for a
+     * reconciler that rebuilds lost record messages from their stored rows
+     * (STAGES.md §9). An item total handed in this way keeps no message for
+     * the item-complete step.
+     *
+     * @param messages the messages
+     * @return {@code DONE}, or {@code RETRY} if they should be handed in
+     *         again later
+     * @throws InterruptedException if interrupted
+     */
+    public Outcome handleOpened(List<ConnectorMessage> messages)
+            throws InterruptedException
+    {
+        List<Opened> opened = new ArrayList<>(messages.size());
+        for (ConnectorMessage message : messages)
+        {
+            opened.add(new Opened(message, null));
+        }
+        return run(opened);
+    }
+
+    /**
+     * A message, opened, with its body as received.
+     *
+     * @param message the message
+     * @param body    its sealed body; null if it wasn't received
+     */
+    private record Opened(ConnectorMessage message, byte[] body)
+    {
+    }
+
+    /**
+     * Processes a batch of opened messages: claims, processes, commits and
+     * sends its records, notes item totals, and completes the items it
+     * touched.
+     *
+     * @param batch the messages
+     * @return {@code DONE}, or {@code RETRY} if the batch failed
+     * @throws InterruptedException if interrupted
+     */
+    private Outcome run(List<Opened> batch) throws InterruptedException
+    {
         try
         {
             Map<StageRegistry.Key, Pending> records =
                     new LinkedHashMap<>();
             Set<UUID> items = new LinkedHashSet<>();
-            for (BrokerMessage received : batch)
+            for (Opened received : batch)
             {
-                ConnectorMessage message;
-                try
-                {
-                    message = opener.open(received.body());
-                }
-                catch (MessageRejectedException rejected)
-                {
-                    if (rejected.reason()
-                            == MessageRejectedException.Reason
-                                    .UNSUPPORTED_VERSION)
-                    {
-                        // Dropping it would strand its record; it waits on
-                        // the queue until this stage is upgraded.
-                        Telemetry.get().auditError("stage.unreadable_version",
-                                stageFields(ErrorCode.MESSAGE_REJECTED));
-                        return Outcome.RETRY;
-                    }
-                    Telemetry.get().auditError("stage.message_rejected",
-                            stageFields(ErrorCode.MESSAGE_REJECTED)
-                                    .with(Attr.REASON,
-                                            rejected.reason().name()));
-                    continue;
-                }
+                ConnectorMessage message = received.message();
                 switch (processor.classify(message))
                 {
                     case StageInput.RecordInput input ->
@@ -300,7 +348,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     }
                     case StageInput.ItemTotal total ->
                     {
-                        registry.expect(total.itemId(), total.expected());
+                        registry.expect(total.itemId(), total.expected(),
+                                received.body());
                         items.add(total.itemId());
                     }
                     case StageInput.Unwanted unwanted ->
@@ -515,26 +564,68 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
 
     /**
      * Sends the item-complete message of each item whose records are all
-     * stored, and hasn't had it. Two workers may both send it; its id is
-     * fixed, so the repeat is dropped.
+     * stored, and hasn't had it, then runs the processor's
+     * {@link StageProcessor#itemCompleted} step. Two workers may both do
+     * it; the message's id is fixed, so the repeat is dropped.
      *
      * @param items the items the batch touched
      * @throws InterruptedException if interrupted
-     * @throws ExecutionException   if the broker refused a message
-     * @throws TimeoutException     if it didn't take one in time
+     * @throws ExecutionException   if the broker refused a message, or the
+     *                              processor's step failed
+     * @throws TimeoutException     if the broker didn't take one in time
      */
     private void completeItems(Set<UUID> items)
             throws InterruptedException, ExecutionException,
             TimeoutException
     {
-        for (ItemProgress progress : registry.due(items))
+        for (StageRegistry.DueItem due : registry.due(items))
         {
+            ItemProgress progress = due.progress().withTotal(total(due));
             send(output, List.of(outbound(processor.itemComplete(progress))));
+            try
+            {
+                processor.itemCompleted(progress);
+            }
+            catch (InterruptedException | RuntimeException failure)
+            {
+                throw failure;
+            }
+            catch (Exception failure)
+            {
+                throw new ExecutionException(failure);
+            }
             registry.markCompleted(progress.itemId());
             Telemetry.get().audit("stage.item_completed",
                     Fields.of(Attr.STAGE, processor.stage())
                             .with(Attr.ITEM_ID, progress.itemId())
                             .with(Attr.COUNT, progress.done()));
+        }
+    }
+
+    /**
+     * Opens the kept message that gave an item's total.
+     *
+     * @param due the item
+     * @return the message; null if none was kept, or it no longer opens
+     *         (its key retired), which is audited
+     */
+    private ConnectorMessage total(StageRegistry.DueItem due)
+    {
+        if (due.total() == null)
+        {
+            return null;
+        }
+        try
+        {
+            return opener.open(due.total());
+        }
+        catch (MessageRejectedException rejected)
+        {
+            Telemetry.get().auditWarn("stage.item_total_unreadable",
+                    stageFields(ErrorCode.MESSAGE_REJECTED)
+                            .with(Attr.ITEM_ID, due.progress().itemId())
+                            .with(Attr.REASON, rejected.reason().name()));
+            return null;
         }
     }
 

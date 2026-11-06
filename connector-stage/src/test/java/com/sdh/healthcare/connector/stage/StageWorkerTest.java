@@ -392,6 +392,42 @@ class StageWorkerTest
     }
 
     /**
+     * Once the item-complete message is sent, the processor's step gets the
+     * message that gave the total; if the step fails, the batch is tried
+     * again and the item isn't marked complete until it succeeds.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void runsTheItemCompletedStepWithTheTotal() throws InterruptedException
+    {
+        StageTestSupport.TestProcessor processor = processor();
+        processor.completedFailures.set(1);
+        StageWorker<String> worker = worker("pod-a", processor);
+        assertThat(worker.handle(batch(2)))
+                .isEqualTo(BatchHandler.Outcome.RETRY);
+        assertThat(processor.completed).isEmpty();
+        assertThat(sentItems()).hasSize(1);
+
+        assertThat(worker.handle(batch(2)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(processor.completed).singleElement().satisfies(done ->
+        {
+            assertThat(done.done()).isEqualTo(2);
+            assertThat(done.total()).isInstanceOfSatisfying(
+                    FileCompleted.class, total ->
+                    {
+                        assertThat(total.itemId()).isEqualTo(item);
+                        assertThat(total.recordCount()).isEqualTo(2);
+                    });
+        });
+        assertThat(sentItems()).hasSize(2);
+        assertThat(worker.handle(batch(2)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(processor.completed).hasSize(1);
+    }
+
+    /**
      * A message that can't be trusted is dropped, one of another type is
      * acknowledged unprocessed, and one of a later major version holds the
      * batch back.

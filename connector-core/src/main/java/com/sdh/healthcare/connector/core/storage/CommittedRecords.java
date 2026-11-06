@@ -8,17 +8,32 @@ package com.sdh.healthcare.connector.core.storage;
 
 import static com.sdh.healthcare.connector.contract.table.RecordsTable.*;
 
+import com.nimbusds.jose.util.JSONArrayUtils;
+import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
+import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
+import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.text.ParseException;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
@@ -35,6 +50,16 @@ import org.apache.iceberg.io.CloseableIterable;
  */
 public final class CommittedRecords
 {
+
+    /** The most bytes a failed record's broker IDs may take, decrypted. */
+    private static final int MAX_REFS_BYTES = 64 << 10;
+
+    /** The columns a {@link Row} is read from. */
+    private static final String[] ROW_COLUMNS = {RECORD_ID, SEQ,
+        SOURCE_OFFSET, SOURCE_LENGTH, FORMAT, CONTENT_TYPE, MAPPING,
+        ERROR_CODE, PLAINTEXT_LENGTH, CHUNK_COUNT, INGESTED_AT, KEK_REF,
+        RECORD_LINE, RECORD_COLUMN, SOURCE_LINE, SOURCE_COLUMN, ERROR_LINE,
+        ERROR_COLUMN};
 
     /**
      * What a committed record's message needs, from its first chunk's row.
@@ -66,17 +91,38 @@ public final class CommittedRecords
     }
 
     /**
-     * A committed record that failed conversion, with where it failed.
+     * A committed record that failed to split or convert, with where it
+     * failed.
      *
-     * @param seq          its number in the file, from 0
-     * @param sourceOffset where it starts in the file, in bytes
-     * @param errorCode    why conversion failed (design §6.4)
-     * @param errorAt      where in the file conversion failed; null if
-     *                     unknown
+     * @param seq             its number in the file, from 0
+     * @param sourceOffset    where it starts in the file, in bytes
+     * @param errorCode       why it failed (design §6.4)
+     * @param errorAt         where in the file it failed; null if unknown
+     * @param message         the queue message of a batch it starts in;
+     *                        -1 if not noted
+     * @param messageRef      that message's broker ID; null if none, or
+     *                        not read
+     * @param messageReplaces the earlier message it replaces; null if
+     *                        none, or not read
      */
     public record Failed(long seq, long sourceOffset, String errorCode,
-            SourcePosition errorAt)
+            SourcePosition errorAt, int message, String messageRef,
+            String messageReplaces)
     {
+
+        /**
+         * A failed record with no message noted.
+         *
+         * @param seq          its number in the file, from 0
+         * @param sourceOffset where it starts in the file, in bytes
+         * @param errorCode    why it failed
+         * @param errorAt      where in the file it failed; null if unknown
+         */
+        public Failed(long seq, long sourceOffset, String errorCode,
+                SourcePosition errorAt)
+        {
+            this(seq, sourceOffset, errorCode, errorAt, -1, null, null);
+        }
     }
 
     /** Not instantiated: this class only has static methods. */
@@ -110,32 +156,12 @@ public final class CommittedRecords
                         Expressions.greaterThan(SEQ, afterSeq),
                         Expressions.lessThanOrEqual(SEQ, uptoSeq),
                         Expressions.equal(CHUNK_INDEX, 0)))
-                .select(RECORD_ID, SEQ, SOURCE_OFFSET, SOURCE_LENGTH, FORMAT,
-                        CONTENT_TYPE, MAPPING, ERROR_CODE, PLAINTEXT_LENGTH,
-                        CHUNK_COUNT, INGESTED_AT, KEK_REF, RECORD_LINE,
-                        RECORD_COLUMN, SOURCE_LINE, SOURCE_COLUMN, ERROR_LINE,
-                        ERROR_COLUMN)
+                .select(ROW_COLUMNS)
                 .build())
         {
             for (Record row : rows)
             {
-                found.add(new Row(
-                        (String) row.getField(RECORD_ID),
-                        (Long) row.getField(SEQ),
-                        (Long) row.getField(SOURCE_OFFSET),
-                        (Long) row.getField(SOURCE_LENGTH),
-                        (String) row.getField(FORMAT),
-                        (String) row.getField(CONTENT_TYPE),
-                        (String) row.getField(MAPPING),
-                        (String) row.getField(ERROR_CODE),
-                        (Long) row.getField(PLAINTEXT_LENGTH),
-                        (Integer) row.getField(CHUNK_COUNT),
-                        ((OffsetDateTime) row.getField(INGESTED_AT))
-                                .withOffsetSameInstant(ZoneOffset.UTC)
-                                .toLocalDate(),
-                        (String) row.getField(KEK_REF),
-                        origin(row),
-                        position(row, ERROR_LINE, ERROR_COLUMN)));
+                found.add(row(row));
             }
         }
         catch (IOException error)
@@ -150,6 +176,115 @@ public final class CommittedRecords
                     + ", " + uptoSeq + "]: found " + found.size());
         }
         return found;
+    }
+
+    /**
+     * Reads every committed record of an item, in sequence order: one row
+     * per record, the first copy if a record was committed twice.
+     *
+     * @param table  the table
+     * @param itemId the item's id
+     * @return the records
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static List<Row> all(Table table, UUID itemId)
+    {
+        Map<Long, Row> found = new TreeMap<>();
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(ITEM_ID, itemId),
+                        Expressions.equal(CHUNK_INDEX, 0)))
+                .select(ROW_COLUMNS)
+                .build())
+        {
+            for (Record row : rows)
+            {
+                Row read = row(row);
+                found.putIfAbsent(read.seq(), read);
+            }
+        }
+        catch (IOException error)
+        {
+            throw new UncheckedIOException(error);
+        }
+        return new ArrayList<>(found.values());
+    }
+
+    /**
+     * Finds the items with records committed in a span of time, and those
+     * records' IDs: for a reconciler, to find records whose messages were
+     * lost.
+     *
+     * @param table the table
+     * @param from  the start of the span, inclusive
+     * @param to    its end, exclusive
+     * @return each item's record IDs
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static Map<UUID, Set<String>> committedBetween(Table table,
+            Instant from, Instant to)
+    {
+        Map<UUID, Set<String>> found = new LinkedHashMap<>();
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(CHUNK_INDEX, 0),
+                        Expressions.greaterThanOrEqual(INGESTED_AT,
+                                micros(from)),
+                        Expressions.lessThan(INGESTED_AT, micros(to))))
+                .select(ITEM_ID, RECORD_ID)
+                .build())
+        {
+            for (Record row : rows)
+            {
+                found.computeIfAbsent((UUID) row.getField(ITEM_ID),
+                        item -> new HashSet<>())
+                        .add((String) row.getField(RECORD_ID));
+            }
+        }
+        catch (IOException error)
+        {
+            throw new UncheckedIOException(error);
+        }
+        return found;
+    }
+
+    /**
+     * A time as Iceberg's timestamp literal.
+     *
+     * @param time the time
+     * @return microseconds since the epoch
+     */
+    private static long micros(Instant time)
+    {
+        return TimeUnit.SECONDS.toMicros(time.getEpochSecond())
+                + TimeUnit.NANOSECONDS.toMicros(time.getNano());
+    }
+
+    /**
+     * Reads a record's first row.
+     *
+     * @param row the row, with {@link #ROW_COLUMNS}
+     * @return the record
+     */
+    private static Row row(Record row)
+    {
+        return new Row(
+                (String) row.getField(RECORD_ID),
+                (Long) row.getField(SEQ),
+                (Long) row.getField(SOURCE_OFFSET),
+                (Long) row.getField(SOURCE_LENGTH),
+                (String) row.getField(FORMAT),
+                (String) row.getField(CONTENT_TYPE),
+                (String) row.getField(MAPPING),
+                (String) row.getField(ERROR_CODE),
+                (Long) row.getField(PLAINTEXT_LENGTH),
+                (Integer) row.getField(CHUNK_COUNT),
+                ((OffsetDateTime) row.getField(INGESTED_AT))
+                        .withOffsetSameInstant(ZoneOffset.UTC)
+                        .toLocalDate(),
+                (String) row.getField(KEK_REF),
+                origin(row),
+                position(row, ERROR_LINE, ERROR_COLUMN));
     }
 
     /**
@@ -254,29 +389,121 @@ public final class CommittedRecords
      */
     public static List<Failed> failed(Table table, UUID itemId)
     {
-        List<Failed> found = new ArrayList<>();
+        return failed(table, itemId, null);
+    }
+
+    /**
+     * Reads an item's committed records that failed, in sequence order,
+     * with the queue message each starts in, its broker IDs decrypted
+     * (STAGES.md §9). A record committed twice is read once.
+     *
+     * @param table  the table
+     * @param itemId the item
+     * @param keys   unwraps the rows' data keys; null to leave the broker
+     *               IDs unread
+     * @return the records
+     * @throws UncheckedIOException if the table can't be read
+     * @throws ChunkIntegrityException if the broker IDs don't decrypt or
+     *                                 parse
+     */
+    public static List<Failed> failed(Table table, UUID itemId,
+            KeyProvider keys)
+    {
+        Map<Long, Failed> found = new TreeMap<>();
         try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
                 .where(Expressions.and(
                         Expressions.equal(ITEM_ID, itemId),
                         Expressions.equal(CHUNK_INDEX, 0),
                         Expressions.notNull(ERROR_CODE)))
                 .select(SEQ, SOURCE_OFFSET, ERROR_CODE, ERROR_LINE,
-                        ERROR_COLUMN)
+                        ERROR_COLUMN, MESSAGE_INDEX, MESSAGE_REFS_ENC,
+                        BDK_WRAPPED, KEK_REF)
                 .build())
         {
             for (Record row : rows)
             {
-                found.add(new Failed((Long) row.getField(SEQ),
+                if (found.containsKey((Long) row.getField(SEQ)))
+                {
+                    // A second copy of the record (STAGES.md §6).
+                    continue;
+                }
+                Integer message = (Integer) row.getField(MESSAGE_INDEX);
+                List<String> refs = keys == null ? null
+                        : messageRefs(row, itemId, keys);
+                found.put((Long) row.getField(SEQ), new Failed(
+                        (Long) row.getField(SEQ),
                         (Long) row.getField(SOURCE_OFFSET),
                         (String) row.getField(ERROR_CODE),
-                        position(row, ERROR_LINE, ERROR_COLUMN)));
+                        position(row, ERROR_LINE, ERROR_COLUMN),
+                        message == null ? -1 : message,
+                        refs == null ? null : refs.get(0),
+                        refs == null ? null : refs.get(1)));
             }
         }
         catch (IOException error)
         {
             throw new UncheckedIOException(error);
         }
-        found.sort(Comparator.comparingLong(Failed::seq));
-        return found;
+        return new ArrayList<>(found.values());
+    }
+
+    /**
+     * Decrypts a failed record's broker IDs.
+     *
+     * @param row    its first row
+     * @param itemId its item
+     * @param keys   unwraps the row's data key
+     * @return the broker ID and the replaced message's, either null; null
+     *         if none were kept
+     * @throws ChunkIntegrityException if they don't decrypt or parse
+     */
+    private static List<String> messageRefs(Record row, UUID itemId,
+            KeyProvider keys)
+    {
+        Object encrypted = row.getField(MESSAGE_REFS_ENC);
+        if (encrypted == null)
+        {
+            return null;
+        }
+        long seq = (Long) row.getField(SEQ);
+        byte[] dataKey = keys.unwrap(new WrappedKey(
+                (String) row.getField(KEK_REF),
+                bytes(row.getField(BDK_WRAPPED))));
+        String json = new String(RecordCrypto.decryptSmall(
+                RecordCrypto.recordKey(dataKey, itemId, seq), itemId, seq,
+                MESSAGE_REFS_CHUNK, 1, MAX_REFS_BYTES, bytes(encrypted)),
+                StandardCharsets.UTF_8);
+        try
+        {
+            List<Object> values = JSONArrayUtils.parse(json);
+            if (values.size() != 2)
+            {
+                throw new ChunkIntegrityException("Malformed broker IDs");
+            }
+            List<String> refs = new ArrayList<>(2);
+            for (Object value : values)
+            {
+                refs.add(value == null ? null : value.toString());
+            }
+            return refs;
+        }
+        catch (ParseException malformed)
+        {
+            throw new ChunkIntegrityException("Malformed broker IDs");
+        }
+    }
+
+    /**
+     * The bytes of a binary field.
+     *
+     * @param value the field, as Iceberg reads it
+     * @return its bytes
+     */
+    private static byte[] bytes(Object value)
+    {
+        ByteBuffer buffer = ((ByteBuffer) value).duplicate();
+        byte[] bytes = new byte[buffer.remaining()];
+        buffer.get(bytes);
+        return bytes;
     }
 }

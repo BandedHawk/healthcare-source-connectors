@@ -258,6 +258,41 @@ class QueueReaderTest
     }
 
     /**
+     * A record committed twice, by two stage workers (STAGES.md §6), reads
+     * back once, from one copy, small or of several chunks; a reader built
+     * without message keys reads it too, and refuses to decode.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void readsOneCopyOfARecordCommittedTwice() throws Exception
+    {
+        byte[] small = "abc".getBytes(StandardCharsets.UTF_8);
+        byte[] large = new byte[RecordCrypto.CHUNK_SIZE + 99];
+        new Random(3).nextBytes(large);
+        UUID itemId = UUID.randomUUID();
+        List<byte[]> first = ingest(itemId, small, large);
+        ingest(itemId, small, large);
+        try (QueueReader reader = reader();
+                QueueReader recordsOnly = QueueReader.builder()
+                        .catalog(catalog)
+                        .keyProvider(kms)
+                        .build())
+        {
+            RecordStored smallMessage =
+                    (RecordStored) reader.decode(first.get(0));
+            RecordStored largeMessage =
+                    (RecordStored) reader.decode(first.get(1));
+            assertThat(reader.readRecord(smallMessage, 1 << 20))
+                    .isEqualTo(small);
+            assertThat(recordsOnly.readRecord(largeMessage, 1 << 24))
+                    .isEqualTo(large);
+            assertThatThrownBy(() -> recordsOnly.decode(first.get(0)))
+                    .isInstanceOf(IllegalStateException.class);
+        }
+    }
+
+    /**
      * A message from a newer contract major version is refused, saying
      * why.
      *

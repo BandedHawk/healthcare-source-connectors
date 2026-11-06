@@ -206,6 +206,7 @@ public final class StageRegistry
                   stage        text        NOT NULL,
                   item_id      uuid        NOT NULL,
                   expected     bigint,
+                  total_message bytea,
                   done         bigint      NOT NULL DEFAULT 0,
                   failed       bigint      NOT NULL DEFAULT 0,
                   completed_at timestamptz,
@@ -479,6 +480,17 @@ public final class StageRegistry
     }
 
     /**
+     * An item whose records are all stored, as kept.
+     *
+     * @param progress its counts, without the total's message
+     * @param total    the message that gave its total, sealed as received;
+     *                 null if it wasn't kept
+     */
+    public record DueItem(ItemProgress progress, byte[] total)
+    {
+    }
+
+    /**
      * Notes how many records an item has. The first total given is kept: a
      * repeat of the same message gives the same one.
      *
@@ -488,11 +500,30 @@ public final class StageRegistry
      */
     public void expect(UUID itemId, long expected)
     {
+        expect(itemId, expected, null);
+    }
+
+    /**
+     * Notes how many records an item has, and keeps the message that said
+     * so, sealed as received, for the stage's item-complete step. The first
+     * given is kept: a repeat of the same message gives the same one.
+     *
+     * @param itemId   the item's id
+     * @param expected how many records it has
+     * @param total    the message, sealed; null to keep none
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void expect(UUID itemId, long expected, byte[] total)
+    {
         String sql = """
-                INSERT INTO %1$s AS i (stage, item_id, expected)
-                VALUES (?, ?, ?)
+                INSERT INTO %1$s AS i (stage, item_id, expected,
+                                       total_message)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT (stage, item_id) DO UPDATE
-                   SET expected = COALESCE(i.expected, EXCLUDED.expected)"""
+                   SET expected = COALESCE(i.expected, EXCLUDED.expected),
+                       total_message = CASE WHEN i.expected IS NULL
+                                            THEN EXCLUDED.total_message
+                                            ELSE i.total_message END"""
                 .formatted(items);
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement upsert = connection.prepareStatement(sql))
@@ -501,6 +532,7 @@ public final class StageRegistry
             upsert.setString(1, stage);
             upsert.setObject(2, itemId);
             upsert.setLong(3, expected);
+            upsert.setBytes(4, total);
             upsert.executeUpdate();
         }
         catch (SQLException failure)
@@ -515,18 +547,20 @@ public final class StageRegistry
      * item-complete message hasn't been sent.
      *
      * @param itemIds the items to look at
-     * @return those that are done, with their counts
+     * @return those that are done, with their counts and the total's
+     *         message
      * @throws IllegalStateException if the database can't be reached
      */
-    public List<ItemProgress> due(Collection<UUID> itemIds)
+    public List<DueItem> due(Collection<UUID> itemIds)
     {
-        List<ItemProgress> due = new ArrayList<>();
+        List<DueItem> due = new ArrayList<>();
         if (itemIds.isEmpty())
         {
             return due;
         }
         String sql = """
-                SELECT item_id, expected, done, failed FROM %s
+                SELECT item_id, expected, done, failed, total_message
+                  FROM %s
                  WHERE stage = ? AND item_id = ANY (?)
                    AND completed_at IS NULL AND expected IS NOT NULL
                    AND done >= expected""".formatted(items);
@@ -541,9 +575,10 @@ public final class StageRegistry
             {
                 while (rows.next())
                 {
-                    due.add(new ItemProgress(rows.getObject(1, UUID.class),
-                            rows.getLong(2), rows.getLong(3),
-                            rows.getLong(4)));
+                    due.add(new DueItem(new ItemProgress(
+                            rows.getObject(1, UUID.class), rows.getLong(2),
+                            rows.getLong(3), rows.getLong(4)),
+                            rows.getBytes(5)));
                 }
             }
             return due;
@@ -574,6 +609,82 @@ public final class StageRegistry
             update.setString(1, stage);
             update.setObject(2, itemId);
             update.executeUpdate();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The records of an item the stage has claimed or stored, by any
+     * worker: for a reconciler, to find those whose messages never came.
+     *
+     * @param itemId the item's id
+     * @return their record IDs
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Set<String> knownRecords(UUID itemId)
+    {
+        String sql = "SELECT record_id FROM " + records
+                + " WHERE stage = ? AND item_id = ?";
+        Set<String> found = new HashSet<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            select.setObject(2, itemId);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(rows.getString(1));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The items, of those given, whose item-complete message was sent.
+     *
+     * @param itemIds the items to look at
+     * @return those completed
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Set<UUID> completed(Collection<UUID> itemIds)
+    {
+        Set<UUID> found = new HashSet<>();
+        if (itemIds.isEmpty())
+        {
+            return found;
+        }
+        String sql = """
+                SELECT item_id FROM %s
+                 WHERE stage = ? AND item_id = ANY (?)
+                   AND completed_at IS NOT NULL""".formatted(items);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            select.setArray(2, connection.createArrayOf("uuid",
+                    itemIds.toArray()));
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(rows.getObject(1, UUID.class));
+                }
+            }
+            return found;
         }
         catch (SQLException failure)
         {

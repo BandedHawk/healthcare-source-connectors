@@ -1,0 +1,424 @@
+/*
+ * Copyright (c) 2026 Smile Digital Health Inc. All rights reserved.
+ *
+ * Proprietary and confidential. Use is subject to the terms in the LICENSE file
+ * in the root of this project.
+ */
+package com.sdh.healthcare.connector.convert.runtime;
+
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
+import com.sdh.healthcare.connector.contract.jose.MessageSealer;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import com.sdh.healthcare.connector.convert.ConvertProcessor;
+import com.sdh.healthcare.connector.convert.ConvertReconciler;
+import com.sdh.healthcare.connector.convert.ResultReporter;
+import com.sdh.healthcare.connector.convert.config.ConvertProperties;
+import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
+import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
+import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
+import com.sdh.healthcare.connector.core.crypto.IdKeys;
+import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
+import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
+import com.sdh.healthcare.connector.core.storage.IngestTables;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import com.sdh.healthcare.connector.reader.QueueReader;
+import com.sdh.healthcare.connector.runtime.FatalExit;
+import com.sdh.healthcare.connector.runtime.LeaseDatabase;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
+import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
+import com.sdh.healthcare.connector.stage.StageDuties;
+import com.sdh.healthcare.connector.stage.StageHealth;
+import com.sdh.healthcare.connector.stage.StageProperties;
+import com.sdh.healthcare.connector.stage.StageReceiver;
+import com.sdh.healthcare.connector.stage.StageRegistry;
+import com.sdh.healthcare.connector.stage.StageWorker;
+import com.zaxxer.hikari.HikariDataSource;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
+import org.apache.camel.CamelContext;
+import org.apache.iceberg.CatalogUtil;
+import org.apache.iceberg.Table;
+import org.apache.iceberg.catalog.Catalog;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Everything the convert stage runs on (STAGES.md §9), set up in a fixed
+ * order: settings and keys → the lease database, holding the duties lease
+ * and the stage's registry → the catalog, with the shared {@code records}
+ * table and its ID key, and {@code split_records}, read only → the
+ * reader, publishers and results channel → the worker → the input route
+ * and the duties, both left stopped. {@link #start()} starts them, and
+ * {@link #close()} stops them first, so no record is being converted when
+ * the rest is closed.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
+ */
+public final class ConvertRuntime implements AutoCloseable
+{
+
+    /** The longest pause before a held batch is tried again. */
+    static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
+
+    /** The shortest age orphan cleanup may delete files at. */
+    static final Duration MIN_ORPHAN_AGE = Duration.ofHours(1);
+
+    /** How long to wait for the producer's broker to take a result. */
+    static final Duration RESULT_TIMEOUT = Duration.ofSeconds(30);
+
+    /** The share of the heap conversions may use, unless set. */
+    static final double DEFAULT_MEMORY_SHARE = 0.4;
+
+    /** Logs start and stop. */
+    private static final Logger LOG =
+            LoggerFactory.getLogger(ConvertRuntime.class);
+
+    /** What the runtime holds, closed in reverse order. */
+    private final List<AutoCloseable> resources;
+
+    /** Claims, converts, stores and sends records. */
+    private final StageWorker<ConvertProcessor.Prepared> worker;
+
+    /** Takes {@code record.split} and {@code item.split} off the broker. */
+    private final StageReceiver receiver;
+
+    /** Whether the broker answers. */
+    private final StageHealth health;
+
+    /** The reconciler and maintenance, on one pod. */
+    private final StageDuties duties;
+
+    /** The shared {@code records} table. */
+    private final Table records;
+
+    /**
+     * What a set-up runtime holds.
+     *
+     * @param resources what to close, in the order opened
+     * @param worker    the worker
+     * @param receiver  the input
+     * @param health    whether the broker answers
+     * @param duties    the reconciler and maintenance
+     * @param records   the {@code records} table
+     */
+    private record Parts(List<AutoCloseable> resources,
+            StageWorker<ConvertProcessor.Prepared> worker,
+            StageReceiver receiver, StageHealth health, StageDuties duties,
+            Table records)
+    {
+    }
+
+    /**
+     * Holds what has been set up.
+     *
+     * @param parts what has been set up
+     */
+    private ConvertRuntime(Parts parts)
+    {
+        this.resources = parts.resources();
+        this.worker = parts.worker();
+        this.receiver = parts.receiver();
+        this.health = parts.health();
+        this.duties = parts.duties();
+        this.records = parts.records();
+    }
+
+    /**
+     * Sets up the convert stage's runtime, with its input and duties not
+     * yet started.
+     *
+     * @param properties the stage's settings
+     * @param camel      the Camel context, for the publishers and the input
+     * @param fatal      stops the process on a fatal error
+     * @return the runtime
+     * @throws Exception if a setting is wrong, a key can't be loaded, or
+     *                   storage can't be reached
+     */
+    public static ConvertRuntime create(ConvertProperties properties,
+            CamelContext camel, FatalExit fatal) throws Exception
+    {
+        ConvertProperties.Storage storageSettings = properties.storage();
+        Map<String, String> catalogProperties = require(
+                storageSettings.catalog(), "sdh.storage.catalog");
+        StageProperties stage = properties.stage();
+        StageWorker.Settings workerSettings = stage.worker();
+        CommonSettings.Queue output = stage.output();
+        CommonSettings.Queue dlq = stage.dlq();
+        ConvertProperties.Maintenance maintenance = properties.maintenance();
+        MaintenanceSettings maintenanceSettings = maintenance.toSettings();
+        if (maintenanceSettings.orphanMinAge().compareTo(MIN_ORPHAN_AGE) < 0)
+        {
+            throw new IllegalArgumentException(
+                    "sdh.maintenance.orphans.min-age must be at least 1 hour");
+        }
+        Optional<Duration> retention = MaintenanceScheduler.retention(
+                "sdh.maintenance.retention", maintenance.retention(),
+                Duration.ofDays(1));
+        ConvertProcessor.Settings convertSettings =
+                convertSettings(properties);
+        String recordsKek = require(properties.crypto().keys().recordsKek(),
+                "sdh.crypto.keys.records-kek");
+        KeyMaterial keys = KeyMaterial.forStage(properties.crypto(),
+                KeyMaterial.Providers.DEFAULT);
+
+        List<AutoCloseable> opened = new ArrayList<>();
+        opened.add(keys);
+        try
+        {
+            HikariDataSource dataSource =
+                    LeaseDatabase.dataSource(properties.lease().jdbc());
+            opened.add(dataSource);
+            JdbcLeaseStore leases = new JdbcLeaseStore(dataSource,
+                    properties.lease().jdbc().table(),
+                    Duration.ofSeconds(10));
+            leases.createTableIfMissing();
+            StageRegistry registry = new StageRegistry(dataSource,
+                    stage.registrySchema(), ConvertProcessor.STAGE,
+                    LeaseKeeper.defaultOwner(), Duration.ofSeconds(10));
+            registry.createTablesIfMissing();
+
+            Catalog catalog = CatalogUtil.buildIcebergCatalog(
+                    storageSettings.catalogName(), catalogProperties, null);
+            if (catalog instanceof AutoCloseable closeable)
+            {
+                opened.add(closeable);
+            }
+            Table records = IngestTables.sharedRecords(catalog,
+                    storageSettings.namespace());
+            Table splitRecords = IngestTables.splitRecords(catalog,
+                    storageSettings.effectiveSplitNamespace());
+            RecordIds ids = new RecordIds(IdKeys.loadOrCreateShared(records,
+                    keys.wrap(), recordsKek));
+            QueueReader reader = QueueReader.builder()
+                    .catalog(catalog)
+                    .expectedCatalogName(storageSettings.catalogName())
+                    .keyProvider(keys.wrap())
+                    .build();
+            opened.add(reader);
+
+            RetryPolicy retry = new RetryPolicy(
+                    properties.retry().maxAttempts(),
+                    properties.retry().initialBackoff(),
+                    properties.retry().maxBackoff());
+            Clock clock = Clock.systemUTC();
+            ClosablePublisher publisher = publisher(camel, output);
+            opened.add(publisher);
+            ClosablePublisher deadLetters = publisher(camel, dlq);
+            opened.add(deadLetters);
+            ResultReporter results = null;
+            if (properties.results().enabled())
+            {
+                ResultsChannel channel = ResultsChannel.open(
+                        properties.results(), output, camel, keys.signer(),
+                        keys.signerKid(), retry, RESULT_TIMEOUT);
+                opened.add(channel);
+                results = new ResultReporter(channel, clock);
+            }
+
+            ConvertProcessor processor = new ConvertProcessor(reader,
+                    ConverterRegistry.load(), convertSettings,
+                    new ConvertProcessor.Storage(records, keys.wrap(),
+                            recordsKek, ids), results, clock);
+            StageWorker<ConvertProcessor.Prepared> worker =
+                    new StageWorker<>(processor, registry, keys.inbox(),
+                            new MessageSealer(keys.signer(), keys.signerKid(),
+                                    keys.recipient(), keys.recipientKid()),
+                            publisher, deadLetters, workerSettings, clock);
+            opened.add(worker);
+            StageHealth health = new StageHealth();
+            StageReceiver receiver = new StageReceiver(camel,
+                    stage.receive(Set.of()), worker, health,
+                    Fields.of(Attr.STAGE, ConvertProcessor.STAGE),
+                    properties.retry().initialBackoff(), MAX_BACKOFF);
+            opened.add(receiver);
+
+            ConvertProperties.Reconcile reconcile = properties.reconcile();
+            ConvertReconciler reconciler = reconcile.enabled()
+                    ? new ConvertReconciler(splitRecords, registry, worker,
+                            storageSettings.catalogName(),
+                            storageSettings.effectiveSplitNamespace(),
+                            reconcile.grace(), reconcile.lookback(), clock)
+                    : null;
+            CommonSettings.Lease lease = properties.lease();
+            StageDuties duties = new StageDuties(leases,
+                    ConvertProcessor.STAGE, properties.connectorId(),
+                    new LeaseKeeper.Settings(lease.ttl(),
+                            lease.renewInterval(), lease.safetyMargin()),
+                    reconciler == null ? null : reconciler::reconcile,
+                    reconcile.interval(),
+                    (committer, dutiesFatal) -> new MaintenanceScheduler(
+                            committer, maintenanceSettings,
+                            maintenance.toSchedule(),
+                            () -> List.of(MaintenanceScheduler.Target.of(
+                                    records, RecordsTable.INGESTED_AT,
+                                    retention)),
+                            new ReentrantLock(), dutiesFatal, clock),
+                    fatal);
+            opened.add(duties);
+            Telemetry.get().audit("connector.started",
+                    Fields.of(Attr.STAGE, ConvertProcessor.STAGE));
+            return new ConvertRuntime(new Parts(List.copyOf(opened), worker,
+                    receiver, health, duties, records));
+        }
+        catch (Exception | Error failure)
+        {
+            closeAll(opened);
+            throw failure;
+        }
+    }
+
+    /**
+     * The conversion settings, from the stage's.
+     *
+     * @param properties the stage's settings
+     * @return the settings
+     * @throws IllegalArgumentException if the largest record is not
+     *                                  positive
+     */
+    static ConvertProcessor.Settings convertSettings(
+            ConvertProperties properties)
+    {
+        ConvertProperties.Convert convert = properties.convert();
+        long maxBytes = convert.maxBytes().toBytes();
+        if (maxBytes < 1)
+        {
+            throw new IllegalArgumentException(
+                    "sdh.convert.max-bytes must be positive");
+        }
+        long memory = convert.memory() != null
+                && convert.memory().toBytes() > 0
+                ? convert.memory().toBytes()
+                : (long) (Runtime.getRuntime().maxMemory()
+                        * DEFAULT_MEMORY_SHARE);
+        return new ConvertProcessor.Settings(convert.options(), maxBytes,
+                memory, properties.storage().catalogName(),
+                properties.storage().namespace());
+    }
+
+    /**
+     * Opens a publisher to a queue.
+     *
+     * @param camel the Camel context
+     * @param queue the queue's settings
+     * @return the publisher
+     * @throws Exception if it can't be opened
+     */
+    private static ClosablePublisher publisher(CamelContext camel,
+            CommonSettings.Queue queue) throws Exception
+    {
+        QueueType type = QueueType.of(queue.type());
+        Publishers.configureBroker(camel, type, queue.artemis().brokerUrl(),
+                queue.artemis().username(), queue.artemis().password());
+        return Publishers.create(camel, type, type.effectiveUri(queue.uri()));
+    }
+
+    /**
+     * Starts the worker's claim renewal, the duties, then the input.
+     *
+     * @throws Exception if the input route can't start
+     */
+    public void start() throws Exception
+    {
+        worker.start();
+        duties.start();
+        receiver.start();
+        LOG.info("convert.started");
+    }
+
+    /**
+     * The worker, for tests and the reconciler.
+     *
+     * @return the worker
+     */
+    public StageWorker<ConvertProcessor.Prepared> worker()
+    {
+        return worker;
+    }
+
+    /**
+     * Whether the input broker answers.
+     *
+     * @return the health
+     */
+    public StageHealth health()
+    {
+        return health;
+    }
+
+    /**
+     * The shared {@code records} table.
+     *
+     * @return the table
+     */
+    public Table records()
+    {
+        return records;
+    }
+
+    /**
+     * Stops the input, the duties and the worker, then closes the rest in
+     * reverse order.
+     */
+    @Override
+    public void close()
+    {
+        closeAll(resources);
+        LOG.info("convert.stopped");
+    }
+
+    /**
+     * Closes resources in reverse order, ignoring failures: shutting down.
+     *
+     * @param opened what was opened, in order
+     */
+    private static void closeAll(List<AutoCloseable> opened)
+    {
+        List<AutoCloseable> reversed = new ArrayList<>(opened);
+        Collections.reverse(reversed);
+        for (AutoCloseable resource : reversed)
+        {
+            try
+            {
+                resource.close();
+            }
+            catch (Exception ignored)
+            {
+                // shutting down
+            }
+        }
+    }
+
+    /**
+     * Checks that a setting is there.
+     *
+     * @param <T>     its type
+     * @param value   its value
+     * @param setting its name, for the message
+     * @return the value
+     * @throws IllegalArgumentException if it is null, blank or empty
+     */
+    static <T> T require(T value, String setting)
+    {
+        if (value == null || value instanceof String text && text.isBlank()
+                || value instanceof Map<?, ?> map && map.isEmpty())
+        {
+            throw new IllegalArgumentException(setting + " is required");
+        }
+        return value;
+    }
+}

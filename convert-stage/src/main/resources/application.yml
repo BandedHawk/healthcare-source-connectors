@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: convert-stage
+  main:
+    banner-mode: off
+
+camel:
+  main:
+    name: convert-stage
+    # PHI hygiene (design §7.5): no body logging, tracing or message history.
+    tracing: false
+    backlog-tracing: false
+    message-history: false
+    log-mask: true
+    log-exhausted-message-body: false
+    # Keeps the JVM alive: the app has no web server or other non-daemon thread. (Camel 4 reads this here; the old
+    # camel.springboot.main-run-controller is ignored, and the packaged app exited right after starting.)
+    run-controller: true
+
+# Telemetry (design §12): spans are exported through sdh.telemetry.otlp (with the PHI allow-list filter), so Boot's
+# own OTLP exporters and the Micrometer OTLP metrics registry are off. Sample every trace: one per file is cheap.
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+    export:
+      otlp:
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
+  otlp:
+    metrics:
+      export:
+        enabled: false
+
+# Azure uses the JDK HTTP client (design §8.1). It warns on every storage request that it ignores the SDK's
+# Content-Length header; the JDK sets that header itself from the request body, so the warning is noise (about one
+# line per request). Errors from it are still logged.
+logging:
+  level:
+    com.azure.core.http.jdk.httpclient.JdkHttpClient: error
+
+sdh:
+  stage:
+    input:
+      # Record messages are small and each is independent: a batch of them is claimed, converted and committed
+      # together (STAGES.md §7).
+      batch:
+        max-messages: 100
+  # Split records whose record.split message was lost (STAGES.md §9).
+  reconcile:
+    enabled: true
+    grace: 10m
+    lookback: 2d
+    interval: 15m

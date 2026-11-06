@@ -76,4 +76,18 @@ public interface StageProcessor<O>
      *         is dropped
      */
     ConnectorMessage itemComplete(ItemProgress progress);
+
+    /**
+     * Called once the item-complete message is sent, before the item is
+     * marked complete, so a failure here has both tried again. Whatever it
+     * sends must be safe to send twice. Does nothing unless overridden.
+     *
+     * @param progress the item and its counts
+     * @throws InterruptedException if interrupted
+     * @throws Exception            if what it does fails; the batch is
+     *                              tried again
+     */
+    default void itemCompleted(ItemProgress progress) throws Exception
+    {
+    }
 }

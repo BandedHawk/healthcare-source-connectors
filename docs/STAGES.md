@@ -252,6 +252,76 @@ unconverted, `CONVERT_SKIPPED`. Reconciling: records split more than the grace a
 registry are sent to its own input again. It sends `item.converted`, then `item.result` to the producer when the
 intake has results on.
 
+**How it is built (step 4c, decided 2026-11-06):**
+- **A module of its own,** `convert-stage`, image `sdh/convert-stage`: a `StageProcessor` on the shared worker (§7).
+  Its input is the split stage's output; it takes `record.split` and `item.split`, and drops the rest as unwanted.
+- **Reading:** a record is read from `split_records` with the reader's own code (`QueueReader.readRecord`), so the
+  stage holds `records-kek` and the recipient's private key, and nothing of landing's: no landing catalog, no
+  `landed-items-kek`.
+- **Converting** is the converter registry of §6.4, per the record's format, with the format options of
+  `sdh.convert.options` (as `sdh.split.options`; a CSV record already carries its header row). The limits stay:
+  a record over `sdh.convert.max-bytes` is stored as split, `CONVERT_TOO_LARGE`, and the conversions running at
+  once share a memory budget. A record on its third claim (two workers stopped part-way through it) is stored as
+  split, `CONVERT_SKIPPED`. A piece the splitter couldn't parse is stored as split with the splitter's error.
+- **Storing:** every pod appends to `records`, shared like `split_records` (§8): more commit retries, the ID key
+  created once by compare-and-swap, appends checked against the claims rather than a table epoch. A stored record
+  is announced with `record.stored`, or `record.failed` if stored as split with an error.
+- **Duplicates and conflicts** are the worker's (§6). The output's digest covers the stored bytes, the error code
+  and the converter's mapping version, so a new converter's different output is a conflict, not a duplicate.
+- **The item's totals:** `item.split` gives the record count. The registry keeps the `item.split` as received,
+  still sealed, with the item's row, and hands it back opened when the item's records are all stored. The convert
+  stage then sends `item.converted`, and `item.result` if results are on. Any later stage can keep its item
+  message the same way.
+- **The producer's references (decided: per record).** The result names the producer's own reference for the
+  item, the item it replaces, and for a queue batch the message each problem is in: its number, broker ID and the
+  earlier message it replaces. The split stage reads them from `landed_items` (it holds that key already) and
+  passes them on:
+  - `item.split` gains `producerRef` and `replaces`; its `failure` is placed in its message as the result needs.
+  - `record.split` gains `message`, `messageRef` and `messageReplaces` for a record of a queue batch (−1, null,
+    null otherwise). Sealed like the rest of the message.
+  - The convert stage keeps them only on a failed record's row in `records`: `message_index` in the clear (a
+    position, not PHI), and `message_refs_enc`, the two IDs as a JSON array encrypted with the record's own key
+    (as landing encrypts the original name). The result is then built from `records` alone.
+  - Nothing grows with the batch: putting every message's IDs in `item.split` could pass the 256 KB limit of SQS
+    and Service Bus.
+- **Results** are sent after `item.converted` and before the item is marked complete, so after a crash they are
+  sent again, with the same message IDs. Each problem names its stage: `split` for a piece the splitter couldn't
+  parse (a `PARSE_*` code), `convert` otherwise.
+- **Duties for one pod,** as in §8 (`convert/<connector-id>/duties`): table maintenance of `records`, and
+  reconciling. The reconciler looks at items with records in `split_records` older than the grace whose records
+  aren't all in the registry, rebuilds the missing records' `record.split` from their rows, and hands them to the
+  worker as if received. An item whose `item.split` never arrived can't be completed this way (its producer's
+  references are in landing); it is audited (`convert.item_total_missing`), for an operator (§12).
+- **Settings:** `sdh.stage.*` (§7); `sdh.convert.options`, `.max-bytes`, `.memory`; `sdh.storage` for `records`
+  and the catalog `split_records` is read from; `sdh.results` as before; `sdh.lease` for the duties lease.
+
+**As built (2026-11-06):**
+- `ConvertProcessor` is the stage's `StageProcessor`; `ConvertRuntime` wires it with keys from
+  `KeyMaterial.forStage` (the records KEK, signing, recipient and inbox keys; no landing KEK) and a `QueueReader`
+  built without message keys, which only reads records (the worker opens the messages). `sdh.storage.split-namespace`
+  names the namespace of `split_records` if it differs; `sdh.reconcile.grace`, `.lookback` and `.interval` tune
+  the reconciler; `sdh.convert.autostart=false` leaves the input and duties stopped for tests.
+- A record stored as split (too large, skipped, a splitter's error, or a format with no converter) isn't read until
+  it is committed: its digest is of its split record ID. A splitter's error code this version doesn't know is
+  stored as `PARSE_UNRECOGNISED`.
+- The registry keeps the received `item.split` in `total_message` on the item's row; the worker opens it again for
+  `itemComplete` and the new `itemCompleted` step, which runs after the item-complete message is sent and before
+  the item is marked complete. If it no longer opens (its key retired), `stage.item_total_unreadable` is audited,
+  `item.converted` names the intake `unknown`, and no result is sent (`convert.result_not_sent`).
+- A failed record's row keeps `message_index` and `message_refs_enc` (`RecordBatchWriter.place`), read back by
+  `CommittedRecords.failed(table, item, keys)`.
+- **Two copies of a record.** A worker that loses its claim between checking it and committing can append a record
+  a successor appends too (§6). The reader now reads a record's chunks from the batch of the first row it meets and
+  skips rows of the same record from another batch; `CommittedRecords` reads each record once.
+- The duties are the split stage's, moved to `connector-stage` as `StageDuties` (lease `<stage>/<id>/duties`),
+  with `StageFailures` deciding what is fatal. The reconciler hands rebuilt messages to
+  `StageWorker.handleOpened`, using the registry's `knownRecords` and `completed`. A rebuilt `record.split` has no
+  queue message, so a failed record found this way is reported without one.
+- `ResultReporter` moved here: built from `item.split` and the failed rows; a `CONVERT_*` code is put down to
+  `convert`, any other to `split`.
+- Left for 4d: the image (`sdh/convert-stage`), distribution kit and integration tests; the conversion settings
+  still in `PipelineSettings`.
+
 ## 10. KEDA
 
 A `ScaledObject` per stage, on its input: Kafka consumer lag, SQS queue length, Pub/Sub undelivered messages,
@@ -286,6 +356,8 @@ Each step builds and passes its tests before the next.
      admin commands and their test (disabled until then), and the demo, sandbox, image and integration-test
      settings, which still name the inbox's; the integration tests compile but aren't run.
    - **4c:** the convert stage, a new module `convert-stage` on `connector-stage` (§9), image `sdh/convert-stage`.
+     **Done 2026-11-06** (as built in §9). The producer's references go per record (decided). Unit tests on an
+     in-memory catalog and embedded Postgres; the image and integration tests are left for 4d.
    - **4d:** `file.started` and `file.completed` removed; the demo, sandbox, images, integration tests and docs
      moved to the stages; the admin commands (`restore`, `decrypt-fallback`, `status`) adapted to the per-item
      rows and `split_records` (decided).
@@ -294,6 +366,15 @@ Each step builds and passes its tests before the next.
 
 ## 12. Open for review
 
+- **A lost `item.split`** (§9): the convert stage can rebuild lost `record.split` messages from `split_records`,
+  but not an `item.split`, whose producer's references come from landing. Options: the split stage's duties send
+  each item's `item.split` again once, a grace after it finished; or an operator command does it for the items the
+  convert stage audits.
+- **A redelivered record stored as `CONVERT_SKIPPED`** (§9): the worker processes it again to compare digests
+  (§6), so it is converted again, which may stop the worker as before. Options: the worker compares by attempt
+  for such records, or a processor may give the digest of a stored record without redoing the work.
+- **A reconciled record has no queue message** (§9): its producer's result names no message for it if it fails.
+  The split stage could keep `message_index` and `message_refs_enc` on every `split_records` row of a batch.
 - Split records as bronze, in their own namespace and table (§3).
 - Postgres for the registry and item rows (§5–§6): the lease database the stages already use. A row per record
   per stage, kept as long as the records are (it is how duplicates are recognised); about 100 bytes each.

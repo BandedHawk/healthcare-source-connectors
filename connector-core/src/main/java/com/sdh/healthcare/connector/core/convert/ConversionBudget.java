@@ -4,12 +4,12 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.core.pipeline;
+package com.sdh.healthcare.connector.core.convert;
 
 import java.util.concurrent.Semaphore;
 
 /**
- * Heap set aside for converting records, shared by the pipeline's workers
+ * Heap set aside for converting records, shared by the threads that convert
  * (design §6.4). Before a record is read and converted, its worker takes
  * what the conversion will need at its peak, and gives it back once the
  * record is ready to write; a conversion that doesn't fit waits for
@@ -24,7 +24,7 @@ import java.util.concurrent.Semaphore;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class ConversionBudget
+public final class ConversionBudget
 {
 
     /** The KiB free, handed out in arrival order. */
@@ -38,7 +38,7 @@ final class ConversionBudget
      *
      * @param bytes the budget; at least 1 KiB is used
      */
-    ConversionBudget(long bytes)
+    public ConversionBudget(long bytes)
     {
         total = (int) Math.min(Integer.MAX_VALUE, Math.max(1, bytes >> 10));
         free = new Semaphore(total, true);
@@ -52,7 +52,7 @@ final class ConversionBudget
      * @throws InterruptedException if the wait is interrupted (the batch is
      *                              being abandoned)
      */
-    int acquire(long bytes) throws InterruptedException
+    public int acquire(long bytes) throws InterruptedException
     {
         int kib = (int) Math.min(total, Math.max(1, (bytes + 1023) >> 10));
         free.acquire(kib);
@@ -64,7 +64,7 @@ final class ConversionBudget
      *
      * @param taken what it returned
      */
-    void release(int taken)
+    public void release(int taken)
     {
         free.release(taken);
     }

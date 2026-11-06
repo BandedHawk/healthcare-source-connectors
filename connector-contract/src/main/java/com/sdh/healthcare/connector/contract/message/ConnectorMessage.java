@@ -751,6 +751,13 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      *                        could
      * @param errorAt         where in the item that was; null if unknown or
      *                        none
+     * @param message         for an item that is a batch of queue messages,
+     *                        the number of the message the record starts
+     *                        in, from 0; -1 otherwise
+     * @param messageRef      that message's broker ID; null if not a batch
+     *                        or not kept
+     * @param messageReplaces the earlier message it replaces, as its
+     *                        producer said; null if none
      */
     record RecordSplit(
             String recordId,
@@ -765,7 +772,10 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
             StorageRef storage,
             RecordOrigin origin,
             String errorCode,
-            SourcePosition errorAt)
+            SourcePosition errorAt,
+            int message,
+            String messageRef,
+            String messageReplaces)
             implements RecordInStorage
     {
 
@@ -804,15 +814,20 @@ public sealed interface ConnectorMessage permits ConnectorMessage.FileStarted,
      *                          stored as they were
      * @param itemSize          the item's size, in bytes
      * @param itemDigest        its keyed digest, as landed
+     * @param producerRef       the producer's own reference for it, from
+     *                          landing; null if none
+     * @param replaces          the item it replaces; null if none
      * @param failure           why the item as a whole couldn't be split
-     *                          further, with the records before it kept;
-     *                          null if it was split to the end
+     *                          further, with the records before it kept,
+     *                          placed in its message for a batch; null if
+     *                          it was split to the end
      * @param startedAt         when the split stage started on it
      * @param completedAt       when it finished
      */
     record ItemSplit(UUID itemId, String intake, long recordCount,
             long failedRecordCount, long itemSize, String itemDigest,
-            Problem failure, Instant startedAt, Instant completedAt)
+            String producerRef, UUID replaces, Problem failure,
+            Instant startedAt, Instant completedAt)
             implements ConnectorMessage
     {
 

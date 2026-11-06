@@ -167,15 +167,18 @@ class ContractRoundTripTest
                 new ConnectorMessage.RecordSplit("ID7", itemId, 5, 110, 20,
                         "ccda", "application/xml", 20, 1, ref,
                         new RecordOrigin(new SourcePosition(2, 1),
-                                new SourcePosition(9, 3)), null, null),
+                                new SourcePosition(9, 3)), null, null, -1,
+                        null, null),
                 new ConnectorMessage.RecordSplit("ID8", itemId, 6, 130, 20,
                         "csv", "text/csv", 20, 1, ref, null,
-                        "PARSE_UNTERMINATED_QUOTE", new SourcePosition(7, 4)),
+                        "PARSE_UNTERMINATED_QUOTE", new SourcePosition(7, 4),
+                        3, "m-4", "m-1"),
                 new ConnectorMessage.ItemSplit(itemId, "claims", 7, 1, 999,
-                        "digest", null, java.time.Instant.EPOCH,
+                        "digest", "claims-2026-11.csv", UUID.randomUUID(),
+                        null, java.time.Instant.EPOCH,
                         java.time.Instant.EPOCH),
                 new ConnectorMessage.ItemSplit(itemId, "claims", 2, 0, 999,
-                        "digest", new ConnectorMessage.Problem(
+                        "digest", null, null, new ConnectorMessage.Problem(
                                 "PARSE_XML_MALFORMED", "split", -1, 300,
                                 new SourcePosition(12, 1), -1, null, null),
                         java.time.Instant.EPOCH, java.time.Instant.EPOCH),
@@ -190,11 +193,12 @@ class ContractRoundTripTest
                 .doesNotContainKey("mapping");
         assertThat(PayloadCodec.toJson(new ConnectorMessage.RecordSplit("ID7",
                 itemId, 5, 110, 20, "ccda", "application/xml", 20, 1, ref,
-                null, null, null)))
-                .doesNotContainKeys("errorCode", "errorLine", "mapping");
+                null, null, null, -1, null, null)))
+                .doesNotContainKeys("errorCode", "errorLine", "mapping",
+                        "message", "messageRef", "messageReplaces");
         assertThat(new ConnectorMessage.RecordSplit("ID7", itemId, 5, 110, 20,
-                "ccda", "application/xml", 20, 1, ref, null, null, null)
-                .orderingKey()).isEqualTo("ID7");
+                "ccda", "application/xml", 20, 1, ref, null, null, null, -1,
+                null, null).orderingKey()).isEqualTo("ID7");
         assertThat(new ConnectorMessage.ItemConverted(itemId, "claims", 1, 0,
                 java.time.Instant.EPOCH).orderingKey())
                 .isEqualTo(itemId.toString());

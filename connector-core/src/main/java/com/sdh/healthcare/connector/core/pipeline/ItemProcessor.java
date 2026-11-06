@@ -14,6 +14,7 @@ import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
+import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
 import com.sdh.healthcare.connector.core.split.SplitException;
 import com.sdh.healthcare.connector.core.storage.CommittedRecords;
@@ -99,6 +100,16 @@ public final class ItemProcessor
         SeekableByteSource open() throws IOException;
     }
 
+    /**
+     * What came with an item from landing.
+     *
+     * @param digest its digest, from its {@code item.landed}
+     * @param refs   what landing kept about it for its result
+     */
+    private record Landing(String digest, LandedRefs refs)
+    {
+    }
+
     /** Splits, stores and announces. */
     private final IngestPipeline pipeline;
 
@@ -151,7 +162,7 @@ public final class ItemProcessor
     }
 
     /**
-     * Splits an item, or finishes or announces again one already started.
+     * Splits an item with nothing kept by landing for its result.
      *
      * @param itemId the item's ID
      * @param digest the item's digest, from its {@code item.landed}
@@ -164,6 +175,26 @@ public final class ItemProcessor
     public Outcome process(UUID itemId, String digest, Opener opener,
             LeaseToken lease) throws Exception
     {
+        return process(itemId, digest, opener, lease, LandedRefs.NONE);
+    }
+
+    /**
+     * Splits an item, or finishes or announces again one already started.
+     *
+     * @param itemId the item's ID
+     * @param digest the item's digest, from its {@code item.landed}
+     * @param opener opens the item's bytes, if they are needed
+     * @param lease  the item's lease, held by the caller
+     * @param refs   what landing kept about the item for its result,
+     *               passed on in {@code item.split} and each
+     *               {@code record.split} (STAGES.md §9)
+     * @return how it ended
+     * @throws Exception if storage or the broker fails; the item is tried
+     *                   again later
+     */
+    public Outcome process(UUID itemId, String digest, Opener opener,
+            LeaseToken lease, LandedRefs refs) throws Exception
+    {
         Telemetry telemetry = Telemetry.get();
         Span span = telemetry.span("ingest.item",
                 Fields.of(Attr.ITEM_ID, itemId)
@@ -171,7 +202,8 @@ public final class ItemProcessor
         telemetry.itemStartedProcessing();
         try (Scope ignored = span.makeCurrent())
         {
-            Outcome outcome = run(itemId, digest, opener, lease);
+            Outcome outcome = run(itemId, new Landing(digest, refs), opener,
+                    lease);
             span.setAttribute(Attr.RESULT.key(), outcome.result().name());
             if (outcome.failure() != null)
             {
@@ -196,14 +228,14 @@ public final class ItemProcessor
     /**
      * Takes an item on from wherever its checkpoint is.
      *
-     * @param itemId the item's ID
-     * @param digest the item's digest
-     * @param opener opens its bytes
-     * @param lease  its lease
+     * @param itemId  the item's ID
+     * @param landing what came with it from landing
+     * @param opener  opens its bytes
+     * @param lease   its lease
      * @return how it ended
      * @throws Exception if storage or the broker fails
      */
-    private Outcome run(UUID itemId, String digest, Opener opener,
+    private Outcome run(UUID itemId, Landing landing, Opener opener,
             LeaseToken lease) throws Exception
     {
         Optional<ItemCheckpoints.Stored> stored = pipeline.stored(itemId);
@@ -215,23 +247,23 @@ public final class ItemProcessor
             {
                 case COMPLETED ->
                 {
-                    announce(checkpoint, digest, endedAt);
+                    announce(checkpoint, landing, endedAt);
                     return new Outcome(itemId, Result.COMPLETED,
                             checkpoint.recordCount(), null);
                 }
                 case FAILED ->
                 {
-                    announce(checkpoint, digest, endedAt);
+                    announce(checkpoint, landing, endedAt);
                     return new Outcome(itemId, Result.FAILED,
                             checkpoint.recordCount(), checkpoint.failure());
                 }
                 case FAILING ->
                 {
-                    return finishFailure(checkpoint, digest, lease);
+                    return finishFailure(checkpoint, landing, lease);
                 }
                 case ARCHIVING ->
                 {
-                    return finishCompletion(checkpoint, digest, lease);
+                    return finishCompletion(checkpoint, landing, lease);
                 }
                 default ->
                 {
@@ -245,7 +277,7 @@ public final class ItemProcessor
         try (SeekableByteSource source = opener.open())
         {
             size = source.size();
-            split = pipeline.split(source, itemId, lease);
+            split = pipeline.split(source, itemId, lease, landing.refs());
         }
         catch (Exception failure)
         {
@@ -253,10 +285,10 @@ public final class ItemProcessor
             {
                 throw failure;
             }
-            return fail(failingCheckpoint(itemId, size, failure), digest,
+            return fail(failingCheckpoint(itemId, size, failure), landing,
                     lease);
         }
-        return finishCompletion(split.checkpoint(), digest, lease);
+        return finishCompletion(split.checkpoint(), landing, lease);
     }
 
     /**
@@ -277,16 +309,16 @@ public final class ItemProcessor
      * Sends {@code item.split} and writes {@code COMPLETED}.
      *
      * @param checkpoint the {@code ARCHIVING} checkpoint
-     * @param digest     the item's digest
+     * @param landing    what came with the item from landing
      * @param lease      its lease
      * @return the outcome
      * @throws Exception if the broker or the store fails
      */
-    private Outcome finishCompletion(Checkpoint checkpoint, String digest,
+    private Outcome finishCompletion(Checkpoint checkpoint, Landing landing,
             LeaseToken lease) throws Exception
     {
         UUID itemId = checkpoint.itemId();
-        announce(checkpoint, digest, endedAt(itemId));
+        announce(checkpoint, landing, endedAt(itemId));
         pipeline.commitCheckpoint(
                 checkpoint.withState(Checkpoint.State.COMPLETED), lease);
         Telemetry.get().audit("item.completed",
@@ -313,29 +345,33 @@ public final class ItemProcessor
     }
 
     /**
-     * Sends an item's {@code item.split}: its totals, and its failure if it
-     * failed.
+     * Sends an item's {@code item.split}: its totals, the producer's
+     * references from landing, and its failure if it failed, placed in its
+     * message for a batch.
      *
-     * @param checkpoint  its checkpoint
-     * @param digest      its digest
+     * @param checkpoint its checkpoint
+     * @param landing    what came with it from landing
      * @param endedAt    when its splitting ended, as stored
      * @throws Exception if the broker fails
      */
-    private void announce(Checkpoint checkpoint, String digest,
+    private void announce(Checkpoint checkpoint, Landing landing,
             Instant endedAt) throws Exception
     {
         Failure failure = checkpoint.failure();
+        LandedRefs refs = landing.refs();
         Problem problem = failure == null ? null
-                : new Problem(failure.code().name(), failure.stage(), -1,
-                        failure.offset(), null, -1, null, null);
+                : refs.place(new Problem(failure.code().name(),
+                        failure.stage(), -1, failure.offset(), null, -1,
+                        null, null));
         Instant finishedAt = endedAt != null ? endedAt
                 : failure != null ? failure.failedAt()
                 : pipeline.clock().instant();
         pipeline.publishNow(List.of(new ItemSplit(checkpoint.itemId(),
                 intake, checkpoint.recordCount(),
                 pipeline.failedRecordCount(checkpoint.itemId()),
-                checkpoint.itemSize(), digest, problem,
-                checkpoint.startedAt(), finishedAt)));
+                checkpoint.itemSize(), landing.digest(), refs.producerRef(),
+                refs.replaces(), problem, checkpoint.startedAt(),
+                finishedAt)));
     }
 
     /**
@@ -376,16 +412,16 @@ public final class ItemProcessor
      * Writes the decision to fail, then finishes failing.
      *
      * @param failing the {@code FAILING} checkpoint
-     * @param digest  the item's digest
+     * @param landing what came with the item from landing
      * @param lease   its lease
      * @return the outcome
      * @throws Exception if the store or the broker fails
      */
-    private Outcome fail(Checkpoint failing, String digest, LeaseToken lease)
-            throws Exception
+    private Outcome fail(Checkpoint failing, Landing landing,
+            LeaseToken lease) throws Exception
     {
         pipeline.commitCheckpoint(failing, lease);
-        return finishFailure(failing, digest, lease);
+        return finishFailure(failing, landing, lease);
     }
 
     /**
@@ -393,20 +429,20 @@ public final class ItemProcessor
      * the failure, and writes {@code FAILED}.
      *
      * @param failing the {@code FAILING} checkpoint
-     * @param digest  the item's digest
+     * @param landing what came with the item from landing
      * @param lease   its lease
      * @return the outcome
      * @throws Exception if the store or the broker fails
      */
-    private Outcome finishFailure(Checkpoint failing, String digest,
+    private Outcome finishFailure(Checkpoint failing, Landing landing,
             LeaseToken lease) throws Exception
     {
         if (failing.committedSeq() > failing.publishedSeq())
         {
-            pipeline.announceCommitted(failing);
+            pipeline.announceCommitted(failing, landing.refs());
         }
         Failure failure = failing.failure();
-        announce(failing, digest, endedAt(failing.itemId()));
+        announce(failing, landing, endedAt(failing.itemId()));
         pipeline.commitCheckpoint(failing.failed(), lease);
         Telemetry.get().auditError("item.failed",
                 Fields.of(Attr.ITEM_ID, failing.itemId())

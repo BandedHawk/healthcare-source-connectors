@@ -110,6 +110,14 @@ public final class PayloadCodec
                     payload.put("origin", originFields(record.origin()));
                 }
                 payload.put("storage", storageFields(record.storage()));
+                if (record instanceof RecordSplit split
+                        && split.message() >= 0)
+                {
+                    payload.put("message", split.message());
+                    putIfSet(payload, "messageRef", split.messageRef());
+                    putIfSet(payload, "messageReplaces",
+                            split.messageReplaces());
+                }
             }
             case FileCompleted completed ->
             {
@@ -176,6 +184,8 @@ public final class PayloadCodec
                 payload.put("failedRecordCount", split.failedRecordCount());
                 payload.put("itemSize", split.itemSize());
                 payload.put("itemDigest", split.itemDigest());
+                putIfSet(payload, "producerRef", split.producerRef());
+                putIfSet(payload, "replaces", split.replaces());
                 if (split.failure() != null)
                 {
                     payload.put("failure", problemFields(split.failure()));
@@ -319,7 +329,12 @@ public final class PayloadCodec
                             storage(payload),
                             origin(payload),
                             (String) payload.get("errorCode"),
-                            position(payload, "errorLine", "errorColumn"));
+                            position(payload, "errorLine", "errorColumn"),
+                            payload.get("message") instanceof Number index
+                                    ? Math.toIntExact(index.longValue())
+                                    : -1,
+                            (String) payload.get("messageRef"),
+                            (String) payload.get("messageReplaces"));
                     case ITEM_SPLIT -> new ItemSplit(
                             itemId,
                             text(payload, "intake"),
@@ -327,6 +342,8 @@ public final class PayloadCodec
                             number(payload, "failedRecordCount"),
                             number(payload, "itemSize"),
                             text(payload, "itemDigest"),
+                            (String) payload.get("producerRef"),
+                            uuid(payload, "replaces"),
                             payload.get("failure") instanceof Map<?, ?> failure
                                     ? problem((Map<String, Object>) failure)
                                     : null,
