@@ -251,7 +251,7 @@ public final class ConvertRuntime implements AutoCloseable
             ConvertProperties.Reconcile reconcile = properties.reconcile();
             ConvertReconciler reconciler = reconcile.enabled()
                     ? new ConvertReconciler(splitRecords, registry, worker,
-                            storageSettings.catalogName(),
+                            processor, storageSettings.catalogName(),
                             storageSettings.effectiveSplitNamespace(),
                             reconcile.grace(), reconcile.lookback(), clock)
                     : null;

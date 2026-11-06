@@ -51,6 +51,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.iceberg.AppendFiles;
@@ -180,6 +181,12 @@ public final class ConvertProcessor
     private final String settingsDigest;
 
     /**
+     * The records the reconciler is handing in, rebuilt, by item and
+     * record ID (see {@link #rebuilding}).
+     */
+    private final Set<String> rebuilt = ConcurrentHashMap.newKeySet();
+
+    /**
      * Creates the processor.
      *
      * @param reader     reads split records
@@ -246,6 +253,48 @@ public final class ConvertProcessor
     }
 
     /**
+     * Notes records the reconciler rebuilt from {@code split_records} and
+     * is about to hand in (STAGES.md §9). A rebuilt {@code record.split}
+     * doesn't know the queue message its record is in, so if one fails, it
+     * is audited, {@code convert.placement_unknown}: for an item that is a
+     * message batch, the producer's result (if results are on) names no
+     * message for it.
+     *
+     * @param messages the rebuilt messages
+     */
+    void rebuilding(List<ConnectorMessage> messages)
+    {
+        for (ConnectorMessage message : messages)
+        {
+            rebuilt.add(rebuiltKey((RecordSplit) message));
+        }
+    }
+
+    /**
+     * Forgets records noted by {@link #rebuilding}, once handed in.
+     *
+     * @param messages the rebuilt messages
+     */
+    void rebuilt(List<ConnectorMessage> messages)
+    {
+        for (ConnectorMessage message : messages)
+        {
+            rebuilt.remove(rebuiltKey((RecordSplit) message));
+        }
+    }
+
+    /**
+     * What a rebuilt record is noted by.
+     *
+     * @param split its message
+     * @return its item and record ID
+     */
+    private static String rebuiltKey(RecordSplit split)
+    {
+        return split.itemId() + "/" + split.recordId();
+    }
+
+    /**
      * {@inheritDoc}
      *
      * @return the record converted, or to be stored as split with the
@@ -256,6 +305,30 @@ public final class ConvertProcessor
             int attempt) throws InterruptedException
     {
         RecordSplit split = (RecordSplit) message;
+        StageOutput<Prepared> output = prepare(split, attempt);
+        if (output.failed() && rebuilt.contains(rebuiltKey(split)))
+        {
+            Telemetry.get().auditWarn("convert.placement_unknown",
+                    Fields.of(Attr.STAGE, STAGE)
+                            .with(Attr.ITEM_ID, split.itemId())
+                            .with(Attr.SEQ, split.seq())
+                            .with(Attr.ERROR_CODE, output.value().error()));
+        }
+        return output;
+    }
+
+    /**
+     * Converts a record, or decides to store it as split.
+     *
+     * @param split   the record's message
+     * @param attempt how many workers have claimed it
+     * @return the record converted, or to be stored as split with the
+     *         reason
+     * @throws InterruptedException if interrupted
+     */
+    private StageOutput<Prepared> prepare(RecordSplit split, int attempt)
+            throws InterruptedException
+    {
         if (split.errorCode() != null)
         {
             return asSplit(split, splitError(split.errorCode()),

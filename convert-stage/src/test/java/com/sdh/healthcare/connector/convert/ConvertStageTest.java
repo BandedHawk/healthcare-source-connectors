@@ -115,6 +115,9 @@ class ConvertStageTest
     /** The stage's registry. */
     StageRegistry registry;
 
+    /** The stage's processor, as the worker runs it. */
+    ConvertProcessor processor;
+
     /** The worker. */
     StageWorker<ConvertProcessor.Prepared> worker;
 
@@ -179,7 +182,7 @@ class ConvertStageTest
                 ConvertProcessor.STAGE, "pod-a", Duration.ofSeconds(10));
         registry.createTablesIfMissing();
         Clock clock = Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC);
-        ConvertProcessor processor = new ConvertProcessor(reader,
+        processor = new ConvertProcessor(reader,
                 ConverterRegistry.load(),
                 new ConvertProcessor.Settings(Map.of("csv.header", "true"),
                         1 << 20, 64L << 20, "prod", NS, "test-build"),
@@ -332,7 +335,7 @@ class ConvertStageTest
         assertThat(worker.handleOpened(List.of(messages.get(0))))
                 .isEqualTo(BatchHandler.Outcome.DONE);
         ConvertReconciler reconciler = new ConvertReconciler(splitRecords,
-                registry, worker, "prod", NS, Duration.ofMinutes(10),
+                registry, worker, processor, "prod", NS, Duration.ofMinutes(10),
                 Duration.ofDays(2),
                 Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC));
 
@@ -377,9 +380,55 @@ class ConvertStageTest
         assertThat(stored.itemId()).isEqualTo(item);
         // A record split more recently than the grace isn't looked at.
         ConvertReconciler early = new ConvertReconciler(splitRecords,
-                registry, worker, "prod", NS, Duration.ofMinutes(10),
+                registry, worker, processor, "prod", NS, Duration.ofMinutes(10),
                 Duration.ofDays(2),
                 Clock.fixed(SPLIT_AT.plusSeconds(60), ZoneOffset.UTC));
         assertThat(early.reconcile()).isZero();
+    }
+
+    /**
+     * A record the reconciler rebuilt that then fails is audited, since
+     * its queue message isn't known: the producer's result, if one is
+     * sent, names no message for it. One that is converted isn't.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void auditsARebuiltRecordThatFailsWithoutItsMessage() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2", "3", "5,6", "8");
+        ConvertReconciler reconciler = new ConvertReconciler(splitRecords,
+                registry, worker, processor, "prod", NS,
+                Duration.ofMinutes(10), Duration.ofDays(2),
+                Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC));
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            // Received as the split stage sent it, a failing record knows
+            // its message, and isn't audited.
+            assertThat(worker.handleOpened(List.of(messages.get(3))))
+                    .isEqualTo(BatchHandler.Outcome.DONE);
+            assertThat(reconciler.reconcile()).isEqualTo(3);
+            assertThat(events.getFinishedLogRecordItems().stream()
+                    .filter(event -> "sdh.audit.convert.placement_unknown"
+                            .equals(event.getEventName())))
+                    .singleElement().satisfies(event -> assertThat(
+                            event.getAttributes().asMap())
+                            .containsEntry(AttributeKey.longKey("sdh.seq"),
+                                    1L)
+                            .containsEntry(
+                                    AttributeKey.stringKey("sdh.item_id"),
+                                    item.toString()));
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
     }
 }

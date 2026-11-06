@@ -349,7 +349,9 @@ intake has results on.
 - The duties are the split stage's, moved to `connector-stage` as `StageDuties` (lease `<stage>/<id>/duties`),
   with `StageFailures` deciding what is fatal. The reconciler hands rebuilt messages to
   `StageWorker.handleOpened`, using the registry's `knownRecords` and `completed`. A rebuilt `record.split` has no
-  queue message, so a failed record found this way is reported without one.
+  queue message, so a failed record found this way is reported without one, and audited
+  `convert.placement_unknown` (stage, item, record number, error code) for the operator (§12). A record of a
+  batch of one message, or of a file, loses nothing.
 - `ResultReporter` moved here: built from `item.split` and the failed rows; a `CONVERT_*` code is put down to
   `convert`, any other to `split`.
 - Left for 4d: the image (`sdh/convert-stage`), distribution kit and integration tests; the conversion settings
@@ -413,8 +415,15 @@ Each step builds and passes its tests before the next.
   change in place.
 - **A redelivered record stored as `CONVERT_SKIPPED`** (§9). Resolved 2026-11-06: versions, comparing at the stored
   attempt, and recovery by hand from a stage changed in flight (§6, §13).
-- **A reconciled record has no queue message** (§9): its producer's result names no message for it if it fails.
-  The split stage could keep `message_index` and `message_refs_enc` on every `split_records` row of a batch.
+- **A reconciled record has no queue message** (§9). Resolved 2026-11-06: its gap is audited
+  (`convert.placement_unknown`), and nothing new is stored. Producer results are not guaranteed (DESIGN §5.3.8):
+  the operator finds problems from what the pipeline records and resolves them with the producer, by steps both
+  agree (§13.3). Rejected for now: keeping `message_index` and `message_refs_enc` on every `split_records` row of a
+  batch, until a producer needs results to be complete.
+- **The operator's problem report**, to build later: `sdh-admin problems --item <id>`, run as `SDH_OPERATOR`,
+  audited and read only, lists an item's failed records with their places, working out a record's message from
+  landing (`message_refs_enc`, `message_replaces_enc` and the message index) on request, for the records a result
+  couldn't place.
 - Split records as bronze, in their own namespace and table (§3).
 - Postgres for the registry and item rows (§5–§6): the lease database the stages already use. A row per record
   per stage, kept as long as the records are (it is how duplicates are recognised); about 100 bytes each.
@@ -449,8 +458,9 @@ each such record, with the fields of §6.
 2. **Identify the record:** stage, item ID and sequence number, `sdh.broker_message_id` for where it sits on the
    queue, `sdh.version` (the build now) and `sdh.stored_version` (the build it was stored with), and `sdh.state`.
 3. **Stop the loop by rolling back.** Deploy the build named in `sdh.stored_version` again: the image built from
-   it, whose version and build time are those of its jar. The record then meets its own version, is a duplicate without being processed, and is
-   acknowledged; anything stored but unsent is sent, as for any duplicate. Needs no tooling.
+   it, whose version and build time are those of its jar. The record then meets its own version, is a duplicate
+   without being processed, and is acknowledged; anything stored but unsent is sent, as for any duplicate. Needs no
+   tooling.
 4. **Then let the queues drain,** and redeploy the new build with nothing in flight.
 5. **If rolling back isn't possible** (the old build is withdrawn, or other records already need the new one): the
    delivery is to be marked a duplicate without processing it. Needs tooling: an admin command that names the stage,
@@ -520,8 +530,26 @@ Per stage, a replay sends:
 
 **Limits:** only what is still kept can be replayed (records past retention can't be rebuilt), and a rebuilt record
 message names no queue message, so if a record that was missing fails at the next stage, the producer's result
-names no message for it (§12, reconciled records).
+names no message for it (audited `convert.placement_unknown`; §13.3).
 
 **Until the tooling exists:** a lost `item.split` is recovered by landing's `item.landed` for the item, sent again.
 Nothing can send it yet but landing itself, when it lands the item; so the replay command for landing comes first.
 
+### 13.3 Telling the producer
+
+Producer results are not guaranteed (DESIGN §5.3.8, decided 2026-11-06). The operator finds problems in a
+producer's data from what the pipeline records (the audit events, `stage.item_completed`, the failed rows of
+`records`), and works out with the producer how to resolve them, by steps both organisations agree. Results help a
+producer find its own data, but a producer must not rely on them being complete.
+
+**Where results can have gaps:**
+- **A record reached its stage by reconciling** (§9): its result names no queue message. Audited
+  `convert.placement_unknown`, with the item and record number.
+- **A replay** (§13.2) sends no result unless the operator asks.
+- **An item lost between stages** has no result until it is recovered (§13.2).
+
+**Placing a record by hand,** until the problem report exists (§12): the record number of
+`convert.placement_unknown` gives its byte offset from its row in `split_records`; the message it is in is the last
+of the landed item's message index that starts at or before it, and its broker ID is that entry of the item's
+`message_refs_enc`. Only the split stage's key (`landed-items-kek`) opens it, so this is done under the operator's
+account, and recorded in the ticket.

@@ -40,7 +40,8 @@ import org.slf4j.LoggerFactory;
  * that aren't complete here; any of their records the registry doesn't
  * know has its {@code record.split} rebuilt from its row and handed to the
  * worker, as if received. A record rebuilt this way doesn't know its queue
- * message, so if it fails, the producer's result names no message for it.
+ * message, so if it fails, the producer's result names no message for it;
+ * the processor audits it, {@code convert.placement_unknown}.
  * <p>
  * An item whose records are all here but whose {@code item.split} never
  * arrived can't be completed: its producer's references are known only to
@@ -71,6 +72,9 @@ public final class ConvertReconciler
     /** Converts the rebuilt records. */
     private final StageWorker<?> worker;
 
+    /** The worker's processor, told which records are rebuilt. */
+    private final ConvertProcessor processor;
+
     /** The catalog's name, put in the rebuilt messages. */
     private final String catalogName;
 
@@ -98,6 +102,8 @@ public final class ConvertReconciler
      * @param splitRecords the split stage's table
      * @param registry     the stage's registry
      * @param worker       converts the rebuilt records
+     * @param processor    the worker's processor, told which records are
+     *                     rebuilt
      * @param catalogName  the catalog's name
      * @param namespace    the namespace of {@code split_records}
      * @param grace        how long a record may wait for its message
@@ -105,12 +111,14 @@ public final class ConvertReconciler
      * @param clock        the time
      */
     public ConvertReconciler(Table splitRecords, StageRegistry registry,
-            StageWorker<?> worker, String catalogName, String namespace,
-            Duration grace, Duration lookback, Clock clock)
+            StageWorker<?> worker, ConvertProcessor processor,
+            String catalogName, String namespace, Duration grace,
+            Duration lookback, Clock clock)
     {
         this.splitRecords = splitRecords;
         this.registry = registry;
         this.worker = worker;
+        this.processor = processor;
         this.catalogName = catalogName;
         this.namespace = namespace;
         this.grace = grace;
@@ -174,7 +182,17 @@ public final class ConvertReconciler
             {
                 List<ConnectorMessage> batch = lost.subList(start,
                         Math.min(lost.size(), start + BATCH));
-                if (worker.handleOpened(batch) != BatchHandler.Outcome.DONE)
+                BatchHandler.Outcome outcome;
+                processor.rebuilding(batch);
+                try
+                {
+                    outcome = worker.handleOpened(batch);
+                }
+                finally
+                {
+                    processor.rebuilt(batch);
+                }
+                if (outcome != BatchHandler.Outcome.DONE)
                 {
                     throw new IllegalStateException(
                             "The worker held back reconciled records");
