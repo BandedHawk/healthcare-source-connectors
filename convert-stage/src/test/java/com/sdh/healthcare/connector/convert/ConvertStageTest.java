@@ -30,6 +30,13 @@ import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.stage.StageRegistry;
 import com.sdh.healthcare.connector.stage.StageWorker;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.logs.SdkLoggerProvider;
+import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
+import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -333,7 +340,29 @@ class ConvertStageTest
         assertThat(registry.knownRecords(item)).containsExactlyInAnyOrder(
                 messages.get(0).recordId(), messages.get(1).recordId());
         assertThat(sentOf("record.stored")).isEqualTo(2);
-        assertThat(reconciler.reconcile()).isZero();
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            // The total is missing on each run, but audited once.
+            Telemetry.install(sdk);
+            assertThat(reconciler.reconcile()).isZero();
+            assertThat(reconciler.reconcile()).isZero();
+            assertThat(events.getFinishedLogRecordItems().stream()
+                    .filter(event -> "sdh.audit.convert.item_total_missing"
+                            .equals(event.getEventName())))
+                    .singleElement().satisfies(event -> assertThat(
+                            event.getAttributes().asMap()).containsEntry(
+                                    AttributeKey.longKey("sdh.count"), 2L));
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
         assertThat(sentOf("item.converted")).isZero();
 
         ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",

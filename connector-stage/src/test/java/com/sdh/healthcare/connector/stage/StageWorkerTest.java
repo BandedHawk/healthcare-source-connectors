@@ -191,6 +191,11 @@ class StageWorkerTest
             assertThat(done.failedRecordCount()).isEqualTo(1);
         });
         assertThat(audit.names()).containsExactly("stage.item_completed");
+        assertThat(audit.attributes("stage.item_completed"))
+                .containsEntry("sdh.stage", "test")
+                .containsEntry("sdh.result", "COMPLETED")
+                .containsKey("sdh.count")
+                .containsKey("sdh.failed_count");
     }
 
     /**

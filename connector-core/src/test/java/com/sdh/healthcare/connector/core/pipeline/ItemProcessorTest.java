@@ -34,6 +34,14 @@ import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.logs.SdkLoggerProvider;
+import io.opentelemetry.sdk.logs.data.LogRecordData;
+import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
+import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
 import java.io.ByteArrayInputStream;
 import java.security.KeyPair;
 import java.security.interfaces.ECPrivateKey;
@@ -306,6 +314,59 @@ class ItemProcessorTest
         assertThat(publisher.sent).hasSize(sent + 1);
         assertThat(messages().getLast().messageId())
                 .isEqualTo(messages.getLast().messageId());
+    }
+
+    /**
+     * The end of an item is audited as at every stage, once: with the
+     * split stage's name, how it ended and its counts, so one query finds
+     * an item that ended here and not at the next stage. Announcing a
+     * finished item again doesn't audit it again.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void auditsTheEndOfAnItemOnceAsEveryStageDoes() throws Exception
+    {
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            LandedItem done = land(csv(10));
+            process(processor(), done);
+            process(processor(), done);
+            LandedItem broken = land("1,ok\n2,\"never closed\n");
+            process(processor(), broken);
+
+            List<LogRecordData> ended = events.getFinishedLogRecordItems()
+                    .stream().filter(event -> "sdh.audit.stage.item_completed"
+                            .equals(event.getEventName()))
+                    .toList();
+            assertThat(ended).hasSize(2);
+            assertThat(ended.get(0).getAttributes().asMap())
+                    .containsEntry(AttributeKey.stringKey("sdh.stage"),
+                            "split")
+                    .containsEntry(AttributeKey.stringKey("sdh.item_id"),
+                            done.itemId().toString())
+                    .containsEntry(AttributeKey.stringKey("sdh.result"),
+                            "COMPLETED")
+                    .containsEntry(AttributeKey.longKey("sdh.count"), 10L)
+                    .containsEntry(AttributeKey.longKey("sdh.failed_count"),
+                            0L);
+            assertThat(ended.get(1).getAttributes().asMap())
+                    .containsEntry(AttributeKey.stringKey("sdh.item_id"),
+                            broken.itemId().toString())
+                    .containsEntry(AttributeKey.stringKey("sdh.result"),
+                            "FAILED");
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
     }
 
     /**

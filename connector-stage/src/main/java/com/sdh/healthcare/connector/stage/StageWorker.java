@@ -643,10 +643,14 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                 throw new ExecutionException(failure);
             }
             registry.markCompleted(progress.itemId());
+            // The same event as the split stage's, so one query over the
+            // stages finds an item lost between two (STAGES.md §13.2).
             Telemetry.get().audit("stage.item_completed",
                     Fields.of(Attr.STAGE, processor.stage())
                             .with(Attr.ITEM_ID, progress.itemId())
-                            .with(Attr.COUNT, progress.done()));
+                            .with(Attr.RESULT, "COMPLETED")
+                            .with(Attr.COUNT, progress.done())
+                            .with(Attr.FAILED_COUNT, progress.failed()));
         }
     }
 

@@ -63,6 +63,9 @@ import java.util.UUID;
 public final class ItemProcessor
 {
 
+    /** The stage's name in {@code stage.item_completed}, as for the others. */
+    static final String STAGE = "split";
+
     /** How an item ended. */
     public enum Result
     {
@@ -318,9 +321,10 @@ public final class ItemProcessor
             LeaseToken lease) throws Exception
     {
         UUID itemId = checkpoint.itemId();
-        announce(checkpoint, landing, endedAt(itemId));
+        ItemSplit announced = announce(checkpoint, landing, endedAt(itemId));
         pipeline.commitCheckpoint(
                 checkpoint.withState(Checkpoint.State.COMPLETED), lease);
+        auditEnded(announced, Result.COMPLETED);
         Telemetry.get().audit("item.completed",
                 Fields.of(Attr.ITEM_ID, itemId)
                         .with(Attr.COUNT, checkpoint.recordCount())
@@ -352,9 +356,10 @@ public final class ItemProcessor
      * @param checkpoint its checkpoint
      * @param landing    what came with it from landing
      * @param endedAt    when its splitting ended, as stored
+     * @return the message sent
      * @throws Exception if the broker fails
      */
-    private void announce(Checkpoint checkpoint, Landing landing,
+    private ItemSplit announce(Checkpoint checkpoint, Landing landing,
             Instant endedAt) throws Exception
     {
         Failure failure = checkpoint.failure();
@@ -366,12 +371,32 @@ public final class ItemProcessor
         Instant finishedAt = endedAt != null ? endedAt
                 : failure != null ? failure.failedAt()
                 : pipeline.clock().instant();
-        pipeline.publishNow(List.of(new ItemSplit(checkpoint.itemId(),
-                intake, checkpoint.recordCount(),
+        ItemSplit message = new ItemSplit(checkpoint.itemId(), intake,
+                checkpoint.recordCount(),
                 pipeline.failedRecordCount(checkpoint.itemId()),
                 checkpoint.itemSize(), landing.digest(), refs.producerRef(),
-                refs.replaces(), problem, checkpoint.startedAt(),
-                finishedAt)));
+                refs.replaces(), problem, checkpoint.startedAt(), finishedAt);
+        pipeline.publishNow(List.of(message));
+        return message;
+    }
+
+    /**
+     * Audits the end of an item at the split stage as every stage does
+     * ({@code stage.item_completed}, STAGES.md §13.2), so one query over
+     * the stages finds an item that ended at one and not the next.
+     *
+     * @param message the item's {@code item.split}
+     * @param result  how it ended
+     */
+    private static void auditEnded(ItemSplit message, Result result)
+    {
+        Telemetry.get().audit("stage.item_completed",
+                Fields.of(Attr.STAGE, STAGE)
+                        .with(Attr.ITEM_ID, message.itemId())
+                        .with(Attr.RESULT, result.name())
+                        .with(Attr.COUNT, message.recordCount())
+                        .with(Attr.FAILED_COUNT,
+                                message.failedRecordCount()));
     }
 
     /**
@@ -442,8 +467,10 @@ public final class ItemProcessor
             pipeline.announceCommitted(failing, landing.refs());
         }
         Failure failure = failing.failure();
-        announce(failing, landing, endedAt(failing.itemId()));
+        ItemSplit announced = announce(failing, landing,
+                endedAt(failing.itemId()));
         pipeline.commitCheckpoint(failing.failed(), lease);
+        auditEnded(announced, Result.FAILED);
         Telemetry.get().auditError("item.failed",
                 Fields.of(Attr.ITEM_ID, failing.itemId())
                         .with(Attr.STAGE, failure.stage())

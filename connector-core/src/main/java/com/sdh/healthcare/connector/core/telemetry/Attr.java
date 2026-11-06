@@ -114,6 +114,9 @@ public enum Attr
     /** How many workers have claimed a record. */
     ATTEMPTS("sdh.attempts"),
 
+    /** How many of an item's records failed, and were stored as they were. */
+    FAILED_COUNT("sdh.failed_count"),
+
     /**
      * The broker's ID of a received message, such as
      * {@code topic/partition/offset} on Kafka: where it is on the queue,

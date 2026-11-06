@@ -87,7 +87,8 @@ stage keeps a row per item in Postgres, `stage_item(stage, item_id, expected, do
 - `done` (and `failed`) go up by one when a record is first stored (§6), never for a duplicate;
 - when `expected` is known and `done` reaches it, a conditional update (`completed_at IS NULL`) lets exactly one
   worker send the stage's item-complete message. Sending it again after a crash is harmless: its message ID is
-  fixed (`ic-<stage>-<itemId>`), and the broker or the reader drops the repeat.
+  fixed (`ic-<stage>-<itemId>`), and the next stage drops the repeat (§6); so may the broker, where it
+  de-duplicates by message ID. `QueueReader` doesn't (found 2026-11-06, §12).
 
 ## 6. Duplicates (decided)
 
@@ -322,7 +323,8 @@ intake has results on.
   reconciling. The reconciler looks at items with records in `split_records` older than the grace whose records
   aren't all in the registry, rebuilds the missing records' `record.split` from their rows, and hands them to the
   worker as if received. An item whose `item.split` never arrived can't be completed this way (its producer's
-  references are in landing); it is audited (`convert.item_total_missing`), for an operator (§12).
+  references are in landing); it is audited (`convert.item_total_missing`, once per item), for an operator to
+  recover by hand (§13.2).
 - **Settings:** `sdh.stage.*` (§7); `sdh.convert.options`, `.max-bytes`, `.memory`; `sdh.storage` for `records`
   and the catalog `split_records` is read from; `sdh.results` as before; `sdh.lease` for the duties lease.
 
@@ -397,10 +399,18 @@ Each step builds and passes its tests before the next.
 
 ## 12. Open for review
 
-- **A lost `item.split`** (§9): the convert stage can rebuild lost `record.split` messages from `split_records`,
-  but not an `item.split`, whose producer's references come from landing. Options: the split stage's duties send
-  each item's `item.split` again once, a grace after it finished; or an operator command does it for the items the
-  convert stage audits.
+- **A lost `item.split`** (§9). Resolved 2026-11-06: found by a query over the stages' `stage.item_completed`, and
+  recovered by hand by replaying the item (§13.2). No automatic recovery: a message lost after the broker took it
+  points to a larger problem with the infrastructure, which needs an operator anyway (decided).
+- **Replay tooling** (§13.2), to build later: an admin command per stage that sends all its output for a
+  completed item again, with the rules of §13.2.
+- **`QueueReader` doesn't drop repeated messages.** A reader outside the stages reads a record twice when it is
+  sent again (a resend after a crash, or a replay). Proposed: the reader drops repeats by record ID, built with the
+  replay tooling.
+- **Editing bad data**, to revisit later: an item or record whose data won't let it past a stage, and must be edited
+  or cleaned. Replay sends data again unchanged; an edit changes it. Under the rule that nothing is lost or
+  replaced, an edited item is probably a new item linked to the original, with who changed what recorded, never a
+  change in place.
 - **A redelivered record stored as `CONVERT_SKIPPED`** (§9). Resolved 2026-11-06: versions, comparing at the stored
   attempt, and recovery by hand from a stage changed in flight (§6, §13).
 - **A reconciled record has no queue message** (§9): its producer's result names no message for it if it fails.
@@ -452,4 +462,66 @@ each such record, with the fields of §6.
 **To build later, for this section:** the admin command to mark a delivery a duplicate (step 5); a way to process a
 conflicting record again under the new version as a linked resubmission (the conflict row of the table); and a
 listing of the records compared under a given pair of versions (step 6).
+
+### 13.2 An item lost between stages
+
+Delivery is at least once, and a stage acknowledges a message only once it has done all it leads to, so a message
+is lost only after a broker took it: it expired before the next stage read it (Kafka and Pub/Sub keep 7 days by
+default, SQS 4, Service Bus a time to live), the broker dead-lettered it after its most deliveries (Service Bus and
+Artemis default to 10), the next stage dropped it as untrusted (`stage.message_rejected`: a key rotated with the
+message still queued), or an operator purged the queue. Each points to a larger problem with the infrastructure,
+so recovery is by hand (decided 2026-11-06).
+
+**What is recovered without an operator, and what isn't:**
+- A lost `record.split` is rebuilt by the convert stage's reconciler from `split_records`, for items split within
+  `sdh.reconcile.lookback` (§9).
+- Nothing else. A lost `item.split` (its producer's references are known only to landing), a lost `item.landed`,
+  and anything a stage sent on after it, such as `record.stored`, `item.converted` or `item.result`, stay lost: a
+  stage re-sends only what it stored and hasn't yet sent, and completes an item once.
+
+**Recognising it.** Every stage audits the end of an item the same way, once: `stage.item_completed`, with
+`sdh.stage`, `sdh.item_id`, `sdh.result` (`COMPLETED` or `FAILED`), `sdh.count` (its records) and
+`sdh.failed_count`. Landing's counterpart is `item.landed`. An item lost between two stages is one that ended at
+one and not at the next after a grace, found by a query over the audit events: `item.landed` without
+`stage.item_completed{stage=split}`, then `stage.item_completed{stage=split}` without `{stage=convert}`, and so on.
+This also finds an item with no records (an empty file, or one that failed before its first record), which the
+convert stage's reconciler can't see, since it starts from `split_records`. The reconciler adds
+`convert.item_total_missing` (item, count of records) once per item for an item whose records are all converted
+but whose `item.split` never came.
+
+**Recovering: replay the item from the last stage it ended at.** A replay sends all of a stage's output for one
+item again, as it first sent it, whatever its rows say. The next stage drops what it already has (each record is a
+duplicate under the same version, not processed again, §6; the total can't change; a completed item isn't
+completed twice), processes what it lacks, and completes the item. Then the same at the stage after, if needed.
+Per stage, a replay sends:
+- **landing:** the item's `item.landed`. The split stage splits an item it hasn't, and sends the `item.split` of
+  one it has finished again, unchanged (`ended_at` is fixed). This is all a lost `item.split` needs, so it is the
+  first tool to build;
+- **split:** every `record.split` of the item, rebuilt from `split_records` as the reconciler rebuilds them, then
+  its `item.split`;
+- **convert:** every `record.stored` and `record.failed`, rebuilt from `records`, then `item.converted`; the
+  producer's `item.result` only if asked (below);
+- **transform** (step 6): the same, from its own tables.
+
+**Rules, so a replay harms nothing:**
+1. **Only a completed item** (its `stage.item_completed` sent): replaying one still in progress would send its
+   item-complete message early. A replay of any other is refused.
+2. **Its own broker de-duplication ID.** Artemis (`_AMQ_DUPL_ID`, a persistent cache), Service Bus (duplicate
+   detection, up to 7 days) and SQS FIFO (5 minutes) drop a message whose ID they have seen, without error, so a
+   replay with the original IDs could do nothing at all. A replay sends `<messageId>~replay-<n>` as the broker's ID
+   and keeps the contract's `messageId` in the body: the stages recognise records by item and record ID, not by
+   broker ID, so nothing downstream changes.
+3. **The producer's result only on request.** The contract allows `item.result` again (a resend after a crash has
+   the same IDs), but producers are outside organisations, and a second result could set off their own handling.
+   It is sent again only when the operator asks, for an item whose result was lost.
+4. **Readers outside the stages** must drop the repeats: `QueueReader` is to do it by record ID (§12).
+5. **Under the build that stored it,** where possible: under a newer one each record meets another version
+   downstream and is processed again to compare, with §13.1's risk.
+
+**Limits:** only what is still kept can be replayed (records past retention can't be rebuilt), and a rebuilt record
+message names no queue message, so if a record that was missing fails at the next stage, the producer's result
+names no message for it (§12, reconciled records).
+
+**Until the tooling exists:** a lost `item.split` is recovered by landing's `item.landed` for the item, sent again.
+Nothing can send it yet but landing itself, when it lands the item; so the replay command for landing comes first.
 

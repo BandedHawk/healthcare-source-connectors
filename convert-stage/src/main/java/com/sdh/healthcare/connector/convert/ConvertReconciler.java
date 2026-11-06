@@ -22,6 +22,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -43,8 +44,10 @@ import org.slf4j.LoggerFactory;
  * <p>
  * An item whose records are all here but whose {@code item.split} never
  * arrived can't be completed: its producer's references are known only to
- * landing. It is audited, {@code convert.item_total_missing}, for an
- * operator (STAGES.md §12). Runs on the pod that holds the duties lease.
+ * landing. It is audited, {@code convert.item_total_missing}, once per
+ * item while this pod holds the duties (again after a restart), for an
+ * operator to recover by hand (STAGES.md §13.2). Runs on the pod that
+ * holds the duties lease.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -82,6 +85,12 @@ public final class ConvertReconciler
 
     /** The time. */
     private final Clock clock;
+
+    /**
+     * The items audited as missing their total, so each is audited once.
+     * Only items still looked at are kept, so it can't grow without end.
+     */
+    private final Set<UUID> reportedMissing = new HashSet<>();
 
     /**
      * Creates a reconciler.
@@ -129,6 +138,8 @@ public final class ConvertReconciler
         Map<UUID, Set<String>> committed = CommittedRecords.committedBetween(
                 splitRecords, now.minus(lookback), now.minus(grace));
         Set<UUID> completed = registry.completed(committed.keySet());
+        reportedMissing.retainAll(committed.keySet());
+        reportedMissing.removeAll(completed);
         int recovered = 0;
         int totalsMissing = 0;
         for (Map.Entry<UUID, Set<String>> item : committed.entrySet())
@@ -144,8 +155,15 @@ public final class ConvertReconciler
                 Optional<ItemProgress> progress = registry.item(itemId);
                 if (progress.isEmpty() || progress.get().expected() < 0)
                 {
-                    Telemetry.get().auditWarn("convert.item_total_missing",
-                            Fields.of(Attr.ITEM_ID, itemId));
+                    if (reportedMissing.add(itemId))
+                    {
+                        Telemetry.get().auditWarn(
+                                "convert.item_total_missing",
+                                Fields.of(Attr.STAGE, ConvertProcessor.STAGE)
+                                        .with(Attr.ITEM_ID, itemId)
+                                        .with(Attr.COUNT,
+                                                item.getValue().size()));
+                    }
                     totalsMissing++;
                 }
                 continue;
