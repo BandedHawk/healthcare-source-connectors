@@ -333,3 +333,5 @@ Checked again since: see the end of this section.
   it, all 110 items landed were split and converted, none twice. The landing node can't run while Vault is
   sealed: it restarted 7 times, the 40 pushes meanwhile failed at the producer, and it took pushes again about
   three minutes after the unseal, Kubernetes' restart delay. The stages' inputs use `groupProtocol=consumer`.
+  Fixed since (revision (ca)), not yet tried here: the landing node stays up through a key service outage, and a
+  node started during one waits for it (`crypto.kms_waiting`) instead of exiting.

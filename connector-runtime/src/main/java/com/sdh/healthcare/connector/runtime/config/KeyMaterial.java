@@ -18,6 +18,7 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
+import com.sdh.healthcare.connector.core.pipeline.Outage;
 import com.sdh.healthcare.connector.kms.AwsKmsKeyProvider;
 import com.sdh.healthcare.connector.kms.AzureKeyVaultKeyProvider;
 import com.sdh.healthcare.connector.kms.GcpKmsKeyProvider;
@@ -25,6 +26,7 @@ import com.sdh.healthcare.connector.kms.KmsJwsSigner;
 import com.sdh.healthcare.connector.kms.VaultTransitKeyProvider;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -39,6 +41,7 @@ import java.security.SecureRandom;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECParameterSpec;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HexFormat;
@@ -48,6 +51,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import javax.crypto.SecretKey;
 import org.slf4j.Logger;
@@ -69,6 +73,13 @@ import org.slf4j.LoggerFactory;
  * with an {@code fsGroup} are always at least 0440. The recipient key must
  * match its pinned fingerprint. Public key files are not checked for
  * permissions.
+ * <p>
+ * A KMS that is down or not answering at startup ({@link Outage}) is
+ * waited for, trying again with a growing pause, rather than startup
+ * failing: a node started during an outage is then ready as soon as the KMS
+ * is back, not after its orchestrator's restart delays (design revision
+ * (ca)). Any other failure, a missing key or permission among them, still
+ * refuses startup at once.
  *
  * @param wrap         wraps and unwraps data keys with the KEKs
  * @param signer       signs messages
@@ -136,6 +147,29 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
         KeyProvider create(String name, CommonSettings.Crypto crypto);
     }
 
+    /** Pauses before the keys are tried again. Replaceable in tests. */
+    @FunctionalInterface
+    public interface Pause
+    {
+
+        /** Sleeps. */
+        Pause SLEEP = Thread::sleep;
+
+        /**
+         * Pauses.
+         *
+         * @param millis how long
+         * @throws InterruptedException if interrupted meanwhile
+         */
+        void pause(long millis) throws InterruptedException;
+    }
+
+    /** The first pause while a KMS is down at startup. */
+    static final Duration FIRST_WAIT = Duration.ofSeconds(1);
+
+    /** The longest pause while a KMS is down at startup. */
+    static final Duration LONGEST_WAIT = Duration.ofSeconds(30);
+
     /**
      * Where the Vault token comes from: read from its file at each use, so
      * a renewed token is picked up, or the token set directly.
@@ -199,6 +233,26 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
             Providers providers)
             throws IOException, GeneralSecurityException, JOSEException
     {
+        return load(crypto, providers, Pause.SLEEP);
+    }
+
+    /**
+     * The splitter's keys, with KMS providers from {@code providers}, and
+     * {@code pause} between tries while a KMS is down.
+     *
+     * @param crypto    the key settings
+     * @param providers builds KMS providers
+     * @param pause     pauses before trying again
+     * @return the keys
+     * @throws IOException              if a key file can't be read, or the
+     *                                  thread is interrupted while waiting
+     * @throws GeneralSecurityException if a key is wrong or unusable
+     * @throws JOSEException            if the KMS signing probe fails
+     */
+    public static KeyMaterial load(CommonSettings.Crypto crypto,
+            Providers providers, Pause pause)
+            throws IOException, GeneralSecurityException, JOSEException
+    {
         CommonSettings.Keys keys = crypto.keys();
         String records = require(keys.recordsKek(),
                 "sdh.crypto.keys.records-kek");
@@ -209,8 +263,8 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
             throw new IllegalArgumentException("The records KEK must differ"
                     + " from the landing KEK (design §7.1)");
         }
-        return load(crypto, providers, List.of(records), List.of(landed),
-                true);
+        return waitingFor(crypto, providers, List.of(records),
+                List.of(landed), true, pause);
     }
 
     /**
@@ -232,7 +286,8 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
     {
         String records = require(crypto.keys().recordsKek(),
                 "sdh.crypto.keys.records-kek");
-        return load(crypto, providers, List.of(records), List.of(), true);
+        return waitingFor(crypto, providers, List.of(records), List.of(),
+                true, Pause.SLEEP);
     }
 
     /**
@@ -253,11 +308,77 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
     {
         String landed = require(crypto.keys().landedItemsKek(),
                 "sdh.crypto.keys.landed-items-kek");
-        return load(crypto, providers, List.of(landed), List.of(), false);
+        return waitingFor(crypto, providers, List.of(landed), List.of(),
+                false, Pause.SLEEP);
     }
 
     /**
-     * Loads and checks the keys. KMS clients opened along the way are
+     * Loads and checks the keys, trying again while a KMS is down
+     * ({@link Outage}): the pause doubles from {@link #FIRST_WAIT} to
+     * {@link #LONGEST_WAIT}, for as long as it takes. Each try is logged as
+     * {@code crypto.kms_waiting}, and the keys loaded after waiting as
+     * {@code crypto.kms_ready}. Any other failure is thrown at once.
+     *
+     * @param crypto     the key settings
+     * @param providers  builds KMS providers
+     * @param probed     KEKs wrapped and unwrapped with, probed at startup
+     * @param unwrapOnly KEKs only unwrapped with, not probed
+     * @param inbox      whether the inbox and landing signing keys are
+     *                   required
+     * @param pause      pauses before trying again
+     * @return the keys
+     * @throws IOException              if a key file can't be read, or the
+     *                                  thread is interrupted while waiting
+     * @throws GeneralSecurityException if a key is wrong or unusable
+     * @throws JOSEException            if the KMS signing probe fails
+     */
+    private static KeyMaterial waitingFor(CommonSettings.Crypto crypto,
+            Providers providers, List<String> probed, List<String> unwrapOnly,
+            boolean inbox, Pause pause)
+            throws IOException, GeneralSecurityException, JOSEException
+    {
+        long start = System.nanoTime();
+        for (int attempt = 1;; attempt++)
+        {
+            try
+            {
+                KeyMaterial keys = load(crypto, providers, probed,
+                        unwrapOnly, inbox);
+                if (attempt > 1)
+                {
+                    LOG.info("crypto.kms_ready attempts={} waited_ms={}",
+                            attempt, TimeUnit.NANOSECONDS.toMillis(
+                                    System.nanoTime() - start));
+                }
+                return keys;
+            }
+            catch (IOException | GeneralSecurityException | JOSEException
+                    | RuntimeException failure)
+            {
+                if (!Outage.caused(failure))
+                {
+                    throw failure;
+                }
+                long wait = Math.min(LONGEST_WAIT.toMillis(),
+                        FIRST_WAIT.toMillis() << Math.min(attempt - 1, 20));
+                LOG.warn("crypto.kms_waiting attempt={} wait_ms={} error={}",
+                        attempt, wait, failure.getClass().getSimpleName());
+                try
+                {
+                    pause.pause(wait);
+                }
+                catch (InterruptedException interrupted)
+                {
+                    Thread.currentThread().interrupt();
+                    throw new InterruptedIOException(
+                            "Interrupted waiting for the KMS");
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads and checks the keys once. KMS clients opened along the way are
      * closed if anything fails.
      *
      * @param crypto     the key settings

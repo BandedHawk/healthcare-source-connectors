@@ -10,6 +10,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
+import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
@@ -20,6 +24,11 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.GeneralSecurityException;
 import java.security.interfaces.ECPrivateKey;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import javax.crypto.KeyGenerator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -208,5 +217,79 @@ class KeyMaterialTest
         assertThatThrownBy(() -> Pem.encryptedPrivateKey(key,
                 "wrong".toCharArray()))
                 .isInstanceOf(GeneralSecurityException.class);
+    }
+
+    /**
+     * A KMS down at startup is waited for, with a growing pause, and the
+     * keys load once it is back (design revision (ca)); one that refuses
+     * the key fails startup at once, without waiting.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void waitsForAKmsThatIsDownButNotOneThatRefuses() throws Exception
+    {
+        TestKeys keys = new TestKeys(dir);
+        String pin = KeyMaterial.fingerprint(keys.recipient.getPublic());
+        CommonSettings.Crypto crypto = crypto(keys, pin, keys.signingPem,
+                "fake-kms", "local", null);
+        KeyGenerator aes = KeyGenerator.getInstance("AES");
+        aes.init(256);
+        AesKeyWrapProvider kek = new AesKeyWrapProvider(Map.of(
+                TestKeys.RECORDS, aes.generateKey(),
+                TestKeys.LANDED, aes.generateKey()));
+        AtomicInteger down = new AtomicInteger(2);
+        List<Long> pauses = new ArrayList<>();
+        KeyMaterial material = KeyMaterial.load(crypto,
+                (name, settings) -> failing(kek, () ->
+                {
+                    if (down.getAndDecrement() > 0)
+                    {
+                        throw new KeyServiceUnavailableException(
+                                "KMS wrap unavailable",
+                                new IOException("HTTP 503"));
+                    }
+                }), pauses::add);
+        assertThat(pauses).containsExactly(1000L, 2000L);
+        byte[] dek = new byte[32];
+        assertThat(material.wrap().unwrap(
+                material.wrap().wrap(TestKeys.RECORDS, dek))).isEqualTo(dek);
+
+        pauses.clear();
+        assertThatThrownBy(() -> KeyMaterial.load(crypto,
+                (name, settings) -> failing(kek, () ->
+                {
+                    throw new IllegalStateException("KMS wrap refused: 403");
+                }), pauses::add))
+                .isInstanceOf(GeneralSecurityException.class)
+                .hasMessageContaining("403");
+        assertThat(pauses).isEmpty();
+    }
+
+    /**
+     * A KMS whose calls first run a check, which may throw.
+     *
+     * @param kek   does the wrapping
+     * @param check runs before each call
+     * @return the provider
+     */
+    static KeyProvider failing(KeyProvider kek, Runnable check)
+    {
+        return new KeyProvider()
+        {
+            @Override
+            public WrappedKey wrap(String keyRef, byte[] dataKey)
+            {
+                check.run();
+                return kek.wrap(keyRef, dataKey);
+            }
+
+            @Override
+            public byte[] unwrap(WrappedKey wrapped)
+            {
+                check.run();
+                return kek.unwrap(wrapped);
+            }
+        };
     }
 }

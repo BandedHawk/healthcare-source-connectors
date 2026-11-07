@@ -9,8 +9,15 @@ package com.sdh.healthcare.connector.landing.intake;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.JWSSigner;
 import com.nimbusds.jose.crypto.ECDSASigner;
+import com.nimbusds.jose.jca.JCAContext;
+import com.nimbusds.jose.util.Base64URL;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
@@ -26,8 +33,8 @@ import com.sdh.healthcare.connector.core.landing.NewItem;
 import com.sdh.healthcare.connector.core.landing.SourceRef;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
-import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.sdh.healthcare.connector.landing.TelemetryCapture;
+import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import java.io.ByteArrayInputStream;
@@ -43,6 +50,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -122,6 +130,9 @@ class PushServiceTest
 
     /** The lander of the last service made by {@link #service(long)}. */
     ItemLander lander;
+
+    /** Whether signing fails as through a key service that is down. */
+    volatile boolean keyServiceDown;
 
     /** The reasons given to the exit hook. */
     final List<String> fatal = new CopyOnWriteArrayList<>();
@@ -205,8 +216,7 @@ class PushServiceTest
         LandingLedger ledger = new LandingLedger(ledgerTable, committer,
                 RETRY);
         Announcer announcer = new Announcer(new MessageSealer(
-                new ECDSASigner((ECPrivateKey) signing.getPrivate()),
-                "connector", recipient.getPublic(), "downstream"),
+                signer(), "connector", recipient.getPublic(), "downstream"),
                 message ->
                 {
                     if (failSends.getAndDecrement() > 0)
@@ -233,6 +243,47 @@ class PushServiceTest
         return new PushService(INTAKE, new IntakeService.Storage(lander,
                 ledger, ledger.load(INTAKE), ids), announcer, fatal::add,
                 Clock.systemUTC(), maxItemBytes, Duration.ofMillis(100));
+    }
+
+    /**
+     * The signing key, failing as a KMS signer does while
+     * {@link #keyServiceDown}: the key service's error, in a
+     * {@link JOSEException}.
+     *
+     * @return the signer
+     * @throws JOSEException if the key isn't usable
+     */
+    JWSSigner signer() throws JOSEException
+    {
+        ECDSASigner key = new ECDSASigner((ECPrivateKey) signing.getPrivate());
+        return new JWSSigner()
+        {
+            @Override
+            public Base64URL sign(JWSHeader header, byte[] signingInput)
+                    throws JOSEException
+            {
+                if (keyServiceDown)
+                {
+                    throw new JOSEException("KMS signing failed",
+                            new KeyServiceUnavailableException(
+                                    "Vault Transit sign unavailable",
+                                    new IOException("HTTP 503")));
+                }
+                return key.sign(header, signingInput);
+            }
+
+            @Override
+            public Set<JWSAlgorithm> supportedJWSAlgorithms()
+            {
+                return key.supportedJWSAlgorithms();
+            }
+
+            @Override
+            public JCAContext getJCAContext()
+            {
+                return key.getJCAContext();
+            }
+        };
     }
 
     /**
@@ -401,6 +452,33 @@ class PushServiceTest
         assertThat(push(service, "a", null, "two").status())
                 .isEqualTo(PushService.Status.UNAVAILABLE);
         assertThat(sent).isEmpty();
+        assertThat(push(service, "a", null, "three").status())
+                .isEqualTo(PushService.Status.LANDED);
+        assertThat(sent).hasSize(2);
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * While the key service is down, the node stays up (design revision
+     * (ca)): a push lands but its message waits, the next is refused as
+     * unavailable, and once the service is back the next push sends both.
+     * Before, the signing failure, wrapped as an
+     * {@link IllegalStateException}, stopped the node.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void staysUpWhileTheKeyServiceIsDown() throws Exception
+    {
+        PushService service = service(0);
+        keyServiceDown = true;
+        assertThat(push(service, "a", null, "one").status())
+                .isEqualTo(PushService.Status.LANDED);
+        assertThat(push(service, "a", null, "two").status())
+                .isEqualTo(PushService.Status.UNAVAILABLE);
+        assertThat(sent).isEmpty();
+        assertThat(fatal).isEmpty();
+        keyServiceDown = false;
         assertThat(push(service, "a", null, "three").status())
                 .isEqualTo(PushService.Status.LANDED);
         assertThat(sent).hasSize(2);

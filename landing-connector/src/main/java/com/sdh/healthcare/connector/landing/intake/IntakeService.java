@@ -16,6 +16,7 @@ import com.sdh.healthcare.connector.core.landing.LandingLedger;
 import com.sdh.healthcare.connector.core.landing.LedgerIndex;
 import com.sdh.healthcare.connector.core.landing.NewItem;
 import com.sdh.healthcare.connector.core.landing.SourceRef;
+import com.sdh.healthcare.connector.core.pipeline.Outage;
 import com.sdh.healthcare.connector.core.pipeline.UuidV7;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -742,7 +743,14 @@ public final class IntakeService implements LandingIntake
     }
 
     /**
-     * Tells whether an error means the node must stop.
+     * Tells whether an error means the node must stop. An
+     * {@link IllegalStateException} means a broken invariant, unless a
+     * service being down caused it ({@link Outage}): signing a message
+     * through a key service that is down, for one, ends in one. Then the
+     * node stays up and the work is tried again, as for any other error
+     * (design revision (ca)). A lost lease, an unknown commit outcome, a
+     * tampered checkpoint and a claimed directory stop it whatever caused
+     * them.
      *
      * @param failure the error
      * @return true if it does
@@ -753,8 +761,9 @@ public final class IntakeService implements LandingIntake
                 || failure instanceof LeaseLostException
                 || failure instanceof CommitStateUnknownException
                 || failure instanceof CheckpointTamperedException
+                || failure instanceof InboundDirectoryClaim.ClaimedException
                 || failure instanceof IllegalStateException
-                || failure instanceof InboundDirectoryClaim.ClaimedException;
+                        && !Outage.caused(failure);
     }
 
     /**

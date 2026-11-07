@@ -8,8 +8,10 @@ package com.sdh.healthcare.connector.landing.intake;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
@@ -23,12 +25,13 @@ import com.sdh.healthcare.connector.core.landing.LandingLedger;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.landing.TelemetryCapture;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
-import com.sdh.healthcare.connector.landing.TelemetryCapture;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -41,8 +44,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -53,6 +56,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import javax.crypto.KeyGenerator;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -805,5 +809,26 @@ class IntakeServiceTest
         Files.createDirectories(root.resolve("in"));
         service.onListingDone();
         assertThat(service.reachable()).isTrue();
+    }
+
+    /**
+     * An {@link IllegalStateException} a service being down caused isn't
+     * fatal; one without such a cause still is, and so is an unknown commit
+     * outcome whatever caused it (design revision (ca)).
+     */
+    @Test
+    void anOutageIsntFatal()
+    {
+        KeyServiceUnavailableException down =
+                new KeyServiceUnavailableException("Vault Transit sign"
+                        + " unavailable", new IOException("HTTP 503"));
+        assertThat(IntakeService.isFatal(new IllegalStateException(
+                "Could not seal message",
+                new JOSEException("KMS signing failed", down)))).isFalse();
+        assertThat(IntakeService.isFatal(down)).isFalse();
+        assertThat(IntakeService.isFatal(
+                new IllegalStateException("broken invariant"))).isTrue();
+        assertThat(IntakeService.isFatal(new CommitStateUnknownException(
+                new SocketTimeoutException("read timed out")))).isTrue();
     }
 }

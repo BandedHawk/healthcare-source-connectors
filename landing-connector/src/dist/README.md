@@ -192,7 +192,9 @@ SDH_OPERATOR=alice bin/sdh-admin replay --item-id <id>   # operator commands: re
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The node exits with status 70
-on conditions it can't safely continue from, and resumes where it stopped.
+on conditions it can't safely continue from, and resumes where it stopped. A service it depends on being down
+(storage, the broker, the key service) doesn't stop it: pushes are answered unavailable, with `Retry-After`, until
+the service is back. At startup it waits for a key service that is down, logging `crypto.kms_waiting`.
 
 ## Build a container image
 
@@ -318,6 +320,10 @@ kubectl debug -it <pod> --image=busybox --target=landing-connector --profile=res
 
 It runs as the node's user and shares its processes, so the node's files are under `/proc/1/root/`. Landed items are
 restored with the file connector's `restore` command.
+
+A pod that runs but never becomes ready, logging `crypto.kms_waiting`, can't reach its key service, or the key
+service isn't serving (Vault sealed, say). It goes on once the key service answers. A key or permission the key
+service refuses stops startup instead, with the error.
 
 ## Licenses
 
