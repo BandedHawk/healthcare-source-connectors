@@ -160,9 +160,10 @@ class ContractVersionTest
 
     /**
      * Sealed and opened as the splitter opens them: a later minor version
-     * opens, and another major version is refused with
-     * {@code UNSUPPORTED_VERSION}, so the splitter can tell it from a
-     * message that is simply bad.
+     * opens, a later major version is refused with
+     * {@code UNSUPPORTED_VERSION} and an earlier one with
+     * {@code EARLIER_VERSION}, so the splitter can tell either from a
+     * message that is simply bad, and hold only the later one.
      *
      * @throws Exception if the test fails to run
      */
@@ -192,6 +193,15 @@ class ContractVersionTest
                         ((MessageRejectedException) thrown).reason())
                 .isEqualTo(MessageRejectedException.Reason
                         .UNSUPPORTED_VERSION);
+
+        // An earlier major version, which no later build reads either.
+        byte[] earlierMajor = sealer.seal(payload(sent,
+                (ContractVersion.MAJOR - 1) + ".4"));
+        assertThatThrownBy(() -> opener.open(earlierMajor))
+                .isInstanceOf(MessageRejectedException.class)
+                .extracting(thrown ->
+                        ((MessageRejectedException) thrown).reason())
+                .isEqualTo(MessageRejectedException.Reason.EARLIER_VERSION);
 
         Map<String, Object> broken = payload(sent, ContractVersion.CURRENT);
         broken.remove("itemId");

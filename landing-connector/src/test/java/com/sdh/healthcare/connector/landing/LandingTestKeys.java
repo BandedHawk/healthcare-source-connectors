@@ -34,32 +34,32 @@ import javax.crypto.spec.PBEParameterSpec;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class LandingTestKeys
+public final class LandingTestKeys
 {
 
     /** The keystore's password. */
-    static final String KEYSTORE_PASSWORD = "ks-secret";
+    public static final String KEYSTORE_PASSWORD = "ks-secret";
 
     /** The signing key's passphrase. */
-    static final String SIGNING_PASSPHRASE = "sign-secret";
+    public static final String SIGNING_PASSPHRASE = "sign-secret";
 
     /** The KEK's alias. */
-    static final String LANDED_ITEMS = "landed-items-kek/1";
+    public static final String LANDED_ITEMS = "landed-items-kek/1";
 
     /** The keystore file. */
-    final Path keystore;
+    public final Path keystore;
 
     /** The encrypted signing key. */
-    final Path signingPem;
+    public final Path signingPem;
 
     /** The recipient's public key. */
-    final Path recipientPem;
+    public final Path recipientPem;
 
     /** The signing key pair. */
-    final KeyPair signing;
+    public final KeyPair signing;
 
     /** The recipient's key pair. */
-    final KeyPair recipient;
+    public final KeyPair recipient;
 
     /**
      * Makes the keys and writes their files.
@@ -67,7 +67,7 @@ final class LandingTestKeys
      * @param directory where to write them
      * @throws Exception if a key can't be made or written
      */
-    LandingTestKeys(Path directory) throws Exception
+    public LandingTestKeys(Path directory) throws Exception
     {
         signing = ec();
         recipient = ec();

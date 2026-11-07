@@ -18,6 +18,9 @@ import com.sdh.healthcare.connector.contract.ContractVersion;
 public class UnsupportedContractVersionException extends RuntimeException
 {
 
+    /** Whether the version is an earlier major version than this build's. */
+    private final boolean earlier;
+
     /**
      * Creates the exception.
      *
@@ -27,5 +30,17 @@ public class UnsupportedContractVersionException extends RuntimeException
     {
         super("Unsupported contract version " + version
                 + "; this reader supports " + ContractVersion.MAJOR + ".x");
+        this.earlier = ContractVersion.isEarlierMajor(version);
+    }
+
+    /**
+     * Tells whether the message's version is an earlier major version than
+     * this build's, which no later build reads either.
+     *
+     * @return true if it is earlier; false if later, or not a version
+     */
+    public boolean earlier()
+    {
+        return earlier;
     }
 }

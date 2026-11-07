@@ -138,6 +138,28 @@ class ItemCheckpointsTest
     }
 
     /**
+     * Items in progress whose checkpoint hasn't been written since a time
+     * are listed as stalled; finished ones, and those written since, are
+     * not.
+     */
+    @Test
+    void listsItemsLeftPartWay()
+    {
+        UUID done = UUID.randomUUID();
+        UUID archiving = UUID.randomUUID();
+        checkpoints.save(start(item), new Held(1));
+        checkpoints.save(start(done).withState(Checkpoint.State.COMPLETED),
+                new Held(1));
+        checkpoints.save(start(archiving).withState(Checkpoint.State.ARCHIVING),
+                new Held(1));
+        Instant later = Instant.now().plus(Duration.ofMinutes(1));
+        assertThat(checkpoints.stalled(later))
+                .containsExactly(item, archiving);
+        assertThat(checkpoints.stalled(
+                Instant.now().minus(Duration.ofMinutes(1)))).isEmpty();
+    }
+
+    /**
      * The end of an item's splitting is noted once; it is counted finished
      * once it is {@code COMPLETED}.
      */

@@ -137,8 +137,10 @@ public final class SplitHandler implements BatchHandler
         {
             if (rejected.reason() == Reason.UNSUPPORTED_VERSION)
             {
-                // Dropping it would strand the item; it is held until
-                // this stage is upgraded.
+                // A later version: dropping it would strand the item; it
+                // is held until this stage is upgraded. An earlier one,
+                // which no upgrade reads, is rejected below, and its item
+                // found by the reconciler.
                 Telemetry.get().auditError("split.unreadable_version",
                         Fields.of(Attr.ERROR_CODE, ErrorCode.MESSAGE_REJECTED)
                                 .with(Attr.INTAKE, intake)

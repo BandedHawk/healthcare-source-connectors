@@ -10,6 +10,8 @@
 #
 # Run it read-only, with /tmp (noexec is fine), the intake directory at /data/intake and the secrets mounted as
 # volumes: see README.md.
+# Operator commands: kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args \
+#   replay --item-id <id> --operator alice
 
 ARG JAVA_IMAGE=gcr.io/distroless/java25-debian13:nonroot
 FROM ${JAVA_IMAGE}
@@ -23,7 +25,7 @@ LABEL org.opencontainers.image.title="landing-connector" \
       org.opencontainers.image.documentation="Third-party notices: /app/legal/NOTICE and /app/legal/THIRD-PARTY.txt"
 
 WORKDIR /app
-COPY app.jar config/jvm.options container/container.options /app/
+COPY app.jar config/jvm.options container/container.options container/admin.args /app/
 COPY native/linux-${TARGETARCH}/ /app/native/
 COPY legal/ /app/legal/
 # The intake mount point, owned by the app user (normally replaced by a volume).

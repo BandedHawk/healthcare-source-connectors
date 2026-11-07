@@ -79,4 +79,33 @@ public final class ContractVersion
             return false;
         }
     }
+
+    /**
+     * Tells whether a payload's version is an earlier major version than
+     * this build's: one no build from now on reads, since readers are
+     * upgraded before writers, and a message of it waiting for an upgrade
+     * would wait for good.
+     *
+     * @param version the payload's version, as "major.minor" (or a major
+     *                version alone)
+     * @return true for an earlier major version; false otherwise, and for
+     *         {@code null} or text that isn't a version
+     */
+    public static boolean isEarlierMajor(String version)
+    {
+        if (version == null)
+        {
+            return false;
+        }
+        int dot = version.indexOf('.');
+        try
+        {
+            return Integer.parseInt(
+                    dot < 0 ? version : version.substring(0, dot)) < MAJOR;
+        }
+        catch (NumberFormatException notANumber)
+        {
+            return false;
+        }
+    }
 }

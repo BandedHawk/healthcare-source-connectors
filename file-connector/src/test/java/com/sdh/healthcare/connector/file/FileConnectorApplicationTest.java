@@ -22,12 +22,14 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
+import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.file.split.SplitHandler;
 import com.sdh.healthcare.connector.file.split.SplitReconciler;
@@ -368,22 +370,57 @@ class FileConnectorApplicationTest
     }
 
     /**
-     * {@code item.landed} messages of other contract versions, as when the
-     * landing node and the stage are upgraded at different times: a later
-     * or earlier minor version is taken, and its item split; a later major
-     * version is held, to be tried again, without stopping the stage, and
-     * its item isn't stranded.
+     * An item left part way, its pod stopped and its message lost, is taken
+     * on again from its checkpoint once the grace has passed, although its
+     * checkpoint says it was started; and only once.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void takesOtherMinorVersionsAndHoldsAnotherMajor() throws Exception
+    void resumesAnItemLeftPartWayWhoseMessageWasLost() throws Exception
+    {
+        TestLanding landing = new TestLanding(catalogProperties(),
+                runtime.keys().wrap(), KEYS, INTAKE);
+        String content = csv(3, "partway");
+        LandedItem item = landing.land(content, "partway.csv");
+        // A pod started it and stopped before its first batch.
+        runtime.tables().checkpoints().save(Checkpoint.start(item.itemId(),
+                IngestPipeline.itemFingerprint(item.itemId()), "csv",
+                content.getBytes(UTF_8).length, Instant.now()), new Held());
+
+        Instant now = Instant.now();
+        assertThat(reconciler(now, Duration.ofMinutes(10)).reconcile())
+                .as("within the grace").isZero();
+        SplitReconciler reconciler = reconciler(
+                now.plus(Duration.ofMinutes(11)), Duration.ofMinutes(10));
+        assertThat(reconciler.reconcile()).isEqualTo(1);
+        assertThat(reconciler.reconcile()).as("never twice").isZero();
+        List<ConnectorMessage> messages = drain();
+        assertThat(of(messages, ItemSplit.class)).extracting(ItemSplit::itemId)
+                .containsExactly(item.itemId());
+        assertThat(of(messages, RecordSplit.class)).hasSize(3);
+        assertThat(FATAL).isEmpty();
+    }
+
+    /**
+     * {@code item.landed} messages of other contract versions, as when the
+     * landing node and the stage are upgraded at different times: a later
+     * or earlier minor version is taken, and its item split; a later major
+     * version is held, to be tried again, without stopping the stage; an
+     * earlier major version, which no upgrade will read, is rejected so it
+     * blocks nothing behind it; and neither item is stranded.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void takesOtherMinorsHoldsALaterMajorAndRejectsAnEarlier() throws Exception
     {
         TestLanding landing = new TestLanding(catalogProperties(),
                 runtime.keys().wrap(), KEYS, INTAKE);
         LandedItem newer = landing.land(csv(2, "newer"), null);
         LandedItem older = landing.land(csv(1, "older"), null);
         LandedItem nextMajor = landing.land(csv(1, "major"), null);
+        LandedItem lastMajor = landing.land(csv(1, "last"), null);
         SplitHandler handler = handler();
 
         Map<String, Object> later = payload(newer,
@@ -402,15 +439,18 @@ class FileConnectorApplicationTest
         byte[] major = landing.seal(payload(nextMajor,
                 (ContractVersion.MAJOR + 1) + ".0"));
         assertThat(handle(handler, major)).isEqualTo(Outcome.RETRY);
+        byte[] earlierMajor = landing.seal(payload(lastMajor,
+                (ContractVersion.MAJOR - 1) + ".4"));
+        assertThat(handle(handler, earlierMajor)).isEqualTo(Outcome.DONE);
         assertThat(runtime.tables().checkpoints().known(
-                List.of(nextMajor.itemId()))).isEmpty();
+                List.of(nextMajor.itemId(), lastMajor.itemId()))).isEmpty();
         assertThat(FATAL).isEmpty();
 
-        // Its item isn't stranded: reconciling splits it.
+        // Neither item is stranded: reconciling splits them.
         assertThat(reconciler(Instant.now().plus(Duration.ofMinutes(11)),
                 Duration.ofMinutes(10)).reconcile()).isPositive();
         assertThat(of(drain(), ItemSplit.class)).extracting(ItemSplit::itemId)
-                .contains(nextMajor.itemId());
+                .contains(nextMajor.itemId(), lastMajor.itemId());
     }
 
     /**

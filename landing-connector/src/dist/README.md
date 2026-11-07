@@ -15,7 +15,7 @@ on a Java 25 base image of your choice.
 | Path | What it is |
 |---|---|
 | `app.jar` | The application |
-| `bin/landing-connector` | Start the node on a host |
+| `bin/landing-connector`, `bin/sdh-admin` | Start the node, or run an operator command, on a host |
 | `config/jvm.options` | JVM options the node must run with (no heap or core dumps, no attach) |
 | `config/application.yml.example` | Every setting, with defaults where they exist |
 | `container/` | `Dockerfile` and container-only JVM options, for building an image |
@@ -188,6 +188,7 @@ Leave room to grow: a ledger near the top of its row needs the next row's heap t
 ```sh
 bin/landing-connector                      # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx1g bin/landing-connector     # extra JVM options
+SDH_OPERATOR=alice bin/sdh-admin replay --item-id <id>   # operator commands: replay
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The node exits with status 70
@@ -286,6 +287,23 @@ spec:
 
 There is no HTTP health endpoint. The process is the health signal: it exits on conditions it can't safely continue
 from, and Kubernetes restarts it. A standby is healthy while it waits.
+
+### Operator commands
+
+The image has no shell, so run the JVM directly:
+
+```sh
+kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args \
+  replay --item-id <id> --operator alice
+```
+
+`--operator` names who is running the command, for the audit log; on a host, `$SDH_OPERATOR` does the same.
+`replay --item-id <id>` sends a fully landed item's `item.landed` again and waits for the broker to acknowledge
+it. It is how an operator recovers an item lost between landing and the split stage, or whose `item.split` was
+lost after: the split stage splits an item it hasn't, and announces again one it has. The broker is given an ID
+of its own for the message (`il-<id>~replay-<millis>`), so a broker that drops repeated IDs doesn't drop it; the
+message itself is the one first sent. No receipt goes to the producer, and nothing is written to the tables, so
+it is safe to run beside the node. Every run is audited (`admin.replay`).
 
 ### Troubleshooting
 

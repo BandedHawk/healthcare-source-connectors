@@ -26,7 +26,9 @@ import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.apache.iceberg.Table;
@@ -59,6 +61,15 @@ import org.slf4j.LoggerFactory;
  * <p>
  * An item another pod is splitting is left to it. If an item's message
  * turns up later, the item is only announced again.
+ * <p>
+ * An item can also be left part way: its pod stopped while splitting it,
+ * and its message, which would have brought it to another pod, was then
+ * lost or purged. Its checkpoint says it was started, so the comparison
+ * above passes it by. Each run therefore also takes on every item still
+ * in progress whose checkpoint hasn't been written for longer than the
+ * grace, whenever it was landed, from its checkpoint, with a
+ * {@code split.recovered} warning (reason {@code CHECKPOINT_STALLED}). One
+ * a pod is still splitting slowly keeps its lease, and is left to it.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -68,6 +79,9 @@ public final class SplitReconciler
 
     /** Why an item was recovered, on its audit event. */
     static final String REASON = "MESSAGE_MISSING";
+
+    /** Why an item left part way was taken on again, on its event. */
+    static final String STALLED = "CHECKPOINT_STALLED";
 
     /** Logs each run, without PHI. */
     private static final Logger LOG =
@@ -118,9 +132,9 @@ public final class SplitReconciler
 
     /**
      * Splits every landed item with no checkpoint for longer than the
-     * grace.
+     * grace, and takes on every item left part way for longer than it.
      *
-     * @return how many were split
+     * @return how many were split or taken on
      * @throws Exception if the landing table or checkpoints can't be read,
      *                   or an item can't be split; the next run tries
      *                   again, from the same point
@@ -180,10 +194,71 @@ public final class SplitReconciler
                 // Its message arrived meanwhile; another pod is on it.
             }
         }
+        int resumed = resumeStalled(table, cutoff);
         previousCutoff = cutoff;
-        LOG.info("split.reconciled checked={} recovered={} full={}",
-                rows.size(), split, from == null);
-        return split;
+        LOG.info("split.reconciled checked={} recovered={} resumed={}"
+                + " full={}", rows.size(), split, resumed, from == null);
+        return split + resumed;
+    }
+
+    /**
+     * Takes on the items left part way since before the cutoff, from their
+     * checkpoints. An item whose summary row is gone (purged by retention)
+     * can't be read, and is left, with a warning, for an operator.
+     *
+     * @param table  the {@code landed_items} table, refreshed
+     * @param cutoff the time their checkpoints were last written before
+     * @return how many were taken on
+     * @throws Exception if an item can't be split; the next run tries again
+     */
+    private int resumeStalled(Table table, Instant cutoff) throws Exception
+    {
+        List<UUID> stalled = checkpoints.stalled(cutoff);
+        if (stalled.isEmpty())
+        {
+            return 0;
+        }
+        Map<UUID, String> digests = new HashMap<>();
+        try (CloseableIterable<Record> read = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(CHUNK_INDEX, SUMMARY_ROW),
+                        Expressions.equal(INTAKE, intake),
+                        Expressions.in(ITEM_ID, stalled.toArray())))
+                .select(ITEM_ID, ITEM_DIGEST)
+                .build())
+        {
+            for (Record row : read)
+            {
+                digests.put((UUID) row.getField(ITEM_ID),
+                        (String) row.getField(ITEM_DIGEST));
+            }
+        }
+        int resumed = 0;
+        for (UUID itemId : stalled)
+        {
+            String digest = digests.get(itemId);
+            if (digest == null)
+            {
+                LOG.warn("split.stalled_unreadable reason=NO_SUMMARY");
+                continue;
+            }
+            try
+            {
+                splitter.split(itemId, digest);
+            }
+            catch (LeaseHeldException held)
+            {
+                // Still being split, slowly, by the pod that holds it.
+                continue;
+            }
+            // Audited after: before, a slow item's pod would be reported
+            // on every run.
+            Telemetry.get().auditWarn("split.recovered",
+                    Fields.of(Attr.ITEM_ID, itemId).with(Attr.INTAKE, intake)
+                            .with(Attr.REASON, STALLED));
+            resumed++;
+        }
+        return resumed;
     }
 
     /**

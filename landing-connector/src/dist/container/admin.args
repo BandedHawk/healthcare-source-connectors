@@ -1,0 +1,8 @@
+# Operator commands inside a running container (design §11.4). No shell is needed:
+#   kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args \
+#     replay --item-id <id> --operator alice
+# (--operator, because kubectl exec can't set an environment variable.) A small heap, so it fits beside the node.
+-Xmx512m
+-jar
+/app/app.jar
+admin

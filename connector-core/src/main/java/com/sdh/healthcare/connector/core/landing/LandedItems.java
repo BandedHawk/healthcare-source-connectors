@@ -387,6 +387,34 @@ public final class LandedItems
     }
 
     /**
+     * The landed item a summary row describes, as it was announced, for
+     * sending its {@code item.landed} again (STAGES.md §13.2). The message
+     * is the one first sent, but for the snapshot it names: the given one,
+     * which must hold the item, such as the table's current snapshot.
+     *
+     * @param summary    the item's summary row
+     * @param snapshotId a snapshot of the table that holds the item
+     * @return the item
+     */
+    public static LandedItem landedItem(Record summary, long snapshotId)
+    {
+        String sourceHash = (String) summary.getField(SOURCE_REF_HASH);
+        SourceRef source = sourceHash == null ? null
+                : new SourceRef(sourceHash,
+                        (Long) summary.getField(SOURCE_SIZE),
+                        (String) summary.getField(SOURCE_VERSION));
+        return new LandedItem((UUID) summary.getField(ITEM_ID),
+                (String) summary.getField(INTAKE),
+                ItemKind.fromWire((String) summary.getField(KIND)),
+                source, (Long) summary.getField(ITEM_SIZE),
+                (String) summary.getField(ITEM_DIGEST),
+                ((OffsetDateTime) summary.getField(LANDED_AT)).toInstant(),
+                snapshotId, (String) summary.getField(KEK_REF),
+                (String) summary.getField(ITEM_SHA256),
+                (UUID) summary.getField(REPLACES_ITEM_ID));
+    }
+
+    /**
      * The item a summary row says this one replaces.
      *
      * @param summary the item's summary row

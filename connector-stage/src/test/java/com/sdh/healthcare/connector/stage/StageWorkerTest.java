@@ -522,8 +522,9 @@ class StageWorkerTest
 
     /**
      * A message that can't be trusted is dropped, one of another type is
-     * acknowledged unprocessed, and one of a later major version holds the
-     * batch back.
+     * acknowledged unprocessed, one of a later major version holds the
+     * batch back, and one of an earlier major version is rejected and
+     * acknowledged.
      *
      * @throws InterruptedException if interrupted
      */
@@ -554,5 +555,20 @@ class StageWorkerTest
         assertThat(worker.handle(List.of(newer)))
                 .isEqualTo(BatchHandler.Outcome.RETRY);
         assertThat(audit.names()).endsWith("stage.unreadable_version");
+
+        // An earlier major version, which no upgrade reads, is rejected,
+        // so the records behind it go on.
+        Map<String, Object> earlier = PayloadCodec.toJson(
+                (ConnectorMessage) new ItemConverted(item, "test", 1, 0,
+                        Instant.EPOCH));
+        earlier.put("v", (ContractVersion.MAJOR - 1) + ".4");
+        BrokerMessage older = new BrokerMessage(
+                StageTestSupport.upstreamSealer().seal(earlier), "z",
+                Map.of());
+        assertThat(worker.handle(List.of(older,
+                StageTestSupport.record(item, 1))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(committed).hasSize(2);
+        assertThat(audit.names()).endsWith("stage.message_rejected");
     }
 }

@@ -39,8 +39,17 @@ public class MessageRejectedException extends Exception
         /** Its signature doesn't verify. */
         BAD_SIGNATURE,
 
-        /** Its contract major version isn't supported. */
+        /**
+         * Its contract major version isn't supported: a later one, which an
+         * upgrade of this reader will read, or one that isn't a version.
+         */
         UNSUPPORTED_VERSION,
+
+        /**
+         * Its contract major version is earlier than this reader's, and no
+         * build from now on reads it: holding it would wait for good.
+         */
+        EARLIER_VERSION,
 
         /** Its payload couldn't be read as a message. */
         BAD_PAYLOAD
@@ -62,9 +71,10 @@ public class MessageRejectedException extends Exception
 
     /**
      * Creates the exception from a failure. An unsupported contract version
-     * becomes {@link Reason#UNSUPPORTED_VERSION} and is kept as the cause;
-     * any other cause is dropped, since its message could hold payload
-     * content.
+     * becomes {@link Reason#EARLIER_VERSION} if it is an earlier major
+     * version, otherwise {@link Reason#UNSUPPORTED_VERSION}, and is kept as
+     * the cause; any other cause is dropped, since its message could hold
+     * payload content.
      *
      * @param reason why the message was rejected
      * @param cause  the failure
@@ -75,7 +85,10 @@ public class MessageRejectedException extends Exception
                 cause instanceof UnsupportedContractVersionException
                         ? cause : null);
         this.reason = cause instanceof UnsupportedContractVersionException
-                ? Reason.UNSUPPORTED_VERSION : reason;
+                unsupported
+                ? (unsupported.earlier() ? Reason.EARLIER_VERSION
+                        : Reason.UNSUPPORTED_VERSION)
+                : reason;
     }
 
     /**

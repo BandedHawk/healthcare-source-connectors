@@ -15,8 +15,10 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -269,6 +271,45 @@ public final class ItemCheckpoints
             select.setQueryTimeout(queryTimeoutSeconds);
             Array ids = connection.createArrayOf("uuid", itemIds.toArray());
             select.setArray(1, ids);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(rows.getObject(1, UUID.class));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Lists the items left part way: in progress ({@code SPLITTING},
+     * {@code ARCHIVING} or {@code FAILING}) with a checkpoint not written
+     * since a time, as when the pod splitting one stopped and its message
+     * was then lost or purged, so that nothing would take it on again. One
+     * being split now may be among them if its batches are slow; its lease
+     * keeps it to its pod. Oldest first.
+     *
+     * @param before the time a checkpoint was last written before
+     * @return the items
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<UUID> stalled(Instant before)
+    {
+        String sql = "SELECT item_id FROM " + table
+                + " WHERE state IN ('SPLITTING', 'ARCHIVING', 'FAILING')"
+                + " AND updated_at < ? ORDER BY updated_at";
+        List<UUID> found = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setTimestamp(1, Timestamp.from(before));
             try (ResultSet rows = select.executeQuery())
             {
                 while (rows.next())

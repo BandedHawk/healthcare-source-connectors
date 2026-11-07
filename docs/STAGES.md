@@ -184,8 +184,10 @@ Two new modules, both published, so `healthcare-data-transformer` can use them:
   (`sdh.stage.input.batch.max-messages`, `max-bytes`, `max-wait`) replace `max-records` and `max-wait`. Claims last
   `sdh.stage.claim.ttl` (60 s), renewed every `renew-interval` (15 s). A message that can't be trusted is audited
   (`stage.message_rejected`) and dropped, one the processor doesn't take is audited (`stage.message_unwanted`) and
-  acknowledged, and one of a contract major version the stage can't read holds the batch back until the stage is
-  upgraded (`stage.unreadable_version`), as for the splitter now. Other audit events: `record.duplicate`,
+  acknowledged, and one of a later contract major version holds the batch back until the stage is upgraded
+  (`stage.unreadable_version`). One of an earlier major version, which no upgrade reads, is rejected
+  (`stage.message_rejected`, reason `EARLIER_VERSION`), so it blocks nothing behind it; its record is found by
+  the reconciler, an item total recovered by replay (§13.2; decided 2026-11-07). Other audit events: `record.duplicate`,
   `record.conflict` (`RECORD_CONFLICT`), `record.claim_lost`, `stage.batch_failed` (`STAGE_BATCH_FAILED`) and
   `stage.item_completed`; none carries a record ID. Messages are still keyed by item ID on the broker; record
   messages move to the record ID in step 4 (§4). Tested by `StageRegistryTest` and `StageWorkerTest` (embedded
@@ -270,7 +272,10 @@ pod of the stage at a time.
   lease, while other pods append: Iceberg checks rewrites against appends, and orphan cleanup's minimum age (at
   least an hour, checked at startup) covers appends in flight. The reconciler splits a missing item itself,
   under the item's lease, rather than sending its `item.landed` again; an item another pod has taken meanwhile
-  is left to it.
+  is left to it. Each run also takes on, from its checkpoint, every item still in progress (`SPLITTING`,
+  `ARCHIVING`, `FAILING`) whose checkpoint hasn't been written for longer than the grace, whenever it was landed
+  (`split.recovered`, reason `CHECKPOINT_STALLED`; built 2026-11-07): its pod stopped part way and its message
+  was lost or purged, so nothing else would. One still being split slowly keeps its item lease, and is left.
 - **Conversion** is removed from the pipeline; step 4c builds it again in the convert stage, from the code in
   git history before 4b. `item.result` moves to the convert stage in step 4c too: the split stage sends none
   (`ResultReporter` is left in `file-connector`, unwired, for 4c to move).
@@ -428,8 +433,9 @@ Each step builds and passes its tests before the next.
 - **A lost `item.split`** (§9). Resolved 2026-11-06: found by a query over the stages' `stage.item_completed`, and
   recovered by hand by replaying the item (§13.2). No automatic recovery: a message lost after the broker took it
   points to a larger problem with the infrastructure, which needs an operator anyway (decided).
-- **Replay tooling** (§13.2), to build later: an admin command per stage that sends all its output for a
-  completed item again, with the rules of §13.2.
+- **Replay tooling** (§13.2): an admin command per stage that sends all its output for a completed item again,
+  with the rules of §13.2. Landing's, `replay --item-id`, built 2026-11-07; the split and convert stages' to
+  build later.
 - **`QueueReader` doesn't drop repeated messages.** A reader outside the stages reads a record twice when it is
   sent again (a resend after a crash, or a replay). Proposed: the reader drops repeats by record ID, built with the
   replay tooling.
@@ -507,11 +513,15 @@ message still queued), or an operator purged the queue. Each points to a larger 
 so recovery is by hand (decided 2026-11-06).
 
 **What is recovered without an operator, and what isn't:**
+- A lost `item.landed` is found by the split stage's reconciler, which splits the item from `landed_items` (§8):
+  every landed item at startup, then those landed since its last run. So is an item its pod left part way whose
+  message was then lost: its checkpoint stalled for longer than the grace (built 2026-11-07).
 - A lost `record.split` is rebuilt by the convert stage's reconciler from `split_records`, for items split within
   `sdh.reconcile.lookback` (§9).
-- Nothing else. A lost `item.split` (its producer's references are known only to landing), a lost `item.landed`,
-  and anything a stage sent on after it, such as `record.stored`, `item.converted` or `item.result`, stay lost: a
-  stage re-sends only what it stored and hasn't yet sent, and completes an item once.
+- Nothing else. A lost `item.split` (its producer's references are known only to landing), and anything a stage
+  sent on after it, such as `record.stored`, `item.converted` or `item.result`, stay lost: a stage re-sends only
+  what it stored and hasn't yet sent, and completes an item once. Corrected 2026-11-07: this said a lost
+  `item.landed` stayed lost too, but the split stage's reconciler has always recovered it.
 
 **Recognising it.** Every stage audits the end of an item the same way, once: `stage.item_completed`, with
 `sdh.stage`, `sdh.item_id`, `sdh.result` (`COMPLETED` or `FAILED`), `sdh.count` (its records) and
@@ -529,8 +539,8 @@ duplicate under the same version, not processed again, §6; the total can't chan
 completed twice), processes what it lacks, and completes the item. Then the same at the stage after, if needed.
 Per stage, a replay sends:
 - **landing:** the item's `item.landed`. The split stage splits an item it hasn't, and sends the `item.split` of
-  one it has finished again, unchanged (`ended_at` is fixed). This is all a lost `item.split` needs, so it is the
-  first tool to build;
+  one it has finished again, unchanged (`ended_at` is fixed). This is all a lost `item.split` needs, so it was
+  built first (2026-11-07): `sdh-admin replay --item-id <id>` on the landing node (design §11.4);
 - **split:** every `record.split` of the item, rebuilt from `split_records` as the reconciler rebuilds them, then
   its `item.split`;
 - **convert:** every `record.stored` and `record.failed`, rebuilt from `records`, then `item.converted`; the
@@ -556,8 +566,13 @@ Per stage, a replay sends:
 message names no queue message, so if a record that was missing fails at the next stage, the producer's result
 names no message for it (audited `convert.placement_unknown`; §13.3).
 
-**Until the tooling exists:** a lost `item.split` is recovered by landing's `item.landed` for the item, sent again.
-Nothing can send it yet but landing itself, when it lands the item; so the replay command for landing comes first.
+**Built so far:** landing's replay (2026-11-07), which recovers a lost `item.landed` or `item.split` on every
+broker. It rebuilds the message from the item's summary row: the one first sent, naming the table's current
+snapshot instead of the one it was landed in (the split stage reads the current table either way). For that, the
+landing node keeps each batch's time to the microsecond, as the table does, so the rebuilt `landedAt` matches.
+The split and convert stages' replays are still to build; until then, what they sent on is recovered only
+where the broker keeps a log that can be read again (Kafka, Event Hubs), by moving the next stage's consumer
+back.
 
 ### 13.3 Telling the producer
 

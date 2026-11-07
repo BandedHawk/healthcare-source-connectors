@@ -35,6 +35,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -660,9 +661,14 @@ public final class ItemLander
         /** The batch data key, wrapped by the KEK. */
         private final WrappedKey wrappedKey;
 
-        /** When the batch was started; every row's partition time. */
-        private final OffsetDateTime landedAt =
-                OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC);
+        /**
+         * When the batch was started; every row's partition time. To the
+         * microsecond, as the table keeps it, so that a message rebuilt from
+         * the summary row (a replay, STAGES.md §13.2) is the one first sent.
+         */
+        private final OffsetDateTime landedAt = OffsetDateTime.ofInstant(
+                clock.instant().truncatedTo(ChronoUnit.MICROS),
+                ZoneOffset.UTC);
 
         /** Writes the batch's rows. */
         private final DataWriter<Record> writer;
