@@ -88,7 +88,8 @@ SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The stage exits with status
-70 on conditions it can't safely continue from, and resumes where it stopped.
+70 on conditions it can't safely continue from, and resumes where it stopped. At startup it waits for a key service
+that is down or not serving, logging `crypto.kms_waiting`; a key or permission refused stops it at once.
 
 ## Build a container image
 
