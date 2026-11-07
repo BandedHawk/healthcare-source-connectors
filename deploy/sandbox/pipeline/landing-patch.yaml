@@ -1,20 +1,18 @@
-# The landing README's Deployment, for a push intake on a cluster of several nodes.
+# The landing README's Deployment, for a push intake, as one pod with no standby (decided 2026-11-07, to fit the
+# sandbox's memory, docs/SANDBOX.md "Memory"). Kubernetes starts a new pod if it dies, on another node if its
+# node is gone; the new pod lands once the old pod's lease has expired. Never more than one: landing in parallel
+# could land a file twice.
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: landing }
 spec:
-  # Only the active node is ready (its push port opens once it holds the lease), so a rolling update could never
-  # make a new pod ready while the old active node lives: both are replaced together, and the first new pod to
-  # get the lease lands. Producers see refusals for that time, and retry.
+  replicas: 1
+  # The pod is ready only once it holds the lease (its push port opens then), so a rolling update could never
+  # make a new pod ready while the old one lives: the old one is stopped first, and the new one lands once it has
+  # the lease. Producers see refusals for that time, and retry.
   strategy: { type: Recreate, rollingUpdate: null }
   template:
     spec:
-      # The active node and the standby on different nodes, so losing a node fails over.
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector: { matchLabels: { app: landing } }
-              topologyKey: kubernetes.io/hostname
       volumes:
         - { name: intake, $patch: delete }     # pushed, not picked up from a directory
       containers:

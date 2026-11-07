@@ -268,8 +268,8 @@ public final class ConvertReconciler
                             .with(Attr.COUNT, days));
         }
         LOG.info("convert.reconciled checked={} recovered={}"
-                + " totals_missing={} days={}", looked.size(),
-                tally.recovered, tally.totalsMissing, days);
+                + " completed={} totals_missing={} days={}", looked.size(),
+                tally.recovered, tally.completed, tally.totalsMissing, days);
         return tally.recovered;
     }
 
@@ -359,6 +359,9 @@ public final class ConvertReconciler
         /** The items whose total never came. */
         int totalsMissing;
 
+        /** The items found stored in full but not completed, completed. */
+        int completed;
+
         /** Created at the start of a run. */
         Tally()
         {
@@ -403,7 +406,11 @@ public final class ConvertReconciler
             if (known.containsAll(item.getValue()))
             {
                 Optional<ItemProgress> progress = registry.item(itemId);
-                if (progress.isEmpty() || progress.get().expected() < 0)
+                if (progress.isPresent() && progress.get().expected() >= 0)
+                {
+                    complete(itemId, progress.get(), tally);
+                }
+                else
                 {
                     if (reportedMissing.add(itemId))
                     {
@@ -444,6 +451,37 @@ public final class ConvertReconciler
                             .with(Attr.COUNT, lost.size()));
             tally.recovered += lost.size();
         }
+    }
+
+    /**
+     * Completes an item whose records are all known and whose total came,
+     * if they are all stored: the batch that would have completed it may
+     * have been lost (STAGES.md §10). Records still claimed leave it for
+     * their worker.
+     *
+     * @param itemId   the item
+     * @param progress its progress
+     * @param tally    what the run has found, added to
+     * @throws InterruptedException  if interrupted
+     * @throws IllegalStateException if the worker couldn't complete it
+     */
+    private void complete(UUID itemId, ItemProgress progress, Tally tally)
+            throws InterruptedException
+    {
+        // As the registry's due(): done counts failed records too.
+        if (progress.done() < progress.expected())
+        {
+            return;
+        }
+        if (worker.completeDue(List.of(itemId)) != BatchHandler.Outcome.DONE)
+        {
+            throw new IllegalStateException(
+                    "The worker couldn't complete a reconciled item");
+        }
+        Telemetry.get().auditWarn("convert.item_completion_recovered",
+                Fields.of(Attr.ITEM_ID, itemId)
+                        .with(Attr.COUNT, progress.expected()));
+        tally.completed++;
     }
 
     /**

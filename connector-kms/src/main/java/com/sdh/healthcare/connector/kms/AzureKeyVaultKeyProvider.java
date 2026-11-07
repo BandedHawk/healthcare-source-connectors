@@ -16,6 +16,7 @@ import com.azure.security.keyvault.keys.cryptography.models.SignatureAlgorithm;
 import com.azure.security.keyvault.keys.cryptography.models.WrapResult;
 import com.azure.security.keyvault.keys.models.JsonWebKey;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import java.security.PublicKey;
 import java.util.Map;
@@ -108,6 +109,8 @@ public final class AzureKeyVaultKeyProvider implements KeyProvider
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if Key Vault can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if Key Vault fails
      */
     @Override
@@ -129,6 +132,8 @@ public final class AzureKeyVaultKeyProvider implements KeyProvider
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if Key Vault can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if Key Vault fails
      */
     @Override
@@ -150,6 +155,8 @@ public final class AzureKeyVaultKeyProvider implements KeyProvider
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if Key Vault can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if Key Vault fails
      */
     @Override
@@ -169,6 +176,8 @@ public final class AzureKeyVaultKeyProvider implements KeyProvider
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if Key Vault can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if Key Vault fails
      */
     @Override

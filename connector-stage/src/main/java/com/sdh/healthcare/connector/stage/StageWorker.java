@@ -21,6 +21,7 @@ import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -318,6 +319,36 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             opened.add(new Opened(message, null, null));
         }
         return run(opened);
+    }
+
+    /**
+     * Completes items whose records are all stored, with their total, but
+     * which weren't completed: for a reconciler, when the batch that would
+     * have completed them was lost (STAGES.md §10). An item not yet due is
+     * left; one completed meanwhile by another worker is completed again,
+     * its message dropped as a repeat.
+     *
+     * @param itemIds the items
+     * @return {@code DONE}, or {@code RETRY} if they should be tried again
+     *         later
+     * @throws InterruptedException if interrupted
+     */
+    public Outcome completeDue(Collection<UUID> itemIds)
+            throws InterruptedException
+    {
+        try
+        {
+            completeItems(new LinkedHashSet<>(itemIds));
+            return Outcome.DONE;
+        }
+        catch (RuntimeException | ExecutionException | TimeoutException failure)
+        {
+            Telemetry.get().auditWarn("stage.batch_failed",
+                    stageFields(ErrorCode.STAGE_BATCH_FAILED)
+                            .with(Attr.REASON,
+                                    failure.getClass().getSimpleName()));
+            return Outcome.RETRY;
+        }
     }
 
     /**
@@ -774,11 +805,63 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                 .with(Attr.STATE, stored.state());
     }
 
-    /** Stops processing and renewing; held claims expire. */
+    /**
+     * Stops renewing and processing, then releases the claims this worker
+     * holds on records it didn't store, so that another worker takes them
+     * over at once rather than after the claim's time to live. Released only
+     * once its threads have stopped, so none is storing meanwhile; if they
+     * haven't stopped within the claim's time to live, or the database can't
+     * be reached, the claims are left to expire, as after a crash.
+     */
     @Override
     public void close()
     {
+        long start = System.nanoTime();
         renewer.shutdownNow();
         workers.shutdownNow();
+        try
+        {
+            if (!workers.awaitTermination(settings.claimTtl().toMillis(),
+                    TimeUnit.MILLISECONDS))
+            {
+                notReleased("busy", start);
+                return;
+            }
+            int released = registry.release();
+            LOG.info("stage.claims_released stage={} count={} elapsed_ms={}",
+                    processor.stage(), released, sinceMillis(start));
+        }
+        catch (InterruptedException interrupted)
+        {
+            Thread.currentThread().interrupt();
+            notReleased("interrupted", start);
+        }
+        catch (RuntimeException failure)
+        {
+            notReleased("unavailable", start);
+        }
+    }
+
+    /**
+     * Logs that the claims were left to expire.
+     *
+     * @param reason why
+     * @param start  when closing began, from {@link System#nanoTime()}
+     */
+    private void notReleased(String reason, long start)
+    {
+        LOG.warn("stage.claims_not_released stage={} reason={} elapsed_ms={}",
+                processor.stage(), reason, sinceMillis(start));
+    }
+
+    /**
+     * The time since a moment.
+     *
+     * @param start the moment, from {@link System#nanoTime()}
+     * @return the milliseconds since
+     */
+    private static long sinceMillis(long start)
+    {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
     }
 }

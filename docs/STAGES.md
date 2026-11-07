@@ -327,9 +327,12 @@ intake has results on.
 - **Duties for one pod,** as in §8 (`convert/<connector-id>/duties`): table maintenance of `records`, and
   reconciling. The reconciler looks at items with records in `split_records` older than the grace whose records
   aren't all in the registry, rebuilds the missing records' `record.split` from their rows, and hands them to the
-  worker as if received. An item whose `item.split` never arrived can't be completed this way (its producer's
-  references are in landing); it is audited (`convert.item_total_missing`, once per item), for an operator to
-  recover by hand (§13.2).
+  worker as if received. A record claimed but never stored, its claim expired, counts as missing: its message may
+  have been lost with the batch that claimed it, and the worker takes the claim over (built 2026-11-07, §10). An
+  item whose records are all stored and whose total came, but which wasn't completed, the batch that would have
+  completed it lost, is completed (`convert.item_completion_recovered`). An item whose `item.split` never arrived
+  can't be completed this way (its producer's references are in landing); it is audited
+  (`convert.item_total_missing`, once per item), for an operator to recover by hand (§13.2).
 - **The reconciler's watermark** (decided 2026-11-07 with the user). Each run looks back `sdh.reconcile.lookback`
   (2 days), so a record split longer ago than that, whose `record.split` was lost while the stage was down (an SQS
   queue keeps messages 4 days by default; a queue purged during an outage), was never looked at again. So the
@@ -356,7 +359,8 @@ intake has results on.
   `convert.reconcile_deferral_capped`, so a queue that is always behind can't hide a real loss for long; then it
   waits again. At startup the pods haven't received anything yet, so a pod newly holding the duties waits one
   `backlog-quiet` whatever the queue shows (`sdh.reason` `STARTING`; `BACKLOG` otherwise). The wait is counted
-  from when this pod took the duties. `sdh.reconcile.backlog-quiet: 0s` turns waiting off. A drained-queue signal
+  from when this pod took the duties. `sdh.reconcile.backlog-quiet: 0s` turns waiting off. (The first build of
+  this never ended the wait at startup on a stage that had never seen a backlog; fixed 2026-11-07, revision (bu).) A drained-queue signal
   from the brokers was rejected: there is none common to the seven.
 - **Settings:** `sdh.stage.*` (§7); `sdh.convert.options`, `.max-bytes`, `.memory`; `sdh.storage` for `records`
   and the catalog `split_records` is read from; `sdh.results` as before; `sdh.lease` for the duties lease.
@@ -398,9 +402,69 @@ Service Bus or RabbitMQ queue length, Event Hubs unprocessed events, Artemis que
 each of the seven. Kafka topics get as many partitions as the stage's `maxReplicaCount` × `concurrency` needs;
 the other brokers have no such limit. A pod shuts down by stopping its consumer, finishing and committing what it
 holds, and handing back the rest, so scaling down loses nothing (and what it couldn't finish is delivered again).
-`minReplicaCount` 0 is allowed, at the cost of a JVM start (about 15 s) on the first message.
+This allowed `minReplicaCount` 0, at the cost of a JVM start (about 15 s) on the first message; corrected
+2026-11-07, below: never fewer than one.
 
 The sandbox gets the KEDA operator, the stages as scaled deployments, and topics with partitions.
+
+**Decided 2026-11-07 with the user:**
+- **At least one pod per stage, always** (`minReplicaCount: 1`). The pod holding a stage's duties runs its
+  reconciler and table maintenance, and a lost message adds no lag: a stage scaled to nothing would never be woken
+  to recover it.
+- **The landing node is never scaled.** It lands serially: parallel landing could land one file twice, through the
+  variants of how a file is retrieved. Exactly one node is in service, the one holding its lease; a standby waits
+  and takes over if it fails (as built, its README). KEDA never targets it.
+
+**As built in the sandbox (step 5, 2026-11-07):**
+- KEDA 2.21.0, installed by `scripts/sandbox.sh up` from its release manifest, checked against a pinned SHA-256.
+- A `ScaledObject` per stage (`deploy/sandbox/pipeline/scaling.yaml`) on its Kafka consumer group's lag: the split
+  stage (group `splitter-<p>`, topic `<p>.landed`) one pod per 5 items waiting, the convert stage (`convert-<p>`,
+  `<p>.split`) one per 5 records (20 until 2026-11-07, which it no longer reached once every partition was
+  committed, below); up to 2 pods each, what the sandbox's memory is sized for (decided 2026-11-07
+  with the user, after the control-plane node ran out of memory with 2 split and 3 convert pods; docs/SANDBOX.md
+  "Memory"); back to one two minutes after the backlog is gone. The Deployments' `replicas` is removed, so a
+  deploy doesn't reset KEDA's count.
+- The sandbox's landing node is one pod with no standby (decided 2026-11-07 with the user, for memory): if it
+  dies, Kubernetes starts another, which lands once the old pod's lease has expired. The README's Deployment
+  keeps its active node and standby.
+- The stages' input topics have six partitions; the others one, until the FHIR stage scales. Partitions are only
+  added, with the topic drained, since a key's queued messages stay on their old partition.
+- `scripts/sandbox.sh scale-demo [count]` pushes copies of the sample documents, each its own item, and reports
+  how many pods each stage ran and how the work was shared, counted in the stages' registries (docs/SANDBOX.md).
+- **Scaling down, as found:** a convert pod that stops doesn't hand back what it holds, as said above: the worker
+  stops (`StageWorker.close`, "held claims expire"), and its claimed records wait for their claims to expire
+  (`sdh.stage.claim.ttl`, 60 s) before the broker's redelivery is taken by another pod. Safe, but a minute late:
+  in the first demo, 2 of 300 records were converted on a second claim, about 50 s after their pod went. Leases
+  (the duties, the split stage's items) are released at shutdown. Fixed (bx): `StageWorker.close` stops renewing
+  and processing, waits for its threads to stop (at most the claim's time to live), and then releases the claims
+  it holds on records it didn't store (`StageRegistry.release`: they expire now; `stage.claims_released` with the
+  count). Another pod takes them over at the broker's redelivery, still as one more attempt, as after an expiry,
+  so the third-claim rule above is unchanged. If its threads don't stop in time, or Postgres can't be reached
+  (`stage.claims_not_released`, with the reason), the claims are left to expire, as after a crash. Measured
+  (2026-11-07, scale-demo 300, one pod deleted and three scaled in): each convert pod stopped in 1.6 to 5 s of
+  its 30 s grace, Camel's drain of the batch in hand being most of it; the release itself took under 5 ms.
+- **A Kafka batch given up was passed by (found and fixed 2026-11-07, revision (by)).** Two of the 300 items
+  were never converted. A pod's batch failed as it stopped (`stage.batch_failed`, ExecutionException, cause not
+  kept), and the receiver gave it up unhandled, as meant; but Camel's Kafka consumer only logs that, polls on
+  from past it, and the next poll's commit moved the partition past the failed batch (`ccda-push.split`
+  partition 0, 755 and 756: one item's total, another's record). A FATAL batch would have been passed the same
+  way. And Camel commits only the last record's partition of a poll (it copies that record's
+  `CamelKafkaManualCommit` to the batch), so the poll's other partitions lagged until a later poll ended on
+  them: duplicates at each rebalance, and a lag that never cleared at the end of a run, which the reconciler's
+  backlog watch counts. Fixed in the receiver (`KafkaOffsets`): a handled poll commits each partition's last
+  record; a poll not handled seeks each of its partitions back to its first record, on the polling thread,
+  before giving up, so its records come again (Camel's own `breakOnFirstError` seeks only one partition). And
+  in the reconciler, which hadn't repaired either item: a claim expired with nothing stored no longer counts as
+  known, and an item stored in full with its total is completed (§9). Checked on the sandbox, 2026-11-07: the
+  lag left by the old commits cleared at the first poll after the upgrade; the next reconciler run rebuilt the
+  record left claimed and completed the other item (`recovered=1 completed=1`); and two scale-demo runs of 300,
+  one with two busy convert pods deleted under load, converted all 300 each, with lag 0 after (4 records on a
+  second claim). In those runs the convert stage no longer scaled out: its lag, no longer inflated by
+  uncommitted partitions, stayed under KEDA's 20, so one pod kept up, and `scale-demo` reports that as a
+  failure; the split stage still scaled to two. Lowered to 5: in the next `scale-demo 300` both stages scaled out
+  and the run passed, but the convert lag peaked at 7, so a second convert pod ran only about a seventh of the
+  time, two short-lived ones storing 26 records to the first pod's 274 (3 on a second claim, their pod stopped).
+  One convert pod keeps up with two split pods at this load.
 
 ## 11. Order of work
 
@@ -486,6 +550,15 @@ Each step builds and passes its tests before the next.
 - **The convert reconciler overlapped the queued backlog** after an outage, or whenever the queue fell more than
   the grace behind: it took queued `record.split`s for lost, and converted them serially on the duties pod. Resolved
   2026-11-07: it waits while records older than the grace still come off the queue, up to a limit (§9).
+- **An outage can fail a valid item as poison** (found 2026-11-07 in the sandbox, SANDBOX.md "Checked";
+  resolved the same day, DESIGN.md §9.2). The split stage counts every resume of an item as a restart without
+  progress, before any work, so that a crash that kills the worker still counts
+  (`IngestPipeline.FAIL_AFTER_RESTARTS`, 3; `RESUME_NO_PROGRESS`). An attempt that failed cleanly because a service
+  was down (Vault sealed, storage unreachable) counted the same, so three retries during an outage failed a valid
+  document. Decided 2026-11-07: an attempt whose error says a service was down (`Outage`, an allow-list) takes its
+  restart back, and `item.restart_not_counted` is audited; crashes and every other error count as before. Still
+  open: an item already failed this way can't be split again, since a replay doesn't re-split a `FAILED` item; it
+  needs a way for an operator to clear the failure (§13.5).
 - Split records as bronze, in their own namespace and table (§3).
 - Postgres for the registry and item rows (§5–§6): the lease database the stages already use. A row per record
   per stage, kept as long as the records are (it is how duplicates are recognised); about 100 bytes each.
@@ -550,7 +623,8 @@ so recovery is by hand (decided 2026-11-06).
   message was then lost: its checkpoint stalled for longer than the grace (built 2026-11-07).
 - A lost `record.split` is rebuilt by the convert stage's reconciler from `split_records`: for items split within
   `sdh.reconcile.lookback` (§9), and, after an outage longer than that, for every day since its watermark
-  (§13.4).
+  (§13.4). So is one whose claim a pod left to expire without storing it, and an item whose records are all
+  stored, with its total, is completed (built 2026-11-07, §10).
 - Nothing else. A lost `item.split` (its producer's references are known only to landing), and anything a stage
   sent on after it, such as `record.stored`, `item.converted` or `item.result`, stay lost: a stage re-sends only
   what it stored and hasn't yet sent, and completes an item once. Corrected 2026-11-07: this said a lost
@@ -677,6 +751,9 @@ this section is what the operator needs to know to recognise it and follow it.
   up from the last day checked. The `convert.reconciled` log line ends every run, with `days=`.
 - `convert.records_recovered` per item rebuilt, with `sdh.count`. Any at all means a `record.split` was lost
   (§13.2), unless it follows `convert.reconcile_deferral_capped`: then many are records still on the queue.
+- `convert.item_completion_recovered` per item completed by the reconciler, with `sdh.count`, its records: all
+  were stored with its total, but the batch that would have completed it was lost (§10). Nothing to do; any at
+  all is worth comparing with `stage.batch_failed` at the time.
 - `convert.placement_unknown` per failed record rebuilt (§13.3): each needs placing by hand if the producer is to
   be told where it was.
 - `convert.item_total_missing`: an item whose records are all converted but whose `item.split` never came; replay
@@ -700,3 +777,22 @@ whose consumer is stuck (a message held, §13.1) delivers nothing and doesn't ho
 it should be, since its records won't arrive. A record lost during a long drain is found only after the drain, or
 after `max-deferral`. The time waited is counted from when this pod took the duties, so if the duties move to
 another pod while waiting, the count starts again.
+
+### 13.5 An item failed by an outage
+
+Before 2026-11-07, a split attempt that failed because a service was down counted towards `RESUME_NO_PROGRESS`
+the same as a crash (§12), so an outage could fail a valid item. Since then such an attempt takes its restart back
+(DESIGN.md §9.2), but some errors still aren't recognised as an outage (other brokers' clients, Google Cloud
+Storage and Azure Blob Storage), and an item failed before the fix stays failed.
+
+**Recognising it:** the item is `FAILED` with `RESUME_NO_PROGRESS` (`sdh-admin status <item>` on the split stage,
+or `item.failed` with that code), and around the attempts before it the split stage logged an outage: `retry`
+lines, the key service or storage unreachable, a sealed Vault. An item that stops the splitter itself, the case
+the guard is for, shows the pod restarting instead (an out-of-memory exit, `OOMKilled`), with no outage around it.
+`item.restart_not_counted` means an outage was recognised and didn't count.
+
+**What to do:** nothing has been lost. The item is still in landing, and the records split before the failure are
+stored. But a replay from landing doesn't split it again, since the split stage finishes a `FAILED` item by
+announcing its failure again (§13.2). Clearing the failure so it is split again needs tooling not yet built;
+until then, the producer can send the original again: a push is always a new item, and a file is landed again
+under a new name (DESIGN.md §5.3.3; `item.duplicate_content` notes it).

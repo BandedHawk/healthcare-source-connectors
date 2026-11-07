@@ -19,6 +19,7 @@ import com.google.cloud.kms.v1.KeyManagementServiceSettings;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Int64Value;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -124,6 +125,8 @@ public final class GcpKmsKeyProvider implements KeyProvider, AutoCloseable
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if Cloud KMS can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if Cloud KMS fails, or the response
      *         fails an integrity check
      */
@@ -162,6 +165,8 @@ public final class GcpKmsKeyProvider implements KeyProvider, AutoCloseable
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if Cloud KMS can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if Cloud KMS fails, or the response
      *         fails an integrity check
      */
@@ -197,6 +202,8 @@ public final class GcpKmsKeyProvider implements KeyProvider, AutoCloseable
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if Cloud KMS can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if Cloud KMS fails, or the response
      *         fails an integrity check
      */
@@ -231,6 +238,8 @@ public final class GcpKmsKeyProvider implements KeyProvider, AutoCloseable
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if Cloud KMS can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if the ref isn't a key version name, or
      *         Cloud KMS fails
      */

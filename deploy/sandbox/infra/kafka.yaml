@@ -31,6 +31,9 @@ spec:
   template:
     metadata: { labels: { app: kafka } }
     spec:
+      # May run on the control-plane node, which is kept for the services whose data is there (docs/SANDBOX.md
+      # "Memory").
+      tolerations: [{ key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }]
       # The image turns every KAFKA_* variable into configuration, including the ones Kubernetes would add for
       # the service named kafka.
       enableServiceLinks: false

@@ -1,12 +1,21 @@
-# The splitter README's Deployment, with requests: its memory is reserved on the node, as its limit.
+# The splitter README's Deployment, with requests: its memory is reserved on the node, as its limit. 1.5 GiB (a
+# 768 MiB heap), not the README's 2 GiB, so two pods fit beside the rest on the sandbox's nodes (docs/SANDBOX.md
+# "Memory"); the sample documents are small.
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: splitter }
 spec:
   template:
     spec:
+      # A stage's two pods on different nodes: each node then has room for one pod of each stage beside the rest,
+      # however the pods arrive (docs/SANDBOX.md "Memory").
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: splitter } }
+              topologyKey: kubernetes.io/hostname
       containers:
         - name: file-connector
           resources:
-            requests: { cpu: 500m, memory: 2Gi }
-            limits: { memory: 2Gi }
+            requests: { cpu: 500m, memory: 1536Mi }
+            limits: { memory: 1536Mi }

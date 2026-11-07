@@ -8,9 +8,9 @@ package com.sdh.healthcare.connector.kms;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -23,6 +23,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -47,6 +48,14 @@ import java.util.function.Supplier;
  */
 public final class VaultTransitKeyProvider implements KeyProvider
 {
+
+    /**
+     * Statuses for Vault not serving rather than refusing: rate limited or
+     * standing by (429), a gateway failing to reach it (502, 504), and
+     * sealed (503).
+     */
+    private static final Set<Integer> NOT_SERVING = Set.of(429, 502, 503,
+            504);
 
     /** Vault's address. */
     private final URI address;
@@ -115,7 +124,8 @@ public final class VaultTransitKeyProvider implements KeyProvider
      * {@inheritDoc}
      *
      * @throws IllegalStateException if Vault refuses or fails
-     * @throws UncheckedIOException if Vault can't be reached
+     * @throws KeyServiceUnavailableException if Vault can't be reached or
+     *         isn't serving
      */
     @Override
     public WrappedKey wrap(String keyRef, byte[] dataKey)
@@ -133,7 +143,8 @@ public final class VaultTransitKeyProvider implements KeyProvider
      * {@inheritDoc}
      *
      * @throws IllegalStateException if Vault refuses or fails
-     * @throws UncheckedIOException if Vault can't be reached
+     * @throws KeyServiceUnavailableException if Vault can't be reached or
+     *         isn't serving
      */
     @Override
     public byte[] unwrap(WrappedKey wrapped)
@@ -150,7 +161,8 @@ public final class VaultTransitKeyProvider implements KeyProvider
      * {@inheritDoc}
      *
      * @throws IllegalStateException if Vault refuses or fails
-     * @throws UncheckedIOException if Vault can't be reached
+     * @throws KeyServiceUnavailableException if Vault can't be reached or
+     *         isn't serving
      */
     @Override
     public byte[] sign(String keyRef, byte[] digest)
@@ -172,7 +184,8 @@ public final class VaultTransitKeyProvider implements KeyProvider
      * <p>The latest version's public key.
      *
      * @throws IllegalStateException if Vault refuses or fails
-     * @throws UncheckedIOException if Vault can't be reached
+     * @throws KeyServiceUnavailableException if Vault can't be reached or
+     *         isn't serving
      */
     @Override
     @SuppressWarnings("unchecked")
@@ -207,7 +220,8 @@ public final class VaultTransitKeyProvider implements KeyProvider
      * @return the parsed response
      * @throws IllegalStateException if Vault refuses, fails or returns
      *         malformed JSON, or the call is interrupted
-     * @throws UncheckedIOException if Vault can't be reached
+     * @throws KeyServiceUnavailableException if Vault can't be reached or
+     *         isn't serving
      */
     private Map<String, Object> call(String method, String path,
             Map<String, Object> body)
@@ -235,7 +249,7 @@ public final class VaultTransitKeyProvider implements KeyProvider
         }
         catch (IOException failure)
         {
-            throw new UncheckedIOException("Vault Transit "
+            throw new KeyServiceUnavailableException("Vault Transit "
                     + path.substring(0, path.indexOf('/')) + " unreachable",
                     failure);
         }
@@ -243,6 +257,13 @@ public final class VaultTransitKeyProvider implements KeyProvider
         {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted calling Vault");
+        }
+        if (NOT_SERVING.contains(response.statusCode()))
+        {
+            // Sealed or standing by (503), or a gateway in front of it.
+            throw new KeyServiceUnavailableException("Vault Transit "
+                    + path.substring(0, path.indexOf('/')) + " unavailable",
+                    new IOException("HTTP " + response.statusCode()));
         }
         if (response.statusCode() / 100 != 2)
         {

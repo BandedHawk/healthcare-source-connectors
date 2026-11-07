@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.kms;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import java.net.URI;
 import java.security.PublicKey;
@@ -78,6 +79,8 @@ public final class AwsKmsKeyProvider implements KeyProvider, AutoCloseable
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if KMS can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if KMS fails
      */
     @Override
@@ -100,6 +103,8 @@ public final class AwsKmsKeyProvider implements KeyProvider, AutoCloseable
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if KMS can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if KMS fails
      */
     @Override
@@ -122,6 +127,8 @@ public final class AwsKmsKeyProvider implements KeyProvider, AutoCloseable
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if KMS can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if KMS fails
      */
     @Override
@@ -146,6 +153,8 @@ public final class AwsKmsKeyProvider implements KeyProvider, AutoCloseable
     /**
      * {@inheritDoc}
      *
+     * @throws KeyServiceUnavailableException if KMS can't be reached
+     *         or isn't serving
      * @throws IllegalStateException if KMS fails
      */
     @Override

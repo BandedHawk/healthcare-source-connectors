@@ -2,8 +2,8 @@
 # no Kubernetes) and points the Docker CLI and Testcontainers at the Docker daemon inside the VM.
 #
 # Environment (defaults): SDH_IT_PROFILE=sdh-it SDH_IT_CPUS=8 SDH_IT_MEMORY=8g SDH_IT_DISK=100g
-# Where the VM is kept: see minikube-home.sh (SDH_SANDBOX). 8 GB leaves room for the demo cluster alongside
-# (scripts/sandbox.sh); the integration tests need about 6.
+# Where the VM is kept: see minikube-home.sh (SDH_SANDBOX). The integration tests need about 6 GB. It doesn't fit
+# beside the demo cluster (scripts/sandbox.sh): the host's memory is checked before it starts (minikube-home.sh).
 #
 # The profile is single-node with no Kubernetes: only its Docker daemon is used. `minikube docker-env` doesn't
 # work on multi-node clusters, and the tests shouldn't share a cluster you use for other work.
@@ -25,6 +25,7 @@ host_state() {
 
 state="$(host_state)"
 if [[ "$state" != "Running" ]]; then
+  sdh_host_guard "$(sdh_size_mib "$PROFILE" "$MEMORY"):$PROFILE" || exit 1
   echo ">> Starting minikube profile '$PROFILE' (kvm2, docker runtime, no Kubernetes, $CPUS CPUs, $MEMORY)"
   # Settings only apply when the VM is first created; an existing profile keeps its size.
   minikube start -p "$PROFILE" --driver=kvm2 --container-runtime=docker --no-kubernetes \

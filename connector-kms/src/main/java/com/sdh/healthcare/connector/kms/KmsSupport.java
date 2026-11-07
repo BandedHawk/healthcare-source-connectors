@@ -6,8 +6,18 @@
  */
 package com.sdh.healthcare.connector.kms;
 
+import com.azure.core.exception.HttpResponseException;
+import com.google.api.gax.rpc.DeadlineExceededException;
+import com.google.api.gax.rpc.UnavailableException;
 import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.crypto.impl.ECDSA;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
+import java.io.IOException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
@@ -15,8 +25,10 @@ import java.security.PublicKey;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import software.amazon.awssdk.core.exception.SdkServiceException;
 
 /**
  * Helpers shared by the KMS providers.
@@ -26,6 +38,13 @@ import java.util.regex.Pattern;
  */
 final class KmsSupport
 {
+
+    /**
+     * Statuses for a KMS not serving: rate limited (429), a gateway failing
+     * to reach it (502, 504), unavailable (503).
+     */
+    private static final Set<Integer> NOT_SERVING = Set.of(429, 502, 503,
+            504);
 
     /**
      * Bound to every wrapped data key where the KMS supports it, so other
@@ -139,17 +158,70 @@ final class KmsSupport
     }
 
     /**
-     * An exception for a failed KMS call.
+     * An exception for a failed KMS call: a
+     * {@link KeyServiceUnavailableException} if the KMS couldn't be reached
+     * or wasn't serving ({@link #notServing}), so the work is tried again
+     * later without being held against the item.
      *
      * @param operation the call, named for operators
      * @param cause what the KMS client threw
      * @return the exception to throw
      */
-    static IllegalStateException failed(String operation, Exception cause)
+    static RuntimeException failed(String operation, Exception cause)
     {
         // The KMS's own message names keys and requests, never data, so it
         // is kept for operators.
+        if (notServing(cause))
+        {
+            return new KeyServiceUnavailableException(
+                    operation + " unavailable: " + cause.getMessage(),
+                    new IOException(cause));
+        }
         return new IllegalStateException(
                 operation + " failed: " + cause.getMessage(), cause);
+    }
+
+    /**
+     * Tells whether a KMS client's error means the KMS couldn't be reached
+     * or wasn't serving, rather than refusing: down its chain of causes, a
+     * connection refused, timed out or unresolved; an AWS or Azure answer
+     * of 429, 502, 503 or 504; or gRPC's {@code UNAVAILABLE} or
+     * {@code DEADLINE_EXCEEDED} from Cloud KMS.
+     *
+     * @param error the error
+     * @return true if so
+     */
+    static boolean notServing(Throwable error)
+    {
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 16; depth++)
+        {
+            if (current instanceof ConnectException
+                    || current instanceof NoRouteToHostException
+                    || current instanceof UnknownHostException
+                    || current instanceof SocketTimeoutException
+                    || current instanceof HttpTimeoutException
+                    || current instanceof UnavailableException
+                    || current instanceof DeadlineExceededException)
+            {
+                return true;
+            }
+            if (current instanceof SdkServiceException aws)
+            {
+                return aws.isThrottlingException()
+                        || NOT_SERVING.contains(aws.statusCode());
+            }
+            if (current instanceof HttpResponseException azure)
+            {
+                return azure.getResponse() != null && NOT_SERVING
+                        .contains(azure.getResponse().getStatusCode());
+            }
+            if (current.getCause() == current)
+            {
+                break;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }

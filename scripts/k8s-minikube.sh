@@ -48,6 +48,7 @@ done
 
 state="$(minikube status -p "$PROFILE" --format '{{.Host}}' 2>/dev/null | head -n 1 || true)"
 if [[ "$state" != "Running" ]]; then
+  sdh_host_guard "$(sdh_size_mib "$PROFILE" "${SDH_K8S_MEMORY:-8g}"):$PROFILE" || exit 1
   echo ">> Starting minikube profile '$PROFILE' (kvm2, docker runtime, Kubernetes)"
   mkdir -p "$(dirname "$KUBECONFIG")"
   minikube start -p "$PROFILE" --driver=kvm2 --container-runtime=docker \

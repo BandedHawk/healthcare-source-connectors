@@ -485,6 +485,32 @@ class StageWorkerTest
     }
 
     /**
+     * A worker closed with records claimed but not stored releases them:
+     * another worker takes them over at once, as second attempts, rather
+     * than after the claims' 30 seconds.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void releasesItsClaimsWhenClosed() throws InterruptedException
+    {
+        StageTestSupport.TestProcessor failing = processor();
+        failing.failures.set(1);
+        StageWorker<String> stopping = worker("pod-a", failing);
+        assertThat(stopping.handle(batch(3)))
+                .isEqualTo(BatchHandler.Outcome.RETRY);
+        stopping.close();
+        StageTestSupport.TestProcessor processor = processor();
+        long start = System.nanoTime();
+        assertThat(worker("pod-b", processor).handle(batch(3)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(Duration.ofNanos(System.nanoTime() - start))
+                .isLessThan(Duration.ofSeconds(10));
+        assertThat(committed).hasSize(3);
+        assertThat(processor.attempts.values()).containsOnly(2);
+    }
+
+    /**
      * Once the item-complete message is sent, the processor's step gets the
      * message that gave the total; if the step fails, the batch is tried
      * again and the item isn't marked complete until it succeeds.

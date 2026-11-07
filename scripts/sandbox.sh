@@ -4,21 +4,25 @@
 # minikube-home.sh).
 #
 #   scripts/sandbox.sh up          create or start the cluster, and the services every pipeline uses
-#   scripts/sandbox.sh images      build the landing node's and both stages' customer images (in the sdh-it VM)
-#                                  and push them to the cluster's registry
+#   scripts/sandbox.sh images      build the landing node's and both stages' customer images (in the sdh-it VM,
+#                                  with the cluster stopped meanwhile) and push them to the cluster's registry
 #   scripts/sandbox.sh deploy      deploy each pipeline's landing node, split stage and convert stage (after up
 #                                  and images)
 #   scripts/sandbox.sh push <pipeline> <file>...
 #                                  push files to a pipeline's landing node, as its producer
 #   scripts/sandbox.sh check       push the sample C-CDA documents and check they are landed, split, converted and
 #                                  sent on
-#   scripts/sandbox.sh status      pods, nodes, topics
+#   scripts/sandbox.sh scale-demo [count]
+#                                  push count copies of the samples (300 by default), and follow KEDA scaling the
+#                                  split and convert stages out to share them, and back
+#   scripts/sandbox.sh status      pods, nodes, topics, scaling
 #   scripts/sandbox.sh grafana     port-forward Grafana to http://localhost:3000 (until interrupted)
 #   scripts/sandbox.sh stop        stop the cluster's VMs; `up` starts them again, with everything kept
 #   scripts/sandbox.sh delete --yes
 #                                  delete the cluster and its volumes (the state directory is kept)
 #
-# Environment (defaults): SDH_DEMO_PROFILE=sdh-demo SDH_DEMO_NODES=3 SDH_DEMO_CPUS=6 SDH_DEMO_MEMORY=6g
+# Environment (defaults): SDH_DEMO_PROFILE=sdh-demo SDH_DEMO_NODES=3 SDH_DEMO_CPUS=6 SDH_DEMO_CP_MEMORY=7680
+#   SDH_DEMO_MEMORY=6912 (MiB, the control-plane node and each other node; docs/SANDBOX.md "Memory")
 #   SDH_DEMO_DISK=120g SDH_PIPELINES=ccda-push (each pushed C-CDA; one namespace sdh-<pipeline> each)
 #
 # Kept in $SDH_SANDBOX/sdh-demo/state (mode 700), made once and reused, since data encrypted or stored under them
@@ -43,6 +47,20 @@ export KUBECONFIG="$SDH_KUBE_DIR/$PROFILE"
 KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9092,kafka-1.kafka.sdh-infra.svc:9092,kafka-2.kafka.sdh-infra.svc:9092"
 PRODUCER_SUBJECT="CN=producer-1,O=SDH Sandbox"
 REGISTRY="localhost:5000"
+# KEDA, which scales the split and convert stages (docs/STAGES.md §10). Its release publishes no checksum, so the
+# manifest's was taken when it was pinned, and every download is checked against it.
+KEDA_VERSION="2.21.0"
+KEDA_SHA256="b43c89ffeef81722d7e2dd2c079d74789767a0f89cae1336cff784994814f6d7"
+# Partitions of each stage's input topic: the most pods KEDA could give a stage.
+STAGE_PARTITIONS=6
+# Memory (MiB; docs/SANDBOX.md "Memory"): each VM's size; what the kubelet keeps from pods on each node, measured
+# 2026-11-07 (the VM's own use, about 1.5 GiB with its in-memory root filesystem, plus on the control-plane node
+# Kubernetes' own pods, which reserve nothing); and the memory left free below which the kubelet evicts pods.
+CP_MEMORY="${SDH_DEMO_CP_MEMORY:-7680}"
+NODE_MEMORY="${SDH_DEMO_MEMORY:-6912}"
+CP_RESERVED=2304
+NODE_RESERVED=1664
+EVICTION_MIB=256
 
 say() { echo ">> $*"; }
 kc() { minikube -p "$PROFILE" kubectl -- "$@"; }
@@ -67,28 +85,179 @@ prefix() { echo "${1//-/_}"; }
 start_cluster() {
   local state
   state="$(minikube status -p "$PROFILE" --format '{{.Host}}' 2>/dev/null | head -n 1 || true)"
-  if [[ "$state" == "Running" ]]; then
-    return
-  fi
+  [[ "$state" == "Running" ]] || boot_cluster
+  # Each harmless to repeat, and needed after any start (minikube's or the script's).
+  reserve_node_memory
+  restore_registry
+  keep_control_plane
+  kc apply -f "$DEPLOY/cluster/local-path-storage.yaml" >/dev/null
+  kc -n local-path-storage rollout status deploy/local-path-provisioner --timeout=300s >/dev/null
+}
+
+# boot_cluster: starts the cluster's VMs, sized and checked against the host's memory, or makes the cluster.
+boot_cluster() {
   mkdir -p "$(dirname "$KUBECONFIG")"
   if minikube profile list -o json 2>/dev/null | python3 -c '
 import json, sys
 names = [p["Name"] for p in json.load(sys.stdin).get("valid", [])]
 sys.exit(0 if sys.argv[1] in names else 1)' "$PROFILE"; then
+    size_vms
+    host_guard_cluster
     say "Starting minikube profile '$PROFILE'"
     minikube start -p "$PROFILE"
   else
-    say "Creating minikube profile '$PROFILE': ${SDH_DEMO_NODES:-3} nodes × ${SDH_DEMO_CPUS:-6} CPUs," \
-      "${SDH_DEMO_MEMORY:-6g}, ${SDH_DEMO_DISK:-120g} disk, Calico, under $MINIKUBE_HOME"
+    local n
+    n=${SDH_DEMO_NODES:-3}
+    host_guard_cluster "$n"
+    say "Creating minikube profile '$PROFILE': $n nodes × ${SDH_DEMO_CPUS:-6} CPUs, ${CP_MEMORY} MiB for the" \
+      "control-plane node and ${NODE_MEMORY} MiB for each other, ${SDH_DEMO_DISK:-120g} disk, Calico, under" \
+      "$MINIKUBE_HOME"
     minikube start -p "$PROFILE" --driver=kvm2 --container-runtime=docker --kubernetes-version=v1.37.0 \
-      --nodes="${SDH_DEMO_NODES:-3}" --cpus="${SDH_DEMO_CPUS:-6}" --memory="${SDH_DEMO_MEMORY:-6g}" \
+      --nodes="$n" --cpus="${SDH_DEMO_CPUS:-6}" --memory="${NODE_MEMORY}m" \
       --disk-size="${SDH_DEMO_DISK:-120g}" --cni=calico --addons=registry,metrics-server
     # Node-local volumes (local-path) instead of minikube's single-node hostpath provisioner.
     minikube -p "$PROFILE" addons disable storage-provisioner
     minikube -p "$PROFILE" addons disable default-storageclass
+    # minikube gives every node the same memory: the control-plane node is given its own while stopped.
+    if ((CP_MEMORY != NODE_MEMORY)); then
+      minikube stop -p "$PROFILE" >/dev/null
+      size_vms
+      minikube start -p "$PROFILE"
+    fi
   fi
-  kc apply -f "$DEPLOY/cluster/local-path-storage.yaml" >/dev/null
-  kc -n local-path-storage rollout status deploy/local-path-provisioner --timeout=300s >/dev/null
+}
+
+# demo_vms: the cluster's VMs (libvirt domains), the control-plane node first.
+demo_vms() {
+  virsh -c qemu:///system list --all --name 2>/dev/null | grep -E "^$PROFILE(-m[0-9]+)?\$" | sort
+}
+
+# vm_target <domain>: the memory it should have, in MiB.
+vm_target() {
+  if [[ "$1" == "$PROFILE" ]]; then echo "$CP_MEMORY"; else echo "$NODE_MEMORY"; fi
+}
+
+# size_vms: gives each stopped VM its memory (docs/SANDBOX.md "Memory"). Everything on the VMs' disks is kept; a
+# running VM is changed only once stopped.
+size_vms() {
+  local vm target
+  for vm in $(demo_vms); do
+    target=$(vm_target "$vm")
+    [[ "$(sdh_vm_mib "$vm")" == "$target" ]] && continue
+    if [[ "$(virsh -c qemu:///system domstate "$vm" 2>/dev/null)" != "shut off" ]]; then
+      say "  $vm has $(sdh_vm_mib "$vm") MiB rather than $target; stop the cluster and run up to change it"
+      continue
+    fi
+    say "  Giving $vm $target MiB (it had $(sdh_vm_mib "$vm"))"
+    virsh -c qemu:///system setmaxmem "$vm" "${target}M" --config >/dev/null
+    virsh -c qemu:///system setmem "$vm" "${target}M" --config >/dev/null
+  done
+}
+
+# host_guard_cluster [nodes]: refuses to start the cluster's stopped VMs, or the given number of new ones, if the
+# host couldn't spare their memory (minikube-home.sh).
+host_guard_cluster() {
+  local vms=() vm i
+  if [[ -n "${1:-}" ]]; then
+    vms+=("$CP_MEMORY:$PROFILE")
+    for ((i = 2; i <= $1; i++)); do vms+=("$NODE_MEMORY:$PROFILE-m0$i"); done
+  else
+    for vm in $(demo_vms); do
+      [[ "$(virsh -c qemu:///system domstate "$vm" 2>/dev/null)" == "running" ]] && continue
+      vms+=("$(vm_target "$vm"):$vm")
+    done
+  fi
+  ((${#vms[@]} == 0)) || sdh_host_guard "${vms[@]}" || exit 1
+}
+
+# reserve_node_memory: tells each node's kubelet what the VM itself uses, so pods are only given what is really
+# there, and to evict pods before the node runs out (minikube sets neither). Without it, every node offered pods
+# its whole memory, and under load the control-plane node ran out (docs/SANDBOX.md "Checked"). minikube writes
+# the kubelet's configuration at every start, so this runs at every start.
+reserve_node_memory() {
+  local node reserved changed
+  for node in $(kc get nodes -o name | cut -d/ -f2); do
+    if [[ "$node" == "$PROFILE" ]]; then reserved=$CP_RESERVED; else reserved=$NODE_RESERVED; fi
+    changed="$(minikube -p "$PROFILE" ssh --native-ssh=false -n "$node" -- \
+      "sudo sh -s ${reserved}Mi ${EVICTION_MIB}Mi" < <(kubelet_memory_script) | tr -d '\r')"
+    [[ "$changed" == *changed* ]] \
+      && say "  $node: ${reserved} MiB kept from pods, which are evicted below ${EVICTION_MIB} MiB free"
+  done
+  wait_for 120 kc wait --for=condition=Ready nodes --all --timeout=10s || { kc get nodes; exit 1; }
+}
+
+# kubelet_memory_script: run on a node as root with <reserved> <eviction>: sets systemReserved memory and
+# evictionHard memory.available in the kubelet's configuration, keeping minikube's other thresholds, and restarts
+# the kubelet if that changed anything (its pods keep running). Prints "changed" or "same".
+kubelet_memory_script() {
+  cat <<'SCRIPT'
+config=/var/lib/kubelet/config.yaml
+awk -v r="$1" -v e="$2" '
+  /^systemReserved:/ { skip = 1; next }
+  /^evictionHard:/ {
+    print "evictionHard:"; print "  memory.available: \"" e "\""; hard = 1; skip = 0
+    rest = $0; sub(/^evictionHard:[ ]*/, "", rest)
+    if (rest != "" && rest != "{}") print "  " rest
+    next
+  }
+  skip && /^[ ]/ { next }
+  hard && /^  memory\.available:/ { next }
+  { skip = 0; if (!/^[ ]/) hard = 0; print }
+  END { print "systemReserved:"; print "  memory: " r }
+' "$config" > /tmp/kubelet-config.yaml || exit 1
+grep -q '^evictionHard:' /tmp/kubelet-config.yaml \
+  || printf 'evictionHard:\n  memory.available: "%s"\n' "$2" >> /tmp/kubelet-config.yaml
+if cmp -s /tmp/kubelet-config.yaml "$config"; then
+  echo same
+else
+  cp /tmp/kubelet-config.yaml "$config" && systemctl restart kubelet && echo changed
+fi
+SCRIPT
+}
+
+# restore_registry: the cluster's registry keeps images only in its container, so a restart empties it, and a pod
+# then can't start on a node that hasn't the image yet. Pushed again from the first node's Docker, which keeps
+# them on its disk; each must come back under the digest it is deployed by.
+restore_registry() {
+  [[ -s "$STATE/images.env" ]] || return 0
+  local line ref repo digest tag
+  # Read on its own descriptor: minikube ssh reads stdin.
+  while IFS= read -r line <&3; do
+    ref="${line#*=}"; repo="${ref%@*}"; digest="${ref#*@}"
+    minikube -p "$PROFILE" ssh -- "curl -sf -o /dev/null \
+      -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+      http://localhost:5000/v2/${repo#*/}/manifests/$digest" 2>/dev/null && continue
+    tag="$(minikube -p "$PROFILE" ssh -- "docker images --digests --format '{{.Repository}}:{{.Tag}} {{.Digest}}' \
+      | awk -v d=$digest -v r=$repo '\$2 == d && index(\$1, r \":\") == 1 && \$1 !~ /<none>/ {print \$1; exit}'" \
+      | tr -d '\r')"
+    if [[ -z "$tag" ]]; then
+      say "  $repo@$digest is in neither the registry nor the first node's Docker: run images again"
+      continue
+    fi
+    minikube -p "$PROFILE" ssh -- "docker push -q $tag >/dev/null" \
+      && minikube -p "$PROFILE" ssh -- "curl -sf -o /dev/null \
+        -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+        http://localhost:5000/v2/${repo#*/}/manifests/$digest" \
+      && say "  Pushed $tag to the registry again" \
+      || say "  $tag pushed again under another digest than $digest: run images again"
+  done 3< "$STATE/images.env"
+}
+
+# keep_control_plane: keeps the control-plane node for the services whose volumes are there (Kafka's first
+# broker, Postgres, SeaweedFS, Vault, LGTM: they tolerate the taint) and Kubernetes' own pods, and moves
+# anything else running there to another node. A pod that had found room there would otherwise hold memory a
+# service needs when it restarts. Not on a single-node cluster.
+keep_control_plane() {
+  (($(kc get nodes --no-headers | wc -l) > 1)) || return 0
+  kc taint nodes "$PROFILE" node-role.kubernetes.io/control-plane=:NoSchedule --overwrite >/dev/null
+  local n p namespaces="sdh-producers"
+  for p in $PIPELINES; do namespaces+=" $(ns "$p")"; done
+  for n in $namespaces; do
+    kc get ns "$n" >/dev/null 2>&1 || continue
+    kc -n "$n" delete pods --field-selector "spec.nodeName=$PROFILE" --wait=false >/dev/null
+  done
+  infra delete pods -l app=otel-collector --field-selector "spec.nodeName=$PROFILE" --wait=false \
+    >/dev/null 2>&1 || true
 }
 
 # --- Shared services -------------------------------------------------------------------------------------------
@@ -145,11 +314,63 @@ start_services() {
       statefulset/lgtm; do
     infra rollout status "$workload" --timeout=600s >/dev/null || { infra get pods; exit 1; }
   done
-  infra wait --for=jsonpath='{.status.phase}'=Running pod/vault-0 --timeout=300s >/dev/null
+  # A changed Vault StatefulSet replaces its pod, which starts sealed: unsealed only once the new pod is there.
+  wait_for 300 vault_current || { infra get pods; exit 1; }
   setup_vault
   setup_buckets
   setup_topics
   setup_database
+  setup_keda
+}
+
+# vault_current: vault-0 runs from its StatefulSet's latest revision.
+vault_current() {
+  [[ "$(infra get pod vault-0 -o jsonpath='{.metadata.labels.controller-revision-hash}')" \
+      == "$(infra get statefulset vault -o jsonpath='{.status.updateRevision}')" \
+    && "$(infra get pod vault-0 -o jsonpath='{.status.phase}')" == Running ]]
+}
+
+# setup_keda: the KEDA operator, from its pinned release manifest, kept under $SDH_SANDBOX once downloaded.
+setup_keda() {
+  local cache="$SDH_SANDBOX/sdh-demo/downloads" manifest
+  manifest="$cache/keda-$KEDA_VERSION.yaml"
+  mkdir -p "$cache"
+  if [[ ! -s "$manifest" ]]; then
+    say "Downloading KEDA $KEDA_VERSION"
+    curl -sSfL --max-time 120 -o "$manifest.part" \
+      "https://github.com/kedacore/keda/releases/download/v$KEDA_VERSION/keda-$KEDA_VERSION.yaml"
+    mv "$manifest.part" "$manifest"
+  fi
+  if [[ "$(sha256sum "$manifest" | cut -d' ' -f1)" != "$KEDA_SHA256" ]]; then
+    rm -f "$manifest"
+    echo "KEDA $KEDA_VERSION's manifest doesn't match its pinned checksum" >&2
+    exit 1
+  fi
+  say "KEDA $KEDA_VERSION (namespace keda)"
+  # Its three pods ask for 100 MiB and may grow to 1000 MiB each, which the nodes are not sized for: held to
+  # 128 MiB each (they use under 50), and run on the control-plane node, so the other two keep room for the
+  # stages to scale (docs/SANDBOX.md "Memory").
+  local work
+  work="$(mktemp -d)"
+  cp "$manifest" "$work/keda.yaml"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources: [keda.yaml]' \
+    'patches:' "  - { target: { kind: Deployment, namespace: keda }, patch: '[{\"op\": \"replace\"," \
+    "      \"path\": \"/spec/template/spec/containers/0/resources\", \"value\": {\"requests\":" \
+    "      {\"cpu\": \"100m\", \"memory\": \"128Mi\"}, \"limits\": {\"memory\": \"128Mi\"}}}," \
+    "      {\"op\": \"add\", \"path\": \"/spec/template/spec/tolerations\", \"value\":" \
+    "      [{\"key\": \"node-role.kubernetes.io/control-plane\", \"operator\": \"Exists\"," \
+    "      \"effect\": \"NoSchedule\"}]}, {\"op\": \"add\", \"path\": \"/spec/template/spec/affinity\"," \
+    "      \"value\": {\"nodeAffinity\": {\"requiredDuringSchedulingIgnoredDuringExecution\":" \
+    "      {\"nodeSelectorTerms\": [{\"matchExpressions\": [{\"key\":" \
+    "      \"node-role.kubernetes.io/control-plane\", \"operator\": \"Exists\"}]}]}}}}]' }" \
+    > "$work/kustomization.yaml"
+  # Server-side: its CRDs are too large for the annotation a client-side apply keeps.
+  kc kustomize "$work" | kc apply --server-side --force-conflicts -f - >/dev/null
+  rm -rf "$work"
+  local workload
+  for workload in keda-operator keda-metrics-apiserver keda-admission; do
+    kc -n keda rollout status "deploy/$workload" --timeout=300s >/dev/null || { kc -n keda get pods; exit 1; }
+  done
 }
 
 # vault_sh <script>: runs a shell script in the Vault pod, logged in as root. The token goes over stdin, so it
@@ -270,11 +491,25 @@ setup_buckets() {
 setup_topics() {
   local p topic
   for p in $PIPELINES; do
-    # One partition each: a pipeline's items and records stay in the order they were landed.
+    # The stages' inputs have a partition for each pod KEDA may run: messages are keyed by item or record, so
+    # each item's and each record's messages stay in order on their partition, and nothing needs more. The rest
+    # have one, until the FHIR stage scales too.
     for topic in "$p.landed" "$p.split" "$p.records" "$p.convert.dlq" "$p.fhir.dlq"; do
+      local partitions=1
+      [[ "$topic" == "$p.landed" || "$topic" == "$p.split" ]] && partitions="$STAGE_PARTITIONS"
       infra exec kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create \
-        --if-not-exists --topic "$topic" --partitions 1 --replication-factor 3 \
+        --if-not-exists --topic "$topic" --partitions "$partitions" --replication-factor 3 \
         --config min.insync.replicas=2 >/dev/null
+      # A topic made with fewer, before the stages scaled. Partitions are only ever added; a key's messages
+      # already queued stay on their old partition, so do this with the topic drained.
+      local have
+      have="$(infra exec kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+        --describe --topic "$topic" | sed -n 's/.*PartitionCount: *\([0-9]*\).*/\1/p' | head -n 1)"
+      if [[ -n "$have" && "$have" -lt "$partitions" ]]; then
+        say "  $topic: $have partitions to $partitions"
+        infra exec kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --alter \
+          --topic "$topic" --partitions "$partitions" >/dev/null
+      fi
     done
   done
 }
@@ -349,6 +584,14 @@ issue() {
 build_images() {
   local version
   version="$(cd "$ROOT" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
+  # The sdh-it VM and the cluster don't both fit in the host's memory (docs/SANDBOX.md "Memory"): the images are
+  # built with the cluster stopped, saved to the sandbox disk, and loaded once sdh-it is stopped again.
+  local state archive="$SDH_SANDBOX/sdh-demo/images.tar"
+  state="$(minikube status -p "$PROFILE" --format '{{.Host}}' 2>/dev/null | head -n 1 || true)"
+  if [[ "$state" == "Running" ]]; then
+    say "Stopping the cluster while sdh-it builds (everything on it is kept)"
+    minikube stop -p "$PROFILE" >/dev/null
+  fi
   say "Building the customer images ($version) in the sdh-it VM"
   (cd "$ROOT" && ./mvnw -q -pl landing-connector,file-connector,convert-stage -am package -DskipTests)
   # module=image: the split stage kept its module's name, file-connector.
@@ -357,13 +600,18 @@ build_images() {
     SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 SDH_IMAGE="sdh/${app#*=}:$version" "$ROOT/scripts/build-image.sh" \
       "${app%%=*}" customer
   done
+  (source "$ROOT/scripts/minikube-env.sh" >/dev/null
+   docker save "sdh/landing-connector:$version" "sdh/split-stage:$version" "sdh/convert-stage:$version") \
+    > "$archive.part"
+  mv "$archive.part" "$archive"
+  say "Stopping the sdh-it VM"
+  MINIKUBE_HOME="$MINIKUBE_HOME" minikube stop -p "${SDH_IT_PROFILE:-sdh-it}" >/dev/null
   start_cluster
   say "Copying them to the cluster's registry ($REGISTRY on every node)"
   # Loaded into the first node's Docker and pushed from there: the registry addon answers on localhost:5000 on
   # every node, and the VMs' networks can't reach each other.
-  (source "$ROOT/scripts/minikube-env.sh" >/dev/null
-   docker save "sdh/landing-connector:$version" "sdh/split-stage:$version" "sdh/convert-stage:$version") \
-    | minikube -p "$PROFILE" ssh --native-ssh=false -- docker load >/dev/null
+  minikube -p "$PROFILE" ssh --native-ssh=false -- docker load < "$archive" >/dev/null
+  rm -f "$archive"
   : > "$STATE/images.env.tmp"
   for app in "${apps[@]}"; do
     app="${app#*=}"
@@ -377,10 +625,6 @@ build_images() {
     say "  $digest"
   done
   mv "$STATE/images.env.tmp" "$STATE/images.env"
-  if [[ "${SDH_IT_STOP:-1}" == "1" || "${SDH_IT_STOP:-}" == "true" ]]; then
-    say "Stopping the sdh-it VM"
-    MINIKUBE_HOME="$MINIKUBE_HOME" minikube stop -p "${SDH_IT_PROFILE:-sdh-it}" >/dev/null
-  fi
 }
 
 # --- Pipelines -------------------------------------------------------------------------------------------------
@@ -480,8 +724,8 @@ deploy_pipeline() {
   cp "$DEPLOY/pipeline/convert-patch.yaml" "$work/convert/"
   stage_kustomization landing "landing.yaml, landing-service.yaml" landing-patch.yaml \
     > "$work/landing/kustomization.yaml"
-  stage_kustomization splitter "splitter.yaml" splitter-patch.yaml > "$work/splitter/kustomization.yaml"
-  stage_kustomization convert "convert.yaml" convert-patch.yaml > "$work/convert/kustomization.yaml"
+  stage_kustomization splitter "splitter.yaml" splitter-patch.yaml scaled > "$work/splitter/kustomization.yaml"
+  stage_kustomization convert "convert.yaml" convert-patch.yaml scaled > "$work/convert/kustomization.yaml"
 
   # The landing node first: it makes the landing tables, which the split stage may only read. The split stage
   # before the convert stage: it makes split_records.
@@ -499,7 +743,14 @@ deploy_pipeline() {
       || ! wait_for 300 logged "$n" deploy/convert "Started ConvertStageApplication"; then
     kc -n "$n" get pods -o wide; kc -n "$n" logs deploy/convert --tail=60; exit 1
   fi
-  say "  landing (active and standby), split stage and convert stage running"
+  envsubst '$PIPELINE $K8S_NS $KAFKA_BROKERS' < "$DEPLOY/pipeline/scaling.yaml" | kc apply -f - >/dev/null
+  local scaled
+  for scaled in splitter convert; do
+    if ! kc -n "$n" wait --for=condition=Ready "scaledobject/$scaled" --timeout=120s >/dev/null; then
+      kc -n "$n" describe "scaledobject/$scaled" | tail -20; exit 1
+    fi
+  done
+  say "  landing (one pod), split stage and convert stage running; KEDA scales each stage to 2 pods"
 }
 
 # apply_secret <namespace> <name> <kubectl create secret args>...
@@ -542,14 +793,20 @@ readme_yaml() {
   awk '/^```yaml$/ {on=1; next} /^```$/ {on=0} on' "$1"
 }
 
-# stage_kustomization <stage> <resources> <patch>
+# stage_kustomization <stage> <resources> <patch> [scaled]: with "scaled", the Deployment's replicas are left to
+# KEDA, so a deploy doesn't reset what it has scaled to.
 stage_kustomization() {
+  local patches="{ path: $3 }"
+  if [[ "${4:-}" == "scaled" ]]; then
+    local remove='[{"op": "remove", "path": "/spec/replicas"}]'
+    patches+=", { target: { kind: Deployment, name: $1 }, patch: '$remove' }"
+  fi
   cat <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: $K8S_NS
 resources: [$2]
-patches: [{ path: $3 }]
+patches: [$patches]
 EOF
 }
 
@@ -569,12 +826,12 @@ logged() {
   grep -qE "$3" <<<"$logs"
 }
 
-# landing_active <namespace>: one landing pod holds the lease (is ready), and the other waits as its standby.
+# landing_active <namespace>: the one landing pod holds the lease (is ready).
 landing_active() {
   local ready
   ready="$(kc -n "$1" get pods -l app=landing \
     -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}')"
-  [[ "$(grep -c true <<<"$ready")" == "1" && "$(grep -c false <<<"$ready")" == "1" ]]
+  [[ "$ready" == "true" ]]
 }
 
 # --- Using it --------------------------------------------------------------------------------------------------
@@ -642,6 +899,104 @@ check() {
   return "$failures"
 }
 
+# scale_demo [count]: pushes count copies of the sample documents, each made an item and a record of its own by a
+# numbered comment before its root element's end tag (the content is otherwise the same: a comment before the
+# root is outside the record, so its copies would share a record ID, the key its messages are partitioned by),
+# and follows KEDA scaling both stages
+# out. What is done is counted in the stages' registries, so a pod scaled away still counts; how the work was
+# shared is from the convert stage's records (who stored each) and the split stage's pods' logs (pods still
+# running when looked at, so a lower bound).
+scale_demo() {
+  local p="${PIPELINES%% *}" count="${1:-300}" n run prefix samples=()
+  [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]] || { echo "usage: $0 scale-demo [count]" >&2; exit 2; }
+  n="$(ns "$p")"
+  prefix="$(prefix "$p")"
+  run="$(date -u +%Y%m%dT%H%M%SZ)"
+  local file
+  for file in "$ROOT"/connector-core/src/test/resources/ccda/*.xml; do
+    samples+=("$(basename "$file")")
+  done
+  db() { infra exec postgres-0 -- psql -U postgres -d sdh -At -c "$1"; }
+  local since
+  since="$(db "SELECT now()")"
+  split_done() { db "SELECT count(*) FROM split_$prefix.split_item WHERE ended_at >= '$since'"; }
+  converted() { db "SELECT count(*) FROM convert_$prefix.stage_item WHERE completed_at >= '$since'"; }
+  # Pods ready, not only asked for: one with no room to run doesn't count.
+  replicas() { kc -n "$n" get deploy "$1" -o jsonpath='{.status.readyReplicas}'; }
+  # Each split pod's items finished, the highest seen in its log.
+  declare -A split_by=() split_before=()
+  tally() {
+    local pod seen
+    for pod in $(kc -n "$n" get pods -l app=splitter -o name); do
+      seen="$(kc -n "$n" logs "$pod" --tail=-1 2>/dev/null | grep -cE '(^|[] ])item\.completed( |$)' || true)"
+      [[ -n "${split_before[$pod]+set}" ]] || split_before[$pod]="$seen"
+      [[ "${split_by[$pod]:-0}" -ge "$seen" ]] || split_by[$pod]="$seen"
+    done
+  }
+  tally
+
+  say "Pushing $count copies of ${#samples[@]} sample C-CDA documents to $p (run $run), one at a time"
+  local url="https://landing.$n.svc:8443/intakes/$p/items"
+  (cd "$ROOT/connector-core/src/test/resources/ccda" && tar -c "${samples[@]}") \
+    | kc -n sdh-producers exec -i deploy/producer -- sh -c '
+        d="$(mktemp -d)"; tar -x -C "$d"; set -- "$d"/*.xml; i=0
+        while [ "$i" -lt "'"$count"'" ]; do
+          for f in "$@"; do
+            [ "$i" -lt "'"$count"'" ] || break
+            i=$((i + 1))
+            sed "s#</ClinicalDocument>#<!-- sandbox scale-demo '"$run"' $i --></ClinicalDocument>#" "$f" \
+              | curl -sS --fail -o /dev/null \
+              --cacert /etc/producer/ca.crt --cert /etc/producer/tls.crt --key /etc/producer/tls.key \
+              -H "Content-Type: application/octet-stream" --data-binary @- "'"$url"'" || echo "push $i failed"
+          done
+        done
+        rm -rf "$d"' &
+  local pusher=$!
+
+  local started=$SECONDS most_split=0 most_convert=0 split_now=0 convert_now=0 r c
+  while ((SECONDS - started < 1800)); do
+    sleep 15
+    tally
+    split_now="$(split_done)"
+    convert_now="$(converted)"
+    r="$(replicas splitter)"; r="${r:-0}"; ((r > most_split)) && most_split=$r
+    c="$(replicas convert)"; c="${c:-0}"; ((c > most_convert)) && most_convert=$c
+    say "  $((SECONDS - started))s: split $split_now/$count on $r pod(s), converted $convert_now/$count on" \
+      "$c pod(s)"
+    ((split_now >= count && convert_now >= count)) && break
+  done
+  wait "$pusher" || true
+
+  local failures=0 pod split_worked=0 convert_worked
+  say "  split stage: up to $most_split pods; items each finished (from logs, at least):"
+  for pod in "${!split_by[@]}"; do
+    local did=$((split_by[$pod] - split_before[$pod]))
+    ((did > 0)) || continue
+    split_worked=$((split_worked + 1))
+    say "    ${pod#pod/}: $did"
+  done
+  say "  convert stage: up to $most_convert pods; records each stored (from its registry):"
+  db "SELECT split_part(owner, '/', 1), count(*) FROM convert_$prefix.stage_record WHERE stored_at >= '$since'
+      GROUP BY 1 ORDER BY 1" | while IFS='|' read -r pod did; do say "    $pod: $did"; done
+  convert_worked="$(db "SELECT count(DISTINCT split_part(owner, '/', 1)) FROM convert_$prefix.stage_record
+      WHERE stored_at >= '$since'")"
+  local again
+  again="$(db "SELECT count(*) FROM convert_$prefix.stage_record WHERE stored_at >= '$since' AND attempts > 1")"
+  ((again == 0)) || say "  $again record(s) converted on a second claim: their first pod stopped holding them"
+  if ((split_now < count || convert_now < count)); then
+    say "  FAIL: $split_now split and $convert_now converted of $count in 30 minutes"; failures=1
+  fi
+  if ((most_split < 2 || split_worked < 2)); then
+    say "  FAIL: the split stage didn't scale out (its backlog may not have passed 5 items)"; failures=1
+  fi
+  if ((most_convert < 2 || convert_worked < 2)); then
+    say "  FAIL: the convert stage didn't scale out (its backlog may not have passed 5 records)"; failures=1
+  fi
+  ((failures)) || say "  Both stages scaled out and shared the work. KEDA scales them back to one pod about" \
+    "two minutes after their backlogs are gone (scripts/sandbox.sh status)."
+  return "$failures"
+}
+
 status() {
   kc get nodes -o wide
   echo
@@ -655,6 +1010,7 @@ status() {
     echo "$p: $(topic_count "$p.landed") on $p.landed, $(topic_count "$p.split") on $p.split," \
       "$(topic_count "$p.records") on $p.records, $(topic_count "$p.convert.dlq") on $p.convert.dlq," \
       "$(topic_count "$p.fhir.dlq") on $p.fhir.dlq"
+    kc -n "$(ns "$p")" get scaledobject,hpa 2>/dev/null || true
   done
 }
 
@@ -679,6 +1035,7 @@ case "${1:-}" in
     shift; push "$@"
     ;;
   check) check ;;
+  scale-demo) scale_demo "${2:-300}" ;;
   status) status ;;
   grafana)
     say "Grafana at http://localhost:3000, user admin, password in $STATE/secrets/grafana (Ctrl-C to stop)"
@@ -690,5 +1047,5 @@ case "${1:-}" in
       exit 2; }
     minikube delete -p "$PROFILE"
     ;;
-  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

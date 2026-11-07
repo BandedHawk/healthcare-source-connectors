@@ -41,6 +41,18 @@ spec:
     - from: [{ namespaceSelector: { matchLabels: { sdh.smiledigitalhealth.com/infra-client: "true" } } }]
       ports: [{ port: 9092 }]   # broker
 ---
+# KEDA's operator reads the stages' consumer lag (deploy/sandbox/pipeline/scaling.yaml), and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: keda-to-kafka, namespace: sdh-infra }
+spec:
+  podSelector: { matchLabels: { app: kafka } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: keda } },
+               podSelector: { matchLabels: { app: keda-operator } } }]
+      ports: [{ port: 9092 }]
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: { name: clients-to-seaweedfs, namespace: sdh-infra }

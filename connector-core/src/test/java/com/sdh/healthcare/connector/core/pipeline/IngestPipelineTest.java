@@ -11,11 +11,13 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
+import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableException;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
@@ -45,6 +47,8 @@ import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.ConnectException;
 import java.nio.ByteBuffer;
 import java.security.KeyPair;
 import java.sql.Connection;
@@ -675,6 +679,155 @@ class IngestPipelineTest
                 split(pipeline, SeekableByteSource.of(file));
         assertThat(result.recordCount()).isEqualTo(CSV_ROWS);
         assertThat(pipeline.failedRecordCount(result.itemId())).isZero();
+    }
+
+    /**
+     * Ends an attempt in the first batch with an error, at the step a hook
+     * names.
+     *
+     * @param error    what the attempt ends with
+     * @param prepared whether to end it once the batch is pending, rather
+     *                 than once it is written
+     * @return the hooks
+     */
+    static PipelineHooks endInFirstBatch(RuntimeException error,
+            boolean prepared)
+    {
+        return new PipelineHooks()
+        {
+
+            /** Ends the attempt once the first batch is written. */
+            @Override
+            public void batchWritten(long lastSeq)
+            {
+                if (!prepared && lastSeq == BATCH - 1)
+                {
+                    throw error;
+                }
+            }
+
+            /** Ends the attempt once the first batch is pending. */
+            @Override
+            public void batchPrepared(long lastSeq)
+            {
+                if (prepared && lastSeq == BATCH - 1)
+                {
+                    throw error;
+                }
+            }
+        };
+    }
+
+    /**
+     * Tries the file in a fresh process whose attempt ends with an error.
+     *
+     * @param file  the file's bytes
+     * @param hooks where and how the attempt ends
+     * @return the error
+     * @throws Exception if the process can't be made
+     */
+    Throwable endsWithAnError(byte[] file, PipelineHooks hooks)
+            throws Exception
+    {
+        IngestPipeline pipeline = process(settings(),
+                new RecordingPublisher(), hooks);
+        Throwable error = catchThrowable(
+                () -> split(pipeline, SeekableByteSource.of(file)));
+        pipeline.close();
+        return error;
+    }
+
+    /**
+     * The restart count stored for the test's item.
+     *
+     * @return the count
+     * @throws Exception if a process can't be made
+     */
+    int storedRestarts() throws Exception
+    {
+        return process(settings(), new RecordingPublisher(),
+                PipelineHooks.NONE).checkpoint(item).orElseThrow()
+                .restarts();
+    }
+
+    /**
+     * An attempt that ends because a service was down (the key service,
+     * here) isn't counted, however often it happens: an outage doesn't fail
+     * a valid item. Once the service is back, the item is split.
+     *
+     * @throws Exception if the file can't be processed
+     */
+    @Test
+    void anOutageDoesntCountTowardsFailingAnItem() throws Exception
+    {
+        byte[] file = csvFile();
+        stopsWhileSplitting(file, STOP_IN_FIRST_BATCH);
+        RuntimeException outage = new KeyServiceUnavailableException(
+                "Vault Transit encrypt unreachable",
+                new ConnectException("Connection refused"));
+        for (int attempt = 0; attempt < 2 * IngestPipeline.FAIL_AFTER_RESTARTS;
+                attempt++)
+        {
+            assertThat(endsWithAnError(file, endInFirstBatch(outage, false)))
+                    .isSameAs(outage);
+            assertThat(storedRestarts()).isZero();
+        }
+        IngestPipeline pipeline = process(settings(),
+                new RecordingPublisher(), PipelineHooks.NONE);
+        assertThat(split(pipeline, SeekableByteSource.of(file))
+                .recordCount()).isEqualTo(CSV_ROWS);
+    }
+
+    /**
+     * An outage while a batch is being committed takes the restart back
+     * and leaves the batch pending, for resume to settle.
+     *
+     * @throws Exception if the file can't be processed
+     */
+    @Test
+    void anOutageMidCommitLeavesTheBatchForResume() throws Exception
+    {
+        byte[] file = csvFile();
+        stopsWhileSplitting(file, STOP_IN_FIRST_BATCH);
+        RuntimeException outage = new UncheckedIOException(
+                new ConnectException("Connection refused"));
+        for (int attempt = 0; attempt < 2 * IngestPipeline.FAIL_AFTER_RESTARTS;
+                attempt++)
+        {
+            endsWithAnError(file, endInFirstBatch(outage, true));
+            assertThat(storedRestarts()).isZero();
+        }
+        IngestPipeline pipeline = process(settings(),
+                new RecordingPublisher(), PipelineHooks.NONE);
+        assertThat(pipeline.stored(item).orElseThrow().pending())
+                .isNotNull();
+        assertThat(split(pipeline, SeekableByteSource.of(file))
+                .recordCount()).isEqualTo(CSV_ROWS);
+    }
+
+    /**
+     * Any other error still counts, so an item that leads to the same
+     * error every time is failed in the end.
+     *
+     * @throws Exception if a process can't be made
+     */
+    @Test
+    void otherErrorsStillCount() throws Exception
+    {
+        byte[] file = csvFile();
+        stopsWhileSplitting(file, STOP_IN_FIRST_BATCH);
+        RuntimeException bug = new IllegalStateException("not an outage");
+        for (int attempt = 1; attempt < IngestPipeline.FAIL_AFTER_RESTARTS;
+                attempt++)
+        {
+            assertThat(endsWithAnError(file, endInFirstBatch(bug, false)))
+                    .isSameAs(bug);
+            assertThat(storedRestarts()).isEqualTo(attempt);
+        }
+        assertThat(endsWithAnError(file, endInFirstBatch(bug, false)))
+                .isInstanceOfSatisfying(SplitException.class, error ->
+                        assertThat(error.code())
+                                .isEqualTo(ErrorCode.RESUME_NO_PROGRESS));
     }
 
     // ---- guards ----

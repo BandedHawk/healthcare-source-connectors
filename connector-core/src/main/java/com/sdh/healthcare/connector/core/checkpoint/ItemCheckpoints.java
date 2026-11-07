@@ -213,6 +213,50 @@ public final class ItemCheckpoints
     }
 
     /**
+     * Replaces an item's checkpoint while it is splitting, and leaves any
+     * pending one as it is, for resume to settle.
+     *
+     * @param checkpoint the checkpoint, {@code SPLITTING}
+     * @param lease      the item's lease
+     * @throws IllegalArgumentException if it isn't {@code SPLITTING}
+     * @throws LeaseLostException       if the lease was lost or taken over,
+     *                                  or the item has no checkpoint
+     * @throws IllegalStateException    if the database can't be reached
+     */
+    public void replace(Checkpoint checkpoint, LeaseToken lease)
+    {
+        if (checkpoint.state() != Checkpoint.State.SPLITTING)
+        {
+            throw new IllegalArgumentException("Only while splitting");
+        }
+        String sql = """
+                UPDATE %s
+                   SET epoch = ?, checkpoint = ?,
+                       updated_at = clock_timestamp()
+                 WHERE item_id = ? AND epoch <= ?
+                   AND state = 'SPLITTING'""".formatted(table);
+        lease.checkHeld();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setLong(1, lease.epoch());
+            update.setString(2, codec.encode(checkpoint));
+            update.setObject(3, checkpoint.itemId());
+            update.setLong(4, lease.epoch());
+            if (update.executeUpdate() != 1)
+            {
+                throw new LeaseLostException(LeaseLostException.Reason.FENCED);
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
      * Keeps the checkpoint after a batch as pending, before the batch is
      * appended. The item must have a checkpoint already.
      *

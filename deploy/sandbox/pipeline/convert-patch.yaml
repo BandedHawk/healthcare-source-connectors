@@ -6,6 +6,13 @@ metadata: { name: convert }
 spec:
   template:
     spec:
+      # A stage's two pods on different nodes: each node then has room for one pod of each stage beside the rest,
+      # however the pods arrive (docs/SANDBOX.md "Memory").
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: convert } }
+              topologyKey: kubernetes.io/hostname
       containers:
         - name: convert-stage
           resources:

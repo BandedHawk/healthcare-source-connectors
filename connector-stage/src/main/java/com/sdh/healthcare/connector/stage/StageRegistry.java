@@ -252,11 +252,12 @@ public final class StageRegistry
                 )""".formatted(reconcile);
         // Added 2026-11-07 (STAGES.md §9): the reconciler waits while a
         // backlog is still coming off the queue. Times are the database's,
-        // so the pods' clocks don't matter.
+        // so the pods' clocks don't matter. seen_at is null until a backlog
+        // is seen: the reconciler's wait at startup makes the row first.
         String backlogDdl = """
                 CREATE TABLE IF NOT EXISTS %s (
                   stage           text        PRIMARY KEY,
-                  seen_at         timestamptz NOT NULL,
+                  seen_at         timestamptz,
                   deferring_since timestamptz
                 )""".formatted(backlog);
         try (Connection connection = dataSource.getConnection();
@@ -272,6 +273,10 @@ public final class StageRegistry
             statement.execute(itemDdl);
             statement.execute(reconcileDdl);
             statement.execute(backlogDdl);
+            // Made NOT NULL by the first build of it, which then never
+            // recorded a wait at startup with no backlog yet seen.
+            statement.execute("ALTER TABLE " + backlog
+                    + " ALTER COLUMN seen_at DROP NOT NULL");
         }
         catch (SQLException failure)
         {
@@ -391,6 +396,38 @@ public final class StageRegistry
             update.setLong(1, ttl.toMillis());
             update.setString(2, stage);
             update.setString(3, owner);
+            return update.executeUpdate();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Ends every live claim this worker holds now, rather than when it
+     * would expire: at shutdown, once nothing is being processed, so that
+     * another worker can take its records over at once. The rows are kept:
+     * a record taken over counts one more attempt, as after an expiry.
+     *
+     * @return how many were released
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public int release()
+    {
+        String sql = """
+                UPDATE %s
+                   SET claim_expires = clock_timestamp()
+                 WHERE stage = ? AND owner = ? AND state = 'CLAIMED'
+                   AND claim_expires > clock_timestamp()"""
+                .formatted(records);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setString(1, stage);
+            update.setString(2, owner);
             return update.executeUpdate();
         }
         catch (SQLException failure)
@@ -675,8 +712,11 @@ public final class StageRegistry
     }
 
     /**
-     * The records of an item the stage has claimed or stored, by any
-     * worker: for a reconciler, to find those whose messages never came.
+     * The records of an item the stage has stored, or holds a live claim
+     * on, by any worker: for a reconciler, to find those whose messages
+     * never came. A claim left to expire with nothing stored isn't known:
+     * its message may have been lost with the batch that claimed it, and
+     * a worker handed it again takes the claim over (STAGES.md §10).
      *
      * @param itemId the item's id
      * @return their record IDs
@@ -685,7 +725,9 @@ public final class StageRegistry
     public Set<String> knownRecords(UUID itemId)
     {
         String sql = "SELECT record_id FROM " + records
-                + " WHERE stage = ? AND item_id = ?";
+                + " WHERE stage = ? AND item_id = ?"
+                + " AND (state <> 'CLAIMED'"
+                + " OR claim_expires > clock_timestamp())";
         Set<String> found = new HashSet<>();
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
@@ -882,18 +924,22 @@ public final class StageRegistry
     }
 
     /**
-     * Notes that the reconciler is waiting for the backlog, if it wasn't
-     * already, and says for how long it has been. Called only once
-     * {@link #sinceBacklog} has found a backlog, so the row is there.
+     * Notes that the reconciler is waiting, if it wasn't already, and says
+     * for how long it has been: for a backlog, or at startup, when there
+     * may be no row yet.
      *
      * @return how long it has waited, by the database's clock
      * @throws IllegalStateException if the database can't be reached
      */
     public Duration deferring()
     {
-        update("UPDATE " + backlog + " SET deferring_since ="
-                + " COALESCE(deferring_since, clock_timestamp())"
-                + " WHERE stage = ?");
+        update("""
+                INSERT INTO %1$s AS b (stage, deferring_since)
+                VALUES (?, clock_timestamp())
+                ON CONFLICT (stage) DO UPDATE
+                   SET deferring_since = COALESCE(b.deferring_since,
+                                                  EXCLUDED.deferring_since)"""
+                .formatted(backlog));
         return since("SELECT extract(epoch FROM clock_timestamp()"
                 + " - deferring_since) FROM " + backlog
                 + " WHERE stage = ? AND deferring_since IS NOT NULL")
@@ -938,7 +984,7 @@ public final class StageRegistry
      * stage.
      *
      * @param sql the query
-     * @return the span; empty if there is no row
+     * @return the span; empty if there is no row, or the span is null
      * @throws IllegalStateException if the database can't be reached
      */
     private Optional<Duration> since(String sql)
@@ -950,10 +996,14 @@ public final class StageRegistry
             select.setString(1, stage);
             try (ResultSet rows = select.executeQuery())
             {
-                return rows.next()
-                        ? Optional.of(Duration.ofMillis(
-                                Math.round(rows.getDouble(1) * 1000)))
-                        : Optional.empty();
+                if (!rows.next())
+                {
+                    return Optional.empty();
+                }
+                double seconds = rows.getDouble(1);
+                return rows.wasNull() ? Optional.empty()
+                        : Optional.of(Duration.ofMillis(
+                                Math.round(seconds * 1000)));
             }
         }
         catch (SQLException failure)

@@ -105,7 +105,8 @@ public final class IngestPipeline implements AutoCloseable
      * {@code RESUME_NO_PROGRESS}, rather than resumed again, so an item that
      * stops a worker every time can't keep being taken up (design §9.2).
      * One or two restarts are allowed for anything else, such as a
-     * redeployment or a lost lease.
+     * redeployment or a lost lease. An attempt that ends because a service
+     * was down isn't counted ({@link Outage}).
      */
     public static final int FAIL_AFTER_RESTARTS = 3;
 
@@ -336,7 +337,58 @@ public final class IngestPipeline implements AutoCloseable
                             .with(Attr.FORMAT, current.format())
                             .with(Attr.BYTES, current.itemSize()));
         }
-        return run(current, source, lease, refs);
+        Checkpoint attempt = current;
+        try
+        {
+            return run(attempt, source, lease, refs);
+        }
+        catch (Exception failure)
+        {
+            // An error is a clean end, not a crash: if a service was down,
+            // it says nothing about the item, so the restart is taken back.
+            if (attempt.restarts() > 0 && Outage.caused(failure))
+            {
+                notCounted(attempt, failure, lease);
+            }
+            throw failure;
+        }
+    }
+
+    /**
+     * Takes back the restart counted for an attempt that ended because a
+     * service was down (STAGES.md §12), unless the checkpoint has moved on
+     * since: progress has reset the count anyway. A batch being committed
+     * is left for resume to settle. If the checkpoint can't be written
+     * either, the restart stays counted.
+     *
+     * @param counted the checkpoint the attempt started from
+     * @param failure why the attempt ended; a failure to take the restart
+     *                back is added to it
+     * @param lease   the item's lease
+     */
+    private void notCounted(Checkpoint counted, Exception failure,
+            LeaseToken lease)
+    {
+        try
+        {
+            Checkpoint now = checkpoints.load(counted.itemId())
+                    .map(ItemCheckpoints.Stored::checkpoint).orElse(null);
+            if (now == null || now.state() != Checkpoint.State.SPLITTING
+                    || now.restarts() != counted.restarts()
+                    || now.nextSeq() != counted.nextSeq())
+            {
+                return;
+            }
+            Checkpoint back = now.notCounted();
+            checkpoints.replace(back, lease);
+            Telemetry.get().audit("item.restart_not_counted",
+                    Fields.of(Attr.ITEM_ID, back.itemId())
+                            .with(Attr.COUNT, back.restarts()));
+        }
+        catch (RuntimeException unwritten)
+        {
+            failure.addSuppressed(unwritten);
+        }
     }
 
     /**

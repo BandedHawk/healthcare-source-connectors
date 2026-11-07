@@ -233,7 +233,9 @@ The node needs:
   for one ready pod instead.
 
 Two replicas give an active node and a standby: both run with `standby: true`, the first to take the lease lands,
-and the other waits. The intake volume must be mountable by both pods (`ReadWriteMany`, or `ReadOnlyMany` for a
+and the other waits. Only the node holding the lease is ever in service: landing in parallel could land one file
+twice, by the different ways a file can be retrieved. So don't autoscale the landing node (with KEDA or a
+HorizontalPodAutoscaler): more pods would only be more standbys. The intake volume must be mountable by both pods (`ReadWriteMany`, or `ReadOnlyMany` for a
 read-only source, unless both run on one node).
 
 ```sh

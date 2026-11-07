@@ -19,6 +19,9 @@ spec:
   template:
     metadata: { labels: { app: postgres } }
     spec:
+      # May run on the control-plane node, which is kept for the services whose data is there (docs/SANDBOX.md
+      # "Memory").
+      tolerations: [{ key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }]
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
@@ -40,7 +43,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
           resources:
-            requests: { cpu: 100m, memory: 384Mi }
+            requests: { cpu: 100m, memory: 512Mi }
             limits: { memory: 512Mi }
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql }

@@ -112,6 +112,9 @@ class ConvertStageTest
     /** Reads records. */
     QueueReader reader;
 
+    /** The registry's schema for this test. */
+    String schema;
+
     /** The stage's registry. */
     StageRegistry registry;
 
@@ -177,8 +180,8 @@ class ConvertStageTest
         records = IngestTables.sharedRecords(catalog, NS);
         reader = QueueReader.builder().catalog(catalog)
                 .expectedCatalogName("prod").keyProvider(kms).build();
-        registry = new StageRegistry(postgres.getPostgresDatabase(),
-                "convert_test_" + SCHEMAS.incrementAndGet(),
+        schema = "convert_test_" + SCHEMAS.incrementAndGet();
+        registry = new StageRegistry(postgres.getPostgresDatabase(), schema,
                 ConvertProcessor.STAGE, "pod-a", Duration.ofSeconds(10));
         registry.createTablesIfMissing();
         Clock clock = Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC);
@@ -253,13 +256,26 @@ class ConvertStageTest
      */
     List<RecordSplit> split(String... rows)
     {
+        return splitFor(item, rows);
+    }
+
+    /**
+     * Writes CSV records of an item to {@code split_records}, as the split
+     * stage does.
+     *
+     * @param itemId the item
+     * @param rows   the rows, each after the same header
+     * @return a {@code record.split} for each
+     */
+    List<RecordSplit> splitFor(UUID itemId, String... rows)
+    {
         RecordBatchWriter writer = new RecordBatchWriter(splitRecords, kms,
                 KEK, new RecordIds(new byte[32]), SPLIT_AT);
         long offset = 0;
         for (int seq = 0; seq < rows.length; seq++)
         {
             byte[] text = ("a,b\n" + rows[seq] + "\n").getBytes(UTF_8);
-            writer.add(new RecordInput(item, seq, offset, "csv", text));
+            writer.add(new RecordInput(itemId, seq, offset, "csv", text));
             offset += text.length;
         }
         DataFile file = writer.finish();
@@ -270,7 +286,7 @@ class ConvertStageTest
         List<RecordSplit> messages = new ArrayList<>();
         for (WrittenRecord record : writer.written())
         {
-            messages.add(new RecordSplit(record.recordId(), item,
+            messages.add(new RecordSplit(record.recordId(), itemId,
                     record.seq(), record.sourceOffset(),
                     record.sourceLength(), "csv", "text/csv",
                     record.plaintextLength(), record.chunkCount(), ref, null,
@@ -384,6 +400,112 @@ class ConvertStageTest
                 Duration.ofDays(2),
                 Clock.fixed(SPLIT_AT.plusSeconds(60), ZoneOffset.UTC));
         assertThat(early.reconcile()).isZero();
+    }
+
+    /**
+     * A record another pod claimed and never stored, its message lost with
+     * that pod's batch, is left while the claim lives, then rebuilt once it
+     * has expired and converted as a second attempt; the item completes.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void reconcilesARecordLeftClaimed() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2", "3,4");
+        assertThat(worker.handleOpened(List.of(messages.get(0))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
+                null, null, null, SPLIT_AT, SPLIT_AT);
+        assertThat(worker.handle(List.of(received(total))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        StageRegistry stopped = new StageRegistry(
+                postgres.getPostgresDatabase(), schema, ConvertProcessor.STAGE,
+                "pod-z", Duration.ofSeconds(10));
+        String held = messages.get(1).recordId();
+        stopped.claim(held, item, Duration.ofMinutes(5));
+        ConvertReconciler reconciler = reconcilerAt(SPLIT_AT.plusSeconds(3600));
+        assertThat(reconciler.reconcile()).as("its claim lives").isZero();
+
+        stopped.release();
+        assertThat(reconciler.reconcile()).isEqualTo(1);
+        assertThat(registry.item(item)).hasValueSatisfying(
+                progress -> assertThat(progress.done()).isEqualTo(2));
+        assertThat(sentOf("record.stored")).isEqualTo(2);
+        assertThat(sentOf("item.converted")).isEqualTo(1);
+        assertThat(registry.claim(held, item, Duration.ofMinutes(1)))
+                .isInstanceOfSatisfying(StageRegistry.Stored.class,
+                        stored -> assertThat(stored.attempts()).isEqualTo(2));
+    }
+
+    /**
+     * An item whose records are all stored and whose total came, but which
+     * the batch that would have completed it lost, is completed by the
+     * reconciler, and audited; an item still short of its total isn't.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void completesAnItemWhoseCompletionWasLost() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2", "3,4");
+        assertThat(worker.handleOpened(List.of(messages.get(0))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
+                null, null, null, SPLIT_AT, SPLIT_AT);
+        // As a batch that took the total, then failed before completing.
+        registry.expect(item, 2, received(total).body());
+        stillShortOfItsTotal();
+        assertThat(worker.handleOpened(List.of(messages.get(1))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(sentOf("item.converted")).as("its own batch completes it")
+                .isEqualTo(1);
+
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            UUID lost = UUID.randomUUID();
+            List<RecordSplit> lostRecords = splitFor(lost, "5,6");
+            assertThat(worker.handleOpened(List.of(lostRecords.get(0))))
+                    .isEqualTo(BatchHandler.Outcome.DONE);
+            registry.expect(lost, 1, received(new ItemSplit(lost, "claims", 1,
+                    0, 10, "digest", null, null, null, SPLIT_AT, SPLIT_AT))
+                    .body());
+            assertThat(reconcilerAt(SPLIT_AT.plusSeconds(3600)).reconcile())
+                    .isZero();
+            assertThat(registry.completed(List.of(lost))).containsExactly(lost);
+            assertThat(events.getFinishedLogRecordItems().stream()
+                    .map(event -> event.getEventName())
+                    .filter(name -> name.contains("completion_recovered")))
+                    .containsExactly(
+                            "sdh.audit.convert.item_completion_recovered");
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
+        assertThat(sentOf("item.converted")).isEqualTo(2);
+    }
+
+    /**
+     * Runs the reconciler on an item one record short of its total: it is
+     * left, not completed.
+     *
+     * @throws Exception if the test fails to run
+     */
+    void stillShortOfItsTotal() throws Exception
+    {
+        // The second record's message is still to come, younger than the
+        // grace: nothing to rebuild or complete yet.
+        assertThat(reconcilerAt(SPLIT_AT.plusSeconds(60)).reconcile())
+                .isZero();
+        assertThat(sentOf("item.converted")).isZero();
     }
 
     /**
@@ -608,6 +730,26 @@ class ConvertStageTest
         {
             Telemetry.install(OpenTelemetry.noop());
         }
+    }
+
+    /**
+     * At startup on a stage where no backlog has ever been seen, so the
+     * registry has no row for it yet, the wait still ends after one quiet
+     * time. The sandbox found it didn't: the wait was never recorded.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void endsTheWaitAtStartupWithNoBacklogEverSeen() throws Exception
+    {
+        split("1,2", "3,4");
+        ConvertReconciler reconciler = reconcilerAt(
+                SPLIT_AT.plus(Duration.ofHours(1)),
+                new ConvertReconciler.Deferral(Duration.ofMillis(250),
+                        Duration.ofHours(6)));
+        assertThat(reconciler.reconcile()).isZero();
+        Thread.sleep(300);
+        assertThat(reconciler.reconcile()).isEqualTo(2);
     }
 
     /**

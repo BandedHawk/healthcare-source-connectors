@@ -121,6 +121,27 @@ class StageRegistryTest
     }
 
     /**
+     * Released claims are taken over at once, with one more attempt; a
+     * stored record and another worker's claim are left alone.
+     */
+    @Test
+    void releasesItsClaimsForAnotherWorker()
+    {
+        first.claim("r1", item, LONG);
+        first.claim("r2", item, LONG);
+        first.store(List.of(entry("r2", false)));
+        second.claim("r3", item, LONG);
+        assertThat(first.release()).isEqualTo(1);
+        assertThat(second.claim("r1", item, LONG))
+                .isEqualTo(new StageRegistry.Owned(2));
+        assertThat(second.claim("r2", item, LONG))
+                .isInstanceOf(StageRegistry.Stored.class);
+        assertThat(first.claim("r3", item, LONG))
+                .isInstanceOf(StageRegistry.Busy.class);
+        assertThat(first.release()).isZero();
+    }
+
+    /**
      * Stored records are counted on their item, keep their message until
      * it is sent, and say who stored them.
      */
@@ -301,5 +322,21 @@ class StageRegistryTest
 
         first.endDeferral();
         assertThat(second.deferring()).isLessThan(Duration.ofMillis(140));
+    }
+
+    /**
+     * A wait at startup is kept with no backlog ever seen, when there is no
+     * row yet; and a row made that way shows no backlog.
+     *
+     * @throws Exception if interrupted
+     */
+    @Test
+    void keepsAWaitWithNoBacklogEverSeen() throws Exception
+    {
+        assertThat(first.deferring()).isLessThan(Duration.ofSeconds(1));
+        assertThat(second.sinceBacklog()).as("none seen").isEmpty();
+        Thread.sleep(150);
+        assertThat(second.deferring())
+                .isGreaterThanOrEqualTo(Duration.ofMillis(140));
     }
 }

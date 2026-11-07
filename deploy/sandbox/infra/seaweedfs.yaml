@@ -22,6 +22,9 @@ spec:
   template:
     metadata: { labels: { app: seaweedfs } }
     spec:
+      # May run on the control-plane node, which is kept for the services whose data is there (docs/SANDBOX.md
+      # "Memory").
+      tolerations: [{ key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }]
       containers:
         - name: seaweedfs
           image: chrislusf/seaweedfs:4.48
@@ -32,7 +35,7 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
           resources:
-            requests: { cpu: 100m, memory: 384Mi }
+            requests: { cpu: 100m, memory: 768Mi }
             limits: { memory: 768Mi }
           volumeMounts:
             - { name: config, mountPath: /etc/seaweedfs, readOnly: true }

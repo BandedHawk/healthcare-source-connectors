@@ -39,7 +39,9 @@ import java.util.UUID;
  *                     It rises only when the connector stops part-way
  *                     through a batch, so a record that stops it every
  *                     time (by running it out of memory, say) is noticed
- *                     instead of crashing the connector forever
+ *                     instead of crashing the connector forever. An
+ *                     attempt that ends because a service was down is
+ *                     taken back ({@link #notCounted})
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -229,6 +231,24 @@ public record Checkpoint(
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
                 failure, restarts + 1);
+    }
+
+    /**
+     * Takes back the restart {@link #resumed} counted, for an attempt that
+     * ended because a service it needs was down (STAGES.md §12): that says
+     * nothing about the item.
+     *
+     * @return the new checkpoint; this one if no restart is counted
+     */
+    public Checkpoint notCounted()
+    {
+        if (restarts == 0)
+        {
+            return this;
+        }
+        return new Checkpoint(itemId, fingerprint, format, itemSize, state,
+                resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
+                failure, restarts - 1);
     }
 
     /**

@@ -42,26 +42,104 @@ If the disk isn't mounted, the scripts refuse to run rather than fill the root f
 
 ## Size
 
-The workstation has 32 threads and 30 GB of memory; 4 threads and about 4 GB are left for the host.
+The workstation has 32 threads and 30.6 GiB of memory, and runs Linux Mint's desktop, NetBeans and a browser.
 
 | VM | Nodes | CPUs | Memory | Disk |
 |---|---|---|---|---|
-| `sdh-demo` | 3 | 6 each | 6 GB each | 120 GB each |
-| `sdh-it` | 1 | 8 | 8 GB | 100 GB |
+| `sdh-demo` | 3 | 6 each | 7.5 GiB (control plane), 6.75 GiB (each other) | 120 GB each |
+| `sdh-it` | 1 | 8 | 8 GiB | 100 GB |
+| `sdh-k8s` | 1 | 4 | 8 GiB | 40 GB |
 
-Both fit at once (26 GB), so images can be built while the cluster runs. `sdh-k8s` (4 CPUs, 8 GB) is for its own
-test, with the others stopped. The cluster's settings apply when it is first made: `SDH_DEMO_NODES`,
-`SDH_DEMO_CPUS`, `SDH_DEMO_MEMORY`, `SDH_DEMO_DISK`.
+Only one of them runs at a time: the cluster alone holds 21 GiB, and with `sdh-it` it would leave the desktop
+too little (Memory, below). `images` therefore stops the cluster while `sdh-it` builds, and starts it again to
+load them. The CPU count and disk apply when the cluster is first made (`SDH_DEMO_NODES`, `SDH_DEMO_CPUS`,
+`SDH_DEMO_DISK`); the memory (`SDH_DEMO_CP_MEMORY`, `SDH_DEMO_MEMORY`, in MiB) is applied to the stopped VMs at
+every `up`, with everything on them kept.
+
+## Memory
+
+Sized on 2026-11-07, after the control-plane node ran out of memory under load (Checked, below), so that neither
+the workstation nor a node can be starved. Three rules, each enforced rather than hoped for:
+
+**1. The VMs never take more than the host can spare.** A KVM guest takes memory from the host as it uses it and
+doesn't give it back, so a VM ends up holding all it was given. Every script that starts a VM (`sandbox.sh up`,
+`it-minikube.sh`, `build-image.sh`, `k8s-minikube.sh`) first checks, in `minikube-home.sh`, that the VMs already
+running plus the new ones, each with 192 MiB of QEMU's own, stay within the host's memory less
+`SDH_HOST_RESERVE` (9 GiB: the desktop with NetBeans and a browser open used 8.6 GiB), and that the host has
+that much available now. If not, it refuses and names the VMs running.
+
+| | MiB |
+|---|---|
+| Host memory | 31,370 |
+| Kept for the desktop (`SDH_HOST_RESERVE`) | 9,216 |
+| What the VMs may hold | 22,154 |
+| The cluster: 7,680 + 2 × 6,912, plus 3 × 192 for QEMU | 22,080 |
+| Left over | 74 |
+
+`sdh-it` (8,192 + 192) doesn't fit beside it, nor does `sdh-k8s`.
+
+**2. Each node offers pods only what it really has.** minikube tells each node's kubelet that the whole VM is
+for pods, and turns off eviction; but a node's own use (the kernel, Docker, the kubelet, and minikube's root
+filesystem, which is in memory) is about 1.5 GiB, and the control-plane node also runs Kubernetes' own pods,
+which reserve nothing (the API server alone used 430 MiB). So every node was offered pods it couldn't hold, and
+the kernel's out-of-memory killer, not Kubernetes, decided what to stop. `up` now sets each kubelet's
+`systemReserved` to what was measured, and evicts pods when less than 256 MiB is free (minikube rewrites the
+kubelet's configuration at each start, so `up` sets it each time). A pod that doesn't fit then waits, unscheduled,
+rather than starving the node. Every pod's request equals its limit, so the scheduler's sums are what the pods
+can use.
+
+| Node | VM | Seen by Kubernetes | Kept from pods | Eviction | For pods |
+|---|---|---|---|---|---|
+| Control plane | 7,680 | 7,429 | 2,304 | 256 | 4,869 |
+| Each other | 6,912 | 6,673 | 1,664 | 256 | 4,753 |
+
+(The guest's kernel keeps about 250 MiB of each VM before Kubernetes sees it.)
+
+**3. The control-plane node is for the shared services whose data is on it,** and KEDA. Their volumes are
+node-local, so Postgres, SeaweedFS, Vault, Grafana LGTM and Kafka's first broker can only run there. `up` taints
+it (`node-role.kubernetes.io/control-plane:NoSchedule`; those five tolerate it, and KEDA is pinned there) and
+moves anything else off it, so that a restarting service always finds its memory free.
+
+| On the control-plane node | MiB |
+|---|---|
+| Kafka (first broker; 384 MiB heap) | 768 |
+| Grafana LGTM | 1,536 |
+| SeaweedFS | 768 |
+| Postgres | 512 |
+| Vault (was 256, which it exceeded) | 384 |
+| Kubernetes' pods that reserve some (etcd, CoreDNS, metrics-server) | 370 |
+| KEDA's three pods (held to 128 MiB each; they ask 100 and may grow to 1,000; they use under 50) | 3 × 128 |
+| Total, of 4,869 | 4,722 |
+
+| On the other two nodes | MiB |
+|---|---|
+| Kafka (two brokers) | 2 × 768 |
+| Landing node (one pod, no standby) | 1,024 |
+| Split stage, one to two pods (768 MiB heap; its README says 2 GiB, the samples are small) | 2 × 1,536 |
+| Convert stage, one to two pods (its README says 2 GiB) | 2 × 1,024 |
+| OpenTelemetry collector | 256 |
+| Producer | 64 |
+| Total at most, of 2 × 4,753 = 9,506 | 8,000 |
+
+A total isn't enough: a pod needs its memory on one node. In the second test run, with both convert pods already
+up, one on each node, neither node had the 1,536 MiB a second split pod needs, and it waited for minutes. So each
+stage's two pods must run on different nodes (a required anti-affinity in `splitter-patch.yaml` and
+`convert-patch.yaml`), and each node is sized for one pod of each beside the rest, however they arrive. The busier
+node holds a Kafka broker (768), a split pod (1,536), a convert pod (1,024), and at worst the landing pod, the
+collector and the producer too (1,344): 4,672 of its 4,753. A third pod of either stage doesn't fit, so KEDA's
+maximum is two. The pods do use their memory: under load the convert pods used about 940 MiB of their 1,024, the
+landing pod 896 of its 1,024, and the split pods 1,170 of their 1,536.
 
 ## Using it
 
 ```sh
 scripts/sandbox.sh up        # make or start the cluster and the shared services (about 10 minutes the first time)
-scripts/sandbox.sh images    # build the three customer images in sdh-it, push them to the cluster's registry
+scripts/sandbox.sh images    # build the three customer images in sdh-it (the cluster stopped), push them to its registry
 scripts/sandbox.sh deploy    # deploy each pipeline's landing node, split stage and convert stage
 scripts/sandbox.sh check     # push the sample C-CDA documents through, and check the result
 scripts/sandbox.sh push ccda-push some.xml   # push your own files (synthetic or de-identified only)
-scripts/sandbox.sh status    # nodes, pods, topic counts
+scripts/sandbox.sh scale-demo [count]   # push count copies of the samples (300), and watch KEDA scale out
+scripts/sandbox.sh status    # nodes, pods, topic counts, scaling
 scripts/sandbox.sh grafana   # http://localhost:3000, user admin, password in state/secrets/grafana
 scripts/sandbox.sh stop      # stop the VMs; `up` starts them again with everything kept
 scripts/sandbox.sh delete --yes   # delete the cluster and its volumes (state/ is kept)
@@ -75,8 +153,8 @@ afterwards unless `SDH_IT_STOP=0`.
 ```
  sdh-producers         sdh-ccda-push (one namespace per pipeline)                         sdh-fhir (reserved)
  ┌──────────┐ mTLS  ┌───────────────────┐ item.landed ┌──────────┐ split ┌─────────┐ records ┌──────────────┐
- │ producer ├──────►│ landing (active)  ├────────────►│ splitter ├──────►│ convert ├────────►│ FHIR stage,  │
- └──────────┘ push  │ landing (standby) │  Kafka      └────┬─────┘ Kafka └────┬────┘  Kafka  │ not yet built│
+ │ producer ├──────►│ landing (one pod) ├────────────►│ splitter ├──────►│ convert ├────────►│ FHIR stage,  │
+ └──────────┘ push  │                   │  Kafka      │ 1–2 pods │ Kafka │1–2 pods │  Kafka  │ not yet built│
                     └─────────┬─────────┘                  │ silver           │ silver       └──────┬───────┘
                               │ bronze                     │                  │                     │ gold
  sdh-infra   ┌────────────────▼────────────────────────────▼──────────────────▼─────────────────────▼───────┐
@@ -95,7 +173,11 @@ when their claim is deleted (`Retain`).
   per stage and pipeline: `split_<pipeline>`, `convert_<pipeline>`). Each stage logs in as its own role, but all
   act as `sdh_catalog`, because a JDBC catalog keeps every namespace in the same tables.
 - **Kafka:** three nodes (KRaft), one per cluster node; every topic has three replicas and needs two for a write.
-  Topics are made by the script, as a customer's broker team would; brokers don't create them.
+  Topics are made by the script, as a customer's broker team would; brokers don't create them. The stages' inputs
+  (`<pipeline>.landed`, `<pipeline>.split`) have six partitions, the most pods KEDA could give a stage; the rest
+  have one. A topic made with fewer is given more by `up` (partitions are only ever added; do it drained).
+- **KEDA** (namespace `keda`, version pinned in the script, its manifest checked against a pinned SHA-256 and kept
+  in `$SDH_SANDBOX/sdh-demo/downloads/`): scales the split and convert stages on their Kafka consumer lag (below).
 - **SeaweedFS:** S3 object storage, a bucket per medallion layer (below).
 - **Vault:** the Transit engine holds every KEK and signing key (`vault-transit`, design §7.4); none leaves it.
   Each stage has a token whose policy allows only its own keys.
@@ -104,17 +186,26 @@ when their claim is deleted (`Retain`).
 
 **A pipeline** (`sdh-<pipeline>`, `deploy/sandbox/pipeline/`): each stage is deployed from the Deployment in its
 README, as customers get it, with the image by digest from the cluster's registry, and with what a production
-cluster adds around it (kustomize patches): requests equal to limits, the push port and its Service, a TCP
-readiness probe, and the two landing replicas on different nodes, so that losing a node fails over. The split
-stage (Deployment `splitter`) and the convert stage (`convert`) run two replicas each, which share the work. The
-convert stage has 1 GB rather than its README's 2 GB, so that a pipeline fits on the nodes. The default
-pipeline is `ccda-push`: C-CDA documents pushed over HTTPS with mTLS.
+cluster adds around it (kustomize patches): requests equal to limits, the push port and its Service, and a TCP
+readiness probe. The landing node runs as one pod, with no standby (decided 2026-11-07, for memory): if it dies,
+Kubernetes starts another, on another node if its node is gone, and it lands once the old pod's lease has
+expired. The split stage (Deployment `splitter`) and the convert stage (`convert`) are scaled by KEDA
+(`deploy/sandbox/pipeline/scaling.yaml`), from one pod to two each (what the memory is sized for, above), on
+their consumer groups' lag: another pod for
+each 5 items waiting to be split, and for each 5 records waiting to be converted. Never fewer than one: the pod
+holding a stage's duties runs its reconciler, and a lost message adds no lag, so a stage scaled to nothing would
+never be woken to recover it. Back to one pod two minutes after the backlog is gone. The script leaves their
+replica count to KEDA, so a `deploy` doesn't reset it. The landing node is never scaled: it lands serially, and
+never more than one pod is in service, since landing in parallel could land a file twice. The split and convert
+stages have less memory than their READMEs say (above). The default pipeline is `ccda-push`: C-CDA documents
+pushed over HTTPS with mTLS.
 
 **Producers** (`sdh-producers`): a pod with its own client certificate from the sandbox CA, which pushes files.
 
 **Network policies:** each pipeline's namespace denies everything but DNS, the shared services' ports and, for the
 landing node, pushes from `sdh-producers`. The shared services accept only namespaces labelled
-`sdh.smiledigitalhealth.com/infra-client`, each on its own port. Grafana is reached by port-forward only.
+`sdh.smiledigitalhealth.com/infra-client`, each on its own port, and KEDA's operator, on Kafka's. Grafana is
+reached by port-forward only.
 
 ## Medallion layers
 
@@ -157,12 +248,20 @@ Deploying it is then one more Deployment in `sdh-fhir`.
 - **Buckets:** a stage's key may use its whole bucket, not only its own pipeline's prefix.
 - **One object store and one database**, each a single pod: losing their node stops the pipeline until it is back
   (nothing is lost; the volumes are on the node's disk).
-- **Landing updates:** both landing replicas are replaced together (`Recreate`). Only the active node is ready,
-  so a rolling update can't make a new pod ready while the old active node lives: tried, it waited until it timed
-  out. Producers are refused for the restart's length, and retry. The Deployment always shows one of two replicas
-  ready, so `kubectl rollout status` never completes for it; the script waits for one ready pod instead. A
-  readiness signal that a standby could pass, with pushes still sent only to the active node, would allow rolling
-  updates; it would need a change to the landing node.
+- **No landing standby:** one landing pod, so losing it, or its node, stops landing until Kubernetes has started
+  another and the old pod's lease has expired; producers are refused meanwhile, and retry. A production cluster
+  can run the README's two replicas, an active node and a standby, for a takeover in seconds.
+- **Landing updates:** the landing pod is replaced by stopping it first (`Recreate`): it is ready only once it
+  holds the lease, so a rolling update can't make a new pod ready while the old one lives: tried, it waited
+  until it timed out. Producers are refused for the restart's length, and retry.
+- **One workstation:** the cluster and the build VM don't run at once (Memory, above).
+- **The registry** (minikube's addon) keeps images only in its container, so a restart empties it; `up` pushes
+  them again from the first node's Docker, where they are kept on disk.
+- **Object storage can lose its last writes in a host crash.** SeaweedFS runs with its defaults: it doesn't
+  sync each write to disk, and keeps its file index in memory. Postgres does sync, so after a crash the Iceberg
+  catalog can name files SeaweedFS no longer has, and the stages fail at startup (`Location does not exist`).
+  S3 and the other object stores a customer would use don't lose an acknowledged write. Repaired by hand once
+  (Checked, below); stop the cluster (`stop`) rather than the host while it runs.
 
 ## Checked
 
@@ -183,3 +282,47 @@ Checked again since: see the end of this section.
 - **Restarting:** `stop`, then `up`: Vault came back sealed and was unsealed, the stages restarted by themselves
   (one landing node active, one standby), and five more documents went through.
 - **Rollouts:** see Landing updates, above.
+- **Scaling (2026-11-07, KEDA):** `scale-demo 300`, three runs. KEDA scaled the split stage to its two pods and
+  the convert stage to its three, within 15 to 50 seconds, and each pod did a share of the work; back to one pod
+  each a few minutes after. Found on the way, and fixed: three split pods and three convert pods don't fit on the
+  nodes at once (the split stage is now limited to two); copies that differ only before the root element share
+  their record IDs, so their records all went to three of the six partitions (the demo now varies the content);
+  the demo's counts from pods' logs missed pods scaled away (it now counts in the registries). A convert pod
+  scaled away doesn't release its claims, so 2 of 300 records were converted a minute late (STAGES.md §10).
+- **Running out of memory (2026-11-07, unplanned):** in the third run, the control-plane node, which holds every
+  shared service and one landing pod, ran out of memory: the kernel killed SeaweedFS, Vault exceeded its 256 MiB
+  and restarted sealed, and the active landing node exceeded its 1 GiB. Its pods' limits come to about 90% of
+  the node, before the Kubernetes control plane's own memory. With Vault sealed, landing couldn't start and the
+  split stage held its items, retrying every five minutes (longer than Kafka's poll interval, so its consumers
+  left the group until each retry). `up` unsealed Vault, and every item finished by itself: 300 converted, none
+  twice. But one valid document was failed, `RESUME_NO_PROGRESS`: the attempts that failed while Vault was down
+  were counted as restarts without progress, the guard meant for a document that crashes the splitter. Fixed
+  since: an attempt that ends because a service is down isn't counted (STAGES.md §12, DESIGN.md §9.2), and the
+  memory is sized (Memory, above). Measured before the fix: the control-plane node's pods had asked for 95% of
+  it, their limits came to 158%, the third node held only a Kafka broker, and at idle the control-plane node had
+  1.2 GB available. After a stop and an `up`, the registry was empty, so the standby landing pod couldn't start
+  on another node.
+- **Memory (2026-11-07, after sizing it; Memory, above):** `stop` and `up` resized the VMs with their data kept,
+  and `scale-demo 300` ran three times while each node's available memory and the kernel's out-of-memory kills
+  were sampled every 20 seconds. First run: the second convert pod waited, unschedulable, as designed rather than
+  starving a node; but it could never have fitted, since the two nodes' free memory was split 469 and 981 MiB.
+  KEDA's pods moved to the control-plane node. Second run: the same for a second split pod, behind two convert
+  pods. Each stage's pods were then spread over the nodes, and the nodes given 256 MiB more. Third run: both
+  stages at two pods, one of each per node, the work shared about evenly (149 and 151 records converted), all
+  300 done; no pod waited, none was evicted or killed for memory. Lowest available memory: 1.4 GiB on a worker,
+  2.8 GiB on the control-plane node, 4.9 GiB on the host. The landing pod restarted twice at startup while Vault
+  was still sealed, as it should.
+- **A host crash (2026-11-07), repaired by hand.** The workstation went down mid-demo. After it, the split and
+  convert stages failed at startup: the catalog in Postgres named metadata files SeaweedFS had lost, its last
+  seven seconds or so (`split_records` commits 02748 and 02749, `records` 00995; every other table intact,
+  landing's too). Matching Postgres against the last snapshots kept showed four items affected: two whose split
+  records were lost (split, by Postgres) and two whose converted records were lost (stored and sent, by
+  Postgres); their documents were all in landing. Repaired, with both stages paused (KEDA's
+  `paused-replicas: 0`) and every row changed first saved, with the SQL, to `$SDH_SANDBOX/sdh-demo/repair-2026-11-07`:
+  in one transaction, each guarded on the values found, the two tables' catalog rows were pointed back at their
+  last files kept, the two lost split items' `split_item` rows deleted, and the two lost records' convert rows
+  deleted with their items set back to not complete. Then the stages ran: the split stage's reconciler split the
+  two items again from landing (and recovered, as `split.recovered`, items the crash had landed but not
+  announced), their queued `record.split` messages found the new rows, and the convert stage's reconciler
+  rebuilt the two lost records (`convert.records_recovered`). After: every item split was converted (3,014),
+  no claim left, no lag on the split stage's group.

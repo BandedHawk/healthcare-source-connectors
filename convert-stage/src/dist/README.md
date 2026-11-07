@@ -168,6 +168,39 @@ spec:
 There is no HTTP health endpoint. The process is the health signal: it exits on conditions it can't safely continue
 from, and Kubernetes restarts it.
 
+### Autoscaling
+
+Any number of pods can run: they share the work through the broker and the lease database. To scale them on the
+backlog, use [KEDA](https://keda.sh) with a `ScaledObject` on the stage's input, which has a scaler for each
+supported broker (Kafka consumer lag, SQS, Pub/Sub, Service Bus, RabbitMQ, Event Hubs, Artemis queue depth). On
+Kafka:
+
+```
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: convert-stage }
+spec:
+  scaleTargetRef: { name: convert-stage }
+  minReplicaCount: 1                   # never 0: see below
+  maxReplicaCount: 6                   # no more than the input topic's partitions
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: <brokers>
+        consumerGroup: <the stage's groupId>
+        topic: <the split stage's output topic>
+        lagThreshold: "20"                # records waiting per pod
+```
+
+- **Keep at least one pod.** The pod holding the duties lease reconciles: it finds the work whose messages were
+  lost, which adds nothing to the backlog, so a stage scaled to zero would never be started to find it.
+- **Remove `replicas` from the Deployment,** or each apply resets what KEDA scaled to.
+- **On Kafka, give the input topic at least `maxReplicaCount` partitions:** a pod beyond that has nothing to read.
+  Partitions can be added later, with the topic drained.
+- Scaling down is safe, but not instant: a pod that stops leaves the records it hadn't stored under its claims,
+  which expire after `sdh.stage.claim.ttl` (60 s). They are delivered again, and another pod converts them,
+  about a minute late. Nothing is lost or converted twice.
+
 ### Operator commands
 
 The image has no shell, so run the JVM directly:

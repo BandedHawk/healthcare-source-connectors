@@ -50,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.camel.CamelContext;
 import org.apache.iceberg.CatalogUtil;
@@ -85,6 +86,9 @@ public final class ConvertRuntime implements AutoCloseable
 
     /** The share of the heap conversions may use, unless set. */
     static final double DEFAULT_MEMORY_SHARE = 0.4;
+
+    /** A resource that takes this long to close is logged. */
+    static final long SLOW_CLOSE_MILLIS = 100;
 
     /** Logs start and stop. */
     private static final Logger LOG =
@@ -390,8 +394,11 @@ public final class ConvertRuntime implements AutoCloseable
     @Override
     public void close()
     {
+        LOG.info("convert.stopping");
+        long start = System.nanoTime();
         closeAll(resources);
-        LOG.info("convert.stopped");
+        LOG.info("convert.stopped elapsed_ms={}", TimeUnit.NANOSECONDS
+                .toMillis(System.nanoTime() - start));
     }
 
     /**
@@ -405,6 +412,7 @@ public final class ConvertRuntime implements AutoCloseable
         Collections.reverse(reversed);
         for (AutoCloseable resource : reversed)
         {
+            long start = System.nanoTime();
             try
             {
                 resource.close();
@@ -412,6 +420,13 @@ public final class ConvertRuntime implements AutoCloseable
             catch (Exception ignored)
             {
                 // shutting down
+            }
+            long elapsed = TimeUnit.NANOSECONDS
+                    .toMillis(System.nanoTime() - start);
+            if (elapsed >= SLOW_CLOSE_MILLIS)
+            {
+                LOG.info("convert.slow_close resource={} elapsed_ms={}",
+                        resource.getClass().getSimpleName(), elapsed);
             }
         }
     }

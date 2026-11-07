@@ -25,7 +25,6 @@ import org.apache.camel.component.azure.servicebus.ServiceBusConstants;
 import org.apache.camel.component.google.pubsub.GooglePubsubConstants;
 import org.apache.camel.component.google.pubsub.consumer.GooglePubsubAcknowledge;
 import org.apache.camel.component.kafka.KafkaConstants;
-import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 import org.apache.camel.model.RouteDefinition;
 import org.apache.camel.spi.ShutdownPrepared;
 import org.apache.camel.support.service.ServiceSupport;
@@ -38,7 +37,9 @@ import org.apache.camel.support.service.ServiceSupport;
  *   <li><b>Kafka:</b> the consumer hands over each poll as one exchange
  *       ({@code batching}); it is handled, in batches of at most
  *       {@code max-messages} and {@code max-bytes}, then its offsets are
- *       committed by hand.</li>
+ *       committed by hand, every partition's; a poll not handled is
+ *       rewound, so that no later commit passes it
+ *       ({@link KafkaOffsets}).</li>
  *   <li><b>SQS, Service Bus, Event Hubs and RabbitMQ:</b> exchanges are
  *       held open until their batch is handled ({@link HeldBatches}). Then
  *       SQS deletes each message, Service Bus completes it (renewing its
@@ -191,7 +192,9 @@ public final class CamelReceiveRoute extends RouteBuilder
     }
 
     /**
-     * Handles a Kafka poll, then commits its offsets.
+     * Handles a Kafka poll, then commits each of its partitions. A poll not
+     * handled is rewound, so that no later commit passes it
+     * ({@link KafkaOffsets}).
      *
      * @param exchange the poll, its records as a list of exchanges
      * @throws Exception if the node is stopping, so nothing is committed
@@ -203,11 +206,37 @@ public final class CamelReceiveRoute extends RouteBuilder
         {
             return;
         }
+        List<Exchange> polled = new ArrayList<>(records.size());
+        for (Object record : records)
+        {
+            polled.add((Exchange) record);
+        }
+        try
+        {
+            handlePoll(polled);
+        }
+        catch (Exception | Error notHandled)
+        {
+            KafkaOffsets.rewind(polled);
+            throw notHandled;
+        }
+        KafkaOffsets.commit(polled);
+    }
+
+    /**
+     * Handles a Kafka poll's records, in batches of at most
+     * {@code max-messages} and {@code max-bytes}.
+     *
+     * @param polled the records, as exchanges
+     * @throws Exception if the node is stopping, or the thread interrupted
+     */
+    private void handlePoll(List<Exchange> polled) throws Exception
+    {
         List<BrokerMessage> batch = new ArrayList<>();
         long bytes = 0;
-        for (Object polled : records)
+        for (Exchange record : polled)
         {
-            BrokerMessage message = kafkaMessage((Exchange) polled,
+            BrokerMessage message = kafkaMessage(record,
                     settings.attributes());
             long size = message.body().length;
             if (!batch.isEmpty() && (batch.size() >= settings.maxMessages()
@@ -221,12 +250,6 @@ public final class CamelReceiveRoute extends RouteBuilder
             bytes += size;
         }
         handleUntilDone(batch);
-        KafkaManualCommit commit = exchange.getMessage().getHeader(
-                KafkaConstants.MANUAL_COMMIT, KafkaManualCommit.class);
-        if (commit != null)
-        {
-            commit.commit();
-        }
     }
 
     /**
