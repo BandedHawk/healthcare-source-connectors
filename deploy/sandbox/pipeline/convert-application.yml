@@ -8,8 +8,9 @@ sdh:
   connector-id: convert-${PIPELINE}
   stage:
     input:
+      # groupProtocol=consumer (KIP-848, Kafka 4): a rebalance doesn't wait for every pod's next poll.
       type: kafka
-      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}&groupId=convert-${PIPELINE}"
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}&groupId=convert-${PIPELINE}&groupProtocol=consumer"
     output:
       type: kafka
       uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}"

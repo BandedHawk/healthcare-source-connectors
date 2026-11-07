@@ -29,7 +29,8 @@ import org.slf4j.LoggerFactory;
  * record of every partition is committed here.
  * <p>
  * A poll that isn't handled, its batch given up as the route stops or
- * fatal, must not be passed by: Camel only logs the failure and polls on,
+ * fatal, or left to be tried again at the next poll, must not be passed
+ * by: Camel only logs the failure and polls on,
  * from past it, and the next poll's commit would then move each partition
  * past records never handled. So each partition is sought back to the
  * poll's first record, and they come again, to this consumer or, after a
@@ -86,18 +87,12 @@ final class KafkaOffsets
     static int rewind(List<Exchange> polled)
     {
         Map<TopicPartition, Long> first = new LinkedHashMap<>();
-        Consumer<?, ?> consumer = null;
         for (Exchange record : polled)
         {
             first.putIfAbsent(partition(record), record.getMessage()
                     .getHeader(KafkaConstants.OFFSET, Long.class));
-            if (consumer == null
-                    && manualCommit(record) instanceof DefaultKafkaManualCommit
-                            known)
-            {
-                consumer = known.getConsumer();
-            }
         }
+        Consumer<?, ?> consumer = consumer(polled);
         if (consumer == null)
         {
             LOG.warn("broker.kafka_not_rewound partitions={} reason=no_consumer",
@@ -120,6 +115,25 @@ final class KafkaOffsets
             }
         }
         return sought;
+    }
+
+    /**
+     * The consumer a poll came from, which may seek on its polling thread.
+     *
+     * @param polled the poll's records, as exchanges
+     * @return the consumer; null if no record's commit names it
+     */
+    static Consumer<?, ?> consumer(List<Exchange> polled)
+    {
+        for (Exchange record : polled)
+        {
+            if (manualCommit(record) instanceof DefaultKafkaManualCommit known
+                    && known.getConsumer() != null)
+            {
+                return known.getConsumer();
+            }
+        }
+        return null;
     }
 
     /**

@@ -208,6 +208,11 @@ spec:
   Partitions can be added later, with the topic drained.
 - Scaling down is safe: an item a pod was splitting when it stopped is delivered again, and another pod resumes
   it from its checkpoint once the item's lease is released or has expired. Nothing is lost or split twice.
+- **On Kafka, a pod holds its message while it splits the item,** so it doesn't poll meanwhile. The stage sets
+  `maxPollIntervalMs` to 30 minutes unless the input's URI sets it: set it above your longest item's split
+  time. An item taking longer is moved to another pod, which waits for it, and is announced again; nothing is
+  lost, but its partition waits. On Kafka 4.0 or later, add `groupProtocol=consumer` to the URI (KIP-848), so
+  that a rebalance, at each scaling, doesn't wait for a pod busy with an item.
 
 ### Operator commands
 

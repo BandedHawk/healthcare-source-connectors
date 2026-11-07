@@ -202,6 +202,30 @@ public record ReceiveSettings(BrokerKind kind, String uri, int maxMessages,
     }
 
     /**
+     * These settings with a Kafka consumer option set, unless the URI sets
+     * it already. For any other broker, these settings as they are.
+     *
+     * @param option the Camel Kafka option, such as
+     *               {@code maxPollIntervalMs}
+     * @param value  its value
+     * @return the settings
+     */
+    public ReceiveSettings withKafkaDefault(String option, String value)
+    {
+        if (kind != BrokerKind.KAFKA
+                || Pattern.compile("[?&]" + Pattern.quote(option) + "=")
+                        .matcher(uri).find())
+        {
+            return this;
+        }
+        return new ReceiveSettings(kind,
+                uri + (uri.indexOf('?') < 0 ? "?" : "&") + option + "="
+                        + value,
+                maxMessages, maxBytes, maxWait, checkInterval, attributes,
+                rabbitmq, artemis, eventhubs);
+    }
+
+    /**
      * The consumer URI with the options receiving needs.
      *
      * @param kind       the broker

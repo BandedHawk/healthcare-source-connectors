@@ -93,6 +93,26 @@ class ReceiveSettingsTest
         assertThat(settings.maxBytes()).isEqualTo(1024 * 1024);
     }
 
+    /**
+     * A Kafka default is added unless the URI sets the option, and isn't
+     * added for another broker.
+     */
+    @Test
+    void addsAKafkaDefaultUnlessSet()
+    {
+        assertThat(of(broker("kafka", "kafka:hl7?groupId=g"))
+                .withKafkaDefault("maxPollIntervalMs", "1800000").uri())
+                .contains("&maxPollIntervalMs=1800000");
+        assertThat(of(broker("kafka",
+                "kafka:hl7?groupId=g&maxPollIntervalMs=600000"))
+                .withKafkaDefault("maxPollIntervalMs", "1800000").uri())
+                .contains("maxPollIntervalMs=600000")
+                .doesNotContain("1800000");
+        assertThat(of(broker("sqs", "aws2-sqs:q"))
+                .withKafkaDefault("maxPollIntervalMs", "1800000").uri())
+                .doesNotContain("maxPollIntervalMs");
+    }
+
     /** Kafka without a consumer group is refused. */
     @Test
     void refusesKafkaWithoutAGroup()

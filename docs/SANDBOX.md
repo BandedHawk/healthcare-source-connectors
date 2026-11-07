@@ -293,8 +293,8 @@ Checked again since: see the end of this section.
   shared service and one landing pod, ran out of memory: the kernel killed SeaweedFS, Vault exceeded its 256 MiB
   and restarted sealed, and the active landing node exceeded its 1 GiB. Its pods' limits come to about 90% of
   the node, before the Kubernetes control plane's own memory. With Vault sealed, landing couldn't start and the
-  split stage held its items, retrying every five minutes (longer than Kafka's poll interval, so its consumers
-  left the group until each retry). `up` unsealed Vault, and every item finished by itself: 300 converted, none
+  split stage held its items, retrying every five minutes (its consumers left the group, since a batch retried in
+  place didn't poll: fixed since, revision (bz), below). `up` unsealed Vault, and every item finished by itself: 300 converted, none
   twice. But one valid document was failed, `RESUME_NO_PROGRESS`: the attempts that failed while Vault was down
   were counted as restarts without progress, the guard meant for a document that crashes the splitter. Fixed
   since: an attempt that ends because a service is down isn't counted (STAGES.md §12, DESIGN.md §9.2), and the
@@ -326,3 +326,10 @@ Checked again since: see the end of this section.
   announced), their queued `record.split` messages found the new rows, and the convert stage's reconciler
   rebuilt the two lost records (`convert.records_recovered`). After: every item split was converted (3,014),
   no claim left, no lag on the split stage's group.
+- **An outage held through, keeping the consumer groups (2026-11-07, revision (bz)).** `scale-demo 150`, Vault
+  sealed for 8 minutes once 51 items had landed, then unsealed. The split stage held 50 items and the convert
+  stage one item's records through it, each retrying at most a minute apart and polling between tries: no
+  consumer left its group, no commit failed, and no restart was counted (`item.restart_not_counted` 7). After
+  it, all 110 items landed were split and converted, none twice. The landing node can't run while Vault is
+  sealed: it restarted 7 times, the 40 pushes meanwhile failed at the producer, and it took pushes again about
+  three minutes after the unseal, Kubernetes' restart delay. The stages' inputs use `groupProtocol=consumer`.

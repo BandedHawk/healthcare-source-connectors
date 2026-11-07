@@ -465,6 +465,29 @@ The sandbox gets the KEDA operator, the stages as scaled deployments, and topics
   and the run passed, but the convert lag peaked at 7, so a second convert pod ran only about a seventh of the
   time, two short-lived ones storing 26 records to the first pod's 274 (3 on a second claim, their pod stopped).
   One convert pod keeps up with two split pods at this load.
+- **A Kafka consumer left its group while it held a batch (found and fixed 2026-11-07, revision (bz)).** Camel
+  handles a poll on the thread that polls, so while a batch was handled the consumer didn't poll, and past
+  `max.poll.interval.ms` (Kafka's default 5 minutes) it left its group: its partitions went to another pod, the
+  rebalance waited for it, and its commit failed, so its records were handled again. Two ways: a batch retried in
+  place through an outage (the memory incident, Vault sealed: the split stage's consumers left their group), and
+  a split item taking longer than the interval (one item per message; at §13.1's rates a 10 GiB CSV takes about
+  24 minutes on 16 cores). Fixed: on Kafka a batch to be tried again is no longer retried in place, since Kafka
+  keeps no delivery count that polling again would raise; after its pause (at most 1 minute,
+  `CamelReceiveRoute.KAFKA_LONGEST_PAUSE`) the poll's handled records are committed, the rest sought back
+  (`KafkaOffsets`), and the next poll brings them again. The stages' longest pause is 1 minute, not 5, on every
+  broker. The split stage sets `maxPollIntervalMs` to 30 minutes unless its URI does; an item taking longer
+  still is moved to another pod, which waits for the item's lease, and is announced again: nothing lost or split
+  twice, but its partition waits. If that is seen, the fix is a Kafka consumer of our own that pauses its
+  partitions and keeps polling while a batch is handled. The sandbox's stages use Kafka 4's group protocol
+  (`groupProtocol=consumer`, KIP-848), under which a rebalance (KEDA scaling) doesn't wait for a busy pod's next
+  poll; it isn't the default, since a broker before 4.0 refuses it. Checked by `KafkaRewindIT`, under both
+  protocols: a batch retried for three poll intervals is handled once and committed, where before the consumer
+  left its group (4 warnings) and, under the classic protocol, handled the records twice. Checked on the
+  sandbox, 2026-11-07, `scale-demo 150` with Vault sealed for 8 minutes once 51 items had landed: the split
+  stage held 50 items and the convert stage one item's records through it (13 tries, `stage.batch_failed`), no
+  consumer left its group (no poll timeouts, rejoins or failed commits in the logs), the outage wasn't counted
+  as restarts (`item.restart_not_counted` 7, no `RESUME_NO_PROGRESS`), and after it every item landed (110) was
+  split and converted, none twice. Long items weren't tried there (its landing node takes 100 MiB at most).
 
 ## 11. Order of work
 

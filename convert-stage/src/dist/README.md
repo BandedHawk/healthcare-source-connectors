@@ -197,6 +197,8 @@ spec:
 - **Remove `replicas` from the Deployment,** or each apply resets what KEDA scaled to.
 - **On Kafka, give the input topic at least `maxReplicaCount` partitions:** a pod beyond that has nothing to read.
   Partitions can be added later, with the topic drained.
+- **On Kafka 4.0 or later, add `groupProtocol=consumer` to the input's URI** (KIP-848), so that a rebalance, at
+  each scaling, doesn't wait for every pod's next poll.
 - Scaling down is safe, but not instant: a pod that stops leaves the records it hadn't stored under its claims,
   which expire after `sdh.stage.claim.ttl` (60 s). They are delivered again, and another pod converts them,
   about a minute late. Nothing is lost or converted twice.

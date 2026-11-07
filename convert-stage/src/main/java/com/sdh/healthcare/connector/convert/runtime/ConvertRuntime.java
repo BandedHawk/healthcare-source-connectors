@@ -75,8 +75,13 @@ import org.slf4j.LoggerFactory;
 public final class ConvertRuntime implements AutoCloseable
 {
 
-    /** The longest pause before a held batch is tried again. */
-    static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
+    /**
+     * The longest pause before a held batch is tried again. Kafka's consumer
+     * doesn't poll while a batch is held, so the pause is kept well under
+     * {@code max.poll.interval.ms} (5 minutes by default): a longer one took
+     * the consumer out of its group at every retry (STAGES.md §10).
+     */
+    static final Duration MAX_BACKOFF = Duration.ofMinutes(1);
 
     /** The shortest age orphan cleanup may delete files at. */
     static final Duration MIN_ORPHAN_AGE = Duration.ofHours(1);

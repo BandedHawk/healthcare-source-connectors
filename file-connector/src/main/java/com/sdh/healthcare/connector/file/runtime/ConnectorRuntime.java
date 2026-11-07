@@ -75,8 +75,22 @@ import org.slf4j.LoggerFactory;
 public final class ConnectorRuntime implements AutoCloseable
 {
 
-    /** The longest pause before a held batch is tried again. */
-    static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
+    /**
+     * The longest pause before a held batch is tried again. Kafka's consumer
+     * doesn't poll while a batch is held, so the pause is kept well under
+     * {@code max.poll.interval.ms} (5 minutes by default): a longer one took
+     * the consumer out of its group at every retry (STAGES.md §10).
+     */
+    static final Duration MAX_BACKOFF = Duration.ofMinutes(1);
+
+    /**
+     * The longest a Kafka consumer may go without polling, unless its URI
+     * sets {@code maxPollIntervalMs}: an item is split while its message is
+     * held, and splitting a large one takes longer than Kafka's 5 minutes.
+     * An item taking longer still is moved to another pod, which waits for
+     * its lease, and the item is announced again (STAGES.md §10).
+     */
+    static final Duration MAX_POLL_INTERVAL = Duration.ofMinutes(30);
 
     /** The shortest age orphan cleanup may delete files at. */
     static final Duration MIN_ORPHAN_AGE = Duration.ofHours(1);
@@ -213,7 +227,9 @@ public final class ConnectorRuntime implements AutoCloseable
                         || landing.storage().catalog().isEmpty()
                         ? null : landing.storage().catalog();
         StageProperties stage = properties.stage();
-        ReceiveSettings input = stage.receive(Set.of());
+        ReceiveSettings input = stage.receive(Set.of()).withKafkaDefault(
+                "maxPollIntervalMs",
+                Long.toString(MAX_POLL_INTERVAL.toMillis()));
         CommonSettings.Queue output = requireQueue(stage.output());
         QueueType queueType = QueueType.of(output.type());
         String queueUri = queueType.effectiveUri(output.uri());

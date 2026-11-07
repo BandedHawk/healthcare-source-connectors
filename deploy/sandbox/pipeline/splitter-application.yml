@@ -24,10 +24,11 @@ sdh:
         client: { region: us-east-1 }
   stage:
     # The stage adds the options that hold a message until its item is split. The group is the one the splitter
-    # had before the stages, so a sandbox made then keeps its place.
+    # had before the stages, so a sandbox made then keeps its place. groupProtocol=consumer (KIP-848, Kafka 4) lets
+    # the group rebalance without waiting for a pod busy splitting an item.
     input:
       type: kafka
-      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&groupId=splitter-${PIPELINE}"
+      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&groupId=splitter-${PIPELINE}&groupProtocol=consumer"
     output:
       type: kafka
       uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}"

@@ -39,7 +39,9 @@ import org.apache.camel.support.service.ServiceSupport;
  *       {@code max-messages} and {@code max-bytes}, then its offsets are
  *       committed by hand, every partition's; a poll not handled is
  *       rewound, so that no later commit passes it
- *       ({@link KafkaOffsets}).</li>
+ *       ({@link KafkaOffsets}). A batch to be tried again is left for the
+ *       next poll, after its pause, so the consumer keeps polling and
+ *       stays in its group.</li>
  *   <li><b>SQS, Service Bus, Event Hubs and RabbitMQ:</b> exchanges are
  *       held open until their batch is handled ({@link HeldBatches}). Then
  *       SQS deletes each message, Service Bus completes it (renewing its
@@ -52,8 +54,8 @@ import org.apache.camel.support.service.ServiceSupport;
  * </ul>
  * Each message's attributes or headers named in
  * {@link ReceiveSettings#attributes()} are read with it, as text. A batch
- * that can't be handled yet is tried again in place, with a growing
- * pause, rather than handed back: that would raise its messages' delivery
+ * that can't be handled yet is tried again in place (on Kafka, at the
+ * next poll), with a growing pause, rather than handed back: that would raise its messages' delivery
  * counts, and dead-letter them during a long outage on a broker with a
  * delivery limit. Messages still held when the route stops are handed back.
  * The route starts after startup recovery. Messages are never logged.
@@ -77,6 +79,14 @@ public final class CamelReceiveRoute extends RouteBuilder
     /** The exchange property holding the RabbitMQ channel. */
     static final String RABBITMQ_CHANNEL = "CamelSpringRabbitmqChannel";
 
+    /**
+     * The longest pause before a Kafka batch is tried again, whatever
+     * {@code maxBackoff} says: the consumer doesn't poll while it pauses,
+     * and must poll within {@code max.poll.interval.ms} (5 minutes by
+     * default) to stay in its group.
+     */
+    static final Duration KAFKA_LONGEST_PAUSE = Duration.ofMinutes(1);
+
     /** The route's ID, by which it is started and stopped. */
     private final String routeId;
 
@@ -94,6 +104,13 @@ public final class CamelReceiveRoute extends RouteBuilder
 
     /** Whether the Kafka route is stopping, so a retry should give up. */
     private volatile boolean stopping;
+
+    /**
+     * Each Kafka consumer thread's failures in a row, for its pauses: a
+     * batch left for the next poll is a new call, so they are kept here.
+     */
+    private final ThreadLocal<Integer> kafkaFailures =
+            ThreadLocal.withInitial(() -> 0);
 
     /**
      * Creates the route. It doesn't start with the Camel context: the caller
@@ -194,7 +211,12 @@ public final class CamelReceiveRoute extends RouteBuilder
     /**
      * Handles a Kafka poll, then commits each of its partitions. A poll not
      * handled is rewound, so that no later commit passes it
-     * ({@link KafkaOffsets}).
+     * ({@link KafkaOffsets}). A batch to be tried again isn't retried in
+     * place, as on the other brokers: the consumer must poll within
+     * {@code max.poll.interval.ms} to stay in its group, and Kafka keeps no
+     * delivery count that polling again would raise. So after its pause the
+     * records handled are committed, the rest are sought back, and the
+     * route returns, for the next poll to bring them again.
      *
      * @param exchange the poll, its records as a list of exchanges
      * @throws Exception if the node is stopping, so nothing is committed
@@ -211,45 +233,99 @@ public final class CamelReceiveRoute extends RouteBuilder
         {
             polled.add((Exchange) record);
         }
+        boolean polling = KafkaOffsets.consumer(polled) != null;
+        int handled;
         try
         {
-            handlePoll(polled);
+            handled = handlePoll(polled, polling);
         }
         catch (Exception | Error notHandled)
         {
             KafkaOffsets.rewind(polled);
             throw notHandled;
         }
-        KafkaOffsets.commit(polled);
+        KafkaOffsets.commit(polled.subList(0, handled));
+        if (handled < polled.size())
+        {
+            KafkaOffsets.rewind(polled.subList(handled, polled.size()));
+        }
     }
 
     /**
      * Handles a Kafka poll's records, in batches of at most
      * {@code max-messages} and {@code max-bytes}.
      *
-     * @param polled the records, as exchanges
+     * @param polled  the records, as exchanges
+     * @param polling whether a batch to be tried again can be left for the
+     *                next poll; if not, it is tried again in place
+     * @return how many of the records, from the first, were handled; the
+     *         rest are to come again
      * @throws Exception if the node is stopping, or the thread interrupted
      */
-    private void handlePoll(List<Exchange> polled) throws Exception
+    private int handlePoll(List<Exchange> polled, boolean polling)
+            throws Exception
     {
         List<BrokerMessage> batch = new ArrayList<>();
         long bytes = 0;
-        for (Exchange record : polled)
+        int first = 0;
+        for (int i = 0; i < polled.size(); i++)
         {
-            BrokerMessage message = kafkaMessage(record,
+            BrokerMessage message = kafkaMessage(polled.get(i),
                     settings.attributes());
             long size = message.body().length;
             if (!batch.isEmpty() && (batch.size() >= settings.maxMessages()
                     || bytes + size > settings.maxBytes()))
             {
-                handleUntilDone(batch);
+                if (!handleKafka(batch, polling))
+                {
+                    return first;
+                }
+                first = i;
                 batch = new ArrayList<>();
                 bytes = 0;
             }
             batch.add(message);
             bytes += size;
         }
-        handleUntilDone(batch);
+        return handleKafka(batch, polling) ? polled.size() : first;
+    }
+
+    /**
+     * Handles one batch of a Kafka poll. If it is to be tried again, it
+     * pauses first, as the failures in a row since the last batch handled
+     * call for.
+     *
+     * @param batch   the messages
+     * @param polling whether to leave a batch to be tried again for the next
+     *                poll, rather than try it again in place
+     * @return true if it was handled; false if it is left for the next poll
+     * @throws Exception if the node is stopping, or the thread interrupted
+     */
+    private boolean handleKafka(List<BrokerMessage> batch, boolean polling)
+            throws Exception
+    {
+        if (!polling)
+        {
+            handleUntilDone(batch);
+            return true;
+        }
+        switch (handler.handle(batch))
+        {
+            case DONE ->
+            {
+                kafkaFailures.remove();
+                return true;
+            }
+            case FATAL -> throw new HeldBatches.NotHandledException();
+            default ->
+            {
+                int failures = kafkaFailures.get() + 1;
+                kafkaFailures.set(failures);
+                pause(Math.min(maxBackoff.toMillis(),
+                        KAFKA_LONGEST_PAUSE.toMillis()), failures);
+                return false;
+            }
+        }
     }
 
     /**
@@ -358,20 +434,33 @@ public final class CamelReceiveRoute extends RouteBuilder
                 case RETRY ->
                 {
                     failures++;
-                    long until = System.nanoTime() + 1_000_000L * Math.min(
-                            maxBackoff.toMillis(), initialBackoff.toMillis()
-                                    << Math.min(failures - 1, 20));
-                    while (!stopping && System.nanoTime() < until)
-                    {
-                        Thread.sleep(Math.min(50, Math.max(1,
-                                (until - System.nanoTime()) / 1_000_000)));
-                    }
-                    if (stopping)
-                    {
-                        throw new HeldBatches.NotHandledException();
-                    }
+                    pause(maxBackoff.toMillis(), failures);
                 }
             }
+        }
+    }
+
+    /**
+     * Pauses before a batch is tried again, doubling from the first pause
+     * with each failure in a row, up to the longest.
+     *
+     * @param longestMillis the longest pause
+     * @param failures      the failures in a row, from 1
+     * @throws Exception if the route is stopping, so the batch is given up,
+     *                   or the thread is interrupted
+     */
+    private void pause(long longestMillis, int failures) throws Exception
+    {
+        long until = System.nanoTime() + 1_000_000L * Math.min(longestMillis,
+                initialBackoff.toMillis() << Math.min(failures - 1, 20));
+        while (!stopping && System.nanoTime() < until)
+        {
+            Thread.sleep(Math.min(50, Math.max(1,
+                    (until - System.nanoTime()) / 1_000_000)));
+        }
+        if (stopping)
+        {
+            throw new HeldBatches.NotHandledException();
         }
     }
 
