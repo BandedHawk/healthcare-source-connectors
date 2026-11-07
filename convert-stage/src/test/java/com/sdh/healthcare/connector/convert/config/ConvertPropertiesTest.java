@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.convert.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.bind.Binder;
@@ -43,5 +44,30 @@ class ConvertPropertiesTest
 
         assertThat(convert.options()).isEmpty();
         assertThat(convert.maxBytes().toBytes()).isEqualTo(1024 * 1024);
+    }
+
+    /**
+     * The reconciler waits for a backlog by default: for 15 minutes of
+     * quiet, and 6 hours at most; both can be set.
+     */
+    @Test
+    void theReconcilerWaitsForABacklogByDefault()
+    {
+        ConvertProperties.Reconcile defaults = new Binder(
+                new MapConfigurationPropertySource(
+                        Map.of("sdh.reconcile.enabled", "true")))
+                .bind("sdh.reconcile", ConvertProperties.Reconcile.class)
+                .get();
+        assertThat(defaults.backlogQuiet()).isEqualTo(Duration.ofMinutes(15));
+        assertThat(defaults.maxDeferral()).isEqualTo(Duration.ofHours(6));
+
+        ConvertProperties.Reconcile set = new Binder(
+                new MapConfigurationPropertySource(Map.of(
+                        "sdh.reconcile.backlog-quiet", "0s",
+                        "sdh.reconcile.max-deferral", "1h")))
+                .bind("sdh.reconcile", ConvertProperties.Reconcile.class)
+                .get();
+        assertThat(set.backlogQuiet()).isZero();
+        assertThat(set.maxDeferral()).isEqualTo(Duration.ofHours(1));
     }
 }

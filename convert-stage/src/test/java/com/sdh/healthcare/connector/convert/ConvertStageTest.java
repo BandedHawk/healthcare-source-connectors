@@ -493,6 +493,179 @@ class ConvertStageTest
     }
 
     /**
+     * A record off the queue is noted as backlog only if it was committed
+     * more than the grace ago; one the reconciler rebuilt isn't; and a
+     * snapshot no longer in the table was expired, so is old.
+     */
+    @Test
+    void notesABacklogOnlyForOldRecordsOffTheQueue()
+    {
+        List<RecordSplit> messages = split("1,2", "3,4");
+        // The snapshot is stamped with the real time, not SPLIT_AT.
+        Instant now = Instant.now();
+        processorAt(now).classify(messages.get(0));
+        assertThat(registry.sinceBacklog()).as("committed just now")
+                .isEmpty();
+
+        ConvertProcessor later = processorAt(now.plus(Duration.ofHours(1)));
+        later.rebuilding(List.of(messages.get(0)));
+        later.classify(messages.get(0));
+        assertThat(registry.sinceBacklog()).as("rebuilt").isEmpty();
+        later.rebuilt(List.of(messages.get(0)));
+        later.classify(messages.get(0));
+        assertThat(registry.sinceBacklog()).as("an hour old").isPresent();
+
+        BacklogWatch watch = new BacklogWatch(
+                IngestTables.splitRecords(catalog, NS), registry,
+                Duration.ofMinutes(10), Clock.systemUTC());
+        assertThat(watch.committedAt(-1L)).hasValue(Instant.EPOCH);
+        assertThat(watch.committedAt(messages.get(0).storage().snapshotId()))
+                .hasValueSatisfying(at -> assertThat(at)
+                        .isBetween(now.minusSeconds(60), now));
+    }
+
+    /**
+     * While a backlog is coming off the queue, a run rebuilds nothing and
+     * leaves the watermark; after waiting the most it may, it goes ahead,
+     * then waits again.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void waitsForABacklogToDrainThenGoesAheadAnyway() throws Exception
+    {
+        split("1,2", "3,4");
+        registry.noteBacklog();
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            ConvertReconciler reconciler = reconcilerAt(
+                    SPLIT_AT.plus(Duration.ofHours(1)),
+                    new ConvertReconciler.Deferral(Duration.ofMinutes(15),
+                            Duration.ofMillis(300)));
+            assertThat(reconciler.reconcile()).isZero();
+            assertThat(registry.knownRecords(item)).isEmpty();
+            assertThat(registry.checkedTo()).as("the watermark stays")
+                    .isEmpty();
+
+            Thread.sleep(400);
+            assertThat(reconciler.reconcile()).as("waited the most")
+                    .isEqualTo(2);
+            assertThat(registry.checkedTo()).isPresent();
+            assertThat(reconciler.reconcile()).as("waits again").isZero();
+            assertThat(deferrals(events)).containsExactly("BACKLOG",
+                    "capped", "BACKLOG");
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
+        assertThat(sentOf("record.stored")).isEqualTo(2);
+    }
+
+    /**
+     * At startup, with no backlog seen yet, a run waits one quiet time for
+     * the pods to start receiving, then goes ahead; a wait left by an
+     * earlier duties holder doesn't count.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void waitsAtStartupForTheQueueToStartDelivering() throws Exception
+    {
+        split("1,2", "3,4");
+        // An earlier holder's backlog, long quiet, and its wait, left.
+        registry.noteBacklog();
+        registry.deferring();
+        Thread.sleep(300);
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            ConvertReconciler reconciler = reconcilerAt(
+                    SPLIT_AT.plus(Duration.ofHours(1)),
+                    new ConvertReconciler.Deferral(Duration.ofMillis(250),
+                            Duration.ofHours(6)));
+            assertThat(reconciler.reconcile()).isZero();
+            assertThat(registry.knownRecords(item)).isEmpty();
+            Thread.sleep(300);
+            assertThat(reconciler.reconcile()).isEqualTo(2);
+            assertThat(reconciler.reconcile()).as("no wait now").isZero();
+            assertThat(deferrals(events)).containsExactly("STARTING");
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
+    }
+
+    /**
+     * The reconciler's waits audited, by reason, and {@code capped} for
+     * each time it went ahead after waiting the most.
+     *
+     * @param events the audit events
+     * @return them in order
+     */
+    static List<String> deferrals(InMemoryLogRecordExporter events)
+    {
+        return events.getFinishedLogRecordItems().stream()
+                .filter(event -> event.getEventName()
+                        .startsWith("sdh.audit.convert.reconcile_defer"))
+                .map(event -> event.getEventName().endsWith("capped")
+                        ? "capped"
+                        : event.getAttributes()
+                                .get(AttributeKey.stringKey("sdh.reason")))
+                .toList();
+    }
+
+    /**
+     * A processor like the test's, with a backlog watch at a time.
+     *
+     * @param now the time the watch sees
+     * @return the processor
+     */
+    ConvertProcessor processorAt(Instant now)
+    {
+        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
+        return new ConvertProcessor(reader, ConverterRegistry.load(),
+                new ConvertProcessor.Settings(Map.of("csv.header", "true"),
+                        1 << 20, 64L << 20, "prod", NS, "test-build"),
+                new ConvertProcessor.Storage(records, kms, KEK,
+                        new RecordIds(new byte[32])),
+                null, clock, new BacklogWatch(
+                        IngestTables.splitRecords(catalog, NS), registry,
+                        Duration.ofMinutes(10), clock));
+    }
+
+    /**
+     * The stage's reconciler at a time, with a 10-minute grace, a 2-day
+     * lookback and a deferral.
+     *
+     * @param now      the time it runs at
+     * @param deferral when it waits for a backlog
+     * @return the reconciler
+     */
+    ConvertReconciler reconcilerAt(Instant now,
+            ConvertReconciler.Deferral deferral)
+    {
+        return new ConvertReconciler(splitRecords, registry, worker,
+                processor, "prod", NS, Duration.ofMinutes(10),
+                Duration.ofDays(2), Clock.fixed(now, ZoneOffset.UTC),
+                deferral);
+    }
+
+    /**
      * The stage's reconciler at a time, with a 10-minute grace and a
      * 2-day lookback.
      *

@@ -48,6 +48,8 @@ sdh:
     grace: 10m
     lookback: 2d
     interval: 15m
+    backlog-quiet: 15m            # waits while records older than the grace still come off the queue; 0s never waits
+    max-deferral: 6h              # the longest it waits before it rebuilds anyway
   lease:                          # the duties lease; the registry is in the same database
     jdbc: { url: "jdbc:postgresql://postgres:5432/sdh?sslmode=verify-full", username: sdh, table: sdh_lease }
     ttl: 60s

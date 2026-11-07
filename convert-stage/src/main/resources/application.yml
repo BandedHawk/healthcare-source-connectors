@@ -55,3 +55,7 @@ sdh:
     grace: 10m
     lookback: 2d
     interval: 15m
+    # While records older than the grace still come off the queue, it
+    # waits rather than rebuild them, up to max-deferral.
+    backlog-quiet: 15m
+    max-deferral: 6h

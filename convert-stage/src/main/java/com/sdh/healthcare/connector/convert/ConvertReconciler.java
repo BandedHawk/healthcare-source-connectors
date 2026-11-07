@@ -58,6 +58,12 @@ import org.slf4j.LoggerFactory;
  * day, so a run cut short resumes where it stopped. Catching up is audited,
  * {@code convert.reconcile_catching_up} and {@code
  * convert.reconcile_caught_up}, with the days to check.
+ * <p>
+ * A record that looks lost may only be queued behind a backlog: after an
+ * outage, or whenever the queue falls further behind than the grace. So
+ * while records older than the grace are still coming off the queue
+ * ({@link BacklogWatch}), a run waits rather than rebuild them, up to a
+ * limit ({@link Deferral}).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -102,6 +108,18 @@ public final class ConvertReconciler
     /** The time. */
     private final Clock clock;
 
+    /** When to wait for a backlog to drain, and for how long at most. */
+    private final Deferral deferral;
+
+    /** Whether a run has cleared a wait left by an earlier duties holder. */
+    private boolean started;
+
+    /**
+     * Whether a run has gone ahead, or seen a backlog: past the wait at
+     * startup.
+     */
+    private boolean warmedUp;
+
     /**
      * The items audited as missing their total, so each is audited once.
      * Only items still looked at are kept, so it can't grow without end.
@@ -109,7 +127,39 @@ public final class ConvertReconciler
     private final Set<UUID> reportedMissing = new HashSet<>();
 
     /**
-     * Creates a reconciler.
+     * When the reconciler waits for a backlog to drain (STAGES.md §9).
+     * While a record older than the grace has come off the queue, on any
+     * pod, within {@code quiet}, the records that look lost are most likely
+     * still queued, so a run rebuilds nothing, and the watermark stays
+     * where it is. After waiting {@code most}, a run goes ahead anyway, so
+     * a queue that is always behind can't hide a real loss for long; then
+     * it waits again. At startup, before the pods have received anything,
+     * it waits one {@code quiet} whatever. Times are the database's.
+     *
+     * @param quiet how long since the last backlog record before a run
+     *              goes ahead; zero never to wait
+     * @param most  the longest it waits before a run goes ahead anyway
+     */
+    public record Deferral(Duration quiet, Duration most)
+    {
+
+        /** Never waits. */
+        public static final Deferral OFF =
+                new Deferral(Duration.ZERO, Duration.ZERO);
+
+        /**
+         * Whether a run ever waits.
+         *
+         * @return whether {@code quiet} is above zero
+         */
+        boolean enabled()
+        {
+            return quiet.isPositive();
+        }
+    }
+
+    /**
+     * Creates a reconciler that never waits for a backlog.
      *
      * @param splitRecords the split stage's table
      * @param registry     the stage's registry
@@ -127,6 +177,31 @@ public final class ConvertReconciler
             String catalogName, String namespace, Duration grace,
             Duration lookback, Clock clock)
     {
+        this(splitRecords, registry, worker, processor, catalogName,
+                namespace, grace, lookback, clock, Deferral.OFF);
+    }
+
+    /**
+     * Creates a reconciler.
+     *
+     * @param splitRecords the split stage's table
+     * @param registry     the stage's registry
+     * @param worker       converts the rebuilt records
+     * @param processor    the worker's processor, told which records are
+     *                     rebuilt
+     * @param catalogName  the catalog's name
+     * @param namespace    the namespace of {@code split_records}
+     * @param grace        how long a record may wait for its message
+     * @param lookback     how far back to look
+     * @param clock        the time
+     * @param deferral     when to wait for a backlog to drain
+     */
+    public ConvertReconciler(Table splitRecords, StageRegistry registry,
+            StageWorker<?> worker, ConvertProcessor processor,
+            String catalogName, String namespace, Duration grace,
+            Duration lookback, Clock clock, Deferral deferral)
+    {
+        this.deferral = deferral;
         this.splitRecords = splitRecords;
         this.registry = registry;
         this.worker = worker;
@@ -153,7 +228,7 @@ public final class ConvertReconciler
         Instant now = clock.instant();
         splitRecords.refresh();
         Snapshot snapshot = splitRecords.currentSnapshot();
-        if (snapshot == null)
+        if (snapshot == null || deferred())
         {
             return 0;
         }
@@ -196,6 +271,82 @@ public final class ConvertReconciler
                 + " totals_missing={} days={}", looked.size(),
                 tally.recovered, tally.totalsMissing, days);
         return tally.recovered;
+    }
+
+    /**
+     * Whether this run waits for a backlog to drain. It waits while a
+     * record older than the grace has come off the queue within the quiet
+     * time, until it has waited the most it may; and, on this reconciler's
+     * first runs, for one quiet time whatever the queue shows, since at
+     * startup the pods haven't yet received anything to show a backlog
+     * by. The time waited is counted afresh by each reconciler, so from
+     * when this pod took the duties. Audited each time it waits
+     * ({@code sdh.reason} {@code BACKLOG} or {@code STARTING}), and when it
+     * stops waiting because it has waited the most, each with
+     * {@code sdh.count}, the minutes it has waited.
+     *
+     * @return whether to rebuild nothing this time
+     * @throws IllegalStateException if the registry can't be reached
+     */
+    private boolean deferred()
+    {
+        if (!deferral.enabled())
+        {
+            return false;
+        }
+        if (!started)
+        {
+            // A wait left by a pod that held the duties before.
+            registry.endDeferral();
+            started = true;
+        }
+        Optional<Duration> since = registry.sinceBacklog();
+        boolean backlog = since.isPresent()
+                && since.get().compareTo(deferral.quiet()) < 0;
+        if (!backlog && warmedUp)
+        {
+            registry.endDeferral();
+            return false;
+        }
+        Duration waited = registry.deferring();
+        if (!backlog)
+        {
+            if (waited.compareTo(deferral.quiet()) < 0)
+            {
+                return defer("STARTING", waited);
+            }
+            warmedUp = true;
+            registry.endDeferral();
+            return false;
+        }
+        warmedUp = true;
+        if (waited.compareTo(deferral.most()) < 0)
+        {
+            return defer("BACKLOG", waited);
+        }
+        Telemetry.get().auditWarn("convert.reconcile_deferral_capped",
+                Fields.of(Attr.STAGE, ConvertProcessor.STAGE)
+                        .with(Attr.COUNT, waited.toMinutes()));
+        registry.endDeferral();
+        return false;
+    }
+
+    /**
+     * Audits a run that waits.
+     *
+     * @param reason {@code BACKLOG} or {@code STARTING}
+     * @param waited how long it has waited so far
+     * @return true
+     */
+    private static boolean defer(String reason, Duration waited)
+    {
+        Telemetry.get().audit("convert.reconcile_deferred",
+                Fields.of(Attr.STAGE, ConvertProcessor.STAGE)
+                        .with(Attr.REASON, reason)
+                        .with(Attr.COUNT, waited.toMinutes()));
+        LOG.info("convert.reconcile_deferred reason={} waited_ms={}", reason,
+                waited.toMillis());
+        return true;
     }
 
     /** What a run found, over its windows. */

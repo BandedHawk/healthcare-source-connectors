@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.broker.send.Publishers;
 import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import com.sdh.healthcare.connector.convert.BacklogWatch;
 import com.sdh.healthcare.connector.convert.ConvertProcessor;
 import com.sdh.healthcare.connector.convert.ConvertReconciler;
 import com.sdh.healthcare.connector.convert.ResultReporter;
@@ -231,10 +232,18 @@ public final class ConvertRuntime implements AutoCloseable
                 results = new ResultReporter(channel, clock);
             }
 
+            ConvertProperties.Reconcile reconcile = properties.reconcile();
+            // Its own instance of the table: the reconciler refreshes its.
+            BacklogWatch backlog = reconcile.enabled()
+                    && reconcile.backlogQuiet().isPositive()
+                    ? new BacklogWatch(IngestTables.splitRecords(catalog,
+                            storageSettings.effectiveSplitNamespace()),
+                            registry, reconcile.grace(), clock)
+                    : null;
             ConvertProcessor processor = new ConvertProcessor(reader,
                     ConverterRegistry.load(), convertSettings,
                     new ConvertProcessor.Storage(records, keys.wrap(),
-                            recordsKek, ids), results, clock);
+                            recordsKek, ids), results, clock, backlog);
             StageWorker<ConvertProcessor.Prepared> worker =
                     new StageWorker<>(processor, registry, keys.inbox(),
                             new MessageSealer(keys.signer(), keys.signerKid(),
@@ -248,12 +257,14 @@ public final class ConvertRuntime implements AutoCloseable
                     properties.retry().initialBackoff(), MAX_BACKOFF);
             opened.add(receiver);
 
-            ConvertProperties.Reconcile reconcile = properties.reconcile();
             ConvertReconciler reconciler = reconcile.enabled()
                     ? new ConvertReconciler(splitRecords, registry, worker,
                             processor, storageSettings.catalogName(),
                             storageSettings.effectiveSplitNamespace(),
-                            reconcile.grace(), reconcile.lookback(), clock)
+                            reconcile.grace(), reconcile.lookback(), clock,
+                            new ConvertReconciler.Deferral(
+                                    reconcile.backlogQuiet(),
+                                    reconcile.maxDeferral()))
                     : null;
             CommonSettings.Lease lease = properties.lease();
             StageDuties duties = new StageDuties(leases,

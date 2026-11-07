@@ -194,8 +194,11 @@ public final class ConvertProcessor
      */
     private final Set<String> rebuilt = ConcurrentHashMap.newKeySet();
 
+    /** Notes a backlog coming off the queue; null if nothing watches. */
+    private final BacklogWatch backlog;
+
     /**
-     * Creates the processor.
+     * Creates the processor, with nothing watching for a backlog.
      *
      * @param reader     reads split records
      * @param converters the converters, by format
@@ -208,6 +211,26 @@ public final class ConvertProcessor
             Settings settings, Storage storage, ResultReporter results,
             Clock clock)
     {
+        this(reader, converters, settings, storage, results, clock, null);
+    }
+
+    /**
+     * Creates the processor.
+     *
+     * @param reader     reads split records
+     * @param converters the converters, by format
+     * @param settings   how records are converted
+     * @param storage    where they are stored
+     * @param results    sends the producer's results; null if they are off
+     * @param clock      stamps batches and completions
+     * @param backlog    told of each record that comes off the queue, for
+     *                   the reconciler (STAGES.md §9); null if none
+     */
+    public ConvertProcessor(QueueReader reader, ConverterRegistry converters,
+            Settings settings, Storage storage, ResultReporter results,
+            Clock clock, BacklogWatch backlog)
+    {
+        this.backlog = backlog;
         this.reader = reader;
         this.converters = converters;
         this.settings = settings;
@@ -227,12 +250,20 @@ public final class ConvertProcessor
     /**
      * {@inheritDoc}
      *
+     * A {@code record.split} off the queue, not one the reconciler rebuilt,
+     * is shown to the backlog watch.
+     *
      * @return a record for {@code record.split}, the item's total for
      *         {@code item.split}, nothing for any other type
      */
     @Override
     public StageInput classify(ConnectorMessage message)
     {
+        if (backlog != null && message instanceof RecordSplit split
+                && !rebuilt.contains(rebuiltKey(split)))
+        {
+            backlog.received(split);
+        }
         return switch (message)
         {
             case RecordSplit split -> new StageInput.RecordInput(

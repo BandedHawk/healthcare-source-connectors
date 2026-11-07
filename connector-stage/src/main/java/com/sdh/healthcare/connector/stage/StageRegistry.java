@@ -69,6 +69,13 @@ public final class StageRegistry
     /** The reconciler's watermark table, with its schema. */
     private final String reconcile;
 
+    /**
+     * When a record older than the reconciler's grace last came off the
+     * queue, and since when the reconciler has waited for that to stop,
+     * with its schema.
+     */
+    private final String backlog;
+
     /** How long a statement may run. */
     private final int queryTimeoutSeconds;
 
@@ -184,6 +191,7 @@ public final class StageRegistry
         this.records = schema + ".stage_record";
         this.items = schema + ".stage_item";
         this.reconcile = schema + ".stage_reconcile";
+        this.backlog = schema + ".stage_backlog";
         this.queryTimeoutSeconds =
                 (int) Math.max(1, queryTimeout.toSeconds());
     }
@@ -242,6 +250,15 @@ public final class StageRegistry
                   checked_to   timestamptz NOT NULL,
                   updated_at   timestamptz NOT NULL
                 )""".formatted(reconcile);
+        // Added 2026-11-07 (STAGES.md §9): the reconciler waits while a
+        // backlog is still coming off the queue. Times are the database's,
+        // so the pods' clocks don't matter.
+        String backlogDdl = """
+                CREATE TABLE IF NOT EXISTS %s (
+                  stage           text        PRIMARY KEY,
+                  seen_at         timestamptz NOT NULL,
+                  deferring_since timestamptz
+                )""".formatted(backlog);
         try (Connection connection = dataSource.getConnection();
                 Statement statement = connection.createStatement())
         {
@@ -254,6 +271,7 @@ public final class StageRegistry
                     + " ADD COLUMN IF NOT EXISTS output_version text");
             statement.execute(itemDdl);
             statement.execute(reconcileDdl);
+            statement.execute(backlogDdl);
         }
         catch (SQLException failure)
         {
@@ -825,6 +843,118 @@ public final class StageRegistry
             upsert.setString(1, stage);
             upsert.setTimestamp(2, Timestamp.from(to));
             upsert.executeUpdate();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Notes that a record older than the reconciler's grace has just come
+     * off the queue: a backlog is still draining (STAGES.md §9). Stamped
+     * with the database's clock.
+     *
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void noteBacklog()
+    {
+        update("""
+                INSERT INTO %1$s AS b (stage, seen_at)
+                VALUES (?, clock_timestamp())
+                ON CONFLICT (stage) DO UPDATE
+                   SET seen_at = GREATEST(b.seen_at, EXCLUDED.seen_at)"""
+                .formatted(backlog));
+    }
+
+    /**
+     * How long ago a record older than the grace last came off the queue,
+     * by the database's clock.
+     *
+     * @return the time since; empty if none ever has
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Optional<Duration> sinceBacklog()
+    {
+        return since("SELECT extract(epoch FROM clock_timestamp() - seen_at)"
+                + " FROM " + backlog + " WHERE stage = ?");
+    }
+
+    /**
+     * Notes that the reconciler is waiting for the backlog, if it wasn't
+     * already, and says for how long it has been. Called only once
+     * {@link #sinceBacklog} has found a backlog, so the row is there.
+     *
+     * @return how long it has waited, by the database's clock
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Duration deferring()
+    {
+        update("UPDATE " + backlog + " SET deferring_since ="
+                + " COALESCE(deferring_since, clock_timestamp())"
+                + " WHERE stage = ?");
+        return since("SELECT extract(epoch FROM clock_timestamp()"
+                + " - deferring_since) FROM " + backlog
+                + " WHERE stage = ? AND deferring_since IS NOT NULL")
+                .orElse(Duration.ZERO);
+    }
+
+    /**
+     * Notes that the reconciler has stopped waiting for the backlog.
+     *
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void endDeferral()
+    {
+        update("UPDATE " + backlog + " SET deferring_since = NULL"
+                + " WHERE stage = ? AND deferring_since IS NOT NULL");
+    }
+
+    /**
+     * Runs a statement whose only parameter is the stage.
+     *
+     * @param sql the statement
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private void update(String sql)
+    {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setString(1, stage);
+            update.executeUpdate();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Reads a span in seconds, by a query whose only parameter is the
+     * stage.
+     *
+     * @param sql the query
+     * @return the span; empty if there is no row
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private Optional<Duration> since(String sql)
+    {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                return rows.next()
+                        ? Optional.of(Duration.ofMillis(
+                                Math.round(rows.getDouble(1) * 1000)))
+                        : Optional.empty();
+            }
         }
         catch (SQLException failure)
         {

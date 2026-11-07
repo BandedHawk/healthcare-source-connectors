@@ -343,6 +343,21 @@ intake has results on.
   `sdh.count`, the days to check). With no row yet (a stage that has never reconciled, or one upgraded to this),
   a run starts at the lookback: nothing older is checked then. Full scans were rejected: they hold every record
   ID ever kept.
+- **Waiting for a backlog** (decided 2026-11-07 with the user). A record that looks lost (split more than the
+  grace ago, unknown to the registry) may only be queued behind a backlog: after an outage, or whenever the queue
+  falls further behind than the grace under load. Rebuilt, it is converted serially on the duties pod, slowing the
+  backlog, and a failed one loses its placement. So every pod notes when a record older than the grace comes off
+  its queue (`BacklogWatch`: the age is from the commit of the snapshot its `record.split` names; a snapshot
+  expired from the table is old), in `stage_backlog.seen_at`, at most once a minute per pod, by the database's
+  clock. While that is within `sdh.reconcile.backlog-quiet` (15 minutes), a run rebuilds nothing and leaves the
+  watermark, audited `convert.reconcile_deferred` (`sdh.count`: minutes waited). Since every pod notes it, a
+  partition still draining anywhere holds the run back, and a queue that delivers nothing (one stuck, or empty)
+  doesn't. After waiting `sdh.reconcile.max-deferral` (6 hours), a run goes ahead anyway,
+  `convert.reconcile_deferral_capped`, so a queue that is always behind can't hide a real loss for long; then it
+  waits again. At startup the pods haven't received anything yet, so a pod newly holding the duties waits one
+  `backlog-quiet` whatever the queue shows (`sdh.reason` `STARTING`; `BACKLOG` otherwise). The wait is counted
+  from when this pod took the duties. `sdh.reconcile.backlog-quiet: 0s` turns waiting off. A drained-queue signal
+  from the brokers was rejected: there is none common to the seven.
 - **Settings:** `sdh.stage.*` (§7); `sdh.convert.options`, `.max-bytes`, `.memory`; `sdh.storage` for `records`
   and the catalog `split_records` is read from; `sdh.results` as before; `sdh.lease` for the duties lease.
 
@@ -350,8 +365,9 @@ intake has results on.
 - `ConvertProcessor` is the stage's `StageProcessor`; `ConvertRuntime` wires it with keys from
   `KeyMaterial.forStage` (the records KEK, signing, recipient and inbox keys; no landing KEK) and a `QueueReader`
   built without message keys, which only reads records (the worker opens the messages). `sdh.storage.split-namespace`
-  names the namespace of `split_records` if it differs; `sdh.reconcile.grace`, `.lookback` and `.interval` tune
-  the reconciler; `sdh.convert.autostart=false` leaves the input and duties stopped for tests.
+  names the namespace of `split_records` if it differs; `sdh.reconcile.grace`, `.lookback`, `.interval`,
+  `.backlog-quiet` and `.max-deferral` tune the reconciler; `sdh.convert.autostart=false` leaves the input and
+  duties stopped for tests.
 - A record stored as split (too large, skipped, a splitter's error, or a format with no converter) isn't read until
   it is committed: its digest is of its split record ID. A splitter's error code this version doesn't know is
   stored as `PARSE_UNRECOGNISED`.
@@ -467,10 +483,9 @@ Each step builds and passes its tests before the next.
   audited and read only, lists an item's failed records with their places, working out a record's message from
   landing (`message_refs_enc`, `message_replaces_enc` and the message index) on request, for the records a result
   couldn't place.
-- **The convert reconciler overlaps the queued backlog** after an outage longer than the grace (§13.4): it can't
-  tell a queued `record.split` from a lost one, so it rebuilds and converts records still on the queue, serially on
-  the duties pod, and a failed one loses its placement. Nothing is converted twice or lost. Raised 2026-11-07, open:
-  a signal that a stage's input is drained, across the seven brokers, would let it rebuild only what is lost.
+- **The convert reconciler overlapped the queued backlog** after an outage, or whenever the queue fell more than
+  the grace behind: it took queued `record.split`s for lost, and converted them serially on the duties pod. Resolved
+  2026-11-07: it waits while records older than the grace still come off the queue, up to a limit (§9).
 - Split records as bronze, in their own namespace and table (§3).
 - Postgres for the registry and item rows (§5–§6): the lease database the stages already use. A row per record
   per stage, kept as long as the records are (it is how duplicates are recognised); about 100 bytes each.
@@ -613,8 +628,9 @@ account, and recorded in the ticket.
 
 ### 13.4 Starting again after a long outage
 
-When the convert stage, or its duties pod, has been down longer than the reconciler's grace (10 minutes), the
-first start afterwards takes longer and works differently than usual. That is expected, and safe for the data;
+When the convert stage, or its duties pod, has been down longer than the reconciler's grace (10 minutes), or its
+queue has fallen further behind than that, the reconciler works differently than usual, and the first start after a
+long outage takes longer. That is expected, and safe for the data;
 this section is what the operator needs to know to recognise it and follow it.
 
 **Why it takes longer.**
@@ -623,19 +639,25 @@ this section is what the operator needs to know to recognise it and follow it.
   lookback if that is later. Each day costs a scan of that day's `split_records` IDs and a registry lookup per item,
   so a week's outage is seven times a normal run's reading before it finds anything. It saves its progress after
   each day: a pod restarted part-way resumes at the next day, not the start.
-- **The queued backlog and the reconciler overlap.** The `record.split` messages queued during the outage are still
-  on the broker, but the reconciler can't tell a queued message from a lost one: every record older than the grace
-  that the registry doesn't know looks lost. So at startup it rebuilds them from `split_records` and converts them
-  itself, serially, on the duties pod, while the other pods read the same records off the queue. Each record is
-  converted once: whichever claims it first stores it, and the other copy is a duplicate, acknowledged and dropped
-  (§6). But the duties pod's single thread sets the pace for what it has rebuilt, so the backlog drains more
-  slowly than the same number of records would on a normal day, and the duties pod is busy (its CPU, and its
-  memory budget, `sdh.convert.memory`) until the run ends.
+- **The reconciler waits for the backlog first.** The `record.split` messages queued during the outage are still on
+  the broker, and the reconciler can't tell a queued message from a lost one. So it doesn't rebuild anything at
+  startup: it waits one `sdh.reconcile.backlog-quiet` (15 minutes) for the pods to start receiving, and then for as
+  long as records older than the grace are still coming off the queue on any pod (§9). Only once the queue has been
+  quiet for 15 minutes does it check the days it missed, and by then what it finds is what was really lost. Records
+  lost during the outage are therefore converted only after the backlog has drained.
+- **Unless the backlog takes longer than `sdh.reconcile.max-deferral`** (6 hours). Then the reconciler goes ahead
+  anyway (`convert.reconcile_deferral_capped`), and the old overlap returns for that run: it rebuilds records still
+  queued and converts them itself, serially, on the duties pod, while the other pods read the same records off the
+  queue. Each record is still converted once (whichever claims it first stores it; the other copy is a duplicate,
+  acknowledged and dropped, §6), but the backlog drains more slowly, the duties pod is busy (its CPU, and its memory
+  budget, `sdh.convert.memory`) until the run ends, and a failed record it reaches first loses its placement
+  (below). After that run it waits again. For an outage whose backlog will take longer than 6 hours to drain, raise
+  `max-deferral` for the restart.
 - **A rebuilt record that fails loses its placement.** A record that failed conversion, and that the reconciler
   reached before its queue message, has no queue message to name in the producer's result: audited
-  `convert.placement_unknown` (§13.3). The longer the outage, the more of these. The record and its error are
-  stored as for any other; only the result's pointer to the producer's message is missing, and it can be placed by
-  hand (§13.3).
+  `convert.placement_unknown` (§13.3). With the wait, this is mostly a record whose message really was lost, or one
+  reached by a run that went ahead after the most wait. The record and its error are stored as for any other; only
+  the result's pointer to the producer's message is missing, and it can be placed by hand (§13.3).
 - **An upgrade to the watermark starts at the lookback.** A stage with no `stage_reconcile` row yet (first started,
   or upgraded from a build before 2026-11-07) checks only the last `sdh.reconcile.lookback` its first time. A record
   lost longer ago than that, before the upgrade, isn't found; the audit query of §13.2 is what finds its item.
@@ -643,13 +665,18 @@ this section is what the operator needs to know to recognise it and follow it.
 **What to watch.**
 - `sdh-admin status` (convert): the `reconciler` line shows how far it has checked and how long ago that is.
   Normally under half an hour. More than an hour behind, it warns: the duties pod is down (the `duties` line says
-  who holds the lease, and when it was renewed), or it is catching up.
+  who holds the lease, and when it was renewed), it is waiting for a backlog, or it is catching up.
+- `convert.reconcile_deferred` at each run that waits, with `sdh.reason` (`STARTING` or `BACKLOG`) and
+  `sdh.count`, the minutes waited so far. After a long outage, expect `STARTING` once, then `BACKLOG` every
+  `sdh.reconcile.interval` until the queue drains. `convert.reconcile_deferral_capped` means it stopped waiting
+  after `sdh.reconcile.max-deferral`: the backlog is draining more slowly than that, or the queue is always behind
+  by more than the grace, which on a normal day calls for more pods.
 - `convert.reconcile_catching_up` at the start of a run that looks further back than the lookback, and
   `convert.reconcile_caught_up` at its end, each with `sdh.count`, the days checked. A `catching_up` with no
   `caught_up` after it means the run stopped part-way (the pod restarted, or lost the lease): the next run picks
   up from the last day checked. The `convert.reconciled` log line ends every run, with `days=`.
-- `convert.records_recovered` per item rebuilt, with `sdh.count`. After a long outage, many are expected: most are
-  records still on the queue, not lost ones. On a normal day, any at all means a `record.split` was lost (§13.2).
+- `convert.records_recovered` per item rebuilt, with `sdh.count`. Any at all means a `record.split` was lost
+  (§13.2), unless it follows `convert.reconcile_deferral_capped`: then many are records still on the queue.
 - `convert.placement_unknown` per failed record rebuilt (§13.3): each needs placing by hand if the producer is to
   be told where it was.
 - `convert.item_total_missing`: an item whose records are all converted but whose `item.split` never came; replay
@@ -665,8 +692,11 @@ this section is what the operator needs to know to recognise it and follow it.
   nothing was left behind, once the queues have drained and the reconciler has caught up.
 
 **Before a planned outage,** drain the queues first where possible (stop the producers' intake and let each stage
-empty its input): then nothing is queued when the stage starts again, the reconciler finds nothing to rebuild, and
-nothing loses its placement.
+empty its input): then nothing is queued when the stage starts again, and the reconciler waits only the 15 minutes
+at startup.
 
-**Not yet built:** a way for the reconciler to know the queue is drained, so that it rebuilds only what is really
-lost. There is no single signal for this across the seven brokers; the overlap above is the cost until there is.
+**Its limits.** The wait is judged from what the pods receive, not from the broker, so it is a proxy: a partition
+whose consumer is stuck (a message held, §13.1) delivers nothing and doesn't hold the reconciler back, which is as
+it should be, since its records won't arrive. A record lost during a long drain is found only after the drain, or
+after `max-deferral`. The time waited is counted from when this pod took the duties, so if the duties move to
+another pod while waiting, the count starts again.

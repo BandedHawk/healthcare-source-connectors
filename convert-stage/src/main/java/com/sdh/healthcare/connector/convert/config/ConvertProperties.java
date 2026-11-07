@@ -135,16 +135,24 @@ public record ConvertProperties(
      * Finding split records whose {@code record.split} messages were lost
      * (STAGES.md §9).
      *
-     * @param enabled  whether to look; on unless turned off
-     * @param grace    how long a record may wait for its message before it
-     *                 is converted without it
-     * @param lookback how far back to look
-     * @param interval how often to look, after the first time at startup
+     * @param enabled      whether to look; on unless turned off
+     * @param grace        how long a record may wait for its message
+     *                     before it is converted without it
+     * @param lookback     how far back to look
+     * @param interval     how often to look, after the first time at
+     *                     startup
+     * @param backlogQuiet how long since a record older than the grace
+     *                     last came off the queue, on any pod, before a run
+     *                     rebuilds anything; zero never to wait
+     * @param maxDeferral  the longest a run waits for the backlog before it
+     *                     goes ahead anyway
      */
     public record Reconcile(@DefaultValue("true") boolean enabled,
             @DefaultValue("10m") Duration grace,
             @DefaultValue("2d") Duration lookback,
-            @DefaultValue("15m") Duration interval)
+            @DefaultValue("15m") Duration interval,
+            @DefaultValue("15m") Duration backlogQuiet,
+            @DefaultValue("6h") Duration maxDeferral)
     {
     }
 

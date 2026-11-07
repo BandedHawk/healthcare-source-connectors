@@ -188,28 +188,38 @@ It finds records split more than `sdh.reconcile.grace` (10 minutes) ago that thi
 their messages and converts them. It remembers how far it has checked, so after an outage it checks every day
 since, a day at a time, saving its progress after each.
 
-So the first start after a long outage is slower than usual, for three reasons:
-- **It reads every day it missed** before it finds anything: a week down is seven days of record IDs to check.
-- **It converts records that are still on the queue.** It can't tell a queued message from a lost one, so it
-  rebuilds the backlog's records too, and converts them one at a time on the duties pod while the other pods read
-  them off the queue. Each record is still converted once; the second copy is dropped as a duplicate. But the
-  backlog drains more slowly, and the duties pod is busy until the run ends.
-- **A failed record it reached first can't be placed** in the producer's result: audited `convert.placement_unknown`.
-  The record and its error are stored as usual, and the event's record number places it by hand.
+It can't tell a message still queued from a lost one, so it waits for the queue first. It waits
+`sdh.reconcile.backlog-quiet` (15 minutes) after it starts, for the pods to begin receiving. Then it keeps waiting
+while records older than the grace are still coming off the queue on any pod. When the queue has been quiet that
+long, it rebuilds what is really lost.
+
+So the first start after a long outage is slower than usual:
+- **Lost records are converted last,** after the backlog has drained and the queue has been quiet for 15 minutes.
+- **It then reads every day it missed:** a week down is seven days of record IDs to check.
+- **If the backlog takes longer than `sdh.reconcile.max-deferral` (6 hours) to drain,** it goes ahead anyway. Then it
+  converts records still on the queue, one at a time on the duties pod, while the other pods read them off the
+  queue. Each record is still converted once, and the second copy is dropped as a duplicate. But the backlog drains
+  more slowly, and a failed record it reaches first can't be placed in the producer's result
+  (`convert.placement_unknown`; the record and its error are stored as usual, and the event's record number places
+  it by hand). After that run it waits again. If you expect a longer drain, raise `max-deferral` for the restart.
 
 What to watch:
 - **`status`'s `reconciler` line:** how far it has checked and how long ago. More than an hour behind, it warns: the
-  duties pod is down (see the `duties` line) or it is catching up.
+  duties pod is down (see the `duties` line), or it is waiting for the backlog or catching up.
+- **`convert.reconcile_deferred`** (audit, `sdh.reason` `STARTING` or `BACKLOG`, `sdh.count` = minutes waited): a run
+  that waited. Expect `STARTING` once after each start, and `BACKLOG` while a backlog drains.
+- **`convert.reconcile_deferral_capped`:** it stopped waiting after `max-deferral`. On a normal day this means the
+  queue is always more than the grace behind: add pods.
 - **`convert.reconcile_catching_up` and `convert.reconcile_caught_up`** (audit, `sdh.count` = days): the start and
   end of a catch-up. A start with no end means the pod stopped part-way; the next run resumes from the last day
   checked.
-- **`convert.records_recovered`:** after an outage, expected in numbers (mostly queued records). On a normal day,
-  any means a message was lost.
+- **`convert.records_recovered`:** a message was lost, unless it follows `reconcile_deferral_capped` (then it is
+  mostly queued records).
 - **`convert.item_total_missing`:** an item whose records are all converted but whose `item.split` hasn't come. Act
   only if it is still incomplete once the queue has drained: replay it from the landing node (`replay --item-id`).
 - **Outage length against queue retention** (Kafka and Pub/Sub 7 days by default, SQS 4): longer, and queued
-  messages are lost. Check the retention before a planned outage, and drain the queues first if you can: then
-  there's no backlog to overlap with.
+  messages are lost. Check the retention before a planned outage, and drain the queues first if you can: then the
+  reconciler waits only its 15 minutes at startup.
 - **Afterwards,** check that every item completed at the split stage also completed here (`stage.item_completed`).
 
 A stage upgraded from a build without the watermark checks only the last `sdh.reconcile.lookback` (2 days) its first

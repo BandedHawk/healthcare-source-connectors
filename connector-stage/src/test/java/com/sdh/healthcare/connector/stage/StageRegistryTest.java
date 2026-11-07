@@ -268,4 +268,38 @@ class StageRegistryTest
         first.markChecked(later.plusSeconds(60));
         assertThat(second.checkedTo()).hasValue(later.plusSeconds(60));
     }
+
+    /**
+     * A backlog noted by one worker is seen by the others, by the
+     * database's clock; a deferral starts once, grows until it is ended,
+     * and starts again afterwards.
+     *
+     * @throws Exception if interrupted
+     */
+    @Test
+    void sharesWhenABacklogWasLastSeenAndHowLongTheReconcilerHasWaited()
+            throws Exception
+    {
+        assertThat(first.sinceBacklog()).isEmpty();
+        first.endDeferral();
+        first.noteBacklog();
+        assertThat(second.sinceBacklog()).hasValueSatisfying(since ->
+                assertThat(since).isBetween(Duration.ZERO,
+                        Duration.ofSeconds(5)));
+
+        Duration started = second.deferring();
+        assertThat(started).isLessThan(Duration.ofSeconds(1));
+        Thread.sleep(150);
+        assertThat(first.deferring()).as("not started again")
+                .isGreaterThanOrEqualTo(Duration.ofMillis(140));
+        Thread.sleep(150);
+        assertThat(first.sinceBacklog().orElseThrow())
+                .isGreaterThanOrEqualTo(Duration.ofMillis(290));
+        second.noteBacklog();
+        assertThat(first.sinceBacklog().orElseThrow())
+                .isLessThan(Duration.ofMillis(290));
+
+        first.endDeferral();
+        assertThat(second.deferring()).isLessThan(Duration.ofMillis(140));
+    }
 }
