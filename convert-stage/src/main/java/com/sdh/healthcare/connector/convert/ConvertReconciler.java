@@ -37,7 +37,8 @@ import org.slf4j.LoggerFactory;
  * Finds split records whose {@code record.split} messages never reached
  * the convert stage (STAGES.md §9). It looks at the items with records in
  * {@code split_records} committed between the lookback and the grace ago
- * that aren't complete here; any of their records the registry doesn't
+ * (or since the registry's watermark, if that is earlier: below) that
+ * aren't complete here; any of their records the registry doesn't
  * know has its {@code record.split} rebuilt from its row and handed to the
  * worker, as if received. A record rebuilt this way doesn't know its queue
  * message, so if it fails, the producer's result names no message for it;
@@ -49,6 +50,14 @@ import org.slf4j.LoggerFactory;
  * item while this pod holds the duties (again after a restart), for an
  * operator to recover by hand (STAGES.md §13.2). Runs on the pod that
  * holds the duties lease.
+ * <p>
+ * The registry keeps how far it has checked ({@link StageRegistry#checkedTo}),
+ * so that after an outage longer than the lookback, the days in between are
+ * checked too, rather than never. A run goes a day at a time, so a day's
+ * record IDs are the most it holds, and moves the watermark on after each
+ * day, so a run cut short resumes where it stopped. Catching up is audited,
+ * {@code convert.reconcile_catching_up} and {@code
+ * convert.reconcile_caught_up}, with the days to check.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -58,6 +67,9 @@ public final class ConvertReconciler
 
     /** The most rebuilt messages handed to the worker at once. */
     static final int BATCH = 100;
+
+    /** The most of {@code split_records} a run reads at once, by time. */
+    static final Duration WINDOW = Duration.ofDays(1);
 
     /** Logs each run's counts. */
     private static final Logger LOG =
@@ -127,12 +139,14 @@ public final class ConvertReconciler
     }
 
     /**
-     * Looks once.
+     * Looks once: from the earlier of the watermark and the lookback ago,
+     * to the grace ago, a day at a time.
      *
      * @return how many records were handed to the worker
      * @throws InterruptedException  if interrupted
-     * @throws IllegalStateException if the worker held a batch back; the
-     *                               rest is looked at next time
+     * @throws IllegalStateException if the worker held a batch back, or the
+     *                               registry can't be reached; the rest is
+     *                               looked at next time, from the watermark
      */
     public int reconcile() throws InterruptedException
     {
@@ -143,13 +157,90 @@ public final class ConvertReconciler
         {
             return 0;
         }
-        Map<UUID, Set<String>> committed = CommittedRecords.committedBetween(
-                splitRecords, now.minus(lookback), now.minus(grace));
+        Instant to = now.minus(grace);
+        Instant recent = now.minus(lookback);
+        // With no watermark yet, nothing older than the lookback is looked
+        // at: a stage that has never reconciled, or one upgraded to this.
+        Instant from = registry.checkedTo()
+                .filter(checked -> checked.isBefore(recent))
+                .orElse(recent);
+        long days = days(from, to);
+        boolean catchingUp = from.isBefore(recent);
+        if (catchingUp)
+        {
+            Telemetry.get().auditWarn("convert.reconcile_catching_up",
+                    Fields.of(Attr.STAGE, ConvertProcessor.STAGE)
+                            .with(Attr.COUNT, days));
+        }
+        Set<UUID> looked = new HashSet<>();
+        Tally tally = new Tally();
+        for (Instant start = from; start.isBefore(to);)
+        {
+            Instant end = start.plus(WINDOW).isBefore(to)
+                    ? start.plus(WINDOW) : to;
+            Map<UUID, Set<String>> committed = CommittedRecords
+                    .committedBetween(splitRecords, start, end);
+            looked.addAll(committed.keySet());
+            reconcile(committed, snapshot.snapshotId(), tally);
+            registry.markChecked(end);
+            start = end;
+        }
+        reportedMissing.retainAll(looked);
+        if (catchingUp)
+        {
+            Telemetry.get().audit("convert.reconcile_caught_up",
+                    Fields.of(Attr.STAGE, ConvertProcessor.STAGE)
+                            .with(Attr.COUNT, days));
+        }
+        LOG.info("convert.reconciled checked={} recovered={}"
+                + " totals_missing={} days={}", looked.size(),
+                tally.recovered, tally.totalsMissing, days);
+        return tally.recovered;
+    }
+
+    /** What a run found, over its windows. */
+    private static final class Tally
+    {
+
+        /** The records handed to the worker. */
+        int recovered;
+
+        /** The items whose total never came. */
+        int totalsMissing;
+
+        /** Created at the start of a run. */
+        Tally()
+        {
+        }
+    }
+
+    /**
+     * How many days, or parts of a day, a span covers.
+     *
+     * @param from its start
+     * @param to   its end
+     * @return the days; 0 if it is empty
+     */
+    static long days(Instant from, Instant to)
+    {
+        long millis = Math.max(0, Duration.between(from, to).toMillis());
+        return (millis + WINDOW.toMillis() - 1) / WINDOW.toMillis();
+    }
+
+    /**
+     * Looks at the items with records committed in one window.
+     *
+     * @param committed  each item's records committed in the window
+     * @param snapshotId the table's snapshot, which holds them all
+     * @param tally      what the run has found, added to
+     * @throws InterruptedException  if interrupted
+     * @throws IllegalStateException if the worker held a batch back
+     */
+    private void reconcile(Map<UUID, Set<String>> committed, long snapshotId,
+            Tally tally) throws InterruptedException
+    {
         Set<UUID> completed = registry.completed(committed.keySet());
-        reportedMissing.retainAll(committed.keySet());
         reportedMissing.removeAll(completed);
-        int recovered = 0;
-        int totalsMissing = 0;
         for (Map.Entry<UUID, Set<String>> item : committed.entrySet())
         {
             UUID itemId = item.getKey();
@@ -172,12 +263,11 @@ public final class ConvertReconciler
                                         .with(Attr.COUNT,
                                                 item.getValue().size()));
                     }
-                    totalsMissing++;
+                    tally.totalsMissing++;
                 }
                 continue;
             }
-            List<ConnectorMessage> lost = rebuild(itemId, known,
-                    snapshot.snapshotId());
+            List<ConnectorMessage> lost = rebuild(itemId, known, snapshotId);
             for (int start = 0; start < lost.size(); start += BATCH)
             {
                 List<ConnectorMessage> batch = lost.subList(start,
@@ -201,12 +291,8 @@ public final class ConvertReconciler
             Telemetry.get().auditWarn("convert.records_recovered",
                     Fields.of(Attr.ITEM_ID, itemId)
                             .with(Attr.COUNT, lost.size()));
-            recovered += lost.size();
+            tally.recovered += lost.size();
         }
-        LOG.info("convert.reconciled checked={} recovered={}"
-                + " totals_missing={}", committed.size(), recovered,
-                totalsMissing);
-        return recovered;
     }
 
     /**

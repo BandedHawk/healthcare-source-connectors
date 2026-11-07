@@ -20,6 +20,8 @@ import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -271,12 +273,46 @@ class StageAdminTest
                 .contains(waiting + " 0 of 5 stored")
                 .doesNotContain(complete.toString())
                 .containsPattern("records: +1 claimed")
-                .contains("1 of them past their claim");
+                .contains("1 of them past their claim")
+                .containsPattern("reconciler: +hasn't checked yet");
         assertThat(audit.attributes("admin.status"))
                 .containsEntry("sdh.operator", "alice")
                 .containsEntry("sdh.stage", "test")
                 .containsEntry("sdh.count", 2L)
                 .containsEntry("sdh.result", "ok");
+    }
+
+    /**
+     * The reconciler's watermark is shown with how long ago it is, and a
+     * warning once that is more than an hour: the duties pod is down, or
+     * catching up on an outage.
+     *
+     * @throws Exception if the registry can't be written
+     */
+    @Test
+    void showsHowFarTheReconcilerHasChecked() throws Exception
+    {
+        StageRegistry registry = StageTestSupport.registry(schema, "pod-a");
+        Instant recent = Instant.now().minus(Duration.ofMinutes(20))
+                .truncatedTo(ChronoUnit.MICROS);
+        registry.markChecked(recent);
+        assertThat(admin("status").out())
+                .containsPattern("reconciler: +checked up to " + recent
+                        + " \\((19|20|21) min ago\\)")
+                .doesNotContain("behind");
+
+        Instant days = recent.minus(Duration.ofDays(3));
+        StageTestSupport.registry(schema, "pod-a").markChecked(days);
+        assertThat(admin("status").out()).as("it only moves forward")
+                .contains("checked up to " + recent);
+
+        String fresh = StageTestSupport.freshSchema();
+        StageTestSupport.registry(fresh, "pod-a").markChecked(days);
+        schema = fresh;
+        assertThat(admin("status").out())
+                .containsPattern("reconciler: +checked up to " + days)
+                .contains("more than 1 h behind: the duties pod is down, or"
+                        + " catching up on an outage");
     }
 
     /**
@@ -317,7 +353,8 @@ class StageAdminTest
         assertThat(status.out())
                 .containsPattern("duties: +unavailable \\(")
                 .containsPattern("items: +unavailable \\(")
-                .containsPattern("records: +unavailable \\(");
+                .containsPattern("records: +unavailable \\(")
+                .containsPattern("reconciler: +unavailable \\(");
         assertThat(status.err()).isEmpty();
         assertThat(audit.attributes("admin.status"))
                 .containsEntry("sdh.result", "failed")

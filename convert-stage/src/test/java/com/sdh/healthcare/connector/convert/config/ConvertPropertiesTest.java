@@ -15,9 +15,17 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 
 /**
  * The convert stage's settings, as Spring binds them.
+ *
+ * @author Jonas Barnett
+ * @since 0.1.0
  */
 class ConvertPropertiesTest
 {
+
+    /** Creates the tests; JUnit runs each on a new instance. */
+    ConvertPropertiesTest()
+    {
+    }
 
     /**
      * No format options is none: the stage started without any used to

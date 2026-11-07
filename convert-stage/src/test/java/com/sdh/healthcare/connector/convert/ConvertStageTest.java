@@ -431,4 +431,78 @@ class ConvertStageTest
             Telemetry.install(OpenTelemetry.noop());
         }
     }
+
+    /**
+     * After an outage longer than the lookback, records split before it
+     * whose messages were lost are still found: the run starts at the
+     * watermark, not the lookback, goes a day at a time, audits that it is
+     * catching up, and leaves the watermark at the grace ago. The next run
+     * is an ordinary one.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void catchesUpOnAnOutageLongerThanTheLookback() throws Exception
+    {
+        split("1,2", "3,4");
+        // The last run before the outage, an hour before the records were
+        // split: it notes how far it checked.
+        Instant before = SPLIT_AT.minus(Duration.ofHours(1));
+        assertThat(reconcilerAt(before).reconcile()).isZero();
+        assertThat(registry.checkedTo())
+                .hasValue(before.minus(Duration.ofMinutes(10)));
+
+        // Five days later, three past the lookback, the messages are gone.
+        Instant after = SPLIT_AT.plus(Duration.ofDays(5));
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            ConvertReconciler reconciler = reconcilerAt(after);
+            assertThat(reconciler.reconcile()).isEqualTo(2);
+            assertThat(registry.checkedTo())
+                    .hasValue(after.minus(Duration.ofMinutes(10)));
+            assertThat(reconciler.reconcile()).as("an ordinary run")
+                    .isZero();
+            assertThat(events.getFinishedLogRecordItems().stream()
+                    .map(event -> event.getEventName())
+                    .filter(name -> name.startsWith("sdh.audit.convert."
+                            + "reconcile_")))
+                    .containsExactly("sdh.audit.convert.reconcile_catching_up",
+                            "sdh.audit.convert.reconcile_caught_up");
+            assertThat(events.getFinishedLogRecordItems().stream()
+                    .filter(event -> event.getEventName()
+                            .endsWith("reconcile_catching_up")))
+                    .singleElement().satisfies(event -> assertThat(
+                            event.getAttributes().asMap()).containsEntry(
+                                    AttributeKey.longKey("sdh.count"), 6L));
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
+        assertThat(sentOf("record.stored")).isEqualTo(2);
+        assertThat(ConvertReconciler.days(after, after)).isZero();
+        assertThat(ConvertReconciler.days(after,
+                after.plus(Duration.ofHours(25)))).isEqualTo(2);
+    }
+
+    /**
+     * The stage's reconciler at a time, with a 10-minute grace and a
+     * 2-day lookback.
+     *
+     * @param now the time it runs at
+     * @return the reconciler
+     */
+    ConvertReconciler reconcilerAt(Instant now)
+    {
+        return new ConvertReconciler(splitRecords, registry, worker,
+                processor, "prod", NS, Duration.ofMinutes(10),
+                Duration.ofDays(2), Clock.fixed(now, ZoneOffset.UTC));
+    }
 }

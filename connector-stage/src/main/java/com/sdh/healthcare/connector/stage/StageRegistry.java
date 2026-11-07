@@ -14,7 +14,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Timestamp;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -63,6 +65,9 @@ public final class StageRegistry
 
     /** The item table, with its schema. */
     private final String items;
+
+    /** The reconciler's watermark table, with its schema. */
+    private final String reconcile;
 
     /** How long a statement may run. */
     private final int queryTimeoutSeconds;
@@ -178,6 +183,7 @@ public final class StageRegistry
         this.owner = owner;
         this.records = schema + ".stage_record";
         this.items = schema + ".stage_item";
+        this.reconcile = schema + ".stage_reconcile";
         this.queryTimeoutSeconds =
                 (int) Math.max(1, queryTimeout.toSeconds());
     }
@@ -228,6 +234,14 @@ public final class StageRegistry
                   completed_at timestamptz,
                   PRIMARY KEY (stage, item_id)
                 )""".formatted(items);
+        // Added 2026-11-07 (STAGES.md §9): how far the reconciler has
+        // checked, so an outage longer than its lookback is caught up on.
+        String reconcileDdl = """
+                CREATE TABLE IF NOT EXISTS %s (
+                  stage        text        PRIMARY KEY,
+                  checked_to   timestamptz NOT NULL,
+                  updated_at   timestamptz NOT NULL
+                )""".formatted(reconcile);
         try (Connection connection = dataSource.getConnection();
                 Statement statement = connection.createStatement())
         {
@@ -239,6 +253,7 @@ public final class StageRegistry
             statement.execute("ALTER TABLE " + records
                     + " ADD COLUMN IF NOT EXISTS output_version text");
             statement.execute(itemDdl);
+            statement.execute(reconcileDdl);
         }
         catch (SQLException failure)
         {
@@ -746,6 +761,70 @@ public final class StageRegistry
                         rows.wasNull() ? -1 : expected, rows.getLong(2),
                         rows.getLong(3)));
             }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * How far the stage's reconciler has checked: every record committed
+     * before it was looked at, after its grace (STAGES.md §9).
+     *
+     * @return the time; empty if the reconciler has never checked a day
+     *         here
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Optional<Instant> checkedTo()
+    {
+        String sql = "SELECT checked_to FROM " + reconcile
+                + " WHERE stage = ?";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                return rows.next()
+                        ? Optional.of(rows.getTimestamp(1).toInstant())
+                        : Optional.empty();
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Notes that the reconciler has checked up to a time. It only moves
+     * forward, so a pod that lost the duties lease part way can't move it
+     * back.
+     *
+     * @param to the time every record committed before has been checked
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void markChecked(Instant to)
+    {
+        String sql = """
+                INSERT INTO %1$s AS r (stage, checked_to, updated_at)
+                VALUES (?, ?, clock_timestamp())
+                ON CONFLICT (stage) DO UPDATE
+                   SET checked_to = GREATEST(r.checked_to,
+                                             EXCLUDED.checked_to),
+                       updated_at = EXCLUDED.updated_at""".formatted(
+                reconcile);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement upsert = connection.prepareStatement(sql))
+        {
+            upsert.setQueryTimeout(queryTimeoutSeconds);
+            upsert.setString(1, stage);
+            upsert.setTimestamp(2, Timestamp.from(to));
+            upsert.executeUpdate();
         }
         catch (SQLException failure)
         {

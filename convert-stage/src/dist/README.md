@@ -177,8 +177,43 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 ```
 
 `--operator` names who is running the command, for the audit log; on a host, `$SDH_OPERATOR` does the same.
-`status` shows the duties lease, the items not yet complete and the records claimed now; `status --item <id>` shows
-one item and its records by state. It reads only the lease database.
+`status` shows the duties lease, the items not yet complete, the records claimed now, and how far the reconciler
+has checked (`reconciler`); `status --item <id>` shows one item and its records by state. It reads only the lease
+database.
+
+### After an outage
+
+The pod holding the duties lease runs the reconciler: at startup, then every `sdh.reconcile.interval` (15 minutes).
+It finds records split more than `sdh.reconcile.grace` (10 minutes) ago that this stage hasn't converted, rebuilds
+their messages and converts them. It remembers how far it has checked, so after an outage it checks every day
+since, a day at a time, saving its progress after each.
+
+So the first start after a long outage is slower than usual, for three reasons:
+- **It reads every day it missed** before it finds anything: a week down is seven days of record IDs to check.
+- **It converts records that are still on the queue.** It can't tell a queued message from a lost one, so it
+  rebuilds the backlog's records too, and converts them one at a time on the duties pod while the other pods read
+  them off the queue. Each record is still converted once; the second copy is dropped as a duplicate. But the
+  backlog drains more slowly, and the duties pod is busy until the run ends.
+- **A failed record it reached first can't be placed** in the producer's result: audited `convert.placement_unknown`.
+  The record and its error are stored as usual, and the event's record number places it by hand.
+
+What to watch:
+- **`status`'s `reconciler` line:** how far it has checked and how long ago. More than an hour behind, it warns: the
+  duties pod is down (see the `duties` line) or it is catching up.
+- **`convert.reconcile_catching_up` and `convert.reconcile_caught_up`** (audit, `sdh.count` = days): the start and
+  end of a catch-up. A start with no end means the pod stopped part-way; the next run resumes from the last day
+  checked.
+- **`convert.records_recovered`:** after an outage, expected in numbers (mostly queued records). On a normal day,
+  any means a message was lost.
+- **`convert.item_total_missing`:** an item whose records are all converted but whose `item.split` hasn't come. Act
+  only if it is still incomplete once the queue has drained: replay it from the landing node (`replay --item-id`).
+- **Outage length against queue retention** (Kafka and Pub/Sub 7 days by default, SQS 4): longer, and queued
+  messages are lost. Check the retention before a planned outage, and drain the queues first if you can: then
+  there's no backlog to overlap with.
+- **Afterwards,** check that every item completed at the split stage also completed here (`stage.item_completed`).
+
+A stage upgraded from a build without the watermark checks only the last `sdh.reconcile.lookback` (2 days) its first
+time.
 
 ### Troubleshooting
 

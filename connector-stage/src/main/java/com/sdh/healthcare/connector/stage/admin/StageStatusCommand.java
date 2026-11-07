@@ -9,17 +9,19 @@ package com.sdh.healthcare.connector.stage.admin;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.RegistryReport;
 import java.io.PrintStream;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
  * {@code status} for a stage on the shared worker (STAGES.md §7): its
- * duties lease, its items not yet complete, and the records claimed now;
- * or, with {@code --item}, one item. Reads only the lease database: no
- * keys, no tables, no queue.
+ * duties lease, its items not yet complete, the records claimed now and
+ * how far its reconciler has checked; or, with {@code --item}, one item.
+ * Reads only the lease database: no keys, no tables, no queue.
  *
  * @param <C> what it reads from
  * @author Jonas Barnett
@@ -31,6 +33,12 @@ public final class StageStatusCommand<C extends StageAdmin>
 
     /** The most items listed. */
     static final int LISTED = 20;
+
+    /**
+     * How far behind the reconciler's watermark may be before the status
+     * warns: ordinarily it is about 25 minutes, the grace and one interval.
+     */
+    static final Duration STALE = Duration.ofHours(1);
 
     /** Creates the command. */
     public StageStatusCommand()
@@ -50,8 +58,9 @@ public final class StageStatusCommand<C extends StageAdmin>
                 status [--item <id>]
                     Shows the duties lease, the items not yet complete
                     (records stored, of how many) and the records claimed
-                    now; with --item, one item and its records by state.
-                    Reads only: takes no lease and changes nothing.""";
+                    now, and how far the reconciler has checked; with
+                    --item, one item and its records by state. Reads only:
+                    takes no lease and changes nothing.""";
     }
 
     @Override
@@ -84,6 +93,8 @@ public final class StageStatusCommand<C extends StageAdmin>
         {
             status.show("items", () -> items(context.registry(), audit));
             status.show("records", () -> claims(context.registry()));
+            status.show("reconciler",
+                    () -> reconciled(context.registry()));
         }
         status.end();
     }
@@ -132,6 +143,34 @@ public final class StageStatusCommand<C extends StageAdmin>
             text += StatusParts.more(claims.expired() + " of them past their"
                     + " claim: their worker stopped, and the next delivery"
                     + " takes them over");
+        }
+        return text;
+    }
+
+    /**
+     * How far the reconciler has checked, and a warning if that is long
+     * ago: it runs every 15 minutes by default, after a 10-minute grace.
+     *
+     * @param registry the stage's registry
+     * @return the text to show
+     */
+    private static String reconciled(RegistryReport registry)
+    {
+        Optional<RegistryReport.Reconciled> reconciled =
+                registry.reconciled();
+        if (reconciled.isEmpty())
+        {
+            return "hasn't checked yet: it starts at the lookback";
+        }
+        Duration behind = reconciled.get().behind();
+        String text = "checked up to " + reconciled.get().checkedTo() + " ("
+                + behind.toMinutes() + " min ago)";
+        if (behind.compareTo(STALE) > 0)
+        {
+            text += StatusParts.more("more than " + STALE.toHours()
+                    + " h behind: the duties pod is down, or catching up on"
+                    + " an outage (convert.reconcile_catching_up;"
+                    + " STAGES.md §9)");
         }
         return text;
     }

@@ -11,6 +11,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -48,6 +49,9 @@ public final class RegistryReport
 
     /** The records table, with its schema. */
     private final String records;
+
+    /** The reconciler's watermark table, with its schema. */
+    private final String reconcile;
 
     /** The items table, with its schema. */
     private final String items;
@@ -98,6 +102,47 @@ public final class RegistryReport
         this.stage = stage;
         this.records = schema + ".stage_record";
         this.items = schema + ".stage_item";
+        this.reconcile = schema + ".stage_reconcile";
+    }
+
+    /**
+     * How far the stage's reconciler has checked (STAGES.md §9), and how
+     * long ago that is, by the database's clock.
+     *
+     * @param checkedTo every record committed before it has been checked
+     * @param behind    how long before now that is
+     */
+    public record Reconciled(Instant checkedTo, Duration behind)
+    {
+    }
+
+    /**
+     * How far the stage's reconciler has checked.
+     *
+     * @return it; empty if it has never checked a day, or the registry is
+     *         from before the watermark and the stage hasn't started since
+     */
+    public Optional<Reconciled> reconciled()
+    {
+        // The stage is bound first, as in every query here.
+        boolean exists = query("SELECT ?::text IS NOT NULL"
+                + " AND to_regclass(?) IS NOT NULL",
+                statement -> statement.setString(2, reconcile),
+                result -> result.next() && result.getBoolean(1));
+        if (!exists)
+        {
+            return Optional.empty();
+        }
+        return query("SELECT checked_to, extract(epoch FROM now()"
+                + " - checked_to) FROM " + reconcile + " WHERE stage = ?",
+                statement ->
+                {
+                }, result -> result.next()
+                        ? Optional.of(new Reconciled(
+                                result.getTimestamp(1).toInstant(),
+                                Duration.ofMillis(Math.round(
+                                        result.getDouble(2) * 1000))))
+                        : Optional.empty());
     }
 
     /**

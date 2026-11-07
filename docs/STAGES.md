@@ -330,6 +330,19 @@ intake has results on.
   worker as if received. An item whose `item.split` never arrived can't be completed this way (its producer's
   references are in landing); it is audited (`convert.item_total_missing`, once per item), for an operator to
   recover by hand (§13.2).
+- **The reconciler's watermark** (decided 2026-11-07 with the user). Each run looks back `sdh.reconcile.lookback`
+  (2 days), so a record split longer ago than that, whose `record.split` was lost while the stage was down (an SQS
+  queue keeps messages 4 days by default; a queue purged during an outage), was never looked at again. So the
+  registry keeps how far the reconciler has checked, `stage_reconcile.checked_to` (one row per stage, only ever
+  moved forward): every record committed before it has been checked at least once, after its grace. A run looks
+  from the earlier of `checked_to` and now less the lookback, to now less the grace, a day at a time (each day's
+  record IDs are all a run holds in memory, never more), and moves `checked_to` to the end of each day once it is
+  done, so a run cut short resumes where it stopped. Normally `checked_to` is minutes old and the lookback
+  decides, as before. After an outage longer than the lookback, the first run catches up on the days in between
+  (`convert.reconcile_catching_up` at its start, `convert.reconcile_caught_up` at its end, each with
+  `sdh.count`, the days to check). With no row yet (a stage that has never reconciled, or one upgraded to this),
+  a run starts at the lookback: nothing older is checked then. Full scans were rejected: they hold every record
+  ID ever kept.
 - **Settings:** `sdh.stage.*` (§7); `sdh.convert.options`, `.max-bytes`, `.memory`; `sdh.storage` for `records`
   and the catalog `split_records` is read from; `sdh.results` as before; `sdh.lease` for the duties lease.
 
@@ -454,6 +467,10 @@ Each step builds and passes its tests before the next.
   audited and read only, lists an item's failed records with their places, working out a record's message from
   landing (`message_refs_enc`, `message_replaces_enc` and the message index) on request, for the records a result
   couldn't place.
+- **The convert reconciler overlaps the queued backlog** after an outage longer than the grace (§13.4): it can't
+  tell a queued `record.split` from a lost one, so it rebuilds and converts records still on the queue, serially on
+  the duties pod, and a failed one loses its placement. Nothing is converted twice or lost. Raised 2026-11-07, open:
+  a signal that a stage's input is drained, across the seven brokers, would let it rebuild only what is lost.
 - Split records as bronze, in their own namespace and table (§3).
 - Postgres for the registry and item rows (§5–§6): the lease database the stages already use. A row per record
   per stage, kept as long as the records are (it is how duplicates are recognised); about 100 bytes each.
@@ -516,8 +533,9 @@ so recovery is by hand (decided 2026-11-06).
 - A lost `item.landed` is found by the split stage's reconciler, which splits the item from `landed_items` (§8):
   every landed item at startup, then those landed since its last run. So is an item its pod left part way whose
   message was then lost: its checkpoint stalled for longer than the grace (built 2026-11-07).
-- A lost `record.split` is rebuilt by the convert stage's reconciler from `split_records`, for items split within
-  `sdh.reconcile.lookback` (§9).
+- A lost `record.split` is rebuilt by the convert stage's reconciler from `split_records`: for items split within
+  `sdh.reconcile.lookback` (§9), and, after an outage longer than that, for every day since its watermark
+  (§13.4).
 - Nothing else. A lost `item.split` (its producer's references are known only to landing), and anything a stage
   sent on after it, such as `record.stored`, `item.converted` or `item.result`, stay lost: a stage re-sends only
   what it stored and hasn't yet sent, and completes an item once. Corrected 2026-11-07: this said a lost
@@ -592,3 +610,63 @@ producer find its own data, but a producer must not rely on them being complete.
 of the landed item's message index that starts at or before it, and its broker ID is that entry of the item's
 `message_refs_enc`. Only the split stage's key (`landed-items-kek`) opens it, so this is done under the operator's
 account, and recorded in the ticket.
+
+### 13.4 Starting again after a long outage
+
+When the convert stage, or its duties pod, has been down longer than the reconciler's grace (10 minutes), the
+first start afterwards takes longer and works differently than usual. That is expected, and safe for the data;
+this section is what the operator needs to know to recognise it and follow it.
+
+**Why it takes longer.**
+- **The reconciler catches up a day at a time.** It runs once at startup and then every `sdh.reconcile.interval`
+  (15 minutes). It checks every record split since its watermark (`stage_reconcile.checked_to`, §9), or since the
+  lookback if that is later. Each day costs a scan of that day's `split_records` IDs and a registry lookup per item,
+  so a week's outage is seven times a normal run's reading before it finds anything. It saves its progress after
+  each day: a pod restarted part-way resumes at the next day, not the start.
+- **The queued backlog and the reconciler overlap.** The `record.split` messages queued during the outage are still
+  on the broker, but the reconciler can't tell a queued message from a lost one: every record older than the grace
+  that the registry doesn't know looks lost. So at startup it rebuilds them from `split_records` and converts them
+  itself, serially, on the duties pod, while the other pods read the same records off the queue. Each record is
+  converted once: whichever claims it first stores it, and the other copy is a duplicate, acknowledged and dropped
+  (§6). But the duties pod's single thread sets the pace for what it has rebuilt, so the backlog drains more
+  slowly than the same number of records would on a normal day, and the duties pod is busy (its CPU, and its
+  memory budget, `sdh.convert.memory`) until the run ends.
+- **A rebuilt record that fails loses its placement.** A record that failed conversion, and that the reconciler
+  reached before its queue message, has no queue message to name in the producer's result: audited
+  `convert.placement_unknown` (§13.3). The longer the outage, the more of these. The record and its error are
+  stored as for any other; only the result's pointer to the producer's message is missing, and it can be placed by
+  hand (§13.3).
+- **An upgrade to the watermark starts at the lookback.** A stage with no `stage_reconcile` row yet (first started,
+  or upgraded from a build before 2026-11-07) checks only the last `sdh.reconcile.lookback` its first time. A record
+  lost longer ago than that, before the upgrade, isn't found; the audit query of §13.2 is what finds its item.
+
+**What to watch.**
+- `sdh-admin status` (convert): the `reconciler` line shows how far it has checked and how long ago that is.
+  Normally under half an hour. More than an hour behind, it warns: the duties pod is down (the `duties` line says
+  who holds the lease, and when it was renewed), or it is catching up.
+- `convert.reconcile_catching_up` at the start of a run that looks further back than the lookback, and
+  `convert.reconcile_caught_up` at its end, each with `sdh.count`, the days checked. A `catching_up` with no
+  `caught_up` after it means the run stopped part-way (the pod restarted, or lost the lease): the next run picks
+  up from the last day checked. The `convert.reconciled` log line ends every run, with `days=`.
+- `convert.records_recovered` per item rebuilt, with `sdh.count`. After a long outage, many are expected: most are
+  records still on the queue, not lost ones. On a normal day, any at all means a `record.split` was lost (§13.2).
+- `convert.placement_unknown` per failed record rebuilt (§13.3): each needs placing by hand if the producer is to
+  be told where it was.
+- `convert.item_total_missing`: an item whose records are all converted but whose `item.split` never came; replay
+  it from landing (§13.2). During catch-up this can appear for an item whose `item.split` is still queued behind its
+  records; it is reported once, and needs action only if the item still hasn't completed (no
+  `stage.item_completed{stage=convert}`) once the queue has drained.
+- **The outage against the brokers' retention.** Kafka and Pub/Sub keep 7 days by default, SQS 4, Service Bus a
+  time to live. An outage longer than retention loses queued messages: the reconcilers rebuild the records, but a
+  lost `item.landed` beyond the split stage's own reach, or a lost `item.split`, needs the audit query and replay of
+  §13.2. Check the retention configured on each queue before a planned outage, and raise it if the outage may be
+  longer.
+- **The audit query of §13.2** (each stage's `stage.item_completed` against the one before) is the check that
+  nothing was left behind, once the queues have drained and the reconciler has caught up.
+
+**Before a planned outage,** drain the queues first where possible (stop the producers' intake and let each stage
+empty its input): then nothing is queued when the stage starts again, the reconciler finds nothing to rebuild, and
+nothing loses its placement.
+
+**Not yet built:** a way for the reconciler to know the queue is drained, so that it rebuilds only what is really
+lost. There is no single signal for this across the seven brokers; the overlap above is the cost until there is.

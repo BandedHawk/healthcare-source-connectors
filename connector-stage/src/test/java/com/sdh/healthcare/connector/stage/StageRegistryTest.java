@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -248,5 +249,23 @@ class StageRegistryTest
         assertThatThrownBy(() -> new StageRegistry(
                 StageTestSupport.database(), "x; drop table y", "test",
                 "pod-a", LONG)).hasMessageContaining("schema");
+    }
+
+    /**
+     * The reconciler's watermark starts out empty, is shared by the
+     * stage's workers, and only moves forward: a pod that lost the duties
+     * part way can't move it back.
+     */
+    @Test
+    void keepsTheReconcilersWatermarkMovingForward()
+    {
+        assertThat(first.checkedTo()).isEmpty();
+        Instant later = Instant.parse("2026-11-07T06:00:00Z");
+        first.markChecked(later);
+        assertThat(second.checkedTo()).hasValue(later);
+        second.markChecked(later.minus(Duration.ofDays(3)));
+        assertThat(first.checkedTo()).hasValue(later);
+        first.markChecked(later.plusSeconds(60));
+        assertThat(second.checkedTo()).hasValue(later.plusSeconds(60));
     }
 }
