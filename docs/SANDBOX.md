@@ -333,5 +333,18 @@ Checked again since: see the end of this section.
   it, all 110 items landed were split and converted, none twice. The landing node can't run while Vault is
   sealed: it restarted 7 times, the 40 pushes meanwhile failed at the producer, and it took pushes again about
   three minutes after the unseal, Kubernetes' restart delay. The stages' inputs use `groupProtocol=consumer`.
-  Fixed since (revision (ca)), not yet tried here: the landing node stays up through a key service outage, and a
-  node started during one waits for it (`crypto.kms_waiting`) instead of exiting.
+  Fixed since: revision (ca), below.
+- **The landing node through a key service outage (2026-11-07, revision (ca)).** The same run, `scale-demo 150`
+  with Vault sealed for 8 minutes once 51 items had landed: the landing node stayed up, with no restart and no
+  `intake.fatal`. It answered each push while sealed unavailable (503, `push.failed`); the producer doesn't
+  retry, so the other 96 pushes failed within 5 seconds and the run ended short at its 30 minutes. Every item
+  that landed (54) was split and converted, none twice, 53 of them finished after the unseal; no consumer left
+  its group. Then, with Vault sealed again, the landing pod was deleted: the new pod waited for the key service
+  (`crypto.kms_waiting`, ten tries, the last 30 seconds apart) with no restart, holding no lease, and was ready
+  39 seconds after the unseal (`crypto.kms_ready attempts=10 waited_ms=201229`, then `lease.acquired`). The
+  check after it landed, split and converted all 5 samples. Last, recovery: a producer retrying each push every
+  5 seconds, with Vault sealed for 3 minutes, against a running landing node. It was refused 36 times (503),
+  its first push landed 2 seconds after the unseal, and all 20 landed, were split and converted, none twice; no
+  restart. `push.failed` and `crypto.kms_waiting` are console log lines, so only the pod's log has them; the
+  collector gets the refusals as `sdh.push.requests` with `sdh.result=unavailable` (36 here), since only audit
+  events leave the host (DESIGN.md §12).
