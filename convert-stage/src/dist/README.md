@@ -84,7 +84,7 @@ Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` b
 ```sh
 bin/convert-stage                          # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/convert-stage         # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, replay
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The stage exits with status
@@ -216,6 +216,14 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 `status` shows the duties lease, the items not yet complete, the records claimed now, and how far the reconciler
 has checked (`reconciler`); `status --item <id>` shows one item and its records by state. It reads only the lease
 database.
+
+`replay --item-id <id>` sends every `record.stored` and `record.failed` of an item the stage has completed again,
+rebuilt from `records`, then its `item.converted`, and waits for the broker: for an item lost after this stage
+(STAGES.md §13.2). `--with-result` also sends the producer's `item.result` again, for a result that was lost;
+without it, the producer hears nothing, since a second result could set off its own handling. With results off
+(`sdh.results.enabled`), `--with-result` is refused before anything is sent. Each message goes
+under a broker ID of its own (`<messageId>~replay-<millis>`). An item not yet complete is refused. It needs the
+stage's keys and catalog, and writes nothing (`admin.replay`).
 
 ### After an outage
 

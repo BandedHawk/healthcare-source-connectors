@@ -10,6 +10,7 @@ import java.util.Locale;
 import java.util.Map;
 import org.springframework.boot.EnvironmentPostProcessor;
 import org.springframework.boot.SpringApplication;
+import org.springframework.boot.WebApplicationType;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
 
@@ -17,7 +18,10 @@ import org.springframework.core.env.MapPropertySource;
  * Runs the web server only on an HTTP push intake (design §5.3.15). Every
  * other intake has no web server and listens on no port, whatever
  * {@code spring.main.web-application-type} says, so a directory or SFTP
- * node can't be reached over the network.
+ * node can't be reached over the network. An application that has already
+ * been set to run none, an operator command ({@code AdminCli}), gets none
+ * on an HTTP intake too: it runs beside the node, and would otherwise try to
+ * start a second web server.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -42,7 +46,9 @@ public final class WebServerSwitch implements EnvironmentPostProcessor
             SpringApplication application)
     {
         String type = environment.getProperty(TYPE, "directory");
-        boolean http = "http".equals(type.trim().toLowerCase(Locale.ROOT));
+        boolean http = "http".equals(type.trim().toLowerCase(Locale.ROOT))
+                && application.getWebApplicationType()
+                        != WebApplicationType.NONE;
         environment.getPropertySources().addFirst(new MapPropertySource(
                 SOURCE_NAME, Map.of("spring.main.web-application-type",
                         http ? "servlet" : "none")));

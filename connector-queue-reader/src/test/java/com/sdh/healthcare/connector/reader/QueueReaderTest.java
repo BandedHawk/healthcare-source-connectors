@@ -228,6 +228,45 @@ class QueueReaderTest
     }
 
     /**
+     * {@code decodeNew} returns a record's message once: the same body
+     * again, or the message sealed again as a replay sends it, is dropped,
+     * while {@code decode} returns every one. With room for one ID, the
+     * first is forgotten once another is decoded.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void decodeNewDropsARepeatedMessage() throws Exception
+    {
+        UUID itemId = UUID.randomUUID();
+        List<byte[]> bodies = ingest(itemId, "one".getBytes(
+                StandardCharsets.UTF_8), "two".getBytes(
+                StandardCharsets.UTF_8));
+        try (QueueReader reader = reader())
+        {
+            ConnectorMessage first = reader.decodeNew(bodies.get(0))
+                    .orElseThrow();
+            assertThat(reader.decodeNew(bodies.get(0))).isEmpty();
+            assertThat(reader.decodeNew(sealer.seal(first))).isEmpty();
+            assertThat(reader.decodeNew(bodies.get(1))).isPresent();
+            assertThat(reader.decode(bodies.get(0)))
+                    .isEqualTo(first);
+        }
+        try (QueueReader small = QueueReader.builder()
+                .recipientKey("downstream-2026", recipient.getPrivate())
+                .trustedSigner("connector-2026",
+                        (ECPublicKey) signer.getPublic())
+                .catalog(catalog).keyProvider(kms).repeatMemory(1).build())
+        {
+            assertThat(small.decodeNew(bodies.get(0))).isPresent();
+            assertThat(small.decodeNew(bodies.get(1))).isPresent();
+            assertThat(small.decodeNew(bodies.get(0))).isPresent();
+        }
+        assertThatThrownBy(() -> QueueReader.builder().repeatMemory(0))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
      * A message whose record ID doesn't match the rows is refused, and one
      * for a record with no rows isn't found.
      *

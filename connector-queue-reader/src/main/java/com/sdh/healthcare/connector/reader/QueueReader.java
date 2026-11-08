@@ -19,8 +19,10 @@ import java.io.UncheckedIOException;
 import java.security.PrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
@@ -55,6 +57,16 @@ import org.apache.iceberg.catalog.TableIdentifier;
  * The message envelope, encryption, chunk layout and table layout are all
  * handled here. Consumers see only the message records and the record
  * bytes. Thread-safe.
+ * <p>
+ * Delivery is at least once: a stage sends a message again after a crash,
+ * and an operator's replay sends an item's messages again (STAGES.md
+ * §13.2), each with the same contract {@code messageId} (for a record,
+ * its item and record IDs). {@link #decodeNew} drops a message whose ID
+ * this reader has decoded recently, the last
+ * {@link Builder#repeatMemory} IDs; {@link #decode} returns every
+ * message. The memory is the process's own, so a consumer that must never
+ * process a record twice, across its restarts too, keeps the record IDs it
+ * has processed itself.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -77,6 +89,12 @@ public final class QueueReader implements AutoCloseable
     /** The batch data keys unwrapped so far. */
     private final BatchKeyCache keys;
 
+    /**
+     * The message IDs decoded most recently by {@link #decodeNew}, oldest
+     * first; guarded by itself.
+     */
+    private final Map<String, Boolean> seen;
+
     /** The tables loaded so far, by identifier. */
     private final Map<TableIdentifier, Table> tables =
             new ConcurrentHashMap<>();
@@ -97,6 +115,18 @@ public final class QueueReader implements AutoCloseable
         this.keys = new BatchKeyCache(
                 Objects.requireNonNull(builder.keyProvider, "keyProvider"),
                 builder.keyCacheSize);
+        int memory = builder.repeatMemory;
+        this.seen = new LinkedHashMap<>(16, 0.75f, true)
+        {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            protected boolean removeEldestEntry(
+                    Map.Entry<String, Boolean> eldest)
+            {
+                return size() > memory;
+            }
+        };
     }
 
     /**
@@ -130,6 +160,35 @@ public final class QueueReader implements AutoCloseable
                     "This reader was built to read records only");
         }
         return opener.open(body);
+    }
+
+    /**
+     * Decodes a message as {@link #decode} does, but drops it if this
+     * reader has decoded one with the same contract {@code messageId}
+     * recently: a message sent again after a stage's crash, or by a replay
+     * (STAGES.md §13.2), under the same ID. A record's message ID is its
+     * item's and record's IDs, so a record is returned once.
+     *
+     * @param body the broker message's body
+     * @return the message; empty if it repeats one decoded recently
+     * @throws MessageRejectedException if the message can't be trusted or
+     *                                  uses an unsupported contract major
+     *                                  version
+     * @throws IllegalStateException    if the reader was built without
+     *                                  message keys
+     */
+    public Optional<ConnectorMessage> decodeNew(byte[] body)
+            throws MessageRejectedException
+    {
+        ConnectorMessage message = decode(body);
+        synchronized (seen)
+        {
+            if (seen.put(message.messageId(), Boolean.TRUE) != null)
+            {
+                return Optional.empty();
+            }
+        }
+        return Optional.of(message);
     }
 
     /**
@@ -234,6 +293,9 @@ public final class QueueReader implements AutoCloseable
         /** How many unwrapped batch keys are kept in memory. */
         private int keyCacheSize = 256;
 
+        /** How many message IDs {@link QueueReader#decodeNew} remembers. */
+        private int repeatMemory = 100_000;
+
         /**
          * Creates a builder with no keys and the default cache size.
          * {@link QueueReader#builder()} does the same.
@@ -317,6 +379,27 @@ public final class QueueReader implements AutoCloseable
         public Builder keyCacheSize(int size)
         {
             this.keyCacheSize = size;
+            return this;
+        }
+
+        /**
+         * Sets how many message IDs {@link QueueReader#decodeNew} remembers
+         * to drop repeats by (default 100,000, about 15 MiB): the oldest is
+         * forgotten first. Set it above the most messages a stage may send
+         * again at once, such as an item's records for a replay.
+         *
+         * @param size how many; at least 1
+         * @return this builder
+         * @throws IllegalArgumentException if it is less than 1
+         */
+        public Builder repeatMemory(int size)
+        {
+            if (size < 1)
+            {
+                throw new IllegalArgumentException(
+                        "repeatMemory must be at least 1");
+            }
+            this.repeatMemory = size;
             return this;
         }
 

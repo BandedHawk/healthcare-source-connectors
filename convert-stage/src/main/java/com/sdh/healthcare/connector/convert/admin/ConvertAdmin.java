@@ -39,7 +39,7 @@ public final class ConvertAdmin
                         Configuration.class, ConvertProperties.class,
                         ConvertProperties::telemetry,
                         ConvertAdminContext::new),
-                List.of(new StageStatusCommand<>()));
+                List.of(new StageStatusCommand<>(), new ReplayCommand()));
     }
 
     /**

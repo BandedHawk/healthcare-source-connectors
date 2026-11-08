@@ -156,8 +156,32 @@ public final class ResultsChannel implements AutoCloseable
     public void send(ConnectorMessage message)
             throws PublishFailedException, InterruptedException
     {
-        OutboundMessage outbound = OutboundMessage.of(message,
+        send(message, null);
+    }
+
+    /**
+     * Sends a message again, for a replay (STAGES.md §13.2), and waits for
+     * its acknowledgement: the message first sent, under its own
+     * {@code messageId}, but with a broker ID of its own, the message ID
+     * and a suffix, since some brokers drop a message whose ID they have
+     * seen without saying so.
+     *
+     * @param message      the message, for the producer
+     * @param brokerSuffix added to the message ID for the broker's ID;
+     *                     null to send it under the message ID
+     * @throws PublishFailedException if the broker didn't acknowledge it
+     *                                after every retry
+     * @throws InterruptedException   if the wait is interrupted
+     */
+    public void send(ConnectorMessage message, String brokerSuffix)
+            throws PublishFailedException, InterruptedException
+    {
+        OutboundMessage first = OutboundMessage.of(message,
                 sealer.seal(message));
+        OutboundMessage outbound = brokerSuffix == null ? first
+                : new OutboundMessage(first.messageId() + brokerSuffix,
+                        first.type(), first.itemId(), first.key(),
+                        first.body());
         try
         {
             retry.call("results.send", failure -> true, attempt ->

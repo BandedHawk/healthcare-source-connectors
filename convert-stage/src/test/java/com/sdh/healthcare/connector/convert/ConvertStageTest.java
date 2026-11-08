@@ -16,6 +16,7 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
@@ -27,10 +28,11 @@ import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.RecordInput;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.reader.QueueReader;
+import com.sdh.healthcare.connector.stage.RegistryReport;
 import com.sdh.healthcare.connector.stage.StageRegistry;
 import com.sdh.healthcare.connector.stage.StageWorker;
-import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -96,6 +98,12 @@ class ConvertStageTest
 
     /** The convert stage's own key, which its input is sealed to. */
     KeyPair recipient;
+
+    /** Signs what the convert stage sends. */
+    KeyPair signer;
+
+    /** The next stage's key, which the convert stage's output is sealed to. */
+    KeyPair downstream;
 
     /** Holds the KEK. */
     AesKeyWrapProvider kms;
@@ -168,8 +176,8 @@ class ConvertStageTest
     {
         splitSigner = ec();
         recipient = ec();
-        KeyPair signer = ec();
-        KeyPair downstream = ec();
+        signer = ec();
+        downstream = ec();
         KeyGenerator aes = KeyGenerator.getInstance("AES");
         aes.init(256);
         kms = new AesKeyWrapProvider(Map.of(KEK, aes.generateKey()));
@@ -334,6 +342,54 @@ class ConvertStageTest
                 .isEqualTo(BatchHandler.Outcome.DONE);
         assertThat(sentOf("record.stored")).isEqualTo(1);
         assertThat(sentOf("item.converted")).isEqualTo(1);
+    }
+
+    /**
+     * A replay's messages are the ones the stage first sent, rebuilt from
+     * {@code records} and the registry: each record's {@code record.stored}
+     * or {@code record.failed}, the same but for the snapshot named, then
+     * {@code item.converted} with the same counts and intake, at the time
+     * the registry says the item completed (STAGES.md §13.2).
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aReplayRebuildsTheMessagesFirstSent() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2", "3");
+        ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
+                null, null, null, SPLIT_AT, SPLIT_AT);
+        assertThat(worker.handle(List.of(received(messages.get(0)),
+                received(total), received(messages.get(1)))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        MessageOpener opener = new MessageOpener(
+                Map.of("transform", downstream.getPrivate()),
+                Map.of("convert", (ECPublicKey) signer.getPublic()));
+        List<ConnectorMessage> first = new ArrayList<>();
+        for (OutboundMessage message : sent)
+        {
+            first.add(opener.open(message.body()));
+        }
+
+        RegistryReport.Item done = new RegistryReport(
+                postgres.getPostgresDatabase(), schema, ConvertProcessor.STAGE)
+                .item(item).orElseThrow();
+        records.refresh();
+        List<ConnectorMessage> again = ConvertProcessor.replayMessages(item,
+                records, "prod", NS, total.intake(), done.done(),
+                done.failed(), done.completedAt());
+
+        assertThat(again).hasSize(first.size());
+        assertThat(again.subList(0, again.size() - 1))
+                .usingRecursiveFieldByFieldElementComparatorIgnoringFields(
+                        "storage.snapshotId")
+                .containsExactlyInAnyOrderElementsOf(
+                        first.subList(0, first.size() - 1));
+        assertThat(again.get(again.size() - 1)).usingRecursiveComparison()
+                .ignoringFields("completedAt")
+                .isEqualTo(first.get(first.size() - 1));
+        assertThat(((ItemConverted) again.get(again.size() - 1))
+                .completedAt()).isEqualTo(done.completedAt());
     }
 
     /**

@@ -446,6 +446,53 @@ public final class IntakeService implements LandingIntake
     }
 
     /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Resubmitter.Landed resubmit(Resubmitter resubmitter,
+            ResubmitRequests.Request request) throws Exception
+    {
+        writer.lockInterruptibly();
+        try
+        {
+            ensureRecovered();
+            announcePending();
+            Resubmitter.Landed landed;
+            try
+            {
+                landed = resubmitter.land(storage, intake, request);
+            }
+            catch (Exception | Error failure)
+            {
+                // Its checkpoint, if storage wouldn't clear it, is given up
+                // by the next listing, which doesn't find it.
+                checkpointStale = true;
+                throw failure;
+            }
+            LandedItem item = landed.item();
+            if (!landed.recorded())
+            {
+                boolean seenContent =
+                        storage.index().mayHaveContent(item.digest());
+                storage.ledger().record(
+                        List.of(LandingLedger.Entry.of(item)));
+                storage.index().add(item.source().key(), item.digest());
+                if (seenContent)
+                {
+                    reportDuplicate(item);
+                }
+            }
+            unannounced = item;
+            announcePending();
+            return landed;
+        }
+        finally
+        {
+            writer.unlock();
+        }
+    }
+
+    /**
      * Tells whether the source could be listed last time.
      *
      * @return true if it could

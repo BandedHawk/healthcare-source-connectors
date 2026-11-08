@@ -20,6 +20,7 @@ import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
 import com.sdh.healthcare.connector.landing.intake.RemoteSource;
+import com.sdh.healthcare.connector.landing.intake.ResubmitPoller;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.route.RemoteIntakeRoute;
 import com.sdh.healthcare.connector.runtime.FatalExit;
@@ -158,6 +159,24 @@ public class LandingConfiguration
      * @param fatal      the exit hook
      * @return the scheduler
      */
+    /**
+     * Carries out operators' requests to land an item again (STAGES.md
+     * §13.5).
+     *
+     * @param runtime    the node's runtime
+     * @param properties the node's settings
+     * @param fatal      stops the process for a fatal error
+     * @return the poller
+     */
+    @Bean(initMethod = "start", destroyMethod = "close")
+    ResubmitPoller resubmitPoller(LandingRuntime runtime,
+            LandingProperties properties, FatalExit fatal)
+    {
+        return new ResubmitPoller(properties.landing().intake(),
+                runtime.intake(), runtime.resubmitter(), fatal,
+                ResubmitPoller.INTERVAL);
+    }
+
     @Bean(initMethod = "start", destroyMethod = "close")
     MaintenanceScheduler maintenanceScheduler(LandingRuntime runtime,
             LandingProperties properties, FatalExit fatal)

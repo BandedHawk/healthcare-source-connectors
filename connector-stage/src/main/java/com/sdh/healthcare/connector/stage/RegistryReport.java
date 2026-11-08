@@ -174,6 +174,24 @@ public final class RegistryReport
     }
 
     /**
+     * The item's total message, the {@code item.split} or its counterpart
+     * as received, still sealed: for a replay of a completed item
+     * (STAGES.md §13.2).
+     *
+     * @param itemId the item
+     * @return the sealed message; empty if none was received
+     */
+    public Optional<byte[]> totalMessage(UUID itemId)
+    {
+        return query("SELECT total_message FROM " + items
+                + " WHERE stage = ? AND item_id = ?",
+                statement -> statement.setObject(2, itemId),
+                result -> result.next()
+                        ? Optional.ofNullable(result.getBytes(1))
+                        : Optional.empty());
+    }
+
+    /**
      * How many items are complete, and how many aren't.
      *
      * @return the counts, by {@code complete} and {@code incomplete}

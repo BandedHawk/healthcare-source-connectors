@@ -38,7 +38,7 @@ public final class LandingAdmin
                         "landing-connector", Configuration.class,
                         LandingProperties.class, LandingProperties::telemetry,
                         LandingAdminContext::new),
-                List.of(new ReplayCommand()));
+                List.of(new ReplayCommand(), new ResubmitCommand()));
     }
 
     /**

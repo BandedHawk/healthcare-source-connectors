@@ -38,7 +38,8 @@ public final class SplitAdmin
                         Configuration.class, ConnectorProperties.class,
                         ConnectorProperties::telemetry,
                         SplitAdminContext::new),
-                List.of(new RestoreCommand(), new SplitStatusCommand()));
+                List.of(new ReplayCommand(), new RestoreCommand(),
+                        new SplitStatusCommand()));
     }
 
     /**

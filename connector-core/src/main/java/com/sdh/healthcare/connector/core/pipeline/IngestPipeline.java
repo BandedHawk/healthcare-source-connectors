@@ -1065,13 +1065,8 @@ public final class IngestPipeline implements AutoCloseable
         {
             StorageRef ref = new StorageRef(settings.catalogName(), namespace,
                     tableName, row.ingestedDate(), snapshotId, row.kekRef());
-            int message = refs.message(row.sourceOffset());
-            messages.add(new RecordSplit(row.recordId(), current.itemId(),
-                    row.seq(), row.sourceOffset(), row.sourceLength(),
-                    row.format(), row.contentType(), row.plaintextLength(),
-                    row.chunkCount(), ref, row.origin(), row.errorCode(),
-                    row.errorAt(), message, refs.messageRef(message),
-                    refs.messageReplaced(message)));
+            messages.add(SplitMessages.recordSplit(current.itemId(), row,
+                    ref, refs));
         }
         Telemetry.get().audit("publish.republish",
                 Fields.of(Attr.ITEM_ID, current.itemId())

@@ -100,7 +100,8 @@ public final class ResultReporter
      *                   larger problem still gets a part of its own
      * @return the parts, at least one
      */
-    static List<ItemResult> parts(ItemSplit total, List<Failed> failed,
+    public static List<ItemResult> parts(ItemSplit total,
+            List<Failed> failed,
             Instant finishedAt, int partSize, int partBytes)
     {
         String status = total.failure() == null ? ItemResult.COMPLETED

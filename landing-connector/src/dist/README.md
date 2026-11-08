@@ -188,7 +188,7 @@ Leave room to grow: a ledger near the top of its row needs the next row's heap t
 ```sh
 bin/landing-connector                      # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx1g bin/landing-connector     # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin replay --item-id <id>   # operator commands: replay
+SDH_OPERATOR=alice bin/sdh-admin replay --item-id <id>   # operator commands: replay, resubmit
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The node exits with status 70
@@ -308,6 +308,20 @@ lost after: the split stage splits an item it hasn't, and announces again one it
 of its own for the message (`il-<id>~replay-<millis>`), so a broker that drops repeated IDs doesn't drop it; the
 message itself is the one first sent. No receipt goes to the producer, and nothing is written to the tables, so
 it is safe to run beside the node. Every run is audited (`admin.replay`).
+
+`resubmit --item-id <id> [--again]` lands a fully landed item again, from what landing kept, as a new item that
+replaces it (`replaces_item_id`), as if its producer had sent it again; both items are kept. It is for an item the
+pipeline failed for a reason that wasn't the item's, such as an outage before the split stage recognised one
+(STAGES.md §13.5): a replay doesn't help there, since the split stage only announces a failed item's failure
+again. The command takes no lease and writes no landing storage: it leaves a request in the lease database
+(`sdh_landing_resubmit`, beside the lease table, created by the node at startup), which the node holding the
+intake's lease carries out within about 10 seconds, and waits up to 2 minutes for it, printing the new item's ID.
+The node audits `item.resubmitted`, or `resubmit.refused` for an item it can't land again. Run again for an
+item already landed again, it is refused unless `--again`, so it never lands a second copy by mistake; run while
+a request is still open, it waits for that one. The producer gets a receipt and a result for the new item, each
+naming the item it replaces. The records split from the first item before it failed are split again under the
+new one, so a consumer sees them under both: the first item is `FAILED` and the new one names it. Every run is
+audited (`admin.resubmit`).
 
 ### Troubleshooting
 

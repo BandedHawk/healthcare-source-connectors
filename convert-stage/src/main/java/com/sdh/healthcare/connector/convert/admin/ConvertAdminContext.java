@@ -6,12 +6,29 @@
  */
 package com.sdh.healthcare.connector.convert.admin;
 
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
+import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.convert.ConvertProcessor;
 import com.sdh.healthcare.connector.convert.config.ConvertProperties;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
+import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.sdh.healthcare.connector.stage.RegistryReport;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.StageAdmin;
+import java.time.Duration;
+import java.util.Map;
+import org.apache.camel.CamelContext;
+import org.apache.camel.impl.DefaultCamelContext;
+import org.apache.iceberg.CatalogUtil;
+import org.apache.iceberg.Table;
+import org.apache.iceberg.catalog.Catalog;
+import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.exceptions.NoSuchTableException;
 
 /**
  * What the convert stage's admin commands read from: the lease database
@@ -29,6 +46,21 @@ final class ConvertAdminContext implements StageAdmin, AutoCloseable
     /** The lease database. */
     private final AdminDatabase database;
 
+    /** The keys, once loaded. */
+    private KeyMaterial keys;
+
+    /** The stage's catalog, once built. */
+    private Catalog catalog;
+
+    /** The Camel context the publishers send through, once started. */
+    private CamelContext camel;
+
+    /** The publisher to the stage's output, once created. */
+    private ClosablePublisher publisher;
+
+    /** The producer's results channel, once opened. */
+    private ResultsChannel results;
+
     /**
      * Creates the context; nothing is opened yet.
      *
@@ -38,6 +70,162 @@ final class ConvertAdminContext implements StageAdmin, AutoCloseable
     {
         this.properties = properties;
         this.database = new AdminDatabase(properties.lease());
+    }
+
+    /**
+     * Creates the context with publishers of the caller's, for tests.
+     *
+     * @param properties the stage's settings
+     * @param publisher  sends to the stage's output
+     * @param results    sends to the producer; null for none
+     */
+    ConvertAdminContext(ConvertProperties properties,
+            ClosablePublisher publisher, ResultsChannel results)
+    {
+        this(properties);
+        this.publisher = publisher;
+        this.results = results;
+    }
+
+    /**
+     * The stage's settings.
+     *
+     * @return the settings
+     */
+    ConvertProperties properties()
+    {
+        return properties;
+    }
+
+    /**
+     * The stage's keys, loaded on first use, as the stage loads them.
+     *
+     * @return the keys
+     * @throws Exception if they can't be loaded
+     */
+    KeyMaterial keys() throws Exception
+    {
+        if (keys == null)
+        {
+            keys = KeyMaterial.forStage(properties.crypto(),
+                    KeyMaterial.Providers.DEFAULT);
+        }
+        return keys;
+    }
+
+    /**
+     * The stage's {@code records}, which must exist: loaded, never
+     * created.
+     *
+     * @return the table
+     * @throws IllegalArgumentException if no catalog is configured
+     * @throws IllegalStateException    if the table doesn't exist
+     */
+    Table records()
+    {
+        if (catalog == null)
+        {
+            Map<String, String> settings = properties.storage().catalog();
+            if (settings == null || settings.isEmpty())
+            {
+                throw new IllegalArgumentException(
+                        "sdh.storage.catalog is required");
+            }
+            catalog = CatalogUtil.buildIcebergCatalog(
+                    properties.storage().catalogName(), settings, null);
+        }
+        try
+        {
+            return catalog.loadTable(TableIdentifier.of(
+                    properties.storage().namespace(),
+                    RecordsTable.DEFAULT_NAME));
+        }
+        catch (NoSuchTableException missing)
+        {
+            throw new IllegalStateException("Table "
+                    + RecordsTable.DEFAULT_NAME
+                    + " does not exist: the stage has never run here");
+        }
+    }
+
+    /**
+     * The Camel context the publishers send through, started on first use.
+     *
+     * @return the context
+     */
+    private CamelContext camel()
+    {
+        if (camel == null)
+        {
+            camel = new DefaultCamelContext();
+            camel.start();
+        }
+        return camel;
+    }
+
+    /**
+     * The publisher to the stage's output ({@code sdh.stage.output}),
+     * created on first use, as the stage creates its own.
+     *
+     * @return the publisher
+     */
+    ClosablePublisher publisher()
+    {
+        if (publisher == null)
+        {
+            CommonSettings.Queue output = properties.stage().output();
+            if (output == null || output.uri() == null)
+            {
+                throw new IllegalArgumentException(
+                        "sdh.stage.output is required");
+            }
+            QueueType type = QueueType.of(output.type());
+            CamelContext context = camel();
+            Publishers.configureBroker(context, type,
+                    output.artemis().brokerUrl(), output.artemis().username(),
+                    output.artemis().password());
+            publisher = Publishers.create(context, type,
+                    type.effectiveUri(output.uri()));
+        }
+        return publisher;
+    }
+
+    /**
+     * The producer's results channel, opened on first use, as the stage
+     * opens it.
+     *
+     * @return the channel
+     * @throws IllegalArgumentException if results are off
+     * @throws Exception                if the producer's key can't be read
+     */
+    ResultsChannel results() throws Exception
+    {
+        if (results == null)
+        {
+            if (!properties.results().enabled())
+            {
+                throw new IllegalArgumentException(
+                        "Results are off (sdh.results.enabled)");
+            }
+            publisher();
+            KeyMaterial loaded = keys();
+            results = ResultsChannel.open(properties.results(),
+                    properties.stage().output(), camel(), loaded.signer(),
+                    loaded.signerKid(), retry(), Duration.ofSeconds(30));
+        }
+        return results;
+    }
+
+    /**
+     * How a send is tried again: the stage's retry settings.
+     *
+     * @return the policy
+     */
+    RetryPolicy retry()
+    {
+        return new RetryPolicy(properties.retry().maxAttempts(),
+                properties.retry().initialBackoff(),
+                properties.retry().maxBackoff());
     }
 
     @Override
@@ -68,6 +256,34 @@ final class ConvertAdminContext implements StageAdmin, AutoCloseable
     @Override
     public void close()
     {
+        closeQuietly(results);
+        closeQuietly(publisher);
+        closeQuietly(camel);
+        if (keys != null)
+        {
+            keys.close();
+        }
+        closeQuietly(catalog);
         database.close();
+    }
+
+    /**
+     * Closes something, if it holds anything to close.
+     *
+     * @param resource the resource, or null
+     */
+    private static void closeQuietly(Object resource)
+    {
+        if (resource instanceof AutoCloseable closeable)
+        {
+            try
+            {
+                closeable.close();
+            }
+            catch (Exception ignored)
+            {
+                // exiting
+            }
+        }
     }
 }

@@ -237,6 +237,44 @@ public final class BatchService implements LandingIntake, BatchHandler
      * {@inheritDoc}
      */
     @Override
+    public Resubmitter.Landed resubmit(Resubmitter resubmitter,
+            ResubmitRequests.Request request) throws Exception
+    {
+        writer.lockInterruptibly();
+        try
+        {
+            prepare();
+            Resubmitter.Landed landed;
+            try
+            {
+                landed = resubmitter.land(storage, intake, request);
+            }
+            catch (Exception | Error failure)
+            {
+                unfinished = true;
+                throw failure;
+            }
+            if (landed.recorded())
+            {
+                unannounced = landed.item();
+            }
+            else
+            {
+                unrecorded = landed.item();
+            }
+            finishLast();
+            return landed;
+        }
+        finally
+        {
+            writer.unlock();
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public long ledgerItems()
     {
         return storage.index().size();

@@ -88,7 +88,7 @@ Records are stored as split, in their original form. Conversion to JSON and the 
 ```sh
 bin/file-connector                         # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/file-connector        # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, replay
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The connector exits with
@@ -228,6 +228,11 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 `restore --item-id <id> --to /tmp` decrypts a landed item into the pod's `/tmp`. `kubectl cp` can't copy out of this
 image, because it needs `tar`; read it through a debug container instead (below), from `/proc/1/root/tmp/<id>`,
 and delete it when you're done.
+`replay --item-id <id>` sends every `record.split` of an item the stage has finished again, rebuilt from
+`split_records`, then its `item.split`, and waits for the broker: for an item lost between this stage and the
+convert stage, which converts what it lacks and completes the item (STAGES.md §13.2). Each message goes under a
+broker ID of its own (`<messageId>~replay-<millis>`), so a broker that drops repeated IDs doesn't drop it. An item
+still being split is refused. Nothing is written, so it is safe beside the running stage (`admin.replay`).
 
 ### Troubleshooting
 

@@ -11,7 +11,10 @@ import com.sdh.healthcare.connector.broker.send.Publishers;
 import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
+import com.sdh.healthcare.connector.landing.intake.ResubmitRequests;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
+import java.time.Duration;
 import java.util.Map;
 import org.apache.camel.CamelContext;
 import org.apache.camel.impl.DefaultCamelContext;
@@ -23,11 +26,12 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
 
 /**
  * What the landing node's admin commands use, each part opened only when a
- * command needs it. Nothing is written to the tables or the lease
- * database, and no lease is taken, so the commands are safe beside the
- * running node: tables are loaded, never created. Unlike the stages'
- * commands, {@code replay} sends to the node's queue, so the publisher is
- * here too (design §11.4).
+ * command needs it. Nothing is written to the tables, and no lease is
+ * taken, so the commands are safe beside the running node: tables are
+ * loaded, never created. Unlike the stages' commands, {@code replay} sends
+ * to the node's queue, so the publisher is here too (design §11.4), and
+ * {@code resubmit} leaves a request in the lease database for the node to
+ * carry out (STAGES.md §13.5).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -50,6 +54,9 @@ final class LandingAdminContext implements AutoCloseable
     /** The publisher to the node's queue, once created. */
     private ClosablePublisher publisher;
 
+    /** The lease database, opened for writing on first use. */
+    private final AdminDatabase database;
+
     /**
      * Creates the context; nothing is opened yet.
      *
@@ -58,6 +65,7 @@ final class LandingAdminContext implements AutoCloseable
     LandingAdminContext(LandingProperties properties)
     {
         this.properties = properties;
+        this.database = new AdminDatabase(properties.lease(), true);
     }
 
     /**
@@ -71,6 +79,7 @@ final class LandingAdminContext implements AutoCloseable
     {
         this.properties = properties;
         this.publisher = publisher;
+        this.database = new AdminDatabase(properties.lease(), true);
     }
 
     /**
@@ -157,9 +166,22 @@ final class LandingAdminContext implements AutoCloseable
         return publisher;
     }
 
+    /**
+     * The requests to land an item again, in the lease database: the
+     * node creates the table at startup.
+     *
+     * @return the request store
+     */
+    ResubmitRequests resubmitRequests()
+    {
+        return new ResubmitRequests(database.dataSource(),
+                properties.lease().jdbc().table(), Duration.ofSeconds(10));
+    }
+
     @Override
     public void close() throws Exception
     {
+        database.close();
         try
         {
             if (publisher != null)

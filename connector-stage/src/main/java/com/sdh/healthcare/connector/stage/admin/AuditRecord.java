@@ -20,6 +20,9 @@ import com.sdh.healthcare.connector.core.telemetry.Fields;
 public final class AuditRecord
 {
 
+    /** Who ran the command. */
+    private final String operator;
+
     /** The fields known so far. */
     private Fields fields;
 
@@ -30,7 +33,18 @@ public final class AuditRecord
      */
     public AuditRecord(String operator)
     {
+        this.operator = operator;
         this.fields = Fields.of(Attr.OPERATOR, operator);
+    }
+
+    /**
+     * Who ran the command.
+     *
+     * @return the operator's name
+     */
+    public String operator()
+    {
+        return operator;
     }
 
     /**

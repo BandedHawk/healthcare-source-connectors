@@ -6,6 +6,9 @@
  */
 package com.sdh.healthcare.connector.file.admin;
 
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
@@ -15,10 +18,13 @@ import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import java.time.Duration;
 import java.util.Map;
+import org.apache.camel.CamelContext;
+import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
@@ -58,6 +64,12 @@ final class SplitAdminContext implements AutoCloseable
     /** Landing's ID keys, once loaded. */
     private RecordIds landingIds;
 
+    /** The Camel context the publisher sends through, once started. */
+    private CamelContext camel;
+
+    /** The publisher to the stage's output, once created. */
+    private ClosablePublisher publisher;
+
     /**
      * Creates the context; nothing is opened yet.
      *
@@ -67,6 +79,49 @@ final class SplitAdminContext implements AutoCloseable
     {
         this.properties = properties;
         this.database = new AdminDatabase(properties.lease());
+    }
+
+    /**
+     * Creates the context with a publisher of the caller's, for tests.
+     *
+     * @param properties the stage's settings
+     * @param publisher  sends the commands' messages
+     */
+    SplitAdminContext(ConnectorProperties properties,
+            ClosablePublisher publisher)
+    {
+        this(properties);
+        this.publisher = publisher;
+    }
+
+    /**
+     * The publisher to the stage's output ({@code sdh.stage.output}),
+     * created on first use, as the stage creates its own: for
+     * {@code replay}.
+     *
+     * @return the publisher
+     * @throws Exception if the Camel context can't start
+     */
+    ClosablePublisher publisher() throws Exception
+    {
+        if (publisher == null)
+        {
+            CommonSettings.Queue output = properties.queue();
+            if (output == null || output.uri() == null)
+            {
+                throw new IllegalArgumentException(
+                        "sdh.stage.output is required");
+            }
+            QueueType type = QueueType.of(output.type());
+            camel = new DefaultCamelContext();
+            Publishers.configureBroker(camel, type,
+                    output.artemis().brokerUrl(), output.artemis().username(),
+                    output.artemis().password());
+            camel.start();
+            publisher = Publishers.create(camel, type,
+                    type.effectiveUri(output.uri()));
+        }
+        return publisher;
     }
 
     /**
@@ -239,6 +294,18 @@ final class SplitAdminContext implements AutoCloseable
     @Override
     public void close()
     {
+        if (publisher != null)
+        {
+            try
+            {
+                publisher.close();
+            }
+            catch (Exception ignored)
+            {
+                // exiting
+            }
+        }
+        closeQuietly(camel);
         if (keys != null)
         {
             keys.close();
@@ -252,11 +319,11 @@ final class SplitAdminContext implements AutoCloseable
     }
 
     /**
-     * Closes a catalog, if it holds anything to close.
+     * Closes a catalog or Camel context, if it holds anything to close.
      *
-     * @param catalog the catalog, or null
+     * @param catalog the catalog or context, or null
      */
-    private static void closeQuietly(Catalog catalog)
+    private static void closeQuietly(Object catalog)
     {
         if (catalog instanceof AutoCloseable closeable)
         {

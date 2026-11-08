@@ -39,4 +39,25 @@ public interface LandingIntake
      * @return the number of ledger entries
      */
     long ledgerItems();
+
+    /**
+     * Lands an item already landed again, as a new item linked to it, for
+     * an operator's request (STAGES.md §13.5), or finds the item an
+     * earlier try of the request landed; then records and announces it as
+     * the intake does its own. Holds the writer lock, after the intake's
+     * recovery.
+     *
+     * @param resubmitter lands the item
+     * @param request     the request
+     * @return the new item
+     * @throws Resubmitter.RefusedException if the request can never be
+     *                                      carried out
+     * @throws Resubmitter.BusyException    if the intake has an unfinished
+     *                                      item of its own to resume
+     * @throws Exception                    if storage, the key service or
+     *                                      the broker fails: the request
+     *                                      is tried again later
+     */
+    Resubmitter.Landed resubmit(Resubmitter resubmitter,
+            ResubmitRequests.Request request) throws Exception;
 }

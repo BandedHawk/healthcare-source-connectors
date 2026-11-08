@@ -12,27 +12,42 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.broker.receive.BatchHandler.Outcome;
 import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.contract.jose.MessageOpener;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.FileConnectorApplication;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.file.TestLanding;
+import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.file.split.SplitHandler;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
+import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.interfaces.ECPublicKey;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
@@ -201,6 +216,10 @@ class AdminCommandsTest
     @Autowired
     ConnectorRuntime runtime;
 
+    /** The stage's settings, as the admin commands read them. */
+    @Autowired
+    ConnectorProperties properties;
+
     /** The item that split completely. */
     UUID goodId;
 
@@ -299,6 +318,102 @@ class AdminCommandsTest
             return paths.map(path -> path.getFileName().toString()).sorted()
                     .toList();
         }
+    }
+
+    /**
+     * Records what it is given to send, acknowledging each at once.
+     *
+     * @param sent where the messages go
+     */
+    record Recording(List<OutboundMessage> sent) implements ClosablePublisher
+    {
+
+        @Override
+        public CompletableFuture<Void> publish(OutboundMessage message)
+        {
+            sent.add(message);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public void close()
+        {
+        }
+    }
+
+    /**
+     * Replays an item through the command, as operator {@code alice}.
+     *
+     * @param itemId the item
+     * @param now    the time the broker IDs are made from
+     * @return what was sent
+     * @throws Exception if the command fails
+     */
+    List<OutboundMessage> replay(UUID itemId, Instant now) throws Exception
+    {
+        List<OutboundMessage> sent = new CopyOnWriteArrayList<>();
+        try (SplitAdminContext context =
+                new SplitAdminContext(properties, new Recording(sent)))
+        {
+            new ReplayCommand(Clock.fixed(now, ZoneOffset.UTC)).run(
+                    AdminArgs.parse(List.of("replay", "--item-id",
+                            itemId.toString()), Set.of()),
+                    context, new AuditRecord("alice"),
+                    new PrintStream(new ByteArrayOutputStream(), true,
+                            UTF_8));
+        }
+        return sent;
+    }
+
+    /**
+     * A finished item's output is sent again: every record.split, in
+     * order, then its item.split, sealed to the convert stage and signed
+     * by the split stage, each under its own message ID with a broker ID
+     * of its own. The failed item's item.split names its failure and
+     * counts the records it committed. An item the stage never had is
+     * refused, and nothing is sent.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void replaysAFinishedItemsRecordsThenItsItemSplit() throws Exception
+    {
+        MessageOpener opener = new MessageOpener(
+                Map.of("downstream-2026", KEYS.recipient.getPrivate()),
+                Map.of("connector-2026",
+                        (ECPublicKey) KEYS.signing.getPublic()));
+        Instant now = Instant.parse("2026-11-07T06:00:00Z");
+        List<OutboundMessage> good = replay(goodId, now);
+        assertThat(good).hasSize(4);
+        List<ConnectorMessage> opened = new ArrayList<>();
+        for (OutboundMessage message : good)
+        {
+            ConnectorMessage inside = opener.open(message.body());
+            opened.add(inside);
+            assertThat(message.messageId()).isEqualTo(inside.messageId()
+                    + "~replay-" + now.toEpochMilli());
+            assertThat(message.itemId()).isEqualTo(goodId);
+        }
+        assertThat(opened.subList(0, 3)).allSatisfy(message ->
+                assertThat(message).isInstanceOf(RecordSplit.class));
+        assertThat(opened.subList(0, 3)).extracting(
+                message -> ((RecordSplit) message).seq())
+                .isSorted().doesNotHaveDuplicates();
+        ItemSplit total = (ItemSplit) opened.get(3);
+        assertThat(total.recordCount()).isEqualTo(3);
+        assertThat(total.failure()).isNull();
+        assertThat(total.intake()).isEqualTo(INTAKE);
+
+        List<OutboundMessage> bad = replay(badId, now);
+        ItemSplit failed = (ItemSplit) opener.open(
+                bad.get(bad.size() - 1).body());
+        assertThat(failed.failure()).isNotNull();
+        assertThat(bad).hasSize((int) failed.recordCount() + 1);
+
+        assertThatThrownBy(() -> replay(UUID.randomUUID(), now))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("no row");
+        assertThat(FATAL).isEmpty();
     }
 
     /**

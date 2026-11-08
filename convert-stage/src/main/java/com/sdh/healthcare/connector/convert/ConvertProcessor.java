@@ -45,6 +45,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -53,6 +54,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
@@ -93,7 +95,7 @@ public final class ConvertProcessor
     public static final int SKIP_ON_ATTEMPT = 3;
 
     /** The intake of an item whose {@code item.split} no longer opens. */
-    static final String UNKNOWN_INTAKE = "unknown";
+    public static final String UNKNOWN_INTAKE = "unknown";
 
     /** Logs converter bugs, by class name only. */
     private static final Logger LOG =
@@ -631,6 +633,70 @@ public final class ConvertProcessor
                 record.format(), representation.contentType(),
                 representation.mapping(), record.plaintextLength(),
                 record.chunkCount(), ref, record.origin());
+    }
+
+    /**
+     * A completed item's output, rebuilt as the stage first sent it, for a
+     * replay (STAGES.md §13.2): a {@code record.stored} or
+     * {@code record.failed} for each record in {@code records}, in order,
+     * then its {@code item.converted}. Each record names the table's
+     * current snapshot rather than the one it was stored in, which reads
+     * the same.
+     *
+     * @param itemId      the item
+     * @param records     the {@code records} table, refreshed
+     * @param catalog     the catalog's name, as messages give it
+     * @param namespace   the table's namespace
+     * @param intake      the item's intake, from its {@code item.split}
+     * @param done        its records stored, from the registry
+     * @param failed      those stored in their original form
+     * @param completedAt when the stage completed it, from the registry
+     * @return the messages
+     */
+    public static List<ConnectorMessage> replayMessages(UUID itemId,
+            Table records, String catalog, String namespace, String intake,
+            long done, long failed, Instant completedAt)
+    {
+        long snapshotId = records.currentSnapshot() == null ? -1
+                : records.currentSnapshot().snapshotId();
+        List<ConnectorMessage> messages = new ArrayList<>();
+        for (CommittedRecords.Row row : CommittedRecords.all(records, itemId))
+        {
+            messages.add(recordMessage(itemId, row, new StorageRef(catalog,
+                    namespace, RecordsTable.DEFAULT_NAME, row.ingestedDate(),
+                    snapshotId, row.kekRef())));
+        }
+        messages.add(new ItemConverted(itemId, intake, done, failed,
+                completedAt));
+        return messages;
+    }
+
+    /**
+     * A stored record's {@code record.stored} or {@code record.failed},
+     * rebuilt from its row of {@code records} as the stage first sent it,
+     * but for the snapshot it names: for a replay (STAGES.md §13.2).
+     *
+     * @param itemId its item
+     * @param row    its row
+     * @param ref    where it is stored: the row's day and KEK, and a
+     *               snapshot that holds it
+     * @return {@code record.failed} if it has an error, else
+     *         {@code record.stored}
+     */
+    public static ConnectorMessage recordMessage(UUID itemId,
+            CommittedRecords.Row row, StorageRef ref)
+    {
+        if (row.errorCode() != null)
+        {
+            return new RecordFailed(row.recordId(), itemId, row.seq(),
+                    row.sourceOffset(), row.sourceLength(), row.format(),
+                    row.contentType(), row.errorCode(), row.plaintextLength(),
+                    row.chunkCount(), ref, row.origin(), row.errorAt());
+        }
+        return new RecordStored(row.recordId(), itemId, row.seq(),
+                row.sourceOffset(), row.sourceLength(), row.format(),
+                row.contentType(), row.mapping(), row.plaintextLength(),
+                row.chunkCount(), ref, row.origin());
     }
 
     /**

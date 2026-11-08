@@ -13,8 +13,9 @@ import com.zaxxer.hikari.HikariDataSource;
 import java.time.Duration;
 
 /**
- * The lease database, as the admin commands open it: one read-only
- * connection, opened on first use. It holds the leases, the stages'
+ * The lease database, as the admin commands open it: one connection,
+ * opened on first use, read-only unless a command leaves a request there
+ * (landing's {@code resubmit}). It holds the leases, the stages'
  * registries and the split stage's item rows (STAGES.md §5).
  *
  * @author Jonas Barnett
@@ -26,21 +27,36 @@ public final class AdminDatabase implements AutoCloseable
     /** The database's settings. */
     private final CommonSettings.Lease settings;
 
+    /** Whether the connection may write. */
+    private final boolean writes;
+
     /** The pool, once opened. */
     private HikariDataSource pool;
 
     /**
-     * Describes the database, without opening it.
+     * Describes the database, read-only, without opening it.
      *
      * @param settings the stage's lease settings
      */
     public AdminDatabase(CommonSettings.Lease settings)
     {
-        this.settings = settings;
+        this(settings, false);
     }
 
     /**
-     * The read-only pool, opened on first use.
+     * Describes the database, without opening it.
+     *
+     * @param settings the stage's lease settings
+     * @param writes   whether the connection may write
+     */
+    public AdminDatabase(CommonSettings.Lease settings, boolean writes)
+    {
+        this.settings = settings;
+        this.writes = writes;
+    }
+
+    /**
+     * The pool, opened on first use.
      *
      * @return the pool
      * @throws IllegalArgumentException if no JDBC URL is set
@@ -61,7 +77,7 @@ public final class AdminDatabase implements AutoCloseable
             config.setPassword(jdbc.password());
             config.setMaximumPoolSize(1);
             config.setConnectionTimeout(10_000);
-            config.setReadOnly(true);
+            config.setReadOnly(!writes);
             config.setPoolName("sdh-admin");
             pool = new HikariDataSource(config);
         }

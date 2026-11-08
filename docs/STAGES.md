@@ -550,11 +550,10 @@ Each step builds and passes its tests before the next.
   recovered by hand by replaying the item (§13.2). No automatic recovery: a message lost after the broker took it
   points to a larger problem with the infrastructure, which needs an operator anyway (decided).
 - **Replay tooling** (§13.2): an admin command per stage that sends all its output for a completed item again,
-  with the rules of §13.2. Landing's, `replay --item-id`, built 2026-11-07; the split and convert stages' to
-  build later.
-- **`QueueReader` doesn't drop repeated messages.** A reader outside the stages reads a record twice when it is
-  sent again (a resend after a crash, or a replay). Proposed: the reader drops repeats by record ID, built with the
-  replay tooling.
+  with the rules of §13.2. Landing's, `replay --item-id`, built 2026-11-07; the split and convert stages' the
+  same day (revision (cc)).
+- **`QueueReader` doesn't drop repeated messages.** Resolved 2026-11-07 (revision (cc)): `decodeNew` drops a
+  message whose contract ID it has decoded recently (DESIGN.md §10.2); `decode` still returns every one.
 - **Editing bad data**, to revisit later: an item or record whose data won't let it past a stage, and must be edited
   or cleaned. Replay sends data again unchanged; an edit changes it. Under the rule that nothing is lost or
   replaced, an edited item is probably a new item linked to the original, with who changed what recorded, never a
@@ -580,8 +579,9 @@ Each step builds and passes its tests before the next.
   was down (Vault sealed, storage unreachable) counted the same, so three retries during an outage failed a valid
   document. Decided 2026-11-07: an attempt whose error says a service was down (`Outage`, an allow-list) takes its
   restart back, and `item.restart_not_counted` is audited; crashes and every other error count as before. Still
-  open: an item already failed this way can't be split again, since a replay doesn't re-split a `FAILED` item; it
-  needs a way for an operator to clear the failure (§13.5).
+  open until 2026-11-07, revision (cb): an item already failed this way couldn't be split again, since a replay
+  doesn't re-split a `FAILED` item. Decided with the user: the landing node's `resubmit` lands it again as a new
+  item that replaces it, rather than splitting it again in place (§13.5).
 - Split records as bronze, in their own namespace and table (§3).
 - Postgres for the registry and item rows (§5–§6): the lease database the stages already use. A row per record
   per stage, kept as long as the records are (it is how duplicates are recognised); about 100 bytes each.
@@ -671,10 +671,12 @@ Per stage, a replay sends:
 - **landing:** the item's `item.landed`. The split stage splits an item it hasn't, and sends the `item.split` of
   one it has finished again, unchanged (`ended_at` is fixed). This is all a lost `item.split` needs, so it was
   built first (2026-11-07): `sdh-admin replay --item-id <id>` on the landing node (design §11.4);
-- **split:** every `record.split` of the item, rebuilt from `split_records` as the reconciler rebuilds them, then
-  its `item.split`;
-- **convert:** every `record.stored` and `record.failed`, rebuilt from `records`, then `item.converted`; the
-  producer's `item.result` only if asked (below);
+- **split:** every `record.split` of the item, rebuilt from `split_records` and placed in its landed message as
+  when first sent, then its `item.split`, rebuilt from its checkpoint: `sdh-admin replay --item-id <id>` on the
+  split stage (built 2026-11-07, revision (cc));
+- **convert:** every `record.stored` and `record.failed`, rebuilt from `records`, then `item.converted`, with the
+  counts and completion time the registry kept; the producer's `item.result` only if asked (below), with
+  `--with-result`: `sdh-admin replay --item-id <id>` on the convert stage (built 2026-11-07, revision (cc));
 - **transform** (step 6): the same, from its own tables.
 
 **Rules, so a replay harms nothing:**
@@ -688,7 +690,8 @@ Per stage, a replay sends:
 3. **The producer's result only on request.** The contract allows `item.result` again (a resend after a crash has
    the same IDs), but producers are outside organisations, and a second result could set off their own handling.
    It is sent again only when the operator asks, for an item whose result was lost.
-4. **Readers outside the stages** must drop the repeats: `QueueReader` is to do it by record ID (§12).
+4. **Readers outside the stages** must drop the repeats: `QueueReader.decodeNew` does, by the contract message ID,
+   which for a record is its item and record IDs (built 2026-11-07, DESIGN.md §10.2).
 5. **Under the build that stored it,** where possible: under a newer one each record meets another version
    downstream and is processed again to compare, with §13.1's risk.
 
@@ -700,9 +703,10 @@ names no message for it (audited `convert.placement_unknown`; §13.3).
 broker. It rebuilds the message from the item's summary row: the one first sent, naming the table's current
 snapshot instead of the one it was landed in (the split stage reads the current table either way). For that, the
 landing node keeps each batch's time to the microsecond, as the table does, so the rebuilt `landedAt` matches.
-The split and convert stages' replays are still to build; until then, what they sent on is recovered only
-where the broker keeps a log that can be read again (Kafka, Event Hubs), by moving the next stage's consumer
-back.
+The split and convert stages' replays followed the same day (revision (cc)). Each rebuilds its records' messages
+from its table, naming the table's current snapshot, which the reader reads the same, and its item-complete message
+from what it kept: the split stage's checkpoint, with when splitting ended, and the convert stage's registry, with
+its counts and when it completed. Both refuse an item not finished, and send under broker IDs of their own.
 
 ### 13.3 Telling the producer
 
@@ -816,6 +820,23 @@ the guard is for, shows the pod restarting instead (an out-of-memory exit, `OOMK
 
 **What to do:** nothing has been lost. The item is still in landing, and the records split before the failure are
 stored. But a replay from landing doesn't split it again, since the split stage finishes a `FAILED` item by
-announcing its failure again (§13.2). Clearing the failure so it is split again needs tooling not yet built;
-until then, the producer can send the original again: a push is always a new item, and a file is landed again
-under a new name (DESIGN.md §5.3.3; `item.duplicate_content` notes it).
+announcing its failure again (§13.2). Instead, land it again as a new item that replaces it, from what landing
+kept (built 2026-11-07, revision (cb)):
+
+```sh
+sdh-admin resubmit --item-id <id> --operator alice     # on the landing node of the item's intake
+```
+
+The command leaves a request in the lease database, and the node holding the intake's lease lands the item's bytes
+again within about 10 seconds, under a new item ID, with `replaces_item_id` naming the failed one, and announces
+it; the command waits for it and prints the new ID (`item.resubmitted`). The split stage splits the new item as any
+other. Both items are kept: the failed one stays `FAILED`, so the records split from it before it failed reach a
+consumer under both items, the new one naming the old. The producer gets a receipt and a result for the new item,
+naming the one it replaces, as for its own resubmission; tell it beforehand (§13.3). Run again for the same item,
+the command is refused unless `--again`, so a second copy is never landed by mistake.
+
+**Why a new item, not the failed one split again** (decided 2026-11-07): the split stage would resume the failed
+item at its checkpoint and repeat nothing, but the convert stage has already completed it as `FAILED`: it keeps the
+first total it gets for an item and completes each once, and the item's `item.split` always has the same message ID.
+Splitting it again in place would mean undoing those rules; landing it again as a new item changes nothing
+downstream, and nothing in place.

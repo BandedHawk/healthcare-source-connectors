@@ -348,3 +348,14 @@ Checked again since: see the end of this section.
   restart. `push.failed` and `crypto.kms_waiting` are console log lines, so only the pod's log has them; the
   collector gets the refusals as `sdh.push.requests` with `sdh.result=unavailable` (36 here), since only audit
   events leave the host (DESIGN.md §12).
+- **Resubmit and the stages' replays (2026-11-08, revisions (cb) and (cc)).** The one item the earlier outage had
+  failed `RESUME_NO_PROGRESS` was landed again with `resubmit` on the landing node, in 26 seconds: a new item
+  naming it in `replaces_item_id` (`item.resubmitted`), split and converted (1 record, none failed) 21 seconds
+  later. The failed item stays `FAILED`; it had split no records, so nothing reached the convert stage twice. Run
+  again, the command was refused, naming the new item. `replay` on the split stage sent the new item's
+  `record.split` and `item.split`, and the convert stage dropped both (nothing new on `ccda-push.records`);
+  `replay` on the convert stage sent its `record.stored` and `item.converted` again, with the same keys and
+  partition, under `<messageId>~replay-<millis>`; landing's `replay` was announced again too. No pod restarted.
+  Found on the way, and fixed: no `sdh-admin` command could start on an HTTP push node, `replay` included, since
+  `WebServerSwitch` gave its context a web server (revision (cb)); and `--with-result`, with results off as here,
+  sent the records before failing (it now refuses first).

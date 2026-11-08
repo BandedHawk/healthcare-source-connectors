@@ -21,11 +21,14 @@ import com.sdh.healthcare.connector.contract.crypto.KeyServiceUnavailableExcepti
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.core.TestPostgres;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
+import com.sdh.healthcare.connector.core.landing.LandedItemSource;
+import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingCheckpoint;
 import com.sdh.healthcare.connector.core.landing.LandingLedger;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
@@ -45,6 +48,8 @@ import java.security.KeyPairGenerator;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECGenParameterSpec;
+import java.sql.Connection;
+import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
@@ -612,5 +617,150 @@ class PushServiceTest
         assertThat(telemetry.value("sdh.landing.bytes", pushes))
                 .isEqualTo(12);
         assertThat(service.waiting()).isZero();
+    }
+
+    /**
+     * A request store in a schema of the test's own.
+     *
+     * @return the store, its table created
+     * @throws Exception if the schema can't be made
+     */
+    static ResubmitRequests requests() throws Exception
+    {
+        String schema = "resubmit_" + UUID.randomUUID().toString()
+                .replace("-", "").substring(0, 12);
+        try (Connection connection = TestPostgres.dataSource().getConnection();
+                Statement statement = connection.createStatement())
+        {
+            statement.execute("CREATE SCHEMA " + schema);
+        }
+        ResubmitRequests requests = new ResubmitRequests(
+                TestPostgres.dataSource(), schema + ".sdh_lease",
+                Duration.ofSeconds(10));
+        requests.createTableIfMissing();
+        return requests;
+    }
+
+    /**
+     * A landed push, resubmitted, is landed again under a new ID that
+     * replaces it, with the same bytes, and announced with a receipt;
+     * the request is marked landed and audited, and a second run finds
+     * nothing to do. Pushes land as before.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void resubmitsAPushAsANewItemThatReplacesIt() throws Exception
+    {
+        PushService service = service(0);
+        UUID first = push(service, "a", null, "0123456789ab").receipt()
+                .itemId();
+        ResubmitRequests requests = requests();
+        ResubmitPoller poller = new ResubmitPoller(INTAKE, service,
+                new Resubmitter(items, keys, requests, Clock.systemUTC()),
+                fatal::add, ResubmitPoller.INTERVAL);
+        ResubmitRequests.Request request =
+                requests.add(INTAKE, first, "alice", UUID.randomUUID());
+
+        assertThat(poller.poll()).isEqualTo(1);
+        ResubmitRequests.Request done =
+                requests.find(request.requestId()).orElseThrow();
+        assertThat(done.outcome()).isEqualTo(ResubmitRequests.Outcome.LANDED);
+        UUID second = done.newItemId();
+        assertThat(second).isNotNull().isNotEqualTo(first);
+        items.refresh();
+        assertThat(LandedItems.summary(items, second)
+                .flatMap(LandedItems::replaces)).contains(first);
+        try (LandedItemSource bytes =
+                LandedItemSource.open(items, second, keys))
+        {
+            assertThat(bytes.size()).isEqualTo(12);
+            assertThat(new String(bytes.readFully(0, 12)))
+                    .isEqualTo("0123456789ab");
+        }
+        assertThat(sent).extracting(OutboundMessage::itemId)
+                .containsExactly(first, second);
+        assertThat(results).hasSize(2);
+        assertThat(telemetry.events()).contains("item.resubmitted",
+                "item.duplicate_content");
+
+        assertThat(poller.poll()).isZero();
+        assertThat(push(service, "a", null, "after").status())
+                .isEqualTo(PushService.Status.LANDED);
+        assertThat(sent).hasSize(3);
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * A resubmission whose message the broker doesn't take is landed but
+     * left open; tried again, it finds the item it landed, announces it,
+     * and lands no second copy.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void aResubmissionTriedAgainLandsOnce() throws Exception
+    {
+        PushService service = service(0);
+        UUID first = push(service, "a", null, "0123456789ab").receipt()
+                .itemId();
+        ResubmitRequests requests = requests();
+        ResubmitPoller poller = new ResubmitPoller(INTAKE, service,
+                new Resubmitter(items, keys, requests, Clock.systemUTC()),
+                fatal::add, ResubmitPoller.INTERVAL);
+        ResubmitRequests.Request request =
+                requests.add(INTAKE, first, "alice", UUID.randomUUID());
+
+        failSends.set(1);
+        assertThat(poller.poll()).isZero();
+        ResubmitRequests.Request open =
+                requests.find(request.requestId()).orElseThrow();
+        assertThat(open.finished()).isFalse();
+        assertThat(open.newItemId()).isNotNull();
+
+        assertThat(poller.poll()).isEqualTo(1);
+        ResubmitRequests.Request done =
+                requests.find(request.requestId()).orElseThrow();
+        assertThat(done.outcome()).isEqualTo(ResubmitRequests.Outcome.LANDED);
+        assertThat(done.newItemId()).isEqualTo(open.newItemId());
+        // Announced again by the intake's own catching up, and by the
+        // resubmission: the same message, which the split stage drops.
+        assertThat(sent.stream().map(OutboundMessage::itemId).distinct())
+                .containsExactly(first, open.newItemId());
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * An item never landed is refused, and the request is closed with the
+     * reason; a second request for the same item can't be added while one
+     * is open.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void refusesAnItemThatCantBeLandedAgain() throws Exception
+    {
+        PushService service = service(0);
+        push(service, "a", null, "0123456789ab");
+        ResubmitRequests requests = requests();
+        ResubmitPoller poller = new ResubmitPoller(INTAKE, service,
+                new Resubmitter(items, keys, requests, Clock.systemUTC()),
+                fatal::add, ResubmitPoller.INTERVAL);
+        ResubmitRequests.Request never = requests.add(INTAKE,
+                UUID.randomUUID(), "alice", UUID.randomUUID());
+        assertThatThrownBy(() -> requests.add(INTAKE, never.itemId(), "bob",
+                UUID.randomUUID()))
+                .isInstanceOf(ResubmitRequests.AlreadyOpenException.class);
+
+        assertThat(poller.poll()).isEqualTo(1);
+        ResubmitRequests.Request done =
+                requests.find(never.requestId()).orElseThrow();
+        assertThat(done.outcome())
+                .isEqualTo(ResubmitRequests.Outcome.REFUSED);
+        assertThat(done.reason()).isEqualTo(Resubmitter.NOT_LANDED);
+        assertThat(telemetry.events()).contains("resubmit.refused");
+
+        assertThat(sent).hasSize(1);
+        assertThat(fatal).isEmpty();
     }
 }

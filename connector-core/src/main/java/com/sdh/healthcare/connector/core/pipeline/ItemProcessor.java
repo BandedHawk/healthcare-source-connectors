@@ -8,7 +8,6 @@ package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
@@ -362,20 +361,10 @@ public final class ItemProcessor
     private ItemSplit announce(Checkpoint checkpoint, Landing landing,
             Instant endedAt) throws Exception
     {
-        Failure failure = checkpoint.failure();
-        LandedRefs refs = landing.refs();
-        Problem problem = failure == null ? null
-                : refs.place(new Problem(failure.code().name(),
-                        failure.stage(), -1, failure.offset(), null, -1,
-                        null, null));
-        Instant finishedAt = endedAt != null ? endedAt
-                : failure != null ? failure.failedAt()
-                : pipeline.clock().instant();
-        ItemSplit message = new ItemSplit(checkpoint.itemId(), intake,
-                checkpoint.recordCount(),
+        ItemSplit message = SplitMessages.itemSplit(checkpoint, intake,
                 pipeline.failedRecordCount(checkpoint.itemId()),
-                checkpoint.itemSize(), landing.digest(), refs.producerRef(),
-                refs.replaces(), problem, checkpoint.startedAt(), finishedAt);
+                landing.digest(), landing.refs(), endedAt,
+                pipeline.clock().instant());
         pipeline.publishNow(List.of(message));
         return message;
     }

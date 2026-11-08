@@ -43,6 +43,8 @@ import com.sdh.healthcare.connector.landing.intake.PushService;
 import com.sdh.healthcare.connector.landing.intake.IntakeSource;
 import com.sdh.healthcare.connector.landing.intake.LocalDirectorySource;
 import com.sdh.healthcare.connector.landing.intake.Readiness;
+import com.sdh.healthcare.connector.landing.intake.ResubmitRequests;
+import com.sdh.healthcare.connector.landing.intake.Resubmitter;
 import com.sdh.healthcare.connector.landing.intake.S3Source;
 import com.sdh.healthcare.connector.landing.intake.SftpSource;
 import com.sdh.healthcare.connector.landing.intake.SmbSource;
@@ -149,6 +151,9 @@ public final class LandingRuntime implements AutoCloseable
     /** The landing tables, for maintenance. */
     private final Tables tables;
 
+    /** Lands items again for operators' requests. */
+    private final Resubmitter resubmitter;
+
     /**
      * The landing tables and what writes them, for table maintenance.
      *
@@ -181,12 +186,14 @@ public final class LandingRuntime implements AutoCloseable
      * @param queue        a queue intake's service, broker and connection;
      *                     null otherwise
      * @param tables       the landing tables
+     * @param resubmitter  lands items again for operators' requests
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
             ResultsChannel results, KeyMaterial keys, SourceSettings source,
             IntakeSource intakeSource, IntakeService service,
-            PushService pushService, QueueIntake queue, Tables tables)
+            PushService pushService, QueueIntake queue, Tables tables,
+            Resubmitter resubmitter)
     {
         this.camel = camel;
         this.dataSource = dataSource;
@@ -206,6 +213,7 @@ public final class LandingRuntime implements AutoCloseable
         this.health = service != null ? service.health()
                 : queue == null ? null : queue.health();
         this.tables = tables;
+        this.resubmitter = resubmitter;
     }
 
     /**
@@ -373,6 +381,11 @@ public final class LandingRuntime implements AutoCloseable
                     receipts);
             IntakeService.Storage storage =
                     new IntakeService.Storage(lander, ledger, index, ids);
+            ResubmitRequests requests = new ResubmitRequests(dataSource,
+                    properties.lease().jdbc().table(), Duration.ofSeconds(10));
+            requests.createTableIfMissing();
+            Resubmitter resubmitter =
+                    new Resubmitter(items, keys.wrap(), requests, clock);
             IntakeService service = null;
             PushService pushService = null;
             QueueIntake queue = null;
@@ -422,7 +435,7 @@ public final class LandingRuntime implements AutoCloseable
                     publisher, results, keys, source, intakeSource, service,
                     pushService, queue,
                     new Tables(committer, items, ledgerTable, lander,
-                            ids));
+                            ids), resubmitter);
         }
         catch (Exception | Error failure)
         {
@@ -615,6 +628,16 @@ public final class LandingRuntime implements AutoCloseable
     public Tables tables()
     {
         return tables;
+    }
+
+    /**
+     * Lands items again for operators' requests (STAGES.md §13.5).
+     *
+     * @return the resubmitter
+     */
+    public Resubmitter resubmitter()
+    {
+        return resubmitter;
     }
 
     /**

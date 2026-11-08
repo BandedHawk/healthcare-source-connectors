@@ -247,6 +247,44 @@ public final class PushService implements LandingIntake
     }
 
     /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Resubmitter.Landed resubmit(Resubmitter resubmitter,
+            ResubmitRequests.Request request) throws Exception
+    {
+        writer.lockInterruptibly();
+        try
+        {
+            prepare();
+            Resubmitter.Landed landed;
+            try
+            {
+                landed = resubmitter.land(storage, intake, request);
+            }
+            catch (Exception | Error failure)
+            {
+                unfinished = true;
+                throw failure;
+            }
+            if (landed.recorded())
+            {
+                unannounced = landed.item();
+            }
+            else
+            {
+                unrecorded = landed.item();
+            }
+            finishLast();
+            return landed;
+        }
+        finally
+        {
+            writer.unlock();
+        }
+    }
+
+    /**
      * Lands a push, or gives back the receipt of the first push with the
      * same idempotency key.
      *
