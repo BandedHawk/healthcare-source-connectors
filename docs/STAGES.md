@@ -554,6 +554,12 @@ Each step builds and passes its tests before the next.
   same day (revision (cc)).
 - **`QueueReader` doesn't drop repeated messages.** Resolved 2026-11-07 (revision (cc)): `decodeNew` drops a
   message whose contract ID it has decoded recently (DESIGN.md §10.2); `decode` still returns every one.
+- **Tests still to write for the operator commands** (found 2026-11-08, trying revisions (cb) and (cc) on the
+  sandbox): the convert stage's `replay` is tested only through `ConvertProcessor.replayMessages`, not as a
+  command, so nothing tests that `--with-result` with results off is refused before anything is sent; and no test
+  runs an operator command with an HTTP push node's configuration, which is how the web server it was given went
+  unnoticed (`WebServerSwitchTest` covers the switch alone). `QueueReader.decodeNew` is tested only as a unit,
+  since nothing in the sandbox reads the records yet.
 - **Editing bad data**, to revisit later: an item or record whose data won't let it past a stage, and must be edited
   or cleaned. Replay sends data again unchanged; an edit changes it. Under the rule that nothing is lost or
   replaced, an edited item is probably a new item linked to the original, with who changed what recorded, never a
