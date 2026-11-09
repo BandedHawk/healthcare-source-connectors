@@ -7,11 +7,14 @@
 package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.split.SeekableByteSource;
@@ -28,6 +31,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Takes one landed item through the split stage (design §5.3.6, STAGES.md
@@ -62,6 +67,9 @@ import java.util.UUID;
 public final class ItemProcessor
 {
 
+    private static final Logger LOG =
+            LoggerFactory.getLogger(ItemProcessor.class);
+
     /** The stage's name in {@code stage.item_completed}, as for the others. */
     public static final String STAGE = "split";
 
@@ -72,7 +80,13 @@ public final class ItemProcessor
         COMPLETED,
 
         /** The item couldn't be split to its end; see the failure. */
-        FAILED
+        FAILED,
+
+        /**
+         * The item is part way, begun under another version, and waits for
+         * an operator (STAGES.md §14.3).
+         */
+        HELD
     }
 
     /**
@@ -118,16 +132,149 @@ public final class ItemProcessor
     /** The intake the items came in by, for {@code item.split}. */
     private final String intake;
 
+    /** The split stage's fail store; null without a database. */
+    private final FailureStore failures;
+
+    /** Operators' corrections of its failures; null for none. */
+    private final CorrectionStore corrections;
+
     /**
-     * Creates a processor.
+     * Creates a processor with no fail store: each failure counts as open.
      *
      * @param pipeline splits, stores and announces
      * @param intake   the intake the items came in by
      */
     public ItemProcessor(IngestPipeline pipeline, String intake)
     {
+        this(pipeline, intake, null);
+    }
+
+    /**
+     * Creates a processor.
+     *
+     * @param pipeline splits, stores and announces
+     * @param intake   the intake the items came in by
+     * @param failures the split stage's fail store (STAGES.md §15.3); null
+     *                 for none
+     */
+    public ItemProcessor(IngestPipeline pipeline, String intake,
+            FailureStore failures)
+    {
+        this(pipeline, intake, failures, null);
+    }
+
+    /**
+     * Creates a processor that also applies operators' corrections.
+     *
+     * @param pipeline    splits, stores and announces
+     * @param intake      the intake the items came in by
+     * @param failures    the split stage's fail store; null for none
+     * @param corrections operators' corrections of its failures (STAGES.md
+     *                    §15.6d); null for none
+     */
+    public ItemProcessor(IngestPipeline pipeline, String intake,
+            FailureStore failures, CorrectionStore corrections)
+    {
         this.pipeline = pipeline;
         this.intake = intake;
+        this.failures = failures;
+        this.corrections = corrections;
+    }
+
+    /**
+     * Applies an operator's correction of one of an item's failures
+     * (STAGES.md §15.6d): splits and stores it, sends its records, notes
+     * its outcome in the fail store, then sends the item's end again, as
+     * the store now counts it. A pod that stops part way leaves the
+     * correction pending, or its end not sent; both are done again.
+     *
+     * @param pending the correction
+     * @param digest  the item's digest, from landing
+     * @param refs    what landing kept about the item
+     * @param lease   the item's lease, held by the caller
+     * @return what it came to
+     * @throws IllegalStateException if the item's splitting hasn't ended,
+     *                               or the processor takes no corrections
+     * @throws Exception             if storage or the broker fails; it is
+     *                               tried again later
+     */
+    public CorrectionStore.Outcome correct(CorrectionStore.Pending pending,
+            String digest, LandedRefs refs, LeaseToken lease) throws Exception
+    {
+        if (corrections == null)
+        {
+            throw new IllegalStateException("No correction store");
+        }
+        Checkpoint checkpoint = ended(pending.itemId());
+        IngestPipeline.CorrectionSplit split = pipeline.splitCorrection(
+                checkpoint, pending, refs, lease);
+        if (!split.messages().isEmpty())
+        {
+            pipeline.publishNow(split.messages());
+        }
+        corrections.finish(split.outcome());
+        reannounce(pending.itemId(), digest, refs);
+        return split.outcome();
+    }
+
+    /**
+     * Sends an item's end again after a change in its failures (a
+     * correction, or an operator's decision), as the fail store now counts
+     * them, and notes it sent for its corrections.
+     *
+     * @param itemId the item
+     * @param digest its digest, from landing
+     * @param refs   what landing kept about it
+     * @throws IllegalStateException if its splitting hasn't ended
+     * @throws Exception             if the store or the broker fails
+     */
+    public void reannounce(UUID itemId, String digest, LandedRefs refs)
+            throws Exception
+    {
+        Checkpoint checkpoint = ended(itemId);
+        Ended ended = announce(checkpoint, new Landing(digest, refs),
+                endedAt(itemId));
+        auditEnded(ended, checkpoint.state() == Checkpoint.State.COMPLETED
+                || wholeItemCorrected(itemId) ? Result.COMPLETED
+                        : Result.FAILED);
+        if (corrections != null)
+        {
+            corrections.markNotified(itemId);
+        }
+    }
+
+    /**
+     * An item's checkpoint, its splitting ended.
+     *
+     * @param itemId the item
+     * @return the checkpoint
+     * @throws IllegalStateException if it hasn't ended
+     */
+    private Checkpoint ended(UUID itemId)
+    {
+        Checkpoint checkpoint = pipeline.checkpoint(itemId)
+                .orElseThrow(() -> new IllegalStateException(
+                        "The item was never split"));
+        if (checkpoint.state() != Checkpoint.State.COMPLETED
+                && checkpoint.state() != Checkpoint.State.FAILED)
+        {
+            throw new IllegalStateException("The item is "
+                    + checkpoint.state() + ", not ended");
+        }
+        return checkpoint;
+    }
+
+    /**
+     * Whether an operator's correction of an item as a whole passed.
+     *
+     * @param itemId the item
+     * @return true if its failure as a whole is {@code CORRECTED}
+     */
+    private boolean wholeItemCorrected(UUID itemId)
+    {
+        return failures != null && failures.failure(itemId,
+                FailureStore.WHOLE_ITEM).map(stored -> stored.state()
+                        == FailureStore.State.CORRECTED).orElse(false);
     }
 
     /**
@@ -267,6 +414,12 @@ public final class ItemProcessor
                 {
                     return finishCompletion(checkpoint, landing, lease);
                 }
+                case HELD ->
+                {
+                    LOG.info("split.item_held_waiting");
+                    return new Outcome(itemId, Result.HELD,
+                            checkpoint.recordCount(), null);
+                }
                 default ->
                 {
                     // SPLITTING, or ABANDONED from before contract 3.0:
@@ -280,6 +433,10 @@ public final class ItemProcessor
         {
             size = source.size();
             split = pipeline.split(source, itemId, lease, landing.refs());
+        }
+        catch (ItemHeldException held)
+        {
+            return new Outcome(itemId, Result.HELD, 0, null);
         }
         catch (Exception failure)
         {
@@ -320,7 +477,7 @@ public final class ItemProcessor
             LeaseToken lease) throws Exception
     {
         UUID itemId = checkpoint.itemId();
-        ItemSplit announced = announce(checkpoint, landing, endedAt(itemId));
+        Ended announced = announce(checkpoint, landing, endedAt(itemId));
         pipeline.commitCheckpoint(
                 checkpoint.withState(Checkpoint.State.COMPLETED), lease);
         auditEnded(announced, Result.COMPLETED);
@@ -348,44 +505,93 @@ public final class ItemProcessor
     }
 
     /**
-     * Sends an item's {@code item.split}: its totals, the producer's
-     * references from landing, and its failure if it failed, placed in its
-     * message for a batch.
+     * What ended an item at the split stage.
+     *
+     * @param itemId  the item
+     * @param message {@code item.split}, or {@code item.progress} while a
+     *                failure is open
+     * @param count   the records it was cut into, failed ones included,
+     *                with those corrections added
+     * @param failed  the pieces the splitter couldn't parse, less those
+     *                corrected
+     */
+    private record Ended(UUID itemId, ConnectorMessage message, long count,
+            long failed)
+    {
+    }
+
+    /**
+     * Records an item's failures in the fail store, then sends the message
+     * that ends it (STAGES.md §15.6): {@code item.split} when none is open,
+     * otherwise {@code item.progress}. Failures aren't sent on (§15.1). Both
+     * steps are safe to repeat, so after a crash it is done again.
      *
      * @param checkpoint its checkpoint
      * @param landing    what came with it from landing
      * @param endedAt    when its splitting ended, as stored
-     * @return the message sent
-     * @throws Exception if the broker fails
+     * @return what was sent
+     * @throws Exception if the store or the broker fails
      */
-    private ItemSplit announce(Checkpoint checkpoint, Landing landing,
+    private Ended announce(Checkpoint checkpoint, Landing landing,
             Instant endedAt) throws Exception
     {
-        ItemSplit message = SplitMessages.itemSplit(checkpoint, intake,
-                pipeline.failedRecordCount(checkpoint.itemId()),
-                landing.digest(), landing.refs(), endedAt,
-                pipeline.clock().instant());
+        UUID itemId = checkpoint.itemId();
+        List<CommittedRecords.Row> failed = pipeline.failedRows(itemId);
+        FailureStore.Counts counts;
+        if (failures == null)
+        {
+            counts = SplitMessages.unstored(checkpoint, failed.size());
+        }
+        else
+        {
+            failures.record(SplitMessages.failures(checkpoint, failed));
+            counts = failures.counts(itemId);
+        }
+        SplitMessages.Corrected corrected = corrections == null
+                ? SplitMessages.Corrected.NONE
+                : SplitMessages.Corrected.of(checkpoint,
+                        pipeline.correctionRows(itemId),
+                        wholeItemCorrected(itemId));
+        ConnectorMessage message = SplitMessages.itemEnd(checkpoint, intake,
+                failed.size(), counts, landing.digest(), landing.refs(),
+                endedAt, pipeline.clock().instant(), corrected);
         pipeline.publishNow(List.of(message));
-        return message;
+        if (message instanceof ItemProgressed progressed)
+        {
+            Telemetry.get().audit("item.progress",
+                    Fields.of(Attr.STAGE, STAGE)
+                            .with(Attr.ITEM_ID, itemId)
+                            .with(Attr.COUNT, progressed.passedCount())
+                            .with(Attr.OPEN_COUNT, progressed.openCount())
+                            .with(Attr.DECLINED_COUNT,
+                                    progressed.declinedCount()));
+        }
+        // With what operators' corrections added and resolved (§15.6d).
+        return new Ended(itemId, message,
+                checkpoint.recordCount() + corrected.added(),
+                failed.size() - corrected.pieces());
     }
 
     /**
      * Audits the end of an item at the split stage as every stage does
      * ({@code stage.item_completed}, STAGES.md §13.2), so one query over
-     * the stages finds an item that ended at one and not the next.
+     * the stages finds an item that ended at one and not the next. An item
+     * with a failure open ends its splitting, but not its time at the stage
+     * ({@code INCOMPLETE}, §15.6).
      *
-     * @param message the item's {@code item.split}
-     * @param result  how it ended
+     * @param ended  what ended it
+     * @param result how its splitting ended
      */
-    private static void auditEnded(ItemSplit message, Result result)
+    private static void auditEnded(Ended ended, Result result)
     {
         Telemetry.get().audit("stage.item_completed",
                 Fields.of(Attr.STAGE, STAGE)
-                        .with(Attr.ITEM_ID, message.itemId())
-                        .with(Attr.RESULT, result.name())
-                        .with(Attr.COUNT, message.recordCount())
-                        .with(Attr.FAILED_COUNT,
-                                message.failedRecordCount()));
+                        .with(Attr.ITEM_ID, ended.itemId())
+                        .with(Attr.RESULT,
+                                ended.message() instanceof ItemProgressed
+                                        ? "INCOMPLETE" : result.name())
+                        .with(Attr.COUNT, ended.count())
+                        .with(Attr.FAILED_COUNT, ended.failed()));
     }
 
     /**
@@ -456,7 +662,7 @@ public final class ItemProcessor
             pipeline.announceCommitted(failing, landing.refs());
         }
         Failure failure = failing.failure();
-        ItemSplit announced = announce(failing, landing,
+        Ended announced = announce(failing, landing,
                 endedAt(failing.itemId()));
         pipeline.commitCheckpoint(failing.failed(), lease);
         auditEnded(announced, Result.FAILED);

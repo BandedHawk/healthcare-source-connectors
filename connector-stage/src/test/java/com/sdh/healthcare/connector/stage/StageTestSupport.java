@@ -69,6 +69,16 @@ final class StageTestSupport
     static final StorageRef REF = new StorageRef("cat", "sdh_split",
             "split_records", LocalDate.of(2026, 11, 5), 7L, "kek-1");
 
+    /** The KEK corrections are wrapped with in the tests. */
+    static final String CORRECTION_KEK = "kek-test";
+
+    /** Wraps the corrections' keys. */
+    static final com.sdh.healthcare.connector.contract.crypto.KeyProvider
+            CORRECTION_KEYS = new com.sdh.healthcare.connector.contract
+                    .crypto.AesKeyWrapProvider(Map.of(CORRECTION_KEK,
+                            new javax.crypto.spec.SecretKeySpec(new byte[32],
+                                    "AES")));
+
     /** How many schemas have been handed out. */
     private static final AtomicInteger SCHEMAS = new AtomicInteger();
 
@@ -289,6 +299,9 @@ final class StageTestSupport
         /** Each item-completed step run, in order. */
         final List<ItemProgress> completed = new CopyOnWriteArrayList<>();
 
+        /** Each item-progressed step run, in order. */
+        final List<ItemProgress> progressed = new CopyOnWriteArrayList<>();
+
         /** How many more item-completed steps are to fail. */
         final AtomicInteger completedFailures = new AtomicInteger();
 
@@ -319,6 +332,9 @@ final class StageTestSupport
                         stored.recordId(), stored.itemId(), stored.seq());
                 case ItemConverted completed -> new StageInput.ItemTotal(
                         completed.itemId(), completed.recordCount());
+                case ConnectorMessage.ItemProgressed progressed ->
+                        new StageInput.ItemTotal(progressed.itemId(),
+                                progressed.passedCount(), true);
                 default -> new StageInput.Unwanted("wrong_type");
             };
         }
@@ -340,8 +356,9 @@ final class StageTestSupport
             }
             RecordStored stored = (RecordStored) message;
             attempts.put(stored.recordId(), attempt);
+            boolean failed = stored.seq() % 5 == 4;
             return new StageOutput<>("v" + version + ":" + stored.recordId(),
-                    stored.seq() % 5 == 4, stored.recordId());
+                    failed, stored.recordId(), failed ? "TEST_FAILED" : null);
         }
 
         @Override
@@ -357,6 +374,12 @@ final class StageTestSupport
             for (StageOutput<String> output : outputs)
             {
                 committed.add(output.value());
+                if (output.failed())
+                {
+                    // Not sent on (STAGES.md §15.1).
+                    messages.add(null);
+                    continue;
+                }
                 messages.add(new RecordStored(output.value(),
                         UUID.fromString(output.value().substring(4, 40)), 0,
                         0, 10, "csv", "application/json", "test/1", 10, 1,
@@ -366,10 +389,49 @@ final class StageTestSupport
         }
 
         @Override
+        public boolean corrects()
+        {
+            return true;
+        }
+
+        /**
+         * A correction passes unless its content says {@code bad}.
+         */
+        @Override
+        public Corrected<String> correct(
+                com.sdh.healthcare.connector.core.failure.CorrectionStore
+                        .Pending correction)
+        {
+            String content = new String(correction.open(CORRECTION_KEYS),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            boolean failed = content.contains("bad");
+            String value = "rec-" + correction.itemId() + "-"
+                    + correction.seq() + "-c" + correction.correction();
+            return new Corrected<>(new StageOutput<>("v" + version + ":"
+                    + value, failed, value, failed ? "TEST_FAILED" : null),
+                    "v" + version);
+        }
+
+        @Override
         public ConnectorMessage itemComplete(ItemProgress progress)
         {
             return new ItemConverted(progress.itemId(), "test",
-                    progress.done(), progress.failed(), Instant.EPOCH);
+                    progress.done(), progress.unresolved(), Instant.EPOCH);
+        }
+
+        @Override
+        public ConnectorMessage itemProgress(ItemProgress progress)
+        {
+            return new ConnectorMessage.ItemProgressed(progress.itemId(),
+                    "test", "test", progress.done(), progress.passed(),
+                    progress.open(), progress.declined(), null, null, null,
+                    Instant.EPOCH, progress.versions());
+        }
+
+        @Override
+        public void itemProgressed(ItemProgress progress)
+        {
+            progressed.add(progress);
         }
 
         @Override

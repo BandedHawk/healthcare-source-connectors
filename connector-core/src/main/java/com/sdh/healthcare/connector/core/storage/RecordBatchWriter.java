@@ -173,6 +173,33 @@ public final class RecordBatchWriter implements AutoCloseable
      */
     private final Map<Placed, MessagePlace> places = new HashMap<>();
 
+    /**
+     * The versions given for each record, by item and number (STAGES.md
+     * §14).
+     */
+    private final Map<Placed, Versions> versions = new HashMap<>();
+
+    /**
+     * The failed record each correction in the batch corrects, by item and
+     * number (STAGES.md §15.6c).
+     */
+    private final Map<Placed, String> corrections = new HashMap<>();
+
+    /**
+     * A record's versions.
+     *
+     * @param stage the version of the stage that made it; null for the
+     *              batch's
+     * @param input the version of the stage before that made its input;
+     *              null if none
+     */
+    private record Versions(String stage, String input)
+    {
+    }
+
+    /** The version of the stage writing the batch; null if not given. */
+    private String stageVersion;
+
     /** The total plaintext length of the records written so far. */
     private long plaintextBytes;
 
@@ -223,6 +250,51 @@ public final class RecordBatchWriter implements AutoCloseable
         {
             throw new UncheckedIOException(error);
         }
+    }
+
+    /**
+     * Names the version of the stage writing the batch, kept on every row
+     * written after (STAGES.md §14).
+     *
+     * @param version the stage's version
+     * @return this writer
+     */
+    public RecordBatchWriter stageVersion(String version)
+    {
+        this.stageVersion = version;
+        return this;
+    }
+
+    /**
+     * Names the versions that made a record, kept on its rows: for a stage
+     * whose version differs by record (the convert stage's, by the
+     * converter used).
+     *
+     * @param itemId       the record's item
+     * @param seq          its number in the item
+     * @param stageVersion the version of the stage that made it; null for
+     *                     the batch's
+     * @param inputVersion the version of the stage before that made its
+     *                     input; null if not known
+     */
+    public void versions(UUID itemId, long seq, String stageVersion,
+            String inputVersion)
+    {
+        versions.put(new Placed(itemId, seq),
+                new Versions(stageVersion, inputVersion));
+    }
+
+    /**
+     * Marks a record as made from an operator's correction, kept on its
+     * rows ({@code correction_of}).
+     *
+     * @param itemId       the record's item
+     * @param seq          its number in the item
+     * @param correctionOf the ID of the failed record it corrects
+     */
+    public void correction(UUID itemId, long seq, String correctionOf)
+    {
+        corrections.put(new Placed(itemId, seq), correctionOf);
     }
 
     /**
@@ -638,6 +710,13 @@ public final class RecordBatchWriter implements AutoCloseable
                                 record.seq(), MESSAGE_REFS_CHUNK, 1, refs)));
             }
         }
+        Versions given = versions.get(
+                new Placed(record.itemId(), record.seq()));
+        row.setField(STAGE_VERSION, given == null || given.stage() == null
+                ? stageVersion : given.stage());
+        row.setField(INPUT_VERSION, given == null ? null : given.input());
+        row.setField(CORRECTION_OF, corrections.get(
+                new Placed(record.itemId(), record.seq())));
         writer.write(row);
     }
 

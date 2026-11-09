@@ -9,19 +9,30 @@ package com.sdh.healthcare.connector.convert.admin;
 import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
 import com.sdh.healthcare.connector.broker.send.Publishers;
 import com.sdh.healthcare.connector.broker.send.QueueType;
+import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.convert.ConvertProcessor;
 import com.sdh.healthcare.connector.convert.config.ConvertProperties;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
+import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.sdh.healthcare.connector.stage.RegistryReport;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
+import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.FailureAdmin;
 import com.sdh.healthcare.connector.stage.admin.StageAdmin;
+import java.io.PrintStream;
 import java.time.Duration;
 import java.util.Map;
+import java.util.UUID;
 import org.apache.camel.CamelContext;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.iceberg.CatalogUtil;
@@ -32,12 +43,15 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
 
 /**
  * What the convert stage's admin commands read from: the lease database
- * only, opened on first use, read-only (design §11.4).
+ * only, opened on first use, read-only (design §11.4). Only
+ * {@code decline} and {@code reopen} write, to the fail store, over a
+ * connection of their own.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class ConvertAdminContext implements StageAdmin, AutoCloseable
+final class ConvertAdminContext
+        implements StageAdmin, FailureAdmin, AutoCloseable
 {
 
     /** The stage's settings. */
@@ -45,6 +59,9 @@ final class ConvertAdminContext implements StageAdmin, AutoCloseable
 
     /** The lease database. */
     private final AdminDatabase database;
+
+    /** The lease database, writing: for the fail store's changes. */
+    private final AdminDatabase writing;
 
     /** The keys, once loaded. */
     private KeyMaterial keys;
@@ -70,6 +87,7 @@ final class ConvertAdminContext implements StageAdmin, AutoCloseable
     {
         this.properties = properties;
         this.database = new AdminDatabase(properties.lease());
+        this.writing = new AdminDatabase(properties.lease(), true);
     }
 
     /**
@@ -254,6 +272,106 @@ final class ConvertAdminContext implements StageAdmin, AutoCloseable
     }
 
     @Override
+    public FailureStore failures()
+    {
+        return new FailureStore(database.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public FailureStore failuresToChange()
+    {
+        return new FailureStore(writing.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public KeyProvider reasonKeys() throws Exception
+    {
+        return keys().wrap();
+    }
+
+    @Override
+    public String reasonKek()
+    {
+        return properties.crypto().keys().recordsKek();
+    }
+
+    @Override
+    public boolean corrects()
+    {
+        return true;
+    }
+
+    @Override
+    public long maxCorrectionBytes()
+    {
+        return properties.convert().maxBytes().toBytes();
+    }
+
+    @Override
+    public CorrectionStore correctionsToChange()
+    {
+        return new CorrectionStore(writing.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public CorrectionStore corrections()
+    {
+        return new CorrectionStore(database.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    /**
+     * The failed record's row of {@code records}, decrypted: the record as
+     * split, which is what failed to convert.
+     */
+    @Override
+    public byte[] failedContent(UUID itemId, long seq) throws Exception
+    {
+        Table table = records();
+        table.refresh();
+        CommittedRecords.Row row = CommittedRecords.all(table, itemId)
+                .stream()
+                .filter(each -> each.seq() == seq && each.errorCode() != null)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("The failed"
+                        + " record isn't in " + RecordsTable.DEFAULT_NAME));
+        long snapshot = table.currentSnapshot().snapshotId();
+        ConnectorMessage.RecordInStorage message =
+                (ConnectorMessage.RecordInStorage) ConvertProcessor
+                        .recordMessage(itemId, row, new StorageRef(
+                                properties.storage().catalogName(),
+                                properties.storage().namespace(),
+                                RecordsTable.DEFAULT_NAME, row.ingestedDate(),
+                                snapshot, row.kekRef()));
+        try (QueueReader reader = QueueReader.builder().catalog(catalog)
+                .keyProvider(keys().wrap()).build())
+        {
+            return reader.readRecord(message,
+                    (int) Math.min(Integer.MAX_VALUE - 8,
+                            maxCorrectionBytes()));
+        }
+    }
+
+    /**
+     * Leaves the item to the stage's workers, which look again at items
+     * whose failures changed (STAGES.md §15.3).
+     */
+    @Override
+    public void changed(UUID itemId, AuditRecord audit, PrintStream out)
+    {
+        out.println("The stage's workers count the change within a renewal"
+                + " interval: item.converted once none of the item's"
+                + " failures is open, else item.progress");
+    }
+
+    @Override
     public void close()
     {
         closeQuietly(results);
@@ -265,6 +383,7 @@ final class ConvertAdminContext implements StageAdmin, AutoCloseable
         }
         closeQuietly(catalog);
         database.close();
+        writing.close();
     }
 
     /**

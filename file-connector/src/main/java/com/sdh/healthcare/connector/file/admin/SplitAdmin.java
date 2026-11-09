@@ -8,6 +8,9 @@ package com.sdh.healthcare.connector.file.admin;
 
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
+import com.sdh.healthcare.connector.stage.admin.AdminCommand;
+import com.sdh.healthcare.connector.stage.admin.FailureCommands;
+import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
@@ -38,8 +41,21 @@ public final class SplitAdmin
                         Configuration.class, ConnectorProperties.class,
                         ConnectorProperties::telemetry,
                         SplitAdminContext::new),
-                List.of(new ReplayCommand(), new RestoreCommand(),
-                        new SplitStatusCommand()));
+                commands());
+    }
+
+    /**
+     * The stage's commands, with those for its fail store.
+     *
+     * @return the commands
+     */
+    static List<AdminCommand<SplitAdminContext>> commands()
+    {
+        List<AdminCommand<SplitAdminContext>> commands = new ArrayList<>(List.of(
+                new ReplayCommand(), new RestoreCommand(),
+                new SplitStatusCommand()));
+        commands.addAll(FailureCommands.<SplitAdminContext>all());
+        return List.copyOf(commands);
     }
 
     /**

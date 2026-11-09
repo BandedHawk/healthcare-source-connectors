@@ -359,3 +359,57 @@ Checked again since: see the end of this section.
   Found on the way, and fixed: no `sdh-admin` command could start on an HTTP push node, `replay` included, since
   `WebServerSwitch` gave its context a web server (revision (cb)); and `--with-result`, with results off as here,
   sent the records before failing (it now refuses first).
+- **Versions at every stage (2026-11-08, revision (cd)).** Deployed over the existing data: on load, both
+  `split_records` and `records` moved from schema 0 to 1, with `stage_version` and `input_version` as optional
+  columns (ids 26 and 27); nothing failed at startup. The 5 samples landed, split and converted. `replay` on the
+  split stage of an item converted before the deploy: the convert stage audited `record.version_differs` (the
+  message under the new build, the stored row under the old) and `record.duplicate`, and processed nothing again;
+  the item's counts and completion stayed as they were. Replayed, a new item was dropped quietly as the worker's
+  own. No pod restarted. Not tried here: a split item held under another version (none was part way through at the
+  deploy; `IngestPipelineTest` covers it), or a duplicate across two convert pods under the same version.
+- **The fail store and item progress (2026-11-08, revision (ce)).** Deployed over the existing data: both stages
+  made `stage_failure` in their registry schemas, and the convert stage's `stage_item` gained `upstream_open` and
+  `progress_key`; nothing failed at startup. The 5 samples landed, split and converted as before. A synthetic C-CDA
+  of 176 bytes, broken off part way (no data in it): the split stage failed it as a whole
+  (`PARSE_UNBALANCED_ELEMENT`), recorded it once in its fail store (seq -1, `FAILED`, with its version, audited
+  `failure.failed`), and sent `item.progress` (0 passed, 1 open) instead of `item.split`; the convert stage took that
+  as a total still open upstream (`upstream_open`), sent its own `item.progress` (`UPSTREAM_OPEN`), recorded nothing
+  in its own fail store, and didn't complete the item. `replay` on the split stage sent the `item.progress` again
+  (0 `record.split`) and wrote nothing; the convert stage dropped it as a repeat. `sdh_stage_failures_open` read 1
+  for split and 0 for convert, and `sdh_stage_failures_total` 1. No pod restarted. Not tried here: a record that
+  fails conversion, a piece failed inside an item that otherwise splits (neither is easy to make from C-CDA; both
+  are tested), and the producer's `incomplete` result (results are off here).
+- **Declining and reopening a failure (2026-11-08, revision (cf)).** Deployed over the existing data: both stages
+  made `stage_failure_event`. `failures` on the split stage listed the malformed item's failure (seq -1, `FAILED`,
+  `PARSE_UNBALANCED_ELEMENT`, offset, version) and nothing of its content. `decline` with no reason on standard
+  input was refused (exit 2) and changed nothing. With a synthetic reason through `kubectl exec -i`, it moved the
+  failure to `DECLINED` (audited `failure.declined`, without the reason), kept the reason encrypted in
+  `stage_failure_event` (98 bytes, under the records KEK), and sent the item's `item.split` again, alone; the
+  convert stage completed the item (`stage.item_completed result=COMPLETED`, 0 records). `reopen` moved it back to
+  `FAILED` and sent `item.progress`; the convert stage left the item complete, as documented. Declined again, and
+  `failures --item-id` showed the three changes, by whom and when, without the reasons. `failures` on the convert
+  stage: 0 open. Found here: `admin.decline` was audited with the item checkpoint's state in `sdh.state`; fixed
+  and tested in `AdminCommandsTest`, not redeployed.
+- **Exporting and correcting a record that failed conversion (2026-11-08, revision (cg)).** Deployed over the
+  existing data: the convert stage made `stage_correction`. A synthetic C-CDA of 151 bytes with an undeclared entity
+  (`&nbsp;`; no data in it) split cleanly and failed conversion (`CONVERT_XML_MALFORMED`, `FAILED` in the convert
+  stage's fail store, item incomplete). `export` with an EC P-256 public key on standard input printed one
+  `sdh-export: ` line, a JWE (`ECDH-ES+A256KW`, `A256GCM`) that opened locally with the private key and held the
+  failed record (150 bytes); audited `admin.export` with the key's SHA-256. The entity was replaced by `&#160;` and
+  submitted with `correct`: the failure moved to `CORRECTION_PENDING` (`failure.correction_submitted`), and within a
+  renewal interval a worker converted it, the correction `PASSED` and the failure `CORRECTED` with `resolved_by` and
+  `resolved_version` (`failure.corrected`), and the item completed (`stage.item_completed result=COMPLETED`,
+  `failed_count=0`). `failures --item-id` showed both changes and the correction, without content. No pod
+  restarted. The `admin.decline` audit fix of (cf) was deployed with it.
+- **Exporting and correcting an item the split stage failed (2026-11-09, revision (ch)).** Deployed over the
+  existing data: the split stage made `stage_correction` (with `notified_at`). A synthetic C-CDA of 162 bytes
+  broken off part way (no data in it) failed at the split stage as a whole (seq -1, `PARSE_UNBALANCED_ELEMENT`, 0
+  records). `export --seq -1` with an EC P-256 public key printed a JWE (`ECDH-ES+A256KW`, `A256GCM`) that opened
+  locally to the item as pushed (same SHA-256). The completed document (190 bytes) submitted with `correct`
+  (`failure.correction_submitted`) was split by the pod within a renewal interval: the correction `PASSED`, the
+  failure `CORRECTED` with `resolved_by` and `resolved_version` (`failure.corrected`), the item's end sent again
+  (`stage.item_completed result=COMPLETED`) and noted (`notified_at`); the convert stage converted the one record
+  and completed the item (`count=1`, `failed_count=0`), with nothing in its fail store. No pod restarted. Found
+  here: the split stage's `stage.item_completed` after the correction said `count=0`, leaving out the records the
+  correction added; fixed and tested in `ItemProcessorTest`, not redeployed. Not tried here: a piece's correction
+  (no C-CDA makes one; `ItemProcessorTest` and `AdminCommandsTest` cover both kinds).

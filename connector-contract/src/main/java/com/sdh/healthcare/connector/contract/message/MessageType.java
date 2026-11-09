@@ -46,6 +46,12 @@ public enum MessageType
     ITEM_CONVERTED("item.converted"),
 
     /**
+     * A stage handled every record of an item once, and some failed and are
+     * still open; sent again whenever its counts change (STAGES.md §15.6).
+     */
+    ITEM_PROGRESS("item.progress"),
+
+    /**
      * A stage stored a record before, and has now produced different output
      * for it; for the stage's dead-letter queue.
      */

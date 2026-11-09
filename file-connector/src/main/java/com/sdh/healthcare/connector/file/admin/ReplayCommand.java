@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
@@ -114,13 +115,43 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
         UUID itemId = parseId(arguments.required("item-id"));
         audit.add(Attr.ITEM_ID, itemId);
         audit.add(Attr.STAGE, "split");
+        send(context, itemId, false, clock, audit, out);
+    }
+
+    /**
+     * Sends an item's output again: every {@code record.split} and its
+     * end, or its end alone, as the fail store counts it now: for
+     * {@code decline} and {@code reopen}, which change the counts.
+     *
+     * @param context  the stage's context
+     * @param itemId   the item
+     * @param endOnly  whether to send the end alone
+     * @param clock    gives the time that makes the broker IDs new
+     * @param audit    the command's audit record
+     * @param out      where to say what was sent
+     * @throws Exception if it can't be sent
+     */
+    static void send(SplitAdminContext context, UUID itemId, boolean endOnly,
+            Clock clock, AuditRecord audit, PrintStream out) throws Exception
+    {
         ConnectorProperties properties = context.properties();
 
         ItemCheckpoints.Stored stored = context.checkpoints().load(itemId)
                 .orElseThrow(() -> new IllegalStateException(
                         "The split stage has no row for this item"));
         Checkpoint checkpoint = stored.checkpoint();
-        audit.add(Attr.STATE, checkpoint.state().name());
+        if (!endOnly)
+        {
+            // decline and reopen audit the failure's state under this key.
+            audit.add(Attr.STATE, checkpoint.state().name());
+        }
+        if (endOnly && checkpoint.state() != Checkpoint.State.COMPLETED
+                && checkpoint.state() != Checkpoint.State.FAILED)
+        {
+            out.println("The item is " + checkpoint.state() + ": its end"
+                    + " will count the change when it is sent");
+            return;
+        }
         if (checkpoint.state() != Checkpoint.State.COMPLETED
                 && checkpoint.state() != Checkpoint.State.FAILED)
         {
@@ -147,19 +178,64 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
         String catalog = properties.storage().catalogName();
         String namespace = properties.storage().namespace();
         List<ConnectorMessage> messages = new ArrayList<>();
+        List<CommittedRecords.Row> failed = new ArrayList<>();
         for (CommittedRecords.Row row : rows)
         {
+            if (!SplitMessages.announced(row))
+            {
+                // In the fail store, not sent on (STAGES.md §15.1).
+                failed.add(row);
+                continue;
+            }
+            if (endOnly)
+            {
+                continue;
+            }
             messages.add(SplitMessages.recordSplit(itemId, row,
                     new StorageRef(catalog, namespace,
                             IngestTables.SPLIT_RECORDS, row.ingestedDate(),
                             snapshotId, row.kekRef()), refs));
         }
-        messages.add(SplitMessages.itemSplit(checkpoint,
-                properties.landing().intake(),
-                CommittedRecords.countFailed(splitRecords, itemId),
+        // Operators' corrections that passed (STAGES.md §15.6d): sent with
+        // the rest, and counted in the item's end.
+        List<CommittedRecords.Row> corrections =
+                CommittedRecords.corrections(splitRecords, itemId);
+        if (!endOnly)
+        {
+            for (CommittedRecords.Row row : corrections)
+            {
+                messages.add(SplitMessages.recordSplit(itemId, row,
+                        new StorageRef(catalog, namespace,
+                                IngestTables.SPLIT_RECORDS,
+                                row.ingestedDate(), snapshotId, row.kekRef()),
+                        refs));
+            }
+        }
+        boolean wholeItem = context.failures()
+                .failure(itemId, FailureStore.WHOLE_ITEM)
+                .map(each -> each.state() == FailureStore.State.CORRECTED)
+                .orElse(false);
+        // The message that ended it, as the fail store counts it now:
+        // item.split, or item.progress while a failure is open (§15.6).
+        // Nothing is written: an item's failures not in the store (one
+        // split before it) count as open.
+        List<FailureStore.Failure> itemFailures =
+                SplitMessages.failures(checkpoint, failed);
+        FailureStore.Counts counts = itemFailures.isEmpty()
+                ? FailureStore.Counts.NONE
+                : context.failures().counts(itemId);
+        if (counts.total() < itemFailures.size())
+        {
+            counts = SplitMessages.unstored(checkpoint, failed.size());
+        }
+        messages.add(SplitMessages.itemEnd(checkpoint,
+                properties.landing().intake(), failed.size(), counts,
                 (String) summary.getField(LandingTables.ITEM_DIGEST), refs,
-                stored.endedAt(), clock.instant()));
-        audit.add(Attr.COUNT, rows.size());
+                stored.endedAt(), clock.instant(),
+                SplitMessages.Corrected.of(checkpoint, corrections,
+                        wholeItem)));
+        audit.add(Attr.COUNT, messages.size() - 1);
+        audit.add(Attr.FAILED_COUNT, failed.size());
 
         String suffix = new Replayer(new MessageSealer(keys.signer(),
                 keys.signerKid(), keys.recipient(), keys.recipientKid()),
@@ -170,9 +246,16 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
                 .send(messages);
         audit.add(Attr.BROKER_MESSAGE_ID,
                 messages.get(messages.size() - 1).messageId() + suffix);
-        out.printf("sent %d record.split and the item.split for %s again,"
+        ConnectorMessage end = messages.get(messages.size() - 1);
+        out.printf("sent %d record.split and the %s for %s again,"
                 + " with broker IDs ending %s; the broker acknowledged"
-                + " them%n", rows.size(), itemId, suffix);
+                + " them%n", messages.size() - 1, end.type().wireName(),
+                itemId, suffix);
+        if (!failed.isEmpty())
+        {
+            out.printf("%d failed piece(s) are in the fail store, not sent"
+                    + " on%n", failed.size());
+        }
     }
 
     /**

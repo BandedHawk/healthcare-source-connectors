@@ -13,7 +13,6 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
@@ -197,7 +196,8 @@ class ConvertProcessorTest
      * A record is converted to JSON and stored; one that fails conversion
      * and a piece the splitter couldn't parse are stored as split, failed,
      * with the queue message each started in kept, its broker IDs
-     * encrypted, on their rows.
+     * encrypted, on their rows, and have no message: failures aren't sent
+     * on (STAGES.md §15.1).
      *
      * @throws Exception if the test fails to run
      */
@@ -221,17 +221,9 @@ class ConvertProcessorTest
                     assertThat(new String(reader.readRecord(stored, 1 << 20),
                             UTF_8)).isEqualTo("[\"1\",\"2\"]");
                 });
-        assertThat(sent.get(1)).isInstanceOfSatisfying(RecordFailed.class,
-                failed ->
-                {
-                    assertThat(failed.errorCode()).isEqualTo(
-                            ErrorCode.CONVERT_CSV_FIELD_COUNT.name());
-                    assertThat(new String(reader.readRecord(failed, 1 << 20),
-                            UTF_8)).isEqualTo(HEADER + "1\n");
-                });
-        assertThat(sent.get(2)).isInstanceOfSatisfying(RecordFailed.class,
-                failed -> assertThat(failed.errorCode())
-                        .isEqualTo("PARSE_UNTERMINATED_QUOTE"));
+        // The failed ones are stored, and not sent on (STAGES.md §15.1).
+        assertThat(sent.get(1)).isNull();
+        assertThat(sent.get(2)).isNull();
 
         records.refresh();
         assertThat(CommittedRecords.failed(records, item, kms))
@@ -259,21 +251,19 @@ class ConvertProcessorTest
         List<String> errors = new ArrayList<>();
         errors.add(null);
         List<RecordSplit> first = split(errors, HEADER + "1,2\n");
-        assertThat(run(processor(1 << 20), first,
-                ConvertProcessor.SKIP_ON_ATTEMPT))
-                .singleElement().isInstanceOfSatisfying(RecordFailed.class,
-                        failed ->
-                        {
-                            assertThat(failed.errorCode()).isEqualTo(
-                                    ErrorCode.CONVERT_SKIPPED.name());
-                            assertThat(reader.readRecord(failed, 100))
-                                    .isEqualTo((HEADER + "1,2\n")
-                                            .getBytes(UTF_8));
-                        });
-        assertThat(run(processor(4), first, 1)).singleElement()
-                .isInstanceOfSatisfying(RecordFailed.class, failed ->
-                        assertThat(failed.errorCode()).isEqualTo(
-                                ErrorCode.CONVERT_TOO_LARGE.name()));
+        ConvertProcessor skipping = processor(1 << 20);
+        StageOutput<ConvertProcessor.Prepared> skipped = skipping.process(
+                first.get(0), ConvertProcessor.SKIP_ON_ATTEMPT);
+        assertThat(skipped.failed()).isTrue();
+        assertThat(skipped.errorCode())
+                .isEqualTo(ErrorCode.CONVERT_SKIPPED.name());
+        assertThat(skipping.commit(List.of(skipped))).containsOnlyNulls();
+        records.refresh();
+        assertThat(CommittedRecords.all(records, item)).singleElement()
+                .satisfies(row -> assertThat(row.errorCode())
+                        .isEqualTo(ErrorCode.CONVERT_SKIPPED.name()));
+        assertThat(processor(4).process(first.get(0), 1).errorCode())
+                .isEqualTo(ErrorCode.CONVERT_TOO_LARGE.name());
     }
 
     /**

@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -59,7 +60,7 @@ public final class CommittedRecords
         SOURCE_OFFSET, SOURCE_LENGTH, FORMAT, CONTENT_TYPE, MAPPING,
         ERROR_CODE, PLAINTEXT_LENGTH, CHUNK_COUNT, INGESTED_AT, KEK_REF,
         RECORD_LINE, RECORD_COLUMN, SOURCE_LINE, SOURCE_COLUMN, ERROR_LINE,
-        ERROR_COLUMN};
+        ERROR_COLUMN, STAGE_VERSION};
 
     /**
      * What a committed record's message needs, from its first chunk's row.
@@ -81,13 +82,56 @@ public final class CommittedRecords
      *                        null for rows written before contract 2.1
      * @param errorAt         where in the file conversion failed; null
      *                        without an error, or before contract 2.1
+     * @param stageVersion    the version of the stage that wrote it
+     *                        (STAGES.md §14); null for a row from before
+     * @param correctionOf    for a record made from an operator's
+     *                        correction, the failed record it corrects
+     *                        (STAGES.md §15.6c); null otherwise
      */
     public record Row(String recordId, long seq, long sourceOffset,
             long sourceLength, String format, String contentType,
             String mapping, String errorCode, long plaintextLength,
             int chunkCount, LocalDate ingestedDate, String kekRef,
-            RecordOrigin origin, SourcePosition errorAt)
+            RecordOrigin origin, SourcePosition errorAt, String stageVersion,
+            String correctionOf)
     {
+    }
+
+    /**
+     * The columns a {@link Failed} is read from in a table: with
+     * {@code correction_of} if the table has it yet.
+     *
+     * @param table the table
+     * @return the columns
+     */
+    private static String[] failedColumns(Table table)
+    {
+        List<String> columns = new ArrayList<>(List.of(SEQ, SOURCE_OFFSET,
+                ERROR_CODE, ERROR_LINE, ERROR_COLUMN, MESSAGE_INDEX,
+                MESSAGE_REFS_ENC, BDK_WRAPPED, KEK_REF));
+        if (table.schema().findField(CORRECTION_OF) != null)
+        {
+            columns.add(CORRECTION_OF);
+        }
+        return columns.toArray(String[]::new);
+    }
+
+    /**
+     * The columns a {@link Row} is read from in a table: with
+     * {@code correction_of} if the table has it yet.
+     *
+     * @param table the table
+     * @return the columns
+     */
+    private static String[] rowColumns(Table table)
+    {
+        if (table.schema().findField(CORRECTION_OF) == null)
+        {
+            return ROW_COLUMNS;
+        }
+        String[] columns = Arrays.copyOf(ROW_COLUMNS, ROW_COLUMNS.length + 1);
+        columns[ROW_COLUMNS.length] = CORRECTION_OF;
+        return columns;
     }
 
     /**
@@ -156,12 +200,16 @@ public final class CommittedRecords
                         Expressions.greaterThan(SEQ, afterSeq),
                         Expressions.lessThanOrEqual(SEQ, uptoSeq),
                         Expressions.equal(CHUNK_INDEX, 0)))
-                .select(ROW_COLUMNS)
+                .select(rowColumns(table))
                 .build())
         {
             for (Record row : rows)
             {
-                found.add(row(row));
+                Row read = row(row);
+                if (read.correctionOf() == null)
+                {
+                    found.add(read);
+                }
             }
         }
         catch (IOException error)
@@ -194,13 +242,55 @@ public final class CommittedRecords
                 .where(Expressions.and(
                         Expressions.equal(ITEM_ID, itemId),
                         Expressions.equal(CHUNK_INDEX, 0)))
-                .select(ROW_COLUMNS)
+                .select(rowColumns(table))
                 .build())
         {
             for (Record row : rows)
             {
                 Row read = row(row);
-                found.putIfAbsent(read.seq(), read);
+                if (read.correctionOf() == null)
+                {
+                    found.putIfAbsent(read.seq(), read);
+                }
+            }
+        }
+        catch (IOException error)
+        {
+            throw new UncheckedIOException(error);
+        }
+        return new ArrayList<>(found.values());
+    }
+
+    /**
+     * Reads the records of an item made from operators' corrections
+     * (STAGES.md §15.6c), which {@link #all} leaves out: one row per
+     * record, by record number then record ID.
+     *
+     * @param table  the table
+     * @param itemId the item's id
+     * @return the records
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static List<Row> corrections(Table table, UUID itemId)
+    {
+        if (table.schema().findField(CORRECTION_OF) == null)
+        {
+            return List.of();
+        }
+        Map<String, Row> found = new TreeMap<>();
+        try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(ITEM_ID, itemId),
+                        Expressions.equal(CHUNK_INDEX, 0),
+                        Expressions.notNull(CORRECTION_OF)))
+                .select(rowColumns(table))
+                .build())
+        {
+            for (Record row : rows)
+            {
+                Row read = row(row);
+                found.putIfAbsent(String.format("%020d", read.seq()) + "/"
+                        + read.recordId(), read);
             }
         }
         catch (IOException error)
@@ -284,7 +374,10 @@ public final class CommittedRecords
                         .toLocalDate(),
                 (String) row.getField(KEK_REF),
                 origin(row),
-                position(row, ERROR_LINE, ERROR_COLUMN));
+                position(row, ERROR_LINE, ERROR_COLUMN),
+                (String) row.getField(STAGE_VERSION),
+                row.struct().field(CORRECTION_OF) == null ? null
+                        : (String) row.getField(CORRECTION_OF));
     }
 
     /**
@@ -415,13 +508,18 @@ public final class CommittedRecords
                         Expressions.equal(ITEM_ID, itemId),
                         Expressions.equal(CHUNK_INDEX, 0),
                         Expressions.notNull(ERROR_CODE)))
-                .select(SEQ, SOURCE_OFFSET, ERROR_CODE, ERROR_LINE,
-                        ERROR_COLUMN, MESSAGE_INDEX, MESSAGE_REFS_ENC,
-                        BDK_WRAPPED, KEK_REF)
+                .select(failedColumns(table))
                 .build())
         {
             for (Record row : rows)
             {
+                if (row.struct().field(CORRECTION_OF) != null
+                        && row.getField(CORRECTION_OF) != null)
+                {
+                    // A correction that failed: its failure is the
+                    // original's (STAGES.md §15.6c).
+                    continue;
+                }
                 if (found.containsKey((Long) row.getField(SEQ)))
                 {
                     // A second copy of the record (STAGES.md §6).

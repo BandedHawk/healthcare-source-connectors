@@ -9,6 +9,8 @@ package com.sdh.healthcare.connector.convert;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
@@ -23,6 +25,7 @@ import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.convert.RecordConverter;
 import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitRecord;
@@ -49,6 +52,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -113,11 +117,44 @@ public final class ConvertProcessor
      * @param errorPosition  where in the record it failed, in bytes; -1
      *                       without an error
      * @param errorAt        where in the item it failed; null if unknown
+     * @param correctionOf   for an operator's correction, the ID of the
+     *                       failed row of {@code records} it corrects
+     *                       (STAGES.md §15.6c); null otherwise
      */
     public record Prepared(RecordSplit split, byte[] bytes,
             Representation representation, ErrorCode error,
-            long errorPosition, SourcePosition errorAt)
+            long errorPosition, SourcePosition errorAt, String correctionOf)
     {
+
+        /**
+         * A record, not a correction.
+         *
+         * @param split          the message it came in
+         * @param bytes          what to store, or null
+         * @param representation what the stored bytes are
+         * @param error          why it isn't converted, or null
+         * @param errorPosition  where in the record it failed, or -1
+         * @param errorAt        where in the item it failed, or null
+         */
+        public Prepared(RecordSplit split, byte[] bytes,
+                Representation representation, ErrorCode error,
+                long errorPosition, SourcePosition errorAt)
+        {
+            this(split, bytes, representation, error, errorPosition, errorAt,
+                    null);
+        }
+
+        /**
+         * The same record, made from a correction.
+         *
+         * @param of the failed row it corrects
+         * @return the record
+         */
+        Prepared correcting(String of)
+        {
+            return new Prepared(split, bytes, representation, error,
+                    errorPosition, errorAt, of);
+        }
     }
 
     /**
@@ -153,10 +190,28 @@ public final class ConvertProcessor
      *                the failed records' broker IDs back
      * @param kekRef  the KEK the data keys are wrapped with
      * @param ids     makes record IDs with the table's ID key
+     * @param splitRecords the split stage's {@code split_records}, to read
+     *                the pieces it couldn't parse for the producer's result,
+     *                since failures aren't sent on (STAGES.md §15.1); null
+     *                to report only this stage's
      */
     public record Storage(Table records, KeyProvider keys, String kekRef,
-            RecordIds ids)
+            RecordIds ids, Table splitRecords)
     {
+
+        /**
+         * Storage that reports only this stage's failures.
+         *
+         * @param records the shared {@code records} table
+         * @param keys    wraps and unwraps the batches' data keys
+         * @param kekRef  the KEK the data keys are wrapped with
+         * @param ids     makes record IDs with the table's ID key
+         */
+        public Storage(Table records, KeyProvider keys, String kekRef,
+                RecordIds ids)
+        {
+            this(records, keys, kekRef, ids, null);
+        }
     }
 
     /** Reads split records. */
@@ -272,6 +327,10 @@ public final class ConvertProcessor
                     split.recordId(), split.itemId(), split.seq());
             case ItemSplit item -> new StageInput.ItemTotal(item.itemId(),
                     item.recordCount());
+            // The split stage has failures open: the records passed so far
+            // (STAGES.md §15.6).
+            case ItemProgressed progressed -> new StageInput.ItemTotal(
+                    progressed.itemId(), progressed.passedCount(), true);
             default -> new StageInput.Unwanted("wrong_type");
         };
     }
@@ -356,6 +415,93 @@ public final class ConvertProcessor
                             .with(Attr.ERROR_CODE, output.value().error()));
         }
         return output;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @return true: the stage converts operators' corrections
+     */
+    @Override
+    public boolean corrects()
+    {
+        return true;
+    }
+
+    /**
+     * Converts an operator's correction of a record that failed here
+     * (STAGES.md §15.6c): the corrected record, in place of the one in
+     * {@code split_records}, converted as the record was, with its place in
+     * the item, its origin and its message taken from the failed row of
+     * {@code records}. Its output is a new row there, marked
+     * {@code correction_of} the failed one; if it passes, it is sent on as
+     * {@code record.stored}.
+     *
+     * @param correction the correction
+     * @return the output, and the version it is made with
+     * @throws InterruptedException if interrupted waiting for memory
+     * @throws IllegalStateException if the failed record isn't in
+     *                               {@code records}
+     */
+    @Override
+    public Corrected<Prepared> correct(CorrectionStore.Pending correction)
+            throws InterruptedException
+    {
+        UUID itemId = correction.itemId();
+        long seq = correction.seq();
+        Table records = storage.records();
+        records.refresh();
+        CommittedRecords.Row original = CommittedRecords.all(records, itemId)
+                .stream()
+                .filter(row -> row.seq() == seq && row.errorCode() != null)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("The failed"
+                        + " record isn't in " + RecordsTable.DEFAULT_NAME));
+        CommittedRecords.Failed placed = CommittedRecords.failed(records,
+                itemId, storage.keys()).stream()
+                .filter(failed -> failed.seq() == seq)
+                .findFirst().orElse(null);
+        byte[] content = correction.open(storage.keys());
+        RecordSplit split = new RecordSplit(original.recordId(), itemId, seq,
+                original.sourceOffset(), original.sourceLength(),
+                original.format(), original.contentType(), content.length, 1,
+                null, original.origin(), null, null,
+                placed == null ? -1 : placed.message(),
+                placed == null ? null : placed.messageRef(),
+                placed == null ? null : placed.messageReplaces(), null);
+        String version = version(split);
+        Optional<RecordConverter> found = converters.get(split.format());
+        StageOutput<Prepared> made;
+        if (found.isEmpty())
+        {
+            made = output(new Prepared(split, content,
+                    Representation.raw(split.format()), null, -1, null),
+                    digest(content, null, "as-split"));
+        }
+        else if (content.length > settings.maxBytes())
+        {
+            made = output(new Prepared(split, content,
+                    Representation.raw(split.format()),
+                    ErrorCode.CONVERT_TOO_LARGE, 0, null),
+                    digest(content, ErrorCode.CONVERT_TOO_LARGE, null));
+        }
+        else
+        {
+            RecordConverter converter = found.get();
+            int taken = budget.acquire((long) Math.ceil(
+                    content.length * converter.memoryFactor()));
+            try
+            {
+                made = convert(split, converter, content);
+            }
+            finally
+            {
+                budget.release(taken);
+            }
+        }
+        return new Corrected<>(new StageOutput<>(made.digest(), made.failed(),
+                made.value().correcting(original.recordId()),
+                made.errorCode()), version);
     }
 
     /**
@@ -482,7 +628,8 @@ public final class ConvertProcessor
     private static StageOutput<Prepared> output(Prepared prepared,
             String digest)
     {
-        return new StageOutput<>(digest, prepared.error() != null, prepared);
+        return new StageOutput<>(digest, prepared.error() != null, prepared,
+                prepared.error() == null ? null : prepared.error().name());
     }
 
     /**
@@ -511,7 +658,8 @@ public final class ConvertProcessor
      * One data file, appended to {@code records}; the table's commit
      * retries cover the other workers appending at the same time.
      *
-     * @return {@code record.stored} or {@code record.failed} for each
+     * @return {@code record.stored} for each record converted; null for
+     *         one that failed, which isn't sent on (STAGES.md §15.1)
      */
     @Override
     public List<ConnectorMessage> commit(List<StageOutput<Prepared>> outputs)
@@ -547,11 +695,19 @@ public final class ConvertProcessor
                 writer.ingestedDate(), records.currentSnapshot().snapshotId(),
                 writer.kekRef());
         List<ConnectorMessage> messages = new ArrayList<>(written.size());
-        for (WrittenRecord record : written)
+        for (int index = 0; index < written.size(); index++)
         {
-            messages.add(message(record, ref));
-            if (record.error() != null)
+            WrittenRecord record = written.get(index);
+            if (record.error() == null)
             {
+                messages.add(message(record, ref,
+                        version(outputs.get(index).value().split())));
+            }
+            else
+            {
+                // Kept in records and in the fail store, and not sent on
+                // (STAGES.md §15.1).
+                messages.add(null);
                 Telemetry.get().auditWarn("record.failed",
                         Fields.of(Attr.ITEM_ID, record.itemId())
                                 .with(Attr.SEQ, record.seq())
@@ -579,6 +735,13 @@ public final class ConvertProcessor
         SplitRecord lineage = SplitRecord.ofRange(split.sourceOffset(),
                 split.sourceLength(), ResumePoint.at(end))
                 .withOrigin(split.origin());
+        writer.versions(split.itemId(), split.seq(), version(split),
+                split.version());
+        if (prepared.correctionOf() != null)
+        {
+            writer.correction(split.itemId(), split.seq(),
+                    prepared.correctionOf());
+        }
         if (prepared.error() != null && split.message() >= 0)
         {
             writer.place(split.itemId(), split.seq(), new MessagePlace(
@@ -616,7 +779,7 @@ public final class ConvertProcessor
      *         {@code record.stored}
      */
     private static ConnectorMessage message(WrittenRecord record,
-            StorageRef ref)
+            StorageRef ref, String version)
     {
         Representation representation = record.representation();
         if (record.error() != null)
@@ -626,20 +789,21 @@ public final class ConvertProcessor
                     record.sourceLength(), record.format(),
                     representation.contentType(), record.error().name(),
                     record.plaintextLength(), record.chunkCount(), ref,
-                    record.origin(), record.errorAt());
+                    record.origin(), record.errorAt(), version);
         }
         return new RecordStored(record.recordId(), record.itemId(),
                 record.seq(), record.sourceOffset(), record.sourceLength(),
                 record.format(), representation.contentType(),
                 representation.mapping(), record.plaintextLength(),
-                record.chunkCount(), ref, record.origin());
+                record.chunkCount(), ref, record.origin(), version);
     }
 
     /**
      * A completed item's output, rebuilt as the stage first sent it, for a
-     * replay (STAGES.md §13.2): a {@code record.stored} or
-     * {@code record.failed} for each record in {@code records}, in order,
-     * then its {@code item.converted}. Each record names the table's
+     * replay (STAGES.md §13.2): a {@code record.stored} for each record in
+     * {@code records} that passed, in order, then its
+     * {@code item.converted}; failed records are in the fail store, and
+     * aren't sent on (§15.1). Each record names the table's
      * current snapshot rather than the one it was stored in, which reads
      * the same.
      *
@@ -660,14 +824,39 @@ public final class ConvertProcessor
         long snapshotId = records.currentSnapshot() == null ? -1
                 : records.currentSnapshot().snapshotId();
         List<ConnectorMessage> messages = new ArrayList<>();
+        Set<String> versions = new LinkedHashSet<>();
         for (CommittedRecords.Row row : CommittedRecords.all(records, itemId))
         {
+            if (row.errorCode() != null)
+            {
+                // In the fail store, and not sent on (STAGES.md §15.1).
+                continue;
+            }
             messages.add(recordMessage(itemId, row, new StorageRef(catalog,
                     namespace, RecordsTable.DEFAULT_NAME, row.ingestedDate(),
                     snapshotId, row.kekRef())));
+            if (row.stageVersion() != null)
+            {
+                versions.add(row.stageVersion());
+            }
         }
-        messages.add(new ItemConverted(itemId, intake, done, failed,
-                completedAt));
+        // Records made from operators' corrections that passed, after the
+        // originals; each resolves a failure (STAGES.md §15.6c).
+        Set<Long> corrected = new java.util.TreeSet<>();
+        for (CommittedRecords.Row row : CommittedRecords.corrections(records,
+                itemId))
+        {
+            if (row.errorCode() == null)
+            {
+                corrected.add(row.seq());
+                messages.add(recordMessage(itemId, row, new StorageRef(
+                        catalog, namespace, RecordsTable.DEFAULT_NAME,
+                        row.ingestedDate(), snapshotId, row.kekRef())));
+            }
+        }
+        messages.add(new ItemConverted(itemId, intake, done,
+                failed - corrected.size(), completedAt,
+                List.copyOf(versions)));
         return messages;
     }
 
@@ -691,12 +880,13 @@ public final class ConvertProcessor
             return new RecordFailed(row.recordId(), itemId, row.seq(),
                     row.sourceOffset(), row.sourceLength(), row.format(),
                     row.contentType(), row.errorCode(), row.plaintextLength(),
-                    row.chunkCount(), ref, row.origin(), row.errorAt());
+                    row.chunkCount(), ref, row.origin(), row.errorAt(),
+                    row.stageVersion());
         }
         return new RecordStored(row.recordId(), itemId, row.seq(),
                 row.sourceOffset(), row.sourceLength(), row.format(),
                 row.contentType(), row.mapping(), row.plaintextLength(),
-                row.chunkCount(), ref, row.origin());
+                row.chunkCount(), ref, row.origin(), row.stageVersion());
     }
 
     /**
@@ -710,24 +900,73 @@ public final class ConvertProcessor
         String intake = progress.total() instanceof ItemSplit split
                 ? split.intake() : UNKNOWN_INTAKE;
         return new ItemConverted(progress.itemId(), intake, progress.done(),
-                progress.failed(), clock.instant());
+                progress.unresolved(), clock.instant(), progress.versions());
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @return {@code item.progress}, with the stage's counts
+     */
+    @Override
+    public ConnectorMessage itemProgress(ItemProgress progress)
+    {
+        ResultReporter.Facts facts = ResultReporter.Facts.of(
+                progress.total());
+        return new ItemProgressed(progress.itemId(),
+                facts == null ? UNKNOWN_INTAKE : facts.intake(), STAGE,
+                progress.done(), progress.passed(), progress.open(),
+                progress.declined(), facts == null ? null : facts.failure(),
+                facts == null ? null : facts.producerRef(),
+                facts == null ? null : facts.replaces(), clock.instant(),
+                progress.versions());
+    }
+
+    /**
+     * Sends the producer's result, if results are on, as
+     * {@code incomplete}: the item's failures at both stages, while one is
+     * open (STAGES.md §15.6).
+     *
+     * @param progress the item and its counts
+     * @throws Exception if a table can't be read or a part can't be sent
+     */
+    @Override
+    public void itemProgressed(ItemProgress progress) throws Exception
+    {
+        report(progress, ItemResult.INCOMPLETE);
     }
 
     /**
      * Sends the producer's result, if results are on, from the item's
-     * {@code item.split} and its failed records in {@code records}.
+     * {@code item.split} and its failed records in {@code split_records}
+     * and {@code records}.
      *
      * @param progress the item and its counts
-     * @throws Exception if the table can't be read or a part can't be sent
+     * @throws Exception if a table can't be read or a part can't be sent
      */
     @Override
     public void itemCompleted(ItemProgress progress) throws Exception
+    {
+        report(progress, ItemResult.COMPLETED);
+    }
+
+    /**
+     * Sends the producer's result, if results are on.
+     *
+     * @param progress the item and its counts
+     * @param status   {@code completed} or {@code incomplete}
+     * @throws Exception if a table can't be read or a part can't be sent
+     */
+    private void report(ItemProgress progress, String status)
+            throws Exception
     {
         if (results == null)
         {
             return;
         }
-        if (!(progress.total() instanceof ItemSplit total))
+        ResultReporter.Facts facts = ResultReporter.Facts.of(
+                progress.total());
+        if (facts == null)
         {
             Telemetry.get().auditWarn("convert.result_not_sent",
                     Fields.of(Attr.ITEM_ID, progress.itemId())
@@ -736,8 +975,52 @@ public final class ConvertProcessor
         }
         Table records = storage.records();
         records.refresh();
-        results.report(total, CommittedRecords.failed(records,
-                progress.itemId(), storage.keys()));
+        // By sequence number: a row of records names a piece the splitter
+        // couldn't parse when it was sent on before 2026-11-08, so it is
+        // the same failure as its row of split_records.
+        Map<Long, CommittedRecords.Failed> failed = new TreeMap<>();
+        long splitFailed = 0;
+        if (storage.splitRecords() != null)
+        {
+            Table splitRecords = storage.splitRecords();
+            splitRecords.refresh();
+            for (CommittedRecords.Failed piece : CommittedRecords.failed(
+                    splitRecords, progress.itemId(), storage.keys()))
+            {
+                failed.put(piece.seq(), piece);
+            }
+            // A piece corrected at the split stage came here as a record
+            // (STAGES.md §15.6d): counted in done, not a problem.
+            for (CommittedRecords.Row row : CommittedRecords.corrections(
+                    splitRecords, progress.itemId()))
+            {
+                if (row.errorCode() == null)
+                {
+                    failed.remove(row.seq());
+                }
+            }
+            splitFailed = failed.size();
+        }
+        for (CommittedRecords.Failed record : CommittedRecords.failed(
+                records, progress.itemId(), storage.keys()))
+        {
+            if (failed.put(record.seq(), record) != null)
+            {
+                splitFailed--;
+            }
+        }
+        // A failure an operator's correction resolved is no longer a
+        // problem of the item's (STAGES.md §15.6c).
+        for (CommittedRecords.Row row : CommittedRecords.corrections(records,
+                progress.itemId()))
+        {
+            if (row.errorCode() == null)
+            {
+                failed.remove(row.seq());
+            }
+        }
+        results.report(facts, status, progress.done() + splitFailed,
+                List.copyOf(failed.values()));
     }
 
     /**

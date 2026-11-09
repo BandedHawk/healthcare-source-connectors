@@ -29,6 +29,18 @@ public enum Attr
     /** The state of a file's checkpoint, such as {@code ARCHIVING}. */
     STATE("sdh.state"),
 
+    /** The state a failure was changed from (STAGES.md §15.3). */
+    FROM_STATE("sdh.from_state"),
+
+    /** An operator's correction's number for its failure (§15.6c). */
+    CORRECTION("sdh.correction"),
+
+    /**
+     * The SHA-256 of the public key an export was encrypted to, hex: who
+     * can read it, without naming them (STAGES.md §15.6c).
+     */
+    RECIPIENT_KEY("sdh.recipient_key"),
+
     /**
      * The stage of processing, such as {@code intake}, {@code split} or
      * {@code archive}.
@@ -116,6 +128,15 @@ public enum Attr
 
     /** How many of an item's records failed, and were stored as they were. */
     FAILED_COUNT("sdh.failed_count"),
+
+    /**
+     * How many of an item's failures an operator declined to correct
+     * (STAGES.md §15.3).
+     */
+    DECLINED_COUNT("sdh.declined_count"),
+
+    /** How many of an item's failures are open: neither passed nor declined. */
+    OPEN_COUNT("sdh.open_count"),
 
     /**
      * The broker's ID of a received message, such as

@@ -18,6 +18,8 @@ import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
@@ -32,6 +34,7 @@ import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.split.ItemSplitter;
+import com.sdh.healthcare.connector.file.split.SplitCorrections;
 import com.sdh.healthcare.connector.file.split.LandedItemsTable;
 import com.sdh.healthcare.connector.file.split.SplitHandler;
 import com.sdh.healthcare.connector.file.split.SplitReconciler;
@@ -40,6 +43,7 @@ import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
+import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
 import com.sdh.healthcare.connector.stage.StageProperties;
@@ -121,6 +125,9 @@ public final class ConnectorRuntime implements AutoCloseable
     private final ItemSplitter splitter;
 
     /** Takes {@code item.landed} messages off the broker. */
+    /** Applies operators' corrections. */
+    private final SplitCorrections corrections;
+
     private final StageReceiver receiver;
 
     /** Whether the broker answers. */
@@ -161,6 +168,7 @@ public final class ConnectorRuntime implements AutoCloseable
      * @param pipeline       splits, stores and publishes
      * @param processor      takes items through the pipeline
      * @param splitter       splits one item at a time
+     * @param corrections    applies operators' corrections
      * @param receiver       takes messages off the broker
      * @param health         whether the broker answers
      * @param duties         the reconciler and maintenance
@@ -171,7 +179,8 @@ public final class ConnectorRuntime implements AutoCloseable
     private record Parts(HikariDataSource dataSource, Catalog catalog,
             Catalog landingCatalog, ClosablePublisher publisher,
             IngestPipeline pipeline, ItemProcessor processor,
-            ItemSplitter splitter, StageReceiver receiver, StageHealth health,
+            ItemSplitter splitter, SplitCorrections corrections,
+            StageReceiver receiver, StageHealth health,
             StageDuties duties, Tables tables, KeyMaterial keys,
             RecordIds ids)
     {
@@ -191,6 +200,7 @@ public final class ConnectorRuntime implements AutoCloseable
         this.pipeline = parts.pipeline();
         this.processor = parts.processor();
         this.splitter = parts.splitter();
+        this.corrections = parts.corrections();
         this.receiver = parts.receiver();
         this.health = parts.health();
         this.duties = parts.duties();
@@ -294,15 +304,32 @@ public final class ConnectorRuntime implements AutoCloseable
                     output.artemis().password());
             publisher = Publishers.create(camel, queueType, queueUri);
             pipeline = new IngestPipeline(
-                    pipelineSettings(properties, format, split, retry),
+                    pipelineSettings(properties, format, split, retry)
+                            .withVersion(version(splitters, format, split)),
                     splitRecords, checkpoints, keys.wrap(), ids, splitters,
                     new MessageSealer(keys.signer(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
                     publisher, clock);
-            ItemProcessor processor = new ItemProcessor(pipeline, intake);
+            // The fail store's states, beside the checkpoints (STAGES.md
+            // §15.3); the failed pieces stay in split_records.
+            FailureStore failures = new FailureStore(dataSource,
+                    stage.registrySchema(), ItemProcessor.STAGE,
+                    Duration.ofSeconds(10));
+            failures.createTableIfMissing();
+            failures.gauges(Duration.ofMinutes(1));
+            // Operators' corrections, applied by any pod (§15.6d).
+            CorrectionStore corrections = new CorrectionStore(dataSource,
+                    stage.registrySchema(), ItemProcessor.STAGE,
+                    Duration.ofSeconds(10));
+            corrections.createTableIfMissing();
+            ItemProcessor processor = new ItemProcessor(pipeline, intake,
+                    failures, corrections);
             ItemSplitter splitter = new ItemSplitter(processor, landedItems,
                     keys.wrap(), leases, properties.connectorId(),
                     leaseSettings);
+            SplitCorrections correcting = new SplitCorrections(corrections,
+                    splitter, leaseSettings.renewInterval(),
+                    leaseSettings.ttl());
 
             StageHealth health = new StageHealth();
             receiver = new StageReceiver(camel, input,
@@ -333,7 +360,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     Fields.of(Attr.FORMAT, format).with(Attr.INTAKE, intake));
             return new ConnectorRuntime(new Parts(dataSource, catalog,
                     landingCatalog, publisher, pipeline, processor, splitter,
-                    receiver, health, duties,
+                    correcting, receiver, health, duties,
                     new Tables(splitRecords, landedItems, checkpoints), keys,
                     ids));
         }
@@ -397,13 +424,32 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
+     * The split stage's version (STAGES.md §14.2): the build, the splitter
+     * (its format and its own version) and a digest of the split settings,
+     * such as {@code 0.1.0@2026-11-08T10:00:00Z/ccda/1/3f9a0c1d22b7}. Kept
+     * with every record cut and in every item's checkpoint.
+     *
+     * @param splitters the splitters
+     * @param format    the format split
+     * @param split     the split settings
+     * @return the version
+     */
+    static String version(SplitterRegistry splitters, String format,
+            SplitConfig split)
+    {
+        return StageBuild.identity(ConnectorRuntime.class) + "/" + format
+                + "/" + splitters.get(format).version() + "/"
+                + split.digest();
+    }
+
+    /**
      * The split settings, with the format's defaults where none are set.
      *
      * @param settings the {@code sdh.split} settings
      * @param format   the format
      * @return the split settings
      */
-    static SplitConfig splitConfig(ConnectorProperties.Split settings,
+    public static SplitConfig splitConfig(ConnectorProperties.Split settings,
             String format)
     {
         SplitConfig config = SplitConfig.defaults(format)
@@ -438,6 +484,7 @@ public final class ConnectorRuntime implements AutoCloseable
     public void start() throws Exception
     {
         duties.start();
+        corrections.start();
         receiver.start();
         LOG.info("split.started");
     }
@@ -460,6 +507,16 @@ public final class ConnectorRuntime implements AutoCloseable
     public ItemSplitter splitter()
     {
         return splitter;
+    }
+
+    /**
+     * Applies operators' corrections.
+     *
+     * @return the loop
+     */
+    public SplitCorrections corrections()
+    {
+        return corrections;
     }
 
     /**
@@ -510,6 +567,7 @@ public final class ConnectorRuntime implements AutoCloseable
     public void close()
     {
         receiver.close();
+        corrections.close();
         duties.close();
         pipeline.close();
         closeQuietly(publisher);

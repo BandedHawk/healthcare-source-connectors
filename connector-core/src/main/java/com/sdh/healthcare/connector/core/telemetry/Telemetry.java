@@ -142,6 +142,18 @@ public final class Telemetry
      */
     private final LongCounter versionDiffers;
 
+    /**
+     * Items the split stage held, begun under another of its versions
+     * (STAGES.md §14.3).
+     */
+    private final LongCounter itemsHeld;
+
+    /**
+     * Failures a stage recorded in its fail store, by stage (STAGES.md
+     * §15.3).
+     */
+    private final LongCounter failuresRecorded;
+
     /** Exports what is buffered, so a process about to die loses nothing. */
     private final Runnable flush;
 
@@ -220,6 +232,16 @@ public final class Telemetry
                 .setUnit("{record}")
                 .setDescription("Records received again under a different"
                         + " version than they were stored with, by stage")
+                .build();
+        itemsHeld = meter.counterBuilder("sdh.split.items_held")
+                .setUnit("{item}")
+                .setDescription("Items held part way, begun under another"
+                        + " version of the split stage")
+                .build();
+        failuresRecorded = meter.counterBuilder("sdh.stage.failures")
+                .setUnit("{failure}")
+                .setDescription("Failures recorded in a stage's fail store,"
+                        + " by stage")
                 .build();
         meter.gaugeBuilder("sdh.items.in_progress").ofLongs()
                 .buildWithCallback(measurement ->
@@ -546,6 +568,22 @@ public final class Telemetry
     public void versionDiffers(String stage)
     {
         versionDiffers.add(1, Fields.of(Attr.STAGE, stage).toAttributes());
+    }
+
+    /**
+     * Counts a failure recorded in a stage's fail store.
+     *
+     * @param stage the stage
+     */
+    public void failureRecorded(String stage)
+    {
+        failuresRecorded.add(1, Fields.of(Attr.STAGE, stage).toAttributes());
+    }
+
+    /** Counts an item the split stage held (STAGES.md §14.3). */
+    public void itemHeld()
+    {
+        itemsHeld.add(1);
     }
 
     /**

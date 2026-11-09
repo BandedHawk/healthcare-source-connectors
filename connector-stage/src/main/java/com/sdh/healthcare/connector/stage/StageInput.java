@@ -45,13 +45,30 @@ public sealed interface StageInput
 
     /**
      * How many records an item has, from the stage before's item-complete
-     * message (STAGES.md §5).
+     * message (STAGES.md §5), or its {@code item.progress}.
      *
      * @param itemId   the item's id
-     * @param expected how many records of it the stage will receive
+     * @param expected how many records of it the stage will receive, or
+     *                 has so far
+     * @param partial  whether it is from the stage before's
+     *                 {@code item.progress}: that stage still has failures
+     *                 open, so the total may grow, and the item can't
+     *                 complete here yet (STAGES.md §15.6)
      */
-    record ItemTotal(UUID itemId, long expected) implements StageInput
+    record ItemTotal(UUID itemId, long expected, boolean partial)
+            implements StageInput
     {
+
+        /**
+         * A final total, from the stage before's item-complete message.
+         *
+         * @param itemId   the item's id
+         * @param expected how many records of it the stage will receive
+         */
+        public ItemTotal(UUID itemId, long expected)
+        {
+            this(itemId, expected, false);
+        }
     }
 
     /**

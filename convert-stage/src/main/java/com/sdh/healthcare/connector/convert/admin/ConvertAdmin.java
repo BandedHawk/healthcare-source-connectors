@@ -8,7 +8,10 @@ package com.sdh.healthcare.connector.convert.admin;
 
 import com.sdh.healthcare.connector.convert.config.ConvertProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
+import com.sdh.healthcare.connector.stage.admin.AdminCommand;
+import com.sdh.healthcare.connector.stage.admin.FailureCommands;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
+import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
@@ -39,7 +42,20 @@ public final class ConvertAdmin
                         Configuration.class, ConvertProperties.class,
                         ConvertProperties::telemetry,
                         ConvertAdminContext::new),
-                List.of(new StageStatusCommand<>(), new ReplayCommand()));
+                commands());
+    }
+
+    /**
+     * The stage's commands, with those for its fail store.
+     *
+     * @return the commands
+     */
+    static List<AdminCommand<ConvertAdminContext>> commands()
+    {
+        List<AdminCommand<ConvertAdminContext>> commands = new ArrayList<>(List.of(
+                new StageStatusCommand<>(), new ReplayCommand()));
+        commands.addAll(FailureCommands.<ConvertAdminContext>all());
+        return List.copyOf(commands);
     }
 
     /**

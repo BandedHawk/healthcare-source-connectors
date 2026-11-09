@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.stage;
 
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.broker.receive.BatchHandler;
 import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
@@ -15,16 +16,18 @@ import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordConflict;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
-import java.time.Clock;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,10 +62,6 @@ class StageWorkerTest
 
     /** The stage's output, shared by all workers. */
     final StageTestSupport.RecordingPublisher output =
-            new StageTestSupport.RecordingPublisher();
-
-    /** The dead-letter queue, shared by all workers. */
-    final StageTestSupport.RecordingPublisher deadLetters =
             new StageTestSupport.RecordingPublisher();
 
     /** The workers made, closed after each test. */
@@ -109,8 +108,7 @@ class StageWorkerTest
         StageWorker<String> worker = new StageWorker<>(processor,
                 StageTestSupport.registry(schema, owner),
                 StageTestSupport.stageOpener(),
-                StageTestSupport.stageSealer(), output, deadLetters,
-                SETTINGS, Clock.systemUTC());
+                StageTestSupport.stageSealer(), output, SETTINGS);
         worker.start();
         workers.add(worker);
         return worker;
@@ -170,6 +168,226 @@ class StageWorkerTest
     }
 
     /**
+     * The item-progress messages sent.
+     *
+     * @return the messages, in order
+     */
+    List<ItemProgressed> sentProgress()
+    {
+        return output.opened().stream()
+                .filter(ItemProgressed.class::isInstance)
+                .map(ItemProgressed.class::cast).toList();
+    }
+
+    /**
+     * A record that fails is stored and kept in the fail store, once, and
+     * not sent on; its item isn't complete while the failure is open, and
+     * gets item.progress instead, once for its counts (STAGES.md §15.6).
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void keepsAFailureAndReportsItsItemInProgress()
+            throws InterruptedException
+    {
+        StageTestSupport.TestProcessor processor = processor();
+        StageWorker<String> worker = worker("pod-a", processor);
+        assertThat(worker.handle(batch(5)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(committed).hasSize(5);
+        assertThat(sentRecords()).hasSize(4)
+                .doesNotContain("rec-" + item + "-4");
+        assertThat(sentItems()).isEmpty();
+        assertThat(sentProgress()).singleElement().satisfies(progress ->
+        {
+            assertThat(progress.itemId()).isEqualTo(item);
+            assertThat(progress.recordCount()).isEqualTo(5);
+            assertThat(progress.passedCount()).isEqualTo(4);
+            assertThat(progress.openCount()).isEqualTo(1);
+        });
+        assertThat(processor.progressed).singleElement().satisfies(
+                progress -> assertThat(progress.complete()).isFalse());
+        assertThat(processor.completed).isEmpty();
+        assertThat(audit.names()).containsExactly("failure.failed",
+                "item.progress");
+        FailureStore failures = StageTestSupport.registry(schema, "pod-a")
+                .failureStore();
+        assertThat(failures.failures(item)).singleElement().satisfies(
+                stored ->
+                {
+                    assertThat(stored.state())
+                            .isEqualTo(FailureStore.State.FAILED);
+                    assertThat(stored.failure().seq()).isEqualTo(4);
+                    assertThat(stored.failure().errorCode())
+                            .isEqualTo("TEST_FAILED");
+                    assertThat(stored.failure().version()).isEqualTo("v1");
+                });
+
+        // Delivered again: a duplicate, with nothing new to report.
+        assertThat(worker.handle(batch(5)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(committed).hasSize(5);
+        assertThat(sentProgress()).hasSize(1);
+        assertThat(failures.counts(item))
+                .isEqualTo(new FailureStore.Counts(1, 0, 0));
+    }
+
+    /**
+     * Once an operator declines an item's last open failure, the worker's
+     * revisit finds the item changed and completes it; a revisit with
+     * nothing changed sends nothing (STAGES.md §15.3).
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void completesAnItemOnceItsFailureIsDeclined() throws InterruptedException
+    {
+        StageTestSupport.TestProcessor processor = processor();
+        StageWorker<String> worker = worker("pod-a", processor);
+        assertThat(worker.handle(batch(5)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(sentProgress()).hasSize(1);
+        worker.revisit();
+        assertThat(sentProgress()).hasSize(1);
+        assertThat(sentItems()).isEmpty();
+
+        FailureStore failures = StageTestSupport.registry(schema, "pod-a")
+                .failureStore();
+        failures.change(item, 4, Set.of(FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "declined", "alice", null);
+        worker.revisit();
+        assertThat(sentItems()).singleElement().satisfies(done ->
+        {
+            assertThat(done.itemId()).isEqualTo(item);
+            assertThat(done.recordCount()).isEqualTo(5);
+        });
+        assertThat(processor.completed).singleElement().satisfies(
+                progress ->
+                {
+                    assertThat(progress.passed()).isEqualTo(4);
+                    assertThat(progress.declined()).isEqualTo(1);
+                    assertThat(progress.open()).isZero();
+                });
+
+        // Complete: not revisited again.
+        worker.revisit();
+        assertThat(sentItems()).hasSize(1);
+        assertThat(failures.counts(item))
+                .isEqualTo(new FailureStore.Counts(0, 1, 0));
+    }
+
+    /**
+     * An operator's correction is processed by a worker (STAGES.md
+     * §15.6c): one that fails leaves the failure FAILED_CORRECTION, and
+     * the item incomplete, sending nothing; one that passes is stored and
+     * sent on as a record of its own, the failure CORRECTED and naming it,
+     * and the item completes with every record passed. A second correction
+     * while one is pending is refused.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void appliesAnOperatorsCorrection() throws InterruptedException
+    {
+        StageTestSupport.TestProcessor processor = processor();
+        StageWorker<String> worker = worker("pod-a", processor);
+        assertThat(worker.handle(batch(5)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        StageRegistry registry = StageTestSupport.registry(schema, "pod-a");
+        CorrectionStore corrections = registry.correctionStore();
+        FailureStore failures = registry.failureStore();
+
+        assertThat(corrections.submit(item, 4, "still bad".getBytes(US_ASCII),
+                StageTestSupport.CORRECTION_KEYS,
+                StageTestSupport.CORRECTION_KEK, "alice")).isEqualTo(1);
+        assertThatThrownBy(() -> corrections.submit(item, 4,
+                "again".getBytes(US_ASCII), StageTestSupport.CORRECTION_KEYS,
+                StageTestSupport.CORRECTION_KEK, "alice"))
+                .isInstanceOf(FailureStore.RefusedException.class);
+        worker.applyCorrections();
+        worker.revisit();
+        assertThat(failures.failure(item, 4)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.FAILED_CORRECTION);
+        assertThat(sentRecords()).hasSize(4);
+        assertThat(sentItems()).isEmpty();
+        assertThat(audit.names()).contains("failure.correction_submitted",
+                "failure.correction_failed");
+
+        assertThat(corrections.submit(item, 4, "fixed".getBytes(US_ASCII),
+                StageTestSupport.CORRECTION_KEYS,
+                StageTestSupport.CORRECTION_KEK, "alice")).isEqualTo(2);
+        worker.applyCorrections();
+        worker.revisit();
+        assertThat(sentRecords()).hasSize(5)
+                .contains("rec-" + item + "-4-c2");
+        assertThat(failures.failure(item, 4)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.CORRECTED);
+        assertThat(corrections.list(item, 4)).extracting(
+                CorrectionStore.Listed::state).containsExactly(
+                        CorrectionStore.State.FAILED,
+                        CorrectionStore.State.PASSED);
+        assertThat(corrections.list(item, 4).get(1).recordId())
+                .isEqualTo("rec-" + item + "-4-c2");
+        assertThat(sentItems()).singleElement().satisfies(done ->
+        {
+            assertThat(done.recordCount()).isEqualTo(5);
+            assertThat(done.failedRecordCount()).isZero();
+        });
+        assertThat(processor.completed).singleElement().satisfies(
+                progress -> assertThat(progress.passed()).isEqualTo(5));
+
+        // Nothing left: a later interval does nothing more.
+        worker.applyCorrections();
+        worker.revisit();
+        assertThat(sentRecords()).hasSize(5);
+        assertThat(sentItems()).hasSize(1);
+    }
+
+    /**
+     * An item the stage before still has failures open for comes with its
+     * item.progress: the records passed so far are handled, and the item
+     * reported in progress, but not completed until its final total comes
+     * (STAGES.md §15.6).
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void waitsForTheStageBeforeToCompleteAnItem() throws InterruptedException
+    {
+        StageTestSupport.TestProcessor processor = processor();
+        StageWorker<String> worker = worker("pod-a", processor);
+        List<BrokerMessage> partial = new ArrayList<>();
+        for (int seq = 0; seq < 3; seq++)
+        {
+            partial.add(StageTestSupport.record(item, seq));
+        }
+        partial.add(StageTestSupport.received(new ItemProgressed(item,
+                "test", "before", 4, 3, 1, 0, null, null, null,
+                java.time.Instant.EPOCH, null)));
+        assertThat(worker.handle(partial))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(sentItems()).isEmpty();
+        assertThat(sentProgress()).singleElement().satisfies(progress ->
+        {
+            assertThat(progress.passedCount()).isEqualTo(3);
+            assertThat(progress.openCount()).isZero();
+        });
+        assertThat(processor.progressed).singleElement().satisfies(
+                progress -> assertThat(progress.upstreamOpen()).isTrue());
+
+        // The stage before resolved its failure: one more record, and its
+        // final total.
+        assertThat(worker.handle(List.of(StageTestSupport.record(item, 3),
+                StageTestSupport.total(item, 4))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(sentItems()).singleElement().satisfies(done ->
+                assertThat(done.recordCount()).isEqualTo(4));
+        assertThat(processor.completed).hasSize(1);
+    }
+
+    /**
      * A batch is processed, committed once, sent, and its item completed
      * with its counts.
      *
@@ -179,17 +397,18 @@ class StageWorkerTest
     void storesSendsAndCompletesAnItem() throws InterruptedException
     {
         StageWorker<String> worker = worker("pod-a", processor());
-        assertThat(worker.handle(batch(5)))
+        assertThat(worker.handle(batch(4)))
                 .isEqualTo(BatchHandler.Outcome.DONE);
-        assertThat(committed).hasSize(5).doesNotHaveDuplicates();
+        assertThat(committed).hasSize(4).doesNotHaveDuplicates();
         assertThat(sentRecords()).containsExactlyInAnyOrderElementsOf(
                 committed);
         assertThat(sentItems()).singleElement().satisfies(done ->
         {
             assertThat(done.itemId()).isEqualTo(item);
-            assertThat(done.recordCount()).isEqualTo(5);
-            assertThat(done.failedRecordCount()).isEqualTo(1);
+            assertThat(done.recordCount()).isEqualTo(4);
+            assertThat(done.failedRecordCount()).isZero();
         });
+        assertThat(sentProgress()).isEmpty();
         assertThat(audit.names()).containsExactly("stage.item_completed");
         assertThat(audit.attributes("stage.item_completed"))
                 .containsEntry("sdh.stage", "test")
@@ -247,40 +466,34 @@ class StageWorkerTest
     }
 
     /**
-     * A record received again under another version, whose output is the
-     * same, is a duplicate once processed again. Before that, the worker
-     * announces the comparison with what an operator needs to recover by
-     * hand, and flushes it, since processing again may stop the process.
+     * A record received again under another version is a duplicate, never
+     * processed again (STAGES.md §14.3): the first output stays, nothing
+     * goes to the dead-letter queue, and the version that differs is
+     * audited, {@code record.version_differs}, with what an operator needs
+     * to find the record. A later version can't stop the worker on a record
+     * stored under an earlier one.
      *
      * @throws InterruptedException if interrupted
      */
     @Test
-    void announcesAComparisonUnderAnotherVersion() throws InterruptedException
+    void takesARecordUnderAnotherVersionAsADuplicateUnprocessed()
+            throws InterruptedException
     {
         worker("pod-a", processor()).handle(batch(1));
+        int sent = output.sent.size();
         StageTestSupport.TestProcessor changed =
-                new StageTestSupport.TestProcessor(2, committed)
-                {
-                    @Override
-                    public StageOutput<String> process(
-                            ConnectorMessage message, int attempt)
-                    {
-                        // A build that changed nothing in the output.
-                        StageOutput<String> output =
-                                super.process(message, attempt);
-                        return new StageOutput<>(
-                                output.digest().replace("v2:", "v1:"),
-                                output.failed(), output.value());
-                    }
-                };
+                new StageTestSupport.TestProcessor(2, committed);
         assertThat(worker("pod-b", changed).handle(batch(1)))
                 .isEqualTo(BatchHandler.Outcome.DONE);
-        assertThat(changed.processed).hasValue(1);
-        assertThat(deadLetters.sent).isEmpty();
+        assertThat(changed.processed).hasValue(0);
+        assertThat(committed).hasSize(1);
+        assertThat(output.sent).hasSize(sent);
         assertThat(audit.names()).containsSubsequence(
-                "record.compare_started", "record.duplicate");
-        assertThat(audit.flushes()).isEqualTo(1);
-        assertThat(audit.attributes("record.compare_started"))
+                "record.version_differs", "record.duplicate");
+        assertThat(audit.names()).doesNotContain("record.compare_started",
+                "record.conflict");
+        assertThat(audit.flushes()).isZero();
+        assertThat(audit.attributes("record.version_differs"))
                 .containsEntry("sdh.stage", "test")
                 .containsEntry("sdh.item_id", item.toString())
                 .containsEntry("sdh.seq", 0L)
@@ -288,38 +501,7 @@ class StageWorkerTest
                         StageTestSupport.record(item, 0).messageId())
                 .containsEntry("sdh.version", "v2")
                 .containsEntry("sdh.stored_version", "v1")
-                .containsEntry("sdh.attempts", 1L)
                 .containsEntry("sdh.state", "SENT");
-    }
-
-    /**
-     * A record stored at its third attempt, received again under another
-     * version, is processed again at that attempt, so an output decided by
-     * attempts (the convert stage's {@code CONVERT_SKIPPED}) comes out the
-     * same rather than doing the work that stopped two workers.
-     *
-     * @throws InterruptedException if interrupted
-     */
-    @Test
-    void comparesAtTheAttemptItWasStoredAt() throws InterruptedException
-    {
-        String held = "rec-" + item + "-0";
-        StageTestSupport.registry(schema, "pod-y").claim(held, item,
-                Duration.ofMillis(1));
-        Thread.sleep(20);
-        StageTestSupport.registry(schema, "pod-z").claim(held, item,
-                Duration.ofMillis(1));
-        Thread.sleep(20);
-        StageTestSupport.TestProcessor first = processor();
-        worker("pod-a", first).handle(batch(1));
-        assertThat(first.attempts).containsEntry(held, 3);
-
-        StageTestSupport.TestProcessor changed =
-                new StageTestSupport.TestProcessor(2, committed);
-        worker("pod-b", changed).handle(batch(1));
-        assertThat(changed.attempts).containsEntry(held, 3);
-        assertThat(audit.attributes("record.compare_started"))
-                .containsEntry("sdh.attempts", 3L);
     }
 
     /**
@@ -372,37 +554,6 @@ class StageWorkerTest
     }
 
     /**
-     * A record that comes again with a different output keeps its first:
-     * the second is reported to the dead-letter queue, with both digests.
-     *
-     * @throws InterruptedException if interrupted
-     */
-    @Test
-    void reportsAConflict() throws InterruptedException
-    {
-        worker("pod-a", processor()).handle(batch(1));
-        StageWorker<String> changed = worker("pod-b",
-                new StageTestSupport.TestProcessor(2, committed));
-        assertThat(changed.handle(batch(1)))
-                .isEqualTo(BatchHandler.Outcome.DONE);
-        assertThat(committed).hasSize(1);
-        assertThat(deadLetters.opened()).singleElement()
-                .isInstanceOfSatisfying(RecordConflict.class, conflict ->
-                {
-                    assertThat(conflict.recordId()).isEqualTo(
-                            committed.get(0));
-                    assertThat(conflict.stage()).isEqualTo("test");
-                    assertThat(conflict.storedDigest()).startsWith("v1:");
-                    assertThat(conflict.newDigest()).startsWith("v2:");
-                });
-        assertThat(audit.names()).containsSubsequence(
-                "record.compare_started", "record.conflict");
-        assertThat(audit.attributes("record.conflict"))
-                .containsEntry("sdh.version", "v2")
-                .containsEntry("sdh.stored_version", "v1");
-    }
-
-    /**
      * A record another worker holds is waited for, after the rest of the
      * batch is stored and sent, and taken over once that claim expires,
      * as a second attempt.
@@ -429,7 +580,8 @@ class StageWorkerTest
 
     /**
      * Two workers given the same batch at once store each record once,
-     * and between them send every record and complete the item.
+     * and between them send every record that passed and report the item
+     * in progress, its failures open.
      *
      * @throws Exception if a worker fails
      */
@@ -458,9 +610,17 @@ class StageWorkerTest
             pool.shutdownNow();
         }
         assertThat(committed).hasSize(40).doesNotHaveDuplicates();
-        assertThat(sentRecords()).containsAll(committed);
-        assertThat(sentItems()).isNotEmpty().allSatisfy(done ->
-                assertThat(done.recordCount()).isEqualTo(40));
+        // Every record but the 8 that failed, which are in the fail store.
+        assertThat(sentRecords()).hasSize(32);
+        assertThat(committed).containsAll(sentRecords());
+        assertThat(sentItems()).isEmpty();
+        assertThat(sentProgress()).isNotEmpty().allSatisfy(progress ->
+        {
+            assertThat(progress.recordCount()).isEqualTo(40);
+            assertThat(progress.openCount()).isEqualTo(8);
+        });
+        assertThat(StageTestSupport.registry(schema, "pod-a").failureStore()
+                .counts(item)).isEqualTo(new FailureStore.Counts(8, 0, 0));
     }
 
     /**

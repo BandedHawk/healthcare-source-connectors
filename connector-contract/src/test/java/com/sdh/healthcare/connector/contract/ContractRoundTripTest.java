@@ -178,6 +178,37 @@ class ContractRoundTripTest
                                 new SourcePosition(12, 1), -1, null, null),
                         java.time.Instant.EPOCH, java.time.Instant.EPOCH),
                 new ConnectorMessage.ItemConverted(itemId, "claims", 7, 2,
+                        java.time.Instant.EPOCH),
+                // With the versions that made them (STAGES.md §14).
+                new RecordStored("ID9", itemId, 7, 150, 20, "ccda",
+                        "application/json", "ccda/2", 30, 1, ref, null,
+                        "0.1.0@2026-11-08T10:00:00Z/ccda/2/3f9a0c1d22b7"),
+                new ConnectorMessage.RecordFailed("ID10", itemId, 8, 170, 20,
+                        "csv", "text/csv", "CONVERT_CSV_FIELD_COUNT", 40, 1,
+                        ref, null, null, "0.1.0@x/csv-row/1/ab"),
+                new ConnectorMessage.RecordSplit("ID11", itemId, 9, 190, 20,
+                        "ccda", "application/xml", 20, 1, ref, null, null,
+                        null, -1, null, null, "0.1.0@x/ccda/1/cd"),
+                new ConnectorMessage.ItemSplit(itemId, "claims", 7, 1, 999,
+                        "digest", null, null, null, java.time.Instant.EPOCH,
+                        java.time.Instant.EPOCH,
+                        java.util.List.of("0.1.0@x/ccda/1/cd")),
+                new ConnectorMessage.ItemConverted(itemId, "claims", 7, 2,
+                        java.time.Instant.EPOCH, java.util.List.of(
+                                "0.1.0@x/ccda/2/ab", "0.1.0@y/ccda/2/ab")),
+                // Failures still open (STAGES.md §15.6).
+                new ConnectorMessage.ItemProgressed(itemId, "claims", "split",
+                        7, 5, 2, 0, null, "claims-2026-11.csv",
+                        UUID.randomUUID(), java.time.Instant.EPOCH,
+                        java.util.List.of("0.1.0@x/ccda/1/cd")),
+                new ConnectorMessage.ItemProgressed(itemId, "claims", "split",
+                        2, 2, 1, 0, new ConnectorMessage.Problem(
+                                "PARSE_XML_MALFORMED", "split", -1, 300,
+                                null, -1, null, null),
+                        null, null, java.time.Instant.EPOCH, null),
+                new ConnectorMessage.ItemResult(itemId, "claims",
+                        ConnectorMessage.ItemResult.INCOMPLETE, 7, 2, null, 2,
+                        1, 1, java.util.List.of(), null, null,
                         java.time.Instant.EPOCH)))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
@@ -190,7 +221,31 @@ class ContractRoundTripTest
                 itemId, 5, 110, 20, "ccda", "application/xml", 20, 1, ref,
                 null, null, null, -1, null, null)))
                 .doesNotContainKeys("errorCode", "errorLine", "mapping",
-                        "message", "messageRef", "messageReplaces");
+                        "message", "messageRef", "messageReplaces",
+                        "version");
+        assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemConverted(
+                itemId, "claims", 1, 0, java.time.Instant.EPOCH)))
+                .doesNotContainKey("versions");
+        assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemProgressed(
+                itemId, "claims", "convert", 3, 2, 1, 0, null, null, null,
+                java.time.Instant.EPOCH, null)))
+                .doesNotContainKeys("failure", "producerRef", "replaces",
+                        "versions");
+        // A change of counts is a new message, the same counts a repeat.
+        assertThat(new ConnectorMessage.ItemProgressed(itemId, "claims",
+                "convert", 3, 2, 1, 0, null, null, null,
+                java.time.Instant.EPOCH, null).messageId())
+                .isEqualTo("ip-convert-" + itemId + "-3-2-1-0")
+                .isNotEqualTo(new ConnectorMessage.ItemProgressed(itemId,
+                        "claims", "convert", 3, 2, 0, 1, null, null, null,
+                        java.time.Instant.EPOCH, null).messageId());
+        assertThat(new ConnectorMessage.ItemResult(itemId, "claims",
+                ConnectorMessage.ItemResult.INCOMPLETE, 3, 1, null, 1, 1, 1,
+                java.util.List.of(), null, null, java.time.Instant.EPOCH)
+                .messageId()).isNotEqualTo(new ConnectorMessage.ItemResult(
+                        itemId, "claims", ConnectorMessage.ItemResult.COMPLETED,
+                        3, 1, null, 1, 1, 1, java.util.List.of(), null, null,
+                        java.time.Instant.EPOCH).messageId());
         assertThat(new ConnectorMessage.RecordSplit("ID7", itemId, 5, 110, 20,
                 "ccda", "application/xml", 20, 1, ref, null, null, null, -1,
                 null, null).orderingKey()).isEqualTo("ID7");

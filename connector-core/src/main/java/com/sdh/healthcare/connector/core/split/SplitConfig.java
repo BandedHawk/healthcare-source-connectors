@@ -6,8 +6,13 @@
  */
 package com.sdh.healthcare.connector.core.split;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Run-time split settings (design §6.2, §14).
@@ -39,6 +44,37 @@ public record SplitConfig(String boundary, Map<String, String> options,
     public SplitConfig
     {
         options = Map.copyOf(options);
+    }
+
+    /**
+     * A short digest of the settings that change how an item is cut, for
+     * the split stage's version (STAGES.md §14): the boundary, the options
+     * in order of name, and the limits. Not the read buffer, which changes
+     * only how much is read at once. A digest, so no setting's value
+     * reaches telemetry.
+     *
+     * @return the first 12 hex digits of the SHA-256
+     */
+    public String digest()
+    {
+        StringBuilder text = new StringBuilder("boundary=")
+                .append(boundary == null ? "" : boundary).append('\0');
+        new TreeMap<>(options).forEach((name, value) ->
+                text.append(name).append('=').append(value).append('\0'));
+        text.append("max-item-bytes=").append(limits.maxItemBytes())
+                .append("\0max-record-bytes=").append(limits.maxRecordBytes())
+                .append("\0max-records-per-item=")
+                .append(limits.maxRecordsPerItem());
+        try
+        {
+            return HexFormat.of().formatHex(MessageDigest.getInstance(
+                    "SHA-256").digest(text.toString().getBytes(
+                            StandardCharsets.UTF_8))).substring(0, 12);
+        }
+        catch (NoSuchAlgorithmException missing)
+        {
+            throw new IllegalStateException(missing);
+        }
     }
 
     /**

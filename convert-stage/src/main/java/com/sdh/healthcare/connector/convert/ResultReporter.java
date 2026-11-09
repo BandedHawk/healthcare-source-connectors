@@ -6,6 +6,8 @@
  */
 package com.sdh.healthcare.connector.convert;
 
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
@@ -16,6 +18,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Sends an item's final result to its producer (design §5.3.8, STAGES.md
@@ -25,12 +28,17 @@ import java.util.List;
  * problems go in parts of at most {@value #PART_SIZE} problems and
  * {@value #PART_BYTES} bytes of them. No content is sent.
  * <p>
- * It is built from the item's {@code item.split}, which carries the
+ * It is built from the item's {@code item.split}, or the split stage's
+ * {@code item.progress} while it has failures open, which carries the
  * producer's reference, the item it replaces and any failure of the item
- * as a whole, and from the item's failed records in {@code records}, whose
- * rows keep their message. The convert stage sends it after
- * {@code item.converted} and before it marks the item complete, so after a
- * crash it is sent again, with the same message IDs.
+ * as a whole, and from the item's failed records: those the splitter
+ * couldn't parse, in {@code split_records}, and those that failed
+ * conversion, in {@code records}, whose rows keep their message. Failures
+ * aren't sent between the stages (STAGES.md §15.1), so the convert stage
+ * reads both. It sends the result after {@code item.converted} and before
+ * it marks the item complete, so after a crash it is sent again, with the
+ * same message IDs; and while a failure is open, after each
+ * {@code item.progress}, as {@code incomplete} (§15.6).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -74,6 +82,42 @@ public final class ResultReporter
     }
 
     /**
+     * What a result says of an item, beyond its problems: from the split
+     * stage's {@code item.split} or {@code item.progress}.
+     *
+     * @param itemId      the item's id
+     * @param intake      the intake it came in through
+     * @param failure     why it couldn't be split further; null if none
+     * @param producerRef the producer's reference; null if none
+     * @param replaces    the item it replaces; null if none
+     */
+    public record Facts(UUID itemId, String intake, Problem failure,
+            String producerRef, UUID replaces)
+    {
+
+        /**
+         * The facts in the message that gave an item's total.
+         *
+         * @param total the message, opened; null if none
+         * @return the facts; null if it isn't one that has them
+         */
+        public static Facts of(ConnectorMessage total)
+        {
+            return switch (total)
+            {
+                case ItemSplit split -> new Facts(split.itemId(),
+                        split.intake(), split.failure(), split.producerRef(),
+                        split.replaces());
+                case ItemProgressed progressed -> new Facts(
+                        progressed.itemId(), progressed.intake(),
+                        progressed.failure(), progressed.producerRef(),
+                        progressed.replaces());
+                case null, default -> null;
+            };
+        }
+    }
+
+    /**
      * Sends an item's result.
      *
      * @param total  the item's {@code item.split}
@@ -84,6 +128,26 @@ public final class ResultReporter
     {
         for (ItemResult part : parts(total, failed, clock.instant(),
                 PART_SIZE, PART_BYTES))
+        {
+            channel.send(part);
+        }
+    }
+
+    /**
+     * Sends an item's result: {@code failed} if it couldn't be split
+     * further, otherwise the status given.
+     *
+     * @param facts       what is known of the item
+     * @param status      {@code completed} or {@code incomplete}
+     * @param recordCount the records it was cut into, failed ones included
+     * @param failed      its failed records, at either stage, in order
+     * @throws Exception if a part couldn't be sent
+     */
+    public void report(Facts facts, String status, long recordCount,
+            List<Failed> failed) throws Exception
+    {
+        for (ItemResult part : parts(facts, status, recordCount, failed,
+                clock.instant(), PART_SIZE, PART_BYTES))
         {
             channel.send(part);
         }
@@ -104,8 +168,30 @@ public final class ResultReporter
             List<Failed> failed,
             Instant finishedAt, int partSize, int partBytes)
     {
-        String status = total.failure() == null ? ItemResult.COMPLETED
-                : ItemResult.FAILED;
+        return parts(Facts.of(total), ItemResult.COMPLETED,
+                total.recordCount(), failed, finishedAt, partSize,
+                partBytes);
+    }
+
+    /**
+     * Builds an item's result, in parts.
+     *
+     * @param facts       what is known of the item
+     * @param asked       {@code completed} or {@code incomplete}; an item
+     *                    that couldn't be split further is {@code failed}
+     * @param recordCount the records it was cut into, failed ones included
+     * @param failed      its failed records, in order
+     * @param finishedAt  when it finished, or was reported
+     * @param partSize    the most problems in a part
+     * @param partBytes   the most bytes of problems in a part; a single
+     *                    larger problem still gets a part of its own
+     * @return the parts, at least one
+     */
+    public static List<ItemResult> parts(Facts facts, String asked,
+            long recordCount, List<Failed> failed, Instant finishedAt,
+            int partSize, int partBytes)
+    {
+        String status = facts.failure() == null ? asked : ItemResult.FAILED;
         List<Problem> problems = new ArrayList<>(failed.size());
         for (Failed record : failed)
         {
@@ -133,11 +219,11 @@ public final class ResultReporter
         List<ItemResult> parts = new ArrayList<>(partCount);
         for (int part = 0; part < partCount; part++)
         {
-            parts.add(new ItemResult(total.itemId(), total.intake(), status,
-                    total.recordCount(), failed.size(), total.failure(),
+            parts.add(new ItemResult(facts.itemId(), facts.intake(), status,
+                    recordCount, failed.size(), facts.failure(),
                     problems.size(), part + 1, partCount,
                     problems.subList(starts.get(part), starts.get(part + 1)),
-                    total.producerRef(), total.replaces(), finishedAt));
+                    facts.producerRef(), facts.replaces(), finishedAt));
         }
         return parts;
     }

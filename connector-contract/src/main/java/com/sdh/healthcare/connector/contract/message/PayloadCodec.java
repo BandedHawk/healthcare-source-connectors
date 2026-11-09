@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.contract.message;
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReceived;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
@@ -101,6 +102,7 @@ public final class PayloadCodec
                     payload.put("origin", originFields(record.origin()));
                 }
                 payload.put("storage", storageFields(record.storage()));
+                putIfSet(payload, "version", record.version());
                 if (record instanceof RecordSplit split
                         && split.message() >= 0)
                 {
@@ -172,6 +174,10 @@ public final class PayloadCodec
                 }
                 payload.put("startedAt", split.startedAt().toString());
                 payload.put("completedAt", split.completedAt().toString());
+                if (!split.versions().isEmpty())
+                {
+                    payload.put("versions", split.versions());
+                }
             }
             case ItemConverted converted ->
             {
@@ -181,6 +187,31 @@ public final class PayloadCodec
                         converted.failedRecordCount());
                 payload.put("completedAt",
                         converted.completedAt().toString());
+                if (!converted.versions().isEmpty())
+                {
+                    payload.put("versions", converted.versions());
+                }
+            }
+            case ItemProgressed progressed ->
+            {
+                payload.put("intake", progressed.intake());
+                payload.put("stage", progressed.stage());
+                payload.put("recordCount", progressed.recordCount());
+                payload.put("passedCount", progressed.passedCount());
+                payload.put("openCount", progressed.openCount());
+                payload.put("declinedCount", progressed.declinedCount());
+                if (progressed.failure() != null)
+                {
+                    payload.put("failure",
+                            problemFields(progressed.failure()));
+                }
+                putIfSet(payload, "producerRef", progressed.producerRef());
+                putIfSet(payload, "replaces", progressed.replaces());
+                payload.put("reportedAt", progressed.reportedAt().toString());
+                if (!progressed.versions().isEmpty())
+                {
+                    payload.put("versions", progressed.versions());
+                }
             }
             case RecordConflict conflict ->
             {
@@ -231,7 +262,8 @@ public final class PayloadCodec
                             number(payload, "plaintextLength"),
                             Math.toIntExact(number(payload, "chunkCount")),
                             storage(payload),
-                            origin(payload));
+                            origin(payload),
+                            (String) payload.get("version"));
                     case RECORD_FAILED -> new RecordFailed(
                             text(payload, "recordId"),
                             itemId,
@@ -245,7 +277,8 @@ public final class PayloadCodec
                             Math.toIntExact(number(payload, "chunkCount")),
                             storage(payload),
                             origin(payload),
-                            position(payload, "errorLine", "errorColumn"));
+                            position(payload, "errorLine", "errorColumn"),
+                            (String) payload.get("version"));
                     case ITEM_LANDED -> new ItemLanded(
                             itemId,
                             text(payload, "intake"),
@@ -300,7 +333,8 @@ public final class PayloadCodec
                                     ? Math.toIntExact(index.longValue())
                                     : -1,
                             (String) payload.get("messageRef"),
-                            (String) payload.get("messageReplaces"));
+                            (String) payload.get("messageReplaces"),
+                            (String) payload.get("version"));
                     case ITEM_SPLIT -> new ItemSplit(
                             itemId,
                             text(payload, "intake"),
@@ -314,13 +348,30 @@ public final class PayloadCodec
                                     ? problem((Map<String, Object>) failure)
                                     : null,
                             Instant.parse(text(payload, "startedAt")),
-                            Instant.parse(text(payload, "completedAt")));
+                            Instant.parse(text(payload, "completedAt")),
+                            texts(payload, "versions"));
                     case ITEM_CONVERTED -> new ItemConverted(
                             itemId,
                             text(payload, "intake"),
                             number(payload, "recordCount"),
                             number(payload, "failedRecordCount"),
-                            Instant.parse(text(payload, "completedAt")));
+                            Instant.parse(text(payload, "completedAt")),
+                            texts(payload, "versions"));
+                    case ITEM_PROGRESS -> new ItemProgressed(
+                            itemId,
+                            text(payload, "intake"),
+                            text(payload, "stage"),
+                            number(payload, "recordCount"),
+                            number(payload, "passedCount"),
+                            number(payload, "openCount"),
+                            number(payload, "declinedCount"),
+                            payload.get("failure") instanceof Map<?, ?> failure
+                                    ? problem((Map<String, Object>) failure)
+                                    : null,
+                            (String) payload.get("producerRef"),
+                            uuid(payload, "replaces"),
+                            Instant.parse(text(payload, "reportedAt")),
+                            texts(payload, "versions"));
                     case RECORD_CONFLICT -> new RecordConflict(
                             text(payload, "recordId"),
                             itemId,

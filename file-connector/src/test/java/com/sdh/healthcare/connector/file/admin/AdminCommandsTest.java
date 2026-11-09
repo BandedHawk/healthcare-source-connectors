@@ -15,6 +15,7 @@ import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
 import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -30,9 +31,13 @@ import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
+import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import io.opentelemetry.api.common.AttributeKey;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -370,7 +375,8 @@ class AdminCommandsTest
      * order, then its item.split, sealed to the convert stage and signed
      * by the split stage, each under its own message ID with a broker ID
      * of its own. The failed item's item.split names its failure and
-     * counts the records it committed. An item the stage never had is
+     * counts the records it committed; it is item.progress, since its
+     * failure is open (STAGES.md §15.6). An item the stage never had is
      * refused, and nothing is sent.
      *
      * @throws Exception if the test fails to run
@@ -404,16 +410,111 @@ class AdminCommandsTest
         assertThat(total.failure()).isNull();
         assertThat(total.intake()).isEqualTo(INTAKE);
 
+        // The failed item ends in item.progress: its failure is open, and
+        // in the fail store, not sent on (STAGES.md §15.6).
         List<OutboundMessage> bad = replay(badId, now);
-        ItemSplit failed = (ItemSplit) opener.open(
+        ItemProgressed failed = (ItemProgressed) opener.open(
                 bad.get(bad.size() - 1).body());
         assertThat(failed.failure()).isNotNull();
-        assertThat(bad).hasSize((int) failed.recordCount() + 1);
+        assertThat(failed.openCount()).isEqualTo(1);
+        assertThat(bad).hasSize((int) failed.passedCount() + 1);
 
         assertThatThrownBy(() -> replay(UUID.randomUUID(), now))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("no row");
         assertThat(FATAL).isEmpty();
+    }
+
+    /** The last fail store command's audit record. */
+    AuditRecord lastAudit;
+
+    /**
+     * Runs a fail store command through the stage's commands, with a
+     * reason on standard input, as operator {@code alice}.
+     *
+     * @param reason what standard input holds
+     * @param args   the command and its options
+     * @return what was sent
+     * @throws Exception if the command fails
+     */
+
+    List<OutboundMessage> failureCommand(String reason, String... args)
+            throws Exception
+    {
+        return failureCommand(reason, new ByteArrayOutputStream(), args);
+    }
+
+    /**
+     * Runs a failure command with its input, keeping what it printed.
+     *
+     * @param input what it reads from standard input
+     * @param out   what it prints
+     * @param args  the command and its options
+     * @return what it sent
+     * @throws Exception if the command fails
+     */
+    List<OutboundMessage> failureCommand(String input,
+            ByteArrayOutputStream out, String... args) throws Exception
+    {
+        List<OutboundMessage> sent = new CopyOnWriteArrayList<>();
+        InputStream stdin = System.in;
+        System.setIn(new ByteArrayInputStream(input.getBytes(UTF_8)));
+        try (SplitAdminContext context =
+                new SplitAdminContext(properties, new Recording(sent)))
+        {
+            AdminCommand<SplitAdminContext> command = SplitAdmin.commands()
+                    .stream().filter(each -> each.name().equals(args[0]))
+                    .findFirst().orElseThrow();
+            AuditRecord audit = new AuditRecord("alice");
+            command.run(AdminArgs.parse(List.of(args), command.flags()),
+                    context, audit, new PrintStream(out, true, UTF_8));
+            lastAudit = audit;
+        }
+        finally
+        {
+            System.setIn(stdin);
+        }
+        return sent;
+    }
+
+    /**
+     * Declining the failed item's failure sends its end again, alone, now
+     * as item.split: none of its failures is open (STAGES.md §15.3).
+     * Reopening it sends item.progress again, with the failure open.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void declineSendsTheItemsEndAgainAsItemSplit() throws Exception
+    {
+        MessageOpener opener = new MessageOpener(
+                Map.of("downstream-2026", KEYS.recipient.getPrivate()),
+                Map.of("connector-2026",
+                        (ECPublicKey) KEYS.signing.getPublic()));
+        long seq;
+        try (SplitAdminContext context = new SplitAdminContext(properties))
+        {
+            seq = context.failures().failures(badId).get(0).failure().seq();
+        }
+        List<OutboundMessage> declined = failureCommand(
+                "Synthetic: the source sent it twice", "decline",
+                "--item-id", badId.toString(), "--seq", Long.toString(seq));
+        assertThat(declined).singleElement().satisfies(message ->
+                assertThat(opener.open(message.body()))
+                        .isInstanceOf(ItemSplit.class));
+        // Audited with the failure's new state, not the item checkpoint's.
+        assertThat(lastAudit.fields().toAttributes().get(
+                AttributeKey.stringKey("sdh.state"))).isEqualTo("DECLINED");
+
+        List<OutboundMessage> reopened = failureCommand(
+                "Synthetic: a correction is possible", "reopen",
+                "--item-id", badId.toString(), "--seq", Long.toString(seq));
+        assertThat(reopened).singleElement().satisfies(message ->
+        {
+            ItemProgressed progress =
+                    (ItemProgressed) opener.open(message.body());
+            assertThat(progress.openCount()).isEqualTo(1);
+        });
     }
 
     /**
@@ -596,5 +697,73 @@ class AdminCommandsTest
                 .isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> OutputFiles.safeName(".hidden"))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    /**
+     * An item the split stage failed as a whole is exported, encrypted to
+     * the operator's key, and corrected: the stage's loop splits the
+     * correction, keeps the records already stored, stores the rest marked
+     * as correcting the item, and the failure is {@code CORRECTED}
+     * (STAGES.md §15.6d). Its own item, so the others' failures stay.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void exportsAndCorrectsAnItemTheStageFailed() throws Exception
+    {
+        String bad = "1,k\n2,l\n3,m\n4,n\n5,o\n6,p\n7,\"never closed\n";
+        TestLanding landing = new TestLanding(CATALOG, runtime.keys().wrap(),
+                KEYS, INTAKE);
+        LandedItem item = landing.land(bad, "bad-brown.csv");
+        assertThat(new SplitHandler(runtime.splitter(),
+                runtime.keys().inbox(), INTAKE, TestLanding.CATALOG,
+                LandingTables.DEFAULT_NAMESPACE, FATAL::add)
+                .handle(List.of(new BrokerMessage(landing.announcement(item),
+                        UUID.randomUUID().toString(), Map.of()))))
+                .isEqualTo(Outcome.DONE);
+        String itemId = item.itemId().toString();
+
+        java.security.KeyPairGenerator generator =
+                java.security.KeyPairGenerator.getInstance("EC");
+        generator.initialize(256);
+        java.security.KeyPair operator = generator.generateKeyPair();
+        String pem = "-----BEGIN PUBLIC KEY-----\n"
+                + java.util.Base64.getMimeEncoder().encodeToString(
+                        operator.getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----\n";
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        failureCommand(pem, out, "export", "--item-id", itemId, "--seq",
+                "-1");
+        String line = out.toString(UTF_8).lines()
+                .filter(each -> each.startsWith("sdh-export: "))
+                .findFirst().orElseThrow();
+        com.nimbusds.jose.JWEObject jwe = com.nimbusds.jose.JWEObject.parse(
+                line.substring("sdh-export: ".length()));
+        jwe.decrypt(new com.nimbusds.jose.crypto.ECDHDecrypter(
+                (java.security.interfaces.ECPrivateKey) operator
+                        .getPrivate()));
+        assertThat(jwe.getPayload().toString()).isEqualTo(bad);
+
+        failureCommand(bad.replace("\"never closed\n",
+                "\"now closed\"\n"), "correct", "--item-id", itemId,
+                "--seq", "-1");
+        assertThat(runtime.corrections().applyPending()).isEqualTo(1);
+
+        try (SplitAdminContext context = new SplitAdminContext(properties))
+        {
+            assertThat(context.failures().failure(item.itemId(), -1))
+                    .hasValueSatisfying(stored -> assertThat(stored.state())
+                            .isEqualTo(com.sdh.healthcare.connector.core
+                                    .failure.FailureStore.State.CORRECTED));
+            assertThat(context.corrections().unnotified(
+                    java.time.Duration.ZERO)).isEmpty();
+        }
+        org.apache.iceberg.Table records = runtime.tables().splitRecords();
+        records.refresh();
+        assertThat(com.sdh.healthcare.connector.core.storage.CommittedRecords
+                .corrections(records, item.itemId())).isNotEmpty()
+                .allSatisfy(row -> assertThat(row.correctionOf())
+                        .isEqualTo(itemId));
+        assertThat(runtime.corrections().sweep()).isZero();
     }
 }

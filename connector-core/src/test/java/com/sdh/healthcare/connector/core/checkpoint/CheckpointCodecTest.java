@@ -103,6 +103,27 @@ class CheckpointCodecTest
                 .isInstanceOf(CheckpointTamperedException.class);
     }
 
+    /**
+     * The version an item was begun under is kept, MAC'd like any other
+     * field, and left out when not known, so a checkpoint from before still
+     * verifies.
+     */
+    @Test
+    void versionIsStoredOnlyWhenKnownAndIsProtected()
+    {
+        assertThat(codec.encode(sample())).doesNotContain("version");
+        Checkpoint versioned = Checkpoint.start(UUID.randomUUID(), "123:abc",
+                "x12", 123, Instant.parse("2026-10-28T12:00:00Z"),
+                "0.1.0@2026-11-08T10:00:00Z/x12/1/3f9a0c1d22b7")
+                .committed(ResumePoint.at(4096, 0, 106), 41, 20);
+        String json = codec.encode(versioned);
+        assertThat(codec.decode(json)).isEqualTo(versioned);
+        assertThat(codec.decode(json).version())
+                .isEqualTo("0.1.0@2026-11-08T10:00:00Z/x12/1/3f9a0c1d22b7");
+        assertThatThrownBy(() -> codec.decode(json.replace("x12/1/", "x12/2/")))
+                .isInstanceOf(CheckpointTamperedException.class);
+    }
+
     /** Sequence numbers that don't fit together are refused. */
     @Test
     void sequenceInvariantsAreEnforced()
@@ -112,7 +133,7 @@ class CheckpointCodecTest
                 checkpoint.fingerprint(), checkpoint.format(),
                 checkpoint.itemSize(), checkpoint.state(),
                 checkpoint.resumeAt(), 10, 9, 10, checkpoint.startedAt(),
-                null, 0))
+                null, 0, null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

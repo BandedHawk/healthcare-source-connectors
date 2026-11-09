@@ -18,6 +18,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.broker.receive.BatchHandler.Outcome;
 import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
@@ -275,19 +276,27 @@ class FileConnectorApplicationTest
 
         List<ItemSplit> split = of(messages, ItemSplit.class);
         assertThat(split).extracting(ItemSplit::itemId).containsExactly(
-                first.itemId(), second.itemId(), third.itemId());
+                first.itemId(), second.itemId());
         assertThat(split).extracting(ItemSplit::itemSize).containsExactly(
-                (long) older.length(), (long) newer.length(),
-                (long) bad.length());
+                (long) older.length(), (long) newer.length());
         assertThat(split).extracting(ItemSplit::itemDigest).containsExactly(
-                first.digest(), second.digest(), third.digest());
-        assertThat(split.subList(0, 2)).extracting(ItemSplit::recordCount)
+                first.digest(), second.digest());
+        assertThat(split).extracting(ItemSplit::recordCount)
                 .containsExactly(12L, 3L);
-        assertThat(split.subList(0, 2)).extracting(ItemSplit::failure)
-                .containsOnlyNulls();
-        assertThat(split.get(2).failure().stage()).isEqualTo("split");
-        assertThat(split.get(2).failure().code())
-                .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+        assertThat(split).extracting(ItemSplit::failure).containsOnlyNulls();
+        // The bad item's failure is open, in the fail store: it ends in
+        // item.progress, not item.split (STAGES.md §15.6).
+        assertThat(of(messages, ItemProgressed.class)).singleElement()
+                .satisfies(progress ->
+                {
+                    assertThat(progress.itemId()).isEqualTo(third.itemId());
+                    assertThat(progress.intake()).isEqualTo(INTAKE);
+                    assertThat(progress.openCount()).isEqualTo(1);
+                    assertThat(progress.failure().stage())
+                            .isEqualTo("split");
+                    assertThat(progress.failure().code())
+                            .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+                });
         assertThat(split).allSatisfy(item ->
                 assertThat(item.intake()).isEqualTo(INTAKE));
         // The producer's reference, from landing, is passed on.

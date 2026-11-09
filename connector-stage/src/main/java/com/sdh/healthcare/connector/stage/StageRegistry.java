@@ -7,6 +7,8 @@
 package com.sdh.healthcare.connector.stage;
 
 import com.sdh.healthcare.connector.contract.message.MessageType;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import java.sql.Array;
 import java.sql.Connection;
@@ -75,6 +77,9 @@ public final class StageRegistry
      * with its schema.
      */
     private final String backlog;
+
+    /** The stage's fail store's states (STAGES.md §15.3), with its schema. */
+    private final String failures;
 
     /** How long a statement may run. */
     private final int queryTimeoutSeconds;
@@ -150,11 +155,56 @@ public final class StageRegistry
      * @param digest   its output's digest
      * @param version  the version its output was made with
      * @param failed   whether it failed, and was stored as it was
-     * @param message  the message it is to be sent as, sealed
+     * @param message  the message it is to be sent as, sealed; null for a
+     *                 failed record, which isn't sent on (STAGES.md §15.1)
+     * @param failure  the failure to record in the fail store, in the same
+     *                 transaction; null if it passed
+     * @param correction what an operator's correction came to, for an
+     *                 entry that is one (STAGES.md §15.6c): noted in the
+     *                 same transaction, its failure resolved or failed
+     *                 again, and not counted on its item, whose count of
+     *                 records is unchanged; null for a record
      */
     public record Entry(String recordId, UUID itemId, String digest,
-            String version, boolean failed, OutboundMessage message)
+            String version, boolean failed, OutboundMessage message,
+            FailureStore.Failure failure, CorrectionStore.Outcome correction)
     {
+
+        /**
+         * A record, not a correction.
+         *
+         * @param recordId the record's id
+         * @param itemId   the id of its item
+         * @param digest   its output's digest
+         * @param version  the version its output was made with
+         * @param failed   whether it failed
+         * @param message  the message it is to be sent as, sealed
+         * @param failure  the failure to record, or null
+         */
+        public Entry(String recordId, UUID itemId, String digest,
+                String version, boolean failed, OutboundMessage message,
+                FailureStore.Failure failure)
+        {
+            this(recordId, itemId, digest, version, failed, message, failure,
+                    null);
+        }
+
+        /**
+         * A record with no failure to record.
+         *
+         * @param recordId the record's id
+         * @param itemId   the id of its item
+         * @param digest   its output's digest
+         * @param version  the version its output was made with
+         * @param failed   whether it failed
+         * @param message  the message it is to be sent as, sealed
+         */
+        public Entry(String recordId, UUID itemId, String digest,
+                String version, boolean failed, OutboundMessage message)
+        {
+            this(recordId, itemId, digest, version, failed, message, null,
+                    null);
+        }
 
         /**
          * What the record is known by.
@@ -192,6 +242,7 @@ public final class StageRegistry
         this.items = schema + ".stage_item";
         this.reconcile = schema + ".stage_reconcile";
         this.backlog = schema + ".stage_backlog";
+        this.failures = FailureStore.table(schema);
         this.queryTimeoutSeconds =
                 (int) Math.max(1, queryTimeout.toSeconds());
     }
@@ -277,6 +328,28 @@ public final class StageRegistry
             // recorded a wait at startup with no backlog yet seen.
             statement.execute("ALTER TABLE " + backlog
                     + " ALTER COLUMN seen_at DROP NOT NULL");
+            // Added 2026-11-08 (STAGES.md §15.6): a total from the stage
+            // before's item.progress, which may grow, and the counts of the
+            // last item.progress this stage sent.
+            statement.execute("ALTER TABLE " + items
+                    + " ADD COLUMN IF NOT EXISTS upstream_open boolean"
+                    + " NOT NULL DEFAULT false");
+            statement.execute("ALTER TABLE " + items
+                    + " ADD COLUMN IF NOT EXISTS progress_key text");
+            statement.execute("ALTER TABLE " + items
+                    + " ADD COLUMN IF NOT EXISTS progress_at timestamptz");
+            for (String ddl : FailureStore.ddls(failures,
+                    failures.substring(0, failures.indexOf('.'))
+                            + ".stage_failure_event"))
+            {
+                statement.execute(ddl);
+            }
+            // Added 2026-11-08 (STAGES.md §15.6c): operators' corrections.
+            for (String ddl : CorrectionStore.ddls(
+                    CorrectionStore.table(schema())))
+            {
+                statement.execute(ddl);
+            }
         }
         catch (SQLException failure)
         {
@@ -439,8 +512,12 @@ public final class StageRegistry
 
     /**
      * Marks records stored, each with the message it is to be sent as, and
-     * counts them on their items, in one transaction. A record whose claim
-     * this worker no longer holds is left alone: its new holder stores and
+     * counts them on their items, in one transaction. A failed record has
+     * no message: it is marked {@code FAILED}, and its failure recorded in
+     * the fail store in the same transaction, so a record is never stored
+     * failed without it (STAGES.md §15.3); each new failure is audited,
+     * {@code failure.failed}, once committed. A record whose claim this
+     * worker no longer holds is left alone: its new holder stores and
      * counts it.
      *
      * @param entries the records, all committed
@@ -451,7 +528,7 @@ public final class StageRegistry
     {
         String mark = """
                 UPDATE %s
-                   SET state = 'STORED', output_digest = ?,
+                   SET state = ?, output_digest = ?,
                        output_version = ?,
                        message_id = ?, message_type = ?, message_key = ?,
                        pending_message = ?, stored_at = clock_timestamp(),
@@ -472,26 +549,45 @@ public final class StageRegistry
             {
                 Set<Key> marked = new HashSet<>();
                 Map<UUID, long[]> counts = new LinkedHashMap<>();
+                List<FailureStore.Failure> failed = new ArrayList<>();
+                List<Entry> corrections = new ArrayList<>();
                 try (PreparedStatement update =
                         connection.prepareStatement(mark))
                 {
                     update.setQueryTimeout(queryTimeoutSeconds);
                     for (Entry entry : entries)
                     {
-                        update.setString(1, entry.digest());
-                        update.setString(2, entry.version());
-                        update.setString(3, entry.message().messageId());
-                        update.setString(4,
-                                entry.message().type().wireName());
-                        update.setString(5, entry.message().key());
-                        update.setBytes(6, entry.message().body());
-                        update.setString(7, stage);
-                        update.setObject(8, entry.itemId());
-                        update.setString(9, entry.recordId());
-                        update.setString(10, owner);
+                        OutboundMessage message = entry.message();
+                        update.setString(1,
+                                message == null ? "FAILED" : "STORED");
+                        update.setString(2, entry.digest());
+                        update.setString(3, entry.version());
+                        update.setString(4, message == null ? null
+                                : message.messageId());
+                        update.setString(5, message == null ? null
+                                : message.type().wireName());
+                        update.setString(6, message == null ? null
+                                : message.key());
+                        update.setBytes(7, message == null ? null
+                                : message.body());
+                        update.setString(8, stage);
+                        update.setObject(9, entry.itemId());
+                        update.setString(10, entry.recordId());
+                        update.setString(11, owner);
                         if (update.executeUpdate() == 1)
                         {
                             marked.add(entry.key());
+                            if (entry.correction() != null)
+                            {
+                                // Not a record of the item's: its count
+                                // stays; its failure moves on instead.
+                                corrections.add(entry);
+                                continue;
+                            }
+                            if (entry.failure() != null)
+                            {
+                                failed.add(entry.failure());
+                            }
                             long[] itemCounts = counts.computeIfAbsent(
                                     entry.itemId(), id -> new long[2]);
                             itemCounts[0]++;
@@ -513,7 +609,23 @@ public final class StageRegistry
                     }
                     upsert.executeBatch();
                 }
+                List<FailureStore.Failure> added = FailureStore.insert(
+                        connection, failures, stage, failed,
+                        queryTimeoutSeconds);
+                List<FailureStore.Changed> finished = new ArrayList<>();
+                for (Entry entry : corrections)
+                {
+                    finished.add(CorrectionStore.finish(connection, schema(),
+                            stage, entry.correction(), queryTimeoutSeconds));
+                }
                 connection.commit();
+                FailureStore.audit(stage, added);
+                for (int index = 0; index < corrections.size(); index++)
+                {
+                    CorrectionStore.audit(stage,
+                            corrections.get(index).correction(),
+                            finished.get(index));
+                }
                 return marked;
             }
             catch (SQLException failure)
@@ -521,6 +633,65 @@ public final class StageRegistry
                 connection.rollback();
                 throw failure;
             }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * A record stored with its message, not yet sent.
+     *
+     * @param key     the record
+     * @param message its message
+     */
+    public record Unsent(Key key, OutboundMessage message)
+    {
+    }
+
+    /**
+     * Corrections stored but not sent for longer than a claim lasts: the
+     * worker that stored one stopped before sending it (STAGES.md §15.6c).
+     * A record has its message sent again when it is delivered again; a
+     * correction isn't, so it is found here.
+     *
+     * @param olderThan how long ago it was stored, at least
+     * @return the corrections, with their messages
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<Unsent> unsentCorrections(Duration olderThan)
+    {
+        String sql = """
+                SELECT item_id, record_id, message_id, message_type,
+                       message_key, pending_message
+                  FROM %s
+                 WHERE stage = ? AND record_id LIKE 'correction:%%'
+                   AND state = 'STORED' AND pending_message IS NOT NULL
+                   AND stored_at <= clock_timestamp()
+                                    - ? * interval '1 millisecond'
+                 LIMIT 100""".formatted(records);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            select.setLong(2, olderThan.toMillis());
+            List<Unsent> found = new ArrayList<>();
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    UUID itemId = rows.getObject(1, UUID.class);
+                    found.add(new Unsent(new Key(itemId, rows.getString(2)),
+                            new OutboundMessage(rows.getString(3),
+                                    MessageType.fromWire(rows.getString(4)),
+                                    itemId, rows.getString(5),
+                                    rows.getBytes(6))));
+                }
+            }
+            return found;
         }
         catch (SQLException failure)
         {
@@ -576,12 +747,40 @@ public final class StageRegistry
     /**
      * An item whose records are all stored, as kept.
      *
-     * @param progress its counts, without the total's message
+     * @param progress    its counts, with its failures, without the
+     *                    total's message
+     * @param progressKey the counts of the last {@code item.progress} sent
+     *                    for it; null if none
+     * @param readAt      when the database read its counts: a change to
+     *                    its failures after then is looked at again
      * @param total    the message that gave its total, sealed as received;
      *                 null if it wasn't kept
      */
-    public record DueItem(ItemProgress progress, byte[] total)
+    public record DueItem(ItemProgress progress, byte[] total,
+            String progressKey, Instant readAt)
     {
+
+        /**
+         * An item with no progress sent.
+         *
+         * @param progress its counts
+         * @param total    the message that gave its total, or null
+         */
+        public DueItem(ItemProgress progress, byte[] total)
+        {
+            this(progress, total, null, null);
+        }
+
+        /**
+         * Whether its counts changed since the last {@code item.progress}
+         * this stage sent for it.
+         *
+         * @return true if one is to be sent
+         */
+        public boolean progressChanged()
+        {
+            return !progress.progressKey().equals(progressKey);
+        }
     }
 
     /**
@@ -609,15 +808,50 @@ public final class StageRegistry
      */
     public void expect(UUID itemId, long expected, byte[] total)
     {
+        expect(itemId, expected, total, false);
+    }
+
+    /**
+     * Notes how many records an item has, or has so far, and keeps the
+     * message that said so. A final total (the stage before's
+     * item-complete message) is kept once given. One from the stage
+     * before's {@code item.progress} ({@code partial}) may grow, while that
+     * stage still has failures open (STAGES.md §15.6): a larger one
+     * replaces it, and the final one replaces it whatever its size.
+     *
+     * @param itemId   the item's id
+     * @param expected how many records it has, or has so far
+     * @param total    the message, sealed; null to keep none
+     * @param partial  whether the total is from {@code item.progress}
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void expect(UUID itemId, long expected, byte[] total,
+            boolean partial)
+    {
         String sql = """
                 INSERT INTO %1$s AS i (stage, item_id, expected,
-                                       total_message)
-                VALUES (?, ?, ?, ?)
+                                       total_message, upstream_open)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (stage, item_id) DO UPDATE
-                   SET expected = COALESCE(i.expected, EXCLUDED.expected),
-                       total_message = CASE WHEN i.expected IS NULL
-                                            THEN EXCLUDED.total_message
-                                            ELSE i.total_message END"""
+                   SET expected = CASE
+                           WHEN i.expected IS NULL THEN EXCLUDED.expected
+                           WHEN NOT i.upstream_open THEN i.expected
+                           WHEN NOT EXCLUDED.upstream_open
+                                THEN EXCLUDED.expected
+                           ELSE GREATEST(i.expected, EXCLUDED.expected) END,
+                       total_message = CASE
+                           WHEN i.expected IS NULL
+                                THEN EXCLUDED.total_message
+                           WHEN NOT i.upstream_open THEN i.total_message
+                           WHEN NOT EXCLUDED.upstream_open
+                                OR EXCLUDED.expected >= i.expected
+                                THEN EXCLUDED.total_message
+                           ELSE i.total_message END,
+                       upstream_open = CASE
+                           WHEN i.expected IS NULL
+                                THEN EXCLUDED.upstream_open
+                           WHEN NOT i.upstream_open THEN false
+                           ELSE EXCLUDED.upstream_open END"""
                 .formatted(items);
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement upsert = connection.prepareStatement(sql))
@@ -627,6 +861,7 @@ public final class StageRegistry
             upsert.setObject(2, itemId);
             upsert.setLong(3, expected);
             upsert.setBytes(4, total);
+            upsert.setBoolean(5, partial);
             upsert.executeUpdate();
         }
         catch (SQLException failure)
@@ -652,12 +887,36 @@ public final class StageRegistry
         {
             return due;
         }
+        // With the versions its records were made under, in the order first
+        // used (STAGES.md §14.3).
+        // And with its failures as the fail store has them (§15.6).
         String sql = """
-                SELECT item_id, expected, done, failed, total_message
-                  FROM %s
-                 WHERE stage = ? AND item_id = ANY (?)
-                   AND completed_at IS NULL AND expected IS NOT NULL
-                   AND done >= expected""".formatted(items);
+                SELECT i.item_id, i.expected, i.done, i.failed,
+                       i.total_message,
+                       ARRAY(SELECT r.output_version FROM %2$s r
+                              WHERE r.stage = i.stage
+                                AND r.item_id = i.item_id
+                                AND r.output_version IS NOT NULL
+                              GROUP BY r.output_version
+                              ORDER BY min(r.stored_at)),
+                       i.upstream_open, i.progress_key,
+                       (SELECT count(*) FROM %3$s f
+                         WHERE f.stage = i.stage AND f.item_id = i.item_id
+                           AND f.state IN ('FAILED', 'CORRECTION_PENDING',
+                                           'FAILED_CORRECTION')),
+                       (SELECT count(*) FROM %3$s f
+                         WHERE f.stage = i.stage AND f.item_id = i.item_id
+                           AND f.state = 'DECLINED'),
+                       clock_timestamp(),
+                       (SELECT count(*) FROM %3$s f
+                         WHERE f.stage = i.stage AND f.item_id = i.item_id
+                           AND f.state IN ('CORRECTED', 'RETRIED',
+                                           'SUPERSEDED'))
+                  FROM %1$s i
+                 WHERE i.stage = ? AND i.item_id = ANY (?)
+                   AND i.completed_at IS NULL AND i.expected IS NOT NULL
+                   AND i.done >= i.expected""".formatted(items, records,
+                failures);
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
         {
@@ -669,10 +928,17 @@ public final class StageRegistry
             {
                 while (rows.next())
                 {
+                    java.sql.Array versions = rows.getArray(6);
                     due.add(new DueItem(new ItemProgress(
                             rows.getObject(1, UUID.class), rows.getLong(2),
-                            rows.getLong(3), rows.getLong(4)),
-                            rows.getBytes(5)));
+                            rows.getLong(3), rows.getLong(4))
+                            .withVersions(versions == null ? List.of()
+                                    : List.of((String[]) versions.getArray()))
+                            .withFailures(rows.getLong(9), rows.getLong(10),
+                                    rows.getBoolean(7))
+                            .withResolved(rows.getLong(12)),
+                            rows.getBytes(5), rows.getString(8),
+                            rows.getTimestamp(11).toInstant()));
                 }
             }
             return due;
@@ -682,6 +948,134 @@ public final class StageRegistry
             throw new IllegalStateException("Stage registry unavailable",
                     failure);
         }
+    }
+
+    /**
+     * Notes the counts of the {@code item.progress} just sent for an item,
+     * so it isn't sent again until they change.
+     *
+     * @param itemId the item's id
+     * @param key    its counts, as {@link ItemProgress#progressKey}
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void markProgressed(UUID itemId, String key)
+    {
+        markProgressed(itemId, key, null);
+    }
+
+    /**
+     * Notes the counts of the {@code item.progress} just sent for an item,
+     * and when they were read, so a failure changed after then (an
+     * operator's decline, say) has the item looked at again
+     * ({@link #changedItems}).
+     *
+     * @param itemId the item's id
+     * @param key    its counts, as {@link ItemProgress#progressKey}
+     * @param readAt when they were read; null for now
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void markProgressed(UUID itemId, String key, Instant readAt)
+    {
+        String sql = """
+                UPDATE %s SET progress_key = ?,
+                       progress_at = COALESCE(?, clock_timestamp())
+                 WHERE stage = ? AND item_id = ? AND completed_at IS NULL"""
+                .formatted(items);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setString(1, key);
+            update.setTimestamp(2, readAt == null ? null
+                    : Timestamp.from(readAt));
+            update.setString(3, stage);
+            update.setObject(4, itemId);
+            update.executeUpdate();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The items not complete whose records are all handled and one of whose
+     * failures changed since their counts were last reported: an operator
+     * declined or reopened it (STAGES.md §15.3), or the report never went.
+     * The worker looks at them again, to complete them or report their new
+     * counts.
+     *
+     * @param limit the most returned
+     * @return their ids
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<UUID> changedItems(int limit)
+    {
+        String sql = """
+                SELECT i.item_id FROM %1$s i
+                 WHERE i.stage = ? AND i.completed_at IS NULL
+                   AND i.expected IS NOT NULL AND i.done >= i.expected
+                   AND EXISTS (SELECT 1 FROM %2$s f
+                                WHERE f.stage = i.stage
+                                  AND f.item_id = i.item_id
+                                  AND f.changed_at > COALESCE(i.progress_at,
+                                      '-infinity'::timestamptz))
+                 LIMIT ?""".formatted(items, failures);
+        List<UUID> found = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            select.setInt(2, limit);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(rows.getObject(1, UUID.class));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The stage's corrections (STAGES.md §15.6c), in the registry's schema.
+     *
+     * @return the store
+     */
+    public CorrectionStore correctionStore()
+    {
+        return new CorrectionStore(dataSource, schema(), stage,
+                java.time.Duration.ofSeconds(queryTimeoutSeconds));
+    }
+
+    /**
+     * The registry's schema.
+     *
+     * @return its name
+     */
+    private String schema()
+    {
+        return failures.substring(0, failures.indexOf('.'));
+    }
+
+    /**
+     * The stage's fail store (STAGES.md §15.3), in the registry's schema.
+     *
+     * @return the store
+     */
+    public FailureStore failureStore()
+    {
+        return new FailureStore(dataSource,
+                failures.substring(0, failures.indexOf('.')), stage,
+                java.time.Duration.ofSeconds(queryTimeoutSeconds));
     }
 
     /**

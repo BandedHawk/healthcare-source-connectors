@@ -682,6 +682,84 @@ class IngestPipelineTest
     }
 
     /**
+     * An item part way, begun under one version of the split stage, is held
+     * by a pod of another (STAGES.md §14.3): not resumed, so no cuts of two
+     * versions mix in it, and no restart counted, since nothing is wrong
+     * with it. It stays held when delivered again. Its records so far, and
+     * its checkpoint, name the version it was begun under.
+     *
+     * @throws Exception if a process can't be made
+     */
+    @Test
+    void holdsAnItemBegunUnderAnotherVersion() throws Exception
+    {
+        byte[] file = csvFile();
+        IngestPipeline first = process(settings().withVersion("split-v1"),
+                new RecordingPublisher(), new PipelineHooks()
+                {
+
+                    /** Stops once the first batch commits. */
+                    @Override
+                    public void batchCommitted(long lastSeq)
+                    {
+                        throw new SimulatedCrash();
+                    }
+                });
+        assertThatThrownBy(() -> split(first, SeekableByteSource.of(file)))
+                .isInstanceOf(SimulatedCrash.class);
+        first.close();
+        Checkpoint before = first.checkpoint(item).orElseThrow();
+        assertThat(before.version()).isEqualTo("split-v1");
+        assertThat(CommittedRecords.all(catalog.loadTable(tableId), item))
+                .isNotEmpty()
+                .allSatisfy(row -> assertThat(row.stageVersion())
+                        .isEqualTo("split-v1"));
+
+        RecordingPublisher published = new RecordingPublisher();
+        IngestPipeline changed = process(settings().withVersion("split-v2"),
+                published, PipelineHooks.NONE);
+        assertThatThrownBy(() -> split(changed, SeekableByteSource.of(file)))
+                .isInstanceOfSatisfying(ItemHeldException.class, held ->
+                        assertThat(held.heldVersion()).isEqualTo("split-v1"));
+        Checkpoint held = changed.checkpoint(item).orElseThrow();
+        assertThat(held.state()).isEqualTo(Checkpoint.State.HELD);
+        assertThat(held.restarts()).isEqualTo(before.restarts());
+        assertThat(held.nextSeq()).isEqualTo(before.nextSeq());
+        assertThat(published.sent).isEmpty();
+
+        assertThatThrownBy(() -> split(process(settings()
+                .withVersion("split-v2"), published, PipelineHooks.NONE),
+                SeekableByteSource.of(file)))
+                .isInstanceOf(ItemHeldException.class);
+        assertThat(changed.checkpoint(item).orElseThrow().state())
+                .isEqualTo(Checkpoint.State.HELD);
+    }
+
+    /**
+     * An item split under one version names it on every record, its
+     * message and its checkpoint (STAGES.md §14.3).
+     *
+     * @throws Exception if the file can't be processed
+     */
+    @Test
+    void namesItsVersionOnEveryRecord() throws Exception
+    {
+        RecordingPublisher published = new RecordingPublisher();
+        IngestPipeline pipeline = process(settings().withVersion("split-v1"),
+                published, PipelineHooks.NONE);
+        split(pipeline, SeekableByteSource.of(csvFile()));
+        assertThat(CommittedRecords.all(catalog.loadTable(tableId), item))
+                .hasSize(CSV_ROWS)
+                .allSatisfy(row -> assertThat(row.stageVersion())
+                        .isEqualTo("split-v1"));
+        assertThat(pipeline.checkpoint(item).orElseThrow().version())
+                .isEqualTo("split-v1");
+        assertThat(records(decode(published.sent))).hasSize(CSV_ROWS)
+                .allSatisfy(record -> assertThat(record.version())
+                        .isEqualTo("split-v1"));
+    }
+
+    /**
      * Ends an attempt in the first batch with an error, at the step a hook
      * names.
      *

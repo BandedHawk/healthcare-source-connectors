@@ -40,6 +40,20 @@ public interface RecordSplitter
     String format();
 
     /**
+     * The splitter's own version, part of the split stage's (STAGES.md §14).
+     * Raise it whenever the splitter would cut the same item differently:
+     * other boundaries, other error codes or positions, other bytes in a
+     * record. An item begun under one version is resumed only under the
+     * same one.
+     *
+     * @return the version, from 1
+     */
+    default int version()
+    {
+        return 1;
+    }
+
+    /**
      * Checks the configuration at startup, so a bad setting fails the
      * service rather than a file.
      *

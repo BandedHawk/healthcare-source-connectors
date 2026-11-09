@@ -15,9 +15,12 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
@@ -26,12 +29,14 @@ import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
+import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.landing.NewItem;
 import com.sdh.healthcare.connector.core.landing.MessageIndex;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipelineTest.RecordingPublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.split.SplitterRegistry;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -192,7 +197,79 @@ class ItemProcessorTest
                         .getPrivate()), "connector", recipient.getPublic(),
                         "downstream"), publisher, Clock.systemUTC());
         open.add(pipeline);
-        return new ItemProcessor(pipeline, "claims");
+        return new ItemProcessor(pipeline, "claims", failures(),
+                corrections());
+    }
+
+    /**
+     * The split stage's correction store, in the test's schema.
+     *
+     * @return the store
+     */
+    CorrectionStore corrections()
+    {
+        CorrectionStore corrections = new CorrectionStore(
+                SplitTestSupport.database(), schema, "split",
+                Duration.ofSeconds(10));
+        corrections.createTableIfMissing();
+        return corrections;
+    }
+
+    /**
+     * Submits a correction as an operator would, and takes it as a pod
+     * would, pending.
+     *
+     * @param itemId  the item
+     * @param seq     the failure's record number
+     * @param content the corrected text
+     * @return the pending correction
+     */
+    CorrectionStore.Pending submit(UUID itemId, long seq, String content)
+    {
+        CorrectionStore corrections = corrections();
+        corrections.submit(itemId, seq, content.getBytes(UTF_8), keys,
+                RECORDS_KEK, "op-test");
+        return corrections.pending(10).stream()
+                .filter(pending -> pending.itemId().equals(itemId))
+                .reduce((first, second) -> second).orElseThrow();
+    }
+
+    /**
+     * A batch with its middle message unparseable.
+     *
+     * @param offsets each message's offset, filled in
+     * @return the landed item
+     * @throws Exception if landing fails
+     */
+    LandedItem batchWithABadMessage(List<Long> offsets) throws Exception
+    {
+        String[] messages = {"1,ok\n", "2,\"never closed\n", "3,ok\n"};
+        StringBuilder joined = new StringBuilder();
+        for (String message : messages)
+        {
+            offsets.add((long) joined.length());
+            joined.append(message);
+        }
+        byte[] bytes = joined.toString().getBytes(UTF_8);
+        return lander.land(new NewItem(
+                UuidV7.next(System.currentTimeMillis()),
+                ItemKind.MESSAGE_BATCH, null, null, null,
+                new MessageIndex(offsets, Arrays.asList(null, null, null))),
+                offset -> new ByteArrayInputStream(bytes, (int) offset,
+                        bytes.length));
+    }
+
+    /**
+     * The split stage's fail store, in the test's schema.
+     *
+     * @return the store
+     */
+    FailureStore failures()
+    {
+        FailureStore failures = new FailureStore(SplitTestSupport.database(),
+                schema, "split", Duration.ofSeconds(10));
+        failures.createTableIfMissing();
+        return failures;
     }
 
     /**
@@ -361,7 +438,12 @@ class ItemProcessorTest
                     .containsEntry(AttributeKey.stringKey("sdh.item_id"),
                             broken.itemId().toString())
                     .containsEntry(AttributeKey.stringKey("sdh.result"),
-                            "FAILED");
+                            "INCOMPLETE");
+            // Recorded in the fail store once, though processed twice.
+            assertThat(events.getFinishedLogRecordItems().stream()
+                    .filter(event -> "sdh.audit.failure.failed"
+                            .equals(event.getEventName())))
+                    .hasSize(1);
         }
         finally
         {
@@ -398,18 +480,40 @@ class ItemProcessorTest
         ItemProcessor.Outcome outcome = process(processor(), item);
         assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.COMPLETED);
         assertThat(outcome.recordCount()).isEqualTo(3);
+        // The piece that failed is kept, in the fail store, and not sent on
+        // (STAGES.md §15.1); the item is incomplete while it is open.
         List<RecordSplit> split = messages().stream()
                 .filter(RecordSplit.class::isInstance)
                 .map(RecordSplit.class::cast).toList();
         assertThat(split).extracting(RecordSplit::sourceOffset)
-                .containsExactlyElementsOf(offsets);
+                .containsExactly(offsets.get(0), offsets.get(2));
         assertThat(split).extracting(RecordSplit::errorCode)
-                .containsExactly(null, "PARSE_UNTERMINATED_QUOTE", null);
-        assertThat(split.get(1).sourceLength())
-                .isEqualTo(messages[1].length());
+                .containsOnlyNulls();
+        assertThat(messages()).noneMatch(ItemSplit.class::isInstance);
         assertThat(messages().getLast()).isInstanceOfSatisfying(
-                ItemSplit.class, done -> assertThat(
-                        done.failedRecordCount()).isEqualTo(1));
+                ItemProgressed.class, progress ->
+                {
+                    assertThat(progress.stage()).isEqualTo("split");
+                    assertThat(progress.recordCount()).isEqualTo(3);
+                    assertThat(progress.passedCount()).isEqualTo(2);
+                    assertThat(progress.openCount()).isEqualTo(1);
+                    assertThat(progress.declinedCount()).isZero();
+                    assertThat(progress.failure()).isNull();
+                });
+        assertThat(failures().failures(item.itemId())).singleElement()
+                .satisfies(stored ->
+                {
+                    assertThat(stored.state())
+                            .isEqualTo(FailureStore.State.FAILED);
+                    assertThat(stored.failure().seq()).isEqualTo(1);
+                    assertThat(stored.failure().sourceOffset())
+                            .isEqualTo(offsets.get(1));
+                    assertThat(stored.failure().errorCode())
+                            .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+                    assertThat(stored.failure().recordId()).isNotNull();
+                });
+        assertThat(failures().counts(item.itemId()))
+                .isEqualTo(new FailureStore.Counts(1, 0, 0));
     }
 
     /**
@@ -426,13 +530,20 @@ class ItemProcessorTest
         assertThat(outcome.failure().code())
                 .isEqualTo(ErrorCode.PARSE_UNTERMINATED_QUOTE);
         assertThat(outcome.failure().stage()).isEqualTo("split");
+        // The item as a whole is the failure, and is open (§15.6).
         assertThat(messages().getLast()).isInstanceOfSatisfying(
-                ItemSplit.class, done ->
+                ItemProgressed.class, progress ->
                 {
-                    assertThat(done.failure().code())
+                    assertThat(progress.failure().code())
                             .isEqualTo("PARSE_UNTERMINATED_QUOTE");
-                    assertThat(done.failure().stage()).isEqualTo("split");
+                    assertThat(progress.failure().stage()).isEqualTo("split");
+                    assertThat(progress.passedCount())
+                            .isEqualTo(outcome.recordCount());
+                    assertThat(progress.openCount()).isEqualTo(1);
                 });
+        assertThat(failures().failures(item.itemId())).singleElement()
+                .satisfies(stored -> assertThat(stored.failure().seq())
+                        .isEqualTo(FailureStore.WHOLE_ITEM));
         assertThat(processor().checkpoint(item.itemId())).hasValueSatisfying(
                 checkpoint -> assertThat(checkpoint.state())
                         .isEqualTo(Checkpoint.State.FAILED));
@@ -502,5 +613,195 @@ class ItemProcessorTest
         {
             throw new AssertionError("a split item isn't read");
         }, lease()).result()).isEqualTo(ItemProcessor.Result.COMPLETED);
+    }
+
+    /**
+     * An operator's correction of a piece the splitter couldn't parse is
+     * split alone, stored at the piece's number and place, marked as
+     * correcting it, and sent; the failure is {@code CORRECTED} and the
+     * item ends in {@code item.split}, nothing failed (STAGES.md §15.6d).
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void correctsAPieceTheSplitterCouldntParse() throws Exception
+    {
+        List<Long> offsets = new ArrayList<>();
+        LandedItem item = batchWithABadMessage(offsets);
+        ItemProcessor processor = processor();
+        process(processor, item);
+        String original = failures().failure(item.itemId(), 1).orElseThrow()
+                .failure().recordId();
+        publisher.sent.clear();
+
+        CorrectionStore.Pending pending = submit(item.itemId(), 1,
+                "2,\"now closed\"\n");
+        CorrectionStore.Outcome outcome = processor.correct(pending,
+                item.digest(), LandedRefs.NONE, lease());
+
+        assertThat(outcome.passed()).isTrue();
+        assertThat(messages()).hasSize(2);
+        assertThat(messages().getFirst()).isInstanceOfSatisfying(
+                RecordSplit.class, split ->
+                {
+                    assertThat(split.seq()).isEqualTo(1);
+                    assertThat(split.sourceOffset()).isEqualTo(offsets.get(1));
+                    assertThat(split.errorCode()).isNull();
+                    assertThat(split.recordId()).isEqualTo(outcome.recordId())
+                            .isNotEqualTo(original);
+                });
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, split ->
+                {
+                    assertThat(split.recordCount()).isEqualTo(3);
+                    assertThat(split.failedRecordCount()).isZero();
+                    assertThat(split.failure()).isNull();
+                });
+        assertThat(failures().failure(item.itemId(), 1)).hasValueSatisfying(
+                stored -> assertThat(stored.state())
+                        .isEqualTo(FailureStore.State.CORRECTED));
+        records.refresh();
+        assertThat(CommittedRecords.corrections(records, item.itemId()))
+                .singleElement().satisfies(row ->
+                {
+                    assertThat(row.seq()).isEqualTo(1);
+                    assertThat(row.correctionOf()).isEqualTo(original);
+                });
+        // The original stays, as it failed.
+        assertThat(CommittedRecords.all(records, item.itemId()))
+                .filteredOn(row -> row.seq() == 1).singleElement()
+                .satisfies(row -> assertThat(row.recordId())
+                        .isEqualTo(original));
+        assertThat(corrections().unnotified(Duration.ZERO)).isEmpty();
+    }
+
+    /**
+     * A correction of a piece that splits into more than one record fails,
+     * stores nothing, and leaves the failure open.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void failsACorrectionOfAPieceThatIsntOneRecord() throws Exception
+    {
+        LandedItem item = batchWithABadMessage(new ArrayList<>());
+        ItemProcessor processor = processor();
+        process(processor, item);
+        publisher.sent.clear();
+
+        CorrectionStore.Outcome outcome = processor.correct(
+                submit(item.itemId(), 1, "2,a\n4,b\n"), item.digest(),
+                LandedRefs.NONE, lease());
+
+        assertThat(outcome.passed()).isFalse();
+        assertThat(outcome.errorCode())
+                .isEqualTo(ErrorCode.CORRECTION_RECORD_COUNT.name());
+        assertThat(messages()).singleElement()
+                .isInstanceOf(ItemProgressed.class);
+        assertThat(failures().failure(item.itemId(), 1)).hasValueSatisfying(
+                stored -> assertThat(stored.state())
+                        .isEqualTo(FailureStore.State.FAILED_CORRECTION));
+        records.refresh();
+        assertThat(CommittedRecords.corrections(records, item.itemId()))
+                .isEmpty();
+    }
+
+    /**
+     * A correction of an item that couldn't be split to its end is the
+     * whole item: the records already stored must come out of it the same,
+     * and the rest are stored after them, marked as correcting the item.
+     * The item then ends in {@code item.split} with no failure.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void correctsAnItemThatCouldntBeSplitToItsEnd() throws Exception
+    {
+        // Enough before the bad row for a batch to be committed.
+        LandedItem item = land("1,ok\n2,ok\n3,ok\n4,ok\n5,\"never closed\n");
+        ItemProcessor processor = processor();
+        long kept = process(processor, item).recordCount();
+        assertThat(kept).isPositive();
+        publisher.sent.clear();
+
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        CorrectionStore.Outcome outcome;
+        List<LogRecordData> ended;
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            outcome = processor().correct(submit(item.itemId(),
+                    FailureStore.WHOLE_ITEM,
+                    "1,ok\n2,ok\n3,ok\n4,ok\n5,\"now closed\"\n"),
+                    item.digest(), LandedRefs.NONE, lease());
+            ended = events.getFinishedLogRecordItems().stream()
+                    .filter(event -> "sdh.audit.stage.item_completed"
+                            .equals(event.getEventName()))
+                    .toList();
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
+
+        assertThat(outcome.passed()).isTrue();
+        List<RecordSplit> split = messages().stream()
+                .filter(RecordSplit.class::isInstance)
+                .map(RecordSplit.class::cast).toList();
+        assertThat(split).isNotEmpty();
+        assertThat(split).extracting(RecordSplit::seq)
+                .allMatch(seq -> seq >= kept);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, end ->
+                {
+                    assertThat(end.recordCount())
+                            .isEqualTo(kept + split.size());
+                    assertThat(end.failure()).isNull();
+                });
+        // The stage's end counts the records the correction added.
+        assertThat(ended).singleElement().satisfies(event -> assertThat(
+                        event.getAttributes().asMap())
+                        .containsEntry(AttributeKey.stringKey("sdh.result"),
+                                "COMPLETED")
+                        .containsEntry(AttributeKey.longKey("sdh.count"),
+                                kept + split.size()));
+        assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
+                .hasValueSatisfying(stored -> assertThat(stored.state())
+                        .isEqualTo(FailureStore.State.CORRECTED));
+        records.refresh();
+        assertThat(CommittedRecords.corrections(records, item.itemId()))
+                .allSatisfy(row -> assertThat(row.correctionOf())
+                        .isEqualTo(item.itemId().toString()));
+    }
+
+    /**
+     * A correction of the whole item that changes a record already stored
+     * fails: only what failed is corrected.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void failsACorrectionOfAnItemThatChangesWhatPassed() throws Exception
+    {
+        LandedItem item = land("1,ok\n2,ok\n3,ok\n4,ok\n5,\"never closed\n");
+        ItemProcessor processor = processor();
+        assertThat(process(processor, item).recordCount()).isPositive();
+
+        CorrectionStore.Outcome outcome = processor.correct(
+                submit(item.itemId(), FailureStore.WHOLE_ITEM,
+                        "1,changed\n2,ok\n3,ok\n4,ok\n5,\"now closed\"\n"),
+                item.digest(), LandedRefs.NONE, lease());
+
+        assertThat(outcome.passed()).isFalse();
+        assertThat(outcome.errorCode())
+                .isEqualTo(ErrorCode.CORRECTION_CHANGES_PASSED.name());
+        assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
+                .hasValueSatisfying(stored -> assertThat(stored.state())
+                        .isEqualTo(FailureStore.State.FAILED_CORRECTION));
     }
 }

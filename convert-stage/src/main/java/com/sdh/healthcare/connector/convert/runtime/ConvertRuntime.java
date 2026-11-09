@@ -169,7 +169,6 @@ public final class ConvertRuntime implements AutoCloseable
         StageProperties stage = properties.stage();
         StageWorker.Settings workerSettings = stage.worker();
         CommonSettings.Queue output = stage.output();
-        CommonSettings.Queue dlq = stage.dlq();
         ConvertProperties.Maintenance maintenance = properties.maintenance();
         MaintenanceSettings maintenanceSettings = maintenance.toSettings();
         if (maintenanceSettings.orphanMinAge().compareTo(MIN_ORPHAN_AGE) < 0)
@@ -202,6 +201,8 @@ public final class ConvertRuntime implements AutoCloseable
                     stage.registrySchema(), ConvertProcessor.STAGE,
                     LeaseKeeper.defaultOwner(), Duration.ofSeconds(10));
             registry.createTablesIfMissing();
+            // Its open failures, for alerting (STAGES.md §15.6).
+            registry.failureStore().gauges(Duration.ofMinutes(1));
 
             Catalog catalog = CatalogUtil.buildIcebergCatalog(
                     storageSettings.catalogName(), catalogProperties, null);
@@ -229,8 +230,6 @@ public final class ConvertRuntime implements AutoCloseable
             Clock clock = Clock.systemUTC();
             ClosablePublisher publisher = publisher(camel, output);
             opened.add(publisher);
-            ClosablePublisher deadLetters = publisher(camel, dlq);
-            opened.add(deadLetters);
             ResultReporter results = null;
             if (properties.results().enabled())
             {
@@ -252,12 +251,13 @@ public final class ConvertRuntime implements AutoCloseable
             ConvertProcessor processor = new ConvertProcessor(reader,
                     ConverterRegistry.load(), convertSettings,
                     new ConvertProcessor.Storage(records, keys.wrap(),
-                            recordsKek, ids), results, clock, backlog);
+                            recordsKek, ids, splitRecords), results, clock,
+                    backlog);
             StageWorker<ConvertProcessor.Prepared> worker =
                     new StageWorker<>(processor, registry, keys.inbox(),
                             new MessageSealer(keys.signer(), keys.signerKid(),
                                     keys.recipient(), keys.recipientKid()),
-                            publisher, deadLetters, workerSettings, clock);
+                            publisher, workerSettings);
             opened.add(worker);
             StageHealth health = new StageHealth();
             StageReceiver receiver = new StageReceiver(camel,

@@ -266,10 +266,32 @@ public enum ErrorCode
     /**
      * A stage had already stored a record, and produced different output
      * for it when it came again: the converter or the mapping changed
-     * between the two. The first output is kept, and the second is reported
-     * to the stage's dead-letter queue (STAGES.md §6).
+     * between the two. No longer raised: since 2026-11-08 a record received
+     * again is a duplicate whatever its version (STAGES.md §14.3), and a
+     * forced reprocess stores a different outcome as a new object (§15.4).
+     * Kept so events and messages from before still read.
      */
     RECORD_CONFLICT,
+
+    /**
+     * A record failed at a stage whose processor gave no code of its own;
+     * recorded so in the stage's fail store (STAGES.md §15.3).
+     */
+    STAGE_FAILED,
+
+    /**
+     * An operator's correction of a piece the splitter couldn't parse
+     * wasn't cut into exactly one record: a correction is one document
+     * (STAGES.md §15.1, rule 6; §15.6d).
+     */
+    CORRECTION_RECORD_COUNT,
+
+    /**
+     * An operator's correction of an item that couldn't be split to the end
+     * would change a record that was already stored: only what failed is
+     * corrected (STAGES.md §15.1, rule 5; §15.6d).
+     */
+    CORRECTION_CHANGES_PASSED,
 
     /**
      * A stage's batch couldn't be finished (storage, the registry or the

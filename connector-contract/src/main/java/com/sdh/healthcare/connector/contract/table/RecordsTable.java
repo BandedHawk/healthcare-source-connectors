@@ -139,6 +139,26 @@ public final class RecordsTable
      */
     public static final int MESSAGE_REFS_CHUNK = -1;
 
+    /**
+     * The version of the stage that wrote the row (STAGES.md §14): its build,
+     * the implementation that made the record and a digest of the settings
+     * that change it. Null on a row written before versions were kept.
+     */
+    public static final String STAGE_VERSION = "stage_version";
+
+    /**
+     * The version of the stage before that made the record this one was
+     * made from: the split stage's, on a row of {@code records}. Null on
+     * {@code split_records}, whose input is landed as received.
+     */
+    public static final String INPUT_VERSION = "input_version";
+
+    /**
+     * For a record made from an operator's correction (STAGES.md §15.6c):
+     * the ID of the record that failed, which it corrects; null otherwise.
+     */
+    public static final String CORRECTION_OF = "correction_of";
+
     /** The table's columns, with their Iceberg field ids. */
     public static final Schema SCHEMA = new Schema(
             required(1, RECORD_ID, Types.StringType.get()),
@@ -173,7 +193,14 @@ public final class RecordsTable
             optional(24, MESSAGE_INDEX, Types.IntegerType.get(),
                     "the queue message a failed record starts in"),
             optional(25, MESSAGE_REFS_ENC, Types.BinaryType.get(),
-                    "that message's broker IDs, encrypted"));
+                    "that message's broker IDs, encrypted"),
+            optional(26, STAGE_VERSION, Types.StringType.get(),
+                    "the version of the stage that wrote the row"),
+            optional(27, INPUT_VERSION, Types.StringType.get(),
+                    "the version of the stage before that made its input"),
+            optional(28, CORRECTION_OF, Types.StringType.get(),
+                    "the failed record an operator's correction made this"
+                            + " one from"));
 
     /** The partitioning: by the day each row was written. */
     public static final PartitionSpec SPEC =

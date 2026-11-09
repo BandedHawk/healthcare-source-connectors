@@ -18,9 +18,25 @@ package com.sdh.healthcare.connector.stage;
  *               conflict, not a duplicate (STAGES.md §6)
  * @param failed whether the record failed, and is stored as it was
  * @param value  what is stored
+ * @param errorCode why it failed, for the fail store (STAGES.md §15.3);
+ *               null if it passed
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public record StageOutput<O>(String digest, boolean failed, O value)
+public record StageOutput<O>(String digest, boolean failed, O value,
+        String errorCode)
 {
+
+    /**
+     * An output with no error code noted: a failed one is recorded in the
+     * fail store as {@code STAGE_FAILED}.
+     *
+     * @param digest the output's digest
+     * @param failed whether the record failed
+     * @param value  what is stored
+     */
+    public StageOutput(String digest, boolean failed, O value)
+    {
+        this(digest, failed, value, null);
+    }
 }

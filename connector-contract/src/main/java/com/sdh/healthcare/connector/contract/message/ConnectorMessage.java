@@ -32,7 +32,7 @@ public sealed interface ConnectorMessage permits
         ConnectorMessage.RecordInStorage, ConnectorMessage.ItemLanded,
         ConnectorMessage.ItemReceived, ConnectorMessage.ItemResult,
         ConnectorMessage.RecordConflict, ConnectorMessage.ItemSplit,
-        ConnectorMessage.ItemConverted
+        ConnectorMessage.ItemConverted, ConnectorMessage.ItemProgressed
 {
 
     /**
@@ -163,6 +163,16 @@ public sealed interface ConnectorMessage permits
          * @return the origin; null if the splitter gave none
          */
         RecordOrigin origin();
+
+        /**
+         * The version of the stage that made the record (STAGES.md §14):
+         * its build, the implementation that made the output, and a digest
+         * of the settings that change output.
+         *
+         * @return the version; null for a record made before versions were
+         *         sent
+         */
+        String version();
     }
 
     /**
@@ -187,6 +197,8 @@ public sealed interface ConnectorMessage permits
      * @param storage         where it is stored
      * @param origin          where the record's text came from in the file;
      *                        null if the splitter gave none
+     * @param version         the convert stage's version that made it; null
+     *                        if not known
      */
     record RecordStored(
             String recordId,
@@ -200,9 +212,38 @@ public sealed interface ConnectorMessage permits
             long plaintextLength,
             int chunkCount,
             StorageRef storage,
-            RecordOrigin origin)
+            RecordOrigin origin,
+            String version)
             implements RecordInStorage
     {
+
+        /**
+         * A message with no version.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its file
+         * @param seq             its number in the file, from 0
+         * @param sourceOffset    where it starts in the file, in bytes
+         * @param sourceLength    how many bytes of the file it covers
+         * @param format          the name of the file's format
+         * @param contentType     what the stored bytes are
+         * @param mapping         the JSON mapping, or null when stored as
+         *                        split
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where the record's text came from
+         */
+        public RecordStored(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, String mapping, long plaintextLength,
+                int chunkCount, StorageRef storage, RecordOrigin origin)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, mapping, plaintextLength, chunkCount, storage,
+                    origin, null);
+        }
 
         /**
          * A message without an origin, for a record the splitter gave
@@ -229,7 +270,7 @@ public sealed interface ConnectorMessage permits
         {
             this(recordId, itemId, seq, sourceOffset, sourceLength, format,
                     contentType, mapping, plaintextLength, chunkCount, storage,
-                    null);
+                    null, null);
         }
 
         /**
@@ -279,6 +320,8 @@ public sealed interface ConnectorMessage permits
      *                        null if the splitter gave none
      * @param errorAt         where in the file conversion failed, as a line
      *                        and column; null if not known
+     * @param version         the convert stage's version that failed it;
+     *                        null if not known
      */
     record RecordFailed(
             String recordId,
@@ -293,9 +336,39 @@ public sealed interface ConnectorMessage permits
             int chunkCount,
             StorageRef storage,
             RecordOrigin origin,
-            SourcePosition errorAt)
+            SourcePosition errorAt,
+            String version)
             implements RecordInStorage
     {
+
+        /**
+         * A message with no version.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its file
+         * @param seq             its number in the file, from 0
+         * @param sourceOffset    where it starts in the file, in bytes
+         * @param sourceLength    how many bytes of the file it covers
+         * @param format          the name of the file's format
+         * @param contentType     the media type of the original format
+         * @param errorCode       why conversion failed
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where the record's text came from
+         * @param errorAt         where conversion failed
+         */
+        public RecordFailed(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, String errorCode, long plaintextLength,
+                int chunkCount, StorageRef storage, RecordOrigin origin,
+                SourcePosition errorAt)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, errorCode, plaintextLength, chunkCount,
+                    storage, origin, errorAt, null);
+        }
 
         /**
          * A message without positions, for a record the splitter gave
@@ -321,7 +394,7 @@ public sealed interface ConnectorMessage permits
         {
             this(recordId, itemId, seq, sourceOffset, sourceLength, format,
                     contentType, errorCode, plaintextLength, chunkCount,
-                    storage, null, null);
+                    storage, null, null, null);
         }
 
         /**
@@ -509,8 +582,9 @@ public sealed interface ConnectorMessage permits
      * @param itemId            the item's id
      * @param intake            the intake it came in through
      * @param status            {@code completed} (every record stored,
-     *                          some perhaps failed) or {@code failed} (the
-     *                          item couldn't be split)
+     *                          some perhaps failed), {@code failed} (the
+     *                          item couldn't be split) or {@code incomplete}
+     *                          (failures still open, STAGES.md §15.6)
      * @param recordCount       the records stored, failed ones included
      * @param failedRecordCount the records that failed conversion
      * @param failure           why the item failed; null if it completed
@@ -537,6 +611,13 @@ public sealed interface ConnectorMessage permits
 
         /** The status of an item that couldn't be split. */
         public static final String FAILED = "failed";
+
+        /**
+         * The status of an item with failures still open: not every record
+         * has passed or been declined (STAGES.md §15.6). Another result
+         * follows when that changes.
+         */
+        public static final String INCOMPLETE = "incomplete";
 
         /**
          * Copies the problems.
@@ -574,11 +655,19 @@ public sealed interface ConnectorMessage permits
         /**
          * {@inheritDoc}
          *
-         * @return "rs-", the item id, "-" and the part
+         * @return "rs-", the item id, "-" and the part; for an
+         *         {@link #INCOMPLETE} result, with its counts before the
+         *         part, so a result whose counts changed isn't taken for a
+         *         repeat of the one before
          */
         @Override
         public String messageId()
         {
+            if (INCOMPLETE.equals(status))
+            {
+                return "rs-" + itemId + "-incomplete-" + recordCount + "-"
+                        + failedRecordCount + "-" + problemCount + "-" + part;
+            }
             return "rs-" + itemId + "-" + part;
         }
     }
@@ -678,6 +767,8 @@ public sealed interface ConnectorMessage permits
      *                        or not kept
      * @param messageReplaces the earlier message it replaces, as its
      *                        producer said; null if none
+     * @param version         the split stage's version that cut it; null if
+     *                        not known
      */
     record RecordSplit(
             String recordId,
@@ -695,9 +786,44 @@ public sealed interface ConnectorMessage permits
             SourcePosition errorAt,
             int message,
             String messageRef,
-            String messageReplaces)
+            String messageReplaces,
+            String version)
             implements RecordInStorage
     {
+
+        /**
+         * A message with no version.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its item
+         * @param seq             its number in the item, from 0
+         * @param sourceOffset    where it starts in the item, in bytes
+         * @param sourceLength    how many bytes of the item it covers
+         * @param format          the name of the item's format
+         * @param contentType     what the stored bytes are
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where its text came from in the item
+         * @param errorCode       why the splitter couldn't parse it, or null
+         * @param errorAt         where in the item that was, or null
+         * @param message         its message in a batch, or -1
+         * @param messageRef      that message's broker ID, or null
+         * @param messageReplaces the message it replaces, or null
+         */
+        public RecordSplit(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, long plaintextLength, int chunkCount,
+                StorageRef storage, RecordOrigin origin, String errorCode,
+                SourcePosition errorAt, int message, String messageRef,
+                String messageReplaces)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, plaintextLength, chunkCount, storage, origin,
+                    errorCode, errorAt, message, messageRef, messageReplaces,
+                    null);
+        }
 
         /**
          * {@inheritDoc}
@@ -743,13 +869,49 @@ public sealed interface ConnectorMessage permits
      *                          it was split to the end
      * @param startedAt         when the split stage started on it
      * @param completedAt       when it finished
+     * @param versions          the split stage's versions its records were
+     *                          cut under, in the order first used; empty if
+     *                          not known
      */
     record ItemSplit(UUID itemId, String intake, long recordCount,
             long failedRecordCount, long itemSize, String itemDigest,
             String producerRef, UUID replaces, Problem failure,
-            Instant startedAt, Instant completedAt)
+            Instant startedAt, Instant completedAt, List<String> versions)
             implements ConnectorMessage
     {
+
+        /**
+         * Copies the versions.
+         */
+        public ItemSplit
+        {
+            versions = versions == null ? List.of() : List.copyOf(versions);
+        }
+
+        /**
+         * A message with no versions.
+         *
+         * @param itemId            the item's id
+         * @param intake            the intake it came in through
+         * @param recordCount       its records, failed ones included
+         * @param failedRecordCount the pieces the splitter couldn't parse
+         * @param itemSize          the item's size, in bytes
+         * @param itemDigest        its keyed digest, as landed
+         * @param producerRef       the producer's reference, or null
+         * @param replaces          the item it replaces, or null
+         * @param failure           why it couldn't be split further, or null
+         * @param startedAt         when the split stage started on it
+         * @param completedAt       when it finished
+         */
+        public ItemSplit(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, long itemSize, String itemDigest,
+                String producerRef, UUID replaces, Problem failure,
+                Instant startedAt, Instant completedAt)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, itemSize,
+                    itemDigest, producerRef, replaces, failure, startedAt,
+                    completedAt, List.of());
+        }
 
         /**
          * {@inheritDoc}
@@ -783,11 +945,38 @@ public sealed interface ConnectorMessage permits
      * @param failedRecordCount those stored in their original form, after
      *                          failing to split or to convert
      * @param completedAt       when the last was stored
+     * @param versions          the convert stage's versions its records
+     *                          were made under, in the order first used;
+     *                          empty if not known
      */
     record ItemConverted(UUID itemId, String intake, long recordCount,
-            long failedRecordCount, Instant completedAt)
+            long failedRecordCount, Instant completedAt, List<String> versions)
             implements ConnectorMessage
     {
+
+        /**
+         * Copies the versions.
+         */
+        public ItemConverted
+        {
+            versions = versions == null ? List.of() : List.copyOf(versions);
+        }
+
+        /**
+         * A message with no versions.
+         *
+         * @param itemId            the item's id
+         * @param intake            the intake it came in through
+         * @param recordCount       its records, failed ones included
+         * @param failedRecordCount those stored in their original form
+         * @param completedAt       when the last was stored
+         */
+        public ItemConverted(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, Instant completedAt)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, completedAt,
+                    List.of());
+        }
 
         /**
          * {@inheritDoc}
@@ -809,6 +998,73 @@ public sealed interface ConnectorMessage permits
         public String messageId()
         {
             return "ic-convert-" + itemId;
+        }
+    }
+
+    /**
+     * A stage has handled every record of an item once, and some failed and
+     * are open: neither passed nor declined (STAGES.md §15.6). It is sent in
+     * place of the item-complete message ({@code item.split},
+     * {@code item.converted}), and again whenever its counts change, until
+     * nothing is open; failures themselves are not sent downstream (§15.1).
+     * A later stage takes it as a total still to grow: it handles the
+     * records passed so far, and completes only on the item-complete
+     * message.
+     *
+     * @param itemId        the item's id
+     * @param intake        the intake it came in through
+     * @param stage         the stage reporting, such as {@code split}
+     * @param recordCount   the records the stage has handled: passed,
+     *                      failed and declined
+     * @param passedCount   those that passed, and were sent on
+     * @param openCount     those that failed and are open
+     * @param declinedCount those an operator declined to correct
+     * @param failure       why the item as a whole couldn't be split
+     *                      further, as in {@link ItemSplit}; null if none
+     * @param producerRef   the producer's own reference for it; null if
+     *                      none
+     * @param replaces      the item it replaces; null if none
+     * @param reportedAt    when the stage reported it
+     * @param versions      the stage's versions its records were made under,
+     *                      in the order first used; empty if not known
+     */
+    record ItemProgressed(UUID itemId, String intake, String stage,
+            long recordCount, long passedCount, long openCount,
+            long declinedCount, Problem failure, String producerRef,
+            UUID replaces, Instant reportedAt, List<String> versions)
+            implements ConnectorMessage
+    {
+
+        /**
+         * Copies the versions.
+         */
+        public ItemProgressed
+        {
+            versions = versions == null ? List.of() : List.copyOf(versions);
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#ITEM_PROGRESS}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.ITEM_PROGRESS;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "ip-", the stage, the item id and the counts: the same
+         *         counts are the same message, and a change is a new one
+         */
+        @Override
+        public String messageId()
+        {
+            return "ip-" + stage + "-" + itemId + "-" + recordCount + "-"
+                    + passedCount + "-" + openCount + "-" + declinedCount;
         }
     }
 

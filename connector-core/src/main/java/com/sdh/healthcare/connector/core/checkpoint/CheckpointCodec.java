@@ -105,6 +105,11 @@ public final class CheckpointCodec
             // existed still verify.
             fields.put("restarts", checkpoint.restarts());
         }
+        if (checkpoint.version() != null)
+        {
+            // Left out when not known, as restarts.
+            fields.put("version", checkpoint.version());
+        }
         return fields;
     }
 
@@ -145,7 +150,8 @@ public final class CheckpointCodec
                             JSONObjectUtils.getString(fields, "startedAt")),
                     failure,
                     fields.containsKey("restarts")
-                            ? JSONObjectUtils.getInt(fields, "restarts") : 0);
+                            ? JSONObjectUtils.getInt(fields, "restarts") : 0,
+                    JSONObjectUtils.getString(fields, "version"));
         }
         catch (ParseException malformed)
         {

@@ -5,8 +5,11 @@ Copyright (c) 2026 Smile Digital Health Inc. All rights reserved. See `legal/LIC
 The convert stage takes each record the split stage (the `file-connector` distribution) has split, converts it to
 JSON (C-CDA, X12, EDIFACT, CSV and others; FHIR stays as it is), stores it encrypted in Apache Iceberg tables, and
 announces it on a message queue with a signed, encrypted message for the readers downstream. A record that can't be
-converted is stored in its original form and announced as failed. When all of an item's records are stored, it
-announces the item, and, if the intake's producer receives results, sends them its result.
+converted is stored in its original form and kept in the stage's fail store, and is not announced: an operator finds
+it there (STAGES.md §15). When every record of an item has passed, it announces the item (`item.converted`), and, if
+the intake's producer receives results, sends them its result. While a failure is open here or at the split stage,
+it announces `item.progress` instead, again whenever the counts change, and the producer's result says
+`incomplete`, listing the problems of both stages.
 
 This distribution contains no Java runtime. Run it on a host with Java 25, or build a container image from it
 on a Java 25 base image of your choice.
@@ -84,7 +87,7 @@ Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` b
 ```sh
 bin/convert-stage                          # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/convert-stage         # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, replay
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, replay, failures, decline, reopen, export, correct
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The stage exits with status
@@ -217,13 +220,57 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 has checked (`reconciler`); `status --item <id>` shows one item and its records by state. It reads only the lease
 database.
 
-`replay --item-id <id>` sends every `record.stored` and `record.failed` of an item the stage has completed again,
-rebuilt from `records`, then its `item.converted`, and waits for the broker: for an item lost after this stage
+`replay --item-id <id>` sends every `record.stored` of an item the stage has completed again, rebuilt from
+`records` (failed records are in the fail store, and aren't sent on), then its `item.converted`, and waits for the broker: for an item lost after this stage
 (STAGES.md §13.2). `--with-result` also sends the producer's `item.result` again, for a result that was lost;
 without it, the producer hears nothing, since a second result could set off its own handling. With results off
 (`sdh.results.enabled`), `--with-result` is refused before anything is sent. Each message goes
 under a broker ID of its own (`<messageId>~replay-<millis>`). An item not yet complete is refused. It needs the
 stage's keys and catalog, and writes nothing (`admin.replay`).
+
+#### Failures
+
+`failures` lists the stage's open failures, newest first, by item, record number (`-1` is the item as a whole),
+state, error code and offset; `--all` lists every state, and `--item-id <id>` one item's, with each change: who,
+when, and whether a reason was given. It shows no content.
+
+`decline --item-id <id> --seq <n>` records that a failure won't be corrected; `reopen` takes that back. Each needs a
+reason, read from standard input, never the command line, so it stays out of shell histories and the cluster's
+audit log. Give `-i` to `kubectl exec`:
+
+```sh
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args decline --item-id <id> --seq -1 --operator alice < reason.txt
+```
+
+The reason (at most 4 KiB) is kept encrypted with the stage's records KEK, one entry per change, and is never
+printed or logged (`failure.declined`, `failure.reopened`). These two are the only commands that write, and only to
+the fail store. The stage's workers count the change within a renewal interval: `item.converted` once none of the item's
+failures is open, else `item.progress` again. Reopening a failure of an item already complete changes only the fail
+store.
+
+To correct a record that failed conversion, export it encrypted to your own key, edit it on your machine, and
+submit the edit. Keep the private key on your machine; only the public key goes to the pod:
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout -out operator.key && openssl ec -in operator.key -pubout -out operator.pem
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args export --item-id <id> --seq <n> --operator alice < operator.pem | sed -n 's/^sdh-export: //p' > failed.jwe
+```
+
+`failed.jwe` is a JWE (`ECDH-ES+A256KW`, or `RSA-OAEP-256` for an RSA key; `A256GCM`) that only `operator.key`
+opens, with any JOSE tool (for example `step crypto jwe decrypt --key operator.key < failed.jwe`). The export is
+audited with the key's SHA-256. Then:
+
+```sh
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args correct --item-id <id> --seq <n> --operator alice < corrected.xml
+```
+
+`correct` takes a failure that is `FAILED` or `FAILED_CORRECTION`, keeps the edit encrypted (at most
+`sdh.convert.max-bytes`), and moves the failure to `CORRECTION_PENDING`. Within a renewal interval a worker converts
+it as the record would have been: if it passes, it is stored as a new row of `records` (`correction_of` naming the
+failed row, which stays), sent on as `record.stored`, the failure becomes `CORRECTED` and the item completes once
+nothing else is open; if it fails, the failure becomes `FAILED_CORRECTION`, and you can correct it again.
+`failures --item-id` shows each correction and what it came to. Delete `failed.jwe` and your edits when you're done.
+
 
 ### After an outage
 
@@ -265,6 +312,9 @@ What to watch:
   messages are lost. Check the retention before a planned outage, and drain the queues first if you can: then the
   reconciler waits only its 15 minutes at startup.
 - **Afterwards,** check that every item completed at the split stage also completed here (`stage.item_completed`).
+- **Open failures:** `sdh.stage.failures_open` and `sdh.stage.failures_oldest_age` (seconds), by stage, for alerting
+  on a failure no one has acted on. Each failure is audited once, `failure.failed`, by item and record number, with
+  no content; its item stays incomplete (`item.progress`) until it is corrected or declined (STAGES.md §15.6).
 
 A stage upgraded from a build without the watermark checks only the last `sdh.reconcile.lookback` (2 days) its first
 time.

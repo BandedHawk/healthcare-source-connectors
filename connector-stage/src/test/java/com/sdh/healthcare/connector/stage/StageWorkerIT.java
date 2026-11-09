@@ -51,7 +51,6 @@ import jakarta.jms.Connection;
 import jakarta.jms.MessageProducer;
 import jakarta.jms.Session;
 import java.net.URI;
-import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -696,9 +695,7 @@ class StageWorkerIT
             worker = new StageWorker<>(processor,
                     StageTestSupport.registry(schema, owner),
                     StageTestSupport.stageOpener(),
-                    StageTestSupport.stageSealer(), output,
-                    new StageTestSupport.RecordingPublisher(), SETTINGS,
-                    Clock.systemUTC());
+                    StageTestSupport.stageSealer(), output, SETTINGS);
             worker.start();
             setup.accept(camel);
             if (settings.kind() == BrokerKind.SQS)

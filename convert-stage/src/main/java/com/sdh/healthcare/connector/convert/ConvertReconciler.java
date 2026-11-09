@@ -497,11 +497,17 @@ public final class ConvertReconciler
             long snapshotId)
     {
         List<ConnectorMessage> lost = new ArrayList<>();
-        for (CommittedRecords.Row row
-                : CommittedRecords.all(splitRecords, itemId))
+        // With the records operators' corrections made at the split stage
+        // (STAGES.md §15.6d), sent on as any record.
+        List<CommittedRecords.Row> rows = new ArrayList<>(
+                CommittedRecords.all(splitRecords, itemId));
+        rows.addAll(CommittedRecords.corrections(splitRecords, itemId));
+        for (CommittedRecords.Row row : rows)
         {
-            if (known.contains(row.recordId()))
+            if (known.contains(row.recordId()) || row.errorCode() != null)
             {
+                // Known, or a piece the splitter couldn't parse: in the
+                // split stage's fail store, never sent on (STAGES.md §15.1).
                 continue;
             }
             StorageRef ref = new StorageRef(catalogName, namespace,

@@ -9,20 +9,36 @@ package com.sdh.healthcare.connector.file.admin;
 import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
 import com.sdh.healthcare.connector.broker.send.Publishers;
 import com.sdh.healthcare.connector.broker.send.QueueType;
+import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.SplitItemReport;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
+import com.sdh.healthcare.connector.core.landing.LandedItemSource;
+import com.sdh.healthcare.connector.core.landing.LandedRefs;
+import com.sdh.healthcare.connector.core.pipeline.SplitMessages;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
+import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
+import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
+import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.FailureAdmin;
+import java.io.PrintStream;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.Map;
+import java.util.UUID;
 import org.apache.camel.CamelContext;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.iceberg.CatalogUtil;
@@ -35,12 +51,14 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * What the split stage's admin commands read from, each part opened only
  * when a command needs it. Strictly read-only: tables are loaded, never
  * created; ID keys are never created; leases are inspected, never taken;
- * the database connection is read-only (design §11.4).
+ * the database connection is read-only (design §11.4). Only
+ * {@code decline} and {@code reopen} write, to the fail store, over a
+ * connection of their own.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class SplitAdminContext implements AutoCloseable
+final class SplitAdminContext implements FailureAdmin, AutoCloseable
 {
 
     /** The stage's settings. */
@@ -48,6 +66,9 @@ final class SplitAdminContext implements AutoCloseable
 
     /** The lease database. */
     private final AdminDatabase database;
+
+    /** The lease database, writing: for the fail store's changes. */
+    private final AdminDatabase writing;
 
     /** The keys, once loaded. */
     private KeyMaterial keys;
@@ -79,6 +100,7 @@ final class SplitAdminContext implements AutoCloseable
     {
         this.properties = properties;
         this.database = new AdminDatabase(properties.lease());
+        this.writing = new AdminDatabase(properties.lease(), true);
     }
 
     /**
@@ -270,6 +292,133 @@ final class SplitAdminContext implements AutoCloseable
                 new CheckpointCodec(splitIds), Duration.ofSeconds(10));
     }
 
+    @Override
+    public String stage()
+    {
+        return ItemProcessor.STAGE;
+    }
+
+    /**
+     * The split stage's fail store (STAGES.md §15.3), to read.
+     *
+     * @return the store
+     */
+    @Override
+    public FailureStore failures()
+    {
+        return new FailureStore(database.dataSource(),
+                properties.stage().registrySchema(), ItemProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public FailureStore failuresToChange()
+    {
+        return new FailureStore(writing.dataSource(),
+                properties.stage().registrySchema(), ItemProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public KeyProvider reasonKeys() throws Exception
+    {
+        return keys().wrap();
+    }
+
+    @Override
+    public String reasonKek()
+    {
+        return properties.crypto().keys().recordsKek();
+    }
+
+    @Override
+    public boolean corrects()
+    {
+        return true;
+    }
+
+    /**
+     * The largest item the stage splits: a correction is a piece of an
+     * item, or the whole of one.
+     */
+    @Override
+    public long maxCorrectionBytes()
+    {
+        String format = properties.split().format();
+        return ConnectorRuntime.splitConfig(properties.split(), format)
+                .limits().maxItemBytes();
+    }
+
+    @Override
+    public CorrectionStore correctionsToChange()
+    {
+        return new CorrectionStore(writing.dataSource(),
+                properties.stage().registrySchema(), ItemProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public CorrectionStore corrections()
+    {
+        return new CorrectionStore(database.dataSource(),
+                properties.stage().registrySchema(), ItemProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    /**
+     * What failed, decrypted: a piece's row of {@code split_records} as
+     * cut from the item, or, for the item as a whole, the item as landed.
+     */
+    @Override
+    public byte[] failedContent(UUID itemId, long seq) throws Exception
+    {
+        int max = (int) Math.min(Integer.MAX_VALUE - 8,
+                maxCorrectionBytes());
+        if (seq == FailureStore.WHOLE_ITEM)
+        {
+            try (LandedItemSource source = LandedItemSource.open(
+                    landedItems(), itemId, keys().wrap()))
+            {
+                if (source.size() > max)
+                {
+                    throw new IllegalStateException("The item is larger"
+                            + " than the stage splits");
+                }
+                return source.readFully(0, (int) source.size());
+            }
+        }
+        Table table = splitRecords();
+        table.refresh();
+        CommittedRecords.Row row = CommittedRecords.all(table, itemId)
+                .stream()
+                .filter(each -> each.seq() == seq && each.errorCode() != null)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("The failed"
+                        + " piece isn't in " + IngestTables.SPLIT_RECORDS));
+        long snapshot = table.currentSnapshot().snapshotId();
+        StorageRef ref = new StorageRef(properties.storage().catalogName(),
+                properties.storage().namespace(), IngestTables.SPLIT_RECORDS,
+                row.ingestedDate(), snapshot, row.kekRef());
+        try (QueueReader reader = QueueReader.builder().catalog(catalog())
+                .keyProvider(keys().wrap()).build())
+        {
+            return reader.readRecord(SplitMessages.recordSplit(itemId, row,
+                    ref, LandedRefs.NONE), max);
+        }
+    }
+
+    /**
+     * Sends the item's end again, as the fail store counts it now:
+     * {@code item.split} once none of its failures is open.
+     */
+    @Override
+    public void changed(UUID itemId, AuditRecord audit, PrintStream out)
+            throws Exception
+    {
+        ReplayCommand.send(this, itemId, true, Clock.systemUTC(), audit,
+                out);
+    }
+
     /**
      * The stage's item rows, without their checkpoints: needs no keys.
      *
@@ -316,6 +465,7 @@ final class SplitAdminContext implements AutoCloseable
         }
         closeQuietly(catalog);
         database.close();
+        writing.close();
     }
 
     /**

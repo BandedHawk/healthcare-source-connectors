@@ -6,7 +6,10 @@ The file connector takes each healthcare file (C-CDA, X12, EDIFACT, FHIR, CSV an
 landed, splits it into records, stores every record encrypted in Apache Iceberg tables, and announces each one on a
 message queue with a signed, encrypted message. Files reach it only through a landing node (the
 `landing-connector` distribution), which stores each one as received and tells the file connector about it with an
-`item.landed` message.
+`item.landed` message. A piece it can't parse, or an item it can't split to the end, is stored as it is and kept in
+the stage's fail store (`stage_failure` in its registry schema, audited `failure.failed`), and not announced; the
+item then ends in `item.progress` instead of `item.split`, until every failure is corrected or declined
+(STAGES.md §15).
 
 This distribution contains no Java runtime. Run it on a host with Java 25, or build a container image from it
 on a Java 25 base image of your choice.
@@ -88,7 +91,7 @@ Records are stored as split, in their original form. Conversion to JSON and the 
 ```sh
 bin/file-connector                         # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/file-connector        # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, replay
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, replay, failures, decline, reopen
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The connector exits with
@@ -229,10 +232,62 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 image, because it needs `tar`; read it through a debug container instead (below), from `/proc/1/root/tmp/<id>`,
 and delete it when you're done.
 `replay --item-id <id>` sends every `record.split` of an item the stage has finished again, rebuilt from
-`split_records`, then its `item.split`, and waits for the broker: for an item lost between this stage and the
+`split_records`, then its `item.split` (or `item.progress`, while one of its failures is open), and waits for the
+broker. Pieces the splitter couldn't parse are in the fail store, and aren't sent: for an item lost between this stage and the
 convert stage, which converts what it lacks and completes the item (STAGES.md §13.2). Each message goes under a
 broker ID of its own (`<messageId>~replay-<millis>`), so a broker that drops repeated IDs doesn't drop it. An item
 still being split is refused. Nothing is written, so it is safe beside the running stage (`admin.replay`).
+
+#### Failures
+
+`failures` lists the stage's open failures, newest first, by item, record number (`-1` is the item as a whole),
+state, error code and offset; `--all` lists every state, and `--item-id <id>` one item's, with each change: who,
+when, and whether a reason was given. It shows no content.
+
+`decline --item-id <id> --seq <n>` records that a failure won't be corrected; `reopen` takes that back. Each needs a
+reason, read from standard input, never the command line, so it stays out of shell histories and the cluster's
+audit log. Give `-i` to `kubectl exec`:
+
+```sh
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args decline --item-id <id> --seq -1 --operator alice < reason.txt
+```
+
+The reason (at most 4 KiB) is kept encrypted with the stage's records KEK, one entry per change, and is never
+printed or logged (`failure.declined`, `failure.reopened`). These two are the only commands that write, and only to
+the fail store. Afterwards the stage sends the item's end again, alone: `item.split` once none of its failures is open, so the
+convert stage can complete it, or `item.progress` with the new counts. An item still being split counts the change
+when it ends.
+
+To correct a failure, export what failed encrypted to your own key, edit it on your machine, and submit the edit.
+Keep the private key on your machine; only the public key goes to the pod:
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout -out operator.key && openssl ec -in operator.key -pubout -out operator.pem
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args export --item-id <id> --seq <n> --operator alice < operator.pem | sed -n 's/^sdh-export: //p' > failed.jwe
+```
+
+For `--seq` from 0, `failed.jwe` holds the piece the splitter couldn't parse; for `--seq -1`, the whole item as
+landed. It is a JWE (`ECDH-ES+A256KW`, or `RSA-OAEP-256` for an RSA key; `A256GCM`) that only `operator.key` opens,
+with any JOSE tool (for example `step crypto jwe decrypt --key operator.key < failed.jwe`). The export is audited with
+the key's SHA-256. Then:
+
+```sh
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args correct --item-id <id> --seq <n> --operator alice < corrected.txt
+```
+
+`correct` takes a failure that is `FAILED` or `FAILED_CORRECTION`, keeps the edit encrypted (at most the stage's
+largest item), and moves the failure to `CORRECTION_PENDING`. Within a renewal interval a pod splits it:
+- a piece's correction must give exactly one record; it is stored in `split_records` at the piece's number and place,
+  with `correction_of` naming the failed row, which stays;
+- the item's correction is the whole item, edited: the records already stored must come out of it unchanged, and
+  those after them are stored, with `correction_of` the item's ID.
+
+If it passes, the new records are sent on as `record.split`, the failure becomes `CORRECTED`, and the item's end is
+sent again (`item.split` once nothing else is open, its failed count without the corrected piece). If it fails
+(`CORRECTION_RECORD_COUNT`, `CORRECTION_CHANGES_PASSED`, or the splitter's code), nothing is stored, the failure
+becomes `FAILED_CORRECTION`, and you can correct it again. `failures --item-id` shows each correction and what it came
+to. Delete `failed.jwe` and your edits when you're done. `restore` also gives a landed item whole, into the pod.
+
 
 ### Troubleshooting
 

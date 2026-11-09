@@ -42,6 +42,9 @@ import java.util.UUID;
  *                     instead of crashing the connector forever. An
  *                     attempt that ends because a service was down is
  *                     taken back ({@link #notCounted})
+ * @param version      the split stage's version the file was begun under
+ *                     (STAGES.md §14): only that version resumes it; null
+ *                     for one begun before versions were kept
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -57,7 +60,8 @@ public record Checkpoint(
         long publishedSeq,
         Instant startedAt,
         Failure failure,
-        int restarts)
+        int restarts,
+        String version)
 {
 
     /** The prefix of the table property that holds a checkpoint. */
@@ -82,7 +86,13 @@ public record Checkpoint(
         FAILED,
 
         /** Given up without finishing. */
-        ABANDONED;
+        ABANDONED,
+
+        /**
+         * Part way, begun under another version of the split stage; waits
+         * for an operator (STAGES.md §14.3). Not resumed, not reconciled.
+         */
+        HELD;
 
         /**
          * Tells whether this state must be finished (or abandoned) before
@@ -187,9 +197,27 @@ public record Checkpoint(
     public static Checkpoint start(UUID itemId, String fingerprint,
             String format, long itemSize, Instant startedAt)
     {
+        return start(itemId, fingerprint, format, itemSize, startedAt, null);
+    }
+
+    /**
+     * A new file, with nothing split yet, begun under a version of the split
+     * stage (STAGES.md §14): only that version resumes it.
+     *
+     * @param itemId      the file's ID
+     * @param fingerprint its keyed fingerprint
+     * @param format      its format
+     * @param itemSize    its size
+     * @param startedAt   when it was started
+     * @param version     the split stage's version; null if not known
+     * @return the checkpoint, {@code SPLITTING} from the start
+     */
+    public static Checkpoint start(UUID itemId, String fingerprint,
+            String format, long itemSize, Instant startedAt, String version)
+    {
         return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.SPLITTING, ResumePoint.START, 0, -1, -1, startedAt,
-                null, 0);
+                null, 0, version);
     }
 
     /**
@@ -217,7 +245,7 @@ public record Checkpoint(
     {
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resume, lastSeq + 1, lastSeq,
-                Math.max(publishedSeq, published), startedAt, failure, 0);
+                Math.max(publishedSeq, published), startedAt, failure, 0, version);
     }
 
     /**
@@ -230,7 +258,7 @@ public record Checkpoint(
     {
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
-                failure, restarts + 1);
+                failure, restarts + 1, version);
     }
 
     /**
@@ -248,7 +276,7 @@ public record Checkpoint(
         }
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
-                failure, restarts - 1);
+                failure, restarts - 1, version);
     }
 
     /**
@@ -262,7 +290,7 @@ public record Checkpoint(
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq,
                 Math.max(publishedSeq, published), startedAt, failure,
-                restarts);
+                restarts, version);
     }
 
     /**
@@ -276,7 +304,7 @@ public record Checkpoint(
     {
         return new Checkpoint(itemId, fingerprint, format, itemSize, next,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
-                null, restarts);
+                null, restarts, version);
     }
 
     /**
@@ -289,7 +317,7 @@ public record Checkpoint(
     {
         return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.FAILING, resumeAt, nextSeq, committedSeq, publishedSeq,
-                startedAt, why, restarts);
+                startedAt, why, restarts, version);
     }
 
     /**
@@ -306,7 +334,7 @@ public record Checkpoint(
         }
         return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.FAILED, resumeAt, nextSeq, committedSeq, publishedSeq,
-                startedAt, failure, restarts);
+                startedAt, failure, restarts, version);
     }
 
     /**

@@ -10,10 +10,13 @@ import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseStore;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
+import com.sdh.healthcare.connector.core.landing.LandingTables;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.iceberg.Table;
@@ -130,5 +133,108 @@ public final class ItemSplitter
         {
             lock.unlock();
         }
+    }
+
+    /**
+     * Applies an operator's correction of one of an item's failures
+     * (STAGES.md §15.6d), under the item's lease, unless another pod
+     * applied it first.
+     *
+     * @param pending  the correction, as listed
+     * @param store    the correction store, read again under the lease
+     * @return what it came to; empty if it was no longer pending
+     * @throws LeaseHeldException   if another pod holds the item's lease
+     * @throws InterruptedException if interrupted while waiting
+     * @throws Exception            if storage or the broker fails; it is
+     *                              tried again later
+     */
+    public Optional<CorrectionStore.Outcome> correct(
+            CorrectionStore.Pending pending, CorrectionStore store)
+            throws Exception
+    {
+        UUID itemId = pending.itemId();
+        lock.lockInterruptibly();
+        try (LeaseKeeper lease = lease(itemId))
+        {
+            if (!store.stillPending(pending))
+            {
+                return Optional.empty();
+            }
+            Landed landed = landed(itemId);
+            CorrectionStore.Outcome outcome = processor.correct(pending,
+                    landed.digest(), landed.refs(), lease);
+            LOG.info("split.correction_done passed={}", outcome.passed());
+            return Optional.of(outcome);
+        }
+        finally
+        {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Sends an item's end again after its failures changed, under its
+     * lease.
+     *
+     * @param itemId the item
+     * @throws LeaseHeldException   if another pod holds its lease
+     * @throws InterruptedException if interrupted while waiting
+     * @throws Exception            if the store or the broker fails
+     */
+    public void reannounce(UUID itemId) throws Exception
+    {
+        lock.lockInterruptibly();
+        try (LeaseKeeper lease = lease(itemId))
+        {
+            Landed landed = landed(itemId);
+            processor.reannounce(itemId, landed.digest(), landed.refs());
+        }
+        finally
+        {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Takes an item's lease.
+     *
+     * @param itemId the item
+     * @return the lease, kept until closed
+     * @throws LeaseHeldException if another pod holds it
+     */
+    private LeaseKeeper lease(UUID itemId) throws LeaseHeldException
+    {
+        return LeaseKeeper.tryAcquire(leases, leasePrefix + itemId, owner,
+                leaseSettings, lost -> LOG.warn(
+                        "split.item_lease_lost reason={}", lost.reason()));
+    }
+
+    /**
+     * What landing kept about an item.
+     *
+     * @param digest its digest
+     * @param refs   what its result names
+     */
+    private record Landed(String digest, LandedRefs refs)
+    {
+    }
+
+    /**
+     * Reads what landing kept about an item.
+     *
+     * @param itemId the item
+     * @return its digest and references
+     * @throws IllegalStateException if it is no longer in landing
+     * @throws java.io.IOException   if its data keys can't be unwrapped
+     */
+    private Landed landed(UUID itemId) throws java.io.IOException
+    {
+        Table landed = landedItems.get();
+        landed.refresh();
+        var summary = LandedItems.summary(landed, itemId)
+                .orElseThrow(() -> new IllegalStateException(
+                        "The item is no longer in landing"));
+        return new Landed((String) summary.getField(
+                LandingTables.ITEM_DIGEST), LandedRefs.of(summary, keys));
     }
 }

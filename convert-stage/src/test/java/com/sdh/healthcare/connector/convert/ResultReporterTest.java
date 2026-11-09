@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
@@ -128,6 +129,52 @@ class ResultReporterTest
             assertThat(part.replaces()).isEqualTo(earlier);
             assertThat(part.failure()).isEqualTo(failure);
         });
+    }
+
+    /**
+     * While a failure is open, the result is incomplete, from the split
+     * stage's item.progress, with the problems of both stages put down to
+     * each; one counts made differently is a different message, and an
+     * item that couldn't be split further is still failed (STAGES.md
+     * §15.6).
+     */
+    @Test
+    void reportsAnItemWithFailuresOpenAsIncomplete()
+    {
+        ConnectorMessage.ItemProgressed progressed =
+                new ConnectorMessage.ItemProgressed(ITEM, "claims", "split",
+                        3, 2, 1, 0, null, "claims.csv", null, AT, null);
+        ResultReporter.Facts facts = ResultReporter.Facts.of(progressed);
+        List<Failed> failed = List.of(
+                new Failed(0, 0, "PARSE_UNTERMINATED_QUOTE", null),
+                new Failed(2, 40, "CONVERT_CSV_FIELD_COUNT", null));
+        List<ItemResult> parts = ResultReporter.parts(facts,
+                ItemResult.INCOMPLETE, 3, failed, AT,
+                ResultReporter.PART_SIZE, ResultReporter.PART_BYTES);
+        assertThat(parts).singleElement().satisfies(part ->
+        {
+            assertThat(part.status()).isEqualTo(ItemResult.INCOMPLETE);
+            assertThat(part.recordCount()).isEqualTo(3);
+            assertThat(part.failedRecordCount()).isEqualTo(2);
+            assertThat(part.producerRef()).isEqualTo("claims.csv");
+            assertThat(part.problems()).extracting(Problem::stage)
+                    .containsExactly("split", "convert");
+        });
+        assertThat(ResultReporter.parts(facts, ItemResult.INCOMPLETE, 3,
+                failed.subList(0, 1), AT, ResultReporter.PART_SIZE,
+                ResultReporter.PART_BYTES).getFirst().messageId())
+                .isNotEqualTo(parts.getFirst().messageId());
+
+        Problem failure = new Problem("PARSE_XML_MALFORMED", "split", -1, 9,
+                null, -1, null, null);
+        assertThat(ResultReporter.parts(ResultReporter.Facts.of(
+                new ConnectorMessage.ItemProgressed(ITEM, "claims", "split",
+                        0, 0, 1, 0, failure, null, null, AT, null)),
+                ItemResult.INCOMPLETE, 0, List.of(), AT,
+                ResultReporter.PART_SIZE, ResultReporter.PART_BYTES))
+                .singleElement().satisfies(part -> assertThat(part.status())
+                        .isEqualTo(ItemResult.FAILED));
+        assertThat(ResultReporter.Facts.of(null)).isNull();
     }
 
     /**

@@ -18,12 +18,15 @@ import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.RecordInput;
@@ -40,6 +43,7 @@ import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
 import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.ECPrivateKey;
@@ -212,11 +216,10 @@ class ConvertStageTest
                 new MessageSealer(
                         new ECDSASigner((ECPrivateKey) signer.getPrivate()),
                         "convert", downstream.getPublic(), "transform"),
-                publisher, publisher,
+                publisher,
                 new StageWorker.Settings(2, Duration.ofMinutes(1),
                         Duration.ofSeconds(15), Duration.ofMillis(50),
-                        Duration.ofSeconds(5)),
-                clock);
+                        Duration.ofSeconds(5)));
     }
 
     /** Stops the worker and reader. */
@@ -326,22 +329,170 @@ class ConvertStageTest
     @Test
     void convertsRecordsAndCompletesTheItem() throws Exception
     {
-        List<RecordSplit> messages = split("1,2", "3");
+        List<RecordSplit> messages = split("1,2", "3,4");
         ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
                 null, null, null, SPLIT_AT, SPLIT_AT);
         List<BrokerMessage> batch = List.of(received(messages.get(0)),
                 received(total), received(messages.get(1)));
         assertThat(worker.handle(batch))
                 .isEqualTo(BatchHandler.Outcome.DONE);
-        assertThat(sentOf("record.stored")).isEqualTo(1);
-        assertThat(sentOf("record.failed")).isEqualTo(1);
+        assertThat(sentOf("record.stored")).isEqualTo(2);
+        assertThat(sentOf("record.failed")).isZero();
         assertThat(sentOf("item.converted")).isEqualTo(1);
         assertThat(registry.completed(List.of(item))).containsExactly(item);
+        // Each record, its row and the item name the version that made
+        // them (STAGES.md §14.3).
+        String version = processor.version(messages.get(0));
+        MessageOpener opener = new MessageOpener(
+                Map.of("transform", downstream.getPrivate()),
+                Map.of("convert", (ECPublicKey) signer.getPublic()));
+        List<ConnectorMessage> opened = new ArrayList<>();
+        for (OutboundMessage message : sent)
+        {
+            opened.add(opener.open(message.body()));
+        }
+        assertThat(opened).filteredOn(m -> m instanceof RecordInStorage)
+                .hasSize(2).allSatisfy(m -> assertThat(
+                        ((RecordInStorage) m).version()).isEqualTo(version));
+        assertThat(opened).filteredOn(ItemConverted.class::isInstance)
+                .singleElement().satisfies(m -> assertThat(
+                        ((ItemConverted) m).versions())
+                        .containsExactly(version));
+        assertThat(CommittedRecords.all(records, item)).hasSize(2)
+                .allSatisfy(row -> assertThat(row.stageVersion())
+                        .isEqualTo(version));
 
         assertThat(worker.handle(batch))
                 .isEqualTo(BatchHandler.Outcome.DONE);
-        assertThat(sentOf("record.stored")).isEqualTo(1);
+        assertThat(sentOf("record.stored")).isEqualTo(2);
         assertThat(sentOf("item.converted")).isEqualTo(1);
+    }
+
+    /**
+     * A record that fails conversion is stored as split and kept in the
+     * convert stage's fail store, not sent on; its item isn't complete
+     * while the failure is open, and gets {@code item.progress} instead,
+     * naming the intake (STAGES.md §15.6).
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void keepsAFailedRecordAndReportsTheItemInProgress() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2", "3");
+        ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
+                "claims.csv", null, null, SPLIT_AT, SPLIT_AT);
+        assertThat(worker.handle(List.of(received(messages.get(0)),
+                received(total), received(messages.get(1)))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(sentOf("record.stored")).isEqualTo(1);
+        assertThat(sentOf("record.failed")).isZero();
+        assertThat(sentOf("item.converted")).isZero();
+        assertThat(sentOf("item.progress")).isEqualTo(1);
+        assertThat(registry.completed(List.of(item))).isEmpty();
+        MessageOpener opener = new MessageOpener(
+                Map.of("transform", downstream.getPrivate()),
+                Map.of("convert", (ECPublicKey) signer.getPublic()));
+        ConnectorMessage.ItemProgressed progress = null;
+        for (OutboundMessage message : sent)
+        {
+            if (opener.open(message.body())
+                    instanceof ConnectorMessage.ItemProgressed opened)
+            {
+                progress = opened;
+            }
+        }
+        assertThat(progress).isNotNull();
+        assertThat(progress.stage()).isEqualTo("convert");
+        assertThat(progress.intake()).isEqualTo("claims");
+        assertThat(progress.producerRef()).isEqualTo("claims.csv");
+        assertThat(progress.recordCount()).isEqualTo(2);
+        assertThat(progress.passedCount()).isEqualTo(1);
+        assertThat(progress.openCount()).isEqualTo(1);
+        assertThat(registry.failureStore().failures(item)).singleElement()
+                .satisfies(stored ->
+                {
+                    assertThat(stored.failure().seq()).isEqualTo(1);
+                    assertThat(stored.failure().errorCode())
+                            .isEqualTo("CONVERT_CSV_FIELD_COUNT");
+                    assertThat(stored.state()).isEqualTo(
+                            com.sdh.healthcare.connector.core.failure
+                                    .FailureStore.State.FAILED);
+                });
+
+        // Delivered again, nothing new: no second item.progress.
+        assertThat(worker.handle(List.of(received(messages.get(0)),
+                received(total), received(messages.get(1)))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(sentOf("item.progress")).isEqualTo(1);
+    }
+
+    /**
+     * An operator's correction of a record that failed conversion is
+     * converted by the worker as the record was (STAGES.md §15.6c): stored
+     * as a new row of records, marked correction_of the failed one, which
+     * stays; sent on as record.stored; the failure CORRECTED; and the item
+     * completed with both records passed. A replay sends the corrected
+     * record too, and counts nothing failed.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void convertsAnOperatorsCorrection() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2", "3");
+        ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
+                "claims.csv", null, null, SPLIT_AT, SPLIT_AT);
+        assertThat(worker.handle(List.of(received(messages.get(0)),
+                received(total), received(messages.get(1)))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(sentOf("item.progress")).isEqualTo(1);
+        CommittedRecords.Row failed = CommittedRecords.all(records, item)
+                .stream().filter(row -> row.errorCode() != null)
+                .findFirst().orElseThrow();
+
+        // A header and the record, as the converter takes it: synthetic.
+        registry.correctionStore().submit(item, 1,
+                "a,b\n3,4\n".getBytes(StandardCharsets.UTF_8), kms, KEK,
+                "alice");
+        worker.applyCorrections();
+        worker.revisit();
+
+        records.refresh();
+        assertThat(CommittedRecords.all(records, item)).hasSize(2)
+                .anySatisfy(row -> assertThat(row.recordId())
+                        .isEqualTo(failed.recordId()));
+        assertThat(CommittedRecords.corrections(records, item))
+                .singleElement().satisfies(row ->
+                {
+                    assertThat(row.seq()).isEqualTo(1);
+                    assertThat(row.errorCode()).isNull();
+                    assertThat(row.correctionOf())
+                            .isEqualTo(failed.recordId());
+                });
+        assertThat(sentOf("record.stored")).isEqualTo(2);
+        assertThat(sentOf("item.converted")).isEqualTo(1);
+        assertThat(registry.failureStore().failure(item, 1)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.CORRECTED);
+        MessageOpener opener = new MessageOpener(
+                Map.of("transform", downstream.getPrivate()),
+                Map.of("convert", (ECPublicKey) signer.getPublic()));
+        for (OutboundMessage message : sent)
+        {
+            if (opener.open(message.body())
+                    instanceof ItemConverted converted)
+            {
+                assertThat(converted.recordCount()).isEqualTo(2);
+                assertThat(converted.failedRecordCount()).isZero();
+            }
+        }
+
+        List<ConnectorMessage> again = ConvertProcessor.replayMessages(item,
+                records, "prod", NS, "claims", 2, 1, SPLIT_AT);
+        assertThat(again).hasSize(3);
+        assertThat(((ItemConverted) again.get(2)).failedRecordCount())
+                .isZero();
     }
 
     /**
@@ -356,7 +507,7 @@ class ConvertStageTest
     @Test
     void aReplayRebuildsTheMessagesFirstSent() throws Exception
     {
-        List<RecordSplit> messages = split("1,2", "3");
+        List<RecordSplit> messages = split("1,2", "3,4");
         ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
                 null, null, null, SPLIT_AT, SPLIT_AT);
         assertThat(worker.handle(List.of(received(messages.get(0)),
@@ -390,6 +541,36 @@ class ConvertStageTest
                 .isEqualTo(first.get(first.size() - 1));
         assertThat(((ItemConverted) again.get(again.size() - 1))
                 .completedAt()).isEqualTo(done.completedAt());
+    }
+
+    /**
+     * A record an operator's correction made at the split stage, whose
+     * {@code record.split} never came, is rebuilt by the reconciler as any
+     * other (STAGES.md §15.6d).
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void reconcilesARecordCorrectedAtTheSplitStage() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2");
+        RecordBatchWriter writer = new RecordBatchWriter(splitRecords, kms,
+                KEK, new RecordIds(new byte[32]), SPLIT_AT);
+        writer.correction(item, 1, "the-failed-piece");
+        writer.add(new RecordInput(item, 1, 8, "csv",
+                "a,b\n3,4\n".getBytes(UTF_8)));
+        splitRecords.newAppend().appendFile(writer.finish()).commit();
+        String corrected = writer.written().get(0).recordId();
+        assertThat(worker.handleOpened(List.of(messages.get(0))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+
+        assertThat(new ConvertReconciler(splitRecords, registry, worker,
+                processor, "prod", NS, Duration.ofMinutes(10),
+                Duration.ofDays(2),
+                Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC))
+                .reconcile()).isEqualTo(1);
+        assertThat(registry.knownRecords(item)).containsExactlyInAnyOrder(
+                messages.get(0).recordId(), corrected);
     }
 
     /**

@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.contract.message.MessageType;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import java.time.Duration;
 import java.time.Instant;
@@ -66,8 +67,16 @@ class StageRegistryTest
      */
     StageRegistry.Entry entry(String recordId, boolean failed)
     {
+        if (failed)
+        {
+            // Not sent on, and recorded in the fail store (STAGES.md §15).
+            return new StageRegistry.Entry(recordId, item, "d-" + recordId,
+                    "v1", true, null, new FailureStore.Failure(item,
+                            Long.parseLong(recordId.substring(1)), recordId,
+                            "TEST_FAILED", 10, "v1"));
+        }
         return new StageRegistry.Entry(recordId, item, "d-" + recordId,
-                "v1", failed, new OutboundMessage("m-" + recordId,
+                "v1", false, new OutboundMessage("m-" + recordId,
                         MessageType.RECORD_STORED, item, recordId,
                         new byte[] {1, 2, 3}));
     }
@@ -181,9 +190,11 @@ class StageRegistryTest
         assertThat(second.claim("r1", item, LONG)).isInstanceOfSatisfying(
                 StageRegistry.Stored.class, row ->
                         assertThat(row.pending()).isNull());
+        // A failed record has nothing to send: failures aren't sent on
+        // (STAGES.md §15.1).
         assertThat(second.claim("r2", item, LONG)).isInstanceOfSatisfying(
                 StageRegistry.Stored.class, row ->
-                        assertThat(row.pending()).isNotNull());
+                        assertThat(row.pending()).isNull());
     }
 
     /**
@@ -204,6 +215,64 @@ class StageRegistryTest
                 .containsExactly(key("r1"));
         assertThat(second.item(item)).contains(
                 new ItemProgress(item, -1, 1, 0));
+    }
+
+    /**
+     * An item made under two versions names both, in the order first used,
+     * each once (STAGES.md §14.3).
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void aDueItemNamesTheVersionsItWasMadeUnder() throws InterruptedException
+    {
+        first.expect(item, 3, new byte[] {1});
+        for (String[] made : new String[][] {{"r1", "v1"}, {"r2", "v2"},
+            {"r3", "v1"}})
+        {
+            first.claim(made[0], item, LONG);
+            first.store(List.of(new StageRegistry.Entry(made[0], item,
+                    "d-" + made[0], made[1], false, new OutboundMessage(
+                            "m-" + made[0], MessageType.RECORD_STORED, item,
+                            made[0], new byte[] {1}))));
+            // stored_at orders them: apart, so the order is the test's.
+            Thread.sleep(5);
+        }
+        assertThat(first.due(List.of(item))).singleElement()
+                .extracting(due -> due.progress().versions())
+                .isEqualTo(List.of("v1", "v2"));
+    }
+
+    /**
+     * A total from the stage before's item.progress may grow, and is
+     * replaced by the final one, which is then kept (STAGES.md §15.6).
+     */
+    @Test
+    void aTotalStillOpenUpstreamGrowsUntilTheFinalOne()
+    {
+        first.expect(item, 2, new byte[] {1}, true);
+        first.expect(item, 1, new byte[] {2}, true);
+        first.claim("r1", item, LONG);
+        first.claim("r2", item, LONG);
+        first.store(List.of(entry("r1", false), entry("r2", false)));
+        assertThat(first.due(List.of(item))).singleElement().satisfies(due ->
+        {
+            assertThat(due.progress().expected()).isEqualTo(2);
+            assertThat(due.progress().upstreamOpen()).isTrue();
+            assertThat(due.progress().complete()).isFalse();
+            assertThat(due.total()).isEqualTo(new byte[] {1});
+        });
+
+        first.expect(item, 3, new byte[] {3}, true);
+        assertThat(first.due(List.of(item))).isEmpty();
+        first.expect(item, 2, new byte[] {4}, false);
+        first.expect(item, 3, new byte[] {5}, true);
+        assertThat(first.due(List.of(item))).singleElement().satisfies(due ->
+        {
+            assertThat(due.progress().expected()).isEqualTo(2);
+            assertThat(due.progress().complete()).isTrue();
+            assertThat(due.total()).isEqualTo(new byte[] {4});
+        });
     }
 
     /**
@@ -228,10 +297,24 @@ class StageRegistryTest
         first.store(List.of(entry("r2", true)));
         first.expect(item, 5, new byte[] {9});
         List<StageRegistry.DueItem> due = first.due(List.of(item));
+        // With the version its records were made under (STAGES.md §14.3).
         assertThat(due).extracting(StageRegistry.DueItem::progress)
-                .containsExactly(new ItemProgress(item, 2, 2, 1));
+                .containsExactly(new ItemProgress(item, 2, 2, 1)
+                        .withVersions(List.of("v1")));
         assertThat(due.get(0).total()).isEqualTo(firstTotal);
         assertThat(second.due(List.of(item))).hasSize(1);
+
+        // Its failure is open, so it reports progress rather than
+        // completing; once noted, the same counts aren't reported again.
+        assertThat(due.get(0).progress().complete()).isFalse();
+        assertThat(due.get(0).progressChanged()).isTrue();
+        first.markProgressed(item, due.get(0).progress().progressKey());
+        assertThat(first.due(List.of(item))).singleElement()
+                .satisfies(again -> assertThat(again.progressChanged())
+                        .isFalse());
+        assertThat(first.failureStore().failures(item)).singleElement()
+                .satisfies(stored -> assertThat(stored.failure().seq())
+                        .isEqualTo(2));
 
         first.markCompleted(item);
         assertThat(first.due(List.of(item, other)))

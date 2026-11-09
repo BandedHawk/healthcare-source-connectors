@@ -45,6 +45,9 @@ import java.util.Objects;
  *                           finish. 0 (the default) means
  *                           {@link #DEFAULT_CONVERT_MEMORY_SHARE} of the
  *                           maximum heap
+ * @param version            the split stage's version (STAGES.md §14),
+ *                           kept with each record it cuts and in each
+ *                           item's checkpoint; null if not set
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -61,7 +64,8 @@ public record PipelineSettings(
         RetryPolicy retry,
         ConverterRegistry converters,
         long convertMaxBytes,
-        long convertMemoryBytes)
+        long convertMemoryBytes,
+        String version)
 {
 
     /**
@@ -86,6 +90,8 @@ public record PipelineSettings(
      * @param converters         JSON converters by format
      * @param convertMaxBytes    largest record converted
      * @param convertMemoryBytes heap for conversions; 0 for the default
+     * @param version            the split stage's version (STAGES.md §14),
+     *                           kept with each record; null if not set
      * @throws NullPointerException     if a required setting is null
      * @throws IllegalArgumentException if a threshold, the worker count or
      *                                  a conversion limit isn't positive
@@ -124,7 +130,8 @@ public record PipelineSettings(
                 SplitConfig.defaults(format), catalogName, kekRef, 10_000,
                 512L << 20, Duration.ofSeconds(30),
                 Runtime.getRuntime().availableProcessors(),
-                RetryPolicy.DEFAULT, ConverterRegistry.load(), 64L << 20, 0);
+                RetryPolicy.DEFAULT, ConverterRegistry.load(), 64L << 20, 0,
+                null);
     }
 
     /**
@@ -138,7 +145,7 @@ public record PipelineSettings(
         return new PipelineSettings(connectorId, format, splitConfig,
                 catalogName, kekRef, commitMaxRecords, commitMaxBytes,
                 commitMaxInterval, encryptWorkers, retry, converters,
-                convertMaxBytes, convertMemoryBytes);
+                convertMaxBytes, convertMemoryBytes, version);
     }
 
     /**
@@ -154,7 +161,8 @@ public record PipelineSettings(
     {
         return new PipelineSettings(connectorId, format, split, catalogName,
                 kekRef, maxRecords, maxBytes, maxInterval, encryptWorkers,
-                retry, converters, convertMaxBytes, convertMemoryBytes);
+                retry, converters, convertMaxBytes, convertMemoryBytes,
+                version);
     }
 
     /**
@@ -168,7 +176,7 @@ public record PipelineSettings(
         return new PipelineSettings(connectorId, format, split, catalogName,
                 kekRef, commitMaxRecords, commitMaxBytes, commitMaxInterval,
                 workers, retry, converters, convertMaxBytes,
-                convertMemoryBytes);
+                convertMemoryBytes, version);
     }
 
     /**
@@ -182,7 +190,7 @@ public record PipelineSettings(
         return new PipelineSettings(connectorId, format, split, catalogName,
                 kekRef, commitMaxRecords, commitMaxBytes, commitMaxInterval,
                 encryptWorkers, policy, converters, convertMaxBytes,
-                convertMemoryBytes);
+                convertMemoryBytes, version);
     }
 
     /**
@@ -198,7 +206,7 @@ public record PipelineSettings(
         return new PipelineSettings(connectorId, format, split, catalogName,
                 kekRef, commitMaxRecords, commitMaxBytes, commitMaxInterval,
                 encryptWorkers, retry, registry, maxBytes,
-                convertMemoryBytes);
+                convertMemoryBytes, version);
     }
 
     /**
@@ -212,7 +220,23 @@ public record PipelineSettings(
     {
         return new PipelineSettings(connectorId, format, split, catalogName,
                 kekRef, commitMaxRecords, commitMaxBytes, commitMaxInterval,
-                encryptWorkers, retry, converters, convertMaxBytes, bytes);
+                encryptWorkers, retry, converters, convertMaxBytes, bytes,
+                version);
+    }
+
+    /**
+     * A copy with the split stage's version, kept with each record it cuts
+     * and in each item's checkpoint (STAGES.md §14).
+     *
+     * @param stageVersion the version
+     * @return the copy
+     */
+    public PipelineSettings withVersion(String stageVersion)
+    {
+        return new PipelineSettings(connectorId, format, split, catalogName,
+                kekRef, commitMaxRecords, commitMaxBytes, commitMaxInterval,
+                encryptWorkers, retry, converters, convertMaxBytes,
+                convertMemoryBytes, stageVersion);
     }
 
     /**

@@ -12,14 +12,16 @@ import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
-import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -55,20 +57,22 @@ import org.slf4j.LoggerFactory;
  *     time;</li>
  * <li>the records this worker claimed are committed by the processor in one
  *     append, then marked stored with the message each is sent as, and
- *     counted on their items;</li>
+ *     counted on their items; a record that failed is marked
+ *     {@code FAILED} and recorded in the stage's fail store in the same
+ *     transaction, and has no message: failures aren't sent on (STAGES.md
+ *     §15.1);</li>
  * <li>the messages are sent, and marked sent;</li>
- * <li>a record already stored is a duplicate if its output is the same,
- *     and is only sent again if its message never was; with a different
- *     output it is a conflict, reported to the dead-letter queue, and the
- *     first output is kept. Under the version it was stored with, its
- *     output must be the same, so it isn't processed again; under another
- *     it is, which is announced and flushed first, since that may stop the
- *     process (STAGES.md §6);</li>
+ * <li>a record already stored is a duplicate, whatever version it was
+ *     stored under, and is only sent again if its message never was; it is
+ *     never processed again (STAGES.md §14.3), and a version that differs
+ *     is audited. The first output is kept;</li>
  * <li>a record another worker holds is waited for, after the rest is
  *     stored and sent, until that worker stores it or lets its claim
  *     expire;</li>
- * <li>an item whose records are all stored gets its item-complete message.
- *     </li>
+ * <li>an item whose records are all stored gets its item-complete message
+ *     if none of its failures is open and the stage before has completed
+ *     it; otherwise its {@code item.progress}, again whenever its counts
+ *     change (§15.6).</li>
  * </ol>
  * Only then is the batch acknowledged. Anything that fails on the way is
  * tried again in place, and what was already stored is recognised.
@@ -79,6 +83,12 @@ import org.slf4j.LoggerFactory;
  */
 public final class StageWorker<O> implements BatchHandler, AutoCloseable
 {
+
+    /** The most items looked at again in one go. */
+    static final int REVISIT_LIMIT = 100;
+
+    /** The most corrections a worker processes in an interval. */
+    static final int CORRECTION_LIMIT = 10;
 
     /** Logs the worker's own events; never a body or a record id. */
     private static final Logger LOG = LoggerFactory.getLogger(
@@ -99,20 +109,23 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     /** Sends the stage's messages. */
     private final MessagePublisher output;
 
-    /** Sends conflicts to the dead-letter queue. */
-    private final MessagePublisher deadLetters;
-
     /** How the worker runs. */
     private final Settings settings;
-
-    /** Gives the time conflicts are found at. */
-    private final Clock clock;
 
     /** Processes records, several at a time. */
     private final ExecutorService workers;
 
     /** Renews this worker's claims. */
     private final ScheduledExecutorService renewer;
+
+    /** Looks again at items whose failures changed (STAGES.md §15.3). */
+    private final ScheduledExecutorService revisiter;
+
+    /**
+     * Held while the processor commits: batches and corrections commit
+     * from different threads, and the processor commits one at a time.
+     */
+    private final Object commits = new Object();
 
     /**
      * How a worker runs.
@@ -201,9 +214,6 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         /** Stored before by another, with the same output. */
         DUPLICATE,
 
-        /** Stored before by another, with a different output. */
-        CONFLICT,
-
         /** Held by another worker. */
         BUSY
     }
@@ -216,29 +226,27 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * @param opener      opens received messages
      * @param sealer      seals the messages the stage sends
      * @param output      sends the stage's messages
-     * @param deadLetters sends conflicts to the dead-letter queue
      * @param settings    how the worker runs
-     * @param clock       gives the time conflicts are found at
      */
     public StageWorker(StageProcessor<O> processor, StageRegistry registry,
             MessageOpener opener, MessageSealer sealer,
-            MessagePublisher output, MessagePublisher deadLetters,
-            Settings settings, Clock clock)
+            MessagePublisher output, Settings settings)
     {
         this.processor = processor;
         this.registry = registry;
         this.opener = opener;
         this.sealer = sealer;
         this.output = output;
-        this.deadLetters = deadLetters;
         this.settings = settings;
-        this.clock = clock;
         this.workers = Executors.newFixedThreadPool(settings.concurrency(),
                 Thread.ofPlatform().name("sdh-" + processor.stage() + "-", 0)
                         .daemon().factory());
         this.renewer = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().name("sdh-" + processor.stage()
                         + "-claims").daemon().factory());
+        this.revisiter = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().name("sdh-" + processor.stage()
+                        + "-revisit").daemon().factory());
     }
 
     /** Starts renewing this worker's claims. */
@@ -247,6 +255,129 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         long period = settings.renewInterval().toMillis();
         renewer.scheduleWithFixedDelay(this::renew, period, period,
                 TimeUnit.MILLISECONDS);
+        revisiter.scheduleWithFixedDelay(() ->
+        {
+            applyCorrections();
+            revisit();
+        }, period, period, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Looks again at the items whose failures changed since their counts
+     * were reported (STAGES.md §15.3): an operator declined or reopened
+     * one. Each completes, or has its new counts reported, as at the end of
+     * a batch. Every pod does it; the messages' ids are fixed, so a repeat
+     * is dropped. A failure is logged and tried again at the next interval.
+     * Run each renewal interval once {@link #start}ed; public for a stage's
+     * own tests.
+     */
+    public void revisit()
+    {
+        try
+        {
+            List<UUID> changed = registry.changedItems(REVISIT_LIMIT);
+            if (!changed.isEmpty())
+            {
+                completeItems(new LinkedHashSet<>(changed));
+            }
+        }
+        catch (InterruptedException interrupted)
+        {
+            Thread.currentThread().interrupt();
+        }
+        catch (Exception failure)
+        {
+            LOG.warn("stage.revisit_failed stage={} reason={}",
+                    processor.stage(), failure.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Processes operators' corrections (STAGES.md §15.6c), oldest first,
+     * if the stage does: each claimed in the registry under a name of its
+     * own, so one worker processes it; its output committed and stored as
+     * a record's is, with its outcome noted in the same transaction (the
+     * correction passed or failed, and its failure {@code CORRECTED} or
+     * {@code FAILED_CORRECTION}), and the record sent on if it passed. A
+     * correction stored but not sent (a worker stopped between the two) is
+     * sent again. The item is then looked at again by {@link #revisit}. A
+     * failure is logged, and the correction tried again at the next
+     * interval. Run each renewal interval once {@link #start}ed; public
+     * for a stage's own tests.
+     */
+    public void applyCorrections()
+    {
+        if (!processor.corrects())
+        {
+            return;
+        }
+        try
+        {
+            List<StageRegistry.Unsent> unsent =
+                    registry.unsentCorrections(settings.claimTtl());
+            if (!unsent.isEmpty())
+            {
+                send(output, unsent.stream()
+                        .map(StageRegistry.Unsent::message).toList());
+                registry.markSent(unsent.stream()
+                        .map(StageRegistry.Unsent::key).toList());
+            }
+            for (CorrectionStore.Pending pending : registry
+                    .correctionStore().pending(CORRECTION_LIMIT))
+            {
+                if (registry.claim(pending.claimId(), pending.itemId(),
+                        settings.claimTtl()) instanceof StageRegistry.Owned)
+                {
+                    applyCorrection(pending);
+                }
+            }
+        }
+        catch (InterruptedException interrupted)
+        {
+            Thread.currentThread().interrupt();
+        }
+        catch (Exception failure)
+        {
+            LOG.warn("stage.correction_failed stage={} reason={}",
+                    processor.stage(), failure.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Processes one correction this worker has claimed, stores it, and
+     * sends its record on if it passed.
+     *
+     * @param pending the correction
+     * @throws Exception if it can't be processed, stored or sent; it is
+     *                   tried again
+     */
+    private void applyCorrection(CorrectionStore.Pending pending)
+            throws Exception
+    {
+        StageProcessor.Corrected<O> made = processor.correct(pending);
+        StageOutput<O> result = made.output();
+        ConnectorMessage message;
+        synchronized (commits)
+        {
+            message = processor.commit(List.of(result)).get(0);
+        }
+        boolean passed = !result.failed() && message != null;
+        String recordId = passed
+                && message instanceof ConnectorMessage.RecordInStorage record
+                        ? record.recordId() : null;
+        String code = passed ? null : result.errorCode() == null
+                ? ErrorCode.STAGE_FAILED.name() : result.errorCode();
+        StageRegistry.Entry entry = new StageRegistry.Entry(
+                pending.claimId(), pending.itemId(), result.digest(),
+                made.version(), !passed, passed ? outbound(message) : null,
+                null, new CorrectionStore.Outcome(pending, passed, recordId,
+                        code, made.version()));
+        if (registry.store(List.of(entry)).contains(entry.key())
+                && entry.message() != null)
+        {
+            send(output, List.of(entry.message()));
+            registry.markSent(List.of(entry.key()));
+        }
     }
 
     /**
@@ -396,7 +527,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     case StageInput.ItemTotal total ->
                     {
                         registry.expect(total.itemId(), total.expected(),
-                                received.body());
+                                received.body(), total.partial());
                         items.add(total.itemId());
                     }
                     case StageInput.Unwanted unwanted ->
@@ -434,7 +565,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     /**
      * One round over the records not yet done: claims and processes each,
      * commits and sends what this worker claimed, sends again what was
-     * stored but never sent, and reports conflicts.
+     * stored but never sent.
      *
      * @param pending the records
      * @return those another worker holds, to look at again
@@ -480,7 +611,6 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                         resent.add(result.pending().input().key());
                     }
                 }
-                case CONFLICT -> conflict(result);
                 case BUSY -> busy.add(result.pending());
             }
         }
@@ -494,8 +624,11 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             {
                 if (marked.contains(entry.key()))
                 {
-                    sends.add(entry.message());
-                    sent.add(entry.key());
+                    if (entry.message() != null)
+                    {
+                        sends.add(entry.message());
+                        sent.add(entry.key());
+                    }
                 }
                 else
                 {
@@ -543,44 +676,30 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     }
 
     /**
-     * Compares a record received again with what another worker stored
-     * (STAGES.md §6). Under the version it was stored with, the output must
-     * be the same: a duplicate, not processed again. Under another, it is
-     * processed again, at the attempt it was stored at, and the same output
-     * is a duplicate, a different one a conflict.
-     * <p>
-     * Processing again under another version happens only when the stage
-     * was changed while records were in flight, and may stop the process,
-     * over and over, as it is delivered again. So it is announced first,
-     * in the console log and as {@code record.compare_started}, flushed to
-     * the collector, with what an operator needs to find the record and
-     * recover by hand.
+     * Treats a record received again, which another worker stored, as a
+     * duplicate whatever its version (STAGES.md §14.3, decided 2026-11-08):
+     * the first output stays, and nothing is processed again, so a later
+     * version can't stop the worker on a record stored under an earlier one.
+     * When the versions differ, that is audited,
+     * {@code record.version_differs}, with what an operator needs to find
+     * the record, and counted. Processing it again under the new version is
+     * an operator's forced reprocess (§15.4).
      *
      * @param record the record
      * @param stored its row
-     * @return a duplicate or a conflict
-     * @throws InterruptedException if interrupted
+     * @return a duplicate
      */
     private Result<O> compare(Pending record, StageRegistry.Stored stored)
-            throws InterruptedException
     {
         String version = processor.version(record.message());
-        if (version.equals(stored.version()))
+        if (!version.equals(stored.version()))
         {
-            return new Result<>(record, Found.DUPLICATE, null, stored,
-                    version);
+            Telemetry telemetry = Telemetry.get();
+            telemetry.versionDiffers(processor.stage());
+            telemetry.auditWarn("record.version_differs",
+                    storedFields(record, stored, version));
         }
-        Telemetry telemetry = Telemetry.get();
-        telemetry.versionDiffers(processor.stage());
-        telemetry.auditWarn("record.compare_started",
-                storedFields(record, stored, version));
-        telemetry.flush();
-        StageOutput<O> again = processor.process(record.message(),
-                stored.attempts());
-        return new Result<>(record,
-                again.digest().equals(stored.digest())
-                        ? Found.DUPLICATE : Found.CONFLICT,
-                again, stored, version);
+        return new Result<>(record, Found.DUPLICATE, null, stored, version);
     }
 
     /**
@@ -599,7 +718,11 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         {
             outputs.add(result.output());
         }
-        List<ConnectorMessage> messages = processor.commit(outputs);
+        List<ConnectorMessage> messages;
+        synchronized (commits)
+        {
+            messages = processor.commit(outputs);
+        }
         if (messages.size() != outputs.size())
         {
             throw new IllegalStateException(
@@ -611,38 +734,38 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         for (int index = 0; index < owned.size(); index++)
         {
             Result<O> result = owned.get(index);
-            entries.add(new StageRegistry.Entry(
-                    result.pending().input().recordId(),
-                    result.pending().input().itemId(),
-                    result.output().digest(), result.version(),
-                    result.output().failed(),
-                    outbound(messages.get(index))));
+            StageOutput<O> made = result.output();
+            StageInput.RecordInput input = result.pending().input();
+            ConnectorMessage message = messages.get(index);
+            entries.add(new StageRegistry.Entry(input.recordId(),
+                    input.itemId(), made.digest(), result.version(),
+                    made.failed(),
+                    made.failed() || message == null ? null
+                            : outbound(message),
+                    made.failed() ? failure(result) : null));
         }
         return entries;
     }
 
     /**
-     * Reports a conflict to the dead-letter queue: the record stored first
-     * stays, the new output is dropped (STAGES.md §6).
+     * The failure to record for a record that failed: named by its item
+     * and sequence number, with where it starts in the item, why, and the
+     * version that failed it. It holds no content.
      *
-     * @param result the record, its new output and its stored row
-     * @throws InterruptedException if interrupted
-     * @throws ExecutionException   if the dead-letter queue refused it
-     * @throws TimeoutException     if it didn't take it in time
+     * @param result the record and its output
+     * @return the failure
      */
-    private void conflict(Result<O> result)
-            throws InterruptedException, ExecutionException,
-            TimeoutException
+    private FailureStore.Failure failure(Result<O> result)
     {
-        Telemetry.get().auditWarn("record.conflict",
-                storedFields(result)
-                        .with(Attr.ERROR_CODE, ErrorCode.RECORD_CONFLICT));
-        send(deadLetters, List.of(outbound(
-                new ConnectorMessage.RecordConflict(
-                        result.pending().input().recordId(),
-                        result.pending().input().itemId(),
-                        processor.stage(), result.stored().digest(),
-                        result.output().digest(), clock.instant()))));
+        StageInput.RecordInput input = result.pending().input();
+        long offset = result.pending().message()
+                instanceof ConnectorMessage.RecordInStorage record
+                        ? record.sourceOffset() : 0;
+        String code = result.output().errorCode();
+        return new FailureStore.Failure(input.itemId(), input.seq(),
+                input.recordId(),
+                code == null ? ErrorCode.STAGE_FAILED.name() : code, offset,
+                result.version());
     }
 
     /**
@@ -664,19 +787,22 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         for (StageRegistry.DueItem due : registry.due(items))
         {
             ItemProgress progress = due.progress().withTotal(total(due));
+            if (!progress.complete())
+            {
+                if (due.progressChanged())
+                {
+                    progressItem(progress, due.readAt());
+                }
+                else
+                {
+                    // The same counts: only note they were looked at.
+                    registry.markProgressed(progress.itemId(),
+                            progress.progressKey(), due.readAt());
+                }
+                continue;
+            }
             send(output, List.of(outbound(processor.itemComplete(progress))));
-            try
-            {
-                processor.itemCompleted(progress);
-            }
-            catch (InterruptedException | RuntimeException failure)
-            {
-                throw failure;
-            }
-            catch (Exception failure)
-            {
-                throw new ExecutionException(failure);
-            }
+            runStep(() -> processor.itemCompleted(progress));
             registry.markCompleted(progress.itemId());
             // The same event as the split stage's, so one query over the
             // stages finds an item lost between two (STAGES.md §13.2).
@@ -685,7 +811,77 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                             .with(Attr.ITEM_ID, progress.itemId())
                             .with(Attr.RESULT, "COMPLETED")
                             .with(Attr.COUNT, progress.done())
-                            .with(Attr.FAILED_COUNT, progress.failed()));
+                            .with(Attr.FAILED_COUNT, progress.unresolved()));
+        }
+    }
+
+    /**
+     * Sends an item's {@code item.progress}: it has handled each of its
+     * records once, and a failure here is open, or the stage before has
+     * failures open (STAGES.md §15.6). Then runs the processor's
+     * {@link StageProcessor#itemProgressed} step, and notes the counts, so
+     * it isn't sent again until they change. Its message id is made from
+     * the counts, so a repeat is dropped.
+     *
+     * @param progress the item and its counts
+     * @param readAt   when its counts were read
+     * @throws InterruptedException if interrupted
+     * @throws ExecutionException   if the broker refused it, or the
+     *                              processor's step failed
+     * @throws TimeoutException     if the broker didn't take it in time
+     */
+    private void progressItem(ItemProgress progress, Instant readAt)
+            throws InterruptedException, ExecutionException,
+            TimeoutException
+    {
+        send(output, List.of(outbound(processor.itemProgress(progress))));
+        runStep(() -> processor.itemProgressed(progress));
+        registry.markProgressed(progress.itemId(), progress.progressKey(),
+                readAt);
+        Telemetry.get().audit("item.progress",
+                Fields.of(Attr.STAGE, processor.stage())
+                        .with(Attr.ITEM_ID, progress.itemId())
+                        .with(Attr.COUNT, progress.passed())
+                        .with(Attr.OPEN_COUNT, progress.open())
+                        .with(Attr.DECLINED_COUNT, progress.declined())
+                        .with(Attr.RESULT, progress.upstreamOpen()
+                                ? "UPSTREAM_OPEN" : "INCOMPLETE"));
+    }
+
+    /** A processor's step after an item's message is sent. */
+    @FunctionalInterface
+    private interface Step
+    {
+
+        /**
+         * Runs the step.
+         *
+         * @throws Exception if it fails
+         */
+        void run() throws Exception;
+    }
+
+    /**
+     * Runs a processor's step, as a failure of the batch if it fails.
+     *
+     * @param step the step
+     * @throws InterruptedException if interrupted
+     * @throws ExecutionException   if the step failed
+     */
+    private static void runStep(Step step)
+            throws InterruptedException, ExecutionException
+    {
+        try
+        {
+            step.run();
+        }
+        catch (InterruptedException | RuntimeException failure)
+        {
+            throw failure;
+        }
+        catch (Exception failure)
+        {
+            throw new ExecutionException(failure);
         }
     }
 
@@ -818,6 +1014,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     {
         long start = System.nanoTime();
         renewer.shutdownNow();
+        revisiter.shutdownNow();
         workers.shutdownNow();
         try
         {
