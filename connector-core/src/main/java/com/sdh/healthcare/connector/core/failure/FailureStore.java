@@ -55,52 +55,40 @@ public final class FailureStore
     public static final long WHOLE_ITEM = -1;
 
     /**
-     * The states of a failure (STAGES.md §15.3).
+     * The states of a failure (STAGES.md §15.8.5). Whether what replaced a
+     * superseded failure passed, and whether it was edited, is told by
+     * that object, not by the failure.
      */
     public enum State
     {
         /** Failed, not acted on. */
         FAILED,
 
-        /** A correction or retry is in flight. */
-        CORRECTION_PENDING,
+        /** A correction or retry of it is waiting to be processed. */
+        REVISION_PENDING,
 
-        /** A correction that failed; names the original. */
-        FAILED_CORRECTION,
-
-        /** A correction passed; names the object that passed. */
-        CORRECTED,
-
-        /** The same input passed on a retry. */
-        RETRIED,
-
-        /** The operator chose not to correct it, with a reason. */
+        /** The operator chose not to act on it, with a reason. */
         DECLINED,
 
-        /** Resolved by reprocessing an earlier stage. */
+        /**
+         * A newer generation or revision exists; names it, and how it came
+         * to be superseded.
+         */
         SUPERSEDED;
+
+        /** The states open, as SQL: those {@link #open} is true of. */
+        public static final String OPEN_SQL =
+                "('FAILED', 'REVISION_PENDING')";
 
         /**
          * Whether a failure in this state keeps its item incomplete: it has
-         * neither passed nor been declined (§15.6).
+         * neither been replaced nor been declined (§15.6).
          *
          * @return true if open
          */
         public boolean open()
         {
-            return this == FAILED || this == CORRECTION_PENDING
-                    || this == FAILED_CORRECTION;
-        }
-
-        /**
-         * Whether a failure in this state passed later, by an operator's
-         * correction or retry, so what passed stands in its place.
-         *
-         * @return true for {@code CORRECTED} and {@code RETRIED}
-         */
-        public boolean passedLater()
-        {
-            return this == CORRECTED || this == RETRIED;
+            return this == FAILED || this == REVISION_PENDING;
         }
     }
 
@@ -767,8 +755,7 @@ public final class FailureStore
                     found.add(new Event(rows.getInt(1),
                             rows.getTimestamp(2).toInstant(),
                             rows.getString(3),
-                            State.valueOf(rows.getString(4)),
-                            State.valueOf(rows.getString(5)),
+                            rows.getString(4), rows.getString(5),
                             sealed == null ? null : new FailureReason(sealed,
                                     rows.getBytes(7), rows.getString(8))));
                 }
@@ -788,12 +775,14 @@ public final class FailureStore
      * @param event    its number for the failure, from 1
      * @param at       when
      * @param operator who made it
-     * @param from     the state before
-     * @param to       the state after
+     * @param from     the state before, as written then: an event keeps
+     *                 the name of a state that has since gone (STAGES.md
+     *                 §15.8.5)
+     * @param to       the state after, as written then
      * @param reason   why, encrypted; null if none was given
      */
-    public record Event(int event, Instant at, String operator, State from,
-            State to, FailureReason reason)
+    public record Event(int event, Instant at, String operator, String from,
+            String to, FailureReason reason)
     {
     }
 
@@ -815,8 +804,7 @@ public final class FailureStore
                  WHERE stage = ?%s
                  ORDER BY failed_at DESC, item_id, seq
                  LIMIT ?""".formatted(table, openOnly
-                        ? " AND state IN ('FAILED', 'CORRECTION_PENDING',"
-                                + " 'FAILED_CORRECTION')" : "");
+                        ? " AND state IN " + State.OPEN_SQL : "");
         List<Listed> found = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
@@ -1090,21 +1078,17 @@ public final class FailureStore
             throws SQLException
     {
         String sql = """
-                SELECT count(*) FILTER (WHERE state IN
-                           ('FAILED', 'CORRECTION_PENDING',
-                            'FAILED_CORRECTION')),
+                SELECT count(*) FILTER (WHERE state IN %2$s),
                        count(*) FILTER (WHERE state = 'DECLINED'),
-                       count(*) FILTER (WHERE state IN
-                           ('CORRECTED', 'RETRIED')
-                           OR (state = 'SUPERSEDED'
-                               AND COALESCE(superseded_how, 'REVISION')
-                                   = 'REVISION'))
+                       count(*) FILTER (WHERE state = 'SUPERSEDED'
+                           AND COALESCE(superseded_how, 'REVISION')
+                               = 'REVISION')
                   FROM %1$s
                  WHERE stage = ? AND item_id = ?
                    AND generation = (SELECT COALESCE(max(generation), 1)
                                        FROM %1$s g
                                       WHERE g.stage = ? AND g.item_id = ?)"""
-                .formatted(table);
+                .formatted(table, State.OPEN_SQL);
         try (PreparedStatement select = connection.prepareStatement(sql))
         {
             select.setQueryTimeout(queryTimeoutSeconds);
@@ -1133,9 +1117,8 @@ public final class FailureStore
         String sql = """
                 SELECT count(*), min(failed_at)
                   FROM %s
-                 WHERE stage = ? AND state IN
-                       ('FAILED', 'CORRECTION_PENDING', 'FAILED_CORRECTION')"""
-                .formatted(table);
+                 WHERE stage = ? AND state IN %s"""
+                .formatted(table, State.OPEN_SQL);
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
         {
@@ -1360,6 +1343,76 @@ public final class FailureStore
         return supersede(connection, table, stage, itemId, "generation < ?",
                 Superseded.GENERATION, "g" + generation, timeout,
                 generation);
+    }
+
+    /**
+     * Supersedes the failure at a number that a correction or retry was
+     * waiting for (STAGES.md §15.8.5), by the revision it made, whether or
+     * not that revision passed, as {@link #supersedeRevision} does. Finds
+     * nothing if something newer superseded it first.
+     *
+     * @param connection the transaction's connection
+     * @param table      the failures' table, with its schema
+     * @param stage      the stage
+     * @param itemId     the item
+     * @param seq        the number
+     * @param newer      the revision's lineage
+     * @param timeout    how long a statement may run, in seconds
+     * @return the failure superseded, as it was; empty if none was
+     * @throws SQLException if a statement fails
+     */
+    public static List<Stored> supersedePending(Connection connection,
+            String table, String stage, UUID itemId, long seq,
+            Lineage newer, int timeout) throws SQLException
+    {
+        return supersede(connection, table, stage, itemId,
+                "seq = ? AND state = 'REVISION_PENDING'",
+                Superseded.REVISION, newer.toString(), timeout, seq);
+    }
+
+    /**
+     * The failure at a number as it stands, on a connection: the current
+     * one if any is, else the newest superseded one, as {@link #failure}
+     * gives.
+     *
+     * @param connection the connection
+     * @param table      the failures' table, with its schema
+     * @param stage      the stage
+     * @param itemId     the item
+     * @param seq        the number
+     * @param timeout    how long a statement may run, in seconds
+     * @return it and its state; empty if there is none
+     * @throws SQLException if a statement fails
+     */
+    public static Optional<Stored> latest(Connection connection,
+            String table, String stage, UUID itemId, long seq, int timeout)
+            throws SQLException
+    {
+        String sql = """
+                SELECT seq, record_id, error_code, source_offset,
+                       failed_version, state, generation, line
+                  FROM %s
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                 ORDER BY state = 'SUPERSEDED', generation DESC, line DESC
+                 LIMIT 1""".formatted(table);
+        try (PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(timeout);
+            select.setString(1, stage);
+            select.setObject(2, itemId);
+            select.setLong(3, seq);
+            try (ResultSet rows = select.executeQuery())
+            {
+                if (!rows.next())
+                {
+                    return Optional.empty();
+                }
+                return Optional.of(new Stored(new Failure(itemId,
+                        rows.getLong(1), rows.getString(2), rows.getString(3),
+                        rows.getLong(4), rows.getString(5), lineage(rows, 7)),
+                        State.valueOf(rows.getString(6))));
+            }
+        }
     }
 
     /**

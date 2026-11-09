@@ -211,9 +211,11 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
                         refs));
             }
         }
+        // Corrected as a whole: its failure superseded, with no failure of
+        // a later revision open in its place (STAGES.md §15.8.5).
         boolean wholeItem = context.failures()
                 .failure(itemId, FailureStore.WHOLE_ITEM)
-                .map(each -> each.state().passedLater())
+                .map(each -> each.state() == FailureStore.State.SUPERSEDED)
                 .orElse(false);
         // The message that ended it, as the fail store counts it now:
         // item.split, or item.progress while a failure is open (§15.6).

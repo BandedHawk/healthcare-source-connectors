@@ -77,6 +77,37 @@ public record Lineage(int generation, List<Integer> line)
     }
 
     /**
+     * A stage's place in a line, by its name.
+     *
+     * @param stage {@code split}, {@code convert} or {@code transform}
+     * @return its place, such as {@link #CONVERT}
+     * @throws IllegalArgumentException for any other stage
+     */
+    public static int stageOf(String stage)
+    {
+        return switch (stage)
+        {
+            case "split" -> SPLIT;
+            case "convert" -> CONVERT;
+            case "transform" -> TRANSFORM;
+            default -> throw new IllegalArgumentException(
+                    "No such stage in a line: " + stage);
+        };
+    }
+
+    /**
+     * The same lineage with a stage's revision one more: what a reprocess,
+     * retry or correction at that stage makes (STAGES.md §15.8.5).
+     *
+     * @param stage the stage's place
+     * @return the lineage
+     */
+    public Lineage nextRevision(int stage)
+    {
+        return withRevision(stage, revision(stage) + 1);
+    }
+
+    /**
      * A lineage, with nothing given read as the first.
      *
      * @param generation the generation; 0 or less for the first

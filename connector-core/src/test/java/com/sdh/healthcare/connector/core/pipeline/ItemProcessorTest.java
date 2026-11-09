@@ -18,6 +18,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
@@ -596,8 +597,7 @@ class ItemProcessorTest
 
         FailureStore failures = failures();
         failures.change(item.itemId(), FailureStore.WHOLE_ITEM,
-                java.util.Set.of(FailureStore.State.FAILED_CORRECTION,
-                        FailureStore.State.FAILED),
+                java.util.Set.of(FailureStore.State.FAILED),
                 FailureStore.State.DECLINED, "empty, as the producer says",
                 "alice", null);
         publisher.sent.clear();
@@ -681,7 +681,7 @@ class ItemProcessorTest
     /**
      * An operator's correction of a piece the splitter couldn't parse is
      * split alone, stored at the piece's number and place, marked as
-     * correcting it, and sent; the failure is {@code CORRECTED} and the
+     * correcting it, and sent; the failure is {@code SUPERSEDED} and the
      * item ends in {@code item.split}, nothing failed (STAGES.md §15.6d).
      *
      * @throws Exception if the test fails
@@ -712,8 +712,11 @@ class ItemProcessorTest
                     assertThat(split.errorCode()).isNull();
                     assertThat(split.recordId()).isEqualTo(outcome.recordId())
                             .isNotEqualTo(original);
-                    // What it resolves (STAGES.md §15.6e).
+                    // What it resolves (STAGES.md §15.6e), as the piece's
+                    // next revision at this stage (§15.8.5).
                     assertThat(split.resolves()).isEqualTo(original);
+                    assertThat(split.lineage()).isEqualTo(Lineage.FIRST
+                            .nextRevision(Lineage.SPLIT));
                 });
         assertThat(messages().getLast()).isInstanceOfSatisfying(
                 ItemSplit.class, split ->
@@ -724,13 +727,15 @@ class ItemProcessorTest
                 });
         assertThat(failures().failure(item.itemId(), 1)).hasValueSatisfying(
                 stored -> assertThat(stored.state())
-                        .isEqualTo(FailureStore.State.CORRECTED));
+                        .isEqualTo(FailureStore.State.SUPERSEDED));
         records.refresh();
         assertThat(CommittedRecords.corrections(records, item.itemId()))
                 .singleElement().satisfies(row ->
                 {
                     assertThat(row.seq()).isEqualTo(1);
                     assertThat(row.correctionOf()).isEqualTo(original);
+                    assertThat(row.lineage().revision(Lineage.SPLIT))
+                            .isEqualTo(2);
                 });
         // The original stays, as it failed.
         assertThat(CommittedRecords.all(records, item.itemId()))
@@ -764,8 +769,14 @@ class ItemProcessorTest
         assertThat(messages()).singleElement()
                 .isInstanceOf(ItemProgressed.class);
         assertThat(failures().failure(item.itemId(), 1)).hasValueSatisfying(
-                stored -> assertThat(stored.state())
-                        .isEqualTo(FailureStore.State.FAILED_CORRECTION));
+                stored ->
+                {
+                    // The revision's own failure (STAGES.md §15.8.5).
+                    assertThat(stored.state())
+                            .isEqualTo(FailureStore.State.FAILED);
+                    assertThat(stored.failure().lineage().revision(
+                            Lineage.SPLIT)).isEqualTo(2);
+                });
         records.refresh();
         assertThat(CommittedRecords.corrections(records, item.itemId()))
                 .isEmpty();
@@ -840,7 +851,7 @@ class ItemProcessorTest
                                 kept + split.size()));
         assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
                 .hasValueSatisfying(stored -> assertThat(stored.state())
-                        .isEqualTo(FailureStore.State.CORRECTED));
+                        .isEqualTo(FailureStore.State.SUPERSEDED));
         records.refresh();
         assertThat(CommittedRecords.corrections(records, item.itemId()))
                 .allSatisfy(row -> assertThat(row.correctionOf())
@@ -869,20 +880,26 @@ class ItemProcessorTest
         assertThat(outcome.errorCode())
                 .isEqualTo(ErrorCode.CORRECTION_CHANGES_PASSED.name());
         assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
-                .hasValueSatisfying(stored -> assertThat(stored.state())
-                        .isEqualTo(FailureStore.State.FAILED_CORRECTION));
+                .hasValueSatisfying(stored ->
+                {
+                    // The revision's own failure (STAGES.md §15.8.5).
+                    assertThat(stored.state())
+                            .isEqualTo(FailureStore.State.FAILED);
+                    assertThat(stored.failure().lineage().revision(
+                            Lineage.SPLIT)).isEqualTo(2);
+                });
     }
 
     /**
      * A retry of an item that failed as a whole splits the item again,
-     * unchanged: one that fails again leaves the failure {@code FAILED},
-     * not {@code FAILED_CORRECTION}, as nothing was edited (STAGES.md
-     * §15.6e), and stores nothing.
+     * unchanged: one that fails again supersedes the failure it was made
+     * for, and its own failure, of the next revision, is the one open
+     * (STAGES.md §15.8.5); it stores nothing.
      *
      * @throws Exception if the test fails
      */
     @Test
-    void leavesAFailedRetryFailed() throws Exception
+    void makesAFailedRetryAFailureOfItsOwn() throws Exception
     {
         String content = "1,ok\n2,ok\n3,ok\n4,ok\n5,\"never closed\n";
         LandedItem item = land(content);
@@ -896,8 +913,6 @@ class ItemProcessorTest
                 item.digest(), LandedRefs.NONE, lease());
 
         assertThat(outcome.passed()).isFalse();
-        assertThat(outcome.failureState())
-                .isEqualTo(FailureStore.State.FAILED);
         assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
                 .hasValueSatisfying(stored -> assertThat(stored.state())
                         .isEqualTo(FailureStore.State.FAILED));

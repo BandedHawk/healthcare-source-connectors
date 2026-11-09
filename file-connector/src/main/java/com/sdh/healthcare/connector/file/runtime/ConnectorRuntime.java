@@ -125,10 +125,10 @@ public final class ConnectorRuntime implements AutoCloseable
     /** Splits one item at a time, under its lease. */
     private final ItemSplitter splitter;
 
-    /** Takes {@code item.landed} messages off the broker. */
     /** Applies operators' corrections. */
     private final SplitCorrections corrections;
 
+    /** Takes {@code item.landed} messages off the broker. */
     private final StageReceiver receiver;
 
     /** Whether the broker answers. */
@@ -318,14 +318,15 @@ public final class ConnectorRuntime implements AutoCloseable
                     Duration.ofSeconds(10));
             failures.createTableIfMissing();
             failures.gauges(Duration.ofMinutes(1));
-            // Items ended before their ends were numbered (§15.6f).
-            checkpoints.numberEarlierCompletions(stage.registrySchema(),
-                    ItemProcessor.STAGE);
-            // Operators' corrections, applied by any pod (§15.6d).
+            // Operators' corrections, applied by any pod (§15.6d); making
+            // the table moves the fail store's states that went (§15.8.5).
             CorrectionStore corrections = new CorrectionStore(dataSource,
                     stage.registrySchema(), ItemProcessor.STAGE,
                     Duration.ofSeconds(10));
             corrections.createTableIfMissing();
+            // Items ended before their ends were numbered (§15.6f).
+            checkpoints.numberEarlierCompletions(stage.registrySchema(),
+                    ItemProcessor.STAGE);
             // Operators' requests to release held items (§15.6e).
             HoldReleases releases = new HoldReleases(dataSource,
                     stage.registrySchema(), Duration.ofSeconds(10));

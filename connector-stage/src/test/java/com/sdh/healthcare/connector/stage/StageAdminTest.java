@@ -119,7 +119,7 @@ class StageAdminTest
         @Override
         public String stage()
         {
-            return "test";
+            return "convert";
         }
 
         @Override
@@ -138,7 +138,7 @@ class StageAdminTest
         public RegistryReport registry()
         {
             return new RegistryReport(database.dataSource(),
-                    settings.registrySchema(), "test");
+                    settings.registrySchema(), "convert");
         }
 
         @Override
@@ -188,7 +188,7 @@ class StageAdminTest
         JdbcLeaseStore leases = new JdbcLeaseStore(StageTestSupport.database(),
                 schema + "_lease", Duration.ofSeconds(10));
         leases.createTableIfMissing();
-        leases.acquire("test/" + CONNECTOR + "/duties", "pod-a",
+        leases.acquire("convert/" + CONNECTOR + "/duties", "pod-a",
                 Duration.ofMinutes(5));
     }
 
@@ -266,7 +266,7 @@ class StageAdminTest
         Result status = admin("status");
         assertThat(status.status()).as(status.out() + status.err()).isZero();
         assertThat(status.out())
-                .containsPattern("duties: +test/test-stage/duties held by"
+                .containsPattern("duties: +convert/test-stage/duties held by"
                         + " pod-a, epoch 1, renewed .+, expires in \\d+")
                 .containsPattern("items: +2 in progress, 1 complete")
                 .contains(partway + " 2 of 3 stored (1 failed)")
@@ -277,7 +277,7 @@ class StageAdminTest
                 .containsPattern("reconciler: +hasn't checked yet");
         assertThat(audit.attributes("admin.status"))
                 .containsEntry("sdh.operator", "alice")
-                .containsEntry("sdh.stage", "test")
+                .containsEntry("sdh.stage", "convert")
                 .containsEntry("sdh.count", 2L)
                 .containsEntry("sdh.result", "ok");
     }

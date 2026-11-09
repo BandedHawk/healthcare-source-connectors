@@ -18,6 +18,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConver
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
@@ -261,13 +262,10 @@ class StageWorkerTest
             assertThat(done.itemId()).isEqualTo(item);
             assertThat(done.recordCount()).isEqualTo(5);
         });
-        assertThat(processor.completed).singleElement().satisfies(
-                progress ->
-                {
-                    assertThat(progress.passed()).isEqualTo(4);
-                    assertThat(progress.declined()).isEqualTo(1);
-                    assertThat(progress.open()).isZero();
-                });
+        // The producer had the item's result once, in progress; the
+        // decline sends it nothing (STAGES.md §15.8.7).
+        assertThat(processor.progressed).hasSize(1);
+        assertThat(processor.completed).isEmpty();
 
         // Complete: not revisited again.
         worker.revisit();
@@ -322,7 +320,10 @@ class StageWorkerTest
             assertThat(done.messageId()).isNotEqualTo(first)
                     .endsWith("~c2");
         });
-        assertThat(processor.completed).hasSize(2);
+        // Reported to the producer once, in progress, before any operator
+        // action (STAGES.md §15.8.7).
+        assertThat(processor.progressed).hasSize(1);
+        assertThat(processor.completed).isEmpty();
 
         // Complete again: nothing more.
         worker.revisit();
@@ -331,11 +332,13 @@ class StageWorkerTest
 
     /**
      * An operator's correction is processed by a worker (STAGES.md
-     * §15.6c): one that fails leaves the failure FAILED_CORRECTION, and
-     * the item incomplete, sending nothing; one that passes is stored and
-     * sent on as a record of its own, the failure CORRECTED and naming it,
-     * and the item completes with every record passed. A second correction
-     * while one is pending is refused.
+     * §15.6c) as the next revision of its record's place (§15.8.5): one
+     * that fails supersedes the failure, and is a failure of its own, open,
+     * so the item stays incomplete, sending nothing; one that passes is
+     * stored and sent on with its revision, supersedes the failure, and the
+     * item completes with every record passed. The producer's result is
+     * sent only for the item's first report, not after the correction. A
+     * second correction while one is pending is refused.
      *
      * @throws InterruptedException if interrupted
      */
@@ -359,9 +362,16 @@ class StageWorkerTest
                 .isInstanceOf(FailureStore.RefusedException.class);
         worker.applyCorrections();
         worker.revisit();
-        assertThat(failures.failure(item, 4)).get()
-                .extracting(FailureStore.Stored::state)
-                .isEqualTo(FailureStore.State.FAILED_CORRECTION);
+        Lineage second = Lineage.FIRST.nextRevision(Lineage.CONVERT);
+        assertThat(failures.failure(item, 4)).get().satisfies(stored ->
+        {
+            assertThat(stored.state()).isEqualTo(FailureStore.State.FAILED);
+            assertThat(stored.failure().lineage()).isEqualTo(second);
+        });
+        assertThat(failures.failures(item)).extracting(
+                FailureStore.Stored::state).containsExactlyInAnyOrder(
+                        FailureStore.State.FAILED,
+                        FailureStore.State.SUPERSEDED);
         assertThat(sentRecords()).hasSize(4);
         assertThat(sentItems()).isEmpty();
         assertThat(audit.names()).contains("failure.correction_submitted",
@@ -376,7 +386,10 @@ class StageWorkerTest
                 .contains("rec-" + item + "-4-c2");
         assertThat(failures.failure(item, 4)).get()
                 .extracting(FailureStore.Stored::state)
-                .isEqualTo(FailureStore.State.CORRECTED);
+                .isEqualTo(FailureStore.State.SUPERSEDED);
+        assertThat(failures.failures(item)).extracting(
+                FailureStore.Stored::state).containsOnly(
+                        FailureStore.State.SUPERSEDED);
         assertThat(corrections.list(item, 4)).extracting(
                 CorrectionStore.Listed::state).containsExactly(
                         CorrectionStore.State.FAILED,
@@ -388,8 +401,10 @@ class StageWorkerTest
             assertThat(done.recordCount()).isEqualTo(5);
             assertThat(done.failedRecordCount()).isZero();
         });
-        assertThat(processor.completed).singleElement().satisfies(
-                progress -> assertThat(progress.passed()).isEqualTo(5));
+        // Reported to the producer once, in progress, before the
+        // corrections (STAGES.md §15.8.7).
+        assertThat(processor.progressed).hasSize(1);
+        assertThat(processor.completed).isEmpty();
 
         // Nothing left: a later interval does nothing more.
         worker.applyCorrections();
@@ -399,10 +414,11 @@ class StageWorkerTest
     }
 
     /**
-     * A retry (STAGES.md §15.6e) is processed as a correction: one that
-     * fails leaves the failure FAILED, not FAILED_CORRECTION, with the
-     * retry's error kept on its row; one that passes makes the failure
-     * RETRIED, naming what passed, and completes the item.
+     * A retry (STAGES.md §15.6e) is processed as a correction, the next
+     * revision of its place (§15.8.5): one that fails supersedes the
+     * failure, and its own failure is the one open, with the retry's
+     * error kept on its row; one that passes supersedes that, and
+     * completes the item.
      *
      * @throws InterruptedException if interrupted
      */
@@ -445,9 +461,13 @@ class StageWorkerTest
                 CorrectionStore.Kind.RETRY)).isEqualTo(2);
         worker.applyCorrections();
         worker.revisit();
-        assertThat(failures.failure(item, 4)).get()
-                .extracting(FailureStore.Stored::state)
-                .isEqualTo(FailureStore.State.RETRIED);
+        assertThat(failures.failure(item, 4)).get().satisfies(stored ->
+        {
+            assertThat(stored.state())
+                    .isEqualTo(FailureStore.State.SUPERSEDED);
+            assertThat(stored.failure().lineage()).isEqualTo(Lineage.FIRST
+                    .nextRevision(Lineage.CONVERT));
+        });
         assertThat(sentRecords()).contains("rec-" + item + "-4-c2");
         assertThat(audit.names()).contains("failure.retried");
         assertThat(sentItems()).singleElement().satisfies(done ->
@@ -473,7 +493,7 @@ class StageWorkerTest
             partial.add(StageTestSupport.record(item, seq));
         }
         partial.add(StageTestSupport.received(new ItemProgressed(item,
-                "test", "before", 4, 3, 1, 0, null, null, null,
+                "convert", "before", 4, 3, 1, 0, null, null, null,
                 java.time.Instant.EPOCH, null)));
         assertThat(worker.handle(partial))
                 .isEqualTo(BatchHandler.Outcome.DONE);
@@ -493,7 +513,9 @@ class StageWorkerTest
                 .isEqualTo(BatchHandler.Outcome.DONE);
         assertThat(sentItems()).singleElement().satisfies(done ->
                 assertThat(done.recordCount()).isEqualTo(4));
-        assertThat(processor.completed).hasSize(1);
+        // Its result went to the producer in progress; what the stage
+        // before's operator resolved sends it nothing (STAGES.md §15.8.7).
+        assertThat(processor.completed).isEmpty();
     }
 
     /**
@@ -520,7 +542,7 @@ class StageWorkerTest
         assertThat(sentProgress()).isEmpty();
         assertThat(audit.names()).containsExactly("stage.item_completed");
         assertThat(audit.attributes("stage.item_completed"))
-                .containsEntry("sdh.stage", "test")
+                .containsEntry("sdh.stage", "convert")
                 .containsEntry("sdh.result", "COMPLETED")
                 .containsKey("sdh.count")
                 .containsKey("sdh.failed_count");
@@ -603,7 +625,7 @@ class StageWorkerTest
                 "record.conflict");
         assertThat(audit.flushes()).isZero();
         assertThat(audit.attributes("record.version_differs"))
-                .containsEntry("sdh.stage", "test")
+                .containsEntry("sdh.stage", "convert")
                 .containsEntry("sdh.item_id", item.toString())
                 .containsEntry("sdh.seq", 0L)
                 .containsEntry("sdh.broker_message_id",
@@ -841,7 +863,7 @@ class StageWorkerTest
                 "stage.message_unwanted");
 
         Map<String, Object> later = PayloadCodec.toJson(
-                (ConnectorMessage) new ItemConverted(item, "test", 1, 0,
+                (ConnectorMessage) new ItemConverted(item, "convert", 1, 0,
                         Instant.EPOCH));
         later.put("v", (ContractVersion.MAJOR + 1) + ".0");
         BrokerMessage newer = new BrokerMessage(
@@ -854,7 +876,7 @@ class StageWorkerTest
         // An earlier major version, which no upgrade reads, is rejected,
         // so the records behind it go on.
         Map<String, Object> earlier = PayloadCodec.toJson(
-                (ConnectorMessage) new ItemConverted(item, "test", 1, 0,
+                (ConnectorMessage) new ItemConverted(item, "convert", 1, 0,
                         Instant.EPOCH));
         earlier.put("v", (ContractVersion.MAJOR - 1) + ".4");
         BrokerMessage older = new BrokerMessage(

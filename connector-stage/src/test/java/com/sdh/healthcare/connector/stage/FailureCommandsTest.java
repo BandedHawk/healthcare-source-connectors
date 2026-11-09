@@ -135,21 +135,23 @@ class FailureCommandsTest
         @Override
         public String stage()
         {
-            return "test";
+            return "convert";
         }
 
         @Override
         public FailureStore failures()
         {
             return new FailureStore(database.dataSource(),
-                    settings.registrySchema(), "test", Duration.ofSeconds(5));
+                    settings.registrySchema(), "convert",
+                    Duration.ofSeconds(5));
         }
 
         @Override
         public FailureStore failuresToChange()
         {
             return new FailureStore(writing.dataSource(),
-                    settings.registrySchema(), "test", Duration.ofSeconds(5));
+                    settings.registrySchema(), "convert",
+                    Duration.ofSeconds(5));
         }
 
         @Override
@@ -186,14 +188,16 @@ class FailureCommandsTest
         public CorrectionStore correctionsToChange()
         {
             return new CorrectionStore(writing.dataSource(),
-                    settings.registrySchema(), "test", Duration.ofSeconds(5));
+                    settings.registrySchema(), "convert",
+                    Duration.ofSeconds(5));
         }
 
         @Override
         public CorrectionStore corrections()
         {
             return new CorrectionStore(database.dataSource(),
-                    settings.registrySchema(), "test", Duration.ofSeconds(5));
+                    settings.registrySchema(), "convert",
+                    Duration.ofSeconds(5));
         }
 
         @Override
@@ -291,7 +295,11 @@ class FailureCommandsTest
         return new Result(status, out.toString(UTF_8), err.toString(UTF_8));
     }
 
-    /** The store, read directly. */
+    /**
+     * The store, read directly.
+     *
+     * @return the stage's fail store
+     */
     FailureStore store()
     {
         return StageTestSupport.registry(schema, "pod-a").failureStore();
@@ -299,7 +307,7 @@ class FailureCommandsTest
 
     /**
      * {@code failures} lists the open failure by item, record number,
-     * state and error code, and is audited.
+     * lineage, state and error code, and is audited.
      */
     @Test
     void listsTheOpenFailures()
@@ -307,8 +315,8 @@ class FailureCommandsTest
         Result listed = admin("", "failures");
         assertThat(listed.status()).as(listed.out() + listed.err()).isZero();
         assertThat(listed.out())
-                .contains("1 open at the test stage")
-                .contains(item + " seq=2 FAILED TEST_FAILED offset=10");
+                .contains("1 open at the convert stage")
+                .contains(item + " seq=2 g1 r1 FAILED TEST_FAILED offset=10");
         assertThat(audit.attributes("admin.failures"))
                 .containsEntry("sdh.operator", "alice")
                 .containsEntry("sdh.count", 1L)
@@ -360,7 +368,7 @@ class FailureCommandsTest
         assertThat(events).singleElement().satisfies(event ->
         {
             assertThat(event.operator()).isEqualTo("alice");
-            assertThat(event.to()).isEqualTo(FailureStore.State.DECLINED);
+            assertThat(event.to()).isEqualTo("DECLINED");
             assertThat(event.reason().keyRef()).isEqualTo(KEK);
             assertThat(new String(event.reason().sealed(), UTF_8))
                     .doesNotContain(REASON);
@@ -384,7 +392,7 @@ class FailureCommandsTest
         Result history = admin("", "failures", "--item-id", item.toString());
         assertThat(history.status()).isZero();
         assertThat(history.out())
-                .contains(item + " seq=2 FAILED TEST_FAILED")
+                .contains(item + " seq=2 g1 r1 FAILED TEST_FAILED")
                 .contains("FAILED -> DECLINED by alice (reason kept,"
                         + " encrypted)")
                 .contains("DECLINED -> FAILED by alice")
@@ -404,7 +412,7 @@ class FailureCommandsTest
 
     /**
      * {@code correct} stores the corrected record, encrypted, and moves the
-     * failure to CORRECTION_PENDING, printing nothing of it; one too long,
+     * failure to REVISION_PENDING, printing nothing of it; one too long,
      * or a second while one is pending, is refused.
      */
     @Test
@@ -419,9 +427,9 @@ class FailureCommandsTest
                 .doesNotContain(corrected);
         assertThat(store().failure(item, 2)).get()
                 .extracting(FailureStore.Stored::state)
-                .isEqualTo(FailureStore.State.CORRECTION_PENDING);
+                .isEqualTo(FailureStore.State.REVISION_PENDING);
         CorrectionStore corrections = new CorrectionStore(
-                StageTestSupport.database(), schema, "test",
+                StageTestSupport.database(), schema, "convert",
                 Duration.ofSeconds(5));
         assertThat(corrections.pending(10)).singleElement().satisfies(
                 pending ->
@@ -462,9 +470,9 @@ class FailureCommandsTest
                 .doesNotContain(FAILED_CONTENT);
         assertThat(store().failure(item, 2)).get()
                 .extracting(FailureStore.Stored::state)
-                .isEqualTo(FailureStore.State.CORRECTION_PENDING);
+                .isEqualTo(FailureStore.State.REVISION_PENDING);
         CorrectionStore corrections = new CorrectionStore(
-                StageTestSupport.database(), schema, "test",
+                StageTestSupport.database(), schema, "convert",
                 Duration.ofSeconds(5));
         assertThat(corrections.pending(10)).singleElement().satisfies(
                 pending ->

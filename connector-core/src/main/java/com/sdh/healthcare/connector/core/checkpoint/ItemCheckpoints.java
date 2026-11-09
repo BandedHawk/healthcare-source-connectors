@@ -174,6 +174,8 @@ public final class ItemCheckpoints
      */
     public int numberEarlierCompletions(String failures, String stage)
     {
+        // Open in the states of now and of before revision (cn), as this
+        // may run before the fail store's states are moved (§15.8.5).
         String sql = """
                 UPDATE %s s SET completion = 1, completed = true
                  WHERE completion = 0 AND NOT completed
@@ -181,7 +183,8 @@ public final class ItemCheckpoints
                    AND NOT EXISTS (
                        SELECT 1 FROM %s f
                         WHERE f.stage = ? AND f.item_id = s.item_id
-                          AND f.state IN ('FAILED', 'CORRECTION_PENDING',
+                          AND f.state IN ('FAILED', 'REVISION_PENDING',
+                                          'CORRECTION_PENDING',
                                           'FAILED_CORRECTION'))"""
                 .formatted(table, FailureStore.table(failures));
         try (Connection connection = dataSource.getConnection();

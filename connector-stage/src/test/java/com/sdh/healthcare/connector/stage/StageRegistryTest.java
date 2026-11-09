@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.message.MessageType;
+import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import java.time.Duration;
@@ -411,7 +412,7 @@ class StageRegistryTest
     void refusesAnOddSchemaName()
     {
         assertThatThrownBy(() -> new StageRegistry(
-                StageTestSupport.database(), "x; drop table y", "test",
+                StageTestSupport.database(), "x; drop table y", "convert",
                 "pod-a", LONG)).hasMessageContaining("schema");
     }
 
@@ -697,5 +698,188 @@ class StageRegistryTest
         first.expect(item, 5, new byte[] {1}, false, 1, 1);
         assertThat(first.item(item).orElseThrow().expected()).isEqualTo(3);
         assertThat(audit.names()).contains("stage.total_superseded");
+    }
+
+    /**
+     * Runs statements on the test's database.
+     *
+     * @param sql the statements, each formatted with the schema
+     * @throws java.sql.SQLException if one fails
+     */
+    void sql(String... sql) throws java.sql.SQLException
+    {
+        try (java.sql.Connection connection = StageTestSupport.database()
+                .getConnection();
+                java.sql.Statement statement = connection.createStatement())
+        {
+            for (String each : sql)
+            {
+                statement.execute(each.formatted(schema));
+            }
+        }
+    }
+
+    /**
+     * An item's count of failed records, as the registry holds it.
+     *
+     * @return the count
+     * @throws java.sql.SQLException if it can't be read
+     */
+    long failedCount() throws java.sql.SQLException
+    {
+        try (java.sql.Connection connection = StageTestSupport.database()
+                .getConnection();
+                java.sql.Statement statement = connection.createStatement();
+                java.sql.ResultSet rows = statement.executeQuery(
+                        "SELECT failed FROM " + schema + ".stage_item"
+                                + " WHERE item_id = '" + item + "'"))
+        {
+            rows.next();
+            return rows.getLong(1);
+        }
+    }
+
+    /**
+     * A failure of the test's item as written before revision (cn).
+     *
+     * @param seq        its number
+     * @param state      its state then
+     * @param resolvedBy what passed in its place, as SQL
+     * @return the statement, formatted with the schema
+     */
+    String oldFailure(int seq, String state, String resolvedBy)
+    {
+        return "INSERT INTO %s.stage_failure (stage, item_id, seq,"
+                + " record_id, error_code, source_offset, failed_version,"
+                + " failed_at, state, changed_at, resolved_by) VALUES"
+                + " ('convert', '" + item + "', " + seq + ", 'r" + seq
+                + "', 'TEST_FAILED', 10, 'v1', now(), '" + state
+                + "', now(), " + resolvedBy + ")";
+    }
+
+    /**
+     * A correction of the test's item as written before revision (cn).
+     *
+     * @param seq        its failure's number
+     * @param state      its state
+     * @param finishedAt when it was processed, as SQL
+     * @param errorCode  why it failed, as SQL
+     * @return the statement, formatted with the schema
+     */
+    String oldCorrection(int seq, String state, String finishedAt,
+            String errorCode)
+    {
+        return "INSERT INTO %s.stage_correction (stage, item_id, seq,"
+                + " correction, state, submitted_at, submitted_by,"
+                + " content_enc, content_key, content_kek, content_length,"
+                + " finished_at, error_code) VALUES ('convert', '" + item
+                + "', " + seq + ", 1, '" + state + "', now(), 'alice',"
+                + " '\\x00', '\\x00', 'kek', 1, " + finishedAt + ", "
+                + errorCode + ")";
+    }
+
+    /**
+     * Failures in the states that went are moved once, at start (STAGES.md
+     * §15.8.5): CORRECTION_PENDING to REVISION_PENDING, its correction's
+     * revision noted; CORRECTED to SUPERSEDED, naming what passed;
+     * FAILED_CORRECTION to SUPERSEDED, with its correction's failure added
+     * as a FAILED row of the next revision, and counted among the item's
+     * failed records. A second start moves nothing.
+     *
+     * @throws java.sql.SQLException if the rows can't be written
+     */
+    @Test
+    void movesFailuresOutOfTheStatesThatWent() throws java.sql.SQLException
+    {
+        sql(oldFailure(1, "CORRECTION_PENDING", "NULL"),
+                oldFailure(2, "CORRECTED", "'r2-fixed'"),
+                oldFailure(3, "FAILED_CORRECTION", "NULL"),
+                oldCorrection(1, "PENDING", "NULL", "NULL"),
+                oldCorrection(3, "FAILED", "now()", "'FIX_FAILED'"),
+                "INSERT INTO %s.stage_item (stage, item_id, done, failed)"
+                        + " VALUES ('convert', '" + item + "', 3, 3)");
+
+        StageTestSupport.registry(schema, "pod-c");
+        Lineage second = Lineage.FIRST.nextRevision(Lineage.CONVERT);
+        FailureStore store = first.failureStore();
+        assertThat(store.failure(item, 1)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.REVISION_PENDING);
+        assertThat(first.correctionStore().pending(10)).singleElement()
+                .satisfies(pending ->
+                {
+                    assertThat(pending.lineage()).isEqualTo(second);
+                    assertThat(pending.recordId()).isEqualTo("r1");
+                });
+        assertThat(store.failure(item, 2)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.SUPERSEDED);
+        assertThat(store.events(item, 2)).singleElement().satisfies(event ->
+        {
+            assertThat(event.from()).isEqualTo("CORRECTED");
+            assertThat(event.to()).isEqualTo("SUPERSEDED");
+        });
+        assertThat(store.failures(item))
+                .filteredOn(stored -> stored.failure().seq() == 3)
+                .satisfiesExactly(
+                        open ->
+                        {
+                            assertThat(open.state())
+                                    .isEqualTo(FailureStore.State.FAILED);
+                            assertThat(open.failure().lineage())
+                                    .isEqualTo(second);
+                            assertThat(open.failure().errorCode())
+                                    .isEqualTo("FIX_FAILED");
+                        },
+                        moved -> assertThat(moved.state())
+                                .isEqualTo(FailureStore.State.SUPERSEDED));
+        assertThat(store.counts(item))
+                .isEqualTo(new FailureStore.Counts(2, 0, 2));
+        assertThat(failedCount()).isEqualTo(4);
+        assertThat(audit.names()).contains("failure.states_moved");
+
+        StageTestSupport.registry(schema, "pod-d");
+        assertThat(failedCount()).isEqualTo(4);
+        assertThat(store.failures(item)).hasSize(4);
+    }
+
+    /**
+     * A correction whose failure something newer superseded while it
+     * waited is still processed and stored, superseded on arrival, not
+     * counted, and its correction noted (STAGES.md §15.8.5).
+     */
+    @Test
+    void aCorrectionOvertakenByANewerRevisionIsStoredLate()
+    {
+        storeAt("r1", 1, Lineage.FIRST, true);
+        first.correctionStore().submit(item, 1, new byte[] {1},
+                StageTestSupport.CORRECTION_KEYS,
+                StageTestSupport.CORRECTION_KEK, "alice");
+        storeAt("r1", 1, Lineage.FIRST.withRevision(Lineage.CONVERT, 3),
+                false);
+        CorrectionStore.Pending pending = first.correctionStore()
+                .pending(10).get(0);
+        assertThat(pending.lineage()).isEqualTo(Lineage.FIRST
+                .nextRevision(Lineage.CONVERT));
+
+        first.claim(pending.claimId(), item, LONG);
+        StageRegistry.Entry entry = new StageRegistry.Entry("r1", item,
+                "d-c1", "v1", false, new OutboundMessage("m-c1",
+                        MessageType.RECORD_STORED, item, pending.claimId(),
+                        new byte[] {1}), null, new CorrectionStore.Outcome(
+                                pending, true, "r1", null, "v1"), 1,
+                pending.lineage());
+        assertThat(first.store(List.of(entry))).containsExactly(entry.key());
+        ItemProgress progress = first.item(item).orElseThrow();
+        assertThat(progress.done()).isEqualTo(1);
+        assertThat(progress.failed()).isEqualTo(1);
+        assertThat(first.correctionStore().list(item, 1)).singleElement()
+                .extracting(CorrectionStore.Listed::state)
+                .isEqualTo(CorrectionStore.State.PASSED);
+        assertThat(first.failureStore().failures(item))
+                .extracting(FailureStore.Stored::state)
+                .containsOnly(FailureStore.State.SUPERSEDED);
+        assertThat(audit.names()).contains("record.superseded_on_arrival",
+                "failure.corrected");
     }
 }

@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.position.LineCounter;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
@@ -1255,7 +1256,10 @@ public final class IngestPipeline implements AutoCloseable
                         ResumePoint.at(original.sourceOffset()
                                 + original.sourceLength()))
                         .withOrigin(original.origin());
+                // The piece's next revision at this stage (STAGES.md
+                // §15.8.5), as its message says.
                 writer.correction(itemId, pending.seq(), original.recordId());
+                writer.lineage(itemId, pending.seq(), revision(pending));
                 writer.addBytes(itemId, pending.seq(), format, lineage,
                         record.readAll(source), Representation.raw(format),
                         null, -1, null);
@@ -1317,7 +1321,10 @@ public final class IngestPipeline implements AutoCloseable
             List<ConnectorMessage> messages = new ArrayList<>();
             for (WrittenRecord record : writer.written())
             {
-                messages.add(message(record, ref, refs, version, resolves));
+                RecordSplit made = message(record, ref, refs, version,
+                        resolves);
+                messages.add(pending.seq() >= 0
+                        ? made.withLineage(revision(pending), false) : made);
             }
             Telemetry.get().recordsStored(messages.size(), format);
             return new CorrectionSplit(new CorrectionStore.Outcome(pending,
@@ -1328,6 +1335,20 @@ public final class IngestPipeline implements AutoCloseable
         {
             Arrays.fill(content, (byte) 0);
         }
+    }
+
+    /**
+     * The revision a correction of one piece makes (STAGES.md §15.8.5): as
+     * noted when it was submitted, or, for one submitted before revisions
+     * were noted, the split stage's second.
+     *
+     * @param pending the correction
+     * @return its lineage
+     */
+    private static Lineage revision(CorrectionStore.Pending pending)
+    {
+        return pending.lineage() != null ? pending.lineage()
+                : Lineage.FIRST.nextRevision(Lineage.SPLIT);
     }
 
     /**

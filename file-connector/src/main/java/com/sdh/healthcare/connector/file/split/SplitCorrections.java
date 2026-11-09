@@ -32,6 +32,7 @@ import org.slf4j.LoggerFactory;
 public final class SplitCorrections implements AutoCloseable
 {
 
+    /** The corrections' log. */
     private static final Logger LOG =
             LoggerFactory.getLogger(SplitCorrections.class);
 

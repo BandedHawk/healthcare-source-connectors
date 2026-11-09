@@ -9,6 +9,10 @@ package com.sdh.healthcare.connector.core.failure;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
+import com.sdh.healthcare.connector.contract.message.Lineage;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.security.SecureRandom;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -20,7 +24,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import javax.sql.DataSource;
 
@@ -29,15 +36,19 @@ import javax.sql.DataSource;
  * what the stage failed, kept encrypted in {@code <schema>.stage_correction}
  * until one of the stage's workers processes it, as any input, and then
  * kept as the record of what was submitted. Submitting one moves its
- * failure to {@code CORRECTION_PENDING} in the same transaction, so only
+ * failure to {@code REVISION_PENDING} in the same transaction, so only
  * one is in flight per failure. The content is encrypted with a data key of
  * its own, wrapped with the stage's records KEK, and bound to its item,
  * record number and correction number.
  * <p>
  * A retry (STAGES.md §15.6e) is a correction without an edit: what failed,
- * submitted unchanged, of kind {@link Kind#RETRY}. It is processed as a
- * correction; if it passes its failure is {@code RETRIED}, and if it fails
- * its failure returns to {@code FAILED}.
+ * submitted unchanged, of kind {@link Kind#RETRY}.
+ * <p>
+ * Either makes the next revision of its place (§15.8.5), noted when it is
+ * submitted: the failed object's line with this stage's revision one more.
+ * Once processed, its failure is {@code SUPERSEDED} by that revision
+ * whether or not it passed; a revision that failed is a failure of its
+ * own, open, of its own line.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -52,7 +63,7 @@ public final class CorrectionStore
         PENDING,
         /** Processed, and passed. */
         PASSED,
-        /** Processed, and failed: its failure is {@code FAILED_CORRECTION}. */
+        /** Processed, and failed: its revision is a failure of its own. */
         FAILED
     }
 
@@ -88,7 +99,7 @@ public final class CorrectionStore
 
     /** The states a failure may be corrected from. */
     public static final Set<FailureStore.State> CORRECTABLE = EnumSet.of(
-            FailureStore.State.FAILED, FailureStore.State.FAILED_CORRECTION);
+            FailureStore.State.FAILED);
 
     /** Makes data keys. */
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -179,12 +190,23 @@ public final class CorrectionStore
                         + " ADD COLUMN IF NOT EXISTS notified_at timestamptz",
                 // A retry or a correction (§15.6e); null for a correction.
                 "ALTER TABLE " + table
-                        + " ADD COLUMN IF NOT EXISTS kind text");
+                        + " ADD COLUMN IF NOT EXISTS kind text",
+                // Added 2026-11-09 (§15.8.5): the failed object's record ID,
+                // and the revision the correction makes; null on rows from
+                // before, filled when the fail store's states are moved.
+                "ALTER TABLE " + table
+                        + " ADD COLUMN IF NOT EXISTS record_id text",
+                "ALTER TABLE " + table
+                        + " ADD COLUMN IF NOT EXISTS generation integer",
+                "ALTER TABLE " + table
+                        + " ADD COLUMN IF NOT EXISTS line integer[]");
     }
 
     /**
      * Creates the table if it isn't there, for a stage without a stage
-     * registry (the split stage).
+     * registry (the split stage), and moves the fail store's failures out
+     * of states that have gone ({@link #moveStates}); the fail store's
+     * table is made first.
      *
      * @throws IllegalStateException if it can't be created
      */
@@ -204,28 +226,318 @@ public final class CorrectionStore
             throw new IllegalStateException(
                     "Could not create the correction store", failure);
         }
-    }
-
-    /**
-     * Notes a correction's outcome in a transaction of its own, and audits
-     * it: for a stage without a stage registry (the split stage), once its
-     * output is committed and sent.
-     *
-     * @param outcome what it came to
-     * @throws FailureStore.RefusedException if the failure is no longer
-     *                                       pending a correction
-     * @throws IllegalStateException         if the database can't be
-     *                                       reached
-     */
-    public void finish(Outcome outcome)
-    {
-        FailureStore.Changed changed;
+        Moved moved;
         try (Connection connection = dataSource.getConnection())
         {
             connection.setAutoCommit(false);
             try
             {
-                changed = finish(connection, schema(), stage, outcome,
+                moved = moveStates(connection, schema(), stage, timeout);
+                connection.commit();
+            }
+            catch (SQLException | RuntimeException failure)
+            {
+                connection.rollback();
+                throw failure;
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException(
+                    "Could not move the fail store's states", failure);
+        }
+        moved.audit(stage);
+    }
+
+    /**
+     * What moving the fail store's states once (STAGES.md §15.8.5) did.
+     *
+     * @param renamed    failures moved from {@code CORRECTION_PENDING} to
+     *                   {@code REVISION_PENDING}
+     * @param superseded failures moved from {@code CORRECTED} or
+     *                   {@code RETRIED} to {@code SUPERSEDED}
+     * @param refailed   per item, failures moved from
+     *                   {@code FAILED_CORRECTION} to {@code SUPERSEDED},
+     *                   each with its correction's failure added as one of
+     *                   its own
+     */
+    public record Moved(int renamed, int superseded, Map<UUID, Long> refailed)
+    {
+
+        /**
+         * Whether anything was moved.
+         *
+         * @return true if it was
+         */
+        public boolean any()
+        {
+            return renamed + superseded > 0 || !refailed.isEmpty();
+        }
+
+        /**
+         * Audits the move, {@code failure.states_moved}, if anything was
+         * moved.
+         *
+         * @param stage the stage
+         */
+        public void audit(String stage)
+        {
+            if (!any())
+            {
+                return;
+            }
+            long refailedCount = refailed.values().stream()
+                    .mapToLong(Long::longValue).sum();
+            Telemetry.get().audit("failure.states_moved",
+                    Fields.of(Attr.STAGE, stage)
+                            .with(Attr.COUNT, renamed + superseded
+                                    + refailedCount)
+                            .with(Attr.FAILED_COUNT, refailedCount));
+        }
+    }
+
+    /**
+     * Moves a stage's failures out of the states that went in revision (cn)
+     * (STAGES.md §15.8.5), once, in the caller's transaction:
+     * {@code CORRECTION_PENDING} becomes {@code REVISION_PENDING};
+     * {@code CORRECTED} and {@code RETRIED} become {@code SUPERSEDED},
+     * naming the record that passed; {@code FAILED_CORRECTION} becomes
+     * {@code SUPERSEDED} by its correction's revision, whose failure is
+     * added as a {@code FAILED} row of its own. Corrections still pending
+     * have their revision noted. Each change of state adds an event, by
+     * {@code pipeline}; earlier events keep the names they were written
+     * with. Rows already moved are left alone, so it may run at every
+     * start.
+     *
+     * @param connection the transaction's connection
+     * @param schema     the stage's registry schema
+     * @param stage      the stage
+     * @param timeout    how long a statement may run, in seconds
+     * @return what was moved
+     * @throws SQLException if a statement fails
+     */
+    public static Moved moveStates(Connection connection, String schema,
+            String stage, int timeout) throws SQLException
+    {
+        String failures = FailureStore.table(schema);
+        String events = FailureStore.eventsTable(schema);
+        String corrections = table(schema);
+        int place = Lineage.stageOf(stage);
+        int renamed;
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE %s SET state = 'REVISION_PENDING'
+                 WHERE stage = ? AND state = 'CORRECTION_PENDING'"""
+                .formatted(failures)))
+        {
+            update.setQueryTimeout(timeout);
+            update.setString(1, stage);
+            renamed = update.executeUpdate();
+        }
+        // What passed: superseded by the record that passed. Rows from
+        // before generations are one per number, so one event each.
+        String event = """
+                INSERT INTO %1$s (stage, item_id, seq, event, at, operator,
+                       from_state, to_state, generation, line)
+                SELECT f.stage, f.item_id, f.seq,
+                       (SELECT count(*) + 1 FROM %1$s e
+                         WHERE e.stage = f.stage AND e.item_id = f.item_id
+                           AND e.seq = f.seq),
+                       clock_timestamp(), 'pipeline', f.state, 'SUPERSEDED',
+                       f.generation, f.line
+                  FROM %2$s f
+                 WHERE f.stage = ? AND f.state IN (%3$s)""";
+        try (PreparedStatement add = connection.prepareStatement(
+                event.formatted(events, failures, "'CORRECTED', 'RETRIED'")))
+        {
+            add.setQueryTimeout(timeout);
+            add.setString(1, stage);
+            add.executeUpdate();
+        }
+        int superseded;
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE %s SET state = 'SUPERSEDED',
+                       superseded_how = 'REVISION',
+                       superseded_by = resolved_by,
+                       changed_at = clock_timestamp()
+                 WHERE stage = ? AND state IN ('CORRECTED', 'RETRIED')"""
+                .formatted(failures)))
+        {
+            update.setQueryTimeout(timeout);
+            update.setString(1, stage);
+            superseded = update.executeUpdate();
+        }
+        Map<UUID, Long> refailed = refail(connection, schema, stage, timeout,
+                event.formatted(events, failures, "'FAILED_CORRECTION'"));
+        // Pending corrections: the revision each makes, read once their
+        // failures are in the states of now.
+        List<Object[]> unnoted = new ArrayList<>();
+        try (PreparedStatement select = connection.prepareStatement("""
+                SELECT item_id, seq, correction FROM %s
+                 WHERE stage = ? AND state = 'PENDING'
+                   AND generation IS NULL""".formatted(corrections)))
+        {
+            select.setQueryTimeout(timeout);
+            select.setString(1, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    unnoted.add(new Object[] {rows.getObject(1, UUID.class),
+                        rows.getLong(2), rows.getInt(3)});
+                }
+            }
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE %s SET record_id = ?, generation = ?, line = ?
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND correction = ?""".formatted(corrections)))
+        {
+            update.setQueryTimeout(timeout);
+            for (Object[] row : unnoted)
+            {
+                Optional<FailureStore.Stored> failed = FailureStore.latest(
+                        connection, failures, stage, (UUID) row[0],
+                        (Long) row[1], timeout);
+                Lineage revision = failed.map(stored -> stored.failure()
+                        .lineage()).orElse(Lineage.FIRST).nextRevision(place);
+                update.setString(1, failed.map(stored -> stored.failure()
+                        .recordId()).orElse(null));
+                update.setInt(2, revision.generation());
+                update.setArray(3, FailureStore.line(connection, revision));
+                update.setString(4, stage);
+                update.setObject(5, row[0]);
+                update.setLong(6, (Long) row[1]);
+                update.setInt(7, (Integer) row[2]);
+                update.executeUpdate();
+            }
+        }
+        return new Moved(renamed, superseded, refailed);
+    }
+
+    /**
+     * Moves failures from {@code FAILED_CORRECTION}: each superseded by its
+     * correction's revision, and that revision's failure, with the last
+     * failed correction's error, added as a {@code FAILED} row of its own.
+     *
+     * @param connection the transaction's connection
+     * @param schema     the stage's registry schema
+     * @param stage      the stage
+     * @param timeout    how long a statement may run, in seconds
+     * @param event      adds an event to each failure moved
+     * @return how many were moved, per item
+     * @throws SQLException if a statement fails
+     */
+    private static Map<UUID, Long> refail(Connection connection,
+            String schema, String stage, int timeout, String event)
+            throws SQLException
+    {
+        String failures = FailureStore.table(schema);
+        int place = Lineage.stageOf(stage);
+        List<FailureStore.Failure> moving = new ArrayList<>();
+        try (PreparedStatement select = connection.prepareStatement("""
+                SELECT item_id, seq, record_id, error_code, source_offset,
+                       failed_version, generation, line
+                  FROM %s
+                 WHERE stage = ? AND state = 'FAILED_CORRECTION'
+                   FOR UPDATE""".formatted(failures)))
+        {
+            select.setQueryTimeout(timeout);
+            select.setString(1, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    moving.add(new FailureStore.Failure(
+                            rows.getObject(1, UUID.class), rows.getLong(2),
+                            rows.getString(3), rows.getString(4),
+                            rows.getLong(5), rows.getString(6),
+                            FailureStore.lineage(rows, 7)));
+                }
+            }
+        }
+        Map<UUID, Long> moved = new TreeMap<>();
+        if (moving.isEmpty())
+        {
+            return moved;
+        }
+        try (PreparedStatement add = connection.prepareStatement(event))
+        {
+            add.setQueryTimeout(timeout);
+            add.setString(1, stage);
+            add.executeUpdate();
+        }
+        String lastError = """
+                SELECT error_code FROM %s
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND state = 'FAILED'
+                 ORDER BY correction DESC
+                 LIMIT 1""".formatted(table(schema));
+        String supersede = """
+                UPDATE %s SET state = 'SUPERSEDED',
+                       superseded_how = 'REVISION', superseded_by = ?,
+                       changed_at = clock_timestamp()
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND generation = ? AND line = ?""".formatted(failures);
+        try (PreparedStatement error = connection.prepareStatement(lastError);
+                PreparedStatement update =
+                        connection.prepareStatement(supersede))
+        {
+            error.setQueryTimeout(timeout);
+            update.setQueryTimeout(timeout);
+            List<FailureStore.Failure> added = new ArrayList<>();
+            for (FailureStore.Failure failure : moving)
+            {
+                Lineage revision = failure.lineage().nextRevision(place);
+                String code = failure.errorCode();
+                error.setString(1, stage);
+                error.setObject(2, failure.itemId());
+                error.setLong(3, failure.seq());
+                try (ResultSet rows = error.executeQuery())
+                {
+                    if (rows.next() && rows.getString(1) != null)
+                    {
+                        code = rows.getString(1);
+                    }
+                }
+                update.setString(1, revision.toString());
+                update.setString(2, stage);
+                update.setObject(3, failure.itemId());
+                update.setLong(4, failure.seq());
+                update.setInt(5, failure.lineage().generation());
+                update.setArray(6, FailureStore.line(connection,
+                        failure.lineage()));
+                update.executeUpdate();
+                added.add(new FailureStore.Failure(failure.itemId(),
+                        failure.seq(), failure.recordId(), code,
+                        failure.sourceOffset(), failure.version(), revision));
+                moved.merge(failure.itemId(), 1L, Long::sum);
+            }
+            FailureStore.insert(connection, failures, stage, added, timeout);
+        }
+        return moved;
+    }
+
+    /**
+     * Notes a correction's outcome in a transaction of its own, and audits
+     * it: for a stage without a stage registry (the split stage), once its
+     * output is committed and sent. A revision that failed is recorded as
+     * a failure of its own.
+     *
+     * @param outcome what it came to
+     * @throws FailureStore.RefusedException if the correction isn't
+     *                                       pending
+     * @throws IllegalStateException         if the database can't be
+     *                                       reached
+     */
+    public void finish(Outcome outcome)
+    {
+        Finished finished;
+        try (Connection connection = dataSource.getConnection())
+        {
+            connection.setAutoCommit(false);
+            try
+            {
+                finished = finish(connection, schema(), stage, outcome, true,
                         timeout);
                 connection.commit();
             }
@@ -240,7 +552,7 @@ public final class CorrectionStore
             throw new IllegalStateException("Correction store unavailable",
                     failure);
         }
-        audit(stage, outcome, changed);
+        audit(stage, outcome, finished);
     }
 
     /**
@@ -371,11 +683,38 @@ public final class CorrectionStore
      * @param keyRef      the KEK it is wrapped with
      * @param length      the content's length, in bytes
      * @param kind        a correction or a retry
+     * @param recordId    the failed object's record ID; null for the item
+     *                    as a whole, or if not known
+     * @param lineage     the revision it makes (STAGES.md §15.8.5); null if
+     *                    not known
      */
     public record Pending(UUID itemId, long seq, int correction,
             String submittedBy, Instant submittedAt, byte[] sealed,
-            byte[] key, String keyRef, long length, Kind kind)
+            byte[] key, String keyRef, long length, Kind kind,
+            String recordId, Lineage lineage)
     {
+
+        /**
+         * A correction or retry, with no revision noted.
+         *
+         * @param itemId      the failure's item
+         * @param seq         its record number
+         * @param correction  the correction's number for the failure
+         * @param submittedBy who submitted it
+         * @param submittedAt when
+         * @param sealed      the content, encrypted
+         * @param key         its data key, wrapped
+         * @param keyRef      the KEK it is wrapped with
+         * @param length      the content's length, in bytes
+         * @param kind        a correction or a retry
+         */
+        public Pending(UUID itemId, long seq, int correction,
+                String submittedBy, Instant submittedAt, byte[] sealed,
+                byte[] key, String keyRef, long length, Kind kind)
+        {
+            this(itemId, seq, correction, submittedBy, submittedAt, sealed,
+                    key, keyRef, length, kind, null, null);
+        }
 
         /**
          * A correction, as submitted before kinds.
@@ -421,20 +760,26 @@ public final class CorrectionStore
         }
 
         /**
-         * The name its output is claimed under in the stage's registry, in
-         * place of a record ID: one per correction.
+         * The name its output is claimed under in the stage's registry: as
+         * any object of its place and line is (STAGES.md §15.8.2), or, with
+         * no revision noted, one of its own per correction.
          *
-         * @return {@code correction:<item>:<seq>:<n>}
+         * @return the record ID with its lineage's suffix, or
+         *         {@code correction:<item>:<seq>:<n>}
          */
         public String claimId()
         {
+            if (recordId != null && lineage != null)
+            {
+                return recordId + lineage.suffix();
+            }
             return "correction:" + itemId + ":" + seq + ":" + correction;
         }
     }
 
     /**
      * Submits a correction: stores its content, encrypted, and moves its
-     * failure to {@code CORRECTION_PENDING}, in one transaction. Audited
+     * failure to {@code REVISION_PENDING}, in one transaction. Audited
      * {@code failure.correction_submitted}, with no content.
      *
      * @param itemId   the failure's item
@@ -458,9 +803,10 @@ public final class CorrectionStore
     }
 
     /**
-     * Submits a correction or a retry: stores its content, encrypted, and
-     * moves its failure to {@code CORRECTION_PENDING}, in one transaction.
-     * Audited {@code failure.correction_submitted} or
+     * Submits a correction or a retry: stores its content, encrypted, with
+     * the revision it makes, the failed object's line with this stage's
+     * revision one more, and moves its failure to {@code REVISION_PENDING},
+     * in one transaction. Audited {@code failure.correction_submitted} or
      * {@code failure.retry_submitted}, with no content.
      *
      * @param itemId   the failure's item
@@ -488,9 +834,10 @@ public final class CorrectionStore
         String insert = """
                 INSERT INTO %s (stage, item_id, seq, correction, state,
                        submitted_at, submitted_by, content_enc, content_key,
-                       content_kek, content_length, kind)
+                       content_kek, content_length, kind, record_id,
+                       generation, line)
                 VALUES (?, ?, ?, ?, 'PENDING', clock_timestamp(), ?, ?, ?,
-                        ?, ?, ?)""".formatted(table);
+                        ?, ?, ?, ?, ?, ?)""".formatted(table);
         int[] number = new int[1];
         FailureStore.Changed changed;
         try (Connection connection = dataSource.getConnection())
@@ -500,8 +847,10 @@ public final class CorrectionStore
             {
                 changed = FailureStore.changeIn(connection, failures, events,
                         stage, itemId, seq, CORRECTABLE,
-                        FailureStore.State.CORRECTION_PENDING, kind.action(),
+                        FailureStore.State.REVISION_PENDING, kind.action(),
                         operator, null, null, timeout);
+                Lineage revision = changed.before().failure().lineage()
+                        .nextRevision(Lineage.stageOf(stage));
                 try (PreparedStatement select =
                         connection.prepareStatement(next))
                 {
@@ -535,6 +884,9 @@ public final class CorrectionStore
                     add.setString(8, wrapped.keyRef());
                     add.setLong(9, content.length);
                     add.setString(10, kind == Kind.RETRY ? kind.name() : null);
+                    add.setString(11, changed.before().failure().recordId());
+                    add.setInt(12, revision.generation());
+                    add.setArray(13, FailureStore.line(connection, revision));
                     add.executeUpdate();
                 }
                 finally
@@ -555,7 +907,7 @@ public final class CorrectionStore
                     failure);
         }
         FailureStore.auditChange(stage, itemId, seq,
-                FailureStore.State.CORRECTION_PENDING, kind == Kind.RETRY
+                FailureStore.State.REVISION_PENDING, kind == Kind.RETRY
                         ? "retry_submitted" : "correction_submitted",
                 operator, changed);
         return number[0];
@@ -573,7 +925,7 @@ public final class CorrectionStore
         String sql = """
                 SELECT item_id, seq, correction, submitted_by, submitted_at,
                        content_enc, content_key, content_kek, content_length,
-                       kind
+                       kind, record_id, generation, line
                   FROM %s
                  WHERE stage = ? AND state = 'PENDING'
                  ORDER BY submitted_at
@@ -595,7 +947,9 @@ public final class CorrectionStore
                             rows.getTimestamp(5).toInstant(),
                             rows.getBytes(6), rows.getBytes(7),
                             rows.getString(8), rows.getLong(9),
-                            Kind.of(rows.getString(10))));
+                            Kind.of(rows.getString(10)), rows.getString(11),
+                            rows.getObject(12) == null ? null
+                                    : FailureStore.lineage(rows, 12)));
                 }
             }
             return found;
@@ -622,24 +976,6 @@ public final class CorrectionStore
     {
 
         /**
-         * The state its failure moves to: for a retry, {@code RETRIED}, or
-         * back to {@code FAILED}, as nothing was edited (STAGES.md §15.6e).
-         *
-         * @return {@code CORRECTED}, {@code RETRIED},
-         *         {@code FAILED_CORRECTION} or {@code FAILED}
-         */
-        public FailureStore.State failureState()
-        {
-            if (pending.kind() == Kind.RETRY)
-            {
-                return passed ? FailureStore.State.RETRIED
-                        : FailureStore.State.FAILED;
-            }
-            return passed ? FailureStore.State.CORRECTED
-                    : FailureStore.State.FAILED_CORRECTION;
-        }
-
-        /**
          * The audit event's last part.
          *
          * @return {@code corrected}, {@code correction_failed},
@@ -656,37 +992,45 @@ public final class CorrectionStore
     }
 
     /**
-     * Notes a correction's outcome within the stage's transaction: the
-     * correction {@code PASSED} or {@code FAILED}, and its failure
-     * {@code CORRECTED} (naming the record that passed) or
-     * {@code FAILED_CORRECTION}. Not audited: the caller audits once it
-     * commits ({@link #audit}).
+     * What noting a correction's outcome changed, to audit once committed.
      *
-     * @param connection the transaction's connection
-     * @param schema     the stage's registry schema
-     * @param stage      the stage
-     * @param outcome    what it came to
-     * @param timeout    how long a statement may run, in seconds
-     * @return the failure as it was
-     * @throws FailureStore.RefusedException if the failure is no longer
-     *                                       pending a correction
+     * @param superseded the failure it was made for, if this superseded it;
+     *                   empty if something newer had first
+     * @param added      the failure of its revision, if this recorded one
+     */
+    public record Finished(List<FailureStore.Stored> superseded,
+            List<FailureStore.Failure> added)
+    {
+    }
+
+    /**
+     * Notes a correction's outcome within the stage's transaction
+     * (STAGES.md §15.8.5): the correction {@code PASSED} or {@code FAILED},
+     * and the failure it was made for {@code SUPERSEDED} by its revision
+     * either way, unless something newer superseded it first. A stage with
+     * no stage registry (the split stage) also records a revision that
+     * failed as a failure of its own here; a stage registry records it
+     * with the revision's other outputs. Not audited: the caller audits
+     * once it commits ({@link #audit}).
+     *
+     * @param connection    the transaction's connection
+     * @param schema        the stage's registry schema
+     * @param stage         the stage
+     * @param outcome       what it came to
+     * @param recordFailure whether to record a revision that failed as a
+     *                      failure here
+     * @param timeout       how long a statement may run, in seconds
+     * @return what changed
+     * @throws FailureStore.RefusedException if the correction isn't
+     *                                       pending
      * @throws SQLException                  if a statement fails
      */
-    public static FailureStore.Changed finish(Connection connection,
-            String schema, String stage, Outcome outcome, int timeout)
-            throws SQLException
+    public static Finished finish(Connection connection, String schema,
+            String stage, Outcome outcome, boolean recordFailure,
+            int timeout) throws SQLException
     {
         Pending pending = outcome.pending();
-        FailureStore.Changed changed = FailureStore.changeIn(connection,
-                FailureStore.table(schema), FailureStore.eventsTable(schema),
-                stage, pending.itemId(), pending.seq(),
-                EnumSet.of(FailureStore.State.CORRECTION_PENDING),
-                outcome.failureState(), pending.kind().action(),
-                pending.submittedBy(),
-                null, outcome.passed()
-                        ? new FailureStore.Resolution(outcome.recordId(),
-                                outcome.version())
-                        : null, timeout);
+        String failures = FailureStore.table(schema);
         String sql = """
                 UPDATE %s SET state = ?, finished_at = clock_timestamp(),
                        result_record_id = ?, error_code = ?
@@ -704,28 +1048,152 @@ public final class CorrectionStore
             update.setObject(5, pending.itemId());
             update.setLong(6, pending.seq());
             update.setInt(7, pending.correction());
-            update.executeUpdate();
+            if (update.executeUpdate() != 1)
+            {
+                throw new FailureStore.RefusedException("Correction "
+                        + pending.correction() + " isn't pending");
+            }
         }
-        return changed;
+        Lineage revision = revision(connection, failures, stage, pending,
+                timeout);
+        List<FailureStore.Stored> superseded = FailureStore.supersedePending(
+                connection, failures, stage, pending.itemId(), pending.seq(),
+                revision, timeout);
+        List<FailureStore.Failure> added = List.of();
+        if (!outcome.passed() && recordFailure)
+        {
+            Original original = original(connection, failures, stage,
+                    pending.itemId(), pending.seq(), revision, timeout);
+            added = FailureStore.insert(connection, failures, stage,
+                    List.of(new FailureStore.Failure(pending.itemId(),
+                            pending.seq(), original.recordId(),
+                            outcome.errorCode(), original.sourceOffset(),
+                            outcome.version(), revision)),
+                    superseded.isEmpty() ? original.supersededBy() : null,
+                    timeout);
+        }
+        return new Finished(superseded, added);
+    }
+
+    /**
+     * The revision a correction makes: as noted when it was submitted, or,
+     * for one submitted before revisions were noted, the line of the
+     * failure it was made for with this stage's revision one more.
+     *
+     * @param connection the transaction's connection
+     * @param failures   the failures' table, with its schema
+     * @param stage      the stage
+     * @param pending    the correction
+     * @param timeout    how long a statement may run, in seconds
+     * @return the revision's lineage
+     * @throws SQLException if a statement fails
+     */
+    public static Lineage revision(Connection connection, String failures,
+            String stage, Pending pending, int timeout) throws SQLException
+    {
+        if (pending.lineage() != null)
+        {
+            return pending.lineage();
+        }
+        Lineage failed = FailureStore.latest(connection, failures, stage,
+                pending.itemId(), pending.seq(), timeout)
+                .map(stored -> stored.failure().lineage())
+                .orElse(Lineage.FIRST);
+        return failed.nextRevision(Lineage.stageOf(stage));
+    }
+
+    /**
+     * What a revision's failure takes from the failure it followed.
+     *
+     * @param recordId     the failed object's record ID
+     * @param sourceOffset where in the item it starts, in bytes
+     * @param supersededBy what superseded that failure, if something did
+     *                     before the revision was stored; null otherwise
+     */
+    private record Original(String recordId, long sourceOffset,
+            String supersededBy)
+    {
+    }
+
+    /**
+     * Reads the failure a revision followed: the one of the line with this
+     * stage's revision one less.
+     *
+     * @param connection the transaction's connection
+     * @param failures   the failures' table, with its schema
+     * @param stage      the stage
+     * @param itemId     the item
+     * @param seq        the number
+     * @param revision   the revision's lineage
+     * @param timeout    how long a statement may run, in seconds
+     * @return what the revision's failure takes from it
+     * @throws SQLException if a statement fails
+     */
+    private static Original original(Connection connection, String failures,
+            String stage, UUID itemId, long seq, Lineage revision,
+            int timeout) throws SQLException
+    {
+        int place = Lineage.stageOf(stage);
+        Lineage older = revision.withRevision(place,
+                Math.max(1, revision.revision(place) - 1));
+        String sql = """
+                SELECT record_id, source_offset, superseded_by FROM %s
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND generation = ? AND line = ?""".formatted(failures);
+        try (PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(timeout);
+            select.setString(1, stage);
+            select.setObject(2, itemId);
+            select.setLong(3, seq);
+            select.setInt(4, older.generation());
+            select.setArray(5, FailureStore.line(connection, older));
+            try (ResultSet rows = select.executeQuery())
+            {
+                if (!rows.next())
+                {
+                    return new Original(null, 0, null);
+                }
+                return new Original(rows.getString(1), rows.getLong(2),
+                        rows.getString(3));
+            }
+        }
     }
 
     /**
      * Audits a correction's outcome, once noted: {@code failure.corrected},
      * {@code failure.correction_failed}, {@code failure.retried} or
      * {@code failure.retry_failed}, with the stage, item, record number,
-     * states and operator; no content.
+     * the revision it made, its number and the operator; then the failure
+     * it superseded ({@code failure.superseded}) and the failure of its
+     * revision, if recorded ({@code failure.failed}). No content.
      *
-     * @param stage   the stage
-     * @param outcome what it came to
-     * @param changed the failure as it was
+     * @param stage    the stage
+     * @param outcome  what it came to
+     * @param finished what noting it changed
      */
     public static void audit(String stage, Outcome outcome,
-            FailureStore.Changed changed)
+            Finished finished)
     {
         Pending pending = outcome.pending();
-        FailureStore.auditChange(stage, pending.itemId(), pending.seq(),
-                outcome.failureState(), outcome.action(),
-                pending.submittedBy(), changed);
+        Fields fields = Fields.of(Attr.STAGE, stage)
+                .with(Attr.ITEM_ID, pending.itemId())
+                .with(Attr.SEQ, pending.seq())
+                .with(Attr.CORRECTION, pending.correction())
+                .with(Attr.OPERATOR, pending.submittedBy());
+        if (pending.lineage() != null)
+        {
+            fields = fields.with(Attr.LINEAGE, pending.lineage().toString());
+        }
+        if (outcome.errorCode() != null)
+        {
+            fields = fields.with(Attr.ERROR_CODE, outcome.errorCode());
+        }
+        Telemetry.get().audit("failure." + outcome.action(), fields);
+        FailureStore.auditSuperseded(stage, finished.superseded(),
+                FailureStore.Superseded.REVISION, pending.lineage() == null
+                        ? null : pending.lineage().toString());
+        FailureStore.audit(stage, finished.added());
     }
 
     /**

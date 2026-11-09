@@ -150,7 +150,7 @@ final class StageTestSupport
     static StageRegistry registry(String schema, String owner)
     {
         StageRegistry registry = new StageRegistry(database(), schema,
-                "test", owner, java.time.Duration.ofSeconds(10));
+                "convert", owner, java.time.Duration.ofSeconds(10));
         registry.createTablesIfMissing();
         return registry;
     }
@@ -251,7 +251,7 @@ final class StageTestSupport
      */
     static BrokerMessage total(UUID itemId, long records)
     {
-        return received(new ItemConverted(itemId, "test", records, 0,
+        return received(new ItemConverted(itemId, "convert", records, 0,
                 Instant.EPOCH));
     }
 
@@ -320,7 +320,7 @@ final class StageTestSupport
         @Override
         public String stage()
         {
-            return "test";
+            return "convert";
         }
 
         @Override
@@ -417,7 +417,7 @@ final class StageTestSupport
         @Override
         public ConnectorMessage itemComplete(ItemProgress progress)
         {
-            return new ItemConverted(progress.itemId(), "test",
+            return new ItemConverted(progress.itemId(), "convert",
                     progress.done(), progress.unresolved(), Instant.EPOCH,
                     List.of(), progress.nextCompletion());
         }
@@ -426,7 +426,7 @@ final class StageTestSupport
         public ConnectorMessage itemProgress(ItemProgress progress)
         {
             return new ConnectorMessage.ItemProgressed(progress.itemId(),
-                    "test", "test", progress.done(), progress.passed(),
+                    "convert", "convert", progress.done(), progress.passed(),
                     progress.open(), progress.declined(), null, null, null,
                     Instant.EPOCH, progress.versions(),
                     progress.completion());

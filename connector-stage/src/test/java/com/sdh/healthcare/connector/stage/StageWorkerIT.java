@@ -704,7 +704,7 @@ class StageWorkerIT
             }
             RouteBuilder route = settings.kind() == BrokerKind.ARTEMIS
                     ? new ArtemisReceiveRoute(ROUTE,
-                            Fields.of(Attr.STAGE, "test"), settings, worker,
+                            Fields.of(Attr.STAGE, "convert"), settings, worker,
                             HEALTH, Duration.ofMillis(50),
                             Duration.ofMillis(200))
                     : new CamelReceiveRoute(ROUTE, settings, worker,

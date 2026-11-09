@@ -703,7 +703,7 @@ class AdminCommandsTest
      * An item the split stage failed as a whole is exported, encrypted to
      * the operator's key, and corrected: the stage's loop splits the
      * correction, keeps the records already stored, stores the rest marked
-     * as correcting the item, and the failure is {@code CORRECTED}
+     * as correcting the item, and the failure is {@code SUPERSEDED}
      * (STAGES.md §15.6d). Its own item, so the others' failures stay.
      *
      * @throws Exception if the test fails to run
@@ -754,7 +754,7 @@ class AdminCommandsTest
             assertThat(context.failures().failure(item.itemId(), -1))
                     .hasValueSatisfying(stored -> assertThat(stored.state())
                             .isEqualTo(com.sdh.healthcare.connector.core
-                                    .failure.FailureStore.State.CORRECTED));
+                                    .failure.FailureStore.State.SUPERSEDED));
             assertThat(context.corrections().unnotified(
                     java.time.Duration.ZERO)).isEmpty();
         }

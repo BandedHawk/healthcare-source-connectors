@@ -64,7 +64,7 @@ public final class SplitMessages
                 row.contentType(), row.plaintextLength(), row.chunkCount(),
                 ref, row.origin(), row.errorCode(), row.errorAt(), message,
                 refs.messageRef(message), refs.messageReplaced(message),
-                row.stageVersion(), row.correctionOf());
+                row.stageVersion(), row.correctionOf(), row.lineage(), false);
     }
 
     /**

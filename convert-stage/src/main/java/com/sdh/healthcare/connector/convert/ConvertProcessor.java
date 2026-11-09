@@ -474,6 +474,13 @@ public final class ConvertProcessor
                 placed == null ? -1 : placed.message(),
                 placed == null ? null : placed.messageRef(),
                 placed == null ? null : placed.messageReplaces(), null);
+        // The record's next revision here (STAGES.md §15.8.5), stored and
+        // sent as such.
+        if (correction.lineage() != null)
+        {
+            split = (RecordSplit) split.withLineage(correction.lineage(),
+                    false);
+        }
         String version = version(split);
         Optional<RecordConverter> found = converters.get(split.format());
         StageOutput<Prepared> made;

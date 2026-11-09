@@ -1400,7 +1400,7 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
 4. **Exact copies** (§15.5) at landing and at the stages.
 5. **The drain check** (§14.4).
 
-### 15.8 Reprocess, generations and revisions (decided 2026-11-09; step 1 built)
+### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 and 2 built)
 
 Worked out with the user on 2026-11-09, in place of the proposal first written here. It replaces `replay`
 (§13.2), the outcomes of §15.4 and the matching of §15.4a, and changes how corrections and retries are recorded
@@ -1715,7 +1715,41 @@ Left from step 1, with why:
 - `RecordBatchWriter` keeps a lineage per item and number within a batch, so one batch can't hold two lineages at
   the same place. No stage writes that today; step 3 must not.
 - A pending correction whose failure has since been superseded is refused when it finishes (`CorrectionStore`
-  acts on current failures only). Step 2 decides what it becomes.
+  acts on current failures only). Step 2 decides what it becomes. (Done in step 2: it is stored late.)
+
+**Step 2 as built (2026-11-09; not yet tried on the sandbox).**
+
+- The fail store's states are `FAILED`, `REVISION_PENDING`, `DECLINED` and `SUPERSEDED`. A correction or retry, when
+  submitted, notes the revision it makes (the failed object's line, this stage's revision one more) and the failed
+  object's record ID in `stage_correction` (`record_id`, `generation`, `line`). `correct`, `retry` and `decline`
+  take a `FAILED` failure only; `failures` shows each failure's lineage.
+- **At the convert stage** a correction is claimed under its place's key (record ID and lineage suffix) and stored
+  through the currency rule like any object: it supersedes the failure at its place (`REVISION`), whether or not it
+  passes; it is never counted as a new record, and adds to the failed count if it failed, its failure a `FAILED` row
+  of its own line. One that arrives after something newer is stored late, flagged `superseded` on its message, its
+  correction still noted `PASSED` or `FAILED`; nothing is refused. Its row of `records` and its `record.stored` carry
+  the revision.
+- **At the split stage** a piece's correction is the piece's next split revision (`r2`), on its row of
+  `split_records` and its `record.split`. A correction of the item as a whole keeps the rules of §15.6d
+  (`CORRECTION_CHANGES_PASSED`, records after the kept ones added in the same generation) until step 4 makes it the
+  item's next generation; its failure is superseded, or the failed revision is a failure of its own, as for a
+  piece.
+- **The producer** gets a result only for an item's first report at the convert stage, in its first generation (no
+  `item.progress` or completion of it sent before). The result step runs on no later report, since each follows an
+  operator's action.
+- **The one-time move**, at every start, changing nothing once done (`CorrectionStore.moveStates`, audited
+  `failure.states_moved`): `CORRECTION_PENDING` becomes `REVISION_PENDING`; `CORRECTED` and `RETRIED` become
+  `SUPERSEDED` naming the record that passed (`superseded_by` from `resolved_by`); `FAILED_CORRECTION` becomes
+  `SUPERSEDED` by the next revision, whose failure (the last failed correction's error code) is added as `FAILED`,
+  and at the convert stage counted among the item's failed records. Pending corrections have their revision noted.
+  Each move adds an event by `pipeline`; earlier events keep the state names they were written with, so the
+  history reads as it happened.
+
+Left from step 2:
+- `retry` of a failed revision processes what failed first (the record as split), not the corrected content
+  that failed; correct it again to try an edit.
+- A reprocess (step 3) must take its revision number past any correction still pending at the place, so the two
+  never share a line.
 
 ## 16. Items with no records (decided and built 2026-11-09)
 

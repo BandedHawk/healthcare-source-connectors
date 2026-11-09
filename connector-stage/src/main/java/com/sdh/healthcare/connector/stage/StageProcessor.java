@@ -113,8 +113,10 @@ public interface StageProcessor<O>
     /**
      * Called once {@code item.progress} is sent, before its counts are
      * noted, so a failure here has both tried again; for the producer's
-     * result, reporting the failures (§15.6). Whatever it sends must be
-     * safe to send twice. Does nothing unless overridden.
+     * result, reporting the failures (§15.6). Called only for the item's
+     * first report here, in its first generation: no operator action sends
+     * the producer anything (§15.8.7). Whatever it sends must be safe to
+     * send twice. Does nothing unless overridden.
      *
      * @param progress the item, its counts and its failures
      * @throws InterruptedException if interrupted
@@ -152,8 +154,9 @@ public interface StageProcessor<O>
      * Processes an operator's correction of a record this stage failed:
      * its corrected input, in place of the record's own, as the record
      * would have been processed, so its output, committed by
-     * {@link #commit}, is stored as a new record linked to the one that
-     * failed (§15.4a) and sent on as any. Called from one thread at a
+     * {@link #commit}, is stored as the next revision of the record's place
+     * (§15.8.5), {@link CorrectionStore.Pending#lineage}, linked to the one
+     * that failed (§15.4a), and sent on as any. Called from one thread at a
      * time.
      *
      * @param correction the correction, its content encrypted
@@ -169,7 +172,9 @@ public interface StageProcessor<O>
 
     /**
      * Called once the item-complete message is sent, before the item is
-     * marked complete, so a failure here has both tried again. Whatever it
+     * marked complete, so a failure here has both tried again. Called only
+     * for the item's first report here, in its first generation: no
+     * operator action sends the producer anything (§15.8.7). Whatever it
      * sends must be safe to send twice. Does nothing unless overridden.
      *
      * @param progress the item and its counts

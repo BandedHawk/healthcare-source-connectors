@@ -22,6 +22,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInSt
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
@@ -432,8 +433,9 @@ class ConvertStageTest
      * An operator's correction of a record that failed conversion is
      * converted by the worker as the record was (STAGES.md §15.6c): stored
      * as a new row of records, marked correction_of the failed one, which
-     * stays; sent on as record.stored; the failure CORRECTED; and the item
-     * completed with both records passed. A replay sends the corrected
+     * stays, and of the record's next revision here (§15.8.5); sent on as
+     * record.stored with that revision; the failure superseded; and the
+     * item completed with both records passed. A replay sends the corrected
      * record too, and counts nothing failed.
      *
      * @throws Exception if the test fails to run
@@ -470,12 +472,14 @@ class ConvertStageTest
                     assertThat(row.errorCode()).isNull();
                     assertThat(row.correctionOf())
                             .isEqualTo(failed.recordId());
+                    assertThat(row.lineage()).isEqualTo(Lineage.FIRST
+                            .nextRevision(Lineage.CONVERT));
                 });
         assertThat(sentOf("record.stored")).isEqualTo(2);
         assertThat(sentOf("item.converted")).isEqualTo(1);
         assertThat(registry.failureStore().failure(item, 1)).get()
                 .extracting(FailureStore.Stored::state)
-                .isEqualTo(FailureStore.State.CORRECTED);
+                .isEqualTo(FailureStore.State.SUPERSEDED);
         MessageOpener opener = new MessageOpener(
                 Map.of("transform", downstream.getPrivate()),
                 Map.of("convert", (ECPublicKey) signer.getPublic()));
@@ -489,8 +493,10 @@ class ConvertStageTest
             }
             if (opened instanceof RecordStored stored && stored.seq() == 1)
             {
-                // What it resolves (STAGES.md §15.6e).
+                // What it resolves (STAGES.md §15.6e), as its revision.
                 assertThat(stored.resolves()).isEqualTo(failed.recordId());
+                assertThat(stored.lineage()).isEqualTo(Lineage.FIRST
+                        .nextRevision(Lineage.CONVERT));
             }
         }
 

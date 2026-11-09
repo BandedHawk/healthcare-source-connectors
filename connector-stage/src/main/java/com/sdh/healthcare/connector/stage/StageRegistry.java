@@ -428,6 +428,10 @@ public final class StageRegistry
                     + " ADD COLUMN IF NOT EXISTS superseded_at timestamptz");
             statement.execute("CREATE INDEX IF NOT EXISTS stage_record_place"
                     + " ON " + records + " (stage, item_id, generation, seq)");
+            // Added 2026-11-09 (§15.8.5): the correction a row was made
+            // from, for one claimed under its place's key.
+            statement.execute("ALTER TABLE " + records
+                    + " ADD COLUMN IF NOT EXISTS correction integer");
             statement.execute("ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS generation integer"
                     + " NOT NULL DEFAULT 1");
@@ -450,6 +454,56 @@ public final class StageRegistry
             throw new IllegalStateException(
                     "Could not create the stage registry", failure);
         }
+        moveFailureStates();
+    }
+
+    /**
+     * Moves the fail store's failures out of the states that went
+     * (STAGES.md §15.8.5; {@link CorrectionStore#moveStates}), and counts
+     * each failure added for a failed correction among its item's failed
+     * records, as a failed revision is counted, in one transaction.
+     * Changes nothing once done.
+     *
+     * @throws IllegalStateException if it can't
+     */
+    private void moveFailureStates()
+    {
+        CorrectionStore.Moved moved;
+        try (Connection connection = dataSource.getConnection())
+        {
+            connection.setAutoCommit(false);
+            try
+            {
+                moved = CorrectionStore.moveStates(connection, schema(),
+                        stage, queryTimeoutSeconds);
+                try (PreparedStatement update = connection.prepareStatement(
+                        "UPDATE " + items + " SET failed = failed + ?"
+                                + " WHERE stage = ? AND item_id = ?"))
+                {
+                    update.setQueryTimeout(queryTimeoutSeconds);
+                    for (Map.Entry<UUID, Long> item
+                            : moved.refailed().entrySet())
+                    {
+                        update.setLong(1, item.getValue());
+                        update.setString(2, stage);
+                        update.setObject(3, item.getKey());
+                        update.executeUpdate();
+                    }
+                }
+                connection.commit();
+            }
+            catch (SQLException | RuntimeException failure)
+            {
+                connection.rollback();
+                throw failure;
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException(
+                    "Could not move the fail store's states", failure);
+        }
+        moved.audit(stage);
     }
 
     /**
@@ -697,7 +751,7 @@ public final class StageRegistry
                        message_id = ?, message_type = ?, message_key = ?,
                        pending_message = ?, stored_at = clock_timestamp(),
                        claim_expires = NULL, seq = ?, generation = ?,
-                       line = ?, late = ?
+                       line = ?, late = ?, correction = ?
                  WHERE stage = ? AND item_id = ? AND record_id = ?
                    AND owner = ? AND state = 'CLAIMED'""".formatted(records);
         // A record whose claim was lost changes nothing of its item's.
@@ -732,8 +786,7 @@ public final class StageRegistry
                         {
                             continue;
                         }
-                        Placement placed = entry.correction() == null
-                                ? currency.place(entry) : Placement.NEW;
+                        Placement placed = currency.place(entry);
                         OutboundMessage message = entry.message();
                         update.setString(1,
                                 message == null ? "FAILED" : "STORED");
@@ -759,10 +812,19 @@ public final class StageRegistry
                         update.setArray(10, FailureStore.line(connection,
                                 entry.lineage()));
                         update.setBoolean(11, placed.late());
-                        update.setString(12, stage);
-                        update.setObject(13, entry.itemId());
-                        update.setString(14, entry.key().recordId());
-                        update.setString(15, owner);
+                        if (entry.correction() == null)
+                        {
+                            update.setNull(12, java.sql.Types.INTEGER);
+                        }
+                        else
+                        {
+                            update.setInt(12, entry.correction().pending()
+                                    .correction());
+                        }
+                        update.setString(13, stage);
+                        update.setObject(14, entry.itemId());
+                        update.setString(15, entry.key().recordId());
+                        update.setString(16, owner);
                         if (update.executeUpdate() != 1)
                         {
                             continue;
@@ -770,10 +832,9 @@ public final class StageRegistry
                         marked.add(entry.key());
                         if (entry.correction() != null)
                         {
-                            // Not a record of the item's: its count stays;
-                            // its failure moves on instead.
+                            // A revision of its place (§15.8.5), counted
+                            // as one; its correction is noted below.
                             corrections.add(entry);
-                            continue;
                         }
                         currency.stored(entry, placed);
                         if (!placed.late() && entry.failure() != null)
@@ -794,11 +855,14 @@ public final class StageRegistry
                             stage, List.of(lateFailure.getKey()),
                             lateFailure.getValue(), queryTimeoutSeconds));
                 }
-                List<FailureStore.Changed> finished = new ArrayList<>();
+                List<CorrectionStore.Finished> finished = new ArrayList<>();
                 for (Entry entry : corrections)
                 {
+                    // Its failure, if it failed, is recorded above, with
+                    // the batch's.
                     finished.add(CorrectionStore.finish(connection, schema(),
-                            stage, entry.correction(), queryTimeoutSeconds));
+                            stage, entry.correction(), false,
+                            queryTimeoutSeconds));
                 }
                 connection.commit();
                 FailureStore.audit(stage, added);
@@ -1045,7 +1109,13 @@ public final class StageRegistry
             item.failed += entry.failed() ? 1 : 0;
             if (placed.supersedes() == null)
             {
-                item.done++;
+                // A correction is a revision of a place already counted,
+                // even where the row before it has no place noted, as one
+                // stored before lineage was kept (STAGES.md §15.8.5).
+                if (entry.correction() == null)
+                {
+                    item.done++;
+                }
                 return;
             }
             try (PreparedStatement update = connection.prepareStatement(
@@ -1380,7 +1450,9 @@ public final class StageRegistry
                 SELECT item_id, record_id, message_id, message_type,
                        message_key, pending_message
                   FROM %s
-                 WHERE stage = ? AND record_id LIKE 'correction:%%'
+                 WHERE stage = ?
+                   AND (correction IS NOT NULL
+                        OR record_id LIKE 'correction:%%')
                    AND state = 'STORED' AND pending_message IS NOT NULL
                    AND stored_at <= clock_timestamp()
                                     - ? * interval '1 millisecond'
@@ -1734,8 +1806,7 @@ public final class StageRegistry
                        (SELECT count(*) FROM %3$s f
                          WHERE f.stage = i.stage AND f.item_id = i.item_id
                            AND f.generation = i.generation
-                           AND f.state IN ('FAILED', 'CORRECTION_PENDING',
-                                           'FAILED_CORRECTION')),
+                           AND f.state IN %4$s),
                        (SELECT count(*) FROM %3$s f
                          WHERE f.stage = i.stage AND f.item_id = i.item_id
                            AND f.generation = i.generation
@@ -1744,16 +1815,15 @@ public final class StageRegistry
                        (SELECT count(*) FROM %3$s f
                          WHERE f.stage = i.stage AND f.item_id = i.item_id
                            AND f.generation = i.generation
-                           AND (f.state IN ('CORRECTED', 'RETRIED')
-                                OR (f.state = 'SUPERSEDED'
-                                    AND COALESCE(f.superseded_how,
-                                                 'REVISION') = 'REVISION'))),
+                           AND f.state = 'SUPERSEDED'
+                           AND COALESCE(f.superseded_how, 'REVISION')
+                               = 'REVISION'),
                        i.completion, i.generation
                   FROM %1$s i
                  WHERE i.stage = ? AND i.item_id = ANY (?)
                    AND i.completed_at IS NULL AND i.expected IS NOT NULL
                    AND i.done >= i.expected""".formatted(items, records,
-                failures);
+                failures, FailureStore.State.OPEN_SQL);
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
         {
@@ -1906,13 +1976,12 @@ public final class StageRegistry
                                        WHERE f.stage = c.stage
                                          AND f.item_id = c.item_id
                                          AND f.generation = c.generation
-                                         AND f.state IN ('FAILED',
-                                             'CORRECTION_PENDING',
-                                             'FAILED_CORRECTION')
+                                         AND f.state IN %3$s
                                          AND f.changed_at > c.completed_at)
                         LIMIT ?)
                    AND i.completed_at IS NOT NULL
-                RETURNING i.item_id""".formatted(items, failures);
+                RETURNING i.item_id""".formatted(items, failures,
+                FailureStore.State.OPEN_SQL);
         List<UUID> reopened = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement update = connection.prepareStatement(sql))

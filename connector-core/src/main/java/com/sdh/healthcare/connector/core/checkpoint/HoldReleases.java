@@ -162,6 +162,7 @@ public final class HoldReleases
     public static final class RefusedException extends RuntimeException
     {
 
+        /** Serial version. */
         private static final long serialVersionUID = 1L;
 
         /**

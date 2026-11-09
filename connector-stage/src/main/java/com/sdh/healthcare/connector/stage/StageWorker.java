@@ -300,9 +300,10 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * Processes operators' corrections (STAGES.md §15.6c), oldest first,
      * if the stage does: each claimed in the registry under a name of its
      * own, so one worker processes it; its output committed and stored as
-     * a record's is, with its outcome noted in the same transaction (the
-     * correction passed or failed, and its failure {@code CORRECTED} or
-     * {@code FAILED_CORRECTION}), and the record sent on if it passed. A
+     * a record's is, as the next revision of its place (§15.8.5), with its
+     * outcome noted in the same transaction (the correction passed or
+     * failed, and its failure superseded either way), and the record sent
+     * on if it passed. A
      * correction stored but not sent (a worker stopped between the two) is
      * sent again. The item is then looked at again by {@link #revisit}. A
      * failure is logged, and the correction tried again at the next
@@ -348,8 +349,10 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     }
 
     /**
-     * Processes one correction this worker has claimed, stores it, and
-     * sends its record on if it passed.
+     * Processes one correction this worker has claimed, stores it as the
+     * next revision of its place (STAGES.md §15.8.5), and sends its record
+     * on if it passed: flagged superseded if something newer is there
+     * already. A revision that failed is a failure of its own.
      *
      * @param pending the correction
      * @throws Exception if it can't be processed, stored or sent; it is
@@ -365,17 +368,36 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         {
             message = processor.commit(List.of(result)).get(0);
         }
+        // Claimed under its place's key; one submitted before revisions
+        // were noted, under a name of its own.
+        boolean revision = pending.recordId() != null
+                && pending.lineage() != null;
+        Lineage lineage = revision ? pending.lineage() : null;
         boolean passed = !result.failed() && message != null;
         String recordId = passed
                 && message instanceof ConnectorMessage.RecordInStorage record
                         ? record.recordId() : null;
         String code = passed ? null : result.errorCode() == null
                 ? ErrorCode.STAGE_FAILED.name() : result.errorCode();
+        if (passed && revision
+                && message instanceof ConnectorMessage.RecordInStorage record)
+        {
+            message = record.withLineage(lineage, !registry.supersededAlready(
+                    List.of(pending.itemId()), List.of(pending.seq()),
+                    List.of(lineage)).isEmpty());
+        }
+        long offset = message instanceof ConnectorMessage.RecordInStorage
+                record ? record.sourceOffset() : 0;
+        FailureStore.Failure failure = passed ? null
+                : new FailureStore.Failure(pending.itemId(), pending.seq(),
+                        pending.recordId(), code, offset, made.version(),
+                        lineage);
         StageRegistry.Entry entry = new StageRegistry.Entry(
-                pending.claimId(), pending.itemId(), result.digest(),
-                made.version(), !passed, passed ? outbound(message) : null,
-                null, new CorrectionStore.Outcome(pending, passed, recordId,
-                        code, made.version()));
+                revision ? pending.recordId() : pending.claimId(),
+                pending.itemId(), result.digest(), made.version(), !passed,
+                passed ? outbound(message) : null, failure,
+                new CorrectionStore.Outcome(pending, passed, recordId, code,
+                        made.version()), pending.seq(), lineage);
         if (registry.store(List.of(entry)).contains(entry.key())
                 && entry.message() != null)
         {
@@ -811,7 +833,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
 
     /**
      * Sends the item-complete message of each item whose records are all
-     * stored, and hasn't had it, then runs the processor's
+     * stored, and hasn't had it, then, if it is the item's first report
+     * here ({@link #firstReport}), runs the processor's
      * {@link StageProcessor#itemCompleted} step. Two workers may both do
      * it; the message's id is fixed, so the repeat is dropped.
      *
@@ -828,11 +851,12 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         for (StageRegistry.DueItem due : registry.due(items))
         {
             ItemProgress progress = due.progress().withTotal(total(due));
+            boolean first = firstReport(due);
             if (!progress.complete())
             {
                 if (due.progressChanged())
                 {
-                    progressItem(progress, due.readAt());
+                    progressItem(progress, due.readAt(), first);
                 }
                 else
                 {
@@ -843,7 +867,10 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                 continue;
             }
             send(output, List.of(outbound(processor.itemComplete(progress))));
-            runStep(() -> processor.itemCompleted(progress));
+            if (first)
+            {
+                runStep(() -> processor.itemCompleted(progress));
+            }
             registry.markCompleted(progress.itemId());
             // The same event as the split stage's, so one query over the
             // stages finds an item lost between two (STAGES.md §13.2).
@@ -857,26 +884,49 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     }
 
     /**
+     * Whether an item's report is its first here: nothing reported of it
+     * before, in its first generation. Only then does the processor's step
+     * after it run, which sends the producer's result: any later report
+     * follows an operator's action (a correction, retry, decline, reopen
+     * or reprocess), and none of those sends the producer anything
+     * (STAGES.md §15.8.7).
+     *
+     * @param due the item
+     * @return true if it is the first
+     */
+    private static boolean firstReport(StageRegistry.DueItem due)
+    {
+        ItemProgress progress = due.progress();
+        return due.progressKey() == null && progress.completion() == 0
+                && progress.generation() == 1;
+    }
+
+    /**
      * Sends an item's {@code item.progress}: it has handled each of its
      * records once, and a failure here is open, or the stage before has
-     * failures open (STAGES.md §15.6). Then runs the processor's
-     * {@link StageProcessor#itemProgressed} step, and notes the counts, so
-     * it isn't sent again until they change. Its message id is made from
-     * the counts, so a repeat is dropped.
+     * failures open (STAGES.md §15.6). Then, for its first report, runs
+     * the processor's {@link StageProcessor#itemProgressed} step, and
+     * notes the counts, so it isn't sent again until they change. Its
+     * message id is made from the counts, so a repeat is dropped.
      *
      * @param progress the item and its counts
      * @param readAt   when its counts were read
+     * @param first    whether it is the item's first report here
      * @throws InterruptedException if interrupted
      * @throws ExecutionException   if the broker refused it, or the
      *                              processor's step failed
      * @throws TimeoutException     if the broker didn't take it in time
      */
-    private void progressItem(ItemProgress progress, Instant readAt)
+    private void progressItem(ItemProgress progress, Instant readAt,
+            boolean first)
             throws InterruptedException, ExecutionException,
             TimeoutException
     {
         send(output, List.of(outbound(processor.itemProgress(progress))));
-        runStep(() -> processor.itemProgressed(progress));
+        if (first)
+        {
+            runStep(() -> processor.itemProgressed(progress));
+        }
         registry.markProgressed(progress.itemId(), progress.progressKey(),
                 readAt);
         Telemetry.get().audit("item.progress",

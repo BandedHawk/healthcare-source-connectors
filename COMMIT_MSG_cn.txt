@@ -1,0 +1,35 @@
+Make corrections and retries revisions of their place
+
+Step 2 of reprocess (STAGES.md §15.8.5, §15.8.10, DESIGN revision cn).
+
+- Fail store states are now FAILED, REVISION_PENDING, DECLINED and
+  SUPERSEDED. CORRECTION_PENDING, FAILED_CORRECTION, CORRECTED and
+  RETRIED go; correct, retry and decline take a FAILED failure only.
+- A correction or retry notes, when submitted, the revision it makes
+  (the failed object's line with this stage's revision one more) and the
+  failed record's ID (stage_correction: record_id, generation, line).
+- Convert stage: a correction is claimed under its place's key and
+  stored through the currency rule. Its failure is superseded whether or
+  not it passes; a failed revision is a FAILED failure of its own. One
+  overtaken by something newer is stored late and flagged, not refused.
+  Its records row and record.stored carry the revision.
+- Split stage: a piece's correction is its next split revision, on its
+  row and record.split. A correction of the item as a whole keeps its
+  rules until step 4 makes it a generation.
+- Producer results only for an item's first report, in its first
+  generation; no operator action sends the producer anything (§15.8.7).
+- One-time move at start (CorrectionStore.moveStates, audited
+  failure.states_moved): old states to new, with events; FAILED_CORRECTION
+  gets its correction's failure as a FAILED row of the next revision,
+  counted at the convert stage. Earlier events keep their state names.
+- failures lists each failure's lineage. Lineage.stageOf and
+  nextRevision added.
+- Tests: the move, a correction overtaken by a newer revision, failed
+  corrections and retries as failures of their own, results sent once.
+  The stage tests' stage is now named convert.
+- Operator READMEs of both stages updated.
+- Javadoc for six members strict lint found without it.
+
+Not yet tried on the sandbox.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -23,6 +23,7 @@ import java.util.UUID;
 public final class ItemHeldException extends Exception
 {
 
+    /** Serial version. */
     private static final long serialVersionUID = 1L;
 
     /** The item held. */

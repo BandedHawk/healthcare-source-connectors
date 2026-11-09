@@ -68,6 +68,7 @@ import org.slf4j.LoggerFactory;
 public final class ItemProcessor
 {
 
+    /** The processor's log. */
     private static final Logger LOG =
             LoggerFactory.getLogger(ItemProcessor.class);
 
@@ -302,14 +303,15 @@ public final class ItemProcessor
      * passed.
      *
      * @param itemId the item
-     * @return true if its failure as a whole is {@code CORRECTED} or
-     *         {@code RETRIED}
+     * @return true if its failure as a whole is superseded, with no
+     *         failure of a later revision open in its place (STAGES.md
+     *         §15.8.5)
      */
     private boolean wholeItemCorrected(UUID itemId)
     {
         return failures != null && failures.failure(itemId,
                 FailureStore.WHOLE_ITEM).map(stored -> stored.state()
-                        .passedLater()).orElse(false);
+                        == FailureStore.State.SUPERSEDED).orElse(false);
     }
 
     /**

@@ -274,23 +274,25 @@ the key's SHA-256. Then:
 kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args correct --item-id <id> --seq <n> --operator alice < corrected.txt
 ```
 
-`correct` takes a failure that is `FAILED` or `FAILED_CORRECTION`, keeps the edit encrypted (at most the stage's
-largest item), and moves the failure to `CORRECTION_PENDING`. Within a renewal interval a pod splits it:
-- a piece's correction must give exactly one record; it is stored in `split_records` at the piece's number and place,
-  with `correction_of` naming the failed row, which stays;
+`correct` takes a failure that is `FAILED`, keeps the edit encrypted (at most the stage's largest item), and moves
+the failure to `REVISION_PENDING`. Within a renewal interval a pod splits it, and the failure becomes `SUPERSEDED`
+whether or not it passes (STAGES.md §15.8.5):
+- a piece's correction must give exactly one record, the piece's next revision at this stage (`g1 r2`, then `r3`,
+  …); it is stored in `split_records` at the piece's number and place, with `correction_of` naming the failed row,
+  which stays;
 - the item's correction is the whole item, edited: the records already stored must come out of it unchanged, and
   those after them are stored, with `correction_of` the item's ID.
 
-If it passes, the new records are sent on as `record.split`, the failure becomes `CORRECTED`, and the item's end is
+If it passes, the new records are sent on as `record.split` (a piece's with its revision), and the item's end is
 sent again (`item.split` once nothing else is open, its failed count without the corrected piece). If it fails
-(`CORRECTION_RECORD_COUNT`, `CORRECTION_CHANGES_PASSED`, or the splitter's code), nothing is stored, the failure
-becomes `FAILED_CORRECTION`, and you can correct it again. `failures --item-id` shows each correction and what it came
-to. Delete `failed.jwe` and your edits when you're done. `restore` also gives a landed item whole, into the pod.
+(`CORRECTION_RECORD_COUNT`, `CORRECTION_CHANGES_PASSED`, or the splitter's code), nothing is stored, and the
+revision is a failure of its own, `FAILED`, which you correct in turn. `failures --item-id` shows each failure with
+its revision, and each correction and what it came to. Delete `failed.jwe` and your edits when you're done. `restore` also gives a landed item whole, into the pod.
 
 `retry --item-id <id> --seq <n>` processes what failed again, unchanged, for a failure that wasn't the data's (a
-limit raised, the stage fixed): it needs no input, and takes a failure that is `FAILED` or `FAILED_CORRECTION`, as
-`correct` does. A pod splits it within a renewal interval, under the rules above; if it passes, the failure becomes
-`RETRIED`; if it fails, it goes back to `FAILED`, and `failures --item-id` shows the retry and its error code.
+limit raised, the stage fixed): it needs no input, and takes a failure that is `FAILED`, as `correct` does. A pod
+splits it within a renewal interval, under the rules above, as the next revision; if it fails, its own failure, with
+the retry's error code, is the one open.
 
 A record that passed by a correction or retry names the failure it resolves in its `record.split` (`resolves`).
 Reopening a failure of an item already complete (`reopen`) makes it incomplete again: the stage sends

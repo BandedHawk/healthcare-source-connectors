@@ -57,8 +57,7 @@ public final class FailureCommands
     public static <C extends FailureAdmin> List<AdminCommand<C>> all()
     {
         return List.of(new ListCommand<>(), new ChangeCommand<>("decline",
-                        "declined", EnumSet.of(FailureStore.State.FAILED,
-                                FailureStore.State.FAILED_CORRECTION),
+                        "declined", EnumSet.of(FailureStore.State.FAILED),
                         FailureStore.State.DECLINED, """
                         decline --item-id <id> --seq <n> < reason.txt
                             Records that a failure won't be corrected (it
@@ -265,13 +264,15 @@ public final class FailureCommands
          * A failure, on one line.
          *
          * @param failure the failure
-         * @return item, record number, state, error code, place, version,
-         *         when it failed, and who changed it last
+         * @return item, record number, lineage (STAGES.md §15.8.8), state,
+         *         error code, place, version, when it failed, and who
+         *         changed it last
          */
         private static String line(FailureStore.Listed failure)
         {
             FailureStore.Failure what = failure.stored().failure();
             return what.itemId() + " seq=" + what.seq() + " "
+                    + what.lineage() + " "
                     + failure.stored().state() + " " + what.errorCode()
                     + " offset=" + what.sourceOffset() + " failed="
                     + failure.failedAt()
@@ -496,7 +497,7 @@ public final class FailureCommands
             audit.add(Attr.CORRECTION, number);
             audit.add(Attr.BYTES, length);
             audit.add(Attr.STATE,
-                    FailureStore.State.CORRECTION_PENDING.name());
+                    FailureStore.State.REVISION_PENDING.name());
             out.println("submitted correction " + number + " of failure "
                     + seq + " of " + itemId + " at the " + context.stage()
                     + " stage (" + length + " bytes, kept encrypted); the"
@@ -599,7 +600,7 @@ public final class FailureCommands
             audit.add(Attr.CORRECTION, number);
             audit.add(Attr.BYTES, length);
             audit.add(Attr.STATE,
-                    FailureStore.State.CORRECTION_PENDING.name());
+                    FailureStore.State.REVISION_PENDING.name());
             out.println("submitted retry " + number + " of failure " + seq
                     + " of " + itemId + " at the " + context.stage()
                     + " stage (" + length + " bytes, kept encrypted); the"
