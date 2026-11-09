@@ -1347,9 +1347,13 @@ held item; `reprocess` is designed first, for review, and built after (§15.8).
   above the one taken; an open one at or above it, unless both are open at the same number, when counts only
   grow); taking one reopens an item completed here (`stage.item_reopened`, reason `upstream`). A failure reopened
   at the stage itself reopens its completed item on the next revisit (`StageRegistry.reopenChanged`,
-  `stage.item_reopened`, reason `failure_reopened`). Known limit: an item completed before this build and then
-  reopened sends `item.progress` with completion 0, which a stage after drops as stale; nothing is released yet,
-  so no such items exist outside test systems.
+  `stage.item_reopened`, reason `failure_reopened`). Known limit: rows from before this build carry completion 0
+  (found on the sandbox, SANDBOX.md "Checked"). An item completed before it and then reopened sends `item.progress`
+  with completion 0: from the split stage, a stage after may drop it as stale; from the convert stage, its
+  progress and its next completion reuse IDs already sent, and are dropped as repeats. A repeated upstream end of
+  such an item is taken as newer once (a false `stage.item_reopened`, the item completed again under its old ID).
+  Nothing is released, so no such rows exist outside test systems; a one-time migration numbering them 1 would
+  close it.
 - **`resolves`:** `record.split` and `record.stored` carry it for a row with `correction_of`; the split stage's
   correction of a whole item names the item ID.
 - **Tests:** `StageWorkerTest` (`appliesARetry`, `completesAgainAnItemWhoseFailureIsReopened`),

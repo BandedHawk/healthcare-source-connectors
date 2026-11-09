@@ -413,3 +413,23 @@ Checked again since: see the end of this section.
   here: the split stage's `stage.item_completed` after the correction said `count=0`, leaving out the records the
   correction added; fixed and tested in `ItemProcessorTest`, not redeployed. Not tried here: a piece's correction
   (no C-CDA makes one; `ItemProcessorTest` and `AdminCommandsTest` cover both kinds).
+- **Retry, release and completing again (2026-11-09, revision (ci)).** Deployed over the existing data: the split
+  stage made `split_release` and `split_item.completion` and `completed`, the convert stage `stage_item.completion`
+  and `upstream_completion`, both `stage_correction.kind`; nothing failed at startup. A synthetic C-CDA of 188 bytes
+  with an undeclared entity (no data in it) failed conversion; `retry` submitted it unchanged (187 bytes, kept
+  encrypted), the worker failed it again and the failure went back to `FAILED` (`failure.retry_failed`), listed as
+  `retry 1 FAILED ... CONVERT_XML_MALFORMED`. Declined, the item completed as `ic-convert-<id>`; reopened, the stage
+  audited `stage.item_reopened reason=failure_reopened` and sent `item.progress` ending `~c1`; declined again, it
+  completed as `ic-convert-<id>~c2`, once. A synthetic C-CDA of 172 bytes broken off part way failed at the split
+  stage as a whole; `retry --seq -1` failed the same way and left it `FAILED`. Declined, reopened and declined
+  there: the split stage sent `is-<id>`, `ip-split-...~c1` and `is-<id>~c2` (each under a `~replay-` broker ID);
+  the convert stage completed the item, reopened it from upstream (`reason=upstream`), and completed it again as
+  `~c2`. `release` on an item not `HELD` was refused (exit 1, "not HELD") and with neither or both flags (exit 2),
+  and wrote no request; `status --item` shows `releases: none`. No item could be held here (one C-CDA splits faster
+  than a deploy interrupts it); `IngestPipelineTest` covers resume and close. No pod restarted. Found here: at
+  startup the landing node announced its last item again, as designed; that item, completed before this build,
+  had no completion number at the convert stage (0), so the split stage's repeated `item.split` was taken as newer
+  and the item was audited `stage.item_reopened` and completed again under its old ID (dropped downstream as a
+  repeat). Harmless here, but it shows the gap in STAGES.md §15.6f's known limit: 3,547 convert rows and every split
+  row from before (ci) carry completion 0, so reopening a failure of one would reuse message IDs already sent.
+  Not fixed: nothing is released, so only the sandbox has such rows.
