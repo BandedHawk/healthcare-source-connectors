@@ -654,6 +654,9 @@ listing of the records compared under a given pair of versions (step 6).
 
 ### 13.2 An item lost between stages
 
+**Replaced by §15.8 (decided 2026-11-09):** replay becomes reprocess, at the stage after the one replayed
+from (§15.8.9). What follows is kept as the record of what was built.
+
 Delivery is at least once, and a stage acknowledges a message only once it has done all it leads to, so a message
 is lost only after a broker took it: it expired before the next stage read it (Kafka and Pub/Sub keep 7 days by
 default, SQS 4, Service Bus a time to live), the broker dead-lettered it after its most deliveries (Service Bus and
@@ -1009,6 +1012,9 @@ back to the submission it came from.
 
 ### 15.1 Rules (decided)
 
+**Rules 4 and 7 changed by §15.8 (decided 2026-11-09):** a failed correction is a new failure of its own
+revision, and a reprocess is always stored and sent.
+
 1. **Landing recognises exact copies,** by the item's keyed digest (`item_digest`), as now (`item.duplicate_content`).
 2. **What a stage fails goes to its fail store,** noted as a failed submission. A dead-letter queue and a fail queue
    are the same thing here: storage of the failed objects, per stage. A failure is **not** sent downstream: the
@@ -1050,6 +1056,9 @@ and recovered by fixing the configuration and replaying (§13.2).
 
 ### 15.3 The fail store
 
+**States changed by §15.8.5 (decided 2026-11-09):** `FAILED`, `REVISION_PENDING`, `DECLINED`, `SUPERSEDED`;
+`FAILED_CORRECTION`, `CORRECTED` and `RETRIED` go. The table below is as built.
+
 Per stage: the failed objects stay where the stage stores everything it makes, in its output table (`split_records`,
 `records`), encrypted, with their error codes, in the same commit as what passed, and are never announced; and a
 state per failure is kept in the stage's registry schema in Postgres (`stage_failure`), since it changes. Decided
@@ -1072,6 +1081,9 @@ with its own reason. Only one correction or retry is in flight per failure. The 
 until each failure is `CORRECTED`, `SUPERSEDED` or `DECLINED`, so the line never loses its start.
 
 ### 15.4 Corrections, retries and reprocessing
+
+**Replaced by §15.8 (decided 2026-11-09):** a reprocess is always stored and sent, never `outcome=same`; a
+retry is a reprocess; a correction is a revision marked `corrected`.
 
 - **`correct`:** the operator exports the failed input (`export`, encrypted to the operator's own key, never
   printed in the clear), edits it, and submits it (`correct`, the edit on standard input). The edited object is
@@ -1099,6 +1111,9 @@ until each failure is `CORRECTED`, `SUPERSEDED` or `DECLINED`, so the line never
   resource an ID derived from its source record, stable across versions (a requirement on the transformer).
 
 ### 15.4a When a later run passes what failed (raised by the user 2026-11-08)
+
+**Replaced by §15.8.3 and §15.8.5 (decided 2026-11-09):** no matching by place across a new cut; a newer
+generation or revision supersedes every earlier object, failed or passed, and becomes current even if it fails.
 
 A failure can pass later without anyone correcting it: a reprocess from an earlier stage (a fixed splitter cuts the
 piece cleanly), a retry after a limit is raised, or a new converter or mapping. The rule: **the failure is never
@@ -1280,6 +1295,10 @@ workers.
 
 ### 15.6e Retry, release and completing again (decided 2026-11-09, step 3d)
 
+**Changed by §15.8.5 and §15.8.7 (decided 2026-11-09):** a retry or correction makes a revision (of one record)
+or a generation (of an item as a whole), and supersedes its failure whether or not it passes; and no operator
+action sends the producer's result again.
+
 Decided with the user on 2026-11-09: a retry that fails leaves its failure `FAILED`; `release` resumes or closes a
 held item; `reprocess` is designed first, for review, and built after (§15.8).
 - **`retry --item-id <id> --seq <n>`** (every stage with a fail store; no input): a correction without an edit
@@ -1376,112 +1395,294 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
 2. **The fail store** (§15.3): failures stored apart and no longer sent downstream; states; `item.progress`; item
    completion by §15.6; the producer's result.
 3. **Operator commands:** `failures` (list, show, export), `correct`, `retry`, `decline`, `reopen`, and the
-   split stage's `release` (built 2026-11-09, §15.6c–§15.6f); then `reprocess` (§15.4), designed in §15.8 for
-   review before it is built.
+   split stage's `release` (built 2026-11-09, §15.6c–§15.6f); then `reprocess`, with generations and revisions,
+   decided 2026-11-09 (§15.8, its own order of building in §15.8.10).
 4. **Exact copies** (§15.5) at landing and at the stages.
 5. **The drain check** (§14.4).
 
-### 15.8 Reprocess (proposed 2026-11-09, for review; not built)
+### 15.8 Reprocess, generations and revisions (decided 2026-11-09; not built)
 
-Designed before it is built, as decided with the user on 2026-11-09. It fills in §15.4's `reprocess` and §15.4a's
-`SUPERSEDED`. Points marked **(to decide)** need the user's choice.
+Worked out with the user on 2026-11-09, in place of the proposal first written here. It replaces `replay`
+(§13.2), the outcomes of §15.4 and the matching of §15.4a, and changes how corrections and retries are recorded
+(§15.3, §15.6c–§15.6f). The parts it replaces are marked there. Four points first proposed in this write-up were
+agreed by the user the same day: a revision per stage (§15.8.2), a failed retry superseding its failure
+(§15.8.5), late outputs still sent on, and no producer result for any operator action (§15.8.7).
 
-**What it is for.** A stage has changed (a new converter, splitter settings, later a new mapping) and the operator
-wants what it made before made again under the version running now. Nothing failed. The earlier output stays, and
-stays readable; what changes is stored as new objects linked to the old ones (no lost or supplanted data).
+#### 15.8.1 What was decided
 
-**Where it starts.** At the earliest stage changed, from that stage's own stored input:
-- the split stage, from `landed_items` (a new splitter or its settings);
-- the convert stage, from `split_records` (a new converter);
-- the transform stage, later, from `records` (a new mapping).
+1. **One operation.** An operator may reprocess an object from any stage, for any reason: a stage changed (a new
+   splitter, converter or mapping), or a message was lost and an item or record never reached a stage. `replay` is
+   the same operation and goes. The object is processed again, under the version running now, and what it makes
+   goes on through the rest of the pipeline. Nothing is skipped because it matches what was made before, was made
+   under the same version, or never reached the stages after: an object with no earlier output downstream is simply
+   processed there as new, flagged as a reprocess.
+2. **Only the split stage fans out.** One item becomes many records (documents); convert and transform take one
+   record and make one. So a reprocess at the convert or transform stage replaces one output with one output, while
+   a reprocess at the split stage makes a new set of records with no assumed relationship to the earlier set, even
+   when the counts match. Records of two splits are never lined up.
+3. **Generations and revisions.**
+   - A reprocess (or a correction) of an **item at the split stage** makes the item's next **generation**. Every
+     record it cuts, and everything made from them, belongs to that generation.
+   - A reprocess (or a correction, or a retry) of **one record** at any stage makes that record's next
+     **revision**. Its siblings, and its item's generation, are unchanged.
+   - Both numbers follow the object to every later stage, and logs, telemetry and the fail store name them and the
+     stage where the reprocess began, so an operator can see why one record has a higher revision than its
+     siblings.
+4. **The latest is current; nothing is lost.** The new generation or revision becomes current as soon as it is
+   made, even if it later fails downstream: this shows the line of processing, not a judgement of which is better.
+   Everything earlier, successes and failures alike, is **superseded**: kept, readable, and comparable with what
+   replaced it, but needing no further action. A superseded object can't be reprocessed, corrected, retried or
+   declined.
+5. **Each stage judges by what has reached it.** An object arriving at a stage where nothing newer has arrived is
+   current there and processed as such. One arriving after something newer is processed, stored and marked
+   superseded on arrival, never dropped. Queues keep no order, so this marking is a stage's best knowledge; the
+   numbers on every output always let a reader work out which is current (§15.8.3).
+6. **A retry is a reprocess; a correction is a revision marked `corrected`.** A retry processes the failed object
+   again unchanged. A correction processes an operator's edit, links to the failure it was made for, and is
+   audited as a change of content.
+7. **Interrupted work is recorded.** If a reprocess is asked for while the object is still being processed, the
+   new generation or revision takes over, and the interruption is logged and counted, since an interrupted split
+   leaves records the output never sees (§15.8.6).
+8. **The pipeline doesn't decide the final record.** Outputs of a reprocess are flagged with the run, the cause and
+   their generation and revisions. What a system after the transformer does with them (replace, retract, keep
+   both, ask an operator) is its own decision. It needn't wait for all of an item's records: it can act on each
+   record as it comes, by the rule in §15.8.3.
+9. **Producers take no part.** Operator work on the pipeline is independent of the producer, whose only
+   responsibility is to deliver data. No operator action (reprocess, retry, correction, decline, reopen) sends
+   an `item.result`; other systems direct corrective work to the producer.
+10. **No pacing.** A reprocess joins the stage's input queue like any other input, at any time, and is told apart
+    only by its flags and run ID in the logs and telemetry.
+11. **Selectors:** by item (and one record of it), by intake and landing time, and by the version that made the
+    output, so an operator can choose any of them, each traced to the run that chose it.
 
-The stages after it are not asked to reprocess: they receive what changed as new records, through the queue, as
-any new record (below). A reprocess of the convert stage never touches the split stage's output.
+#### 15.8.2 Identity: where an object stands in its line
 
-**The command.** `reprocess` on that stage's admin, run as `SDH_OPERATOR`, with a reason on standard input
-(encrypted as a decline's), and one selector:
-- `--item-id <id>` (repeatable);
+Each object a stage stores is named by its **place** and its **line**:
+- **place:** the item, the generation, and the record's sequence number in that generation (`-1` for the item as a
+  whole). Sequence numbers are only comparable within one generation.
+- **line:** a revision number per stage the object has passed, in pipeline order: `split.convert.transform`. Each
+  stage numbers its own revisions of a place: 1 when it first processes an input, and one more each time that same
+  input is reprocessed, corrected or retried at that stage. The line written out with its generation reads, for
+  example, `g2 r1.3.1`: generation 2, the split stage's first cut of it, the convert stage's third revision, the
+  transform stage's first.
+
+The user agreed to "two numbers, a generation and a revision", then (agreed the same day) revisions as a
+number per stage, not one number, or the arrival rule breaks: the convert stage's revision 2 of record 5 reaches
+the transformer, then convert's revision 1, delivered late, arrives after it. With one counter, the transformer
+would number the late one 3 and make it current. With the line, the late one is `r1.1.1` against `r1.2.1`, and is
+superseded on arrival.
+
+Record IDs stay the keyed digest of the record's content (DESIGN.md §7.3), the proof of what a record holds. They no
+longer identify an object alone: an identical document in two generations, or two revisions of a record whose
+output is the same, are different objects with the same content. So:
+- **registry keys** (`StageRegistry.Key`) and the fail store's key gain the generation and the line;
+- **message IDs** gain `~g<n>` past generation 1 and `~r<line>` past `r1.1.1`, as completion numbers do
+  (`~c<n>`), so every message of today keeps its ID, and a reprocess is never dropped as a repeat by a stage, a
+  broker's de-duplication (Artemis, Service Bus, SQS FIFO) or `QueueReader`;
+- **stored rows** (`split_records`, `records`, the transformer's) gain `generation`, `line`, `cause` (`reprocess`,
+  `correction`; null for first processing), `run_id`, and `superseded_on_arrival`. Rows written before read as
+  generation 1, `r1.1.1`, no cause. Contract 3.0 is unreleased, so the columns are added under it.
+
+Exact copies (§15.5) are unchanged across items and within a generation, but a reprocess never counts as an exact
+copy of what it supersedes: it is always stored and sent (§15.1, rule 7, which said "nothing new is stored" when
+the outcome was the same, is replaced). A stage may still note that the output's digest equals the one it
+supersedes (`same_output=true` on its audit) as information for the operator.
+
+#### 15.8.3 Which object is current
+
+At any stage, and for a system after the transformer:
+- **between generations of an item:** the higher generation supersedes every object of the lower one, whatever its
+  sequence number;
+- **within a generation:** for the same sequence number, the higher line supersedes the lower, compared stage by
+  stage from the left.
+
+A stage learns of a generation from any message of it: a record, or the item's own messages (`item.split`,
+`item.progress`). Without the item's messages, a new generation that failed as a whole at the split stage (a new
+splitter rejects the item) would send nothing downstream, and the stages after would go on treating the older
+generation as current.
+
+What a stage records:
+- **the latest generation of each item it has seen** (`stage_item` gains `generation`; the split stage's
+  `split_item` too, as the generation it is cutting or last cut);
+- **the latest line of each place,** from its registry rows;
+- **superseding is derived, not written over rows:** a reprocess of a 10,000-record item doesn't rewrite 10,000
+  rows. An object is superseded when its stage holds a newer generation or line. Only an object stored after a
+  newer one gets `superseded_on_arrival` on its own row, so the late arrivals can be listed.
+- **failures:** a failure of a superseded object moves to `SUPERSEDED` (`failure.superseded`, with the run and the
+  object that superseded it), at once when the stage learns of the newer generation or line. This holds for every
+  open or declined failure: a declined one is still recorded as declined first, its superseding a later event.
+
+#### 15.8.4 The command and the run
+
+`reprocess` on a stage's admin, run as `SDH_OPERATOR`, with a reason on standard input (sealed as a decline's), and
+one selector:
+- `--item-id <id>` (repeatable): at the split stage, the item; at a later stage, every current record of the
+  item there; with `--seq <n>`, the one record;
 - `--intake <name> --landed-from <time> --landed-to <time>`;
-- `--made-by <version>`: the items with any output that version made (from `stage_version`, as
-  `sdh-admin versions` lists them, §14.5).
+- `--made-by <version>`: what that version of the stage made (from `stage_version`, as `sdh-admin versions` lists
+  it, §14.5).
 
-`--dry-run` lists the items selected, with counts by version, and records nothing. Otherwise the command records
-a run and prints its ID; it makes no output itself. Like `release`, the stage's pods do the work, under the
-item's lease (split) or the record's claim (convert), so nothing is made outside a pod and two pods never
-reprocess the same item.
+`--dry-run` lists what the selector chooses, with counts by version and what would be refused, and records
+nothing. Otherwise the command records a run, expands the selector once into the objects it chooses (so the run
+is a fixed list: items landed later aren't added; a rerun is a new run), and prints the run's ID. It makes no output
+and sends nothing itself: the CLI holds no broker credentials. `reprocess --status --run <id>` shows the run object
+by object, with no content; `reprocess --cancel --run <id>` withdraws what isn't yet queued.
 
-**The run.** A table per stage, `<schema>.reprocess_run` (the run ID, a UUIDv7; the stage; the selector; who,
-when, the reason sealed; the version it was requested under; state `PENDING`, `RUNNING`, `DONE`, `CANCELLED`) and
-`<schema>.reprocess_item` (run, item, state, and per item the counts below). The selector is expanded to items
-once, when the run is recorded, so the run is a fixed list: items landed later are not added, and a rerun is a new
-run. `reprocess --cancel --run <id>` stops items not yet started; an item started finishes. `reprocess --status
---run <id>` shows the run, item by item, without content. Pods take a bounded number of a run's items each
-renewal interval **(to decide: the limit, and whether a run waits while the stage's live backlog is above a
-threshold, so a remap never delays new data)**.
+Tables per stage: `<schema>.reprocess_run` (ID as a UUIDv7; stage; selector; who, when, the reason sealed; the
+version it was asked under; `PENDING`, `QUEUED`, `DONE`, `CANCELLED`) and `<schema>.reprocess_object` (run, place,
+the line or generation it was given, state, and the outcome once known).
 
-A run is refused, or an item skipped with its reason, when:
-- the item hasn't finished at this stage (in progress, `HELD`, `CLOSED`): only an ended item is reprocessed;
-- the item has a correction or release pending;
-- the version running now is the one that made all of the item's output there (nothing would change), unless
-  `--force` is given, for a stage that is not deterministic in a way the version doesn't capture.
+**Queueing.** Each renewal interval, a pod of the stage takes the run's objects not yet queued, each under the
+item's lease (split) or the record's claim (later stages), so two pods never queue the same object:
+1. it checks the object is still current at the stage (else `refused: superseded`);
+2. it gives it its generation or line: the item's latest generation + 1 at the split stage; the place's latest
+   revision at this stage + 1 at a later stage; and records that in `reprocess_object` before sending, so a resend
+   after a crash keeps the same number;
+3. it puts a reprocess message on the stage's own input queue: `item.reprocess` at the split stage (naming the
+   landed item and the generation), `record.reprocess` at a later stage (naming the stored input record and the
+   line), with the run ID and cause;
+4. the stage's workers take it as any input, at the stage's own pace.
 
-**Each record, and its outcome.** The stage processes the stored input as it processes new input, under the
-version running now, with the duplicate rule (§14.3) bypassed for this run alone. Each output is compared with the
-one stored for the same input:
-- **same** (its digest equals the stored output's, `stage_record.output_digest` at the convert stage, the record
-  ID at the split stage): nothing stored, nothing sent; counted `same`.
-- **different:** stored as a new row with the new version and `supersedes` naming the row it replaces (a new
-  column, beside `correction_of`), and sent downstream with `supersedes` in its `record.split` or
-  `record.stored`. The old row stays as it was. A stage after takes it as a new record (its record ID is new), and
-  its own output for it names, in its own `supersedes`, the output it made from the superseded input, found from
-  its registry by that input's record ID. Counted `different`.
-- **failed:** the earlier output stays, and stays current. The failure goes to the fail store as any failure,
-  with `reprocess_run` set and `reprocess_of` naming the output it was reprocessing, so it is listed and can be
-  corrected, retried or declined; but it doesn't reopen the item, since the item's output is complete (§15.4a,
-  "the other way round"). Counted `failed`.
+Reprocess messages are signed by the stage's own key, and a stage accepts these two types only when signed by
+itself (every other type it accepts from the stage before it, as now). Each stage needs leave to send to its own
+input queue: a deployment change on each broker (§15.8.9).
 
-**Open failures resolved by a reprocess (§15.4a).** A reprocess also runs over an item's failed input, since a
-changed stage may now pass it. A record that passes where an open failure (`FAILED`, `DECLINED`,
-`FAILED_CORRECTION`) was is matched to it only exactly: the same item and sequence number, and at the split stage
-the same source offset and length. Matched, it is stored with `resolves` naming the failure, which moves to
-`SUPERSEDED` with `resolved_by`, `resolved_at`, `resolved_version` and the run (`failure.superseded`), and the
-item's counts change, so the item is announced again by §15.6e: `item.progress`, or its item-complete message
-with the next completion number once nothing is open. A failure no passing record matches stays open and is listed
-`unmatched` in the run's status. A `DECLINED` failure superseded is still recorded as declined first; its
-superseding is a later event, not a rewrite **(to decide: whether a reprocess may supersede a declined failure at
-all, or only `FAILED` and `FAILED_CORRECTION`)**.
+**Refused, with the reason in `reprocess_object` and the run's status:**
+- the object is superseded at this stage;
+- the stored input is past retention, so it can't be read;
+- the item has a hold release pending (§15.6e), to be applied first.
 
-**When the split stage cuts differently.** A new splitter may cut an item into different records: more, fewer,
-or at other places. Records are named by their content, so a different cut can't be lined up with the old one
-record by record. Proposed: at the split stage the item is reprocessed only if the new cut gives the same number
-of records at the same places (offset and length per sequence number); records whose bytes then differ are
-`different`, as above. An item cut otherwise is stored as nothing and listed `cut_differs`, and the operator lands
-it again with `resubmit` (§13.5), which makes a new item under the new version, linked to the old one
-**(to decide: this, or storing the new cut as a new generation of the item, a larger change downstream)**.
+Nothing else is refused: an object in progress is interrupted (§15.8.6), and one never processed downstream is
+simply processed there. A correction or retry not yet processed is warned about by the command (the reprocess will
+supersede it), not refused (§15.8.5).
 
-**Counting at the stages after.** A stage after receives a superseding record for an item it has completed. It
-must not count it as one more record of the item. Proposed: the registry row for the superseding input names what
-it supersedes, and the item's counts are kept per sequence number, the latest version's row standing for its
-place; the item is not reopened and no item-complete message is sent again, since its total hasn't changed. The
-stage sends a `record.stored` (or `record.failed`) for it as for any record **(to decide: whether the stages after
-send an item-level message when a reprocess changes an item, such as `item.reprocessed` with the run and counts,
-so the transformer and producers learn that an item's output changed)**.
+**What a reprocess reads at each stage:** the split stage, the landed item (`landed_items`); the convert stage, the
+input record as the split stage stored it (the current object of its place in `split_records`, failed pieces
+excluded, as they are the split stage's own failures); the transform stage, the converted record (`records`). A
+stage after the first reads only rows of its input's current generation and line, judged from those rows' own
+columns, so it needs nothing from the stage before's registry.
 
-**Producers.** A reprocess sends no new `item.result` unless an open failure was resolved (the item's outcome
-changed), when the result is sent again as `completed`, as for a correction (§15.6e).
+#### 15.8.5 Corrections and retries as revisions
 
-**Telemetry.** Audited, no content: `stage.reprocess_requested` (run, stage, selector kind, operator, item
-count), `stage.reprocess_item` per item (run, item, counts `same`, `different`, `failed`, `superseded`,
-`unmatched`, or the reason skipped), `stage.reprocess_done` (run, totals), `failure.superseded` per failure
-resolved. A new attribute, `sdh.run_id`, joins them. Metrics: `sdh.stage.reprocessed` by stage and outcome, and
-`sdh.stage.failures_resolved` by stage and how (§15.4a).
+What exists (§15.6c–§15.6f) is kept as the operator's steps (`export`, `correct`, `retry`, with the corrected
+content in `stage_correction` and applied by the stage's workers), but what they make is recorded as a revision:
+- **A correction or retry of one record** (at the convert or transform stage, or of one piece at the split stage)
+  makes the next revision of its place, with cause `correction` (with the edit stored, as now) or `reprocess` (a
+  retry). The failure is `SUPERSEDED` by it **whether or not the revision passes**; a revision that fails is a new
+  failure of its own (`FAILED`, with its line), open, naming the one it followed. A piece corrected at the split
+  stage must still give exactly one record (`CORRECTION_RECORD_COUNT` otherwise); for more, the operator corrects
+  the item as a whole.
+- **A correction or retry of the item as a whole** (`--seq -1` at the split stage) makes the item's next
+  generation, with cause `correction` or `reprocess`. It may cut any number of records. Its earlier rule, that
+  records already stored come out byte for byte (`CORRECTION_CHANGES_PASSED`), goes: the earlier generation is
+  superseded as a whole rather than extended.
+- **A correction waiting when a reprocess supersedes its object** isn't refused or discarded: when its turn comes
+  it is processed, stored and superseded on arrival, by §15.8.1 rule 5. The edit is kept, and can be seen.
+- **Decline and reopen** are unchanged, for current failures only.
 
-**In the contract (3.0, unreleased).** `record.split` and `record.stored` gain the optional `supersedes` (the
-record ID replaced). Nothing else changes: `resolves` and completion numbering (§15.6e) already carry the rest.
+The fail store's states become:
 
-**Order of building, once agreed:** the run tables and commands (`--dry-run` first); the convert stage's
-reprocess, since its outcomes are per record; then the split stage's, with the cut check; then counting
-superseding records at the stages after; then `SUPERSEDED`. Each with its tests, and tried on the sandbox.
+| State | Meaning |
+|---|---|
+| `FAILED` | failed, not acted on |
+| `REVISION_PENDING` | a correction or retry is waiting to be processed (was `CORRECTION_PENDING`) |
+| `DECLINED` | the operator chose not to act on it, with a reason |
+| `SUPERSEDED` | a newer generation or revision exists; names it, the run or correction that made it, and its cause |
+
+`FAILED_CORRECTION`, `CORRECTED` and `RETRIED` go: whether a newer object passed, and whether it was edited, is
+told by that object (its own state, its cause). An item is complete at a stage when every current object of its
+current generation there has passed or been declined. Sandbox rows in the states that go are moved once at start,
+as completions were numbered (revision (cj)): `CORRECTED` and `RETRIED` to `SUPERSEDED` naming what passed,
+`FAILED_CORRECTION` to `SUPERSEDED` with the correction's failure added as a `FAILED` row of its own.
+
+This reverses the decision of earlier on 2026-11-09 that a failed retry returns its failure to `FAILED` (agreed
+by the user): under the rules above, the retried object is superseded by the retry, and the retry's own
+failure is the open one.
+
+#### 15.8.6 Interrupted processing
+
+- **At the split stage**, splitting an item can take a while, and may be part way, or `HELD` (§14.3), when its next
+  generation is asked for. The new generation takes the item's lease; the older one stops where it is and ends as
+  `INTERRUPTED`, keeping what it had cut. The split stage audits `split.generation_interrupted` (item, the
+  generation stopped and the one that stopped it, the run, records cut so far, the offset reached) and sends the
+  older generation's `item.split` with result `INTERRUPTED` and its count, so every stage after knows how many of
+  its records to expect, accounts for each, and doesn't report the item's total missing
+  (`convert.item_total_missing`). Counted in `sdh.split.generations_interrupted`. A `HELD` item reprocessed this
+  way needs no `release`; a `CLOSED` one may be reprocessed too, in place of landing it again.
+- **At the convert and transform stages**, a record is processed in one step and can't be cut short. A record in
+  progress when its next revision is queued finishes; whichever is stored second is judged by §15.8.3, so the
+  older is superseded either way, and the late one is marked on arrival. Nothing is lost, so this isn't counted as
+  an interruption, but as a late arrival (`record.superseded_on_arrival`, below).
+- **An item's older generation at a stage after the split** can't be interrupted either: its records still arrive
+  and are processed and marked superseded. When the stage learns of the newer generation it audits
+  `stage.generation_superseded` (item, both generations, the run, counts of the older one's records done, failed
+  and still expected), and sends no item-complete message for the older generation thereafter.
+
+#### 15.8.7 Messages and completion
+
+- **Item-complete messages** (`item.split`, `item.converted`, later `item.transformed`) are sent per generation,
+  with `generation`; completion numbers (§15.6e) count within a generation. A system after the transformer
+  needn't wait for them; they let it tell when a generation is whole, if it wants to.
+- **Every output of a reprocess or correction** carries `generation`, `line`, `cause` and `runId` (null for a
+  correction, which names its correction instead), `revisionOf` (the record ID of the object it supersedes at the
+  same place, when the stage holds one) and `resolves` for a correction or retry (the failure it was made for). An
+  output stored superseded on arrival carries `superseded: true`. Such an output is still sent on (agreed),
+  so lineage reaches the end of the pipeline; a system after the transformer can ignore it by the flag.
+- **Producers:** no operator action sends the producer anything: not a reprocess, retry, correction, decline or
+  reopen (decided with the user 2026-11-09). The producer's only responsibility to the pipeline is to deliver data;
+  other systems direct any corrective work to the producer. This replaces §15.6e's sending the producer's result
+  again (`incomplete`, then `completed`) when a failure changes state. The result sent when an item is first
+  processed is unchanged.
+
+#### 15.8.8 Telemetry
+
+Audited, with no content, all carrying `sdh.run_id` (new), `sdh.generation` (new), `sdh.line` (new), `sdh.cause`
+(new) and `sdh.began_at` (the stage where the reprocess began; new):
+- `stage.reprocess_requested` (run, stage, selector kind, operator, objects chosen, objects refused);
+- `stage.reprocess_queued` per object (place, the generation or line given);
+- `stage.reprocess_refused` per object (place, reason);
+- `stage.generation_started` per item (the generation, cause, stage it began at), at every stage on the
+  generation's first message;
+- `stage.reprocessed` per object processed (place, line, outcome `stored` or `failed`, `same_output`);
+- `split.generation_interrupted`, `stage.generation_superseded` (§15.8.6);
+- `record.superseded_on_arrival` (place, its line, the newer line or generation);
+- `failure.superseded` (place, the newer object, the run or correction);
+- `stage.reprocess_done` per run (totals).
+
+Metrics: `sdh.stage.reprocessed` by stage, cause and outcome; `sdh.stage.superseded_on_arrival` by stage;
+`sdh.split.generations_interrupted`; `sdh.stage.failures_superseded` by stage and cause. The fail store's
+listing (`failures`) shows each failure's generation and line.
+
+#### 15.8.9 What changes elsewhere
+
+- **Replay goes** (§13.2): landing's `replay --item-id` is a reprocess at the split stage; the split stage's is a
+  reprocess at the convert stage of every current record of the item; the convert stage's is a reprocess at the
+  transform stage. The replay rules: "only a completed item" goes (§15.8.6 handles in-progress items); the
+  broker's own ID per resend stays, now as the generation and line in the message ID; "the producer's result only
+  on request" becomes never.
+- **The duplicate rule** (§14.3) still holds for a redelivery: the same message, with the same generation and line,
+  is a duplicate whatever its version. A reprocess is never a redelivery, since its generation or line is new.
+- **A held split item** may be released (§15.6e) or reprocessed (§15.8.6).
+- **Landing's `resubmit`** stays, for a new item from the producer's data, linked by `replaces_item_id`; a
+  reprocess is for the same item.
+- **Deployment:** each stage may send to its own input queue (Kafka ACLs, SQS and Pub/Sub permissions, Service Bus
+  and Event Hubs send rights, Artemis and RabbitMQ users); the sandbox and the deployment guide add them.
+- **Stable FHIR IDs** (§15.4) leave the pipeline's requirements: what a reprocess's output replaces is decided after
+  the transformer.
+
+#### 15.8.10 Order of building, once agreed
+
+1. Generation and line in rows, keys, message IDs and the contract; the fail store's states and the one-time move
+   of sandbox rows; the currency rule at every stage (§15.8.3), with `superseded_on_arrival` and
+   `failure.superseded`.
+2. Corrections and retries as revisions (§15.8.5).
+3. The run tables and `reprocess` (`--dry-run` first), the pods' queueing and the self-signed reprocess messages,
+   at the convert stage first (one record in, one out).
+4. The split stage's reprocess: generations, interruption, `INTERRUPTED` item ends, `stage.generation_superseded`
+   downstream.
+5. Replay's removal; the brokers' send rights in the sandbox and the deployment guide.
+
+Each with its tests, and tried on the sandbox.
 
 ## 16. Items with no records (decided and built 2026-11-09)
 
