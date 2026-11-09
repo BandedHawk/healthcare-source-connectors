@@ -433,3 +433,7 @@ Checked again since: see the end of this section.
   repeat). Harmless here, but it shows the gap in STAGES.md §15.6f's known limit: 3,547 convert rows and every split
   row from before (ci) carry completion 0, so reopening a failure of one would reuse message IDs already sent.
   Fixed in revision (cj): each start numbers such rows 1 (STAGES.md §15.6f).
+- 2026-11-09, revision (cj): the first start numbered the earlier rows, auditing
+  `split.completions_numbered count=3547`, `stage.completions_numbered` and `stage.totals_numbered` (each
+  `count=3547`); no row at either stage is left at completion 0, and no item was audited `stage.item_reopened`
+  at startup. A second start numbered nothing (no audit). `check` passes (5 items split and converted).
