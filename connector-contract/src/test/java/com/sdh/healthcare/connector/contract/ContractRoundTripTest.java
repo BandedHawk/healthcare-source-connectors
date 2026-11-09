@@ -18,6 +18,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
@@ -328,6 +329,107 @@ class ContractRoundTripTest
         assertThat(PayloadCodec.toJson(new RecordStored("ID1", itemId, 0, 10,
                 20, "ccda", "application/json", "ccda/2", 30, 1, ref)))
                 .doesNotContainKey("resolves");
+    }
+
+    /**
+     * A record's lineage and an item message's generation (STAGES.md
+     * §15.8.2) round-trip, go in the message IDs past the first, and are
+     * left out of the payload for the first of everything, so its messages
+     * are as before.
+     */
+    @Test
+    void lineageRoundTrips()
+    {
+        UUID itemId = UUID.randomUUID();
+        StorageRef ref = new StorageRef("cat", "sdh_ingest", "records",
+                LocalDate.of(2026, 11, 9), 42L, "kek-1");
+        java.time.Instant at = java.time.Instant.EPOCH;
+        Lineage later = new Lineage(2, java.util.List.of(1, 3, 1));
+        RecordStored stored = new RecordStored("ID1", itemId, 0, 10, 20,
+                "ccda", "application/json", "ccda/2", 30, 1, ref, null, "v",
+                null, later, true);
+        ConnectorMessage.RecordSplit split = new ConnectorMessage.RecordSplit(
+                "ID2", itemId, 1, 30, 20, "ccda", "application/xml", 20, 1,
+                ref, null, null, null, -1, null, null, "v", null,
+                new Lineage(3, java.util.List.of()), false);
+        ConnectorMessage.RecordFailed failed =
+                new ConnectorMessage.RecordFailed("ID3", itemId, 2, 50, 20,
+                        "csv", "text/csv", "CONVERT_CSV_FIELD_COUNT", 20, 1,
+                        ref, null, null, "v",
+                        new Lineage(1, java.util.List.of(2)), false);
+        ConnectorMessage.ItemSplit secondGeneration =
+                new ConnectorMessage.ItemSplit(itemId, "claims", 7, 1, 999,
+                        "digest", null, null, null, at, at,
+                        java.util.List.of(), 2, 2);
+        ConnectorMessage.ItemConverted converted =
+                new ConnectorMessage.ItemConverted(itemId, "claims", 7, 1, at,
+                        java.util.List.of(), 1, 2);
+        ConnectorMessage.ItemProgressed progressed =
+                new ConnectorMessage.ItemProgressed(itemId, "claims",
+                        "convert", 7, 6, 1, 0, null, null, null, at,
+                        java.util.List.of(), 0, 3);
+        for (ConnectorMessage message : java.util.List.of(stored, split,
+                failed, secondGeneration, converted, progressed))
+        {
+            assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
+                    .isEqualTo(message);
+        }
+
+        assertThat(later.line()).containsExactly(1, 3);
+        assertThat(later).hasToString("g2 r1.3");
+        assertThat(stored.messageId())
+                .isEqualTo("rec-" + itemId + "-ID1~g2~r1.3");
+        assertThat(split.messageId()).isEqualTo("sp-" + itemId + "-ID2~g3");
+        assertThat(failed.messageId())
+                .isEqualTo("rec-" + itemId + "-ID3~r2");
+        assertThat(secondGeneration.messageId())
+                .isEqualTo("is-" + itemId + "~g2~c2");
+        assertThat(converted.messageId())
+                .isEqualTo("ic-convert-" + itemId + "~g2");
+        assertThat(progressed.messageId())
+                .isEqualTo("ip-convert-" + itemId + "-7-6-1-0~g3");
+        assertThat(PayloadCodec.toJson(stored))
+                .containsEntry("superseded", true)
+                .containsEntry("generation", 2)
+                .containsEntry("line", java.util.List.of(1, 3));
+
+        RecordStored first = new RecordStored("ID1", itemId, 0, 10, 20,
+                "ccda", "application/json", "ccda/2", 30, 1, ref);
+        assertThat(first.lineage()).isEqualTo(Lineage.FIRST);
+        assertThat(first.messageId()).isEqualTo("rec-" + itemId + "-ID1");
+        assertThat(PayloadCodec.toJson(first)).doesNotContainKeys(
+                "generation", "line", "superseded");
+        assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemSplit(itemId,
+                "claims", 7, 1, 999, "digest", null, null, null, at, at)))
+                .doesNotContainKey("generation");
+    }
+
+    /**
+     * Lineages compare by generation, then by revision stage by stage, a
+     * stage not given counting as revision 1 (STAGES.md §15.8.3): a late
+     * revision 1 is older than a revision 2 that came first.
+     */
+    @Test
+    void lineagesCompareByGenerationThenRevision()
+    {
+        Lineage convertRevised = Lineage.FIRST.withRevision(
+                Lineage.CONVERT, 2);
+        assertThat(convertRevised.line()).containsExactly(1, 2);
+        assertThat(Lineage.FIRST).isLessThan(convertRevised);
+        assertThat(convertRevised.withRevision(Lineage.TRANSFORM, 4))
+                .isLessThan(Lineage.FIRST.withRevision(Lineage.CONVERT, 3));
+        assertThat(new Lineage(1, java.util.List.of(9, 9)))
+                .isLessThan(new Lineage(2, java.util.List.of()));
+        assertThat(new Lineage(1, java.util.List.of(1, 1, 1)))
+                .isEqualByComparingTo(Lineage.FIRST)
+                .isEqualTo(Lineage.FIRST);
+        assertThat(convertRevised.upTo(Lineage.SPLIT))
+                .isEqualTo(Lineage.FIRST);
+        assertThat(Lineage.parseLine(convertRevised.lineText()))
+                .containsExactly(1, 2);
+        assertThat(convertRevised.revision(Lineage.TRANSFORM)).isEqualTo(1);
+        assertThatThrownBy(() -> new Lineage(0, java.util.List.of()))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     /**

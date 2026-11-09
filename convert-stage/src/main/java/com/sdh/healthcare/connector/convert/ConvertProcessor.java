@@ -323,15 +323,19 @@ public final class ConvertProcessor
         }
         return switch (message)
         {
+            // Made under the record's lineage, the convert stage's first
+            // revision of it (STAGES.md §15.8.2).
             case RecordSplit split -> new StageInput.RecordInput(
-                    split.recordId(), split.itemId(), split.seq());
+                    split.recordId(), split.itemId(), split.seq(),
+                    split.lineage());
             case ItemSplit item -> new StageInput.ItemTotal(item.itemId(),
-                    item.recordCount(), false, item.completion());
+                    item.recordCount(), false, item.completion(),
+                    item.generation());
             // The split stage has failures open: the records passed so far
             // (STAGES.md §15.6).
             case ItemProgressed progressed -> new StageInput.ItemTotal(
                     progressed.itemId(), progressed.passedCount(), true,
-                    progressed.completion());
+                    progressed.completion(), progressed.generation());
             default -> new StageInput.Unwanted("wrong_type");
         };
     }
@@ -703,7 +707,8 @@ public final class ConvertProcessor
             {
                 Prepared prepared = outputs.get(index).value();
                 messages.add(message(record, ref,
-                        version(prepared.split()), prepared.correctionOf()));
+                        version(prepared.split()), prepared.correctionOf())
+                        .withLineage(prepared.split().lineage(), false));
             }
             else
             {
@@ -739,6 +744,7 @@ public final class ConvertProcessor
                 .withOrigin(split.origin());
         writer.versions(split.itemId(), split.seq(), version(split),
                 split.version());
+        writer.lineage(split.itemId(), split.seq(), split.lineage());
         if (prepared.correctionOf() != null)
         {
             writer.correction(split.itemId(), split.seq(),
@@ -783,8 +789,9 @@ public final class ConvertProcessor
      * @return {@code record.failed} if it has an error, else
      *         {@code record.stored}
      */
-    private static ConnectorMessage message(WrittenRecord record,
-            StorageRef ref, String version, String resolves)
+    private static ConnectorMessage.RecordInStorage message(
+            WrittenRecord record, StorageRef ref, String version,
+            String resolves)
     {
         Representation representation = record.representation();
         if (record.error() != null)
@@ -911,13 +918,13 @@ public final class ConvertProcessor
                     row.sourceOffset(), row.sourceLength(), row.format(),
                     row.contentType(), row.errorCode(), row.plaintextLength(),
                     row.chunkCount(), ref, row.origin(), row.errorAt(),
-                    row.stageVersion());
+                    row.stageVersion(), row.lineage(), false);
         }
         return new RecordStored(row.recordId(), itemId, row.seq(),
                 row.sourceOffset(), row.sourceLength(), row.format(),
                 row.contentType(), row.mapping(), row.plaintextLength(),
                 row.chunkCount(), ref, row.origin(), row.stageVersion(),
-                row.correctionOf());
+                row.correctionOf(), row.lineage(), false);
     }
 
     /**
@@ -932,7 +939,7 @@ public final class ConvertProcessor
                 ? split.intake() : UNKNOWN_INTAKE;
         return new ItemConverted(progress.itemId(), intake, progress.done(),
                 progress.unresolved(), clock.instant(), progress.versions(),
-                progress.nextCompletion());
+                progress.nextCompletion(), progress.generation());
     }
 
     /**
@@ -951,7 +958,8 @@ public final class ConvertProcessor
                 progress.declined(), facts == null ? null : facts.failure(),
                 facts == null ? null : facts.producerRef(),
                 facts == null ? null : facts.replaces(), clock.instant(),
-                progress.versions(), progress.completion());
+                progress.versions(), progress.completion(),
+                progress.generation());
     }
 
     /**

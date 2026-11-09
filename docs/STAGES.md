@@ -1400,7 +1400,7 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
 4. **Exact copies** (§15.5) at landing and at the stages.
 5. **The drain check** (§14.4).
 
-### 15.8 Reprocess, generations and revisions (decided 2026-11-09; not built)
+### 15.8 Reprocess, generations and revisions (decided 2026-11-09; step 1 built)
 
 Worked out with the user on 2026-11-09, in place of the proposal first written here. It replaces `replay`
 (§13.2), the outcomes of §15.4 and the matching of §15.4a, and changes how corrections and retries are recorded
@@ -1683,6 +1683,39 @@ listing (`failures`) shows each failure's generation and line.
 5. Replay's removal; the brokers' send rights in the sandbox and the deployment guide.
 
 Each with its tests, and tried on the sandbox.
+
+**Step 1 as built (2026-11-09; not yet tried on the sandbox).**
+
+- `Lineage` (connector-contract) holds a generation and a revision per stage, trailing 1s left out, and orders by
+  generation, then revision stage by stage. A message ID gains `~g<n>` past generation 1 and `~r<line>` past
+  revision 1, so IDs from before are unchanged. Record messages carry `generation`, `line` and, when true,
+  `superseded`; item messages carry `generation`. Each is left out of the payload at its first value.
+- The records tables gain `generation` and `line` (fields 29 and 30), added by schema evolution; a row without them
+  is the first of everything. A registry key is the record ID plus the lineage's suffix.
+- The fail store's key is now `(stage, item_id, seq, generation, line)`, moved by a one-time statement on start, and
+  it gains `superseded_how` (`REVISION`, `GENERATION`, `ARRIVAL`) and `superseded_by`. Events gain `generation` and
+  `line`. Operator commands act on the current failure at a number: not superseded, of the newest lineage.
+- The registry applies §15.8.3 in `store` and `expect`, under a lock on the item's row taken once per transaction,
+  items in one order. A record whose claim was lost changes nothing (its claim is checked, and its row locked,
+  first). A record of a newer generation starts the item again: counts and total dropped, older failures
+  superseded (`GENERATION`), `stage.generation_superseded` and `stage.generation_started` audited. A late record is
+  stored, not counted, its failure kept as `SUPERSEDED` (`ARRIVAL`), `record.superseded_on_arrival` audited and
+  `sdh.stage.superseded_on_arrival` counted. A newer revision at a place marks the older row superseded and its
+  failure `SUPERSEDED` (`REVISION`); it adds to the failed count if it failed, never to done. An item's resolved
+  count takes `CORRECTED`, `RETRIED` and `REVISION`-superseded failures of its current generation only. A total of
+  an older generation is dropped, audited `stage.total_superseded`.
+- The worker asks the registry which outputs are superseded already, and sets `superseded` on their messages before
+  sealing them; `store` decides again under its locks.
+
+Left from step 1, with why:
+
+- The renames of the fail store's states wait for step 2, since they follow from how corrections become revisions
+  there.
+- Superseded on arrival is kept in the registry (`stage_record.late`), not in the Iceberg rows, and on the message.
+- `RecordBatchWriter` keeps a lineage per item and number within a batch, so one batch can't hold two lineages at
+  the same place. No stage writes that today; step 3 must not.
+- A pending correction whose failure has since been superseded is refused when it finishes (`CorrectionStore`
+  acts on current failures only). Step 2 decides what it becomes.
 
 ## 16. Items with no records (decided and built 2026-11-09)
 

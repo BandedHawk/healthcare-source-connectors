@@ -6,9 +6,11 @@
  */
 package com.sdh.healthcare.connector.core.failure;
 
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -114,10 +116,64 @@ public final class FailureStore
      * @param sourceOffset where in the item it starts, in bytes
      * @param version      the stage's version that failed it; null if not
      *                     known
+     * @param lineage      where the failed object stands in its line
+     *                     (STAGES.md §15.8.2): with the item and sequence
+     *                     number, what the failure is known by
      */
     public record Failure(UUID itemId, long seq, String recordId,
-            String errorCode, long sourceOffset, String version)
+            String errorCode, long sourceOffset, String version,
+            Lineage lineage)
     {
+
+        /**
+         * Reads no lineage as the first.
+         */
+        public Failure
+        {
+            lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A failure of the first lineage.
+         *
+         * @param itemId       the item
+         * @param seq          the record's number in the item
+         * @param recordId     the failed record's id, or null
+         * @param errorCode    why it failed
+         * @param sourceOffset where in the item it starts, in bytes
+         * @param version      the stage's version that failed it, or null
+         */
+        public Failure(UUID itemId, long seq, String recordId,
+                String errorCode, long sourceOffset, String version)
+        {
+            this(itemId, seq, recordId, errorCode, sourceOffset, version,
+                    null);
+        }
+    }
+
+    /**
+     * How a failure came to be superseded (STAGES.md §15.8.3), kept with it
+     * so an item's counts take only those that stand for a later pass.
+     */
+    public enum Superseded
+    {
+        /**
+         * A newer revision of the same place was stored: it stands for the
+         * failure, passed or failed, and counts as resolving it.
+         */
+        REVISION,
+
+        /**
+         * A newer generation of the item was seen: the failure belongs to
+         * one that no longer counts.
+         */
+        GENERATION,
+
+        /**
+         * The failed object arrived after a newer one at its place, and was
+         * superseded as it was stored: it never counted.
+         */
+        ARRIVAL
     }
 
     /**
@@ -291,6 +347,8 @@ public final class FailureStore
     public static List<String> ddls(String table, String events)
     {
         // An index is made in its table's schema, so its name is plain.
+        String name = table.substring(table.indexOf('.') + 1);
+        String schema = table.substring(0, table.indexOf('.'));
         return List.of(ddl(table),
                 "ALTER TABLE " + table
                         + " ADD COLUMN IF NOT EXISTS reason_key bytea",
@@ -298,6 +356,38 @@ public final class FailureStore
                         + " ADD COLUMN IF NOT EXISTS reason_kek text",
                 "CREATE INDEX IF NOT EXISTS stage_failure_changed ON "
                         + table + " (stage, changed_at)",
+                // Added 2026-11-09 (STAGES.md §15.8.2): a failure is of one
+                // generation and line, so a newer revision's failure, or a
+                // newer generation's at the same number, is a row of its
+                // own; rows from before are the first of everything.
+                "ALTER TABLE " + table + " ADD COLUMN IF NOT EXISTS"
+                        + " generation integer NOT NULL DEFAULT 1",
+                "ALTER TABLE " + table + " ADD COLUMN IF NOT EXISTS"
+                        + " line integer[] NOT NULL DEFAULT '{}'",
+                "ALTER TABLE " + table + " ADD COLUMN IF NOT EXISTS"
+                        + " superseded_how text",
+                "ALTER TABLE " + table + " ADD COLUMN IF NOT EXISTS"
+                        + " superseded_by text",
+                """
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                      SELECT 1 FROM pg_constraint c
+                        JOIN pg_attribute a ON a.attrelid = c.conrelid
+                                           AND a.attnum = ANY (c.conkey)
+                       WHERE c.conrelid = '%1$s'::regclass
+                         AND c.contype = 'p' AND a.attname = 'generation')
+                  THEN
+                    EXECUTE (SELECT format(
+                                 'ALTER TABLE %%I.%%I DROP CONSTRAINT %%I',
+                                 '%2$s', '%3$s', conname)
+                               FROM pg_constraint
+                              WHERE conrelid = '%1$s'::regclass
+                                AND contype = 'p');
+                    ALTER TABLE %1$s
+                      ADD PRIMARY KEY (stage, item_id, seq, generation, line);
+                  END IF;
+                END $$""".formatted(table, schema, name),
                 """
                 CREATE TABLE IF NOT EXISTS %s (
                   stage       text        NOT NULL,
@@ -312,7 +402,13 @@ public final class FailureStore
                   reason_key  bytea,
                   reason_kek  text,
                   PRIMARY KEY (stage, item_id, seq, event)
-                )""".formatted(events));
+                )""".formatted(events),
+                // Added 2026-11-09 (STAGES.md §15.8.2): which failure at the
+                // number an event changed; null for one from before.
+                "ALTER TABLE " + events + " ADD COLUMN IF NOT EXISTS"
+                        + " generation integer",
+                "ALTER TABLE " + events + " ADD COLUMN IF NOT EXISTS"
+                        + " line integer[]");
     }
 
     /**
@@ -525,14 +621,20 @@ public final class FailureStore
             String operator, ReasonSealer reason, Resolution resolution,
             int timeout) throws SQLException
     {
+        // The current failure at the number: not superseded, of the newest
+        // generation and line (STAGES.md §15.8.3).
         String lock = """
                 SELECT record_id, error_code, source_offset, failed_version,
                        state,
                        (SELECT count(*) FROM %2$s e
                          WHERE e.stage = f.stage AND e.item_id = f.item_id
-                           AND e.seq = f.seq)
+                           AND e.seq = f.seq),
+                       generation, line
                   FROM %1$s f
                  WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND state <> 'SUPERSEDED'
+                 ORDER BY generation DESC, line DESC
+                 LIMIT 1
                    FOR UPDATE""".formatted(table, events);
         String update = """
                 UPDATE %s
@@ -543,14 +645,14 @@ public final class FailureStore
                        resolved_at = CASE WHEN ? THEN clock_timestamp()
                                           ELSE resolved_at END,
                        resolved_version = COALESCE(?, resolved_version)
-                 WHERE stage = ? AND item_id = ? AND seq = ?"""
-                .formatted(table);
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND generation = ? AND line = ?""".formatted(table);
         String insert = """
                 INSERT INTO %s (stage, item_id, seq, event, at, operator,
                        from_state, to_state, reason_enc, reason_key,
-                       reason_kek)
-                VALUES (?, ?, ?, ?, clock_timestamp(), ?, ?, ?, ?, ?, ?)"""
-                .formatted(events);
+                       reason_kek, generation, line)
+                VALUES (?, ?, ?, ?, clock_timestamp(), ?, ?, ?, ?, ?, ?, ?,
+                        ?)""".formatted(events);
         Stored before;
         int event;
         try (PreparedStatement select = connection.prepareStatement(lock))
@@ -569,7 +671,8 @@ public final class FailureStore
                 }
                 before = new Stored(new Failure(itemId, seq,
                         rows.getString(1), rows.getString(2),
-                        rows.getLong(3), rows.getString(4)),
+                        rows.getLong(3), rows.getString(4),
+                        lineage(rows, 7)),
                         State.valueOf(rows.getString(5)));
                 event = rows.getInt(6) + 1;
             }
@@ -596,6 +699,8 @@ public final class FailureStore
             set.setString(9, stage);
             set.setObject(10, itemId);
             set.setLong(11, seq);
+            set.setInt(12, before.failure().lineage().generation());
+            set.setArray(13, line(connection, before.failure().lineage()));
             set.executeUpdate();
         }
         try (PreparedStatement add = connection.prepareStatement(insert))
@@ -611,6 +716,8 @@ public final class FailureStore
             add.setBytes(8, sealed == null ? null : sealed.sealed());
             add.setBytes(9, sealed == null ? null : sealed.key());
             add.setString(10, sealed == null ? null : sealed.keyRef());
+            add.setInt(11, before.failure().lineage().generation());
+            add.setArray(12, line(connection, before.failure().lineage()));
             add.executeUpdate();
         }
         return new Changed(before, event);
@@ -703,7 +810,7 @@ public final class FailureStore
         String sql = """
                 SELECT item_id, seq, record_id, error_code, source_offset,
                        failed_version, state, failed_at, changed_at,
-                       changed_by
+                       changed_by, generation, line
                   FROM %s
                  WHERE stage = ?%s
                  ORDER BY failed_at DESC, item_id, seq
@@ -746,10 +853,10 @@ public final class FailureStore
         String sql = """
                 SELECT item_id, seq, record_id, error_code, source_offset,
                        failed_version, state, failed_at, changed_at,
-                       changed_by
+                       changed_by, generation, line
                   FROM %s
                  WHERE stage = ? AND item_id = ?
-                 ORDER BY seq""".formatted(table);
+                 ORDER BY seq, generation, line""".formatted(table);
         List<Listed> found = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
@@ -785,7 +892,8 @@ public final class FailureStore
         return new Listed(new Stored(new Failure(
                 rows.getObject(1, UUID.class), rows.getLong(2),
                 rows.getString(3), rows.getString(4), rows.getLong(5),
-                rows.getString(6)), State.valueOf(rows.getString(7))),
+                rows.getString(6), lineage(rows, 11)),
+                State.valueOf(rows.getString(7))),
                 rows.getTimestamp(8).toInstant(),
                 rows.getTimestamp(9).toInstant(), rows.getString(10));
     }
@@ -849,14 +957,42 @@ public final class FailureStore
             String stage, List<Failure> failures, int queryTimeoutSeconds)
             throws SQLException
     {
+        return insert(connection, table, stage, failures, null,
+                queryTimeoutSeconds);
+    }
+
+    /**
+     * Records failures on a connection, as {@link #insert(Connection,
+     * String, String, List, int)} does, or, for objects superseded as they
+     * arrived (STAGES.md §15.8.3), records them as {@code SUPERSEDED} at
+     * once, by {@link Superseded#ARRIVAL}, so they are kept and listed but
+     * never open nor counted.
+     *
+     * @param connection          the connection
+     * @param table               the table, with its schema
+     * @param stage               the stage
+     * @param failures            the failures
+     * @param supersededBy        for failures superseded on arrival, what
+     *                            was there first, as its lineage's text;
+     *                            null for failures to record open
+     * @param queryTimeoutSeconds how long the statement may run
+     * @return those not recorded before
+     * @throws SQLException if the statement fails
+     */
+    public static List<Failure> insert(Connection connection, String table,
+            String stage, List<Failure> failures, String supersededBy,
+            int queryTimeoutSeconds) throws SQLException
+    {
         String sql = """
                 INSERT INTO %s (stage, item_id, seq, record_id, error_code,
                        source_offset, failed_version, failed_at, state,
-                       changed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, clock_timestamp(), 'FAILED',
-                        clock_timestamp())
-                ON CONFLICT (stage, item_id, seq) DO NOTHING"""
-                .formatted(table);
+                       changed_at, generation, line, superseded_how,
+                       superseded_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, clock_timestamp(), ?,
+                        clock_timestamp(), ?, ?, ?, ?)
+                ON CONFLICT (stage, item_id, seq, generation, line)
+                DO NOTHING""".formatted(table);
+        boolean late = supersededBy != null;
         List<Failure> added = new ArrayList<>();
         try (PreparedStatement insert = connection.prepareStatement(sql))
         {
@@ -870,6 +1006,12 @@ public final class FailureStore
                 insert.setString(5, failure.errorCode());
                 insert.setLong(6, failure.sourceOffset());
                 insert.setString(7, failure.version());
+                insert.setString(8, late ? State.SUPERSEDED.name()
+                        : State.FAILED.name());
+                insert.setInt(9, failure.lineage().generation());
+                insert.setArray(10, line(connection, failure.lineage()));
+                insert.setString(11, late ? Superseded.ARRIVAL.name() : null);
+                insert.setString(12, supersededBy);
                 if (insert.executeUpdate() == 1)
                 {
                     added.add(failure);
@@ -900,6 +1042,11 @@ public final class FailureStore
             if (failure.version() != null)
             {
                 fields = fields.with(Attr.VERSION, failure.version());
+            }
+            if (!failure.lineage().first())
+            {
+                fields = fields.with(Attr.LINEAGE,
+                        failure.lineage().toString());
             }
             telemetry.auditWarn("failure.failed", fields);
             telemetry.failureRecorded(stage);
@@ -948,14 +1095,23 @@ public final class FailureStore
                             'FAILED_CORRECTION')),
                        count(*) FILTER (WHERE state = 'DECLINED'),
                        count(*) FILTER (WHERE state IN
-                           ('CORRECTED', 'RETRIED', 'SUPERSEDED'))
-                  FROM %s
-                 WHERE stage = ? AND item_id = ?""".formatted(table);
+                           ('CORRECTED', 'RETRIED')
+                           OR (state = 'SUPERSEDED'
+                               AND COALESCE(superseded_how, 'REVISION')
+                                   = 'REVISION'))
+                  FROM %1$s
+                 WHERE stage = ? AND item_id = ?
+                   AND generation = (SELECT COALESCE(max(generation), 1)
+                                       FROM %1$s g
+                                      WHERE g.stage = ? AND g.item_id = ?)"""
+                .formatted(table);
         try (PreparedStatement select = connection.prepareStatement(sql))
         {
             select.setQueryTimeout(queryTimeoutSeconds);
             select.setString(1, stage);
             select.setObject(2, itemId);
+            select.setString(3, stage);
+            select.setObject(4, itemId);
             try (ResultSet rows = select.executeQuery())
             {
                 rows.next();
@@ -1094,10 +1250,11 @@ public final class FailureStore
     {
         String sql = """
                 SELECT seq, record_id, error_code, source_offset,
-                       failed_version, state
+                       failed_version, state, generation, line
                   FROM %s
                  WHERE stage = ? AND item_id = ?
-                 ORDER BY seq""".formatted(table);
+                 ORDER BY seq, state = 'SUPERSEDED', generation DESC,
+                          line DESC""".formatted(table);
         List<Stored> found = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
@@ -1111,7 +1268,8 @@ public final class FailureStore
                 {
                     found.add(new Stored(new Failure(itemId, rows.getLong(1),
                             rows.getString(2), rows.getString(3),
-                            rows.getLong(4), rows.getString(5)),
+                            rows.getLong(4), rows.getString(5),
+                            lineage(rows, 7)),
                             State.valueOf(rows.getString(6))));
                 }
             }
@@ -1135,7 +1293,9 @@ public final class FailureStore
     }
 
     /**
-     * One failure, by its item and sequence number.
+     * One failure, by its item and sequence number: the current one there,
+     * not superseded and of the newest lineage, if any is (STAGES.md
+     * §15.8.3), else the newest superseded one.
      *
      * @param itemId the item
      * @param seq    its sequence number
@@ -1147,5 +1307,221 @@ public final class FailureStore
         return failures(itemId).stream()
                 .filter(stored -> stored.failure().seq() == seq)
                 .findFirst();
+    }
+
+    /**
+     * Supersedes the failure of an object a newer revision of its place
+     * replaced (STAGES.md §15.8.3), if it has one not already superseded,
+     * on a connection, as part of the caller's transaction: its state moves
+     * to {@code SUPERSEDED}, {@link Superseded#REVISION}, naming the newer
+     * lineage, with an event of the change. The caller audits it once
+     * committed ({@link #auditSuperseded}).
+     *
+     * @param connection the transaction's connection
+     * @param table      the failures' table, with its schema
+     * @param stage      the stage
+     * @param itemId     the item
+     * @param seq        the place's number
+     * @param older      the lineage of the object replaced
+     * @param newer      the lineage that replaced it
+     * @param timeout    how long a statement may run, in seconds
+     * @return the failure superseded, if there was one
+     * @throws SQLException if a statement fails
+     */
+    public static List<Stored> supersedeRevision(Connection connection,
+            String table, String stage, UUID itemId, long seq,
+            Lineage older, Lineage newer, int timeout) throws SQLException
+    {
+        return supersede(connection, table, stage, itemId,
+                "seq = ? AND generation = ? AND line = ?",
+                Superseded.REVISION, newer.toString(), timeout, seq,
+                older.generation(), line(connection, older));
+    }
+
+    /**
+     * Supersedes every failure of an item's generations before one
+     * (STAGES.md §15.8.3), not already superseded, on a connection, as part
+     * of the caller's transaction, as {@link #supersedeRevision} does, by
+     * {@link Superseded#GENERATION}.
+     *
+     * @param connection the transaction's connection
+     * @param table      the failures' table, with its schema
+     * @param stage      the stage
+     * @param itemId     the item
+     * @param generation the newer generation
+     * @param timeout    how long a statement may run, in seconds
+     * @return the failures superseded
+     * @throws SQLException if a statement fails
+     */
+    public static List<Stored> supersedeGeneration(Connection connection,
+            String table, String stage, UUID itemId, int generation,
+            int timeout) throws SQLException
+    {
+        return supersede(connection, table, stage, itemId, "generation < ?",
+                Superseded.GENERATION, "g" + generation, timeout,
+                generation);
+    }
+
+    /**
+     * Supersedes the failures that match, adding an event to each, before
+     * it is changed, so the event names the state it left.
+     *
+     * @param connection the transaction's connection
+     * @param table      the failures' table, with its schema
+     * @param stage      the stage
+     * @param itemId     the item
+     * @param where      the further condition, with its parameters' places
+     * @param how        how they were superseded
+     * @param by         what superseded them, as a lineage's text
+     * @param timeout    how long a statement may run, in seconds
+     * @param parameters the condition's parameters
+     * @return the failures superseded, as they were
+     * @throws SQLException if a statement fails
+     */
+    private static List<Stored> supersede(Connection connection, String table,
+            String stage, UUID itemId, String where, Superseded how,
+            String by, int timeout, Object... parameters) throws SQLException
+    {
+        String events = table + "_event";
+        String select = """
+                SELECT seq, record_id, error_code, source_offset,
+                       failed_version, state, generation, line
+                  FROM %s
+                 WHERE stage = ? AND item_id = ? AND state <> 'SUPERSEDED'
+                   AND %s
+                   FOR UPDATE""".formatted(table, where);
+        List<Stored> found = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement(select))
+        {
+            query.setQueryTimeout(timeout);
+            query.setString(1, stage);
+            query.setObject(2, itemId);
+            for (int index = 0; index < parameters.length; index++)
+            {
+                query.setObject(3 + index, parameters[index]);
+            }
+            try (ResultSet rows = query.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(new Stored(new Failure(itemId, rows.getLong(1),
+                            rows.getString(2), rows.getString(3),
+                            rows.getLong(4), rows.getString(5),
+                            lineage(rows, 7)),
+                            State.valueOf(rows.getString(6))));
+                }
+            }
+        }
+        String event = """
+                INSERT INTO %s (stage, item_id, seq, event, at, operator,
+                       from_state, to_state, generation, line)
+                VALUES (?, ?, ?,
+                        (SELECT count(*) + 1 FROM %1$s e
+                          WHERE e.stage = ? AND e.item_id = ? AND e.seq = ?),
+                        clock_timestamp(), 'pipeline', ?, 'SUPERSEDED', ?, ?)"""
+                .formatted(events);
+        String update = """
+                UPDATE %s
+                   SET state = 'SUPERSEDED', changed_at = clock_timestamp(),
+                       superseded_how = ?, superseded_by = ?
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND generation = ? AND line = ?""".formatted(table);
+        try (PreparedStatement add = connection.prepareStatement(event);
+                PreparedStatement set = connection.prepareStatement(update))
+        {
+            add.setQueryTimeout(timeout);
+            set.setQueryTimeout(timeout);
+            for (Stored stored : found)
+            {
+                Failure failure = stored.failure();
+                Array line = line(connection, failure.lineage());
+                add.setString(1, stage);
+                add.setObject(2, itemId);
+                add.setLong(3, failure.seq());
+                add.setString(4, stage);
+                add.setObject(5, itemId);
+                add.setLong(6, failure.seq());
+                add.setString(7, stored.state().name());
+                add.setInt(8, failure.lineage().generation());
+                add.setArray(9, line);
+                add.executeUpdate();
+                set.setString(1, how.name());
+                set.setString(2, by);
+                set.setString(3, stage);
+                set.setObject(4, itemId);
+                set.setLong(5, failure.seq());
+                set.setInt(6, failure.lineage().generation());
+                set.setArray(7, line);
+                set.executeUpdate();
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Audits failures superseded, once committed: {@code failure.superseded},
+     * with the stage, item, number, the state each left, its lineage and
+     * what superseded it; no content.
+     *
+     * @param stage      the stage
+     * @param superseded the failures, as they were
+     * @param how        how they were superseded
+     * @param by         what superseded them, as a lineage's text
+     */
+    public static void auditSuperseded(String stage, List<Stored> superseded,
+            Superseded how, String by)
+    {
+        Telemetry telemetry = Telemetry.get();
+        for (Stored stored : superseded)
+        {
+            telemetry.audit("failure.superseded", Fields.of(Attr.STAGE, stage)
+                    .with(Attr.ITEM_ID, stored.failure().itemId())
+                    .with(Attr.SEQ, stored.failure().seq())
+                    .with(Attr.STATE, stored.state().name())
+                    .with(Attr.LINEAGE, stored.failure().lineage().toString())
+                    .with(Attr.REASON, how.name())
+                    .with(Attr.SUPERSEDED_BY, by));
+        }
+    }
+
+    /**
+     * A lineage's revisions as a SQL array, for the {@code line} column.
+     *
+     * @param connection the connection
+     * @param lineage    the lineage
+     * @return the array
+     * @throws SQLException if it can't be made
+     */
+    public static Array line(Connection connection, Lineage lineage)
+            throws SQLException
+    {
+        return connection.createArrayOf("integer",
+                lineage.line().toArray());
+    }
+
+    /**
+     * Reads a lineage from a row's {@code generation} and {@code line}
+     * columns.
+     *
+     * @param rows   the rows, on one
+     * @param column the {@code generation} column's index; {@code line} is
+     *               the next
+     * @return the lineage
+     * @throws SQLException if it can't be read
+     */
+    public static Lineage lineage(ResultSet rows, int column)
+            throws SQLException
+    {
+        int generation = rows.getInt(column);
+        Array line = rows.getArray(column + 1);
+        List<Integer> revisions = new ArrayList<>();
+        if (line != null)
+        {
+            for (Object revision : (Object[]) line.getArray())
+            {
+                revisions.add(((Number) revision).intValue());
+            }
+        }
+        return Lineage.of(generation, revisions);
     }
 }

@@ -143,6 +143,12 @@ public final class Telemetry
     private final LongCounter versionDiffers;
 
     /**
+     * Records stored after a newer object at their place, by stage
+     * (STAGES.md §15.8.3).
+     */
+    private final LongCounter supersededOnArrival;
+
+    /**
      * Items the split stage held, begun under another of its versions
      * (STAGES.md §14.3).
      */
@@ -232,6 +238,12 @@ public final class Telemetry
                 .setUnit("{record}")
                 .setDescription("Records received again under a different"
                         + " version than they were stored with, by stage")
+                .build();
+        supersededOnArrival = meter.counterBuilder(
+                "sdh.stage.superseded_on_arrival")
+                .setUnit("{record}")
+                .setDescription("Records stored after a newer one at their"
+                        + " place, by stage")
                 .build();
         itemsHeld = meter.counterBuilder("sdh.split.items_held")
                 .setUnit("{item}")
@@ -568,6 +580,18 @@ public final class Telemetry
     public void versionDiffers(String stage)
     {
         versionDiffers.add(1, Fields.of(Attr.STAGE, stage).toAttributes());
+    }
+
+    /**
+     * Counts a record stored after a newer one at its place (STAGES.md
+     * §15.8.3).
+     *
+     * @param stage the stage
+     */
+    public void supersededOnArrival(String stage)
+    {
+        supersededOnArrival.add(1,
+                Fields.of(Attr.STAGE, stage).toAttributes());
     }
 
     /**

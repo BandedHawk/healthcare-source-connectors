@@ -159,6 +159,19 @@ public final class RecordsTable
      */
     public static final String CORRECTION_OF = "correction_of";
 
+    /**
+     * The generation of the record's item (STAGES.md §15.8.2), from 1; null
+     * on a row written before generations were kept, which is the first.
+     */
+    public static final String GENERATION = "generation";
+
+    /**
+     * The record's revision per stage, joined with dots without trailing
+     * 1s, such as {@code 1.3} (STAGES.md §15.8.2); null on a row of the
+     * first revision everywhere, or written before lineage was kept.
+     */
+    public static final String LINE = "line";
+
     /** The table's columns, with their Iceberg field ids. */
     public static final Schema SCHEMA = new Schema(
             required(1, RECORD_ID, Types.StringType.get()),
@@ -200,7 +213,11 @@ public final class RecordsTable
                     "the version of the stage before that made its input"),
             optional(28, CORRECTION_OF, Types.StringType.get(),
                     "the failed record an operator's correction made this"
-                            + " one from"));
+                            + " one from"),
+            optional(29, GENERATION, Types.IntegerType.get(),
+                    "the generation of the record's item"),
+            optional(30, LINE, Types.StringType.get(),
+                    "the record's revision per stage"));
 
     /** The partitioning: by the day each row was written. */
     public static final PartitionSpec SPEC =

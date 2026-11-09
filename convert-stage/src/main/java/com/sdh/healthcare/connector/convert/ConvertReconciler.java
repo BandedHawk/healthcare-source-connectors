@@ -504,7 +504,8 @@ public final class ConvertReconciler
         rows.addAll(CommittedRecords.corrections(splitRecords, itemId));
         for (CommittedRecords.Row row : rows)
         {
-            if (known.contains(row.recordId()) || row.errorCode() != null)
+            if (known.contains(StageRegistry.Key.of(itemId, row.recordId(),
+                    row.lineage()).recordId()) || row.errorCode() != null)
             {
                 // Known, or a piece the splitter couldn't parse: in the
                 // split stage's fail store, never sent on (STAGES.md §15.1).
@@ -517,7 +518,8 @@ public final class ConvertReconciler
                     row.sourceOffset(), row.sourceLength(), row.format(),
                     row.contentType(), row.plaintextLength(),
                     row.chunkCount(), ref, row.origin(), row.errorCode(),
-                    row.errorAt(), -1, null, null));
+                    row.errorAt(), -1, null, null, null, null,
+                    row.lineage(), false));
         }
         return lost;
     }

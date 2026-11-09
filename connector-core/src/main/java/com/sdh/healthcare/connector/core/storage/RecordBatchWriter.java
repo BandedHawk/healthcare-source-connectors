@@ -12,6 +12,7 @@ import static com.sdh.healthcare.connector.contract.table.RecordsTable.*;
 
 import com.nimbusds.jose.util.JSONArrayUtils;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
@@ -185,6 +186,9 @@ public final class RecordBatchWriter implements AutoCloseable
      */
     private final Map<Placed, String> corrections = new HashMap<>();
 
+    /** The lineage of each record that isn't the first (§15.8.2). */
+    private final Map<Placed, Lineage> lineages = new HashMap<>();
+
     /**
      * A record's versions.
      *
@@ -295,6 +299,23 @@ public final class RecordBatchWriter implements AutoCloseable
     public void correction(UUID itemId, long seq, String correctionOf)
     {
         corrections.put(new Placed(itemId, seq), correctionOf);
+    }
+
+    /**
+     * Gives a record's lineage (STAGES.md §15.8.2), kept on its rows
+     * ({@code generation}, {@code line}); a record given none is the first
+     * of everything, and its rows leave both null.
+     *
+     * @param itemId  the record's item
+     * @param seq     its number in the item
+     * @param lineage where it stands in its line
+     */
+    public void lineage(UUID itemId, long seq, Lineage lineage)
+    {
+        if (!lineage.first())
+        {
+            lineages.put(new Placed(itemId, seq), lineage);
+        }
     }
 
     /**
@@ -717,6 +738,12 @@ public final class RecordBatchWriter implements AutoCloseable
         row.setField(INPUT_VERSION, given == null ? null : given.input());
         row.setField(CORRECTION_OF, corrections.get(
                 new Placed(record.itemId(), record.seq())));
+        Lineage lineage = lineages.get(
+                new Placed(record.itemId(), record.seq()));
+        row.setField(GENERATION, lineage == null ? null
+                : lineage.generation());
+        row.setField(LINE, lineage == null || lineage.line().isEmpty() ? null
+                : lineage.lineText());
         writer.write(row);
     }
 

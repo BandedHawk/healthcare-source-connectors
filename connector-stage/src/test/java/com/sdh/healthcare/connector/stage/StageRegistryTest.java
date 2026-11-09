@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.stage;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
@@ -548,5 +549,153 @@ class StageRegistryTest
                 assertThat(rows.getInt(3)).isEqualTo(isOpen ? 0 : 1);
             }
         }
+    }
+
+    /**
+     * A record at a place, of a lineage, claimed and stored by the first
+     * worker.
+     *
+     * @param recordId the record
+     * @param seq      its place
+     * @param lineage  its lineage
+     * @param failed   whether it failed
+     * @return the keys marked stored
+     */
+    Set<StageRegistry.Key> storeAt(String recordId, long seq,
+            Lineage lineage, boolean failed)
+    {
+        String id = StageRegistry.Key.of(item, recordId, lineage).recordId();
+        first.claim(id, item, LONG);
+        FailureStore.Failure failure = failed ? new FailureStore.Failure(
+                item, seq, recordId, "TEST_FAILED", 10, "v1", lineage)
+                : null;
+        OutboundMessage message = failed ? null : new OutboundMessage(
+                "m-" + id, MessageType.RECORD_STORED, item, id,
+                new byte[] {1});
+        return first.store(List.of(new StageRegistry.Entry(recordId, item,
+                "d-" + id, "v1", failed, message, failure, null, seq,
+                lineage)));
+    }
+
+    /**
+     * The first record of a later generation starts its item again here:
+     * the counts and total of the generation before are dropped, and its
+     * failures superseded, not counted as resolved (STAGES.md §15.8.3).
+     */
+    @Test
+    void aLaterGenerationStartsTheItemAgain()
+    {
+        first.expect(item, 2, new byte[] {1});
+        storeAt("r1", 1, Lineage.FIRST, false);
+        storeAt("r2", 2, Lineage.FIRST, true);
+        Lineage second = Lineage.of(2, null);
+        assertThat(storeAt("r1", 1, second, false))
+                .containsExactly(StageRegistry.Key.of(item, "r1", second));
+        ItemProgress progress = first.item(item).orElseThrow();
+        assertThat(progress.generation()).isEqualTo(2);
+        assertThat(progress.expected()).isEqualTo(-1);
+        assertThat(progress.done()).isEqualTo(1);
+        assertThat(progress.failed()).isZero();
+        assertThat(first.failureStore().counts(item).resolved()).isZero();
+        assertThat(first.failureStore().failures(item)).singleElement()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.SUPERSEDED);
+        assertThat(audit.names()).contains("stage.generation_superseded",
+                "stage.generation_started", "failure.superseded");
+    }
+
+    /**
+     * A record of a generation the stage has already moved past is kept,
+     * not counted, and its failure kept superseded; before sealing it is
+     * found superseded already.
+     */
+    @Test
+    void aRecordOfAnEarlierGenerationIsSupersededOnArrival()
+    {
+        storeAt("r1", 1, Lineage.of(2, null), false);
+        assertThat(first.supersededAlready(List.of(item, item),
+                List.of(1L, 1L), List.of(Lineage.FIRST, Lineage.of(3, null))))
+                .containsExactly(0);
+        assertThat(storeAt("r1", 1, Lineage.FIRST, true))
+                .containsExactly(key("r1"));
+        ItemProgress progress = first.item(item).orElseThrow();
+        assertThat(progress.generation()).isEqualTo(2);
+        assertThat(progress.done()).isEqualTo(1);
+        assertThat(progress.failed()).isZero();
+        assertThat(first.failureStore().failures(item)).singleElement()
+                .satisfies(stored ->
+                {
+                    assertThat(stored.state())
+                            .isEqualTo(FailureStore.State.SUPERSEDED);
+                    assertThat(stored.failure().lineage())
+                            .isEqualTo(Lineage.FIRST);
+                });
+        assertThat(audit.names()).contains("record.superseded_on_arrival");
+    }
+
+    /**
+     * A newer revision at a place replaces the one there: it isn't
+     * counted again, a failure it replaces counts as resolved, and an
+     * older revision arriving after it is superseded on arrival.
+     */
+    @Test
+    void aNewerRevisionReplacesTheOneAtItsPlace()
+    {
+        Lineage second = Lineage.FIRST.withRevision(Lineage.CONVERT, 2);
+        Lineage third = Lineage.FIRST.withRevision(Lineage.CONVERT, 3);
+        storeAt("r1", 1, Lineage.FIRST, true);
+        storeAt("r1", 1, third, false);
+        ItemProgress progress = first.item(item).orElseThrow();
+        assertThat(progress.done()).isEqualTo(1);
+        assertThat(progress.failed()).isEqualTo(1);
+        assertThat(first.failureStore().counts(item).resolved()).isEqualTo(1);
+        assertThat(first.failureStore().failure(item, 1)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.SUPERSEDED);
+        storeAt("r1", 1, second, true);
+        progress = first.item(item).orElseThrow();
+        assertThat(progress.done()).isEqualTo(1);
+        assertThat(progress.failed()).isEqualTo(1);
+        assertThat(first.failureStore().failures(item))
+                .extracting(FailureStore.Stored::state)
+                .containsOnly(FailureStore.State.SUPERSEDED);
+        assertThat(audit.names()).contains("record.superseded_on_arrival");
+    }
+
+    /**
+     * A newer revision that fails, in place of one that passed, leaves the
+     * place failed.
+     */
+    @Test
+    void aFailedRevisionTakesThePlaceOfOneThatPassed()
+    {
+        storeAt("r1", 1, Lineage.FIRST, false);
+        storeAt("r1", 1, Lineage.FIRST.withRevision(Lineage.CONVERT, 2),
+                true);
+        ItemProgress progress = first.item(item).orElseThrow();
+        assertThat(progress.done()).isEqualTo(1);
+        assertThat(progress.failed()).isEqualTo(1);
+        assertThat(first.failureStore().counts(item).resolved()).isZero();
+        assertThat(first.failureStore().failure(item, 1)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.FAILED);
+    }
+
+    /**
+     * A total of a generation the stage has moved past is dropped; one of
+     * a later generation starts the item again.
+     */
+    @Test
+    void aTotalIsWeighedByItsGeneration()
+    {
+        storeAt("r1", 1, Lineage.FIRST, false);
+        first.expect(item, 3, new byte[] {1}, false, 0, 2);
+        ItemProgress progress = first.item(item).orElseThrow();
+        assertThat(progress.generation()).isEqualTo(2);
+        assertThat(progress.expected()).isEqualTo(3);
+        assertThat(progress.done()).isZero();
+        first.expect(item, 5, new byte[] {1}, false, 1, 1);
+        assertThat(first.item(item).orElseThrow().expected()).isEqualTo(3);
+        assertThat(audit.names()).contains("stage.total_superseded");
     }
 }

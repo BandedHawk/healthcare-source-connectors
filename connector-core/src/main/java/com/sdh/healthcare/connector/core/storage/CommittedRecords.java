@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import java.io.IOException;
@@ -87,14 +88,25 @@ public final class CommittedRecords
      * @param correctionOf    for a record made from an operator's
      *                        correction, the failed record it corrects
      *                        (STAGES.md §15.6c); null otherwise
+     * @param lineage         where it stands in its line (STAGES.md
+     *                        §15.8.2); the first of everything for a row
+     *                        that keeps none
      */
     public record Row(String recordId, long seq, long sourceOffset,
             long sourceLength, String format, String contentType,
             String mapping, String errorCode, long plaintextLength,
             int chunkCount, LocalDate ingestedDate, String kekRef,
             RecordOrigin origin, SourcePosition errorAt, String stageVersion,
-            String correctionOf)
+            String correctionOf, Lineage lineage)
     {
+
+        /**
+         * Reads no lineage as the first.
+         */
+        public Row
+        {
+            lineage = Lineage.orFirst(lineage);
+        }
     }
 
     /**
@@ -118,20 +130,23 @@ public final class CommittedRecords
 
     /**
      * The columns a {@link Row} is read from in a table: with
-     * {@code correction_of} if the table has it yet.
+     * {@code correction_of}, {@code generation} and {@code line}, each if
+     * the table has it yet.
      *
      * @param table the table
      * @return the columns
      */
     private static String[] rowColumns(Table table)
     {
-        if (table.schema().findField(CORRECTION_OF) == null)
+        List<String> columns = new ArrayList<>(Arrays.asList(ROW_COLUMNS));
+        for (String optional : List.of(CORRECTION_OF, GENERATION, LINE))
         {
-            return ROW_COLUMNS;
+            if (table.schema().findField(optional) != null)
+            {
+                columns.add(optional);
+            }
         }
-        String[] columns = Arrays.copyOf(ROW_COLUMNS, ROW_COLUMNS.length + 1);
-        columns[ROW_COLUMNS.length] = CORRECTION_OF;
-        return columns;
+        return columns.toArray(String[]::new);
     }
 
     /**
@@ -377,7 +392,26 @@ public final class CommittedRecords
                 position(row, ERROR_LINE, ERROR_COLUMN),
                 (String) row.getField(STAGE_VERSION),
                 row.struct().field(CORRECTION_OF) == null ? null
-                        : (String) row.getField(CORRECTION_OF));
+                        : (String) row.getField(CORRECTION_OF),
+                lineage(row));
+    }
+
+    /**
+     * Reads a row's lineage (STAGES.md §15.8.2), from its
+     * {@code generation} and {@code line}, if the table has them and they
+     * are set.
+     *
+     * @param row the row
+     * @return the lineage; {@link Lineage#FIRST} if none is kept
+     */
+    private static Lineage lineage(Record row)
+    {
+        Integer generation = row.struct().field(GENERATION) == null ? null
+                : (Integer) row.getField(GENERATION);
+        String line = row.struct().field(LINE) == null ? null
+                : (String) row.getField(LINE);
+        return Lineage.of(generation == null ? 1 : generation,
+                Lineage.parseLine(line));
     }
 
     /**

@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.stage;
 
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
@@ -24,6 +25,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -138,16 +141,33 @@ public final class StageRegistry
     }
 
     /**
-     * What a record is known by: its item and its id. A record id comes
-     * from the content alone (design §7.3), so the same content in two
-     * items is a record of each, counted and stored for both (decided
-     * 2026-11-05).
+     * What a record is known by: its item and its name in the registry. A
+     * record id comes from the content alone (design §7.3), so the same
+     * content in two items is a record of each, counted and stored for
+     * both (decided 2026-11-05). The name is the record id and the suffix
+     * of the lineage this stage makes it under ({@link Lineage#suffix},
+     * STAGES.md §15.8.2), so the same content in two generations, or in
+     * two revisions, is an object of each; for the first of everything it
+     * is the record id alone, as before lineage was kept.
      *
      * @param itemId   the id of the record's item
-     * @param recordId the record's id
+     * @param recordId the record's name: its id, and its lineage's suffix
      */
     public record Key(UUID itemId, String recordId)
     {
+
+        /**
+         * The key of a record made under a lineage.
+         *
+         * @param itemId   the record's item
+         * @param recordId its id
+         * @param lineage  the lineage this stage makes it under
+         * @return the key
+         */
+        public static Key of(UUID itemId, String recordId, Lineage lineage)
+        {
+            return new Key(itemId, recordId + lineage.suffix());
+        }
     }
 
     /**
@@ -167,11 +187,48 @@ public final class StageRegistry
      *                 same transaction, its failure resolved or failed
      *                 again, and not counted on its item, whose count of
      *                 records is unchanged; null for a record
+     * @param seq      its place in its item's generation, from 0; -1 if it
+     *                 has none, when it is never weighed against another
+     *                 at its place
+     * @param lineage  the lineage the stage made it under (STAGES.md
+     *                 §15.8.2): with the place, what decides whether it is
+     *                 current (§15.8.3)
      */
     public record Entry(String recordId, UUID itemId, String digest,
             String version, boolean failed, OutboundMessage message,
-            FailureStore.Failure failure, CorrectionStore.Outcome correction)
+            FailureStore.Failure failure, CorrectionStore.Outcome correction,
+            long seq, Lineage lineage)
     {
+
+        /**
+         * Reads no lineage as the first.
+         */
+        public Entry
+        {
+            lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * An entry with no place, of the first lineage: a correction, or a
+         * record never weighed against another.
+         *
+         * @param recordId   the record's id
+         * @param itemId     the id of its item
+         * @param digest     its output's digest
+         * @param version    the version its output was made with
+         * @param failed     whether it failed
+         * @param message    the message it is to be sent as, sealed
+         * @param failure    the failure to record, or null
+         * @param correction what a correction came to, or null
+         */
+        public Entry(String recordId, UUID itemId, String digest,
+                String version, boolean failed, OutboundMessage message,
+                FailureStore.Failure failure,
+                CorrectionStore.Outcome correction)
+        {
+            this(recordId, itemId, digest, version, failed, message, failure,
+                    correction, -1, null);
+        }
 
         /**
          * A record, not a correction.
@@ -216,7 +273,7 @@ public final class StageRegistry
          */
         public Key key()
         {
-            return new Key(itemId, recordId);
+            return Key.of(itemId, recordId, lineage);
         }
     }
 
@@ -351,6 +408,29 @@ public final class StageRegistry
             statement.execute("ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS upstream_completion integer"
                     + " NOT NULL DEFAULT 0");
+            // Added 2026-11-09 (STAGES.md §15.8): each record's place and
+            // lineage, so the stage can tell which object at a place is
+            // current, and whether one arrived after a newer one; and each
+            // item's generation, whose records alone it counts. Rows from
+            // before are the first of everything.
+            statement.execute("ALTER TABLE " + records
+                    + " ADD COLUMN IF NOT EXISTS seq bigint");
+            statement.execute("ALTER TABLE " + records
+                    + " ADD COLUMN IF NOT EXISTS generation integer"
+                    + " NOT NULL DEFAULT 1");
+            statement.execute("ALTER TABLE " + records
+                    + " ADD COLUMN IF NOT EXISTS line integer[]"
+                    + " NOT NULL DEFAULT '{}'");
+            statement.execute("ALTER TABLE " + records
+                    + " ADD COLUMN IF NOT EXISTS late boolean"
+                    + " NOT NULL DEFAULT false");
+            statement.execute("ALTER TABLE " + records
+                    + " ADD COLUMN IF NOT EXISTS superseded_at timestamptz");
+            statement.execute("CREATE INDEX IF NOT EXISTS stage_record_place"
+                    + " ON " + records + " (stage, item_id, generation, seq)");
+            statement.execute("ALTER TABLE " + items
+                    + " ADD COLUMN IF NOT EXISTS generation integer"
+                    + " NOT NULL DEFAULT 1");
             numberEarlierCompletions(statement);
             for (String ddl : FailureStore.ddls(failures,
                     failures.substring(0, failures.indexOf('.'))
@@ -586,6 +666,23 @@ public final class StageRegistry
      * {@code failure.failed}, once committed. A record whose claim this
      * worker no longer holds is left alone: its new holder stores and
      * counts it.
+     * <p>
+     * Each record is weighed against what the stage holds (STAGES.md
+     * §15.8.3), oldest first, so a batch holding two of one place is
+     * judged as if they came one after the other:
+     * <ul>
+     * <li>of a later generation than its item's here: the item moves to
+     *     that generation, its counts start again, and the failures of the
+     *     generations before are superseded;</li>
+     * <li>of an earlier generation, or older than the object stored at its
+     *     place: it is stored, marked late ({@code late}), not counted, and
+     *     its failure, if it failed, is recorded superseded; audited
+     *     {@code record.superseded_on_arrival};</li>
+     * <li>newer than the object stored at its place: that object is
+     *     superseded, and its failure, if it had one; the place isn't
+     *     counted again, and this record's failure, if it failed, is
+     *     counted as a new one.</li>
+     * </ul>
      *
      * @param entries the records, all committed
      * @return the keys of those marked; the others' claims were lost
@@ -599,31 +696,44 @@ public final class StageRegistry
                        output_version = ?,
                        message_id = ?, message_type = ?, message_key = ?,
                        pending_message = ?, stored_at = clock_timestamp(),
-                       claim_expires = NULL
+                       claim_expires = NULL, seq = ?, generation = ?,
+                       line = ?, late = ?
                  WHERE stage = ? AND item_id = ? AND record_id = ?
                    AND owner = ? AND state = 'CLAIMED'""".formatted(records);
-        String count = """
-                INSERT INTO %1$s AS i (stage, item_id, done, failed)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT (stage, item_id) DO UPDATE
-                   SET done = i.done + EXCLUDED.done,
-                       failed = i.failed + EXCLUDED.failed"""
-                .formatted(items);
+        // A record whose claim was lost changes nothing of its item's.
+        String holds = """
+                SELECT 1 FROM %s
+                 WHERE stage = ? AND item_id = ? AND record_id = ?
+                   AND owner = ? AND state = 'CLAIMED'
+                   FOR UPDATE""".formatted(records);
+        // Item rows are locked in one order, so two workers can't deadlock.
+        List<Entry> ordered = new ArrayList<>(entries);
+        ordered.sort(Comparator.comparing(Entry::itemId)
+                .thenComparing(Entry::lineage));
         try (Connection connection = dataSource.getConnection())
         {
             connection.setAutoCommit(false);
             try
             {
                 Set<Key> marked = new HashSet<>();
-                Map<UUID, long[]> counts = new LinkedHashMap<>();
                 List<FailureStore.Failure> failed = new ArrayList<>();
                 List<Entry> corrections = new ArrayList<>();
+                Currency currency = new Currency(connection);
                 try (PreparedStatement update =
-                        connection.prepareStatement(mark))
+                        connection.prepareStatement(mark);
+                        PreparedStatement held =
+                                connection.prepareStatement(holds))
                 {
                     update.setQueryTimeout(queryTimeoutSeconds);
-                    for (Entry entry : entries)
+                    held.setQueryTimeout(queryTimeoutSeconds);
+                    for (Entry entry : ordered)
                     {
+                        if (!holds(held, entry))
+                        {
+                            continue;
+                        }
+                        Placement placed = entry.correction() == null
+                                ? currency.place(entry) : Placement.NEW;
                         OutboundMessage message = entry.message();
                         update.setString(1,
                                 message == null ? "FAILED" : "STORED");
@@ -637,48 +747,53 @@ public final class StageRegistry
                                 : message.key());
                         update.setBytes(7, message == null ? null
                                 : message.body());
-                        update.setString(8, stage);
-                        update.setObject(9, entry.itemId());
-                        update.setString(10, entry.recordId());
-                        update.setString(11, owner);
-                        if (update.executeUpdate() == 1)
+                        if (entry.seq() < 0)
                         {
-                            marked.add(entry.key());
-                            if (entry.correction() != null)
-                            {
-                                // Not a record of the item's: its count
-                                // stays; its failure moves on instead.
-                                corrections.add(entry);
-                                continue;
-                            }
-                            if (entry.failure() != null)
-                            {
-                                failed.add(entry.failure());
-                            }
-                            long[] itemCounts = counts.computeIfAbsent(
-                                    entry.itemId(), id -> new long[2]);
-                            itemCounts[0]++;
-                            itemCounts[1] += entry.failed() ? 1 : 0;
+                            update.setNull(8, java.sql.Types.BIGINT);
+                        }
+                        else
+                        {
+                            update.setLong(8, entry.seq());
+                        }
+                        update.setInt(9, entry.lineage().generation());
+                        update.setArray(10, FailureStore.line(connection,
+                                entry.lineage()));
+                        update.setBoolean(11, placed.late());
+                        update.setString(12, stage);
+                        update.setObject(13, entry.itemId());
+                        update.setString(14, entry.key().recordId());
+                        update.setString(15, owner);
+                        if (update.executeUpdate() != 1)
+                        {
+                            continue;
+                        }
+                        marked.add(entry.key());
+                        if (entry.correction() != null)
+                        {
+                            // Not a record of the item's: its count stays;
+                            // its failure moves on instead.
+                            corrections.add(entry);
+                            continue;
+                        }
+                        currency.stored(entry, placed);
+                        if (!placed.late() && entry.failure() != null)
+                        {
+                            failed.add(entry.failure());
                         }
                     }
                 }
-                try (PreparedStatement upsert =
-                        connection.prepareStatement(count))
-                {
-                    upsert.setQueryTimeout(queryTimeoutSeconds);
-                    for (Map.Entry<UUID, long[]> item : counts.entrySet())
-                    {
-                        upsert.setString(1, stage);
-                        upsert.setObject(2, item.getKey());
-                        upsert.setLong(3, item.getValue()[0]);
-                        upsert.setLong(4, item.getValue()[1]);
-                        upsert.addBatch();
-                    }
-                    upsert.executeBatch();
-                }
+                currency.flush();
                 List<FailureStore.Failure> added = FailureStore.insert(
                         connection, failures, stage, failed,
                         queryTimeoutSeconds);
+                List<FailureStore.Failure> late = new ArrayList<>();
+                for (Map.Entry<FailureStore.Failure, String> lateFailure
+                        : currency.lateFailures.entrySet())
+                {
+                    late.addAll(FailureStore.insert(connection, failures,
+                            stage, List.of(lateFailure.getKey()),
+                            lateFailure.getValue(), queryTimeoutSeconds));
+                }
                 List<FailureStore.Changed> finished = new ArrayList<>();
                 for (Entry entry : corrections)
                 {
@@ -687,6 +802,7 @@ public final class StageRegistry
                 }
                 connection.commit();
                 FailureStore.audit(stage, added);
+                currency.audit(late);
                 for (int index = 0; index < corrections.size(); index++)
                 {
                     CorrectionStore.audit(stage,
@@ -700,6 +816,536 @@ public final class StageRegistry
                 connection.rollback();
                 throw failure;
             }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Where a record stands against what the stage holds at its place
+     * (STAGES.md §15.8.3).
+     *
+     * @param late       whether something newer was there first: it is
+     *                   stored, not counted
+     * @param supersedes the name of the older object it replaces at its
+     *                   place, which is then superseded; null if none
+     * @param older      that object's lineage; null if none
+     * @param newer      for a late record, what was there first, as text;
+     *                   null otherwise
+     */
+    private record Placement(boolean late, String supersedes, Lineage older,
+            String newer)
+    {
+
+        /** The first at its place, in its item's current generation. */
+        static final Placement NEW = new Placement(false, null, null, null);
+    }
+
+    /**
+     * An item's row as one {@link #store} weighs records against: its
+     * generation, and the counts to add, or to start again from.
+     */
+    private static final class ItemRow
+    {
+
+        /** The generation it had when read. */
+        private final int readGeneration;
+
+        /** Its records counted when read. */
+        private final long readDone;
+
+        /** Its failed records counted when read. */
+        private final long readFailed;
+
+        /** Whether the transaction made it. */
+        private final boolean created;
+
+        /** Its generation now. */
+        private int generation;
+
+        /** Whether its counts start again, for a new generation. */
+        private boolean reset;
+
+        /** Records to add to its count, or to start it from. */
+        private long done;
+
+        /** Failed records to add, or to start from. */
+        private long failed;
+
+        /**
+         * An item's row as read.
+         *
+         * @param generation its generation
+         * @param done       its records counted
+         * @param failed     its failed records counted
+         * @param created    whether the transaction made it
+         */
+        ItemRow(int generation, long done, long failed, boolean created)
+        {
+            this.created = created;
+            this.readGeneration = generation;
+            this.readDone = done;
+            this.readFailed = failed;
+            this.generation = generation;
+        }
+    }
+
+    /**
+     * Whether this registry still holds a record's claim, locking its row
+     * until the transaction ends so the claim can't be lost meanwhile.
+     *
+     * @param held  the query, on the open transaction
+     * @param entry the record
+     * @return true if the claim is held
+     * @throws SQLException if the query fails
+     */
+    private boolean holds(PreparedStatement held, Entry entry)
+            throws SQLException
+    {
+        held.setString(1, stage);
+        held.setObject(2, entry.itemId());
+        held.setString(3, entry.key().recordId());
+        held.setString(4, owner);
+        try (ResultSet found = held.executeQuery())
+        {
+            return found.next();
+        }
+    }
+
+    /**
+     * Weighs one transaction's records against what the stage holds
+     * (STAGES.md §15.8.3), keeps their items' counts, and gathers what to
+     * audit once it commits.
+     */
+    private final class Currency
+    {
+
+        /** The transaction's connection. */
+        private final Connection connection;
+
+        /** The items' rows, locked, as read and changed so far. */
+        private final Map<UUID, ItemRow> rows = new HashMap<>();
+
+        /**
+         * Failures of records superseded on arrival, with what was there
+         * first, in order.
+         */
+        private final Map<FailureStore.Failure, String> lateFailures =
+                new LinkedHashMap<>();
+
+        /** Failures superseded, with how and by what, to audit. */
+        private final List<Object[]> superseded = new ArrayList<>();
+
+        /** Events to audit once committed, with their fields. */
+        private final List<Object[]> events = new ArrayList<>();
+
+        /**
+         * Weighs records in a transaction.
+         *
+         * @param connection its connection
+         */
+        Currency(Connection connection)
+        {
+            this.connection = connection;
+        }
+
+        /**
+         * Weighs a record against its item's generation and what is stored
+         * at its place, moving the item to a later generation if the record
+         * is of one.
+         *
+         * @param entry the record
+         * @return where it stands
+         * @throws SQLException if a statement fails
+         */
+        Placement place(Entry entry) throws SQLException
+        {
+            ItemRow item = item(entry.itemId(), entry.lineage().generation());
+            int generation = entry.lineage().generation();
+            if (generation < item.generation)
+            {
+                return new Placement(true, null, null, "g" + item.generation);
+            }
+            if (generation > item.generation)
+            {
+                newGeneration(entry.itemId(), item, generation);
+            }
+            if (entry.seq() < 0)
+            {
+                return Placement.NEW;
+            }
+            String sql = """
+                    SELECT record_id, generation, line FROM %s
+                     WHERE stage = ? AND item_id = ? AND generation = ?
+                       AND seq = ? AND record_id <> ? AND state <> 'CLAIMED'
+                       AND NOT late AND superseded_at IS NULL
+                       FOR UPDATE""".formatted(records);
+            try (PreparedStatement select = connection.prepareStatement(sql))
+            {
+                select.setQueryTimeout(queryTimeoutSeconds);
+                select.setString(1, stage);
+                select.setObject(2, entry.itemId());
+                select.setInt(3, generation);
+                select.setLong(4, entry.seq());
+                select.setString(5, entry.key().recordId());
+                try (ResultSet found = select.executeQuery())
+                {
+                    while (found.next())
+                    {
+                        Lineage there = FailureStore.lineage(found, 2);
+                        int order = there.compareTo(entry.lineage());
+                        if (order > 0)
+                        {
+                            return new Placement(true, null, null,
+                                    there.toString());
+                        }
+                        if (order < 0)
+                        {
+                            return new Placement(false, found.getString(1),
+                                    there, null);
+                        }
+                    }
+                }
+            }
+            return Placement.NEW;
+        }
+
+        /**
+         * Notes a record marked stored: counts it on its item unless it was
+         * late or replaced another at its place, and supersedes what it
+         * replaced.
+         *
+         * @param entry  the record
+         * @param placed where it stood
+         * @throws SQLException if a statement fails
+         */
+        void stored(Entry entry, Placement placed) throws SQLException
+        {
+            long seq = entry.seq();
+            if (placed.late())
+            {
+                if (entry.failure() != null)
+                {
+                    lateFailures.put(withLineage(entry.failure(),
+                            entry.lineage()), placed.newer());
+                }
+                events.add(new Object[] {"record.superseded_on_arrival",
+                    Fields.of(Attr.STAGE, stage)
+                            .with(Attr.ITEM_ID, entry.itemId())
+                            .with(Attr.SEQ, seq < 0 ? null : seq)
+                            .with(Attr.LINEAGE, entry.lineage().toString())
+                            .with(Attr.SUPERSEDED_BY, placed.newer())});
+                Telemetry.get().supersededOnArrival(stage);
+                return;
+            }
+            ItemRow item = rows.get(entry.itemId());
+            item.failed += entry.failed() ? 1 : 0;
+            if (placed.supersedes() == null)
+            {
+                item.done++;
+                return;
+            }
+            try (PreparedStatement update = connection.prepareStatement(
+                    "UPDATE " + records + " SET superseded_at"
+                            + " = clock_timestamp() WHERE stage = ?"
+                            + " AND item_id = ? AND record_id = ?"))
+            {
+                update.setQueryTimeout(queryTimeoutSeconds);
+                update.setString(1, stage);
+                update.setObject(2, entry.itemId());
+                update.setString(3, placed.supersedes());
+                update.executeUpdate();
+            }
+            String by = entry.lineage().toString();
+            superseded.add(new Object[] {FailureStore.supersedeRevision(
+                    connection, failures, stage, entry.itemId(), seq,
+                    placed.older(), entry.lineage(), queryTimeoutSeconds),
+                FailureStore.Superseded.REVISION, by});
+        }
+
+        /**
+         * An item's row, read and locked once per transaction; made, at the
+         * given generation, if the item has none yet.
+         *
+         * @param itemId     the item
+         * @param generation the generation to make it at
+         * @return the row
+         * @throws SQLException if a statement fails
+         */
+        private ItemRow item(UUID itemId, int generation) throws SQLException
+        {
+            ItemRow known = rows.get(itemId);
+            if (known != null)
+            {
+                return known;
+            }
+            ItemRow row = lockItem(connection, itemId, generation);
+            rows.put(itemId, row);
+            if (row.created && generation > 1)
+            {
+                startedGeneration(itemId, generation);
+            }
+            return row;
+        }
+
+        /**
+         * Moves an item to a later generation: its counts start again, and
+         * the failures of its generations before are superseded.
+         *
+         * @param itemId     the item
+         * @param item       its row
+         * @param generation the generation
+         * @throws SQLException if a statement fails
+         */
+        private void newGeneration(UUID itemId, ItemRow item, int generation)
+                throws SQLException
+        {
+            long done = item.reset ? item.done : item.readDone + item.done;
+            long failedCount = item.reset ? item.failed
+                    : item.readFailed + item.failed;
+            events.add(new Object[] {"stage.generation_superseded",
+                Fields.of(Attr.STAGE, stage).with(Attr.ITEM_ID, itemId)
+                        .with(Attr.GENERATION, item.generation)
+                        .with(Attr.SUPERSEDED_BY, "g" + generation)
+                        .with(Attr.COUNT, done)
+                        .with(Attr.FAILED_COUNT, failedCount)});
+            superseded.add(new Object[] {FailureStore.supersedeGeneration(
+                    connection, failures, stage, itemId, generation,
+                    queryTimeoutSeconds),
+                FailureStore.Superseded.GENERATION, "g" + generation});
+            item.generation = generation;
+            item.reset = true;
+            item.done = 0;
+            item.failed = 0;
+            startedGeneration(itemId, generation);
+        }
+
+        /**
+         * Notes, to audit, that the stage has its first object of an
+         * item's later generation.
+         *
+         * @param itemId     the item
+         * @param generation the generation
+         */
+        private void startedGeneration(UUID itemId, int generation)
+        {
+            events.add(new Object[] {"stage.generation_started",
+                Fields.of(Attr.STAGE, stage).with(Attr.ITEM_ID, itemId)
+                        .with(Attr.GENERATION, generation)});
+        }
+
+        /**
+         * Writes the items' generations and counts.
+         *
+         * @throws SQLException if a statement fails
+         */
+        void flush() throws SQLException
+        {
+            for (Map.Entry<UUID, ItemRow> entry : rows.entrySet())
+            {
+                writeItem(connection, entry.getKey(), entry.getValue());
+            }
+        }
+
+        /**
+         * Audits, once committed, what the transaction superseded.
+         *
+         * @param late the failures recorded superseded on arrival
+         */
+        void audit(List<FailureStore.Failure> late)
+        {
+            Telemetry telemetry = Telemetry.get();
+            for (Object[] event : events)
+            {
+                telemetry.audit((String) event[0], (Fields) event[1]);
+            }
+            for (Object[] change : superseded)
+            {
+                @SuppressWarnings("unchecked")
+                List<FailureStore.Stored> stored =
+                        (List<FailureStore.Stored>) change[0];
+                FailureStore.auditSuperseded(stage, stored,
+                        (FailureStore.Superseded) change[1],
+                        (String) change[2]);
+            }
+            for (FailureStore.Failure failure : late)
+            {
+                FailureStore.auditSuperseded(stage, List.of(
+                        new FailureStore.Stored(failure,
+                                FailureStore.State.FAILED)),
+                        FailureStore.Superseded.ARRIVAL,
+                        lateFailures.get(failure));
+            }
+        }
+    }
+
+    /**
+     * A failure with the lineage of the object that failed.
+     *
+     * @param failure the failure
+     * @param lineage the lineage
+     * @return the failure
+     */
+    private static FailureStore.Failure withLineage(
+            FailureStore.Failure failure, Lineage lineage)
+    {
+        return new FailureStore.Failure(failure.itemId(), failure.seq(),
+                failure.recordId(), failure.errorCode(),
+                failure.sourceOffset(), failure.version(), lineage);
+    }
+
+    /**
+     * Reads and locks an item's row, making it at a generation if the item
+     * has none yet.
+     *
+     * @param connection the transaction's connection
+     * @param itemId     the item
+     * @param generation the generation to make it at
+     * @return the row
+     * @throws SQLException if a statement fails
+     */
+    private ItemRow lockItem(Connection connection, UUID itemId,
+            int generation) throws SQLException
+    {
+        boolean created;
+        try (PreparedStatement insert = connection.prepareStatement(
+                "INSERT INTO " + items + " (stage, item_id, generation)"
+                        + " VALUES (?, ?, ?) ON CONFLICT DO NOTHING"))
+        {
+            insert.setQueryTimeout(queryTimeoutSeconds);
+            insert.setString(1, stage);
+            insert.setObject(2, itemId);
+            insert.setInt(3, generation);
+            created = insert.executeUpdate() == 1;
+        }
+        try (PreparedStatement select = connection.prepareStatement(
+                "SELECT generation, done, failed FROM " + items
+                        + " WHERE stage = ? AND item_id = ? FOR UPDATE"))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            select.setObject(2, itemId);
+            try (ResultSet row = select.executeQuery())
+            {
+                row.next();
+                return new ItemRow(row.getInt(1), row.getLong(2),
+                        row.getLong(3), created);
+            }
+        }
+    }
+
+    /**
+     * Writes an item's row as a transaction changed it: its counts added
+     * to, or, for a new generation, started again, with its total and
+     * completions cleared, since they were the generation before's.
+     *
+     * @param connection the transaction's connection
+     * @param itemId     the item
+     * @param item       its row
+     * @throws SQLException if a statement fails
+     */
+    private void writeItem(Connection connection, UUID itemId, ItemRow item)
+            throws SQLException
+    {
+        String sql = item.reset ? """
+                UPDATE %s SET generation = ?, done = ?, failed = ?,
+                       expected = NULL, total_message = NULL,
+                       upstream_open = false, upstream_completion = 0,
+                       completion = 0, completed_at = NULL,
+                       progress_key = NULL, progress_at = NULL
+                 WHERE stage = ? AND item_id = ?""".formatted(items)
+                : """
+                UPDATE %s SET generation = ?, done = done + ?,
+                       failed = failed + ?
+                 WHERE stage = ? AND item_id = ?""".formatted(items);
+        if (!item.reset && item.done == 0 && item.failed == 0)
+        {
+            return;
+        }
+        try (PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setInt(1, item.generation);
+            update.setLong(2, item.done);
+            update.setLong(3, item.failed);
+            update.setString(4, stage);
+            update.setObject(5, itemId);
+            update.executeUpdate();
+        }
+    }
+
+    /**
+     * Which of some records something newer at the stage already
+     * supersedes (STAGES.md §15.8.3): their item is of a later generation
+     * here, or a newer object is stored at their place. For marking a
+     * record's message superseded before it is sealed; {@link #store}
+     * decides again, under its locks, whether it is counted.
+     *
+     * @param itemIds     each record's item
+     * @param seqs        each record's place; -1 for none
+     * @param lineages    each record's lineage
+     * @return the indexes of those superseded
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Set<Integer> supersededAlready(List<UUID> itemIds, List<Long> seqs,
+            List<Lineage> lineages)
+    {
+        Set<Integer> found = new HashSet<>();
+        if (itemIds.isEmpty())
+        {
+            return found;
+        }
+        String sql = """
+                WITH p (idx, item_id, seq, generation, line) AS (
+                  SELECT * FROM unnest(?::integer[], ?::uuid[], ?::bigint[],
+                                       ?::integer[], ?::text[]))
+                SELECT p.idx FROM p
+                 WHERE EXISTS (SELECT 1 FROM %1$s i
+                                WHERE i.stage = ? AND i.item_id = p.item_id
+                                  AND i.generation > p.generation)
+                    OR (p.seq >= 0 AND EXISTS (
+                        SELECT 1 FROM %2$s r
+                         WHERE r.stage = ? AND r.item_id = p.item_id
+                           AND r.generation = p.generation AND r.seq = p.seq
+                           AND r.state <> 'CLAIMED' AND NOT r.late
+                           AND r.superseded_at IS NULL
+                           AND r.line > COALESCE(string_to_array(
+                                   NULLIF(p.line, ''), '.')::integer[],
+                                   '{}')))""".formatted(items, records);
+        Object[] indexes = new Object[itemIds.size()];
+        Object[] lines = new Object[itemIds.size()];
+        Object[] generations = new Object[itemIds.size()];
+        for (int index = 0; index < itemIds.size(); index++)
+        {
+            indexes[index] = index;
+            lines[index] = lineages.get(index).lineText();
+            generations[index] = lineages.get(index).generation();
+        }
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setArray(1, connection.createArrayOf("integer", indexes));
+            select.setArray(2, connection.createArrayOf("uuid",
+                    itemIds.toArray()));
+            select.setArray(3, connection.createArrayOf("bigint",
+                    seqs.toArray()));
+            select.setArray(4, connection.createArrayOf("integer",
+                    generations));
+            select.setArray(5, connection.createArrayOf("text", lines));
+            select.setString(6, stage);
+            select.setString(7, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(rows.getInt(1));
+                }
+            }
+            return found;
         }
         catch (SQLException failure)
         {
@@ -919,6 +1565,29 @@ public final class StageRegistry
     public void expect(UUID itemId, long expected, byte[] total,
             boolean partial, int completion)
     {
+        expect(itemId, expected, total, partial, completion, 1);
+    }
+
+    /**
+     * Notes how many records an item's generation has, or has so far, as
+     * {@link #expect(UUID, long, byte[], boolean, int)} does, weighed by
+     * generation first (STAGES.md §15.8.3): a total of an earlier
+     * generation than the item's here is stale, and changes nothing; one of
+     * a later generation moves the item to it, as its first record would,
+     * its counts starting again and the failures of the generations before
+     * superseded, and is then taken.
+     *
+     * @param itemId     the item's id
+     * @param expected   how many records it has, or has so far
+     * @param total      the message, sealed; null to keep none
+     * @param partial    whether the total is from {@code item.progress}
+     * @param completion the stage before's completion number
+     * @param generation the generation the total is of, from 1
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void expect(UUID itemId, long expected, byte[] total,
+            boolean partial, int completion, int generation)
+    {
         // take: the row's total is replaced, a new round of the item;
         // grow: a total from item.progress, the same round, still open.
         String take = """
@@ -966,22 +1635,55 @@ public final class StageRegistry
                 RETURNING (SELECT completed_at FROM prior) IS NOT NULL
                           AND i.completed_at IS NULL"""
                 .formatted(items, take, grow);
-        boolean reopens;
-        try (Connection connection = dataSource.getConnection();
-                PreparedStatement upsert = connection.prepareStatement(sql))
+        boolean reopens = false;
+        Currency currency;
+        try (Connection connection = dataSource.getConnection())
         {
-            upsert.setQueryTimeout(queryTimeoutSeconds);
-            upsert.setString(1, stage);
-            upsert.setObject(2, itemId);
-            upsert.setString(3, stage);
-            upsert.setObject(4, itemId);
-            upsert.setLong(5, expected);
-            upsert.setBytes(6, total);
-            upsert.setBoolean(7, partial);
-            upsert.setInt(8, completion);
-            try (ResultSet rows = upsert.executeQuery())
+            connection.setAutoCommit(false);
+            try
             {
-                reopens = rows.next() && rows.getBoolean(1);
+                currency = new Currency(connection);
+                ItemRow item = currency.item(itemId, generation);
+                if (generation < item.generation)
+                {
+                    // A total of a generation superseded here: stale.
+                    connection.rollback();
+                    Telemetry.get().audit("stage.total_superseded",
+                            Fields.of(Attr.STAGE, stage)
+                                    .with(Attr.ITEM_ID, itemId)
+                                    .with(Attr.GENERATION, generation)
+                                    .with(Attr.SUPERSEDED_BY,
+                                            "g" + item.generation));
+                    return;
+                }
+                if (generation > item.generation)
+                {
+                    currency.newGeneration(itemId, item, generation);
+                }
+                currency.flush();
+                try (PreparedStatement upsert =
+                        connection.prepareStatement(sql))
+                {
+                    upsert.setQueryTimeout(queryTimeoutSeconds);
+                    upsert.setString(1, stage);
+                    upsert.setObject(2, itemId);
+                    upsert.setString(3, stage);
+                    upsert.setObject(4, itemId);
+                    upsert.setLong(5, expected);
+                    upsert.setBytes(6, total);
+                    upsert.setBoolean(7, partial);
+                    upsert.setInt(8, completion);
+                    try (ResultSet rows = upsert.executeQuery())
+                    {
+                        reopens = rows.next() && rows.getBoolean(1);
+                    }
+                }
+                connection.commit();
+            }
+            catch (SQLException failure)
+            {
+                connection.rollback();
+                throw failure;
             }
         }
         catch (SQLException failure)
@@ -989,6 +1691,7 @@ public final class StageRegistry
             throw new IllegalStateException("Stage registry unavailable",
                     failure);
         }
+        currency.audit(List.of());
         if (reopens)
         {
             Telemetry.get().audit("stage.item_reopened",
@@ -1022,23 +1725,30 @@ public final class StageRegistry
                        ARRAY(SELECT r.output_version FROM %2$s r
                               WHERE r.stage = i.stage
                                 AND r.item_id = i.item_id
+                                AND r.generation = i.generation
+                                AND NOT r.late
                                 AND r.output_version IS NOT NULL
                               GROUP BY r.output_version
                               ORDER BY min(r.stored_at)),
                        i.upstream_open, i.progress_key,
                        (SELECT count(*) FROM %3$s f
                          WHERE f.stage = i.stage AND f.item_id = i.item_id
+                           AND f.generation = i.generation
                            AND f.state IN ('FAILED', 'CORRECTION_PENDING',
                                            'FAILED_CORRECTION')),
                        (SELECT count(*) FROM %3$s f
                          WHERE f.stage = i.stage AND f.item_id = i.item_id
+                           AND f.generation = i.generation
                            AND f.state = 'DECLINED'),
                        clock_timestamp(),
                        (SELECT count(*) FROM %3$s f
                          WHERE f.stage = i.stage AND f.item_id = i.item_id
-                           AND f.state IN ('CORRECTED', 'RETRIED',
-                                           'SUPERSEDED')),
-                       i.completion
+                           AND f.generation = i.generation
+                           AND (f.state IN ('CORRECTED', 'RETRIED')
+                                OR (f.state = 'SUPERSEDED'
+                                    AND COALESCE(f.superseded_how,
+                                                 'REVISION') = 'REVISION'))),
+                       i.completion, i.generation
                   FROM %1$s i
                  WHERE i.stage = ? AND i.item_id = ANY (?)
                    AND i.completed_at IS NULL AND i.expected IS NOT NULL
@@ -1064,7 +1774,8 @@ public final class StageRegistry
                             .withFailures(rows.getLong(9), rows.getLong(10),
                                     rows.getBoolean(7))
                             .withResolved(rows.getLong(12))
-                            .withCompletion(rows.getInt(13)),
+                            .withCompletion(rows.getInt(13))
+                            .withGeneration(rows.getInt(14)),
                             rows.getBytes(5), rows.getString(8),
                             rows.getTimestamp(11).toInstant()));
                 }
@@ -1194,6 +1905,7 @@ public final class StageRegistry
                           AND EXISTS (SELECT 1 FROM %2$s f
                                        WHERE f.stage = c.stage
                                          AND f.item_id = c.item_id
+                                         AND f.generation = c.generation
                                          AND f.state IN ('FAILED',
                                              'CORRECTION_PENDING',
                                              'FAILED_CORRECTION')
@@ -1301,7 +2013,8 @@ public final class StageRegistry
      * a worker handed it again takes the claim over (STAGES.md §10).
      *
      * @param itemId the item's id
-     * @return their record IDs
+     * @return their names: each record ID with its lineage's suffix
+     *         ({@link Key})
      * @throws IllegalStateException if the database can't be reached
      */
     public Set<String> knownRecords(UUID itemId)
@@ -1378,14 +2091,14 @@ public final class StageRegistry
      * An item's row.
      *
      * @param itemId the item's id
-     * @return its counts, with -1 for a total not yet known, and the
-     *         completions sent; empty if it has no row
+     * @return its counts, with -1 for a total not yet known, the
+     *         completions sent and its generation; empty if it has no row
      * @throws IllegalStateException if the database can't be reached
      */
     public Optional<ItemProgress> item(UUID itemId)
     {
-        String sql = "SELECT expected, done, failed, completion FROM " + items
-                + " WHERE stage = ? AND item_id = ?";
+        String sql = "SELECT expected, done, failed, completion, generation"
+                + " FROM " + items + " WHERE stage = ? AND item_id = ?";
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
         {
@@ -1402,7 +2115,8 @@ public final class StageRegistry
                 boolean unknown = rows.wasNull();
                 return Optional.of(new ItemProgress(itemId,
                         unknown ? -1 : expected, rows.getLong(2),
-                        rows.getLong(3)).withCompletion(rows.getInt(4)));
+                        rows.getLong(3)).withCompletion(rows.getInt(4))
+                        .withGeneration(rows.getInt(5)));
             }
         }
         catch (SQLException failure)

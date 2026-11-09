@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.stage;
 
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import java.util.UUID;
 
 /**
@@ -27,10 +28,34 @@ public sealed interface StageInput
      * @param seq      its sequence number in the item, from 0: what
      *                 telemetry names it by, with the item, never by its
      *                 id; -1 if it has none
+     * @param lineage  the lineage the stage makes it under (STAGES.md
+     *                 §15.8.2): the input's, with this stage's revision;
+     *                 with the record id, its name in the registry
      */
-    record RecordInput(String recordId, UUID itemId, long seq)
+    record RecordInput(String recordId, UUID itemId, long seq,
+            Lineage lineage)
             implements StageInput
     {
+
+        /**
+         * Reads no lineage as the first.
+         */
+        public RecordInput
+        {
+            lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A record of the first lineage.
+         *
+         * @param recordId the record's id
+         * @param itemId   the id of the item it came from
+         * @param seq      its sequence number in the item, or -1
+         */
+        public RecordInput(String recordId, UUID itemId, long seq)
+        {
+            this(recordId, itemId, seq, null);
+        }
 
         /**
          * What the registry knows the record by.
@@ -39,7 +64,7 @@ public sealed interface StageInput
          */
         StageRegistry.Key key()
         {
-            return new StageRegistry.Key(itemId, recordId);
+            return StageRegistry.Key.of(itemId, recordId, lineage);
         }
     }
 
@@ -60,11 +85,38 @@ public sealed interface StageInput
      *                   one reopening a completion taken here reopens the
      *                   item (STAGES.md §15.6e), and one from before it is
      *                   stale
+     * @param generation the item's generation the total is of, from 1
+     *                   (STAGES.md §15.8): one of an earlier generation than
+     *                   the item's here is stale, and one of a later moves
+     *                   the item to it
      */
     record ItemTotal(UUID itemId, long expected, boolean partial,
-            int completion)
+            int completion, int generation)
             implements StageInput
     {
+
+        /**
+         * Reads a generation not given as the first.
+         */
+        public ItemTotal
+        {
+            generation = Math.max(1, generation);
+        }
+
+        /**
+         * A total of the item's first generation.
+         *
+         * @param itemId     the item's id
+         * @param expected   how many records of it the stage will receive,
+         *                   or has so far
+         * @param partial    whether it is from {@code item.progress}
+         * @param completion the stage before's completion number
+         */
+        public ItemTotal(UUID itemId, long expected, boolean partial,
+                int completion)
+        {
+            this(itemId, expected, partial, completion, 1);
+        }
 
         /**
          * A total from the stage before's first completion, or from its

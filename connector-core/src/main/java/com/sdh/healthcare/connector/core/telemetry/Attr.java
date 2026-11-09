@@ -123,6 +123,21 @@ public enum Attr
     /** The version a record's stored output was made with. */
     STORED_VERSION("sdh.stored_version"),
 
+    /**
+     * Where an object stands in its line of processing (STAGES.md
+     * §15.8.2), such as {@code g2 r1.3}: numbers, never content.
+     */
+    LINEAGE("sdh.lineage"),
+
+    /**
+     * The lineage, or generation such as {@code g2}, that superseded an
+     * object (STAGES.md §15.8.3).
+     */
+    SUPERSEDED_BY("sdh.superseded_by"),
+
+    /** An item's generation, from 1 (STAGES.md §15.8). */
+    GENERATION("sdh.generation"),
+
     /** How many workers have claimed a record. */
     ATTEMPTS("sdh.attempts"),
 

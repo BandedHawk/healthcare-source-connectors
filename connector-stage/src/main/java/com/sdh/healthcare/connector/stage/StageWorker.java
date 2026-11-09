@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
@@ -531,7 +532,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     {
                         registry.expect(total.itemId(), total.expected(),
                                 received.body(), total.partial(),
-                                total.completion());
+                                total.completion(), total.generation());
                         items.add(total.itemId());
                     }
                     case StageInput.Unwanted unwanted ->
@@ -660,8 +661,9 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     private Result<O> claimAndProcess(Pending record)
             throws InterruptedException
     {
-        StageRegistry.Claim claim = registry.claim(record.input().recordId(),
-                record.input().itemId(), settings.claimTtl());
+        StageRegistry.Claim claim = registry.claim(
+                record.input().key().recordId(), record.input().itemId(),
+                settings.claimTtl());
         return switch (claim)
         {
             case StageRegistry.Owned owned ->
@@ -734,6 +736,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                             + messages.size() + " of " + outputs.size()
                             + " outputs");
         }
+        Set<Integer> late = superseded(owned);
         List<StageRegistry.Entry> entries = new ArrayList<>();
         for (int index = 0; index < owned.size(); index++)
         {
@@ -741,14 +744,48 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             StageOutput<O> made = result.output();
             StageInput.RecordInput input = result.pending().input();
             ConnectorMessage message = messages.get(index);
+            if (message instanceof ConnectorMessage.RecordInStorage record)
+            {
+                // Sent on with the lineage it was made under, and marked if
+                // something newer was here first (STAGES.md §15.8.3).
+                message = record.withLineage(input.lineage(),
+                        late.contains(index));
+            }
             entries.add(new StageRegistry.Entry(input.recordId(),
                     input.itemId(), made.digest(), result.version(),
                     made.failed(),
                     made.failed() || message == null ? null
                             : outbound(message),
-                    made.failed() ? failure(result) : null));
+                    made.failed() ? failure(result) : null, null,
+                    input.seq(), input.lineage()));
         }
         return entries;
+    }
+
+    /**
+     * Which of the records this worker processed something newer at the
+     * stage already supersedes (STAGES.md §15.8.3), so their messages are
+     * sealed marked as such. The registry decides again, as it stores
+     * them, whether each is counted; a record found newer only then is
+     * still stored late, its message unmarked, and a reader tells by its
+     * lineage.
+     *
+     * @param owned the records, processed
+     * @return the indexes of those superseded
+     */
+    private Set<Integer> superseded(List<Result<O>> owned)
+    {
+        List<UUID> itemIds = new ArrayList<>();
+        List<Long> seqs = new ArrayList<>();
+        List<Lineage> lineages = new ArrayList<>();
+        for (Result<O> result : owned)
+        {
+            StageInput.RecordInput input = result.pending().input();
+            itemIds.add(input.itemId());
+            seqs.add(input.seq());
+            lineages.add(input.lineage());
+        }
+        return registry.supersededAlready(itemIds, seqs, lineages);
     }
 
     /**
@@ -769,7 +806,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         return new FailureStore.Failure(input.itemId(), input.seq(),
                 input.recordId(),
                 code == null ? ErrorCode.STAGE_FAILED.name() : code, offset,
-                result.version());
+                result.version(), input.lineage());
     }
 
     /**

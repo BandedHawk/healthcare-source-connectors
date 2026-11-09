@@ -109,6 +109,11 @@ public final class PayloadCodec
                     case RecordStored stored -> stored.resolves();
                     default -> null;
                 });
+                putLineage(payload, record.lineage());
+                if (record.superseded())
+                {
+                    payload.put("superseded", true);
+                }
                 if (record instanceof RecordSplit split
                         && split.message() >= 0)
                 {
@@ -189,6 +194,10 @@ public final class PayloadCodec
                 {
                     payload.put("versions", split.versions());
                 }
+                if (split.generation() > 1)
+                {
+                    payload.put("generation", split.generation());
+                }
                 if (split.completion() > 1)
                 {
                     payload.put("completion", split.completion());
@@ -205,6 +214,10 @@ public final class PayloadCodec
                 if (!converted.versions().isEmpty())
                 {
                     payload.put("versions", converted.versions());
+                }
+                if (converted.generation() > 1)
+                {
+                    payload.put("generation", converted.generation());
                 }
                 if (converted.completion() > 1)
                 {
@@ -230,6 +243,10 @@ public final class PayloadCodec
                 if (!progressed.versions().isEmpty())
                 {
                     payload.put("versions", progressed.versions());
+                }
+                if (progressed.generation() > 1)
+                {
+                    payload.put("generation", progressed.generation());
                 }
                 if (progressed.completion() > 0)
                 {
@@ -287,7 +304,9 @@ public final class PayloadCodec
                             storage(payload),
                             origin(payload),
                             (String) payload.get("version"),
-                            (String) payload.get("resolves"));
+                            (String) payload.get("resolves"),
+                            lineage(payload),
+                            Boolean.TRUE.equals(payload.get("superseded")));
                     case RECORD_FAILED -> new RecordFailed(
                             text(payload, "recordId"),
                             itemId,
@@ -302,7 +321,9 @@ public final class PayloadCodec
                             storage(payload),
                             origin(payload),
                             position(payload, "errorLine", "errorColumn"),
-                            (String) payload.get("version"));
+                            (String) payload.get("version"),
+                            lineage(payload),
+                            Boolean.TRUE.equals(payload.get("superseded")));
                     case ITEM_LANDED -> new ItemLanded(
                             itemId,
                             text(payload, "intake"),
@@ -360,7 +381,9 @@ public final class PayloadCodec
                             (String) payload.get("messageRef"),
                             (String) payload.get("messageReplaces"),
                             (String) payload.get("version"),
-                            (String) payload.get("resolves"));
+                            (String) payload.get("resolves"),
+                            lineage(payload),
+                            Boolean.TRUE.equals(payload.get("superseded")));
                     case ITEM_SPLIT -> new ItemSplit(
                             itemId,
                             text(payload, "intake"),
@@ -376,7 +399,8 @@ public final class PayloadCodec
                             Instant.parse(text(payload, "startedAt")),
                             Instant.parse(text(payload, "completedAt")),
                             texts(payload, "versions"),
-                            completion(payload, 1));
+                            completion(payload, 1),
+                            generation(payload));
                     case ITEM_CONVERTED -> new ItemConverted(
                             itemId,
                             text(payload, "intake"),
@@ -384,7 +408,8 @@ public final class PayloadCodec
                             number(payload, "failedRecordCount"),
                             Instant.parse(text(payload, "completedAt")),
                             texts(payload, "versions"),
-                            completion(payload, 1));
+                            completion(payload, 1),
+                            generation(payload));
                     case ITEM_PROGRESS -> new ItemProgressed(
                             itemId,
                             text(payload, "intake"),
@@ -400,7 +425,8 @@ public final class PayloadCodec
                             uuid(payload, "replaces"),
                             Instant.parse(text(payload, "reportedAt")),
                             texts(payload, "versions"),
-                            completion(payload, 0));
+                            completion(payload, 0),
+                            generation(payload));
                     case RECORD_CONFLICT -> new RecordConflict(
                             text(payload, "recordId"),
                             itemId,
@@ -428,6 +454,65 @@ public final class PayloadCodec
     {
         return payload.get("completion") instanceof Number number
                 ? Math.toIntExact(number.longValue()) : absent;
+    }
+
+    /**
+     * Reads an item message's generation (STAGES.md §15.8): 1 if absent.
+     *
+     * @param payload the payload
+     * @return the generation
+     */
+    private static int generation(Map<String, Object> payload)
+    {
+        return payload.get("generation") instanceof Number number
+                ? Math.toIntExact(number.longValue()) : 1;
+    }
+
+    /**
+     * Writes a record's lineage (STAGES.md §15.8.2): its generation past
+     * the first, and its revisions past the first, so a message of the
+     * first of everything is as before.
+     *
+     * @param payload the payload
+     * @param lineage the lineage
+     */
+    private static void putLineage(Map<String, Object> payload,
+            Lineage lineage)
+    {
+        if (lineage.generation() > 1)
+        {
+            payload.put("generation", lineage.generation());
+        }
+        if (!lineage.line().isEmpty())
+        {
+            payload.put("line", lineage.line());
+        }
+    }
+
+    /**
+     * Reads a record's lineage, as {@link #putLineage} writes it.
+     *
+     * @param payload the payload
+     * @return the lineage; {@link Lineage#FIRST} if none is given
+     * @throws IllegalArgumentException if the line isn't a list of numbers
+     *                                  from 1
+     */
+    private static Lineage lineage(Map<String, Object> payload)
+    {
+        List<Integer> line = new ArrayList<>();
+        if (payload.get("line") instanceof List<?> revisions)
+        {
+            for (Object revision : revisions)
+            {
+                if (!(revision instanceof Number number))
+                {
+                    throw new IllegalArgumentException(
+                            "line must hold numbers");
+                }
+                line.add(Math.toIntExact(number.longValue()));
+            }
+        }
+        return Lineage.of(generation(payload), line);
     }
 
     /**

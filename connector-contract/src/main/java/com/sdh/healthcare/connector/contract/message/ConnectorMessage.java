@@ -66,6 +66,19 @@ public sealed interface ConnectorMessage permits
     }
 
     /**
+     * What an item message's ID gains for a later generation of the item
+     * (STAGES.md §15.8.2): nothing for the first, so IDs from before
+     * generations were numbered stay the same.
+     *
+     * @param generation the generation, from 1
+     * @return {@code ~g<n>}, or nothing
+     */
+    static String generationSuffix(int generation)
+    {
+        return generation <= 1 ? "" : "~g" + generation;
+    }
+
+    /**
      * The id of the file the message is about.
      *
      * @return the file id
@@ -188,6 +201,33 @@ public sealed interface ConnectorMessage permits
          *         sent
          */
         String version();
+
+        /**
+         * Where the record stands in its line of processing (STAGES.md
+         * §15.8.2): its item's generation and a revision per stage.
+         *
+         * @return the lineage; {@link Lineage#FIRST} for the first of
+         *         everything
+         */
+        Lineage lineage();
+
+        /**
+         * Whether the stage that sent it already held something newer at
+         * the same place when it stored it (STAGES.md §15.8.3): it is sent
+         * on for its lineage, and a reader may leave it.
+         *
+         * @return true if superseded on arrival
+         */
+        boolean superseded();
+
+        /**
+         * The same message with another lineage and superseded flag.
+         *
+         * @param lineage    the lineage
+         * @param superseded whether superseded on arrival
+         * @return the message
+         */
+        RecordInStorage withLineage(Lineage lineage, boolean superseded);
     }
 
     /**
@@ -217,6 +257,9 @@ public sealed interface ConnectorMessage permits
      * @param resolves        for a record made by an operator's correction
      *                        or retry, the failed record it resolves
      *                        (STAGES.md §15.6e); null otherwise
+     * @param lineage         where it stands in its line (STAGES.md
+     *                        §15.8.2); null for the first of everything
+     * @param superseded      whether superseded on arrival (§15.8.3)
      */
     record RecordStored(
             String recordId,
@@ -232,9 +275,50 @@ public sealed interface ConnectorMessage permits
             StorageRef storage,
             RecordOrigin origin,
             String version,
-            String resolves)
+            String resolves,
+            Lineage lineage,
+            boolean superseded)
             implements RecordInStorage
     {
+
+        /**
+         * Reads no lineage as the first.
+         */
+        public RecordStored
+        {
+            lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A message of the first lineage, not superseded.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its file
+         * @param seq             its number in the file, from 0
+         * @param sourceOffset    where it starts in the file, in bytes
+         * @param sourceLength    how many bytes of the file it covers
+         * @param format          the name of the file's format
+         * @param contentType     what the stored bytes are
+         * @param mapping         the JSON mapping, or null when stored as
+         *                        split
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where the record's text came from
+         * @param version         the convert stage's version, or null
+         * @param resolves        the failed record it resolves, or null
+         */
+        public RecordStored(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, String mapping, long plaintextLength,
+                int chunkCount, StorageRef storage, RecordOrigin origin,
+                String version, String resolves)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, mapping, plaintextLength, chunkCount, storage,
+                    origin, version, resolves, null, false);
+        }
 
         /**
          * A message that resolves no failure.
@@ -337,12 +421,29 @@ public sealed interface ConnectorMessage permits
          * {@inheritDoc}
          *
          * @return "rec-", the item id and the record id: the same content
-         *         in another item is a record of its own there
+         *         in another item is a record of its own there; then the
+         *         lineage's suffix ({@link Lineage#suffix})
          */
         @Override
         public String messageId()
         {
-            return "rec-" + itemId + "-" + recordId;
+            return "rec-" + itemId + "-" + recordId + lineage.suffix();
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @param lineage    {@inheritDoc}
+         * @param superseded {@inheritDoc}
+         * @return {@inheritDoc}
+         */
+        @Override
+        public RecordStored withLineage(Lineage lineage, boolean superseded)
+        {
+            return new RecordStored(recordId, itemId, seq, sourceOffset,
+                    sourceLength, format, contentType, mapping,
+                    plaintextLength, chunkCount, storage, origin, version,
+                    resolves, lineage, superseded);
         }
     }
 
@@ -371,6 +472,9 @@ public sealed interface ConnectorMessage permits
      *                        and column; null if not known
      * @param version         the convert stage's version that failed it;
      *                        null if not known
+     * @param lineage         where it stands in its line (STAGES.md
+     *                        §15.8.2); null for the first of everything
+     * @param superseded      whether superseded on arrival (§15.8.3)
      */
     record RecordFailed(
             String recordId,
@@ -386,9 +490,49 @@ public sealed interface ConnectorMessage permits
             StorageRef storage,
             RecordOrigin origin,
             SourcePosition errorAt,
-            String version)
+            String version,
+            Lineage lineage,
+            boolean superseded)
             implements RecordInStorage
     {
+
+        /**
+         * Reads no lineage as the first.
+         */
+        public RecordFailed
+        {
+            lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A message of the first lineage, not superseded.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its file
+         * @param seq             its number in the file, from 0
+         * @param sourceOffset    where it starts in the file, in bytes
+         * @param sourceLength    how many bytes of the file it covers
+         * @param format          the name of the file's format
+         * @param contentType     the media type of the original format
+         * @param errorCode       why conversion failed
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where the record's text came from
+         * @param errorAt         where conversion failed
+         * @param version         the convert stage's version, or null
+         */
+        public RecordFailed(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, String errorCode, long plaintextLength,
+                int chunkCount, StorageRef storage, RecordOrigin origin,
+                SourcePosition errorAt, String version)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, errorCode, plaintextLength, chunkCount,
+                    storage, origin, errorAt, version, null, false);
+        }
 
         /**
          * A message with no version.
@@ -461,12 +605,29 @@ public sealed interface ConnectorMessage permits
          * {@inheritDoc}
          *
          * @return "rec-", the item id and the record id: the same content
-         *         in another item is a record of its own there
+         *         in another item is a record of its own there; then the
+         *         lineage's suffix ({@link Lineage#suffix})
          */
         @Override
         public String messageId()
         {
-            return "rec-" + itemId + "-" + recordId;
+            return "rec-" + itemId + "-" + recordId + lineage.suffix();
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @param lineage    {@inheritDoc}
+         * @param superseded {@inheritDoc}
+         * @return {@inheritDoc}
+         */
+        @Override
+        public RecordFailed withLineage(Lineage lineage, boolean superseded)
+        {
+            return new RecordFailed(recordId, itemId, seq, sourceOffset,
+                    sourceLength, format, contentType, errorCode,
+                    plaintextLength, chunkCount, storage, origin, errorAt,
+                    version, lineage, superseded);
         }
     }
 
@@ -865,6 +1026,9 @@ public sealed interface ConnectorMessage permits
      *                        or retry, the failed piece it resolves, or for
      *                        a correction of the item as a whole the item's
      *                        id (STAGES.md §15.6e); null otherwise
+     * @param lineage         where it stands in its line (STAGES.md
+     *                        §15.8.2); null for the first of everything
+     * @param superseded      whether superseded on arrival (§15.8.3)
      */
     record RecordSplit(
             String recordId,
@@ -884,9 +1048,55 @@ public sealed interface ConnectorMessage permits
             String messageRef,
             String messageReplaces,
             String version,
-            String resolves)
+            String resolves,
+            Lineage lineage,
+            boolean superseded)
             implements RecordInStorage
     {
+
+        /**
+         * Reads no lineage as the first.
+         */
+        public RecordSplit
+        {
+            lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A message of the first lineage, not superseded.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its item
+         * @param seq             its number in the item, from 0
+         * @param sourceOffset    where it starts in the item, in bytes
+         * @param sourceLength    how many bytes of the item it covers
+         * @param format          the name of the item's format
+         * @param contentType     what the stored bytes are
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where its text came from in the item
+         * @param errorCode       why the splitter couldn't parse it, or null
+         * @param errorAt         where in the item that was, or null
+         * @param message         its message in a batch, or -1
+         * @param messageRef      that message's broker ID, or null
+         * @param messageReplaces the message it replaces, or null
+         * @param version         the split stage's version, or null
+         * @param resolves        the failure it resolves, or null
+         */
+        public RecordSplit(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, long plaintextLength, int chunkCount,
+                StorageRef storage, RecordOrigin origin, String errorCode,
+                SourcePosition errorAt, int message, String messageRef,
+                String messageReplaces, String version, String resolves)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, plaintextLength, chunkCount, storage, origin,
+                    errorCode, errorAt, message, messageRef, messageReplaces,
+                    version, resolves, null, false);
+        }
 
         /**
          * A message that resolves no failure.
@@ -972,12 +1182,30 @@ public sealed interface ConnectorMessage permits
          * {@inheritDoc}
          *
          * @return "sp-", the item id and the record id: the same content
-         *         in another item is a record of its own there
+         *         in another item is a record of its own there; then the
+         *         lineage's suffix ({@link Lineage#suffix})
          */
         @Override
         public String messageId()
         {
-            return "sp-" + itemId + "-" + recordId;
+            return "sp-" + itemId + "-" + recordId + lineage.suffix();
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @param lineage    {@inheritDoc}
+         * @param superseded {@inheritDoc}
+         * @return {@inheritDoc}
+         */
+        @Override
+        public RecordSplit withLineage(Lineage lineage, boolean superseded)
+        {
+            return new RecordSplit(recordId, itemId, seq, sourceOffset,
+                    sourceLength, format, contentType, plaintextLength,
+                    chunkCount, storage, origin, errorCode, errorAt, message,
+                    messageRef, messageReplaces, version, resolves, lineage,
+                    superseded);
         }
     }
 
@@ -1007,23 +1235,55 @@ public sealed interface ConnectorMessage permits
      * @param completion        which completion of the item at the split
      *                          stage this is, from 1: a later one follows
      *                          an operator's reopening it (STAGES.md
-     *                          §15.6e)
+     *                          §15.6e), counted within its generation
+     * @param generation        the item's generation it is the end of, from
+     *                          1 (STAGES.md §15.8)
      */
     record ItemSplit(UUID itemId, String intake, long recordCount,
             long failedRecordCount, long itemSize, String itemDigest,
             String producerRef, UUID replaces, Problem failure,
             Instant startedAt, Instant completedAt, List<String> versions,
-            int completion)
+            int completion, int generation)
             implements ConnectorMessage
     {
 
         /**
-         * Copies the versions; a completion not given is the first.
+         * Copies the versions; a completion or generation not given is the
+         * first.
          */
         public ItemSplit
         {
             versions = versions == null ? List.of() : List.copyOf(versions);
             completion = Math.max(1, completion);
+            generation = Math.max(1, generation);
+        }
+
+        /**
+         * The end of the item's first generation.
+         *
+         * @param itemId            the item's id
+         * @param intake            the intake it came in through
+         * @param recordCount       its records, failed ones included
+         * @param failedRecordCount the pieces the splitter couldn't parse
+         * @param itemSize          the item's size, in bytes
+         * @param itemDigest        its keyed digest, as landed
+         * @param producerRef       the producer's reference, or null
+         * @param replaces          the item it replaces, or null
+         * @param failure           why it couldn't be split further, or null
+         * @param startedAt         when the split stage started on it
+         * @param completedAt       when it finished
+         * @param versions          the versions, in the order first used
+         * @param completion        which completion this is, from 1
+         */
+        public ItemSplit(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, long itemSize, String itemDigest,
+                String producerRef, UUID replaces, Problem failure,
+                Instant startedAt, Instant completedAt, List<String> versions,
+                int completion)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, itemSize,
+                    itemDigest, producerRef, replaces, failure, startedAt,
+                    completedAt, versions, completion, 1);
         }
 
         /**
@@ -1091,13 +1351,15 @@ public sealed interface ConnectorMessage permits
         /**
          * {@inheritDoc}
          *
-         * @return "is-" and the item id, and from its second completion
-         *         {@code ~c} and the completion's number
+         * @return "is-" and the item id; from its second generation
+         *         {@code ~g} and the generation's number; and from its
+         *         second completion {@code ~c} and the completion's number
          */
         @Override
         public String messageId()
         {
-            return "is-" + itemId + ConnectorMessage.completionSuffix(
+            return "is-" + itemId + ConnectorMessage.generationSuffix(
+                    generation) + ConnectorMessage.completionSuffix(
                     completion, 1);
         }
     }
@@ -1115,21 +1377,45 @@ public sealed interface ConnectorMessage permits
      *                          were made under, in the order first used;
      *                          empty if not known
      * @param completion        which completion of the item at the convert
-     *                          stage this is, from 1 (STAGES.md §15.6e)
+     *                          stage this is, from 1 (STAGES.md §15.6e),
+     *                          counted within its generation
+     * @param generation        the item's generation it is the end of, from
+     *                          1 (STAGES.md §15.8)
      */
     record ItemConverted(UUID itemId, String intake, long recordCount,
             long failedRecordCount, Instant completedAt, List<String> versions,
-            int completion)
+            int completion, int generation)
             implements ConnectorMessage
     {
 
         /**
-         * Copies the versions; a completion not given is the first.
+         * Copies the versions; a completion or generation not given is the
+         * first.
          */
         public ItemConverted
         {
             versions = versions == null ? List.of() : List.copyOf(versions);
             completion = Math.max(1, completion);
+            generation = Math.max(1, generation);
+        }
+
+        /**
+         * The end of the item's first generation.
+         *
+         * @param itemId            the item's id
+         * @param intake            the intake it came in through
+         * @param recordCount       its records, failed ones included
+         * @param failedRecordCount those stored in their original form
+         * @param completedAt       when the last was stored
+         * @param versions          the versions, in the order first used
+         * @param completion        which completion this is, from 1
+         */
+        public ItemConverted(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, Instant completedAt,
+                List<String> versions, int completion)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, completedAt,
+                    versions, completion, 1);
         }
 
         /**
@@ -1180,13 +1466,15 @@ public sealed interface ConnectorMessage permits
         /**
          * {@inheritDoc}
          *
-         * @return "ic-convert-" and the item id, and from its second
+         * @return "ic-convert-" and the item id; from its second
+         *         generation {@code ~g} and its number; and from its second
          *         completion {@code ~c} and the completion's number
          */
         @Override
         public String messageId()
         {
-            return "ic-convert-" + itemId + ConnectorMessage.completionSuffix(
+            return "ic-convert-" + itemId + ConnectorMessage.generationSuffix(
+                    generation) + ConnectorMessage.completionSuffix(
                     completion, 1);
         }
     }
@@ -1221,23 +1509,56 @@ public sealed interface ConnectorMessage permits
      *                      before this: 0 until its first completion; from
      *                      1, it reopens that completion, after an operator
      *                      reopened a failure (STAGES.md §15.6e), and a
-     *                      stage after that took it reopens its own
+     *                      stage after that took it reopens its own;
+     *                      counted within its generation
+     * @param generation    the item's generation it reports on, from 1
+     *                      (STAGES.md §15.8)
      */
     record ItemProgressed(UUID itemId, String intake, String stage,
             long recordCount, long passedCount, long openCount,
             long declinedCount, Problem failure, String producerRef,
             UUID replaces, Instant reportedAt, List<String> versions,
-            int completion)
+            int completion, int generation)
             implements ConnectorMessage
     {
 
         /**
-         * Copies the versions.
+         * Copies the versions; a generation not given is the first.
          */
         public ItemProgressed
         {
             versions = versions == null ? List.of() : List.copyOf(versions);
             completion = Math.max(0, completion);
+            generation = Math.max(1, generation);
+        }
+
+        /**
+         * Progress of the item's first generation.
+         *
+         * @param itemId        the item's id
+         * @param intake        the intake it came in through
+         * @param stage         the stage reporting
+         * @param recordCount   the records the stage has handled
+         * @param passedCount   those that passed
+         * @param openCount     those that failed and are open
+         * @param declinedCount those declined
+         * @param failure       why the item as a whole couldn't be split
+         *                      further, or null
+         * @param producerRef   the producer's reference, or null
+         * @param replaces      the item it replaces, or null
+         * @param reportedAt    when the stage reported it
+         * @param versions      the versions, in the order first used
+         * @param completion    the completions before it
+         */
+        public ItemProgressed(UUID itemId, String intake, String stage,
+                long recordCount, long passedCount, long openCount,
+                long declinedCount, Problem failure, String producerRef,
+                UUID replaces, Instant reportedAt, List<String> versions,
+                int completion)
+        {
+            this(itemId, intake, stage, recordCount, passedCount, openCount,
+                    declinedCount, failure, producerRef, replaces,
+                    reportedAt, versions, completion, 1);
         }
 
         /**
@@ -1283,6 +1604,7 @@ public sealed interface ConnectorMessage permits
          *
          * @return "ip-", the stage, the item id and the counts: the same
          *         counts are the same message, and a change is a new one;
+         *         from its second generation, {@code ~g} and its number;
          *         after a completion, {@code ~c} and its number, so the
          *         counts before it and after a reopening differ
          */
@@ -1291,6 +1613,7 @@ public sealed interface ConnectorMessage permits
         {
             return "ip-" + stage + "-" + itemId + "-" + recordCount + "-"
                     + passedCount + "-" + openCount + "-" + declinedCount
+                    + ConnectorMessage.generationSuffix(generation)
                     + ConnectorMessage.completionSuffix(completion, 0);
         }
     }
