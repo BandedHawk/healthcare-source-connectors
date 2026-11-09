@@ -460,8 +460,15 @@ Checked again since: see the end of this section.
   of 114 bytes broken off part way, corrected as a whole, became `SUPERSEDED` by `g1 r2`, and both stages completed
   it with 1 record (its record still `g1 r1` at the convert stage: whole-item corrections keep the old rules until
   step 4). `check` passes (5 items split and converted). No pod restarted. The producer's results are off here, so
-  the rule that operator actions send it nothing (§15.8.7) wasn't seen. Seen here, not changed: `failures
-  --item-id` prints the seq's events and corrections under each of its revisions; a failure superseded by a
-  revision says `changed ... by <operator>` where its event says `by pipeline`; `superseded_by` holds a lineage
+  the rule that operator actions send it nothing (§15.8.7) wasn't seen. Seen here, and fixed since (below):
+  `failures --item-id` printed the seq's events and corrections under each of its revisions; a failure superseded
+  by a revision said `changed ... by <operator>` where its event said `by pipeline`; `superseded_by` held a lineage
   (`g1 r1.3`) for new rows and a record ID for rows moved from `CORRECTED`; and the split stage's whole-item
-  correction is noted as `g1 r2`, a revision no record carries.
+  correction was noted as `g1 r2`, a revision no record carried.
+- 2026-11-09, the four fixed: at the next start each stage named its superseded failures again
+  (`failure.states_moved`, split `count=3`, convert `count=4`): every `superseded_by` a revision (`g1 r2` at the
+  split stage, `g1 r1.2` and `g1 r1.3` at the convert stage), every one changed by `pipeline`, each keeping when it
+  changed. `failures --item-id` shows each revision with only its own changes and the correction submitted for it,
+  with the revision it makes (`correction 1 FAILED ... as g1 r1.2`, `correction 2 PASSED ... as g1 r1.3, made
+  ...`). A new synthetic C-CDA broken off part way, corrected as a whole, was superseded by `g1 r2`, and its record
+  reached the convert stage as `g1 r2.1` and completed. `check` passes. No pod restarted.

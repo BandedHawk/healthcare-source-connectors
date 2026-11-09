@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
@@ -256,12 +257,16 @@ public final class CorrectionStore
      *                   {@code REVISION_PENDING}
      * @param superseded failures moved from {@code CORRECTED} or
      *                   {@code RETRIED} to {@code SUPERSEDED}
+     * @param relabelled failures an earlier build superseded, named again:
+     *                   by the revision rather than the record that passed,
+     *                   and changed by {@code pipeline}
      * @param refailed   per item, failures moved from
      *                   {@code FAILED_CORRECTION} to {@code SUPERSEDED},
      *                   each with its correction's failure added as one of
      *                   its own
      */
-    public record Moved(int renamed, int superseded, Map<UUID, Long> refailed)
+    public record Moved(int renamed, int superseded, int relabelled,
+            Map<UUID, Long> refailed)
     {
 
         /**
@@ -271,7 +276,8 @@ public final class CorrectionStore
          */
         public boolean any()
         {
-            return renamed + superseded > 0 || !refailed.isEmpty();
+            return renamed + superseded + relabelled > 0
+                    || !refailed.isEmpty();
         }
 
         /**
@@ -291,7 +297,7 @@ public final class CorrectionStore
             Telemetry.get().audit("failure.states_moved",
                     Fields.of(Attr.STAGE, stage)
                             .with(Attr.COUNT, renamed + superseded
-                                    + refailedCount)
+                                    + relabelled + refailedCount)
                             .with(Attr.FAILED_COUNT, refailedCount));
         }
     }
@@ -300,14 +306,17 @@ public final class CorrectionStore
      * Moves a stage's failures out of the states that went in revision (cn)
      * (STAGES.md §15.8.5), once, in the caller's transaction:
      * {@code CORRECTION_PENDING} becomes {@code REVISION_PENDING};
-     * {@code CORRECTED} and {@code RETRIED} become {@code SUPERSEDED},
-     * naming the record that passed; {@code FAILED_CORRECTION} becomes
+     * {@code CORRECTED} and {@code RETRIED} become {@code SUPERSEDED} by
+     * their correction's revision (the record that passed stays in
+     * {@code resolved_by}); {@code FAILED_CORRECTION} becomes
      * {@code SUPERSEDED} by its correction's revision, whose failure is
      * added as a {@code FAILED} row of its own. Corrections still pending
      * have their revision noted. Each change of state adds an event, by
      * {@code pipeline}; earlier events keep the names they were written
-     * with. Rows already moved are left alone, so it may run at every
-     * start.
+     * with. Every failure superseded is changed by {@code pipeline}, and
+     * one an earlier build of this move named by its record is named by
+     * its revision instead. Rows already moved are left alone, so it may
+     * run at every start.
      *
      * @param connection the transaction's connection
      * @param schema     the stage's registry schema
@@ -333,7 +342,7 @@ public final class CorrectionStore
             update.setString(1, stage);
             renamed = update.executeUpdate();
         }
-        // What passed: superseded by the record that passed. Rows from
+        // What passed: superseded by its correction's revision. Rows from
         // before generations are one per number, so one event each.
         String event = """
                 INSERT INTO %1$s (stage, item_id, seq, event, at, operator,
@@ -353,19 +362,15 @@ public final class CorrectionStore
             add.setString(1, stage);
             add.executeUpdate();
         }
-        int superseded;
-        try (PreparedStatement update = connection.prepareStatement("""
-                UPDATE %s SET state = 'SUPERSEDED',
-                       superseded_how = 'REVISION',
-                       superseded_by = resolved_by,
-                       changed_at = clock_timestamp()
-                 WHERE stage = ? AND state IN ('CORRECTED', 'RETRIED')"""
-                .formatted(failures)))
-        {
-            update.setQueryTimeout(timeout);
-            update.setString(1, stage);
-            superseded = update.executeUpdate();
-        }
+        int superseded = supersede(connection, failures, stage, place,
+                "state IN ('CORRECTED', 'RETRIED')", true, timeout);
+        // Moved by an earlier build of this move: named by the record that
+        // passed, and changed by the operator who corrected it.
+        int relabelled = supersede(connection, failures, stage, place,
+                "state = 'SUPERSEDED' AND (changed_by IS DISTINCT FROM"
+                        + " 'pipeline' OR (superseded_how = 'REVISION'"
+                        + " AND superseded_by = resolved_by))", false,
+                timeout);
         Map<UUID, Long> refailed = refail(connection, schema, stage, timeout,
                 event.formatted(events, failures, "'FAILED_CORRECTION'"));
         // Pending corrections: the revision each makes, read once their
@@ -411,7 +416,83 @@ public final class CorrectionStore
                 update.executeUpdate();
             }
         }
-        return new Moved(renamed, superseded, refailed);
+        return new Moved(renamed, superseded, relabelled, refailed);
+    }
+
+    /**
+     * Supersedes the failures that match, as changed by {@code pipeline}:
+     * one that passed by a correction (named by its record, in
+     * {@code resolved_by}) by that correction's revision, the next of its
+     * own at this stage; any other keeps what superseded it.
+     *
+     * @param connection the transaction's connection
+     * @param failures   the fail store's table
+     * @param stage      the stage
+     * @param place      the stage's place in a lineage
+     * @param where      which of the stage's failures
+     * @param now        whether they change now, rather than keeping when
+     *                   they were superseded
+     * @param timeout    how long a statement may run, in seconds
+     * @return how many were changed
+     * @throws SQLException if a statement fails
+     */
+    private static int supersede(Connection connection, String failures,
+            String stage, int place, String where, boolean now, int timeout)
+            throws SQLException
+    {
+        List<Object[]> found = new ArrayList<>();
+        try (PreparedStatement select = connection.prepareStatement("""
+                SELECT item_id, seq, generation, line, superseded_how,
+                       superseded_by, resolved_by
+                  FROM %s
+                 WHERE stage = ? AND %s
+                   FOR UPDATE""".formatted(failures, where)))
+        {
+            select.setQueryTimeout(timeout);
+            select.setString(1, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    Lineage lineage = FailureStore.lineage(rows, 3);
+                    String how = rows.getString(5);
+                    String by = rows.getString(6);
+                    // Named by its record, or not yet superseded: the
+                    // revision its correction made.
+                    boolean byRecord = how == null || ("REVISION".equals(how)
+                            && Objects.equals(by, rows.getString(7)));
+                    found.add(new Object[] {rows.getObject(1, UUID.class),
+                        rows.getLong(2), lineage, how == null ? "REVISION"
+                                : how,
+                        byRecord ? lineage.nextRevision(place).toString()
+                                : by});
+                }
+            }
+        }
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE %s SET state = 'SUPERSEDED', superseded_how = ?,
+                       superseded_by = ?, changed_by = 'pipeline',
+                       changed_at = CASE WHEN ? THEN clock_timestamp()
+                           ELSE COALESCE(changed_at, clock_timestamp()) END
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND generation = ? AND line = ?""".formatted(failures)))
+        {
+            update.setQueryTimeout(timeout);
+            for (Object[] row : found)
+            {
+                Lineage lineage = (Lineage) row[2];
+                update.setString(1, (String) row[3]);
+                update.setString(2, (String) row[4]);
+                update.setBoolean(3, now);
+                update.setString(4, stage);
+                update.setObject(5, row[0]);
+                update.setLong(6, (Long) row[1]);
+                update.setInt(7, lineage.generation());
+                update.setArray(8, FailureStore.line(connection, lineage));
+                update.executeUpdate();
+            }
+        }
+        return found.size();
     }
 
     /**
@@ -475,7 +556,7 @@ public final class CorrectionStore
         String supersede = """
                 UPDATE %s SET state = 'SUPERSEDED',
                        superseded_how = 'REVISION', superseded_by = ?,
-                       changed_at = clock_timestamp()
+                       changed_by = 'pipeline', changed_at = clock_timestamp()
                  WHERE stage = ? AND item_id = ? AND seq = ?
                    AND generation = ? AND line = ?""".formatted(failures);
         try (PreparedStatement error = connection.prepareStatement(lastError);
@@ -1210,7 +1291,7 @@ public final class CorrectionStore
         String sql = """
                 SELECT correction, state, submitted_by, submitted_at,
                        finished_at, result_record_id, error_code,
-                       content_length, kind
+                       content_length, kind, generation, line
                   FROM %s
                  WHERE stage = ? AND item_id = ? AND seq = ?
                  ORDER BY correction""".formatted(table);
@@ -1233,7 +1314,9 @@ public final class CorrectionStore
                             rows.getTimestamp(4).toInstant(),
                             finished == null ? null : finished.toInstant(),
                             rows.getString(6), rows.getString(7),
-                            rows.getLong(8), Kind.of(rows.getString(9))));
+                            rows.getLong(8), Kind.of(rows.getString(9)),
+                            rows.getObject(10) == null ? null
+                                    : FailureStore.lineage(rows, 10)));
                 }
             }
             return found;
@@ -1257,10 +1340,13 @@ public final class CorrectionStore
      * @param errorCode   why it failed; null unless it did
      * @param length      its content's length, in bytes
      * @param kind        a correction or a retry
+     * @param lineage     the revision it makes, the next of the failure it
+     *                    was submitted for (STAGES.md §15.8.5); null for
+     *                    one submitted before revisions were noted
      */
     public record Listed(int correction, State state, String submittedBy,
             Instant submittedAt, Instant finishedAt, String recordId,
-            String errorCode, long length, Kind kind)
+            String errorCode, long length, Kind kind, Lineage lineage)
     {
     }
 }

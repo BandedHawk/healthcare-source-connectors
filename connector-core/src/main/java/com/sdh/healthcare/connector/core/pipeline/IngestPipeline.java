@@ -1182,6 +1182,9 @@ public final class IngestPipeline implements AutoCloseable
      * them must pass. Those are stored, numbered on from the item's, their
      * places those in the correction, marked as correcting the item.</li>
      * </ul>
+     * What it stores is the split stage's next revision of what failed
+     * (STAGES.md §15.8.5), on its rows and messages; a record kept from
+     * before keeps its own, and isn't sent again.
      * A correction that fails stores nothing. Committed under the item's
      * lease.
      *
@@ -1298,6 +1301,7 @@ public final class IngestPipeline implements AutoCloseable
                 {
                     SplitRecord record = split.get(seq);
                     writer.correction(itemId, seq, itemId.toString());
+                    writer.lineage(itemId, seq, revision(pending));
                     writer.add(itemId, seq, format, record, source);
                 }
             }
@@ -1323,8 +1327,7 @@ public final class IngestPipeline implements AutoCloseable
             {
                 RecordSplit made = message(record, ref, refs, version,
                         resolves);
-                messages.add(pending.seq() >= 0
-                        ? made.withLineage(revision(pending), false) : made);
+                messages.add(made.withLineage(revision(pending), false));
             }
             Telemetry.get().recordsStored(messages.size(), format);
             return new CorrectionSplit(new CorrectionStore.Outcome(pending,
@@ -1338,7 +1341,7 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
-     * The revision a correction of one piece makes (STAGES.md §15.8.5): as
+     * The revision a correction makes (STAGES.md §15.8.5): as
      * noted when it was submitted, or, for one submitted before revisions
      * were noted, the split stage's second.
      *

@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.stage.admin;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureReason;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
@@ -211,12 +212,20 @@ public final class FailureCommands
                     out.println("no failures for " + itemId + " at the "
                             + context.stage() + " stage");
                 }
+                int place = Lineage.stageOf(context.stage());
                 for (FailureStore.Listed failure : listed)
                 {
                     out.println(line(failure));
+                    FailureStore.Failure what = failure.stored().failure();
+                    // A number's failures, one per revision, share its
+                    // events and corrections: each shows its own.
                     for (FailureStore.Event event : failures.events(itemId,
-                            failure.stored().failure().seq()))
+                            what.seq()))
                     {
+                        if (!event.lineage().equals(what.lineage()))
+                        {
+                            continue;
+                        }
                         out.println("  " + event.at() + " " + event.from()
                                 + " -> " + event.to() + " by "
                                 + event.operator()
@@ -228,9 +237,15 @@ public final class FailureCommands
                             : corrections == null
                                     ? List.<CorrectionStore.Listed>of()
                                     : corrections.list(itemId,
-                                            failure.stored().failure()
-                                                    .seq()))
+                                            what.seq()))
                     {
+                        if (correction.lineage() == null
+                                ? !first(listed, failure)
+                                : !correction.lineage().equals(what.lineage()
+                                        .nextRevision(place)))
+                        {
+                            continue;
+                        }
                         out.println("  " + (correction.kind()
                                 == CorrectionStore.Kind.RETRY ? "retry "
                                         : "correction ")
@@ -241,6 +256,8 @@ public final class FailureCommands
                                 + correction.length() + " bytes"
                                 + (correction.errorCode() == null ? ""
                                         : ", " + correction.errorCode())
+                                + (correction.lineage() == null ? ""
+                                        : ", as " + correction.lineage())
                                 + (correction.recordId() == null ? ""
                                         : ", made " + correction.recordId()));
                     }
@@ -258,6 +275,23 @@ public final class FailureCommands
             {
                 out.println(line(failure));
             }
+        }
+
+        /**
+         * Whether a failure is the first at its number, the one a
+         * correction submitted before revisions were noted was for.
+         *
+         * @param listed  the item's failures
+         * @param failure one of them
+         * @return true if none at its number failed before it
+         */
+        private static boolean first(List<FailureStore.Listed> listed,
+                FailureStore.Listed failure)
+        {
+            long seq = failure.stored().failure().seq();
+            return listed.stream().filter(other -> other.stored().failure()
+                    .seq() == seq).noneMatch(other -> other.failedAt()
+                            .isBefore(failure.failedAt()));
         }
 
         /**

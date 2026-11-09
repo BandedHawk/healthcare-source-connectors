@@ -281,13 +281,15 @@ whether or not it passes (STAGES.md §15.8.5):
   …); it is stored in `split_records` at the piece's number and place, with `correction_of` naming the failed row,
   which stays;
 - the item's correction is the whole item, edited: the records already stored must come out of it unchanged, and
-  those after them are stored, with `correction_of` the item's ID.
+  those after them are stored, with `correction_of` the item's ID, as the item's next revision at this stage
+  (`g1 r2`); the records kept from before keep theirs.
 
-If it passes, the new records are sent on as `record.split` (a piece's with its revision), and the item's end is
+If it passes, the new records are sent on as `record.split` with their revision, and the item's end is
 sent again (`item.split` once nothing else is open, its failed count without the corrected piece). If it fails
 (`CORRECTION_RECORD_COUNT`, `CORRECTION_CHANGES_PASSED`, or the splitter's code), nothing is stored, and the
 revision is a failure of its own, `FAILED`, which you correct in turn. `failures --item-id` shows each failure with
-its revision, and each correction and what it came to. Delete `failed.jwe` and your edits when you're done. `restore` also gives a landed item whole, into the pod.
+its revision, its own changes (a failure superseded is changed by `pipeline`), and each correction submitted for it,
+the revision it makes and what it came to. Delete `failed.jwe` and your edits when you're done. `restore` also gives a landed item whole, into the pod.
 
 `retry --item-id <id> --seq <n>` processes what failed again, unchanged, for a failure that wasn't the data's (a
 limit raised, the stage fixed): it needs no input, and takes a failure that is `FAILED`, as `correct` does. A pod

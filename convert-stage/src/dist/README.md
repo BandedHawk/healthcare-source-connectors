@@ -273,7 +273,8 @@ the record's next revision at this stage (`g1 r1.2`, then `r1.3`, …; STAGES.md
 (`correction_of` naming the failed row, which stays, and the revision in `generation` and `line`), sent on as
 `record.stored` with its revision, and the item completes once nothing else is open; if it fails, the revision is a
 failure of its own, `FAILED`, and you correct that one. `failures --item-id` shows each failure with its revision,
-and each correction and what it came to. Delete `failed.jwe` and your edits when you're done.
+its own changes (a failure superseded is changed by `pipeline`), and each correction submitted for it, the revision
+it makes and what it came to. Delete `failed.jwe` and your edits when you're done.
 
 `retry --item-id <id> --seq <n>` converts what failed again, unchanged, for a failure that wasn't the data's (a limit
 raised, the converter fixed): it needs no input, and takes a failure that is `FAILED`. It makes the next revision

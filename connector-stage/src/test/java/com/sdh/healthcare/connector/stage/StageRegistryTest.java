@@ -720,6 +720,31 @@ class StageRegistryTest
     }
 
     /**
+     * One value from the test's item's failure at a number that is
+     * superseded.
+     *
+     * @param seq    the failure's number
+     * @param column the column, as SQL
+     * @return its value, as text
+     * @throws java.sql.SQLException if it can't be read
+     */
+    String superseded(int seq, String column) throws java.sql.SQLException
+    {
+        try (java.sql.Connection connection = StageTestSupport.database()
+                .getConnection();
+                java.sql.Statement statement = connection.createStatement();
+                java.sql.ResultSet rows = statement.executeQuery(
+                        "SELECT " + column + " FROM " + schema
+                                + ".stage_failure WHERE item_id = '" + item
+                                + "' AND seq = " + seq
+                                + " AND state = 'SUPERSEDED'"))
+        {
+            rows.next();
+            return rows.getString(1);
+        }
+    }
+
+    /**
      * An item's count of failed records, as the registry holds it.
      *
      * @return the count
@@ -781,10 +806,13 @@ class StageRegistryTest
     /**
      * Failures in the states that went are moved once, at start (STAGES.md
      * §15.8.5): CORRECTION_PENDING to REVISION_PENDING, its correction's
-     * revision noted; CORRECTED to SUPERSEDED, naming what passed;
-     * FAILED_CORRECTION to SUPERSEDED, with its correction's failure added
-     * as a FAILED row of the next revision, and counted among the item's
-     * failed records. A second start moves nothing.
+     * revision noted; CORRECTED to SUPERSEDED by its correction's
+     * revision, the record that passed kept; FAILED_CORRECTION to
+     * SUPERSEDED, with its correction's failure added as a FAILED row of
+     * the next revision, and counted among the item's failed records. Each
+     * is changed by the pipeline, and a row an earlier build moved naming
+     * its record is named by its revision, keeping when it changed. A
+     * second start moves nothing.
      *
      * @throws java.sql.SQLException if the rows can't be written
      */
@@ -794,6 +822,11 @@ class StageRegistryTest
         sql(oldFailure(1, "CORRECTION_PENDING", "NULL"),
                 oldFailure(2, "CORRECTED", "'r2-fixed'"),
                 oldFailure(3, "FAILED_CORRECTION", "NULL"),
+                oldFailure(4, "SUPERSEDED", "'r4-fixed'"),
+                "UPDATE %s.stage_failure SET superseded_how = 'REVISION',"
+                        + " superseded_by = 'r4-fixed', changed_by = 'alice',"
+                        + " changed_at = '2026-11-09 10:00:00+00'"
+                        + " WHERE seq = 4",
                 oldCorrection(1, "PENDING", "NULL", "NULL"),
                 oldCorrection(3, "FAILED", "now()", "'FIX_FAILED'"),
                 "INSERT INTO %s.stage_item (stage, item_id, done, failed)"
@@ -818,7 +851,18 @@ class StageRegistryTest
         {
             assertThat(event.from()).isEqualTo("CORRECTED");
             assertThat(event.to()).isEqualTo("SUPERSEDED");
+            assertThat(event.lineage()).isEqualTo(Lineage.FIRST);
         });
+        for (int seq : new int[] {2, 3, 4})
+        {
+            assertThat(superseded(seq, "superseded_by"))
+                    .isEqualTo(second.toString());
+            assertThat(superseded(seq, "changed_by")).isEqualTo("pipeline");
+        }
+        assertThat(superseded(2, "resolved_by")).isEqualTo("r2-fixed");
+        assertThat(superseded(4, "resolved_by")).isEqualTo("r4-fixed");
+        assertThat(superseded(4, "changed_at = '2026-11-09 10:00:00+00'"))
+                .isEqualTo("t");
         assertThat(store.failures(item))
                 .filteredOn(stored -> stored.failure().seq() == 3)
                 .satisfiesExactly(
@@ -834,13 +878,13 @@ class StageRegistryTest
                         moved -> assertThat(moved.state())
                                 .isEqualTo(FailureStore.State.SUPERSEDED));
         assertThat(store.counts(item))
-                .isEqualTo(new FailureStore.Counts(2, 0, 2));
+                .isEqualTo(new FailureStore.Counts(2, 0, 3));
         assertThat(failedCount()).isEqualTo(4);
         assertThat(audit.names()).contains("failure.states_moved");
 
         StageTestSupport.registry(schema, "pod-d");
         assertThat(failedCount()).isEqualTo(4);
-        assertThat(store.failures(item)).hasSize(4);
+        assertThat(store.failures(item)).hasSize(5);
     }
 
     /**

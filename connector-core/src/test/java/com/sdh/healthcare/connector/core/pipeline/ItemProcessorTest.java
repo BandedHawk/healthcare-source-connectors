@@ -785,8 +785,10 @@ class ItemProcessorTest
     /**
      * A correction of an item that couldn't be split to its end is the
      * whole item: the records already stored must come out of it the same,
-     * and the rest are stored after them, marked as correcting the item.
-     * The item then ends in {@code item.split} with no failure.
+     * and the rest are stored after them, marked as correcting the item,
+     * as the split stage's next revision of it (STAGES.md §15.8.5); those
+     * kept keep their own. The item then ends in {@code item.split} with no
+     * failure.
      *
      * @throws Exception if the test fails
      */
@@ -835,6 +837,9 @@ class ItemProcessorTest
         // Each resolves the item's failure (STAGES.md §15.6e).
         assertThat(split).extracting(RecordSplit::resolves)
                 .containsOnly(item.itemId().toString());
+        Lineage second = Lineage.FIRST.nextRevision(Lineage.SPLIT);
+        assertThat(split).extracting(RecordSplit::lineage)
+                .containsOnly(second);
         assertThat(messages().getLast()).isInstanceOfSatisfying(
                 ItemSplit.class, end ->
                 {
@@ -854,8 +859,16 @@ class ItemProcessorTest
                         .isEqualTo(FailureStore.State.SUPERSEDED));
         records.refresh();
         assertThat(CommittedRecords.corrections(records, item.itemId()))
-                .allSatisfy(row -> assertThat(row.correctionOf())
-                        .isEqualTo(item.itemId().toString()));
+                .isNotEmpty().allSatisfy(row ->
+                {
+                    assertThat(row.correctionOf())
+                            .isEqualTo(item.itemId().toString());
+                    assertThat(row.lineage()).isEqualTo(second);
+                });
+        assertThat(CommittedRecords.all(records, item.itemId()))
+                .filteredOn(row -> row.seq() < kept)
+                .extracting(CommittedRecords.Row::lineage)
+                .containsOnly(Lineage.FIRST);
     }
 
     /**

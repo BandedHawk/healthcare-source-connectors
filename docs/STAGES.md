@@ -1717,7 +1717,7 @@ Left from step 1, with why:
 - A pending correction whose failure has since been superseded is refused when it finishes (`CorrectionStore`
   acts on current failures only). Step 2 decides what it becomes. (Done in step 2: it is stored late.)
 
-**Step 2 as built (2026-11-09; not yet tried on the sandbox).**
+**Step 2 as built (2026-11-09; tried on the sandbox, SANDBOX.md, and the four things seen there fixed).**
 
 - The fail store's states are `FAILED`, `REVISION_PENDING`, `DECLINED` and `SUPERSEDED`. A correction or retry, when
   submitted, notes the revision it makes (the failed object's line, this stage's revision one more) and the failed
@@ -1732,18 +1732,25 @@ Left from step 1, with why:
 - **At the split stage** a piece's correction is the piece's next split revision (`r2`), on its row of
   `split_records` and its `record.split`. A correction of the item as a whole keeps the rules of §15.6d
   (`CORRECTION_CHANGES_PASSED`, records after the kept ones added in the same generation) until step 4 makes it the
-  item's next generation; its failure is superseded, or the failed revision is a failure of its own, as for a
+  item's next generation; the records it adds are its split revision (`r2`), on their rows and messages, those
+  kept keep theirs, and its failure is superseded, or the failed revision is a failure of its own, as for a
   piece.
 - **The producer** gets a result only for an item's first report at the convert stage, in its first generation (no
   `item.progress` or completion of it sent before). The result step runs on no later report, since each follows an
   operator's action.
 - **The one-time move**, at every start, changing nothing once done (`CorrectionStore.moveStates`, audited
   `failure.states_moved`): `CORRECTION_PENDING` becomes `REVISION_PENDING`; `CORRECTED` and `RETRIED` become
-  `SUPERSEDED` naming the record that passed (`superseded_by` from `resolved_by`); `FAILED_CORRECTION` becomes
-  `SUPERSEDED` by the next revision, whose failure (the last failed correction's error code) is added as `FAILED`,
-  and at the convert stage counted among the item's failed records. Pending corrections have their revision noted.
+  `SUPERSEDED` by their correction's revision (the record that passed stays in `resolved_by`); `FAILED_CORRECTION`
+  becomes `SUPERSEDED` by the next revision, whose failure (the last failed correction's error code) is added as
+  `FAILED`, and at the convert stage counted among the item's failed records. Pending corrections have their
+  revision noted.
   Each move adds an event by `pipeline`; earlier events keep the state names they were written with, so the
-  history reads as it happened.
+  history reads as it happened. `superseded_by` always names a revision (or generation), never a record; a failure
+  superseded is changed by `pipeline`, and rows the first build of the move named by their record, or left changed
+  by the operator, are put right at the next start, keeping when they changed.
+- **`failures --item-id`** shows under each failure only its own events (the event's lineage, §15.8.8) and the
+  corrections submitted for it (the revision each makes, the next of the failure's; one from before revisions
+  were noted, under the number's first failure).
 
 Left from step 2:
 - `retry` of a failed revision processes what failed first (the record as split), not the corrected content

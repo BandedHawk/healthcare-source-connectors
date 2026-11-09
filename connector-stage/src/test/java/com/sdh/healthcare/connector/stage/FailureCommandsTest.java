@@ -454,6 +454,45 @@ class FailureCommandsTest
     }
 
     /**
+     * A correction that failed leaves two failures at the number, its
+     * revision's open: the item's history shows each with only its own
+     * changes and corrections, the one superseded changed by the pipeline
+     * (STAGES.md §15.8.5).
+     */
+    @Test
+    void showsEachRevisionWithItsOwnHistory()
+    {
+        assertThat(admin("<synthetic still broken/>", "correct", "--item-id",
+                item.toString(), "--seq", "2").status()).isZero();
+        CorrectionStore corrections = new CorrectionStore(
+                StageTestSupport.database(), schema, "convert",
+                Duration.ofSeconds(5));
+        corrections.finish(new CorrectionStore.Outcome(
+                corrections.pending(10).get(0), false, null, "TEST_FAILED",
+                "v1"));
+
+        Result history = admin("", "failures", "--item-id", item.toString());
+        assertThat(history.status()).as(history.out() + history.err())
+                .isZero();
+        List<String> failures = List.of(history.out()
+                .split("(?m)^(?=\\S)"));
+        assertThat(failures).hasSize(2);
+        assertThat(failures).filteredOn(failure -> failure.startsWith(item
+                + " seq=2 g1 r1.2 FAILED")).singleElement()
+                .satisfies(failure -> assertThat(failure)
+                        .doesNotContain("->")
+                        .doesNotContain("correction 1"));
+        assertThat(failures).filteredOn(failure -> failure.startsWith(item
+                + " seq=2 g1 r1 SUPERSEDED")).singleElement()
+                .asString()
+                .contains(" by pipeline version=")
+                .contains("FAILED -> REVISION_PENDING by alice")
+                .contains("REVISION_PENDING -> SUPERSEDED by pipeline")
+                .contains("correction 1 FAILED by alice")
+                .contains(", TEST_FAILED, as g1 r1.2");
+    }
+
+    /**
      * {@code retry} submits what failed, unchanged, as a correction of kind
      * RETRY, reading nothing from standard input and printing nothing of
      * it; a retry while one is pending, or of a declined failure, is

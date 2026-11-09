@@ -735,7 +735,7 @@ public final class FailureStore
     {
         String sql = """
                 SELECT event, at, operator, from_state, to_state, reason_enc,
-                       reason_key, reason_kek
+                       reason_key, reason_kek, generation, line
                   FROM %s
                  WHERE stage = ? AND item_id = ? AND seq = ?
                  ORDER BY event""".formatted(events);
@@ -757,7 +757,8 @@ public final class FailureStore
                             rows.getString(3),
                             rows.getString(4), rows.getString(5),
                             sealed == null ? null : new FailureReason(sealed,
-                                    rows.getBytes(7), rows.getString(8))));
+                                    rows.getBytes(7), rows.getString(8)),
+                            lineage(rows, 9)));
                 }
             }
             return found;
@@ -780,9 +781,11 @@ public final class FailureStore
      *                 §15.8.5)
      * @param to       the state after, as written then
      * @param reason   why, encrypted; null if none was given
+     * @param lineage  the lineage of the failure it changed: a number's
+     *                 failures, one per revision, share its events
      */
     public record Event(int event, Instant at, String operator, String from,
-            String to, FailureReason reason)
+            String to, FailureReason reason, Lineage lineage)
     {
     }
 
@@ -1476,7 +1479,8 @@ public final class FailureStore
         String update = """
                 UPDATE %s
                    SET state = 'SUPERSEDED', changed_at = clock_timestamp(),
-                       superseded_how = ?, superseded_by = ?
+                       changed_by = 'pipeline', superseded_how = ?,
+                       superseded_by = ?
                  WHERE stage = ? AND item_id = ? AND seq = ?
                    AND generation = ? AND line = ?""".formatted(table);
         try (PreparedStatement add = connection.prepareStatement(event);
