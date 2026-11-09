@@ -22,13 +22,26 @@ import java.util.Optional;
  * A message that can't be split fails alone: the rest of it, from where
  * its last good record ended, becomes one record marked with the error
  * ({@link SplitRecord.Failure}), and the next message carries on. A record
- * larger than the limit fails its message the same way.
+ * larger than the limit fails its message the same way. Each message is
+ * held to the rules for an item without records ({@link WholeItemSession},
+ * STAGES.md §16): an empty or blank message fails alone
+ * ({@code SPLIT_EMPTY}), as one failed piece, possibly of 0 bytes.
+ * <p>
+ * The failed piece of an empty message resumes at its offset with the
+ * context {@code [}{@value #MESSAGE_DONE}{@code , index]}: the offset alone
+ * can't tell which of the messages there are done.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
 final class MessageSession implements SplitSession
 {
+
+    /**
+     * The first context entry of a resume point that names the message
+     * done, as {@code [MESSAGE_DONE, index]}; never an offset.
+     */
+    static final long MESSAGE_DONE = -1;
 
     /** Splits each message. */
     private final RecordSplitter splitter;
@@ -80,6 +93,12 @@ final class MessageSession implements SplitSession
         this.size = source.size();
         this.config = config;
         this.position = from.offset();
+        List<Long> done = from.context();
+        if (done.size() == 2 && done.get(0) == MESSAGE_DONE)
+        {
+            this.message = Math.toIntExact(done.get(1)) + 1;
+            return;
+        }
         this.message = messageAt(from.offset());
         if (message < this.offsets.size()
                 && from.offset() > this.offsets.get(message))
@@ -105,11 +124,6 @@ final class MessageSession implements SplitSession
                 if (inner == null)
                 {
                     base = offsets.get(message);
-                    if (end == base)
-                    {
-                        message++;
-                        continue;
-                    }
                     ResumePoint from = resumeWithin == null
                             ? ResumePoint.START : resumeWithin;
                     resumeWithin = null;
@@ -135,10 +149,12 @@ final class MessageSession implements SplitSession
             catch (SplitException failure)
             {
                 long at = position;
+                ResumePoint resume = end > base ? ResumePoint.at(end)
+                        : ResumePoint.at(end, MESSAGE_DONE, message);
                 SplitRecord rest = new SplitRecord(at, end - at,
                         end > at ? List.of(new SplitRecord.SourceRange(at,
                                 end - at)) : List.of(),
-                        ResumePoint.at(end), null,
+                        resume, null,
                         new SplitRecord.Failure(failure.code(),
                                 Math.min(end, base + failure.offset())));
                 finishMessage();
@@ -168,8 +184,8 @@ final class MessageSession implements SplitSession
      */
     private void open(ResumePoint from) throws IOException, SplitException
     {
-        inner = splitter.open(new Slice(source, base, end(message) - base),
-                from, config);
+        inner = WholeItemSession.open(splitter,
+                new Slice(source, base, end(message) - base), from, config);
     }
 
     /** Closes the current message's session and moves to the next. */
@@ -192,7 +208,7 @@ final class MessageSession implements SplitSession
 
     /**
      * The message an offset falls in. An offset at a message's start is
-     * that message, skipping empty ones.
+     * that message, or the first of the empty messages there.
      *
      * @param offset the offset
      * @return the message; the count if the offset is at the end
@@ -201,7 +217,7 @@ final class MessageSession implements SplitSession
     {
         for (int index = 0; index < offsets.size(); index++)
         {
-            if (offset < end(index))
+            if (offset < end(index) || offset == offsets.get(index))
             {
                 return index;
             }

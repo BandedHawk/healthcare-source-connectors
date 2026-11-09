@@ -109,6 +109,18 @@ public final class EdifactSplitter implements RecordSplitter
     /**
      * {@inheritDoc}
      *
+     * @return 2: an interchange without a message is an
+     *         empty container (STAGES.md §16)
+     */
+    @Override
+    public int version()
+    {
+        return 2;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
      * @throws IllegalArgumentException if the boundary isn't UNH, UNG or
      *                                  UNB
      */
@@ -244,6 +256,9 @@ public final class EdifactSplitter implements RecordSplitter
 
         /** The open functional group; null outside a group. */
         private Envelope ung;
+
+        /** Whether an interchange has been opened. */
+        private boolean read;
 
         /**
          * Creates a session.
@@ -507,6 +522,18 @@ public final class EdifactSplitter implements RecordSplitter
         /**
          * {@inheritDoc}
          *
+         * @return true once an interchange was read: the file was EDIFACT,
+         *         without a message (or group) to cut
+         */
+        @Override
+        public boolean emptyContainer()
+        {
+            return read;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
          * @throws SplitException if the envelopes don't balance, a control
          *                        reference doesn't match, or a record is
          *                        too large
@@ -537,6 +564,7 @@ public final class EdifactSplitter implements RecordSplitter
                                 ErrorCode.PARSE_EDIFACT_INVALID_ENVELOPE,
                                 start);
                     }
+                    read = true;
                     if (level == Level.UNB)
                     {
                         Segment unz = scanUntil(start, "UNZ",

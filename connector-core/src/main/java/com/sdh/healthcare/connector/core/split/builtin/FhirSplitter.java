@@ -72,6 +72,17 @@ public final class FhirSplitter implements RecordSplitter
     /**
      * {@inheritDoc}
      *
+     * @return 2: an empty array is an empty container (STAGES.md §16)
+     */
+    @Override
+    public int version()
+    {
+        return 2;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
      * @throws IllegalArgumentException if the group size is negative
      */
     @Override
@@ -206,6 +217,19 @@ public final class FhirSplitter implements RecordSplitter
             this.group = group;
             this.boundary = boundary;
             this.max = max;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return true: a file that isn't blank and gives no resource can
+         *         only be an empty array, {@code []}, since anything else is
+         *         a resource or an error
+         */
+        @Override
+        public boolean emptyContainer()
+        {
+            return true;
         }
 
         /**

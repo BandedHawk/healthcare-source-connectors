@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.core.split;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.core.split.builtin.CsvSplitter;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
@@ -125,14 +126,14 @@ class MessageSessionTest
     @Test
     void splitsEachMessageOnItsOwnAndResumesAnywhere() throws Exception
     {
-        Batch batch = batch("id,name\n1,a\n2,b\n", "", "code\nX\n");
+        Batch batch = batch("id,name\n1,a\n2,b\n", "code\nX\n");
         SplitConfig config = config();
         List<SplitRecord> all = split(batch, config, ResumePoint.START);
         assertThat(texts(batch, all)).containsExactly("id,name\n1,a\n",
                 "id,name\n2,b\n", "code\nX\n");
         assertThat(all).extracting(SplitRecord::failure).containsOnlyNulls();
         assertThat(all.get(2).sourceOffset())
-                .isEqualTo(batch.offsets().get(2) + "code\n".length());
+                .isEqualTo(batch.offsets().get(1) + "code\n".length());
         for (int i = 0; i < all.size(); i++)
         {
             ResumePoint from = ResumePoint.parse(all.get(i).resume().encode());
@@ -140,6 +141,50 @@ class MessageSessionTest
                     .as("after record %d", i)
                     .isEqualTo(texts(batch, all).subList(i + 1, all.size()));
         }
+    }
+
+    /**
+     * An empty or blank message fails alone (STAGES.md §16), as a failed
+     * piece of its own bytes, and so does a message that is a header
+     * without rows; the next message carries on. Resuming after any record
+     * gives the rest, even after one of two empty messages at one offset.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void failsEmptyAndBlankMessagesAlone() throws Exception
+    {
+        Batch batch = batch("id\n1\n", "", "", " \r\n", "id\n", "id\n2\n");
+        SplitConfig config = config();
+        List<SplitRecord> all = split(batch, config, ResumePoint.START);
+        assertThat(texts(batch, all)).containsExactly("id\n1\n", "", "",
+                " \r\n", "id\n", "id\n2\n");
+        assertThat(all).extracting(record -> record.failure() == null ? null
+                : record.failure().code()).containsExactly(null,
+                        ErrorCode.SPLIT_EMPTY, ErrorCode.SPLIT_EMPTY,
+                        ErrorCode.SPLIT_EMPTY, ErrorCode.SPLIT_NO_RECORDS,
+                        null);
+        assertThat(all.get(1).sourceOffset()).isEqualTo(all.get(2)
+                .sourceOffset());
+        for (int i = 0; i < all.size(); i++)
+        {
+            ResumePoint from = ResumePoint.parse(all.get(i).resume().encode());
+            assertThat(texts(batch, split(batch, config, from)))
+                    .as("after record %d", i)
+                    .isEqualTo(texts(batch, all).subList(i + 1, all.size()));
+        }
+    }
+
+    /**
+     * A batch without messages has nothing in it, so fails as a whole.
+     */
+    @Test
+    void failsABatchWithoutMessages()
+    {
+        assertThatThrownBy(() -> split(batch(), config(), ResumePoint.START))
+                .isInstanceOfSatisfying(SplitException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo(ErrorCode.SPLIT_EMPTY));
     }
 
     /**

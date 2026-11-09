@@ -1482,3 +1482,155 @@ record ID replaced). Nothing else changes: `resolves` and completion numbering (
 **Order of building, once agreed:** the run tables and commands (`--dry-run` first); the convert stage's
 reprocess, since its outcomes are per record; then the split stage's, with the cut check; then counting
 superseding records at the stages after; then `SUPERSEDED`. Each with its tests, and tried on the sandbox.
+
+## 16. Items with no records (decided and built 2026-11-09)
+
+Raised by the user on 2026-11-09: an item may hold a single document (one `ClinicalDocument`, one CSV row), and
+that is one record, as now. But an item that gives no records at all should never pass unseen, and every splitter
+should treat such items by the same rules. Designed, then built the same day (§16.7).
+
+### 16.1 Found (2026-11-09)
+
+Every built-in splitter was run against the same inputs. Today a split with no records completes the item
+(`stage.item_completed count=0`) with no warning, and the formats disagree:
+
+| Input | `ccda` / `xml` | `csv` | `csv` with header | `delimited` | `fhir` | `x12` | `edifact` | `parquet` |
+|---|---|---|---|---|---|---|---|---|
+| 0 bytes | 0 records | 0 | 0 | 0 | 0 | 0 | 0 | — (not Parquet) |
+| blank (spaces, tabs, line ends) | 0 | **a record per blank line** | **a record** | 0 | 0 | **fails** `PARSE_X12_INVALID_ENVELOPE` | **fails** `PARSE_EDIFACT_UNEXPECTED_SEGMENT` | — |
+| text that isn't the format | **0** | a record per line | rows | a record (lines before the first match) | fails `PARSE_JSON_MALFORMED` | fails | fails | fails `PARSE_PARQUET_MALFORMED` |
+| the format, nothing in it | XML without the boundary element: 0 | — | header only: 0 | — | `[]`: 0 | `ISA…IEA`, or `GS…GE`, with no `ST`: 0 | `UNB…UNZ`, or `UNG…UNE`, with no `UNH`: 0 | no rows: 0 |
+
+A single document is one record in every format (`XmlSplitterTest.wholeFileIsOneDocument`, and every sandbox
+`check`, whose C-CDA files hold one document each).
+
+### 16.2 Rules (decided with the user 2026-11-09)
+
+1. **Empty fails the item, and an operator decides.** An item of 0 bytes, or blank (rule 2), fails as a whole
+   (`--seq -1`, §15.6d), whatever the format, with `SPLIT_EMPTY`: nothing was sent.
+2. **Blank is empty, in every text format.** Input of only spaces, tabs, CR and LF (after a byte-order mark, where
+   the format allows one) is no data: no splitter cuts a record from it or fails it as malformed. In CSV a line of
+   only spaces, tabs and CR is skipped, as an empty line already is, unless it holds the delimiter (with
+   `csv.delimiter` a tab, a line of tabs is a row of empty fields). Parquet is binary, so this rule doesn't apply
+   to it.
+3. **Content the splitter can't cut is one record.** Decided with the user 2026-11-09: an item that isn't empty
+   or blank, from which the splitter cut nothing, is taken as a single document: the whole item becomes one record
+   (offset 0, the item's length) and goes to the convert stage like any other. The stages after parse it and
+   decide whether it is garbage; a splitter mostly can't tell a document it doesn't recognise from garbage, and
+   isn't asked to. Examples: plain text, or XML without the boundary element, sent to `ccda` or `xml`.
+   The one exception is a splitter that can tell from the item's start that it isn't its format: it fails the item
+   as now (`PARSE_*`), and no splitter gains new checks for it. Those today: X12 (no `ISA`), EDIFACT (no `UNA` or
+   `UNB`), FHIR (not JSON, or the wrong `resourceType`) and Parquet (not a Parquet file).
+4. **A container with nothing in it fails, and an operator decides.** A splitter that read the item as its format
+   and found no records in it says so, and the item fails as a whole with `SPLIT_NO_RECORDS`, since it holds no
+   data. Taking it as one record would hide that: a header-only CSV would pass as one row of data. Those today: a
+   CSV header alone (`csv.header=true`), an X12 interchange or group with no `ST`, an EDIFACT interchange or group
+   with no `UNH`, FHIR `[]`, a Parquet file with no rows, a `delimited` file of separator lines alone (`SEPARATOR`
+   mode). The XML formats can't tell an empty wrapper from a
+   document they don't know, so for them rule 3 applies.
+5. **The split stage decides, not each splitter.** A splitter only cuts, skips blank input (rule 2), fails what it
+   can tell isn't its format (rule 3), and reports a container it found empty (rule 4). What happens to an item
+   with no records is decided once, by the split stage (`WholeItemSession`, which `SplitterRegistry` puts around
+   every session it opens), so it holds for every format, a plugin's too: a plugin that reports nothing gets rule
+   3.
+
+Two codes rather than one (accepted by the user 2026-11-09), since "nothing was sent" (`SPLIT_EMPTY`) and "a
+well-formed file with nothing in it" (`SPLIT_NO_RECORDS`, most often the wrong file or the wrong boundary setting)
+point the operator to different causes.
+
+### 16.3 What the split stage does
+
+- **At the item's end,** before it moves to `ARCHIVING`, if the item's record count is 0:
+  - 0 bytes or blank: the item fails with `SPLIT_EMPTY`;
+  - the splitter's session reports an empty container (new on `SplitSession`, `false` by default): it fails with
+    `SPLIT_NO_RECORDS`;
+  - otherwise the whole item is stored and sent as record 0 (its origin line 1, column 1; its resume point the
+    item's end), then the item completes with 1 record. Nothing new is audited for it beyond `item.split count=1`
+    (left open: an audit `split.whole_item` would let an operator see that the splitter found no boundary).
+
+  A failure takes the path of any item that couldn't be split (§15.6a): `item.failing` (with the code), its
+  failure in the fail store with `--seq -1`, `item.split` with the failure, `FAILED`, and `item.result` `failed` to
+  the producer when results are on. Nothing reaches the convert stage.
+- **Resumed items:** the count is the checkpoint's, across restarts, so an item resumed after its last record is
+  not mistaken for an empty one. The whole-item record is committed like any batch, so a restart before the commit
+  makes it again, the same.
+- **Message batches** (§5.3.16): each message is split on its own, and a message that can't be split already fails
+  alone. The same rules hold at each message (accepted by the user 2026-11-09). A blank or empty message fails
+  alone, as one failed piece (`SPLIT_EMPTY`), and so does an empty container (`SPLIT_NO_RECORDS`); a message the
+  splitter cut nothing from is one record; the next message carries on. An Artemis message of a type with no byte
+  form is landed empty and reported at landing (`message.unsupported_type`), so it now also shows as a failed piece
+  at the split stage. A batch with no messages at all fails as a whole (`SPLIT_EMPTY`).
+- **The operator's choices** for a failed item are those of any failed item (§15.4, §15.6e), with nothing new:
+  - `decline`, with a reason ("the producer confirms the file is empty"): the item completes with 0 records, and
+    the convert stage completes it with 0 records too, as tried on the sandbox (SANDBOX.md "Checked",
+    2026-11-09);
+  - `correct --seq -1`: the corrected item is split from its start, and a correction that is again empty fails
+    the same way (`FAILED_CORRECTION`, with the code);
+  - `retry`: the same bytes give the same failure, so it goes back to `FAILED`;
+  - `resubmit` (§13.5): the producer's right file lands as a new item linked to this one.
+- **Telemetry:** nothing new beyond the codes. `item.failing` and `stage.item_completed result=FAILED` already
+  carry the code; `sdh.stage.failures` counts it by code.
+
+### 16.4 What the stages after must catch
+
+Rule 3 relies on the stages after, each judging only what it is for (decided with the user 2026-11-09):
+
+- **The convert stage** judges only whether a record can be turned into well-formed JSON from its format, for
+  every format alike. It can't tell whether the content is right. C-CDA: plain text fails (`CONVERT_XML_MALFORMED`,
+  no root element), but any well-formed XML converts, a C-CDA document or not. CSV: almost any text is rows of
+  fields, so it fails only what can't be read as CSV (`CONVERT_CSV_MALFORMED`, `CONVERT_CSV_FIELD_COUNT`). X12 and
+  EDIFACT: it fails segments it can't read (`CONVERT_X12_MALFORMED`, `CONVERT_EDIFACT_MALFORMED`,
+  `CONVERT_EDIFACT_CHARSET`), not a transaction that is wrong for its type.
+- **The transform stage** judges whether that JSON is what the format must be (a C-CDA document, an 837 claim, the
+  columns a CSV feed must have), against its mapping, and fails what isn't.
+
+So until the transformer is built, content that converts passes the pipeline, right or not, in every format. The
+split stage doesn't add checks to make up for it.
+
+### 16.5 Versions and items already split
+
+Rules 2 and 4 change what `csv`, `x12`, `edifact`, `fhir`, `parquet` and `delimited` give for some items, so they
+raise their splitter version to 2 (§14.2); rules 1 and 3 are the split stage's own, and change its build. The split
+stage's version changes with them. An item part way under the old version at the deploy is held, as for any change
+(§14.3), and released by `release --resume|--close`; the drain check (§14.4) avoids that once built. Items already
+completed with no records stay completed: the rules aren't applied backwards. An operator finds them from the
+audits (`stage.item_completed stage=split count=0`) and can reprocess them once reprocess is built (§15.8).
+
+### 16.6 Tests, when built
+
+- Per splitter (`*SplitterTest`): 0 bytes and blank give no records and no error; CSV skips blank lines but keeps
+  a tab-delimited line of tabs; each empty container of rule 4 is reported; a single document is one record (kept).
+- `IngestPipelineTest`: an empty item and a blank one fail `SPLIT_EMPTY`; a header-only CSV fails
+  `SPLIT_NO_RECORDS`; plain text into `ccda` is one record of the whole item, and so is XML without the boundary;
+  an item resumed after its last record completes; in a batch, an empty message fails alone and a message with no
+  boundary is one record; `emptyFileGoesStraightToArchiving` becomes `emptyFileFails`.
+- `ItemProcessorTest`: decline of an empty item completes it with 0 records; a whole-item correction that is
+  empty fails.
+- The sandbox: push an empty file, a blank one and a file of plain text to the C-CDA intake; see the first two
+  fail `SPLIT_EMPTY` and the third pass the split as one record and fail at the convert stage
+  (`CONVERT_XML_MALFORMED`); decline one and correct another.
+
+### 16.7 As built (2026-11-09)
+
+- **`WholeItemSession`** (connector-core, `split`): opened by `SplitterRegistry.open` around every splitter
+  session, so items, whole-item corrections and each message of a batch all get the rules. At the item's start it
+  fails an empty or blank item (`SPLIT_EMPTY`) before the splitter sees it: only spaces, tabs, CR and LF, after a
+  UTF-8 byte-order mark, read only as far as the first other byte. After a session from the start that gave no
+  record, it fails an empty container (`SPLIT_NO_RECORDS`), or gives the whole item as record 0, which the limits
+  then check like any record (`LIMIT_RECORD_SIZE`). A resumed session is passed through, since a resume point
+  always follows a record. `SplitterRegistry.openMessages` fails a batch with no messages (`SPLIT_EMPTY`).
+- **`SplitSession.emptyContainer()`**, `false` by default: true in `csv` for a header without rows, `x12` once an
+  `ISA` was read, `edifact` once an interchange was opened, `fhir` (non-blank with no resource can only be `[]`),
+  `parquet`, and `delimited` in `SEPARATOR` mode.
+- **CSV:** a line of only spaces, tabs and CR is skipped, unless it holds the delimiter.
+- **Batches:** an empty message is no longer passed over: it fails alone as a 0-byte piece. Its resume point names
+  the message (`[MessageSession.MESSAGE_DONE, index]` as context, `-1` never being an offset), since several empty
+  messages share an offset, and an offset at a message's start now means the first empty message there.
+- **Codes:** `SPLIT_EMPTY`, `SPLIT_NO_RECORDS` (`ErrorCode`). Splitter versions 2 as §16.5.
+- **Tests:** `NoRecordsTest` (every format: empty and blank, each empty container, content without a boundary as
+  one record with its resume point, the size limit on it, a single document kept); `CsvSplitterTest`
+  (`headerOnlyFileIsAnEmptyContainer`, `blankLinesAreSkipped`); `FhirSplitterTest`; `MessageSessionTest`
+  (`failsEmptyAndBlankMessagesAlone`, resuming after every record, `failsABatchWithoutMessages`);
+  `IngestPipelineTest.emptyFileFails`; `ItemProcessorTest.failsAnEmptyItemForAnOperatorToDecide` (failed whole,
+  an empty correction failing, declined and complete with 0 records, naming its failure).
+- **Tried on the sandbox** 2026-11-09 (SANDBOX.md "Checked"); the `-Pit` suite not run.

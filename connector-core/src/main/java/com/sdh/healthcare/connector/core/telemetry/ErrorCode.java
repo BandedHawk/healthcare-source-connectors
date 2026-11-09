@@ -133,6 +133,22 @@ public enum ErrorCode
      */
     PARSE_UNRECOGNISED,
 
+    /**
+     * An item, or a message of a batch, that is 0 bytes or blank: only
+     * spaces, tabs, CR and LF, after a byte-order mark. Nothing was sent, so
+     * it fails as a whole for an operator to decide (STAGES.md §16).
+     */
+    SPLIT_EMPTY,
+
+    /**
+     * An item, or a message of a batch, that the splitter read as its format
+     * and found to hold nothing to cut: a CSV header alone, an X12 or
+     * EDIFACT envelope with nothing inside, a FHIR {@code []}, a Parquet
+     * file with no rows. It fails as a whole for an operator to decide
+     * (STAGES.md §16).
+     */
+    SPLIT_NO_RECORDS,
+
     /** A CSV quoted field that is never closed. */
     PARSE_UNTERMINATED_QUOTE,
 

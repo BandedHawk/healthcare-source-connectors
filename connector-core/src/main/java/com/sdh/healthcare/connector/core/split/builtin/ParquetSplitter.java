@@ -80,6 +80,17 @@ public final class ParquetSplitter implements RecordSplitter
         return "parquet";
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * @return 2: a file without rows is an empty container (STAGES.md §16)
+     */
+    @Override
+    public int version()
+    {
+        return 2;
+    }
+
     @Override
     public SplitSession open(SeekableByteSource src, ResumePoint from,
             SplitConfig cfg) throws IOException, SplitException
@@ -208,6 +219,18 @@ public final class ParquetSplitter implements RecordSplitter
                 throw new SplitException(ErrorCode.RESUME_INVALID,
                         from.offset());
             }
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return true: a Parquet file read to its end without a row has
+         *         none
+         */
+        @Override
+        public boolean emptyContainer()
+        {
+            return true;
         }
 
         @Override

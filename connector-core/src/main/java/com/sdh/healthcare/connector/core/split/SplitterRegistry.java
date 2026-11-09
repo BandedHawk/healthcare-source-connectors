@@ -136,7 +136,8 @@ public final class SplitterRegistry
 
     /**
      * Opens a session that also enforces {@link SplitLimits} (design
-     * §6.3).
+     * §6.3), and the rules for an item without records (STAGES.md §16,
+     * {@link WholeItemSession}).
      *
      * @param format  the format's name
      * @param source  the file
@@ -146,8 +147,8 @@ public final class SplitterRegistry
      * @param config  the split settings
      * @return the session
      * @throws IOException    if the file can't be read
-     * @throws SplitException if the file is too large, or can't be split
-     *                        from there
+     * @throws SplitException if the file is too large, empty or blank, or
+     *                        can't be split from there
      */
     public SplitSession open(String format, SeekableByteSource source,
             ResumePoint from, long nextSeq, SplitConfig config)
@@ -158,15 +159,16 @@ public final class SplitterRegistry
         {
             throw new SplitException(ErrorCode.LIMIT_ITEM_SIZE, 0);
         }
-        return new LimitedSession(get(format).open(source, from, config),
-                limits, nextSeq, from);
+        return new LimitedSession(WholeItemSession.open(get(format), source,
+                from, config), limits, nextSeq, from);
     }
 
     /**
      * Opens a session over a message batch that splits each message on its
      * own (design §5.3.16), and enforces {@link SplitLimits} on the whole:
-     * a message that can't be split, or holds a record over the size
-     * limit, fails alone.
+     * a message that can't be split, holds a record over the size limit,
+     * or is empty or blank, fails alone. A batch without messages fails
+     * as a whole ({@code SPLIT_EMPTY}).
      *
      * @param format  the format's name
      * @param source  the item
@@ -177,7 +179,7 @@ public final class SplitterRegistry
      * @param config  the split settings
      * @return the session
      * @throws IOException    if the item can't be read
-     * @throws SplitException if the item is too large
+     * @throws SplitException if the item is too large, or has no messages
      */
     public SplitSession openMessages(String format, SeekableByteSource source,
             List<Long> offsets, ResumePoint from, long nextSeq,
@@ -187,6 +189,10 @@ public final class SplitterRegistry
         if (source.size() > limits.maxItemBytes())
         {
             throw new SplitException(ErrorCode.LIMIT_ITEM_SIZE, 0);
+        }
+        if (offsets.isEmpty() && ResumePoint.START.equals(from))
+        {
+            throw new SplitException(ErrorCode.SPLIT_EMPTY, 0);
         }
         return new LimitedSession(new MessageSession(get(format), source,
                 offsets, from, config), limits, nextSeq, from);

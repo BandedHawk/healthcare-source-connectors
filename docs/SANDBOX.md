@@ -437,3 +437,12 @@ Checked again since: see the end of this section.
   `split.completions_numbered count=3547`, `stage.completions_numbered` and `stage.totals_numbered` (each
   `count=3547`); no row at either stage is left at completion 0, and no item was audited `stage.item_reopened`
   at startup. A second start numbered nothing (no audit). `check` passes (5 items split and converted).
+- 2026-11-09, revision (ck), items with no records (STAGES.md §16): pushed to `ccda-push` an empty item, a blank
+  one (spaces, CR LF, a tab) and one line of plain text. The empty and the blank items each failed as a whole
+  (`item.failing` and `failure.failed seq=-1`, `SPLIT_EMPTY`), with nothing sent to the convert stage. The text was
+  split as one record of the whole item (`batch.committed count=1`, `item.split count=1`) and failed at the convert
+  stage (`record.failed`, `CONVERT_XML_MALFORMED`), as designed. `decline --seq -1` of the empty item (a synthetic
+  reason) sent its `item.split` again, and the convert stage completed it with 0 records. `correct --seq -1` of the
+  blank item with a synthetic C-CDA document (`google-synthea-sample1.xml`) was `CORRECTED`, and both stages
+  completed it with 1 record. The C-CDA splitter's version stays 1 (`ccda/1` in the version), since its cut is
+  unchanged. `check` passes (5 items split and converted). No pod restarted.

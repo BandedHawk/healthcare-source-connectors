@@ -25,7 +25,8 @@ import java.util.Optional;
  * <p>
  * Options: {@code csv.header} (default false) prepends the first row to
  * every record; {@code csv.delimiter} (default {@code ,}) is needed to
- * know where a quoted field may start. Empty lines are skipped. A quote
+ * know where a quoted field may start. Blank lines (only spaces, tabs and
+ * CR) are skipped, unless they hold the delimiter. A quote
  * that doesn't open a field is kept as an ordinary character.
  *
  * @author Jonas Barnett
@@ -116,25 +117,59 @@ public final class CsvSplitter implements RecordSplitter
         ByteScanner scanner = new ByteScanner(source, start,
                 config.readBufferBytes());
         byte[] headerBytes = header;
-        return () ->
+        return new SplitSession()
         {
-            long[] row = nextRow(scanner, delimiter, max);
-            if (row == null)
+            /**
+             * {@inheritDoc}
+             */
+            @Override
+            public Optional<SplitRecord> next()
+                    throws IOException, SplitException
             {
-                return Optional.empty();
+                long[] row = nextRow(scanner, delimiter, max);
+                if (row == null)
+                {
+                    return Optional.empty();
+                }
+                SplitRecord.SourceRange range = new SplitRecord.SourceRange(
+                        row[0], row[1] - row[0]);
+                List<SplitRecord.Part> parts = headerBytes == null
+                        ? List.of(range)
+                        : List.of(new SplitRecord.Literal(headerBytes),
+                                range);
+                return Optional.of(new SplitRecord(row[0], row[1] - row[0],
+                        parts, ResumePoint.at(row[1])));
             }
-            SplitRecord.SourceRange range = new SplitRecord.SourceRange(row[0],
-                    row[1] - row[0]);
-            List<SplitRecord.Part> parts = headerBytes == null
-                    ? List.of(range)
-                    : List.of(new SplitRecord.Literal(headerBytes), range);
-            return Optional.of(new SplitRecord(row[0], row[1] - row[0],
-                    parts, ResumePoint.at(row[1])));
+
+            /**
+             * {@inheritDoc}
+             *
+             * @return true for a header without rows
+             */
+            @Override
+            public boolean emptyContainer()
+            {
+                return headerBytes != null;
+            }
         };
     }
 
     /**
-     * The next non-empty row.
+     * {@inheritDoc}
+     *
+     * @return 2: blank lines are skipped, and a header without rows is an
+     *         empty container (STAGES.md §16)
+     */
+    @Override
+    public int version()
+    {
+        return 2;
+    }
+
+    /**
+     * The next row that isn't blank: a line of only spaces, tabs and CR is
+     * skipped, unless it holds the delimiter (a tab, say), which makes it a
+     * row of empty fields.
      *
      * @param scanner   reads the file
      * @param delimiter the field delimiter
@@ -191,7 +226,7 @@ public final class CsvSplitter implements RecordSplitter
                     {
                         inQuotes = true;
                     }
-                    if (next != '\r')
+                    if (next != '\r' && next != ' ' && next != '\t')
                     {
                         empty = false;
                     }

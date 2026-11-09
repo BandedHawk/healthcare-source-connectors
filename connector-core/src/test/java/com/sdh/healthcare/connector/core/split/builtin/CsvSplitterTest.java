@@ -69,17 +69,41 @@ class CsvSplitterTest
     }
 
     /**
-     * A file of only a header, or nothing, has no records.
+     * A file of only a header is an empty container; one of nothing, or of
+     * blank lines, is empty (STAGES.md §16).
+     */
+    @Test
+    void headerOnlyFileIsAnEmptyContainer()
+    {
+        SplitConfig header = config("csv").withOption("csv.header", "true");
+        assertThat(splitError(splitter, "id,note\n", header).code())
+                .isEqualTo(ErrorCode.SPLIT_NO_RECORDS);
+        assertThat(splitError(splitter, " \n\nid,note\n \t\r\n", header)
+                .code()).isEqualTo(ErrorCode.SPLIT_NO_RECORDS);
+        assertThat(splitError(splitter, "", header).code())
+                .isEqualTo(ErrorCode.SPLIT_EMPTY);
+        assertThat(splitError(splitter, " \t\r\n\n", config("csv")).code())
+                .isEqualTo(ErrorCode.SPLIT_EMPTY);
+    }
+
+    /**
+     * A line of only spaces, tabs and CR is skipped, before the header too,
+     * unless it holds the delimiter: with a tab delimiter, a line of tabs is
+     * a row of empty fields.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void headerOnlyFileHasNoRecords() throws Exception
+    void blankLinesAreSkipped() throws Exception
     {
-        assertThat(splitAndCheckResume(splitter, "id,note\n",
-                config("csv").withOption("csv.header", "true"))).isEmpty();
-        assertThat(splitAndCheckResume(splitter, "",
-                config("csv").withOption("csv.header", "true"))).isEmpty();
+        assertThat(splitAndCheckResume(splitter, "a,b\n  \n\t\r\nc,d\n \n",
+                config("csv"))).containsExactly("a,b\n", "c,d\n");
+        assertThat(splitAndCheckResume(splitter, " \nid\n \n1\n",
+                config("csv").withOption("csv.header", "true")))
+                .containsExactly("id\n1\n");
+        assertThat(splitAndCheckResume(splitter, "a\tb\n\t\n  \n",
+                config("csv").withOption("csv.delimiter", "\\t")))
+                .containsExactly("a\tb\n", "\t\n");
     }
 
     /**

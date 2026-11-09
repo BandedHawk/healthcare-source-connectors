@@ -97,6 +97,18 @@ public final class DelimitedSplitter implements RecordSplitter
     /**
      * {@inheritDoc}
      *
+     * @return 2: a file of separators alone is an
+     *         empty container (STAGES.md §16)
+     */
+    @Override
+    public int version()
+    {
+        return 2;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
      * @throws IllegalArgumentException if a setting is missing or invalid
      */
     @Override
@@ -193,6 +205,19 @@ public final class DelimitedSplitter implements RecordSplitter
             this.settings = settings;
             this.max = max;
             this.window = new byte[settings.window()];
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return true in {@code SEPARATOR} mode, where a file that isn't
+         *         blank and gives no record holds only separators; in the
+         *         other modes every line that isn't blank is in a record
+         */
+        @Override
+        public boolean emptyContainer()
+        {
+            return settings.mode() == Mode.SEPARATOR;
         }
 
         /**

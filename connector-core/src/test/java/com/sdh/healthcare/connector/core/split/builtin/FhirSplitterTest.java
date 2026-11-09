@@ -67,10 +67,12 @@ class FhirSplitterTest
                 .containsExactly(B1, B2, B3);
         assertThat(splitAndCheckResume(splitter, B2, config("fhir")))
                 .containsExactly(B2);
-        assertThat(splitAndCheckResume(splitter, "[ ]", config("fhir")))
-                .isEmpty();
-        assertThat(splitAndCheckResume(splitter, "  \n", config("fhir")))
-                .isEmpty();
+        // An empty array holds nothing; blank is nothing sent (STAGES.md
+        // §16).
+        assertThat(splitError(splitter, "[ ]", config("fhir")).code())
+                .isEqualTo(ErrorCode.SPLIT_NO_RECORDS);
+        assertThat(splitError(splitter, "  \n", config("fhir")).code())
+                .isEqualTo(ErrorCode.SPLIT_EMPTY);
     }
 
     /**

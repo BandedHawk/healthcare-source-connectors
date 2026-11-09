@@ -94,6 +94,18 @@ public final class X12Splitter implements RecordSplitter
     /**
      * {@inheritDoc}
      *
+     * @return 2: an interchange without a transaction set is an
+     *         empty container (STAGES.md §16)
+     */
+    @Override
+    public int version()
+    {
+        return 2;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
      * @throws IllegalArgumentException if the boundary isn't ST, GS or ISA
      */
     @Override
@@ -443,6 +455,18 @@ public final class X12Splitter implements RecordSplitter
         }
 
         // ---- structure ----
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return true once an interchange was read: the file was X12,
+         *         without a transaction set (or group) to cut
+         */
+        @Override
+        public boolean emptyContainer()
+        {
+            return terminator != 0;
+        }
 
         /**
          * {@inheritDoc}

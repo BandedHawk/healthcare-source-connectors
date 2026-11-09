@@ -566,6 +566,53 @@ class ItemProcessorTest
     }
 
     /**
+     * An empty or blank item fails as a whole (STAGES.md §16), for an
+     * operator to decide; declined, it completes with no records. A
+     * whole-item correction that is itself blank fails the same way.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void failsAnEmptyItemForAnOperatorToDecide() throws Exception
+    {
+        LandedItem item = land(" \r\n");
+        ItemProcessor processor = processor();
+        ItemProcessor.Outcome outcome = process(processor, item);
+        assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.FAILED);
+        assertThat(outcome.failure().code())
+                .isEqualTo(ErrorCode.SPLIT_EMPTY);
+        assertThat(outcome.recordCount()).isZero();
+        assertThat(failures().failures(item.itemId())).singleElement()
+                .satisfies(stored -> assertThat(stored.failure().seq())
+                        .isEqualTo(FailureStore.WHOLE_ITEM));
+
+        publisher.sent.clear();
+        CorrectionStore.Outcome corrected = processor.correct(
+                submit(item.itemId(), FailureStore.WHOLE_ITEM, "\n\n"),
+                item.digest(), LandedRefs.NONE, lease());
+        assertThat(corrected.passed()).isFalse();
+        assertThat(corrected.errorCode())
+                .isEqualTo(ErrorCode.SPLIT_EMPTY.name());
+
+        FailureStore failures = failures();
+        failures.change(item.itemId(), FailureStore.WHOLE_ITEM,
+                java.util.Set.of(FailureStore.State.FAILED_CORRECTION,
+                        FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "empty, as the producer says",
+                "alice", null);
+        publisher.sent.clear();
+        processor.reannounce(item.itemId(), item.digest(), LandedRefs.NONE);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, split ->
+                {
+                    // Complete, naming the failure it was declined for.
+                    assertThat(split.recordCount()).isZero();
+                    assertThat(split.failure().code())
+                            .isEqualTo("SPLIT_EMPTY");
+                });
+    }
+
+    /**
      * An item that isn't in landing fails at the landing stage.
      *
      * @throws Exception if the test fails to run

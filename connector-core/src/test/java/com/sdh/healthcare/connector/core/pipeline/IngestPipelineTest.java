@@ -363,26 +363,27 @@ class IngestPipelineTest
     }
 
     /**
-     * An empty item goes straight to archiving, with nothing to announce.
+     * An empty or blank item can't be split: nothing was sent, so it fails
+     * for an operator to decide, with nothing stored or announced
+     * (STAGES.md §16).
      *
-     * @throws Exception if the file can't be processed or a message opened
+     * @throws Exception if the pipeline can't be made
      */
     @Test
-    void emptyFileGoesStraightToArchiving() throws Exception
+    void emptyFileFails() throws Exception
     {
         RecordingPublisher publisher = new RecordingPublisher();
         IngestPipeline pipeline = process(settings(), publisher,
                 PipelineHooks.NONE);
-        IngestPipeline.SplitResult empty =
-                split(pipeline, SeekableByteSource.of(new byte[0]));
-        assertThat(empty.recordCount()).isZero();
-        assertThat(empty.checkpoint().state())
-                .isEqualTo(Checkpoint.State.ARCHIVING);
+        for (byte[] bytes : List.of(new byte[0], " \r\n\t\n".getBytes(UTF_8)))
+        {
+            assertThatThrownBy(() -> split(pipeline,
+                    SeekableByteSource.of(bytes)))
+                    .isInstanceOfSatisfying(SplitException.class,
+                            failure -> assertThat(failure.code())
+                                    .isEqualTo(ErrorCode.SPLIT_EMPTY));
+        }
         assertThat(publisher.sent).isEmpty();
-        // Splitting the same item again does nothing: it is already waiting
-        // for archiving.
-        assertThat(split(pipeline, SeekableByteSource.of(new byte[0])).itemId())
-                .isEqualTo(empty.itemId());
     }
 
     /**
