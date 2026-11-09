@@ -326,11 +326,12 @@ public final class ConvertProcessor
             case RecordSplit split -> new StageInput.RecordInput(
                     split.recordId(), split.itemId(), split.seq());
             case ItemSplit item -> new StageInput.ItemTotal(item.itemId(),
-                    item.recordCount());
+                    item.recordCount(), false, item.completion());
             // The split stage has failures open: the records passed so far
             // (STAGES.md §15.6).
             case ItemProgressed progressed -> new StageInput.ItemTotal(
-                    progressed.itemId(), progressed.passedCount(), true);
+                    progressed.itemId(), progressed.passedCount(), true,
+                    progressed.completion());
             default -> new StageInput.Unwanted("wrong_type");
         };
     }
@@ -700,8 +701,9 @@ public final class ConvertProcessor
             WrittenRecord record = written.get(index);
             if (record.error() == null)
             {
+                Prepared prepared = outputs.get(index).value();
                 messages.add(message(record, ref,
-                        version(outputs.get(index).value().split())));
+                        version(prepared.split()), prepared.correctionOf()));
             }
             else
             {
@@ -773,13 +775,16 @@ public final class ConvertProcessor
     /**
      * The message announcing a stored record.
      *
-     * @param record the record
-     * @param ref    where it is stored
+     * @param record   the record
+     * @param ref      where it is stored
+     * @param version  the stage's version that made it
+     * @param resolves for a correction or retry, the failed record it
+     *                 resolves; null otherwise
      * @return {@code record.failed} if it has an error, else
      *         {@code record.stored}
      */
     private static ConnectorMessage message(WrittenRecord record,
-            StorageRef ref, String version)
+            StorageRef ref, String version, String resolves)
     {
         Representation representation = record.representation();
         if (record.error() != null)
@@ -795,7 +800,7 @@ public final class ConvertProcessor
                 record.seq(), record.sourceOffset(), record.sourceLength(),
                 record.format(), representation.contentType(),
                 representation.mapping(), record.plaintextLength(),
-                record.chunkCount(), ref, record.origin(), version);
+                record.chunkCount(), ref, record.origin(), version, resolves);
     }
 
     /**
@@ -820,6 +825,31 @@ public final class ConvertProcessor
     public static List<ConnectorMessage> replayMessages(UUID itemId,
             Table records, String catalog, String namespace, String intake,
             long done, long failed, Instant completedAt)
+    {
+        return replayMessages(itemId, records, catalog, namespace, intake,
+                done, failed, completedAt, 1);
+    }
+
+    /**
+     * A completed item's output, as {@link #replayMessages(UUID, Table,
+     * String, String, String, long, long, Instant)} rebuilds it, its
+     * {@code item.converted} numbered as the stage's last completion of it
+     * (STAGES.md §15.6e).
+     *
+     * @param itemId      the item
+     * @param records     the {@code records} table, refreshed
+     * @param catalog     the catalog's name, as messages give it
+     * @param namespace   the table's namespace
+     * @param intake      the item's intake, from its {@code item.split}
+     * @param done        its records stored, from the registry
+     * @param failed      those stored in their original form
+     * @param completedAt when the stage completed it, from the registry
+     * @param completion  its last completion's number, from the registry
+     * @return the messages
+     */
+    public static List<ConnectorMessage> replayMessages(UUID itemId,
+            Table records, String catalog, String namespace, String intake,
+            long done, long failed, Instant completedAt, int completion)
     {
         long snapshotId = records.currentSnapshot() == null ? -1
                 : records.currentSnapshot().snapshotId();
@@ -856,7 +886,7 @@ public final class ConvertProcessor
         }
         messages.add(new ItemConverted(itemId, intake, done,
                 failed - corrected.size(), completedAt,
-                List.copyOf(versions)));
+                List.copyOf(versions), completion));
         return messages;
     }
 
@@ -886,7 +916,8 @@ public final class ConvertProcessor
         return new RecordStored(row.recordId(), itemId, row.seq(),
                 row.sourceOffset(), row.sourceLength(), row.format(),
                 row.contentType(), row.mapping(), row.plaintextLength(),
-                row.chunkCount(), ref, row.origin(), row.stageVersion());
+                row.chunkCount(), ref, row.origin(), row.stageVersion(),
+                row.correctionOf());
     }
 
     /**
@@ -900,7 +931,8 @@ public final class ConvertProcessor
         String intake = progress.total() instanceof ItemSplit split
                 ? split.intake() : UNKNOWN_INTAKE;
         return new ItemConverted(progress.itemId(), intake, progress.done(),
-                progress.unresolved(), clock.instant(), progress.versions());
+                progress.unresolved(), clock.instant(), progress.versions(),
+                progress.nextCompletion());
     }
 
     /**
@@ -919,7 +951,7 @@ public final class ConvertProcessor
                 progress.declined(), facts == null ? null : facts.failure(),
                 facts == null ? null : facts.producerRef(),
                 facts == null ? null : facts.replaces(), clock.instant(),
-                progress.versions());
+                progress.versions(), progress.completion());
     }
 
     /**
@@ -1020,7 +1052,9 @@ public final class ConvertProcessor
             }
         }
         results.report(facts, status, progress.done() + splitFailed,
-                List.copyOf(failed.values()));
+                List.copyOf(failed.values()),
+                ItemResult.COMPLETED.equals(status)
+                        ? progress.nextCompletion() : progress.completion());
     }
 
     /**

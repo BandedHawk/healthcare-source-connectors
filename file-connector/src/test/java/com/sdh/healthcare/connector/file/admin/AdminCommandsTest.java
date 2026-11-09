@@ -766,4 +766,57 @@ class AdminCommandsTest
                         .isEqualTo(itemId));
         assertThat(runtime.corrections().sweep()).isZero();
     }
+
+    /**
+     * {@code release} is refused for an item that isn't held, and without
+     * one of its actions or, to close, a reason; a request for an item no
+     * longer held when a pod comes to it is refused there, noted with why,
+     * and shown by {@code status --item} (STAGES.md §15.6e).
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void releasesOnlyAHeldItem() throws Exception
+    {
+        String good = goodId.toString();
+        assertThatThrownBy(() -> failureCommand("", "release", "--item-id",
+                good, "--resume")).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not HELD");
+        assertThatThrownBy(() -> failureCommand("", "release", "--item-id",
+                good, "--resume", "--close"))
+                .isInstanceOf(AdminArgs.UsageException.class);
+        assertThatThrownBy(() -> failureCommand("", "release", "--item-id",
+                good, "--close")).isInstanceOf(AdminArgs.UsageException.class);
+
+        try (SplitAdminContext context = new SplitAdminContext(properties))
+        {
+            // As if the item had been held when it was asked for.
+            assertThat(context.releasesToChange().request(goodId,
+                    com.sdh.healthcare.connector.core.checkpoint.HoldReleases
+                            .Action.CLOSE, "alice", "a synthetic reason",
+                    context.reasonKeys(), context.reasonKek())).isEqualTo(1);
+        }
+        assertThat(runtime.corrections().applyReleases()).isEqualTo(1);
+        assertThat(runtime.corrections().applyReleases()).isZero();
+        try (SplitAdminContext context = new SplitAdminContext(properties))
+        {
+            assertThat(context.releases().list(goodId)).singleElement()
+                    .satisfies(each ->
+                    {
+                        assertThat(each.state()).isEqualTo(com.sdh.healthcare
+                                .connector.core.checkpoint.HoldReleases.State
+                                .REFUSED);
+                        assertThat(each.refusal()).contains("COMPLETED");
+                        assertThat(each.reasoned()).isTrue();
+                    });
+            assertThat(context.checkpoints().load(goodId).orElseThrow()
+                    .checkpoint().state()).isEqualTo(com.sdh.healthcare
+                            .connector.core.checkpoint.Checkpoint.State
+                            .COMPLETED);
+        }
+        Result status = admin("status", "--item", good);
+        assertThat(status.out()).contains("CLOSE by alice")
+                .contains("REFUSED").contains("(reason kept, encrypted)")
+                .doesNotContain("synthetic");
+    }
 }

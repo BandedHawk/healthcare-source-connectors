@@ -87,7 +87,7 @@ Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` b
 ```sh
 bin/convert-stage                          # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/convert-stage         # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, replay, failures, decline, reopen, export, correct
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, replay, failures, decline, reopen, export, correct, retry
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The stage exits with status
@@ -243,10 +243,11 @@ kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/ad
 ```
 
 The reason (at most 4 KiB) is kept encrypted with the stage's records KEK, one entry per change, and is never
-printed or logged (`failure.declined`, `failure.reopened`). These two are the only commands that write, and only to
-the fail store. The stage's workers count the change within a renewal interval: `item.converted` once none of the item's
-failures is open, else `item.progress` again. Reopening a failure of an item already complete changes only the fail
-store.
+printed or logged (`failure.declined`, `failure.reopened`). They write only to the fail store. The stage's workers
+count the change within a renewal interval: `item.converted` once none of the item's failures is open, else
+`item.progress` again. Reopening a failure of an item already complete makes it incomplete again: `item.progress`
+and an `incomplete` result are sent, and once nothing is open the item completes again under a message ID of its own
+(`~c2`, `~c3`, …; STAGES.md §15.6e). The split stage reopening an item does the same here.
 
 To correct a record that failed conversion, export it encrypted to your own key, edit it on your machine, and
 submit the edit. Keep the private key on your machine; only the public key goes to the pod:
@@ -270,6 +271,12 @@ it as the record would have been: if it passes, it is stored as a new row of `re
 failed row, which stays), sent on as `record.stored`, the failure becomes `CORRECTED` and the item completes once
 nothing else is open; if it fails, the failure becomes `FAILED_CORRECTION`, and you can correct it again.
 `failures --item-id` shows each correction and what it came to. Delete `failed.jwe` and your edits when you're done.
+
+`retry --item-id <id> --seq <n>` converts what failed again, unchanged, for a failure that wasn't the data's (a limit
+raised, the converter fixed): it needs no input, and takes a failure that is `FAILED` or `FAILED_CORRECTION`. If it
+passes, the record is stored and sent as a correction's would be, and the failure becomes `RETRIED`; if it fails, it
+goes back to `FAILED`, and `failures --item-id` shows the retry and its error code. A record that passed by a
+correction or retry names the failure it resolves in its `record.stored` (`resolves`).
 
 
 ### After an outage

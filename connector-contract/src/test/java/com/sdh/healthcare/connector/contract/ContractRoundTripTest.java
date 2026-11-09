@@ -260,6 +260,77 @@ class ContractRoundTripTest
     }
 
     /**
+     * An item's completion number and a correction's {@code resolves}
+     * (STAGES.md §15.6e) survive the payload codec; the first completion
+     * keeps the ID it always had and isn't written, and each later one has
+     * an ID of its own.
+     */
+    @Test
+    void completionsAndResolvesRoundTrip()
+    {
+        UUID itemId = UUID.randomUUID();
+        StorageRef ref = new StorageRef("cat", "sdh_ingest", "records",
+                LocalDate.of(2026, 11, 9), 42L, "kek-1");
+        java.time.Instant at = java.time.Instant.EPOCH;
+        ConnectorMessage.ItemSplit secondSplit =
+                new ConnectorMessage.ItemSplit(itemId, "claims", 7, 1, 999,
+                        "digest", null, null, null, at, at,
+                        java.util.List.of(), 2);
+        ConnectorMessage.ItemConverted secondConverted =
+                new ConnectorMessage.ItemConverted(itemId, "claims", 7, 1, at,
+                        java.util.List.of(), 2);
+        ConnectorMessage.ItemProgressed reopened =
+                new ConnectorMessage.ItemProgressed(itemId, "claims",
+                        "convert", 7, 6, 1, 0, null, null, null, at,
+                        java.util.List.of(), 1);
+        ConnectorMessage.ItemResult secondResult =
+                new ConnectorMessage.ItemResult(itemId, "claims",
+                        ConnectorMessage.ItemResult.COMPLETED, 7, 1, null, 1,
+                        1, 1, java.util.List.of(), null, null, at, 2);
+        ConnectorMessage.ItemResult reopenedResult =
+                new ConnectorMessage.ItemResult(itemId, "claims",
+                        ConnectorMessage.ItemResult.INCOMPLETE, 7, 1, null, 1,
+                        1, 1, java.util.List.of(), null, null, at, 1);
+        for (ConnectorMessage message : java.util.List.of(
+                new RecordStored("ID1", itemId, 0, 10, 20, "ccda",
+                        "application/json", "ccda/2", 30, 1, ref, null,
+                        "0.1.0@x/ccda/2/ab", "rec-1"),
+                new ConnectorMessage.RecordSplit("ID2", itemId, 1, 30, 20,
+                        "ccda", "application/xml", 20, 1, ref, null, null,
+                        null, -1, null, null, "0.1.0@x/ccda/1/cd",
+                        itemId.toString()),
+                secondSplit, secondConverted, reopened, secondResult,
+                reopenedResult))
+        {
+            assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
+                    .isEqualTo(message);
+        }
+
+        assertThat(secondSplit.messageId()).isEqualTo("is-" + itemId + "~c2");
+        assertThat(secondConverted.messageId())
+                .isEqualTo("ic-convert-" + itemId + "~c2");
+        assertThat(reopened.messageId())
+                .isEqualTo("ip-convert-" + itemId + "-7-6-1-0~c1");
+        assertThat(secondResult.messageId()).endsWith("~c2");
+        assertThat(reopenedResult.messageId()).endsWith("~c1");
+
+        // The first completion: as before, and nothing more written.
+        ConnectorMessage.ItemSplit firstSplit =
+                new ConnectorMessage.ItemSplit(itemId, "claims", 7, 1, 999,
+                        "digest", null, null, null, at, at,
+                        java.util.List.of(), 1);
+        assertThat(firstSplit.messageId()).isEqualTo("is-" + itemId);
+        assertThat(PayloadCodec.toJson(firstSplit))
+                .doesNotContainKey("completion");
+        assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemProgressed(
+                itemId, "claims", "convert", 7, 6, 1, 0, null, null, null, at,
+                null))).doesNotContainKey("completion");
+        assertThat(PayloadCodec.toJson(new RecordStored("ID1", itemId, 0, 10,
+                20, "ccda", "application/json", "ccda/2", 30, 1, ref)))
+                .doesNotContainKey("resolves");
+    }
+
+    /**
      * An encrypted chunk decrypts to what was encrypted, and only as the
      * chunk and record it was encrypted as.
      */

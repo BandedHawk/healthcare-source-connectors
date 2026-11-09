@@ -103,6 +103,12 @@ public final class PayloadCodec
                 }
                 payload.put("storage", storageFields(record.storage()));
                 putIfSet(payload, "version", record.version());
+                putIfSet(payload, "resolves", switch (record)
+                {
+                    case RecordSplit split -> split.resolves();
+                    case RecordStored stored -> stored.resolves();
+                    default -> null;
+                });
                 if (record instanceof RecordSplit split
                         && split.message() >= 0)
                 {
@@ -158,6 +164,11 @@ public final class PayloadCodec
                 putIfSet(payload, "producerRef", result.producerRef());
                 putIfSet(payload, "replaces", result.replaces());
                 payload.put("finishedAt", result.finishedAt().toString());
+                if (result.completion() > (ItemResult.COMPLETED.equals(
+                        result.status()) ? 1 : 0))
+                {
+                    payload.put("completion", result.completion());
+                }
             }
             case ItemSplit split ->
             {
@@ -178,6 +189,10 @@ public final class PayloadCodec
                 {
                     payload.put("versions", split.versions());
                 }
+                if (split.completion() > 1)
+                {
+                    payload.put("completion", split.completion());
+                }
             }
             case ItemConverted converted ->
             {
@@ -190,6 +205,10 @@ public final class PayloadCodec
                 if (!converted.versions().isEmpty())
                 {
                     payload.put("versions", converted.versions());
+                }
+                if (converted.completion() > 1)
+                {
+                    payload.put("completion", converted.completion());
                 }
             }
             case ItemProgressed progressed ->
@@ -211,6 +230,10 @@ public final class PayloadCodec
                 if (!progressed.versions().isEmpty())
                 {
                     payload.put("versions", progressed.versions());
+                }
+                if (progressed.completion() > 0)
+                {
+                    payload.put("completion", progressed.completion());
                 }
             }
             case RecordConflict conflict ->
@@ -263,7 +286,8 @@ public final class PayloadCodec
                             Math.toIntExact(number(payload, "chunkCount")),
                             storage(payload),
                             origin(payload),
-                            (String) payload.get("version"));
+                            (String) payload.get("version"),
+                            (String) payload.get("resolves"));
                     case RECORD_FAILED -> new RecordFailed(
                             text(payload, "recordId"),
                             itemId,
@@ -314,7 +338,8 @@ public final class PayloadCodec
                             problems(payload),
                             (String) payload.get("producerRef"),
                             uuid(payload, "replaces"),
-                            Instant.parse(text(payload, "finishedAt")));
+                            Instant.parse(text(payload, "finishedAt")),
+                            completion(payload, 0));
                     case RECORD_SPLIT -> new RecordSplit(
                             text(payload, "recordId"),
                             itemId,
@@ -334,7 +359,8 @@ public final class PayloadCodec
                                     : -1,
                             (String) payload.get("messageRef"),
                             (String) payload.get("messageReplaces"),
-                            (String) payload.get("version"));
+                            (String) payload.get("version"),
+                            (String) payload.get("resolves"));
                     case ITEM_SPLIT -> new ItemSplit(
                             itemId,
                             text(payload, "intake"),
@@ -349,14 +375,16 @@ public final class PayloadCodec
                                     : null,
                             Instant.parse(text(payload, "startedAt")),
                             Instant.parse(text(payload, "completedAt")),
-                            texts(payload, "versions"));
+                            texts(payload, "versions"),
+                            completion(payload, 1));
                     case ITEM_CONVERTED -> new ItemConverted(
                             itemId,
                             text(payload, "intake"),
                             number(payload, "recordCount"),
                             number(payload, "failedRecordCount"),
                             Instant.parse(text(payload, "completedAt")),
-                            texts(payload, "versions"));
+                            texts(payload, "versions"),
+                            completion(payload, 1));
                     case ITEM_PROGRESS -> new ItemProgressed(
                             itemId,
                             text(payload, "intake"),
@@ -371,7 +399,8 @@ public final class PayloadCodec
                             (String) payload.get("producerRef"),
                             uuid(payload, "replaces"),
                             Instant.parse(text(payload, "reportedAt")),
-                            texts(payload, "versions"));
+                            texts(payload, "versions"),
+                            completion(payload, 0));
                     case RECORD_CONFLICT -> new RecordConflict(
                             text(payload, "recordId"),
                             itemId,
@@ -386,6 +415,19 @@ public final class PayloadCodec
                     "messageId does not match payload");
         }
         return message;
+    }
+
+    /**
+     * Reads an item message's completion number (STAGES.md §15.6e).
+     *
+     * @param payload the payload
+     * @param absent  what a payload without one means
+     * @return the number
+     */
+    private static int completion(Map<String, Object> payload, int absent)
+    {
+        return payload.get("completion") instanceof Number number
+                ? Math.toIntExact(number.longValue()) : absent;
     }
 
     /**

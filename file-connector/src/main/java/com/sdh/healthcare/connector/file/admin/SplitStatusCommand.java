@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.file.admin;
 
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
+import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.SplitItemReport;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
@@ -93,6 +94,8 @@ final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
                     itemLease(context, itemId)));
             status.show("checkpoint", () -> checkpoint(
                     context.checkpoints(), itemId, audit));
+            status.show("releases", () -> releases(context.releases(),
+                    itemId));
         }
         else
         {
@@ -221,6 +224,39 @@ final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
                     + checkpoint.restarts() + " time(s) in a row without"
                     + " progress; at " + IngestPipeline.FAIL_AFTER_RESTARTS
                     + " the item fails"));
+        }
+        return text.toString();
+    }
+
+    /**
+     * An item's requests to release it from a hold (STAGES.md §15.6e),
+     * without their reasons.
+     *
+     * @param releases the release store
+     * @param itemId   the item
+     * @return one line per request, or none
+     */
+    private static String releases(HoldReleases releases, UUID itemId)
+    {
+        List<HoldReleases.Listed> listed = releases.list(itemId);
+        if (listed.isEmpty())
+        {
+            return "none";
+        }
+        StringBuilder text = new StringBuilder(listed.size() + " request(s)");
+        for (HoldReleases.Listed each : listed)
+        {
+            HoldReleases.Request request = each.request();
+            text.append(StatusParts.more(request.request() + " "
+                    + request.action() + " by " + request.requestedBy()
+                    + " at " + request.requestedAt() + ": " + each.state()
+                    + (each.doneAt() == null ? "" : " at " + each.doneAt())
+                    + (each.fromVersion() == null ? ""
+                            : ", held under " + each.fromVersion())
+                    + (each.toVersion() == null ? ""
+                            : ", resumed under " + each.toVersion())
+                    + (each.refusal() == null ? "" : ", " + each.refusal())
+                    + (each.reasoned() ? " (reason kept, encrypted)" : "")));
         }
         return text.toString();
     }

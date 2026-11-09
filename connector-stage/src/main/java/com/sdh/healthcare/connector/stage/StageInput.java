@@ -50,14 +50,35 @@ public sealed interface StageInput
      * @param itemId   the item's id
      * @param expected how many records of it the stage will receive, or
      *                 has so far
-     * @param partial  whether it is from the stage before's
-     *                 {@code item.progress}: that stage still has failures
-     *                 open, so the total may grow, and the item can't
-     *                 complete here yet (STAGES.md §15.6)
+     * @param partial    whether it is from the stage before's
+     *                   {@code item.progress}: that stage still has
+     *                   failures open, so the total may grow, and the item
+     *                   can't complete here yet (STAGES.md §15.6)
+     * @param completion the stage before's completion number: of its
+     *                   item-complete message, from 1, or for
+     *                   {@code item.progress} its completions before it, so
+     *                   one reopening a completion taken here reopens the
+     *                   item (STAGES.md §15.6e), and one from before it is
+     *                   stale
      */
-    record ItemTotal(UUID itemId, long expected, boolean partial)
+    record ItemTotal(UUID itemId, long expected, boolean partial,
+            int completion)
             implements StageInput
     {
+
+        /**
+         * A total from the stage before's first completion, or from its
+         * {@code item.progress} before that.
+         *
+         * @param itemId   the item's id
+         * @param expected how many records of it the stage will receive,
+         *                 or has so far
+         * @param partial  whether it is from {@code item.progress}
+         */
+        public ItemTotal(UUID itemId, long expected, boolean partial)
+        {
+            this(itemId, expected, partial, partial ? 0 : 1);
+        }
 
         /**
          * A final total, from the stage before's item-complete message.

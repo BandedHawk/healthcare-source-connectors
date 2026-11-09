@@ -34,12 +34,16 @@ import java.util.UUID;
  * @param resolved     its failures at this stage that later passed, by a
  *                     correction (STAGES.md §15.4a): still counted in
  *                     {@code failed}, which counts what failed once
+ * @param completion   how many times the stage has completed the item:
+ *                     its next item-complete message is the next number
+ *                     (STAGES.md §15.6e)
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record ItemProgress(UUID itemId, long expected, long done,
         long failed, ConnectorMessage total, List<String> versions,
-        long open, long declined, boolean upstreamOpen, long resolved)
+        long open, long declined, boolean upstreamOpen, long resolved,
+        int completion)
 {
 
     /**
@@ -48,6 +52,28 @@ public record ItemProgress(UUID itemId, long expected, long done,
     public ItemProgress
     {
         versions = versions == null ? List.of() : List.copyOf(versions);
+    }
+
+    /**
+     * An item's counts, never completed.
+     *
+     * @param itemId       the item's id
+     * @param expected     how many records it has
+     * @param done         how many the stage stored, failed ones included
+     * @param failed       how many of those failed
+     * @param total        the message that gave its total, or null
+     * @param versions     the versions, in the order first used
+     * @param open         its failures neither passed nor declined
+     * @param declined     its failures declined
+     * @param upstreamOpen whether its total may still grow
+     * @param resolved     its failures that later passed
+     */
+    public ItemProgress(UUID itemId, long expected, long done, long failed,
+            ConnectorMessage total, List<String> versions, long open,
+            long declined, boolean upstreamOpen, long resolved)
+    {
+        this(itemId, expected, done, failed, total, versions, open, declined,
+                upstreamOpen, resolved, 0);
     }
 
     /**
@@ -127,7 +153,7 @@ public record ItemProgress(UUID itemId, long expected, long done,
     public ItemProgress withTotal(ConnectorMessage message)
     {
         return new ItemProgress(itemId, expected, done, failed, message,
-                versions, open, declined, upstreamOpen, resolved);
+                versions, open, declined, upstreamOpen, resolved, completion);
     }
 
     /**
@@ -139,7 +165,7 @@ public record ItemProgress(UUID itemId, long expected, long done,
     public ItemProgress withVersions(List<String> made)
     {
         return new ItemProgress(itemId, expected, done, failed, total, made,
-                open, declined, upstreamOpen, resolved);
+                open, declined, upstreamOpen, resolved, completion);
     }
 
     /**
@@ -155,7 +181,8 @@ public record ItemProgress(UUID itemId, long expected, long done,
             boolean upstream)
     {
         return new ItemProgress(itemId, expected, done, failed, total,
-                versions, openNow, declinedNow, upstream, resolved);
+                versions, openNow, declinedNow, upstream, resolved,
+                completion);
     }
 
     /**
@@ -167,7 +194,33 @@ public record ItemProgress(UUID itemId, long expected, long done,
     public ItemProgress withResolved(long resolvedNow)
     {
         return new ItemProgress(itemId, expected, done, failed, total,
-                versions, open, declined, upstreamOpen, resolvedNow);
+                versions, open, declined, upstreamOpen, resolvedNow,
+                completion);
+    }
+
+    /**
+     * The same counts, with how many times the stage has completed the
+     * item.
+     *
+     * @param completions its completions sent so far
+     * @return the progress
+     */
+    public ItemProgress withCompletion(int completions)
+    {
+        return new ItemProgress(itemId, expected, done, failed, total,
+                versions, open, declined, upstreamOpen, resolved,
+                completions);
+    }
+
+    /**
+     * The number of the item's next completion here, from 1, for its
+     * item-complete message.
+     *
+     * @return the number
+     */
+    public int nextCompletion()
+    {
+        return completion + 1;
     }
 
     /**
@@ -214,6 +267,7 @@ public record ItemProgress(UUID itemId, long expected, long done,
     {
         return expected + "/" + done + "/" + failed + "/" + open + "/"
                 + declined + "/" + upstreamOpen
-                + (resolved == 0 ? "" : "/" + resolved);
+                + (resolved == 0 ? "" : "/" + resolved)
+                + (completion == 0 ? "" : "/c" + completion);
     }
 }

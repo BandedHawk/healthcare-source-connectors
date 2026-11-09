@@ -213,7 +213,7 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
         }
         boolean wholeItem = context.failures()
                 .failure(itemId, FailureStore.WHOLE_ITEM)
-                .map(each -> each.state() == FailureStore.State.CORRECTED)
+                .map(each -> each.state().passedLater())
                 .orElse(false);
         // The message that ended it, as the fail store counts it now:
         // item.split, or item.progress while a failure is open (§15.6).
@@ -228,12 +228,16 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
         {
             counts = SplitMessages.unstored(checkpoint, failed.size());
         }
+        // Numbered as the stage numbers it (STAGES.md §15.6e), before it
+        // is sent: the same end again keeps its number.
+        int completion = context.checkpointsToChange().announced(itemId,
+                counts.open() == 0);
         messages.add(SplitMessages.itemEnd(checkpoint,
                 properties.landing().intake(), failed.size(), counts,
                 (String) summary.getField(LandingTables.ITEM_DIGEST), refs,
                 stored.endedAt(), clock.instant(),
                 SplitMessages.Corrected.of(checkpoint, corrections,
-                        wholeItem)));
+                        wholeItem), completion));
         audit.add(Attr.COUNT, messages.size() - 1);
         audit.add(Attr.FAILED_COUNT, failed.size());
 

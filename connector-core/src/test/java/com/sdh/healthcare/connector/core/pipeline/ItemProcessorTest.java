@@ -226,9 +226,24 @@ class ItemProcessorTest
      */
     CorrectionStore.Pending submit(UUID itemId, long seq, String content)
     {
+        return submit(itemId, seq, content, CorrectionStore.Kind.CORRECTION);
+    }
+
+    /**
+     * Submits a correction or a retry, and returns it as pending.
+     *
+     * @param itemId  the failure's item
+     * @param seq     its record number
+     * @param content what is submitted
+     * @param kind    a correction or a retry
+     * @return the pending submission
+     */
+    CorrectionStore.Pending submit(UUID itemId, long seq, String content,
+            CorrectionStore.Kind kind)
+    {
         CorrectionStore corrections = corrections();
         corrections.submit(itemId, seq, content.getBytes(UTF_8), keys,
-                RECORDS_KEK, "op-test");
+                RECORDS_KEK, "op-test", kind);
         return corrections.pending(10).stream()
                 .filter(pending -> pending.itemId().equals(itemId))
                 .reduce((first, second) -> second).orElseThrow();
@@ -649,6 +664,8 @@ class ItemProcessorTest
                     assertThat(split.errorCode()).isNull();
                     assertThat(split.recordId()).isEqualTo(outcome.recordId())
                             .isNotEqualTo(original);
+                    // What it resolves (STAGES.md §15.6e).
+                    assertThat(split.resolves()).isEqualTo(original);
                 });
         assertThat(messages().getLast()).isInstanceOfSatisfying(
                 ItemSplit.class, split ->
@@ -756,6 +773,9 @@ class ItemProcessorTest
         assertThat(split).isNotEmpty();
         assertThat(split).extracting(RecordSplit::seq)
                 .allMatch(seq -> seq >= kept);
+        // Each resolves the item's failure (STAGES.md §15.6e).
+        assertThat(split).extracting(RecordSplit::resolves)
+                .containsOnly(item.itemId().toString());
         assertThat(messages().getLast()).isInstanceOfSatisfying(
                 ItemSplit.class, end ->
                 {
@@ -803,5 +823,115 @@ class ItemProcessorTest
         assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
                 .hasValueSatisfying(stored -> assertThat(stored.state())
                         .isEqualTo(FailureStore.State.FAILED_CORRECTION));
+    }
+
+    /**
+     * A retry of an item that failed as a whole splits the item again,
+     * unchanged: one that fails again leaves the failure {@code FAILED},
+     * not {@code FAILED_CORRECTION}, as nothing was edited (STAGES.md
+     * §15.6e), and stores nothing.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void leavesAFailedRetryFailed() throws Exception
+    {
+        String content = "1,ok\n2,ok\n3,ok\n4,ok\n5,\"never closed\n";
+        LandedItem item = land(content);
+        ItemProcessor processor = processor();
+        assertThat(process(processor, item).recordCount()).isPositive();
+        publisher.sent.clear();
+
+        CorrectionStore.Outcome outcome = processor.correct(
+                submit(item.itemId(), FailureStore.WHOLE_ITEM, content,
+                        CorrectionStore.Kind.RETRY),
+                item.digest(), LandedRefs.NONE, lease());
+
+        assertThat(outcome.passed()).isFalse();
+        assertThat(outcome.failureState())
+                .isEqualTo(FailureStore.State.FAILED);
+        assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
+                .hasValueSatisfying(stored -> assertThat(stored.state())
+                        .isEqualTo(FailureStore.State.FAILED));
+        assertThat(messages()).singleElement()
+                .isInstanceOf(ItemProgressed.class);
+        assertThat(corrections().list(item.itemId(), FailureStore.WHOLE_ITEM))
+                .singleElement().satisfies(retry ->
+                {
+                    assertThat(retry.kind())
+                            .isEqualTo(CorrectionStore.Kind.RETRY);
+                    assertThat(retry.errorCode()).startsWith("PARSE_");
+                });
+        records.refresh();
+        assertThat(CommittedRecords.corrections(records, item.itemId()))
+                .isEmpty();
+    }
+
+    /**
+     * An item complete at the split stage whose failure an operator
+     * reopens is announced in progress, reopening its completion
+     * downstream, and once the failure is declined again completes a
+     * second time under an ID of its own (STAGES.md §15.6e); the same end
+     * announced again keeps its number.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void completesAgainAnItemWhoseFailureIsReopened() throws Exception
+    {
+        LandedItem item = land("1,ok\n2,\"never closed\n");
+        ItemProcessor processor = processor();
+        process(processor, item);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemProgressed.class, progress ->
+                        assertThat(progress.completion()).isZero());
+        FailureStore failures = failures();
+        long seq = failures.failures(item.itemId()).getFirst().failure()
+                .seq();
+
+        failures.change(item.itemId(), seq,
+                java.util.Set.of(FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "declined", "alice", null);
+        publisher.sent.clear();
+        processor.reannounce(item.itemId(), item.digest(), LandedRefs.NONE);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, split ->
+                {
+                    assertThat(split.completion()).isEqualTo(1);
+                    assertThat(split.messageId())
+                            .isEqualTo("is-" + item.itemId());
+                });
+        // The same end again: the same number, a repeat downstream drops.
+        publisher.sent.clear();
+        processor.reannounce(item.itemId(), item.digest(), LandedRefs.NONE);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, split ->
+                        assertThat(split.completion()).isEqualTo(1));
+
+        failures.change(item.itemId(), seq,
+                java.util.Set.of(FailureStore.State.DECLINED),
+                FailureStore.State.FAILED, "reopened", "alice", null);
+        publisher.sent.clear();
+        processor.reannounce(item.itemId(), item.digest(), LandedRefs.NONE);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemProgressed.class, progress ->
+                {
+                    assertThat(progress.completion()).isEqualTo(1);
+                    assertThat(progress.openCount()).isEqualTo(1);
+                    assertThat(progress.messageId()).endsWith("~c1");
+                });
+
+        failures.change(item.itemId(), seq,
+                java.util.Set.of(FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "declined", "alice", null);
+        publisher.sent.clear();
+        processor.reannounce(item.itemId(), item.digest(), LandedRefs.NONE);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, split ->
+                {
+                    assertThat(split.completion()).isEqualTo(2);
+                    assertThat(split.messageId())
+                            .isEqualTo("is-" + item.itemId() + "~c2");
+                });
     }
 }

@@ -25,7 +25,10 @@ import java.util.UUID;
  * A stage's commands for its fail store (STAGES.md §15.3, §15.7 step 3):
  * {@code failures} lists them, {@code decline} records an operator's choice
  * not to correct one, with a reason, and {@code reopen} takes that back when
- * new information allows a correction. Nothing is removed: each change is
+ * new information allows a correction, {@code correct} and {@code retry}
+ * submit an edit, or what failed unchanged, for the stage's workers to
+ * process, and {@code export} gives what failed, encrypted to the
+ * operator's key. Nothing is removed: each change is
  * an event of its own, with who, when and the reason, encrypted. None
  * prints content: a failure is named by its item, record number, error
  * code and place, and a reason is never shown.
@@ -48,7 +51,8 @@ public final class FailureCommands
      * The commands.
      *
      * @param <C> the stage's context
-     * @return {@code failures}, {@code decline} and {@code reopen}
+     * @return {@code failures}, {@code decline}, {@code reopen},
+     *         {@code correct}, {@code retry} and {@code export}
      */
     public static <C extends FailureAdmin> List<AdminCommand<C>> all()
     {
@@ -71,9 +75,11 @@ public final class FailureCommands
                             information allows a correction, with the
                             reason read from standard input. Its item is
                             incomplete again until the failure is resolved
-                            or declined (an item already complete is not
-                            reopened downstream yet)."""),
-                new CorrectCommand<>(), new ExportCommand<>());
+                            or declined; an item already complete is
+                            reopened, here and downstream, and completes
+                            again, numbered after the last."""),
+                new CorrectCommand<>(), new RetryCommand<>(),
+                new ExportCommand<>());
     }
 
     /**
@@ -83,7 +89,7 @@ public final class FailureCommands
      * @return the ID
      * @throws AdminArgs.UsageException if it isn't a UUID
      */
-    static UUID itemId(String text)
+    public static UUID itemId(String text)
     {
         try
         {
@@ -129,7 +135,7 @@ public final class FailureCommands
      * @throws IOException              if it can't be read
      * @throws AdminArgs.UsageException if it is empty or too long
      */
-    static String reason(InputStream input) throws IOException
+    public static String reason(InputStream input) throws IOException
     {
         byte[] bytes = input.readNBytes(FailureReason.MAX_BYTES + 1);
         if (bytes.length > FailureReason.MAX_BYTES)
@@ -226,7 +232,10 @@ public final class FailureCommands
                                             failure.stored().failure()
                                                     .seq()))
                     {
-                        out.println("  correction " + correction.correction()
+                        out.println("  " + (correction.kind()
+                                == CorrectionStore.Kind.RETRY ? "retry "
+                                        : "correction ")
+                                + correction.correction()
                                 + " " + correction.state() + " by "
                                 + correction.submittedBy() + " at "
                                 + correction.submittedAt() + ", "
@@ -490,6 +499,109 @@ public final class FailureCommands
                     FailureStore.State.CORRECTION_PENDING.name());
             out.println("submitted correction " + number + " of failure "
                     + seq + " of " + itemId + " at the " + context.stage()
+                    + " stage (" + length + " bytes, kept encrypted); the"
+                    + " stage's workers process it within a renewal"
+                    + " interval: see failures --item-id");
+        }
+    }
+
+    /**
+     * Submits a retry of a failure (STAGES.md §15.6e): what it failed on,
+     * read by the stage as {@code export} reads it, unchanged, as a
+     * correction of kind {@code RETRY}. The stage's workers process it with
+     * the version running now: if it passes the failure is {@code RETRIED},
+     * and if not it is {@code FAILED} again.
+     *
+     * @param <C> the stage's context
+     */
+    static final class RetryCommand<C extends FailureAdmin>
+            implements AdminCommand<C>
+    {
+
+        @Override
+        public String name()
+        {
+            return "retry";
+        }
+
+        @Override
+        public String usage()
+        {
+            return """
+                    retry --item-id <id> --seq <n>
+                        Processes again, unchanged, what a failure that is
+                        FAILED or FAILED_CORRECTION failed on: for a failure
+                        that wasn't the data's (a limit raised, the stage
+                        fixed, a service back). The stage's workers process
+                        it within a renewal interval, under the version
+                        running now: if it passes, it is stored as a new
+                        record linked to the failed one and sent on, and
+                        the failure is RETRIED; if not, it is FAILED again,
+                        and the retry's error is shown by failures
+                        --item-id. Nothing of it is printed.""";
+        }
+
+        @Override
+        public Set<String> options()
+        {
+            return Set.of("item-id", "seq");
+        }
+
+        @Override
+        public Set<String> flags()
+        {
+            return Set.of();
+        }
+
+        @Override
+        public void run(AdminArgs arguments, C context, AuditRecord audit,
+                PrintStream out) throws Exception
+        {
+            UUID itemId = itemId(arguments.required("item-id"));
+            long seq = seq(arguments.required("seq"));
+            audit.add(Attr.STAGE, context.stage());
+            audit.add(Attr.ITEM_ID, itemId);
+            audit.add(Attr.SEQ, seq);
+            if (!context.corrects())
+            {
+                throw new IllegalStateException("The " + context.stage()
+                        + " stage doesn't take retries yet");
+            }
+            FailureStore.Stored failure = context.failures()
+                    .failure(itemId, seq)
+                    .orElseThrow(() -> new IllegalStateException("The "
+                            + context.stage() + " stage has no failure "
+                            + seq + " for this item"));
+            if (!CorrectionStore.CORRECTABLE.contains(failure.state()))
+            {
+                // Refused before what failed is read.
+                throw new IllegalStateException("The failure is "
+                        + failure.state() + ": it can be retried only from "
+                        + CorrectionStore.CORRECTABLE);
+            }
+            byte[] content = context.failedContent(itemId, seq);
+            int length = content.length;
+            int number;
+            try
+            {
+                number = context.correctionsToChange().submit(itemId, seq,
+                        content, context.reasonKeys(), context.reasonKek(),
+                        audit.operator(), CorrectionStore.Kind.RETRY);
+            }
+            catch (FailureStore.RefusedException refused)
+            {
+                throw new IllegalStateException(refused.getMessage());
+            }
+            finally
+            {
+                Arrays.fill(content, (byte) 0);
+            }
+            audit.add(Attr.CORRECTION, number);
+            audit.add(Attr.BYTES, length);
+            audit.add(Attr.STATE,
+                    FailureStore.State.CORRECTION_PENDING.name());
+            out.println("submitted retry " + number + " of failure " + seq
+                    + " of " + itemId + " at the " + context.stage()
                     + " stage (" + length + " bytes, kept encrypted); the"
                     + " stage's workers process it within a renewal"
                     + " interval: see failures --item-id");

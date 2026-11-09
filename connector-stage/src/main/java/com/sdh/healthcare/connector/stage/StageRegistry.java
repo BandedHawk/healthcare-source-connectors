@@ -10,6 +10,9 @@ import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -338,6 +341,16 @@ public final class StageRegistry
                     + " ADD COLUMN IF NOT EXISTS progress_key text");
             statement.execute("ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS progress_at timestamptz");
+            // Added 2026-11-09 (STAGES.md §15.6e): how many times this
+            // stage completed the item, and the completion of the stage
+            // before its total is from, so an item reopened upstream is
+            // reopened here and a stale message changes nothing.
+            statement.execute("ALTER TABLE " + items
+                    + " ADD COLUMN IF NOT EXISTS completion integer"
+                    + " NOT NULL DEFAULT 0");
+            statement.execute("ALTER TABLE " + items
+                    + " ADD COLUMN IF NOT EXISTS upstream_completion integer"
+                    + " NOT NULL DEFAULT 0");
             for (String ddl : FailureStore.ddls(failures,
                     failures.substring(0, failures.indexOf('.'))
                             + ".stage_failure_event"))
@@ -828,46 +841,105 @@ public final class StageRegistry
     public void expect(UUID itemId, long expected, byte[] total,
             boolean partial)
     {
+        expect(itemId, expected, total, partial, partial ? 0 : 1);
+    }
+
+    /**
+     * Notes how many records an item has, or has so far, and keeps the
+     * message that said so, as {@link #expect(UUID, long, byte[], boolean)}
+     * does, by the stage before's completion number (STAGES.md §15.6e). A
+     * final total is taken if it is of a later completion than the one
+     * taken; a total from {@code item.progress} grows the one taken while
+     * it is open, and reopens the item if it reopens the completion taken
+     * (or a later one): the item is then incomplete here again, and
+     * reported so. One from an earlier completion is stale, and changes
+     * nothing, so the messages need no order.
+     *
+     * @param itemId     the item's id
+     * @param expected   how many records it has, or has so far
+     * @param total      the message, sealed; null to keep none
+     * @param partial    whether the total is from {@code item.progress}
+     * @param completion the stage before's completion number, as
+     *                   {@link StageInput.ItemTotal#completion}
+     */
+    public void expect(UUID itemId, long expected, byte[] total,
+            boolean partial, int completion)
+    {
+        // take: the row's total is replaced, a new round of the item;
+        // grow: a total from item.progress, the same round, still open.
+        String take = """
+                (i.expected IS NULL
+                 OR (NOT EXCLUDED.upstream_open
+                     AND EXCLUDED.upstream_completion
+                         > i.upstream_completion)
+                 OR (EXCLUDED.upstream_open
+                     AND EXCLUDED.upstream_completion
+                         >= i.upstream_completion
+                     AND (NOT i.upstream_open
+                          OR EXCLUDED.upstream_completion
+                             > i.upstream_completion)))""";
+        String grow = """
+                (EXCLUDED.upstream_open AND i.upstream_open
+                 AND EXCLUDED.upstream_completion = i.upstream_completion)""";
+        // Whether it reopens the item here: complete before, not after.
         String sql = """
+                WITH prior AS (SELECT completed_at FROM %1$s
+                                WHERE stage = ? AND item_id = ?)
                 INSERT INTO %1$s AS i (stage, item_id, expected,
-                                       total_message, upstream_open)
-                VALUES (?, ?, ?, ?, ?)
+                                       total_message, upstream_open,
+                                       upstream_completion)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (stage, item_id) DO UPDATE
                    SET expected = CASE
-                           WHEN i.expected IS NULL THEN EXCLUDED.expected
-                           WHEN NOT i.upstream_open THEN i.expected
-                           WHEN NOT EXCLUDED.upstream_open
-                                THEN EXCLUDED.expected
-                           ELSE GREATEST(i.expected, EXCLUDED.expected) END,
+                           WHEN %2$s THEN EXCLUDED.expected
+                           WHEN %3$s
+                                THEN GREATEST(i.expected, EXCLUDED.expected)
+                           ELSE i.expected END,
                        total_message = CASE
-                           WHEN i.expected IS NULL
-                                THEN EXCLUDED.total_message
-                           WHEN NOT i.upstream_open THEN i.total_message
-                           WHEN NOT EXCLUDED.upstream_open
-                                OR EXCLUDED.expected >= i.expected
+                           WHEN %2$s THEN EXCLUDED.total_message
+                           WHEN %3$s AND EXCLUDED.expected >= i.expected
                                 THEN EXCLUDED.total_message
                            ELSE i.total_message END,
                        upstream_open = CASE
-                           WHEN i.expected IS NULL
-                                THEN EXCLUDED.upstream_open
-                           WHEN NOT i.upstream_open THEN false
-                           ELSE EXCLUDED.upstream_open END"""
-                .formatted(items);
+                           WHEN %2$s THEN EXCLUDED.upstream_open
+                           ELSE i.upstream_open END,
+                       upstream_completion = CASE
+                           WHEN %2$s THEN EXCLUDED.upstream_completion
+                           ELSE i.upstream_completion END,
+                       completed_at = CASE
+                           WHEN %2$s AND i.expected IS NOT NULL THEN NULL
+                           ELSE i.completed_at END
+                RETURNING (SELECT completed_at FROM prior) IS NOT NULL
+                          AND i.completed_at IS NULL"""
+                .formatted(items, take, grow);
+        boolean reopens;
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement upsert = connection.prepareStatement(sql))
         {
             upsert.setQueryTimeout(queryTimeoutSeconds);
             upsert.setString(1, stage);
             upsert.setObject(2, itemId);
-            upsert.setLong(3, expected);
-            upsert.setBytes(4, total);
-            upsert.setBoolean(5, partial);
-            upsert.executeUpdate();
+            upsert.setString(3, stage);
+            upsert.setObject(4, itemId);
+            upsert.setLong(5, expected);
+            upsert.setBytes(6, total);
+            upsert.setBoolean(7, partial);
+            upsert.setInt(8, completion);
+            try (ResultSet rows = upsert.executeQuery())
+            {
+                reopens = rows.next() && rows.getBoolean(1);
+            }
         }
         catch (SQLException failure)
         {
             throw new IllegalStateException("Stage registry unavailable",
                     failure);
+        }
+        if (reopens)
+        {
+            Telemetry.get().audit("stage.item_reopened",
+                    Fields.of(Attr.STAGE, stage).with(Attr.ITEM_ID, itemId)
+                            .with(Attr.REASON, "upstream"));
         }
     }
 
@@ -911,7 +983,8 @@ public final class StageRegistry
                        (SELECT count(*) FROM %3$s f
                          WHERE f.stage = i.stage AND f.item_id = i.item_id
                            AND f.state IN ('CORRECTED', 'RETRIED',
-                                           'SUPERSEDED'))
+                                           'SUPERSEDED')),
+                       i.completion
                   FROM %1$s i
                  WHERE i.stage = ? AND i.item_id = ANY (?)
                    AND i.completed_at IS NULL AND i.expected IS NOT NULL
@@ -936,7 +1009,8 @@ public final class StageRegistry
                                     : List.of((String[]) versions.getArray()))
                             .withFailures(rows.getLong(9), rows.getLong(10),
                                     rows.getBoolean(7))
-                            .withResolved(rows.getLong(12)),
+                            .withResolved(rows.getLong(12))
+                            .withCompletion(rows.getInt(13)),
                             rows.getBytes(5), rows.getString(8),
                             rows.getTimestamp(11).toInstant()));
                 }
@@ -1046,6 +1120,64 @@ public final class StageRegistry
     }
 
     /**
+     * Reopens the items complete here one of whose failures was opened
+     * again since they completed (an operator's {@code reopen}, STAGES.md
+     * §15.6e): each is incomplete again, so the worker reports it in
+     * progress, and completes it again, numbered after the last, once
+     * nothing is open. Audited {@code stage.item_reopened}.
+     *
+     * @param limit the most reopened
+     * @return their ids
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<UUID> reopenChanged(int limit)
+    {
+        String sql = """
+                UPDATE %1$s i SET completed_at = NULL
+                 WHERE i.stage = ? AND i.item_id IN (
+                       SELECT c.item_id FROM %1$s c
+                        WHERE c.stage = ? AND c.completed_at IS NOT NULL
+                          AND EXISTS (SELECT 1 FROM %2$s f
+                                       WHERE f.stage = c.stage
+                                         AND f.item_id = c.item_id
+                                         AND f.state IN ('FAILED',
+                                             'CORRECTION_PENDING',
+                                             'FAILED_CORRECTION')
+                                         AND f.changed_at > c.completed_at)
+                        LIMIT ?)
+                   AND i.completed_at IS NOT NULL
+                RETURNING i.item_id""".formatted(items, failures);
+        List<UUID> reopened = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setString(1, stage);
+            update.setString(2, stage);
+            update.setInt(3, limit);
+            try (ResultSet rows = update.executeQuery())
+            {
+                while (rows.next())
+                {
+                    reopened.add(rows.getObject(1, UUID.class));
+                }
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+        for (UUID itemId : reopened)
+        {
+            Telemetry.get().audit("stage.item_reopened",
+                    Fields.of(Attr.STAGE, stage).with(Attr.ITEM_ID, itemId)
+                            .with(Attr.REASON, "failure_reopened"));
+        }
+        return reopened;
+    }
+
+    /**
      * The stage's corrections (STAGES.md §15.6c), in the registry's schema.
      *
      * @return the store
@@ -1079,7 +1211,8 @@ public final class StageRegistry
     }
 
     /**
-     * Marks an item's item-complete message sent.
+     * Marks an item's item-complete message sent, and counts the
+     * completion (STAGES.md §15.6e): the next is numbered after it.
      *
      * @param itemId the item's id
      * @throws IllegalStateException if the database can't be reached
@@ -1087,7 +1220,8 @@ public final class StageRegistry
     public void markCompleted(UUID itemId)
     {
         String sql = """
-                UPDATE %s SET completed_at = clock_timestamp()
+                UPDATE %s SET completed_at = clock_timestamp(),
+                       completion = completion + 1
                  WHERE stage = ? AND item_id = ? AND completed_at IS NULL"""
                 .formatted(items);
         try (Connection connection = dataSource.getConnection();

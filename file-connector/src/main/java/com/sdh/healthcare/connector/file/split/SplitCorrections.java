@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.file.split;
 
+import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import java.time.Duration;
@@ -20,7 +21,10 @@ import org.slf4j.LoggerFactory;
  * Applies operators' corrections of the split stage's failures (STAGES.md
  * §15.6d), on every pod, each interval: each pending correction under its
  * item's lease, then sends again the end of any item whose correction was
- * applied by a pod that stopped before sending it.
+ * applied by a pod that stopped before sending it. It also applies
+ * operators' requests to end the hold on an item held across versions
+ * (§15.6e), which are applied as corrections are, by a pod under the
+ * item's lease.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -36,6 +40,9 @@ public final class SplitCorrections implements AutoCloseable
 
     /** The pending corrections. */
     private final CorrectionStore store;
+
+    /** Operators' requests to release held items; null for none. */
+    private final HoldReleases releases;
 
     /** Applies them under the items' leases. */
     private final ItemSplitter splitter;
@@ -61,7 +68,25 @@ public final class SplitCorrections implements AutoCloseable
     public SplitCorrections(CorrectionStore store, ItemSplitter splitter,
             Duration interval, Duration unsentAfter)
     {
+        this(store, null, splitter, interval, unsentAfter);
+    }
+
+    /**
+     * Creates the loop, applying requests to release held items too, not
+     * yet started.
+     *
+     * @param store       the correction store
+     * @param releases    the requests to release held items
+     * @param splitter    applies them under the items' leases
+     * @param interval    how often to look
+     * @param unsentAfter how long an item's end may go unsent after its
+     *                    correction, before it is sent again
+     */
+    public SplitCorrections(CorrectionStore store, HoldReleases releases,
+            ItemSplitter splitter, Duration interval, Duration unsentAfter)
+    {
         this.store = store;
+        this.releases = releases;
         this.splitter = splitter;
         this.interval = interval;
         this.unsentAfter = unsentAfter;
@@ -84,6 +109,7 @@ public final class SplitCorrections implements AutoCloseable
         {
             applyPending();
             sweep();
+            applyReleases();
         }
         catch (InterruptedException interrupted)
         {
@@ -111,6 +137,38 @@ public final class SplitCorrections implements AutoCloseable
             try
             {
                 if (splitter.correct(pending, store).isPresent())
+                {
+                    applied++;
+                }
+            }
+            catch (LeaseHeldException held)
+            {
+                // Another pod has the item; it or a later interval will.
+            }
+        }
+        return applied;
+    }
+
+    /**
+     * Applies the pending requests to release held items, oldest first.
+     * One whose item's lease another pod holds waits for the next
+     * interval.
+     *
+     * @return how many were applied or refused here
+     * @throws Exception if storage or the broker fails
+     */
+    public int applyReleases() throws Exception
+    {
+        if (releases == null)
+        {
+            return 0;
+        }
+        int applied = 0;
+        for (HoldReleases.Request request : releases.pending(LIMIT))
+        {
+            try
+            {
+                if (splitter.release(request, releases).isPresent())
                 {
                     applied++;
                 }

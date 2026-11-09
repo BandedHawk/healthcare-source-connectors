@@ -331,10 +331,12 @@ final class StageTestSupport
                 case RecordStored stored -> new StageInput.RecordInput(
                         stored.recordId(), stored.itemId(), stored.seq());
                 case ItemConverted completed -> new StageInput.ItemTotal(
-                        completed.itemId(), completed.recordCount());
+                        completed.itemId(), completed.recordCount(), false,
+                        completed.completion());
                 case ConnectorMessage.ItemProgressed progressed ->
                         new StageInput.ItemTotal(progressed.itemId(),
-                                progressed.passedCount(), true);
+                                progressed.passedCount(), true,
+                                progressed.completion());
                 default -> new StageInput.Unwanted("wrong_type");
             };
         }
@@ -416,7 +418,8 @@ final class StageTestSupport
         public ConnectorMessage itemComplete(ItemProgress progress)
         {
             return new ItemConverted(progress.itemId(), "test",
-                    progress.done(), progress.unresolved(), Instant.EPOCH);
+                    progress.done(), progress.unresolved(), Instant.EPOCH,
+                    List.of(), progress.nextCompletion());
         }
 
         @Override
@@ -425,7 +428,8 @@ final class StageTestSupport
             return new ConnectorMessage.ItemProgressed(progress.itemId(),
                     "test", "test", progress.done(), progress.passed(),
                     progress.open(), progress.declined(), null, null, null,
-                    Instant.EPOCH, progress.versions());
+                    Instant.EPOCH, progress.versions(),
+                    progress.completion());
         }
 
         @Override

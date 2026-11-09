@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 /**
  * Tests for {@link StageRegistry}, on a real Postgres.
@@ -43,6 +44,10 @@ class StageRegistryTest
 
     /** The item the records are from. */
     final UUID item = UUID.randomUUID();
+
+    /** The audit events. */
+    @RegisterExtension
+    final AuditCapture audit = new AuditCapture();
 
     /** Creates the tests; JUnit runs each test on a new instance. */
     StageRegistryTest()
@@ -272,6 +277,57 @@ class StageRegistryTest
             assertThat(due.progress().expected()).isEqualTo(2);
             assertThat(due.progress().complete()).isTrue();
             assertThat(due.total()).isEqualTo(new byte[] {4});
+        });
+    }
+
+    /**
+     * Totals are taken by the stage before's completion number (STAGES.md
+     * §15.6e): an item.progress that reopens the completion taken reopens
+     * the item here, one from before it or a repeat of the completion
+     * withdrawn changes nothing, and the next completion is taken.
+     */
+    @Test
+    void anItemReopenedUpstreamIsReopenedHere()
+    {
+        first.expect(item, 1, new byte[] {1}, true, 0);
+        first.claim("r1", item, LONG);
+        first.claim("r2", item, LONG);
+        first.store(List.of(entry("r1", false), entry("r2", false)));
+        first.expect(item, 2, new byte[] {2}, false, 1);
+        assertThat(first.due(List.of(item))).singleElement().satisfies(due ->
+        {
+            assertThat(due.progress().complete()).isTrue();
+            assertThat(due.progress().nextCompletion()).isEqualTo(1);
+        });
+        first.markCompleted(item);
+        assertThat(first.due(List.of(item))).isEmpty();
+
+        // From before the completion, or a repeat of it: stale.
+        first.expect(item, 1, new byte[] {3}, true, 0);
+        first.expect(item, 2, new byte[] {2}, false, 1);
+        assertThat(first.due(List.of(item))).isEmpty();
+
+        // Reopening it: due again, open upstream, its next completion 2.
+        first.expect(item, 2, new byte[] {4}, true, 1);
+        assertThat(audit.names()).contains("stage.item_reopened");
+        assertThat(first.due(List.of(item))).singleElement().satisfies(due ->
+        {
+            assertThat(due.progress().upstreamOpen()).isTrue();
+            assertThat(due.progress().complete()).isFalse();
+            assertThat(due.progress().completion()).isEqualTo(1);
+            assertThat(due.total()).isEqualTo(new byte[] {4});
+        });
+        // The completion it withdrew, delivered again: still open.
+        first.expect(item, 2, new byte[] {2}, false, 1);
+        assertThat(first.due(List.of(item))).singleElement().satisfies(due ->
+                assertThat(due.progress().upstreamOpen()).isTrue());
+
+        first.expect(item, 2, new byte[] {5}, false, 2);
+        assertThat(first.due(List.of(item))).singleElement().satisfies(due ->
+        {
+            assertThat(due.progress().complete()).isTrue();
+            assertThat(due.progress().nextCompletion()).isEqualTo(2);
+            assertThat(due.total()).isEqualTo(new byte[] {5});
         });
     }
 

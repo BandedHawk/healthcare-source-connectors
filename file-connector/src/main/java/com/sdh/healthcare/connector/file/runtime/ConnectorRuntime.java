@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
+import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
@@ -322,13 +323,17 @@ public final class ConnectorRuntime implements AutoCloseable
                     stage.registrySchema(), ItemProcessor.STAGE,
                     Duration.ofSeconds(10));
             corrections.createTableIfMissing();
+            // Operators' requests to release held items (§15.6e).
+            HoldReleases releases = new HoldReleases(dataSource,
+                    stage.registrySchema(), Duration.ofSeconds(10));
+            releases.createTableIfMissing();
             ItemProcessor processor = new ItemProcessor(pipeline, intake,
                     failures, corrections);
             ItemSplitter splitter = new ItemSplitter(processor, landedItems,
                     keys.wrap(), leases, properties.connectorId(),
                     leaseSettings);
             SplitCorrections correcting = new SplitCorrections(corrections,
-                    splitter, leaseSettings.renewInterval(),
+                    releases, splitter, leaseSettings.renewInterval(),
                     leaseSettings.ttl());
 
             StageHealth health = new StageHealth();

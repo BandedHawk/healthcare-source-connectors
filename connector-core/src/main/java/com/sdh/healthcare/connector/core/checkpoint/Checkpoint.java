@@ -92,7 +92,14 @@ public record Checkpoint(
          * Part way, begun under another version of the split stage; waits
          * for an operator (STAGES.md §14.3). Not resumed, not reconciled.
          */
-        HELD;
+        HELD,
+
+        /**
+         * Held, then ended by an operator ({@code release --close},
+         * STAGES.md §15.6e), to be landed again: not resumed, reconciled or
+         * announced. Its records already stored stay.
+         */
+        CLOSED;
 
         /**
          * Tells whether this state must be finished (or abandoned) before
@@ -245,7 +252,8 @@ public record Checkpoint(
     {
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resume, lastSeq + 1, lastSeq,
-                Math.max(publishedSeq, published), startedAt, failure, 0, version);
+                Math.max(publishedSeq, published), startedAt, failure, 0,
+                version);
     }
 
     /**
@@ -305,6 +313,26 @@ public record Checkpoint(
         return new Checkpoint(itemId, fingerprint, format, itemSize, next,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
                 null, restarts, version);
+    }
+
+    /**
+     * Resumes a held item under another version of the split stage, by an
+     * operator's choice (STAGES.md §15.6e): {@code SPLITTING} again, under
+     * that version from here on.
+     *
+     * @param next the version it resumes under
+     * @return the new checkpoint
+     * @throws IllegalStateException if it isn't {@code HELD}
+     */
+    public Checkpoint released(String next)
+    {
+        if (state != State.HELD)
+        {
+            throw new IllegalStateException("Not held");
+        }
+        return new Checkpoint(itemId, fingerprint, format, itemSize,
+                State.SPLITTING, resumeAt, nextSeq, committedSeq,
+                publishedSeq, startedAt, null, restarts, next);
     }
 
     /**

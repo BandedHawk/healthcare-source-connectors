@@ -131,6 +131,15 @@ public final class ItemCheckpoints
             statement.execute("CREATE SCHEMA IF NOT EXISTS "
                     + table.substring(0, table.indexOf('.')));
             statement.execute(ddl);
+            // Added 2026-11-09 (STAGES.md §15.6e): how many times the item's
+            // end was sent as item.split, and whether the last end sent was
+            // one, so a reopened item completes again under a new number.
+            statement.execute("ALTER TABLE " + table
+                    + " ADD COLUMN IF NOT EXISTS completion integer"
+                    + " NOT NULL DEFAULT 0");
+            statement.execute("ALTER TABLE " + table
+                    + " ADD COLUMN IF NOT EXISTS completed boolean"
+                    + " NOT NULL DEFAULT false");
         }
         catch (SQLException failure)
         {
@@ -362,6 +371,56 @@ public final class ItemCheckpoints
                 }
             }
             return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Notes the end about to be sent for an item, and numbers it (STAGES.md
+     * §15.6e): an {@code item.split} after one that wasn't is the next
+     * completion, and one after one that was is the same again; an
+     * {@code item.progress} after an {@code item.split} reopens that
+     * completion. Noted before the message is sent, so a resend after a
+     * stop is numbered the same. Not fenced by the item's lease: the
+     * number only grows, and an operator's command sends an item's end
+     * too.
+     *
+     * @param itemId   the item
+     * @param complete whether the end is {@code item.split}
+     * @return for {@code item.split}, the completion's number, from 1; for
+     *         {@code item.progress}, the completions sent before it
+     * @throws IllegalStateException if the item has no row, or the
+     *                               database can't be reached
+     */
+    public int announced(UUID itemId, boolean complete)
+    {
+        String sql = """
+                UPDATE %s
+                   SET completion = CASE WHEN ? AND NOT completed
+                                         THEN completion + 1
+                                         ELSE completion END,
+                       completed = ?
+                 WHERE item_id = ?
+                RETURNING completion""".formatted(table);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setBoolean(1, complete);
+            update.setBoolean(2, complete);
+            update.setObject(3, itemId);
+            try (ResultSet rows = update.executeQuery())
+            {
+                if (!rows.next())
+                {
+                    throw new IllegalStateException("The item has no row");
+                }
+                return rows.getInt(1);
+            }
         }
         catch (SQLException failure)
         {

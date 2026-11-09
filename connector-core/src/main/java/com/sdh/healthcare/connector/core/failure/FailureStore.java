@@ -89,6 +89,17 @@ public final class FailureStore
             return this == FAILED || this == CORRECTION_PENDING
                     || this == FAILED_CORRECTION;
         }
+
+        /**
+         * Whether a failure in this state passed later, by an operator's
+         * correction or retry, so what passed stands in its place.
+         *
+         * @return true for {@code CORRECTED} and {@code RETRIED}
+         */
+        public boolean passedLater()
+        {
+            return this == CORRECTED || this == RETRIED;
+        }
     }
 
     /**

@@ -16,6 +16,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef
 import com.sdh.healthcare.connector.contract.position.LineCounter;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
+import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
@@ -245,6 +246,19 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
+     * Notes the end about to be sent for an item, and numbers it, as
+     * {@link ItemCheckpoints#announced} does.
+     *
+     * @param itemId   the item
+     * @param complete whether the end is {@code item.split}
+     * @return the completion's number, or the completions before
+     */
+    int announced(UUID itemId, boolean complete)
+    {
+        return checkpoints.announced(itemId, complete);
+    }
+
+    /**
      * Reads what is stored for an item, verified.
      *
      * @param itemId the item
@@ -403,6 +417,49 @@ public final class IngestPipeline implements AutoCloseable
                         .with(Attr.VERSION, settings.version())
                         .with(Attr.STORED_VERSION, current.version()));
         throw new ItemHeldException(current.itemId(), current.version());
+    }
+
+    /**
+     * Ends the hold on an item held across versions, by an operator's
+     * request (STAGES.md §15.6e), under the item's lease: to resume it,
+     * {@code SPLITTING} again under the version running now, audited
+     * {@code split.released}; or to close it, {@code CLOSED}, audited
+     * {@code split.item_closed}. Nothing is split here: a resumed item is
+     * split by the caller once the lease is let go.
+     *
+     * @param itemId   the item
+     * @param action   what the operator asked
+     * @param operator who asked
+     * @param lease    the item's lease
+     * @return the checkpoint as it was held; empty if the item isn't held,
+     *         and nothing is changed
+     * @throws IllegalStateException if the store can't be reached
+     */
+    public Optional<Checkpoint> release(UUID itemId,
+            HoldReleases.Action action, String operator, LeaseToken lease)
+    {
+        Checkpoint current = checkpoint(itemId).orElse(null);
+        if (current == null || current.state() != Checkpoint.State.HELD)
+        {
+            return Optional.empty();
+        }
+        Fields fields = Fields.of(Attr.ITEM_ID, itemId)
+                .with(Attr.SEQ, current.nextSeq())
+                .with(Attr.STORED_VERSION, current.version())
+                .with(Attr.OPERATOR, operator);
+        if (action == HoldReleases.Action.RESUME)
+        {
+            commitCheckpoint(current.released(settings.version()), lease);
+            Telemetry.get().auditWarn("split.released",
+                    fields.with(Attr.VERSION, settings.version()));
+        }
+        else
+        {
+            commitCheckpoint(current.withState(Checkpoint.State.CLOSED),
+                    lease);
+            Telemetry.get().auditWarn("split.item_closed", fields);
+        }
+        return Optional.of(current);
     }
 
     /**
@@ -1065,6 +1122,24 @@ public final class IngestPipeline implements AutoCloseable
     private static RecordSplit message(WrittenRecord record, StorageRef ref,
             LandedRefs refs, String version)
     {
+        return message(record, ref, refs, version, null);
+    }
+
+    /**
+     * The message announcing a record written by an operator's correction
+     * or retry, naming the failure it resolves (STAGES.md §15.6e).
+     *
+     * @param record   the record
+     * @param ref      where it is stored
+     * @param refs     what landing kept about its item
+     * @param version  the split stage's version
+     * @param resolves the failed piece's record id, or the item's id for a
+     *                 correction of the item as a whole; null for none
+     * @return the message
+     */
+    private static RecordSplit message(WrittenRecord record, StorageRef ref,
+            LandedRefs refs, String version, String resolves)
+    {
         int message = refs.message(record.sourceOffset());
         return new RecordSplit(record.recordId(), record.itemId(),
                 record.seq(), record.sourceOffset(), record.sourceLength(),
@@ -1073,7 +1148,7 @@ public final class IngestPipeline implements AutoCloseable
                 record.origin(),
                 record.error() == null ? null : record.error().name(),
                 record.errorAt(), message, refs.messageRef(message),
-                refs.messageReplaced(message), version);
+                refs.messageReplaced(message), version, resolves);
     }
 
     /**
@@ -1235,10 +1310,14 @@ public final class IngestPipeline implements AutoCloseable
             StorageRef ref = new StorageRef(settings.catalogName(), namespace,
                     tableName, writer.ingestedDate(), snapshot.snapshotId(),
                     writer.kekRef());
+            // Each names what it resolves (STAGES.md §15.6e): the failed
+            // piece, or the item for a correction of it as a whole.
+            String resolves = pending.seq() >= 0
+                    ? stored.get(pending.seq()).recordId() : itemId.toString();
             List<ConnectorMessage> messages = new ArrayList<>();
             for (WrittenRecord record : writer.written())
             {
-                messages.add(message(record, ref, refs, version));
+                messages.add(message(record, ref, refs, version, resolves));
             }
             Telemetry.get().recordsStored(messages.size(), format);
             return new CorrectionSplit(new CorrectionStore.Outcome(pending,

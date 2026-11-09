@@ -91,7 +91,7 @@ Records are stored as split, in their original form. Conversion to JSON and the 
 ```sh
 bin/file-connector                         # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/file-connector        # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, replay, failures, decline, reopen
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, replay, failures, decline, reopen, export, correct, retry, release
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The connector exits with
@@ -253,8 +253,7 @@ kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/ad
 ```
 
 The reason (at most 4 KiB) is kept encrypted with the stage's records KEK, one entry per change, and is never
-printed or logged (`failure.declined`, `failure.reopened`). These two are the only commands that write, and only to
-the fail store. Afterwards the stage sends the item's end again, alone: `item.split` once none of its failures is open, so the
+printed or logged (`failure.declined`, `failure.reopened`). They write only to the fail store. Afterwards the stage sends the item's end again, alone: `item.split` once none of its failures is open, so the
 convert stage can complete it, or `item.progress` with the new counts. An item still being split counts the change
 when it ends.
 
@@ -287,6 +286,34 @@ sent again (`item.split` once nothing else is open, its failed count without the
 (`CORRECTION_RECORD_COUNT`, `CORRECTION_CHANGES_PASSED`, or the splitter's code), nothing is stored, the failure
 becomes `FAILED_CORRECTION`, and you can correct it again. `failures --item-id` shows each correction and what it came
 to. Delete `failed.jwe` and your edits when you're done. `restore` also gives a landed item whole, into the pod.
+
+`retry --item-id <id> --seq <n>` processes what failed again, unchanged, for a failure that wasn't the data's (a
+limit raised, the stage fixed): it needs no input, and takes a failure that is `FAILED` or `FAILED_CORRECTION`, as
+`correct` does. A pod splits it within a renewal interval, under the rules above; if it passes, the failure becomes
+`RETRIED`; if it fails, it goes back to `FAILED`, and `failures --item-id` shows the retry and its error code.
+
+A record that passed by a correction or retry names the failure it resolves in its `record.split` (`resolves`).
+Reopening a failure of an item already complete (`reopen`) makes it incomplete again: the stage sends
+`item.progress`, which the convert stage takes as reopening its own item, and once nothing is open the item
+completes again, under a message ID of its own (`~c2`, `~c3`, …; STAGES.md §15.6e).
+
+#### Held items
+
+An item part way through splitting when the stage's version changed is held (`HELD`, `split.version_held`): pods
+of the new version neither resume nor reconcile it. `status --item <id>` shows its checkpoint and version.
+`release` ends the hold, with one of:
+
+```sh
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args release --item-id <id> --resume --operator alice
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args release --item-id <id> --close --operator alice < reason.txt
+```
+
+`--resume` splits the rest of it under the version running now, so its records are made under two versions, which
+its `item.split` names. `--close` ends it unfinished (`CLOSED`), with a reason, kept as a decline's: nothing more is
+sent, the convert stage keeps it incomplete, and you land it again with landing's `resubmit`. Either is a request a
+pod applies within a renewal interval, under the item's lease (`split.released` or `split.item_closed`); one for an
+item that is no longer held is refused (`split.release_refused`). `status --item` lists the requests and what each
+came to, without the reasons.
 
 
 ### Troubleshooting

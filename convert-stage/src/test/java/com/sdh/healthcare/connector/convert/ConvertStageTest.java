@@ -20,6 +20,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConver
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
@@ -480,11 +481,16 @@ class ConvertStageTest
                 Map.of("convert", (ECPublicKey) signer.getPublic()));
         for (OutboundMessage message : sent)
         {
-            if (opener.open(message.body())
-                    instanceof ItemConverted converted)
+            ConnectorMessage opened = opener.open(message.body());
+            if (opened instanceof ItemConverted converted)
             {
                 assertThat(converted.recordCount()).isEqualTo(2);
                 assertThat(converted.failedRecordCount()).isZero();
+            }
+            if (opened instanceof RecordStored stored && stored.seq() == 1)
+            {
+                // What it resolves (STAGES.md §15.6e).
+                assertThat(stored.resolves()).isEqualTo(failed.recordId());
             }
         }
 

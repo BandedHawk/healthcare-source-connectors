@@ -277,6 +277,59 @@ class StageWorkerTest
     }
 
     /**
+     * An item complete here whose failure an operator reopens is
+     * incomplete again (STAGES.md §15.6e): the worker reports it in
+     * progress, reopening its first completion, and once the failure is
+     * declined again completes it a second time, under a new message ID.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void completesAgainAnItemWhoseFailureIsReopened()
+            throws InterruptedException
+    {
+        StageTestSupport.TestProcessor processor = processor();
+        StageWorker<String> worker = worker("pod-a", processor);
+        assertThat(worker.handle(batch(5)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        FailureStore failures = StageTestSupport.registry(schema, "pod-a")
+                .failureStore();
+        failures.change(item, 4, Set.of(FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "declined", "alice", null);
+        worker.revisit();
+        assertThat(sentItems()).singleElement().satisfies(done ->
+                assertThat(done.completion()).isEqualTo(1));
+        String first = sentItems().get(0).messageId();
+
+        failures.change(item, 4, Set.of(FailureStore.State.DECLINED),
+                FailureStore.State.FAILED, "reopened", "alice", null);
+        worker.revisit();
+        assertThat(audit.names()).contains("stage.item_reopened");
+        assertThat(sentProgress()).last().satisfies(progress ->
+        {
+            assertThat(progress.completion()).isEqualTo(1);
+            assertThat(progress.openCount()).isEqualTo(1);
+            assertThat(progress.messageId()).endsWith("~c1");
+        });
+        assertThat(sentItems()).hasSize(1);
+
+        failures.change(item, 4, Set.of(FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "declined", "alice", null);
+        worker.revisit();
+        assertThat(sentItems()).hasSize(2).last().satisfies(done ->
+        {
+            assertThat(done.completion()).isEqualTo(2);
+            assertThat(done.messageId()).isNotEqualTo(first)
+                    .endsWith("~c2");
+        });
+        assertThat(processor.completed).hasSize(2);
+
+        // Complete again: nothing more.
+        worker.revisit();
+        assertThat(sentItems()).hasSize(2);
+    }
+
+    /**
      * An operator's correction is processed by a worker (STAGES.md
      * §15.6c): one that fails leaves the failure FAILED_CORRECTION, and
      * the item incomplete, sending nothing; one that passes is stored and
@@ -343,6 +396,62 @@ class StageWorkerTest
         worker.revisit();
         assertThat(sentRecords()).hasSize(5);
         assertThat(sentItems()).hasSize(1);
+    }
+
+    /**
+     * A retry (STAGES.md §15.6e) is processed as a correction: one that
+     * fails leaves the failure FAILED, not FAILED_CORRECTION, with the
+     * retry's error kept on its row; one that passes makes the failure
+     * RETRIED, naming what passed, and completes the item.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void appliesARetry() throws InterruptedException
+    {
+        StageTestSupport.TestProcessor processor = processor();
+        StageWorker<String> worker = worker("pod-a", processor);
+        assertThat(worker.handle(batch(5)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        StageRegistry registry = StageTestSupport.registry(schema, "pod-a");
+        CorrectionStore corrections = registry.correctionStore();
+        FailureStore failures = registry.failureStore();
+
+        assertThat(corrections.submit(item, 4, "still bad".getBytes(US_ASCII),
+                StageTestSupport.CORRECTION_KEYS,
+                StageTestSupport.CORRECTION_KEK, "alice",
+                CorrectionStore.Kind.RETRY)).isEqualTo(1);
+        worker.applyCorrections();
+        worker.revisit();
+        assertThat(failures.failure(item, 4)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.FAILED);
+        assertThat(corrections.list(item, 4)).singleElement()
+                .satisfies(retry ->
+                {
+                    assertThat(retry.kind())
+                            .isEqualTo(CorrectionStore.Kind.RETRY);
+                    assertThat(retry.state())
+                            .isEqualTo(CorrectionStore.State.FAILED);
+                    assertThat(retry.errorCode()).isNotNull();
+                });
+        assertThat(sentItems()).isEmpty();
+        assertThat(audit.names()).contains("failure.retry_submitted",
+                "failure.retry_failed");
+
+        assertThat(corrections.submit(item, 4, "same".getBytes(US_ASCII),
+                StageTestSupport.CORRECTION_KEYS,
+                StageTestSupport.CORRECTION_KEK, "alice",
+                CorrectionStore.Kind.RETRY)).isEqualTo(2);
+        worker.applyCorrections();
+        worker.revisit();
+        assertThat(failures.failure(item, 4)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.RETRIED);
+        assertThat(sentRecords()).contains("rec-" + item + "-4-c2");
+        assertThat(audit.names()).contains("failure.retried");
+        assertThat(sentItems()).singleElement().satisfies(done ->
+                assertThat(done.failedRecordCount()).isZero());
     }
 
     /**

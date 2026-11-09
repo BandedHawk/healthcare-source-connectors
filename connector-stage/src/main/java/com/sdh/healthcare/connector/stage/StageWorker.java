@@ -265,9 +265,11 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     /**
      * Looks again at the items whose failures changed since their counts
      * were reported (STAGES.md §15.3): an operator declined or reopened
-     * one. Each completes, or has its new counts reported, as at the end of
-     * a batch. Every pod does it; the messages' ids are fixed, so a repeat
-     * is dropped. A failure is logged and tried again at the next interval.
+     * one. An item already complete whose failure was reopened is
+     * incomplete again (§15.6e). Each completes, or has its new counts
+     * reported, as at the end of a batch. Every pod does it; the messages'
+     * ids are fixed, so a repeat is dropped. A failure is logged and tried
+     * again at the next interval.
      * Run each renewal interval once {@link #start}ed; public for a stage's
      * own tests.
      */
@@ -275,6 +277,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     {
         try
         {
+            registry.reopenChanged(REVISIT_LIMIT);
             List<UUID> changed = registry.changedItems(REVISIT_LIMIT);
             if (!changed.isEmpty())
             {
@@ -527,7 +530,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     case StageInput.ItemTotal total ->
                     {
                         registry.expect(total.itemId(), total.expected(),
-                                received.body(), total.partial());
+                                received.body(), total.partial(),
+                                total.completion());
                         items.add(total.itemId());
                     }
                     case StageInput.Unwanted unwanted ->

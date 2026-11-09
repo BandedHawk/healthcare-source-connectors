@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
+import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
@@ -86,7 +87,13 @@ public final class ItemProcessor
          * The item is part way, begun under another version, and waits for
          * an operator (STAGES.md §14.3).
          */
-        HELD
+        HELD,
+
+        /**
+         * The item was held, and an operator closed it, to land it again
+         * (STAGES.md §15.6e): nothing more is done with it.
+         */
+        CLOSED
     }
 
     /**
@@ -218,6 +225,32 @@ public final class ItemProcessor
     }
 
     /**
+     * The split stage's version, as this processor splits under it.
+     *
+     * @return the version; null if none is set
+     */
+    public String version()
+    {
+        return pipeline.settings().version();
+    }
+
+    /**
+     * Ends the hold on an item held across versions, as an operator asked
+     * (STAGES.md §15.6e): see {@link IngestPipeline#release}.
+     *
+     * @param itemId   the item
+     * @param action   what the operator asked
+     * @param operator who asked
+     * @param lease    the item's lease, held by the caller
+     * @return the checkpoint as it was held; empty if it isn't held
+     */
+    public Optional<Checkpoint> release(UUID itemId,
+            HoldReleases.Action action, String operator, LeaseToken lease)
+    {
+        return pipeline.release(itemId, action, operator, lease);
+    }
+
+    /**
      * Sends an item's end again after a change in its failures (a
      * correction, or an operator's decision), as the fail store now counts
      * them, and notes it sent for its corrections.
@@ -265,16 +298,18 @@ public final class ItemProcessor
     }
 
     /**
-     * Whether an operator's correction of an item as a whole passed.
+     * Whether an operator's correction or retry of an item as a whole
+     * passed.
      *
      * @param itemId the item
-     * @return true if its failure as a whole is {@code CORRECTED}
+     * @return true if its failure as a whole is {@code CORRECTED} or
+     *         {@code RETRIED}
      */
     private boolean wholeItemCorrected(UUID itemId)
     {
         return failures != null && failures.failure(itemId,
                 FailureStore.WHOLE_ITEM).map(stored -> stored.state()
-                        == FailureStore.State.CORRECTED).orElse(false);
+                        .passedLater()).orElse(false);
     }
 
     /**
@@ -420,6 +455,12 @@ public final class ItemProcessor
                     return new Outcome(itemId, Result.HELD,
                             checkpoint.recordCount(), null);
                 }
+                case CLOSED ->
+                {
+                    LOG.info("split.item_closed_skipped");
+                    return new Outcome(itemId, Result.CLOSED,
+                            checkpoint.recordCount(), null);
+                }
                 default ->
                 {
                     // SPLITTING, or ABANDONED from before contract 3.0:
@@ -552,9 +593,11 @@ public final class ItemProcessor
                 : SplitMessages.Corrected.of(checkpoint,
                         pipeline.correctionRows(itemId),
                         wholeItemCorrected(itemId));
+        // Numbered before it is sent (STAGES.md §15.6e).
+        int completion = pipeline.announced(itemId, counts.open() == 0);
         ConnectorMessage message = SplitMessages.itemEnd(checkpoint, intake,
                 failed.size(), counts, landing.digest(), landing.refs(),
-                endedAt, pipeline.clock().instant(), corrected);
+                endedAt, pipeline.clock().instant(), corrected, completion);
         pipeline.publishNow(List.of(message));
         if (message instanceof ItemProgressed progressed)
         {

@@ -446,6 +446,45 @@ class FailureCommandsTest
     }
 
     /**
+     * {@code retry} submits what failed, unchanged, as a correction of kind
+     * RETRY, reading nothing from standard input and printing nothing of
+     * it; a retry while one is pending, or of a declined failure, is
+     * refused.
+     */
+    @Test
+    void submitsARetry()
+    {
+        Result submitted = admin("", "retry", "--item-id", item.toString(),
+                "--seq", "2");
+        assertThat(submitted.status()).as(submitted.out() + submitted.err())
+                .isZero();
+        assertThat(submitted.out()).contains("submitted retry 1")
+                .doesNotContain(FAILED_CONTENT);
+        assertThat(store().failure(item, 2)).get()
+                .extracting(FailureStore.Stored::state)
+                .isEqualTo(FailureStore.State.CORRECTION_PENDING);
+        CorrectionStore corrections = new CorrectionStore(
+                StageTestSupport.database(), schema, "test",
+                Duration.ofSeconds(5));
+        assertThat(corrections.pending(10)).singleElement().satisfies(
+                pending ->
+                {
+                    assertThat(pending.kind())
+                            .isEqualTo(CorrectionStore.Kind.RETRY);
+                    assertThat(new String(pending.open(KEYS), UTF_8))
+                            .isEqualTo(FAILED_CONTENT);
+                });
+        assertThat(audit.names()).contains("failure.retry_submitted");
+        assertThat(audit.attributes("admin.retry"))
+                .containsEntry("sdh.correction", 1L)
+                .containsEntry("sdh.result", "ok");
+        assertThat(admin("", "retry", "--item-id", item.toString(),
+                "--seq", "2").status()).isEqualTo(1);
+        assertThat(admin("", "failures", "--item-id", item.toString()).out())
+                .contains("retry 1 PENDING by alice");
+    }
+
+    /**
      * {@code export} prints the failed record encrypted to the key given,
      * which only its private key opens, and audits the key's fingerprint;
      * the plaintext is never printed. Without a key it is refused.

@@ -51,9 +51,10 @@ public final class SplitAdmin
      */
     static List<AdminCommand<SplitAdminContext>> commands()
     {
-        List<AdminCommand<SplitAdminContext>> commands = new ArrayList<>(List.of(
-                new ReplayCommand(), new RestoreCommand(),
-                new SplitStatusCommand()));
+        List<AdminCommand<SplitAdminContext>> commands =
+                new ArrayList<>(List.of(new ReplayCommand(),
+                        new RestoreCommand(), new SplitStatusCommand(),
+                        new ReleaseCommand()));
         commands.addAll(FailureCommands.<SplitAdminContext>all());
         return List.copyOf(commands);
     }

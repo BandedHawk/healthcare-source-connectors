@@ -147,7 +147,8 @@ final class ReplayCommand implements AdminCommand<ConvertAdminContext>
                 context.properties().storage().namespace(),
                 total == null ? ConvertProcessor.UNKNOWN_INTAKE
                         : total.intake(),
-                item.done(), item.failed(), item.completedAt());
+                item.done(), item.failed(), item.completedAt(),
+                item.completion());
         int recordCount = messages.size() - 1;
         audit.add(Attr.COUNT, recordCount);
 
@@ -162,10 +163,12 @@ final class ReplayCommand implements AdminCommand<ConvertAdminContext>
 
         if (withResult)
         {
-            List<ItemResult> parts = ResultReporter.parts(total,
+            List<ItemResult> parts = ResultReporter.parts(
+                    ResultReporter.Facts.of(total), ItemResult.COMPLETED,
+                    total.recordCount(),
                     CommittedRecords.failed(records, itemId, keys.wrap()),
                     item.completedAt(), ResultReporter.PART_SIZE,
-                    ResultReporter.PART_BYTES);
+                    ResultReporter.PART_BYTES, item.completion());
             for (ItemResult part : parts)
             {
                 results.send(part, suffix);

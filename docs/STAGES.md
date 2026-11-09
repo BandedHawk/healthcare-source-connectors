@@ -564,6 +564,10 @@ Each step builds and passes its tests before the next.
   runs an operator command with an HTTP push node's configuration, which is how the web server it was given went
   unnoticed (`WebServerSwitchTest` covers the switch alone). `QueueReader.decodeNew` is tested only as a unit,
   since nothing in the sandbox reads the records yet.
+- **Reprocess** (§15.8), proposed 2026-11-09 for review before it is built: runs recorded by the operator and
+  done by the stage's pods; outcomes `same`, `different` (stored with `supersedes`) and `failed`; open failures
+  matched exactly and `SUPERSEDED`. Four points to decide there: a run's pace beside live data, whether a declined
+  failure may be superseded, an item the split stage now cuts differently, and an item-level message downstream.
 - **A stage changed with records in flight** (§13.1): proposed 2026-11-08, a version at every stage, kept with the
   data, and a mandatory drain check (§14).
 - **Editing bad data**, to revisit later: an item or record whose data won't let it past a stage, and must be edited
@@ -969,8 +973,8 @@ Until the operator tooling for edits is designed (§12, "Editing bad data", set 
 change what, and how an edit links to the original), the conscious choice is per item, through what exists:
 - **land the item again** (`sdh-admin resubmit`, §13.5): a new item linked to the original by `replaces_item_id`,
   made from start to end under the current versions; the original and its outputs are kept;
-- **release a held split item** (`sdh-admin release --item-id <id> --resume|--resubmit`): resume it under the new
-  version, which then makes it under two (recorded, §14.3); or leave it held and land it again;
+- **release a held split item** (`sdh-admin release --item-id <id> --resume|--close`, built 2026-11-09, §15.6e):
+  resume it under the new version, which then makes it under two (recorded, §14.3); or close it and land it again;
 - **list what a version made:** `sdh-admin versions` per stage: items and record counts by version, items made
   under more than one, and the redeliveries audited `record.version_differs`.
 
@@ -1274,6 +1278,87 @@ workers.
   corrected record whose `record.split` was lost; the split replay sends the corrected records too.
 - **Not yet:** as §15.6c, but for the split stage's corrections and export.
 
+### 15.6e Retry, release and completing again (decided 2026-11-09, step 3d)
+
+Decided with the user on 2026-11-09: a retry that fails leaves its failure `FAILED`; `release` resumes or closes a
+held item; `reprocess` is designed first, for review, and built after (§15.8).
+- **`retry --item-id <id> --seq <n>`** (every stage with a fail store; no input): a correction without an edit
+  (§15.4). The command reads what the failure failed on, as `export` does, and submits that, unchanged, as a
+  correction of kind `RETRY` (`stage_correction.kind`; null is an operator's correction), from `FAILED` or
+  `FAILED_CORRECTION`, moving the failure to `CORRECTION_PENDING` (audited `failure.retry_submitted`). The stage's
+  workers process it exactly as a correction (§15.6c, §15.6d), with the version running now. If it passes, the
+  failure is `RETRIED`, naming what passed (`failure.retried`); if it fails, the failure returns to `FAILED`, the
+  failed object unchanged, and the retry's error code is kept on its row (`failure.retry_failed`), shown by
+  `failures --item-id`. A retry under the version that failed it is allowed (a pipeline failure whose retries were
+  spent passes once the service is back); one that passes keeps the version it passed under
+  (`resolved_version`), beside the version that failed it. At the split stage, a retry of the item as a whole splits
+  the landed item again from its start, under the same rules as a correction of it: the records already stored
+  must come out unchanged.
+- **`release --item-id <id> --resume|--close`** (the split stage): ends the hold on an item held across versions
+  (§14.3). The command records a request (`split_release`: who, when, the action, and for `--close` the reason,
+  from standard input, encrypted as a decline's); the split stage's pods apply it within a renewal interval under
+  the item's lease, so no output is made outside a pod. `--resume`: the item's checkpoint goes back to
+  `SPLITTING` under the version running now, `split.released` audited with both versions, and the pod resumes it
+  from its checkpoint; its records keep the version that made each, so the item is made under two, and its
+  `item.split` names both. `--close`: the checkpoint goes to `CLOSED` (ended; not resumed, reconciled or counted
+  held), `split.item_closed` audited; nothing is sent downstream, where the records already sent stay and the item
+  stays incomplete (`convert.item_total_missing`), since it never finished splitting. Closing is for an item the
+  operator lands again with landing's `resubmit` (§13.5), whose new item links to it. A request for an item not
+  `HELD` is refused by the command, and again when applied if the item moved on in between, saying why in the
+  request's row (`status --item`) and audit (`split.release_refused`).
+- **Completing again (§15.6, "Reopened after completion"):** an item's completions are numbered, from 1. Each
+  stage keeps the number it last sent (`stage_item.completion`; the split stage's `split_item.completion`). When a
+  failure of an item complete at a stage is opened again (`reopen`), the stage sends `item.progress` carrying the
+  number of completions sent before it (`completion`), which names the completion it withdraws; when nothing is
+  open again, it sends the item-complete
+  message with the next number. The first completion's message ID is unchanged; a later one's carries `~c<n>`, so
+  it isn't dropped as a repeat. A stage after takes an upstream `item.progress` that reopens the completion it
+  last took as reopening its own item (its total open again, its completion withdrawn, its own `item.progress`
+  sent with its own number); one naming an earlier completion, or not reopening, is stale and changes nothing, so no
+  ordering is needed. The producer's result is sent again as `incomplete`, then `completed`.
+- **`resolves`:** a record that passed by a correction or retry names, in its `record.split` or `record.stored`,
+  the failed record it resolves (`resolves`, the failed row's record ID; for a correction of a whole item, its
+  item ID), so the stage after, and later the transformer, can follow it back without reading the table.
+
+### 15.6f Step 3d as built (2026-11-09)
+
+- **Retry:** `retry --item-id <id> --seq <n>` at both stages (`FailureCommands.RetryCommand`, shared by the stage
+  library and the split stage's admin). `stage_correction` gains `kind` (`RETRY`; null for a correction), and
+  `CorrectionStore.Kind` decides the outcome's state and audit: `RETRIED` or back to `FAILED`
+  (`failure.retried`, `failure.retry_failed`), beside `CORRECTED` or `FAILED_CORRECTION`. `FailureStore.State
+  .passedLater()` is true for `CORRECTED` and `RETRIED`, wherever a corrected failure counts as passed. The listing
+  marks each row `retry` or `correction`.
+- **Release:** `release --item-id <id> --resume|--close` in the split stage's admin, `--close` with a reason on
+  standard input. Requests are rows of `split_release` (`HoldReleases`: `PENDING`, `DONE` or `REFUSED`, with the
+  versions it moved between or the refusal; the reason sealed as a decline's). `SplitCorrections` applies pending
+  requests each renewal interval through `ItemSplitter.release`, under the item's lock and lease;
+  `IngestPipeline.release` moves a `HELD` checkpoint to `SPLITTING` under the running version
+  (`Checkpoint.released`, `split.released`) or to the new state `CLOSED` (`split.item_closed`), and a resumed item
+  is split from its checkpoint at once. A pod that finds a `CLOSED` checkpoint skips it (`Result.CLOSED`,
+  `split.item_closed_skipped`). `status --item` lists an item's requests, without their reasons.
+- **Completing again:** `split_item` and `stage_item` gain `completion` (completions sent) and the split stage
+  `completed` (whether the last end sent was complete); `stage_item` gains `upstream_completion`, the number of
+  the upstream message its total was taken from. The split stage numbers each end it sends
+  (`ItemCheckpoints.announced`, before the send, so the same end sent again keeps its number); the stage library
+  counts in `markCompleted`. `item.split`, `item.converted` and a `COMPLETED` `item.result` carry `completion`
+  (1 when absent), `item.progress` and an `INCOMPLETE` result the completions before them (0 when absent); the ID
+  gains `~c<n>` past the first (`ConnectorMessage.completionSuffix`), and the codec writes the field only past the
+  default. `StageRegistry.expect` takes an upstream total only if it is newer by that number (a complete total
+  above the one taken; an open one at or above it, unless both are open at the same number, when counts only
+  grow); taking one reopens an item completed here (`stage.item_reopened`, reason `upstream`). A failure reopened
+  at the stage itself reopens its completed item on the next revisit (`StageRegistry.reopenChanged`,
+  `stage.item_reopened`, reason `failure_reopened`). Known limit: an item completed before this build and then
+  reopened sends `item.progress` with completion 0, which a stage after drops as stale; nothing is released yet,
+  so no such items exist outside test systems.
+- **`resolves`:** `record.split` and `record.stored` carry it for a row with `correction_of`; the split stage's
+  correction of a whole item names the item ID.
+- **Tests:** `StageWorkerTest` (`appliesARetry`, `completesAgainAnItemWhoseFailureIsReopened`),
+  `StageRegistryTest.anItemReopenedUpstreamIsReopenedHere`, `FailureCommandsTest.submitsARetry`,
+  `ItemProcessorTest` (`leavesAFailedRetryFailed`, `completesAgainAnItemWhoseFailureIsReopened`, `resolves` on
+  corrections), `IngestPipelineTest` (release, resume and close), `AdminCommandsTest.releasesOnlyAHeldItem`,
+  `ContractRoundTripTest.completionsAndResolvesRoundTrip` and `ConvertStageTest` (`resolves`). Not yet tried on
+  the sandbox.
+
 ### 15.7 Order of building
 
 Each step builds, passes its tests, and is tried on the sandbox before the next:
@@ -1282,7 +1367,110 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
    `record.version_differs`; a split item held across versions.
 2. **The fail store** (§15.3): failures stored apart and no longer sent downstream; states; `item.progress`; item
    completion by §15.6; the producer's result.
-3. **Operator commands:** `failures` (list, show, export), `correct`, `retry`, `decline`, `reopen`; then
-   `reprocess` (§15.4).
+3. **Operator commands:** `failures` (list, show, export), `correct`, `retry`, `decline`, `reopen`, and the
+   split stage's `release` (built 2026-11-09, §15.6c–§15.6f); then `reprocess` (§15.4), designed in §15.8 for
+   review before it is built.
 4. **Exact copies** (§15.5) at landing and at the stages.
 5. **The drain check** (§14.4).
+
+### 15.8 Reprocess (proposed 2026-11-09, for review; not built)
+
+Designed before it is built, as decided with the user on 2026-11-09. It fills in §15.4's `reprocess` and §15.4a's
+`SUPERSEDED`. Points marked **(to decide)** need the user's choice.
+
+**What it is for.** A stage has changed (a new converter, splitter settings, later a new mapping) and the operator
+wants what it made before made again under the version running now. Nothing failed. The earlier output stays, and
+stays readable; what changes is stored as new objects linked to the old ones (no lost or supplanted data).
+
+**Where it starts.** At the earliest stage changed, from that stage's own stored input:
+- the split stage, from `landed_items` (a new splitter or its settings);
+- the convert stage, from `split_records` (a new converter);
+- the transform stage, later, from `records` (a new mapping).
+
+The stages after it are not asked to reprocess: they receive what changed as new records, through the queue, as
+any new record (below). A reprocess of the convert stage never touches the split stage's output.
+
+**The command.** `reprocess` on that stage's admin, run as `SDH_OPERATOR`, with a reason on standard input
+(encrypted as a decline's), and one selector:
+- `--item-id <id>` (repeatable);
+- `--intake <name> --landed-from <time> --landed-to <time>`;
+- `--made-by <version>`: the items with any output that version made (from `stage_version`, as
+  `sdh-admin versions` lists them, §14.5).
+
+`--dry-run` lists the items selected, with counts by version, and records nothing. Otherwise the command records
+a run and prints its ID; it makes no output itself. Like `release`, the stage's pods do the work, under the
+item's lease (split) or the record's claim (convert), so nothing is made outside a pod and two pods never
+reprocess the same item.
+
+**The run.** A table per stage, `<schema>.reprocess_run` (the run ID, a UUIDv7; the stage; the selector; who,
+when, the reason sealed; the version it was requested under; state `PENDING`, `RUNNING`, `DONE`, `CANCELLED`) and
+`<schema>.reprocess_item` (run, item, state, and per item the counts below). The selector is expanded to items
+once, when the run is recorded, so the run is a fixed list: items landed later are not added, and a rerun is a new
+run. `reprocess --cancel --run <id>` stops items not yet started; an item started finishes. `reprocess --status
+--run <id>` shows the run, item by item, without content. Pods take a bounded number of a run's items each
+renewal interval **(to decide: the limit, and whether a run waits while the stage's live backlog is above a
+threshold, so a remap never delays new data)**.
+
+A run is refused, or an item skipped with its reason, when:
+- the item hasn't finished at this stage (in progress, `HELD`, `CLOSED`): only an ended item is reprocessed;
+- the item has a correction or release pending;
+- the version running now is the one that made all of the item's output there (nothing would change), unless
+  `--force` is given, for a stage that is not deterministic in a way the version doesn't capture.
+
+**Each record, and its outcome.** The stage processes the stored input as it processes new input, under the
+version running now, with the duplicate rule (§14.3) bypassed for this run alone. Each output is compared with the
+one stored for the same input:
+- **same** (its digest equals the stored output's, `stage_record.output_digest` at the convert stage, the record
+  ID at the split stage): nothing stored, nothing sent; counted `same`.
+- **different:** stored as a new row with the new version and `supersedes` naming the row it replaces (a new
+  column, beside `correction_of`), and sent downstream with `supersedes` in its `record.split` or
+  `record.stored`. The old row stays as it was. A stage after takes it as a new record (its record ID is new), and
+  its own output for it names, in its own `supersedes`, the output it made from the superseded input, found from
+  its registry by that input's record ID. Counted `different`.
+- **failed:** the earlier output stays, and stays current. The failure goes to the fail store as any failure,
+  with `reprocess_run` set and `reprocess_of` naming the output it was reprocessing, so it is listed and can be
+  corrected, retried or declined; but it doesn't reopen the item, since the item's output is complete (§15.4a,
+  "the other way round"). Counted `failed`.
+
+**Open failures resolved by a reprocess (§15.4a).** A reprocess also runs over an item's failed input, since a
+changed stage may now pass it. A record that passes where an open failure (`FAILED`, `DECLINED`,
+`FAILED_CORRECTION`) was is matched to it only exactly: the same item and sequence number, and at the split stage
+the same source offset and length. Matched, it is stored with `resolves` naming the failure, which moves to
+`SUPERSEDED` with `resolved_by`, `resolved_at`, `resolved_version` and the run (`failure.superseded`), and the
+item's counts change, so the item is announced again by §15.6e: `item.progress`, or its item-complete message
+with the next completion number once nothing is open. A failure no passing record matches stays open and is listed
+`unmatched` in the run's status. A `DECLINED` failure superseded is still recorded as declined first; its
+superseding is a later event, not a rewrite **(to decide: whether a reprocess may supersede a declined failure at
+all, or only `FAILED` and `FAILED_CORRECTION`)**.
+
+**When the split stage cuts differently.** A new splitter may cut an item into different records: more, fewer,
+or at other places. Records are named by their content, so a different cut can't be lined up with the old one
+record by record. Proposed: at the split stage the item is reprocessed only if the new cut gives the same number
+of records at the same places (offset and length per sequence number); records whose bytes then differ are
+`different`, as above. An item cut otherwise is stored as nothing and listed `cut_differs`, and the operator lands
+it again with `resubmit` (§13.5), which makes a new item under the new version, linked to the old one
+**(to decide: this, or storing the new cut as a new generation of the item, a larger change downstream)**.
+
+**Counting at the stages after.** A stage after receives a superseding record for an item it has completed. It
+must not count it as one more record of the item. Proposed: the registry row for the superseding input names what
+it supersedes, and the item's counts are kept per sequence number, the latest version's row standing for its
+place; the item is not reopened and no item-complete message is sent again, since its total hasn't changed. The
+stage sends a `record.stored` (or `record.failed`) for it as for any record **(to decide: whether the stages after
+send an item-level message when a reprocess changes an item, such as `item.reprocessed` with the run and counts,
+so the transformer and producers learn that an item's output changed)**.
+
+**Producers.** A reprocess sends no new `item.result` unless an open failure was resolved (the item's outcome
+changed), when the result is sent again as `completed`, as for a correction (§15.6e).
+
+**Telemetry.** Audited, no content: `stage.reprocess_requested` (run, stage, selector kind, operator, item
+count), `stage.reprocess_item` per item (run, item, counts `same`, `different`, `failed`, `superseded`,
+`unmatched`, or the reason skipped), `stage.reprocess_done` (run, totals), `failure.superseded` per failure
+resolved. A new attribute, `sdh.run_id`, joins them. Metrics: `sdh.stage.reprocessed` by stage and outcome, and
+`sdh.stage.failures_resolved` by stage and how (§15.4a).
+
+**In the contract (3.0, unreleased).** `record.split` and `record.stored` gain the optional `supersedes` (the
+record ID replaced). Nothing else changes: `resolves` and completion numbering (§15.6e) already carry the rest.
+
+**Order of building, once agreed:** the run tables and commands (`--dry-run` first); the convert stage's
+reprocess, since its outcomes are per record; then the split stage's, with the cut check; then counting
+superseding records at the stages after; then `SUPERSEDED`. Each with its tests, and tried on the sandbox.

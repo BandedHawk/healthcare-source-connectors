@@ -7,6 +7,8 @@
 package com.sdh.healthcare.connector.file.split;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
+import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseStore;
@@ -16,6 +18,9 @@ import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
@@ -170,6 +175,68 @@ public final class ItemSplitter
         {
             lock.unlock();
         }
+    }
+
+    /**
+     * Applies an operator's request to end the hold on an item held across
+     * versions (STAGES.md §15.6e), under the item's lease, unless another
+     * pod applied it first; then, for {@code RESUME}, splits the item from
+     * its checkpoint under the version running here. A request for an item
+     * that isn't held is refused, and noted so.
+     *
+     * @param request  the request, as listed
+     * @param releases the release store, read again under the lease
+     * @return what it came to; empty if it was no longer pending
+     * @throws LeaseHeldException   if another pod holds the item's lease
+     * @throws InterruptedException if interrupted while waiting
+     * @throws Exception            if storage or the broker fails; a
+     *                              request applied is resumed by the
+     *                              reconciler, one not applied is tried
+     *                              again later
+     */
+    public Optional<HoldReleases.State> release(HoldReleases.Request request,
+            HoldReleases releases) throws Exception
+    {
+        UUID itemId = request.itemId();
+        Optional<Checkpoint> held;
+        lock.lockInterruptibly();
+        try (LeaseKeeper lease = lease(itemId))
+        {
+            if (!releases.stillPending(request))
+            {
+                return Optional.empty();
+            }
+            held = processor.release(itemId, request.action(),
+                    request.requestedBy(), lease);
+            if (held.isEmpty())
+            {
+                String state = processor.checkpoint(itemId)
+                        .map(checkpoint -> checkpoint.state().name())
+                        .orElse("never split");
+                releases.finish(request, HoldReleases.State.REFUSED, null,
+                        null, "The item is " + state + ", not HELD");
+                Telemetry.get().auditWarn("split.release_refused",
+                        Fields.of(Attr.ITEM_ID, itemId)
+                                .with(Attr.ACTION, request.action().name())
+                                .with(Attr.STATE, state));
+                return Optional.of(HoldReleases.State.REFUSED);
+            }
+            releases.finish(request, HoldReleases.State.DONE,
+                    held.get().version(),
+                    request.action() == HoldReleases.Action.RESUME
+                            ? processor.version() : null, null);
+        }
+        finally
+        {
+            lock.unlock();
+        }
+        if (request.action() == HoldReleases.Action.RESUME)
+        {
+            // Split now, under a lease of its own; if this pod stops first,
+            // the reconciler resumes it as it does any stalled item.
+            split(itemId, landed(itemId).digest());
+        }
+        return Optional.of(HoldReleases.State.DONE);
     }
 
     /**

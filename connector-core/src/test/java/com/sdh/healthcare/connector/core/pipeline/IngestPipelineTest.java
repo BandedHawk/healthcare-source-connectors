@@ -30,6 +30,7 @@ import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
+import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.convert.ConversionException;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
@@ -733,6 +734,98 @@ class IngestPipelineTest
                 .isInstanceOf(ItemHeldException.class);
         assertThat(changed.checkpoint(item).orElseThrow().state())
                 .isEqualTo(Checkpoint.State.HELD);
+    }
+
+    /**
+     * Holds an item under split-v1's successor, and returns the process of
+     * the new version.
+     *
+     * @param file      the item's bytes
+     * @param published where the new process sends
+     * @return the process of split-v2, the item held
+     * @throws Exception if a process can't be made
+     */
+    IngestPipeline heldUnderAnotherVersion(byte[] file,
+            RecordingPublisher published) throws Exception
+    {
+        IngestPipeline first = process(settings().withVersion("split-v1"),
+                new RecordingPublisher(), new PipelineHooks()
+                {
+
+                    /** Stops once the first batch commits. */
+                    @Override
+                    public void batchCommitted(long lastSeq)
+                    {
+                        throw new SimulatedCrash();
+                    }
+                });
+        assertThatThrownBy(() -> split(first, SeekableByteSource.of(file)))
+                .isInstanceOf(SimulatedCrash.class);
+        first.close();
+        IngestPipeline changed = process(settings().withVersion("split-v2"),
+                published, PipelineHooks.NONE);
+        assertThatThrownBy(() -> split(changed, SeekableByteSource.of(file)))
+                .isInstanceOf(ItemHeldException.class);
+        return changed;
+    }
+
+    /**
+     * An operator's release with resume (STAGES.md §15.6e) has a held item
+     * split on under the version running now: its records keep the version
+     * that made each, so it is made under two.
+     *
+     * @throws Exception if a process can't be made
+     */
+    @Test
+    void resumesAHeldItemUnderTheNewVersionWhenReleased() throws Exception
+    {
+        byte[] file = csvFile();
+        RecordingPublisher published = new RecordingPublisher();
+        IngestPipeline changed = heldUnderAnotherVersion(file, published);
+
+        assertThat(changed.release(item, HoldReleases.Action.RESUME, "alice",
+                leases.get(changed))).hasValueSatisfying(held ->
+                        assertThat(held.version()).isEqualTo("split-v1"));
+        Checkpoint released = changed.checkpoint(item).orElseThrow();
+        assertThat(released.state()).isEqualTo(Checkpoint.State.SPLITTING);
+        assertThat(released.version()).isEqualTo("split-v2");
+
+        split(changed, SeekableByteSource.of(file));
+        assertThat(changed.checkpoint(item).orElseThrow().state())
+                .isEqualTo(Checkpoint.State.ARCHIVING);
+        assertThat(CommittedRecords.all(catalog.loadTable(tableId), item))
+                .hasSize(CSV_ROWS)
+                .extracting(CommittedRecords.Row::stageVersion)
+                .contains("split-v1", "split-v2");
+        // Released once: a second request finds it no longer held.
+        assertThat(changed.release(item, HoldReleases.Action.RESUME, "alice",
+                leases.get(changed))).isEmpty();
+    }
+
+    /**
+     * An operator's release with close ends a held item, CLOSED: neither
+     * resumed nor held, its records kept.
+     *
+     * @throws Exception if a process can't be made
+     */
+    @Test
+    void closesAHeldItemWhenReleased() throws Exception
+    {
+        byte[] file = csvFile();
+        RecordingPublisher published = new RecordingPublisher();
+        IngestPipeline changed = heldUnderAnotherVersion(file, published);
+        long stored = CommittedRecords.all(catalog.loadTable(tableId), item)
+                .size();
+
+        assertThat(changed.release(item, HoldReleases.Action.CLOSE, "alice",
+                leases.get(changed))).isPresent();
+        assertThat(changed.checkpoint(item).orElseThrow().state())
+                .isEqualTo(Checkpoint.State.CLOSED);
+        assertThatThrownBy(() -> split(changed, SeekableByteSource.of(file)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(CommittedRecords.all(catalog.loadTable(tableId), item))
+                .hasSize((int) stored);
+        assertThat(published.sent).isEmpty();
     }
 
     /**

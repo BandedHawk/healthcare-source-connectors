@@ -64,7 +64,7 @@ public final class SplitMessages
                 row.contentType(), row.plaintextLength(), row.chunkCount(),
                 ref, row.origin(), row.errorCode(), row.errorAt(), message,
                 refs.messageRef(message), refs.messageReplaced(message),
-                row.stageVersion());
+                row.stageVersion(), row.correctionOf());
     }
 
     /**
@@ -206,6 +206,39 @@ public final class SplitMessages
             String digest, LandedRefs refs, Instant endedAt, Instant now,
             Corrected corrected)
     {
+        return itemEnd(checkpoint, intake, failedCount, counts, digest, refs,
+                endedAt, now, corrected, counts.open() == 0 ? 1 : 0);
+    }
+
+    /**
+     * The message that ends an item at the split stage, as {@link
+     * #itemEnd(Checkpoint, String, long, FailureStore.Counts, String,
+     * LandedRefs, Instant, Instant, Corrected)} makes it, numbered by the
+     * item's completions (STAGES.md §15.6e).
+     *
+     * @param checkpoint  its checkpoint
+     * @param intake      the intake it came in through
+     * @param failedCount its pieces stored in their original form
+     * @param counts      its failures in the fail store, by state
+     * @param digest      its digest, from landing
+     * @param refs        what landing kept about it
+     * @param endedAt     when its splitting ended, as stored; null if not
+     *                    yet noted
+     * @param now         the time, if neither that nor its failure gives
+     *                    one
+     * @param corrected   what its corrections added
+     * @param completion  for {@code item.split}, the completion's number;
+     *                    for {@code item.progress}, the completions before
+     *                    it, as {@link
+     *                    com.sdh.healthcare.connector.core.checkpoint
+     *                    .ItemCheckpoints#announced} gives
+     * @return the message
+     */
+    public static ConnectorMessage itemEnd(Checkpoint checkpoint,
+            String intake, long failedCount, FailureStore.Counts counts,
+            String digest, LandedRefs refs, Instant endedAt, Instant now,
+            Corrected corrected, int completion)
+    {
         ItemSplit split = itemSplit(checkpoint, intake, failedCount, digest,
                 refs, endedAt, now);
         long records = checkpoint.recordCount() + corrected.added();
@@ -217,12 +250,12 @@ public final class SplitMessages
             return new ItemSplit(split.itemId(), intake, passed, failed,
                     split.itemSize(), digest, split.producerRef(),
                     split.replaces(), problem, split.startedAt(),
-                    split.completedAt(), split.versions());
+                    split.completedAt(), split.versions(), completion);
         }
         return new ItemProgressed(split.itemId(), intake, STAGE, records,
                 passed, counts.open(), counts.declined(), problem,
                 split.producerRef(), split.replaces(), split.completedAt(),
-                split.versions());
+                split.versions(), completion);
     }
 
     /**

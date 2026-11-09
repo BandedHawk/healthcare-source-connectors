@@ -66,9 +66,11 @@ public final class RegistryReport
      * @param failed      those of them stored as failed
      * @param completedAt when its item-complete message was sent; null if
      *                    it hasn't been
+     * @param completion  how many times the stage has completed it
+     *                    (STAGES.md §15.6e)
      */
     public record Item(UUID itemId, long expected, long done, long failed,
-            Instant completedAt)
+            Instant completedAt, int completion)
     {
     }
 
@@ -153,7 +155,8 @@ public final class RegistryReport
      */
     public List<Item> incomplete(int limit)
     {
-        return items("SELECT item_id, expected, done, failed, completed_at"
+        return items("SELECT item_id, expected, done, failed, completed_at,"
+                + " completion"
                 + " FROM " + items + " WHERE stage = ? AND completed_at IS NULL"
                 + " ORDER BY item_id LIMIT " + Math.max(0, limit));
     }
@@ -166,7 +169,8 @@ public final class RegistryReport
      */
     public Optional<Item> item(UUID itemId)
     {
-        return query("SELECT item_id, expected, done, failed, completed_at"
+        return query("SELECT item_id, expected, done, failed, completed_at,"
+                + " completion"
                 + " FROM " + items + " WHERE stage = ? AND item_id = ?",
                 statement -> statement.setObject(2, itemId),
                 result -> result.next()
@@ -298,7 +302,8 @@ public final class RegistryReport
         Timestamp completed = result.getTimestamp(5);
         return new Item(result.getObject(1, UUID.class), expected,
                 result.getLong(3), result.getLong(4),
-                completed == null ? null : completed.toInstant());
+                completed == null ? null : completed.toInstant(),
+                result.getInt(6));
     }
 
     /** Sets a query's parameters after the stage. */

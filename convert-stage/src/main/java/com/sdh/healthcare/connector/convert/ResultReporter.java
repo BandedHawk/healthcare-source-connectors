@@ -146,8 +146,26 @@ public final class ResultReporter
     public void report(Facts facts, String status, long recordCount,
             List<Failed> failed) throws Exception
     {
+        report(facts, status, recordCount, failed, 0);
+    }
+
+    /**
+     * Sends an item's result, numbered by the item's completions at the
+     * stage (STAGES.md §15.6e).
+     *
+     * @param facts       what is known of the item
+     * @param status      {@code completed} or {@code incomplete}
+     * @param recordCount the records it was cut into, failed ones included
+     * @param failed      its failed records, at either stage, in order
+     * @param completion  for {@code completed}, the completion's number;
+     *                    otherwise the completions before it
+     * @throws Exception if a part couldn't be sent
+     */
+    public void report(Facts facts, String status, long recordCount,
+            List<Failed> failed, int completion) throws Exception
+    {
         for (ItemResult part : parts(facts, status, recordCount, failed,
-                clock.instant(), PART_SIZE, PART_BYTES))
+                clock.instant(), PART_SIZE, PART_BYTES, completion))
         {
             channel.send(part);
         }
@@ -191,6 +209,29 @@ public final class ResultReporter
             long recordCount, List<Failed> failed, Instant finishedAt,
             int partSize, int partBytes)
     {
+        return parts(facts, asked, recordCount, failed, finishedAt, partSize,
+                partBytes, 0);
+    }
+
+    /**
+     * Builds an item's result, in parts, numbered by its completions.
+     *
+     * @param facts       what is known of the item
+     * @param asked       {@code completed} or {@code incomplete}; an item
+     *                    that couldn't be split further is {@code failed}
+     * @param recordCount the records it was cut into, failed ones included
+     * @param failed      its failed records, in order
+     * @param finishedAt  when it finished, or was reported
+     * @param partSize    the most problems in a part
+     * @param partBytes   the most bytes of problems in a part
+     * @param completion  for {@code completed}, the completion's number;
+     *                    otherwise the completions before it
+     * @return the parts, at least one
+     */
+    public static List<ItemResult> parts(Facts facts, String asked,
+            long recordCount, List<Failed> failed, Instant finishedAt,
+            int partSize, int partBytes, int completion)
+    {
         String status = facts.failure() == null ? asked : ItemResult.FAILED;
         List<Problem> problems = new ArrayList<>(failed.size());
         for (Failed record : failed)
@@ -223,7 +264,8 @@ public final class ResultReporter
                     recordCount, failed.size(), facts.failure(),
                     problems.size(), part + 1, partCount,
                     problems.subList(starts.get(part), starts.get(part + 1)),
-                    facts.producerRef(), facts.replaces(), finishedAt));
+                    facts.producerRef(), facts.replaces(), finishedAt,
+                    completion));
         }
         return parts;
     }

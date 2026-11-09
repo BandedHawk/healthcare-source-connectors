@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.broker.send.Publishers;
 import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
+import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.SplitItemReport;
@@ -292,6 +293,21 @@ final class SplitAdminContext implements FailureAdmin, AutoCloseable
                 new CheckpointCodec(splitIds), Duration.ofSeconds(10));
     }
 
+    /**
+     * The checkpoints of the stage's items, to number an item's end before
+     * it is sent (STAGES.md §15.6e): over the connection that may write.
+     *
+     * @return the checkpoints
+     * @throws Exception if the ID key can't be loaded
+     */
+    ItemCheckpoints checkpointsToChange() throws Exception
+    {
+        checkpoints();
+        return new ItemCheckpoints(writing.dataSource(),
+                properties.stage().registrySchema(),
+                new CheckpointCodec(splitIds), Duration.ofSeconds(10));
+    }
+
     @Override
     public String stage()
     {
@@ -417,6 +433,29 @@ final class SplitAdminContext implements FailureAdmin, AutoCloseable
     {
         ReplayCommand.send(this, itemId, true, Clock.systemUTC(), audit,
                 out);
+    }
+
+    /**
+     * Operators' requests to release held items (STAGES.md §15.6e), to
+     * record one: over the connection that may write.
+     *
+     * @return the store
+     */
+    HoldReleases releasesToChange()
+    {
+        return new HoldReleases(writing.dataSource(),
+                properties.stage().registrySchema(), Duration.ofSeconds(10));
+    }
+
+    /**
+     * Operators' requests to release held items, to list.
+     *
+     * @return the store
+     */
+    HoldReleases releases()
+    {
+        return new HoldReleases(database.dataSource(),
+                properties.stage().registrySchema(), Duration.ofSeconds(10));
     }
 
     /**

@@ -143,7 +143,13 @@ public enum Attr
      * {@code topic/partition/offset} on Kafka: where it is on the queue,
      * never its content.
      */
-    BROKER_MESSAGE_ID("sdh.broker_message_id");
+    BROKER_MESSAGE_ID("sdh.broker_message_id"),
+
+    /**
+     * What an operator asked of an item, such as {@code RESUME} for a held
+     * split item (STAGES.md §15.6e).
+     */
+    ACTION("sdh.action");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

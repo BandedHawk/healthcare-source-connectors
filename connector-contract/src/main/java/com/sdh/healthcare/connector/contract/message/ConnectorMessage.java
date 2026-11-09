@@ -51,6 +51,21 @@ public sealed interface ConnectorMessage permits
     String messageId();
 
     /**
+     * What a message ID gains for an item's later completions (STAGES.md
+     * §15.6e): nothing for the first, so IDs from before completions were
+     * numbered stay the same.
+     *
+     * @param completion the completion's number
+     * @param first      the number that adds nothing: 1 for an
+     *                   item-complete message, 0 for {@code item.progress}
+     * @return {@code ~c<n>}, or nothing
+     */
+    static String completionSuffix(int completion, int first)
+    {
+        return completion <= first ? "" : "~c" + completion;
+    }
+
+    /**
      * The id of the file the message is about.
      *
      * @return the file id
@@ -199,6 +214,9 @@ public sealed interface ConnectorMessage permits
      *                        null if the splitter gave none
      * @param version         the convert stage's version that made it; null
      *                        if not known
+     * @param resolves        for a record made by an operator's correction
+     *                        or retry, the failed record it resolves
+     *                        (STAGES.md §15.6e); null otherwise
      */
     record RecordStored(
             String recordId,
@@ -213,9 +231,40 @@ public sealed interface ConnectorMessage permits
             int chunkCount,
             StorageRef storage,
             RecordOrigin origin,
-            String version)
+            String version,
+            String resolves)
             implements RecordInStorage
     {
+
+        /**
+         * A message that resolves no failure.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its file
+         * @param seq             its number in the file, from 0
+         * @param sourceOffset    where it starts in the file, in bytes
+         * @param sourceLength    how many bytes of the file it covers
+         * @param format          the name of the file's format
+         * @param contentType     what the stored bytes are
+         * @param mapping         the JSON mapping, or null when stored as
+         *                        split
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where the record's text came from
+         * @param version         the convert stage's version, or null
+         */
+        public RecordStored(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, String mapping, long plaintextLength,
+                int chunkCount, StorageRef storage, RecordOrigin origin,
+                String version)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, mapping, plaintextLength, chunkCount, storage,
+                    origin, version, null);
+        }
 
         /**
          * A message with no version.
@@ -597,12 +646,17 @@ public sealed interface ConnectorMessage permits
      *                          {@link ItemReceived}; null if none
      * @param replaces          the item it replaces; null if none
      * @param finishedAt        when the item was finished
+     * @param completion        for a {@link #COMPLETED} result, which
+     *                          completion of the item it reports, from 1;
+     *                          otherwise how many came before it, so a
+     *                          result after an operator reopened a failure
+     *                          isn't taken for a repeat (STAGES.md §15.6e)
      */
     record ItemResult(UUID itemId, String intake, String status,
             long recordCount, long failedRecordCount, Problem failure,
             long problemCount, int part, int partCount,
             List<Problem> problems, String producerRef, UUID replaces,
-            Instant finishedAt)
+            Instant finishedAt, int completion)
             implements ConnectorMessage
     {
 
@@ -635,10 +689,42 @@ public sealed interface ConnectorMessage permits
          * @param producerRef       the producer's reference, or null
          * @param replaces          the item it replaces, or null
          * @param finishedAt        when it was finished
+         * @param completion        its completion's number, or those
+         *                          before it
          */
         public ItemResult
         {
             problems = List.copyOf(problems);
+            completion = Math.max(COMPLETED.equals(status) ? 1 : 0,
+                    completion);
+        }
+
+        /**
+         * A result of an item's first completion, or before it.
+         *
+         * @param itemId            the item's id
+         * @param intake            the intake
+         * @param status            completed, incomplete or failed
+         * @param recordCount       the records stored
+         * @param failedRecordCount the records that failed
+         * @param failure           why it failed, or null
+         * @param problemCount      the problems in all
+         * @param part              this part, from 1
+         * @param partCount         the parts
+         * @param problems          this part's problems
+         * @param producerRef       the producer's reference, or null
+         * @param replaces          the item it replaces, or null
+         * @param finishedAt        when it was finished
+         */
+        public ItemResult(UUID itemId, String intake, String status,
+                long recordCount, long failedRecordCount, Problem failure,
+                long problemCount, int part, int partCount,
+                List<Problem> problems, String producerRef, UUID replaces,
+                Instant finishedAt)
+        {
+            this(itemId, intake, status, recordCount, failedRecordCount,
+                    failure, problemCount, part, partCount, problems,
+                    producerRef, replaces, finishedAt, 0);
         }
 
         /**
@@ -663,10 +749,16 @@ public sealed interface ConnectorMessage permits
         @Override
         public String messageId()
         {
+            if (COMPLETED.equals(status))
+            {
+                return "rs-" + itemId + "-" + part
+                        + ConnectorMessage.completionSuffix(completion, 1);
+            }
             if (INCOMPLETE.equals(status))
             {
                 return "rs-" + itemId + "-incomplete-" + recordCount + "-"
-                        + failedRecordCount + "-" + problemCount + "-" + part;
+                        + failedRecordCount + "-" + problemCount + "-" + part
+                        + ConnectorMessage.completionSuffix(completion, 0);
             }
             return "rs-" + itemId + "-" + part;
         }
@@ -769,6 +861,10 @@ public sealed interface ConnectorMessage permits
      *                        producer said; null if none
      * @param version         the split stage's version that cut it; null if
      *                        not known
+     * @param resolves        for a record made by an operator's correction
+     *                        or retry, the failed piece it resolves, or for
+     *                        a correction of the item as a whole the item's
+     *                        id (STAGES.md §15.6e); null otherwise
      */
     record RecordSplit(
             String recordId,
@@ -787,9 +883,45 @@ public sealed interface ConnectorMessage permits
             int message,
             String messageRef,
             String messageReplaces,
-            String version)
+            String version,
+            String resolves)
             implements RecordInStorage
     {
+
+        /**
+         * A message that resolves no failure.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its item
+         * @param seq             its number in the item, from 0
+         * @param sourceOffset    where it starts in the item, in bytes
+         * @param sourceLength    how many bytes of the item it covers
+         * @param format          the name of the item's format
+         * @param contentType     what the stored bytes are
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where its text came from in the item
+         * @param errorCode       why the splitter couldn't parse it, or null
+         * @param errorAt         where in the item that was, or null
+         * @param message         its message in a batch, or -1
+         * @param messageRef      that message's broker ID, or null
+         * @param messageReplaces the message it replaces, or null
+         * @param version         the split stage's version, or null
+         */
+        public RecordSplit(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, long plaintextLength, int chunkCount,
+                StorageRef storage, RecordOrigin origin, String errorCode,
+                SourcePosition errorAt, int message, String messageRef,
+                String messageReplaces, String version)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, plaintextLength, chunkCount, storage, origin,
+                    errorCode, errorAt, message, messageRef, messageReplaces,
+                    version, null);
+        }
 
         /**
          * A message with no version.
@@ -872,20 +1004,52 @@ public sealed interface ConnectorMessage permits
      * @param versions          the split stage's versions its records were
      *                          cut under, in the order first used; empty if
      *                          not known
+     * @param completion        which completion of the item at the split
+     *                          stage this is, from 1: a later one follows
+     *                          an operator's reopening it (STAGES.md
+     *                          §15.6e)
      */
     record ItemSplit(UUID itemId, String intake, long recordCount,
             long failedRecordCount, long itemSize, String itemDigest,
             String producerRef, UUID replaces, Problem failure,
-            Instant startedAt, Instant completedAt, List<String> versions)
+            Instant startedAt, Instant completedAt, List<String> versions,
+            int completion)
             implements ConnectorMessage
     {
 
         /**
-         * Copies the versions.
+         * Copies the versions; a completion not given is the first.
          */
         public ItemSplit
         {
             versions = versions == null ? List.of() : List.copyOf(versions);
+            completion = Math.max(1, completion);
+        }
+
+        /**
+         * The item's first completion.
+         *
+         * @param itemId            the item's id
+         * @param intake            the intake it came in through
+         * @param recordCount       its records, failed ones included
+         * @param failedRecordCount the pieces the splitter couldn't parse
+         * @param itemSize          the item's size, in bytes
+         * @param itemDigest        its keyed digest, as landed
+         * @param producerRef       the producer's reference, or null
+         * @param replaces          the item it replaces, or null
+         * @param failure           why it couldn't be split further, or null
+         * @param startedAt         when the split stage started on it
+         * @param completedAt       when it finished
+         * @param versions          the versions, in the order first used
+         */
+        public ItemSplit(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, long itemSize, String itemDigest,
+                String producerRef, UUID replaces, Problem failure,
+                Instant startedAt, Instant completedAt, List<String> versions)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, itemSize,
+                    itemDigest, producerRef, replaces, failure, startedAt,
+                    completedAt, versions, 1);
         }
 
         /**
@@ -927,12 +1091,14 @@ public sealed interface ConnectorMessage permits
         /**
          * {@inheritDoc}
          *
-         * @return "is-" and the item id
+         * @return "is-" and the item id, and from its second completion
+         *         {@code ~c} and the completion's number
          */
         @Override
         public String messageId()
         {
-            return "is-" + itemId;
+            return "is-" + itemId + ConnectorMessage.completionSuffix(
+                    completion, 1);
         }
     }
 
@@ -948,18 +1114,40 @@ public sealed interface ConnectorMessage permits
      * @param versions          the convert stage's versions its records
      *                          were made under, in the order first used;
      *                          empty if not known
+     * @param completion        which completion of the item at the convert
+     *                          stage this is, from 1 (STAGES.md §15.6e)
      */
     record ItemConverted(UUID itemId, String intake, long recordCount,
-            long failedRecordCount, Instant completedAt, List<String> versions)
+            long failedRecordCount, Instant completedAt, List<String> versions,
+            int completion)
             implements ConnectorMessage
     {
 
         /**
-         * Copies the versions.
+         * Copies the versions; a completion not given is the first.
          */
         public ItemConverted
         {
             versions = versions == null ? List.of() : List.copyOf(versions);
+            completion = Math.max(1, completion);
+        }
+
+        /**
+         * The item's first completion.
+         *
+         * @param itemId            the item's id
+         * @param intake            the intake it came in through
+         * @param recordCount       its records, failed ones included
+         * @param failedRecordCount those stored in their original form
+         * @param completedAt       when the last was stored
+         * @param versions          the versions, in the order first used
+         */
+        public ItemConverted(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, Instant completedAt,
+                List<String> versions)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, completedAt,
+                    versions, 1);
         }
 
         /**
@@ -992,12 +1180,14 @@ public sealed interface ConnectorMessage permits
         /**
          * {@inheritDoc}
          *
-         * @return "ic-convert-" and the item id
+         * @return "ic-convert-" and the item id, and from its second
+         *         completion {@code ~c} and the completion's number
          */
         @Override
         public String messageId()
         {
-            return "ic-convert-" + itemId;
+            return "ic-convert-" + itemId + ConnectorMessage.completionSuffix(
+                    completion, 1);
         }
     }
 
@@ -1027,11 +1217,17 @@ public sealed interface ConnectorMessage permits
      * @param reportedAt    when the stage reported it
      * @param versions      the stage's versions its records were made under,
      *                      in the order first used; empty if not known
+     * @param completion    how many times the stage has completed the item
+     *                      before this: 0 until its first completion; from
+     *                      1, it reopens that completion, after an operator
+     *                      reopened a failure (STAGES.md §15.6e), and a
+     *                      stage after that took it reopens its own
      */
     record ItemProgressed(UUID itemId, String intake, String stage,
             long recordCount, long passedCount, long openCount,
             long declinedCount, Problem failure, String producerRef,
-            UUID replaces, Instant reportedAt, List<String> versions)
+            UUID replaces, Instant reportedAt, List<String> versions,
+            int completion)
             implements ConnectorMessage
     {
 
@@ -1041,6 +1237,34 @@ public sealed interface ConnectorMessage permits
         public ItemProgressed
         {
             versions = versions == null ? List.of() : List.copyOf(versions);
+            completion = Math.max(0, completion);
+        }
+
+        /**
+         * Progress before the item's first completion.
+         *
+         * @param itemId        the item's id
+         * @param intake        the intake it came in through
+         * @param stage         the stage reporting
+         * @param recordCount   the records the stage has handled
+         * @param passedCount   those that passed
+         * @param openCount     those that failed and are open
+         * @param declinedCount those declined
+         * @param failure       why the item as a whole couldn't be split
+         *                      further, or null
+         * @param producerRef   the producer's reference, or null
+         * @param replaces      the item it replaces, or null
+         * @param reportedAt    when the stage reported it
+         * @param versions      the versions, in the order first used
+         */
+        public ItemProgressed(UUID itemId, String intake, String stage,
+                long recordCount, long passedCount, long openCount,
+                long declinedCount, Problem failure, String producerRef,
+                UUID replaces, Instant reportedAt, List<String> versions)
+        {
+            this(itemId, intake, stage, recordCount, passedCount, openCount,
+                    declinedCount, failure, producerRef, replaces,
+                    reportedAt, versions, 0);
         }
 
         /**
@@ -1058,13 +1282,16 @@ public sealed interface ConnectorMessage permits
          * {@inheritDoc}
          *
          * @return "ip-", the stage, the item id and the counts: the same
-         *         counts are the same message, and a change is a new one
+         *         counts are the same message, and a change is a new one;
+         *         after a completion, {@code ~c} and its number, so the
+         *         counts before it and after a reopening differ
          */
         @Override
         public String messageId()
         {
             return "ip-" + stage + "-" + itemId + "-" + recordCount + "-"
-                    + passedCount + "-" + openCount + "-" + declinedCount;
+                    + passedCount + "-" + openCount + "-" + declinedCount
+                    + ConnectorMessage.completionSuffix(completion, 0);
         }
     }
 
