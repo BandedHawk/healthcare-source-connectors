@@ -446,3 +446,22 @@ Checked again since: see the end of this section.
   blank item with a synthetic C-CDA document (`google-synthea-sample1.xml`) was `CORRECTED`, and both stages
   completed it with 1 record. The C-CDA splitter's version stays 1 (`ccda/1` in the version), since its cut is
   unchanged. `check` passes (5 items split and converted). No pod restarted.
+- **Corrections and retries as revisions (2026-11-09, revision (cn); STAGES.md §15.8.5).** Deployed over the
+  existing data: at startup each stage moved its fail store's rows out of the old states once
+  (`failure.states_moved`, split `count=2`, convert `count=1`): the three `CORRECTED` failures became `SUPERSEDED`
+  (`REVISION`), keeping `superseded_by` from `resolved_by`, each with an event; the `DECLINED` and `FAILED` ones
+  were left as they were, and earlier events keep the state names they were written with. At the convert stage, a
+  synthetic C-CDA of 128 bytes with an undeclared entity failed (`g1 r1 FAILED`). Corrected with another undeclared
+  entity, r1 became `SUPERSEDED` by `g1 r1.2`, and r1.2 failed as a failure of its own, `FAILED`
+  (`failure.correction_failed lineage=g1 r1.2`, then `item.progress`). Corrected again with `&#160;`, r1.2 became
+  `SUPERSEDED` by `g1 r1.3`, which passed: stored as `<record>~r1.3`, sent as `record.stored` under a message ID
+  ending `~r1.3`, and the item completed (`failed_count=0`). A second such record, retried, failed as `g1 r1.2`
+  (`failure.retry_failed`); declined, the item completed (`failed_count=1`). At the split stage, a synthetic C-CDA
+  of 114 bytes broken off part way, corrected as a whole, became `SUPERSEDED` by `g1 r2`, and both stages completed
+  it with 1 record (its record still `g1 r1` at the convert stage: whole-item corrections keep the old rules until
+  step 4). `check` passes (5 items split and converted). No pod restarted. The producer's results are off here, so
+  the rule that operator actions send it nothing (§15.8.7) wasn't seen. Seen here, not changed: `failures
+  --item-id` prints the seq's events and corrections under each of its revisions; a failure superseded by a
+  revision says `changed ... by <operator>` where its event says `by pipeline`; `superseded_by` holds a lineage
+  (`g1 r1.3`) for new rows and a record ID for rows moved from `CORRECTED`; and the split stage's whole-item
+  correction is noted as `g1 r2`, a revision no record carries.
