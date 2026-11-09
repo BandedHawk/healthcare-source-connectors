@@ -6,6 +6,10 @@
  */
 package com.sdh.healthcare.connector.core.checkpoint;
 
+import com.sdh.healthcare.connector.core.failure.FailureStore;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -145,6 +149,58 @@ public final class ItemCheckpoints
         {
             throw new IllegalStateException(
                     "Could not create the checkpoint table", failure);
+        }
+    }
+
+    /**
+     * Numbers the completions of items whose end was sent before ends were
+     * numbered (STAGES.md §15.6f): an ended item none of whose failures is
+     * open in the fail store was sent as {@code item.split}, its first
+     * completion, so it is numbered 1 and marked complete, as this build
+     * would have done. An ended item with no failure in the store is one
+     * from before the store, whose end was {@code item.split} too. Without
+     * it, reopening such an item would send {@code item.progress} under a
+     * number the stage after takes as stale.
+     * <p>
+     * A row this build wrote matches only if its end, complete, wasn't sent
+     * yet (a stop between the two); sending it then gives the number this
+     * gave it. Runs at every start, after the fail store's tables are made,
+     * and changes nothing once done.
+     *
+     * @param failures the fail store's schema
+     * @param stage    the stage's name in the fail store
+     * @return how many items were numbered
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public int numberEarlierCompletions(String failures, String stage)
+    {
+        String sql = """
+                UPDATE %s s SET completion = 1, completed = true
+                 WHERE completion = 0 AND NOT completed
+                   AND state IN ('COMPLETED', 'FAILED')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM %s f
+                        WHERE f.stage = ? AND f.item_id = s.item_id
+                          AND f.state IN ('FAILED', 'CORRECTION_PENDING',
+                                          'FAILED_CORRECTION'))"""
+                .formatted(table, FailureStore.table(failures));
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setString(1, stage);
+            int numbered = update.executeUpdate();
+            if (numbered > 0)
+            {
+                Telemetry.get().audit("split.completions_numbered",
+                        Fields.of(Attr.COUNT, numbered));
+            }
+            return numbered;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException(
+                    "Could not number the items' completions", failure);
         }
     }
 

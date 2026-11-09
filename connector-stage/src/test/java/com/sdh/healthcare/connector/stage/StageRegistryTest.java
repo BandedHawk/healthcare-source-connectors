@@ -42,6 +42,9 @@ class StageRegistryTest
     /** The second worker's registry, on the same tables. */
     StageRegistry second;
 
+    /** The registry's schema for this test. */
+    String schema;
+
     /** The item the records are from. */
     final UUID item = UUID.randomUUID();
 
@@ -58,7 +61,7 @@ class StageRegistryTest
     @BeforeEach
     void tables()
     {
-        String schema = StageTestSupport.freshSchema();
+        schema = StageTestSupport.freshSchema();
         first = StageTestSupport.registry(schema, "pod-a");
         second = StageTestSupport.registry(schema, "pod-b");
     }
@@ -477,5 +480,73 @@ class StageRegistryTest
         Thread.sleep(150);
         assertThat(second.deferring())
                 .isGreaterThanOrEqualTo(Duration.ofMillis(140));
+    }
+
+    /**
+     * Rows from before completions were numbered (STAGES.md §15.6f) are
+     * numbered 1 when the tables are next made: an item completed then is
+     * its first completion, and a complete total taken then the first of
+     * the stage before's. A repeat of that total is then stale, and
+     * reopening the item withdraws completion 1. A row whose total is
+     * still open upstream isn't touched.
+     *
+     * @throws java.sql.SQLException if the rows can't be set up
+     */
+    @Test
+    void numbersTheCompletionsOfEarlierRows() throws java.sql.SQLException
+    {
+        UUID open = UUID.randomUUID();
+        first.expect(open, 3, new byte[] {9}, true, 0);
+        first.expect(item, 1, new byte[] {1}, false, 1);
+        first.claim("r1", item, LONG);
+        first.store(List.of(entry("r1", false)));
+        assertThat(first.due(List.of(item))).hasSize(1);
+        first.markCompleted(item);
+        // As an earlier build left them: no numbers.
+        try (java.sql.Connection connection =
+                StageTestSupport.database().getConnection();
+                java.sql.Statement statement = connection.createStatement())
+        {
+            statement.executeUpdate("UPDATE " + schema + ".stage_item"
+                    + " SET completion = 0, upstream_completion = 0");
+        }
+
+        StageRegistry restarted = StageTestSupport.registry(schema, "pod-c");
+        assertThat(audit.names()).contains("stage.completions_numbered",
+                "stage.totals_numbered");
+        assertThat(restarted.item(item)).hasValueSatisfying(row ->
+                assertThat(row.completion()).isEqualTo(1));
+
+        // The same total again: stale, nothing reopened.
+        restarted.expect(item, 1, new byte[] {1}, false, 1);
+        assertThat(audit.names()).doesNotContain("stage.item_reopened");
+        assertThat(restarted.due(List.of(item))).isEmpty();
+        // Reopened upstream: completion 1 withdrawn, the next is 2.
+        restarted.expect(item, 1, new byte[] {2}, true, 1);
+        assertThat(restarted.due(List.of(item))).singleElement()
+                .satisfies(due ->
+                {
+                    assertThat(due.progress().completion()).isEqualTo(1);
+                    assertThat(due.progress().nextCompletion())
+                            .isEqualTo(2);
+                });
+
+        // Open upstream: left as it was, and numbering again changes
+        // nothing.
+        StageTestSupport.registry(schema, "pod-d");
+        try (java.sql.Connection connection =
+                StageTestSupport.database().getConnection();
+                java.sql.Statement statement = connection.createStatement();
+                java.sql.ResultSet rows = statement.executeQuery(
+                        "SELECT item_id, completion, upstream_completion"
+                        + " FROM " + schema + ".stage_item"))
+        {
+            while (rows.next())
+            {
+                boolean isOpen = open.equals(rows.getObject(1));
+                assertThat(rows.getInt(2)).isEqualTo(isOpen ? 0 : 1);
+                assertThat(rows.getInt(3)).isEqualTo(isOpen ? 0 : 1);
+            }
+        }
     }
 }

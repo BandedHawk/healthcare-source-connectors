@@ -1347,21 +1347,25 @@ held item; `reprocess` is designed first, for review, and built after (§15.8).
   above the one taken; an open one at or above it, unless both are open at the same number, when counts only
   grow); taking one reopens an item completed here (`stage.item_reopened`, reason `upstream`). A failure reopened
   at the stage itself reopens its completed item on the next revisit (`StageRegistry.reopenChanged`,
-  `stage.item_reopened`, reason `failure_reopened`). Known limit: rows from before this build carry completion 0
-  (found on the sandbox, SANDBOX.md "Checked"). An item completed before it and then reopened sends `item.progress`
-  with completion 0: from the split stage, a stage after may drop it as stale; from the convert stage, its
-  progress and its next completion reuse IDs already sent, and are dropped as repeats. A repeated upstream end of
-  such an item is taken as newer once (a false `stage.item_reopened`, the item completed again under its old ID).
-  Nothing is released, so no such rows exist outside test systems; a one-time migration numbering them 1 would
-  close it.
+  `stage.item_reopened`, reason `failure_reopened`). Rows from before this build carried completion 0 (found on
+  the sandbox, SANDBOX.md "Checked"), so reopening such an item would have sent messages under IDs already sent,
+  and a repeated upstream end of one was taken as newer (a false `stage.item_reopened`). Each start numbers them,
+  added 2026-11-09 (revision (cj)): at a stage of the stage library, an item completed with no number gets
+  completion 1 and a complete total with no number upstream completion 1 (`stage.completions_numbered`,
+  `stage.totals_numbered`); at the split stage, an ended item none of whose failures is open (one from before
+  the fail store has none) gets completion 1, marked complete (`ItemCheckpoints.numberEarlierCompletions`,
+  `split.completions_numbered`). This build always numbers what it writes, so only earlier rows match, but for a
+  split item ended and not yet announced, where the number given is the one announcing it gives. Each changes
+  nothing once done.
 - **`resolves`:** `record.split` and `record.stored` carry it for a row with `correction_of`; the split stage's
   correction of a whole item names the item ID.
 - **Tests:** `StageWorkerTest` (`appliesARetry`, `completesAgainAnItemWhoseFailureIsReopened`),
   `StageRegistryTest.anItemReopenedUpstreamIsReopenedHere`, `FailureCommandsTest.submitsARetry`,
   `ItemProcessorTest` (`leavesAFailedRetryFailed`, `completesAgainAnItemWhoseFailureIsReopened`, `resolves` on
   corrections), `IngestPipelineTest` (release, resume and close), `AdminCommandsTest.releasesOnlyAHeldItem`,
-  `ContractRoundTripTest.completionsAndResolvesRoundTrip` and `ConvertStageTest` (`resolves`). Not yet tried on
-  the sandbox.
+  `ContractRoundTripTest.completionsAndResolvesRoundTrip` and `ConvertStageTest` (`resolves`); the numbering of
+  earlier rows by `StageRegistryTest.numbersTheCompletionsOfEarlierRows` and
+  `ItemProcessorTest.numbersTheCompletionsOfEarlierItems`. Tried on the sandbox (SANDBOX.md "Checked").
 
 ### 15.7 Order of building
 

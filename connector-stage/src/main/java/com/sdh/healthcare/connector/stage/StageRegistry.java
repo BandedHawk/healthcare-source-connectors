@@ -351,6 +351,7 @@ public final class StageRegistry
             statement.execute("ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS upstream_completion integer"
                     + " NOT NULL DEFAULT 0");
+            numberEarlierCompletions(statement);
             for (String ddl : FailureStore.ddls(failures,
                     failures.substring(0, failures.indexOf('.'))
                             + ".stage_failure_event"))
@@ -368,6 +369,59 @@ public final class StageRegistry
         {
             throw new IllegalStateException(
                     "Could not create the stage registry", failure);
+        }
+    }
+
+    /**
+     * Numbers the completions of rows written before completions were
+     * (STAGES.md §15.6f): an item completed here, or a complete total taken
+     * from the stage before, was its first completion, so it is numbered 1,
+     * as this build would have numbered it. Without it, reopening such an
+     * item would send messages under IDs already sent, which the stages
+     * after drop as repeats. Nothing this build writes matches: it numbers
+     * a completion, and a complete total, as it stores them. Runs at every
+     * start, and changes nothing once done.
+     *
+     * @param statement where to run it
+     * @throws SQLException if it can't
+     */
+    private void numberEarlierCompletions(Statement statement)
+            throws SQLException
+    {
+        Connection connection = statement.getConnection();
+        number(connection, "stage.completions_numbered", """
+                UPDATE %s SET completion = 1
+                 WHERE stage = ? AND completion = 0
+                   AND completed_at IS NOT NULL""".formatted(items));
+        number(connection, "stage.totals_numbered", """
+                UPDATE %s SET upstream_completion = 1
+                 WHERE stage = ? AND upstream_completion = 0
+                   AND expected IS NOT NULL AND NOT upstream_open"""
+                .formatted(items));
+    }
+
+    /**
+     * Runs one of {@link #numberEarlierCompletions}'s updates, and audits
+     * how many rows it numbered, if any.
+     *
+     * @param connection where to run it
+     * @param event      the audit event's name
+     * @param sql        the update, taking the stage
+     * @throws SQLException if it can't
+     */
+    private void number(Connection connection, String event, String sql)
+            throws SQLException
+    {
+        try (PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setString(1, stage);
+            int numbered = update.executeUpdate();
+            if (numbered > 0)
+            {
+                Telemetry.get().audit(event, Fields.of(Attr.STAGE, stage)
+                        .with(Attr.COUNT, numbered));
+            }
         }
     }
 
@@ -1324,13 +1378,13 @@ public final class StageRegistry
      * An item's row.
      *
      * @param itemId the item's id
-     * @return its counts, with -1 for a total not yet known; empty if it
-     *         has no row
+     * @return its counts, with -1 for a total not yet known, and the
+     *         completions sent; empty if it has no row
      * @throws IllegalStateException if the database can't be reached
      */
     public Optional<ItemProgress> item(UUID itemId)
     {
-        String sql = "SELECT expected, done, failed FROM " + items
+        String sql = "SELECT expected, done, failed, completion FROM " + items
                 + " WHERE stage = ? AND item_id = ?";
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
@@ -1345,9 +1399,10 @@ public final class StageRegistry
                     return Optional.empty();
                 }
                 long expected = rows.getLong(1);
+                boolean unknown = rows.wasNull();
                 return Optional.of(new ItemProgress(itemId,
-                        rows.wasNull() ? -1 : expected, rows.getLong(2),
-                        rows.getLong(3)));
+                        unknown ? -1 : expected, rows.getLong(2),
+                        rows.getLong(3)).withCompletion(rows.getInt(4)));
             }
         }
         catch (SQLException failure)

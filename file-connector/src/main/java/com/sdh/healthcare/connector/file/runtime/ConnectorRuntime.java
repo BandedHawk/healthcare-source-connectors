@@ -318,6 +318,9 @@ public final class ConnectorRuntime implements AutoCloseable
                     Duration.ofSeconds(10));
             failures.createTableIfMissing();
             failures.gauges(Duration.ofMinutes(1));
+            // Items ended before their ends were numbered (§15.6f).
+            checkpoints.numberEarlierCompletions(stage.registrySchema(),
+                    ItemProcessor.STAGE);
             // Operators' corrections, applied by any pod (§15.6d).
             CorrectionStore corrections = new CorrectionStore(dataSource,
                     stage.registrySchema(), ItemProcessor.STAGE,

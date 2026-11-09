@@ -22,6 +22,7 @@ import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
@@ -933,5 +934,74 @@ class ItemProcessorTest
                     assertThat(split.messageId())
                             .isEqualTo("is-" + item.itemId() + "~c2");
                 });
+    }
+
+    /**
+     * Items whose ends were sent before ends were numbered (STAGES.md
+     * §15.6f) are numbered 1 at the next start if none of their failures
+     * is open, so reopening one withdraws completion 1; an item still open
+     * isn't touched, and completes first under its usual ID.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void numbersTheCompletionsOfEarlierItems() throws Exception
+    {
+        ItemProcessor processor = processor();
+        LandedItem clean = land("1,ok\n2,ok\n");
+        LandedItem declined = land("1,ok\n2,\"never closed\n");
+        LandedItem open = land("3,ok\n4,\"never closed\n");
+        for (LandedItem item : List.of(clean, declined, open))
+        {
+            process(processor, item);
+        }
+        FailureStore failures = failures();
+        long seq = failures.failures(declined.itemId()).getFirst().failure()
+                .seq();
+        failures.change(declined.itemId(), seq,
+                java.util.Set.of(FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "declined", "alice", null);
+        processor.reannounce(declined.itemId(), declined.digest(),
+                LandedRefs.NONE);
+        // As an earlier build left them: no numbers.
+        try (java.sql.Connection connection =
+                SplitTestSupport.database().getConnection();
+                java.sql.Statement statement = connection.createStatement())
+        {
+            statement.executeUpdate("UPDATE " + schema + ".split_item"
+                    + " SET completion = 0, completed = false");
+        }
+
+        ItemCheckpoints checkpoints = SplitTestSupport.checkpoints(schema,
+                new RecordIds(IdKeys.loadOrCreateShared(records, keys,
+                        RECORDS_KEK)));
+        assertThat(checkpoints.numberEarlierCompletions(schema, "split"))
+                .isEqualTo(2);
+        assertThat(checkpoints.numberEarlierCompletions(schema, "split"))
+                .isZero();
+
+        failures.change(declined.itemId(), seq,
+                java.util.Set.of(FailureStore.State.DECLINED),
+                FailureStore.State.FAILED, "reopened", "alice", null);
+        publisher.sent.clear();
+        processor.reannounce(declined.itemId(), declined.digest(),
+                LandedRefs.NONE);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemProgressed.class, progress ->
+                {
+                    assertThat(progress.completion()).isEqualTo(1);
+                    assertThat(progress.messageId()).endsWith("~c1");
+                });
+
+        long openSeq = failures.failures(open.itemId()).getFirst()
+                .failure().seq();
+        failures.change(open.itemId(), openSeq,
+                java.util.Set.of(FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "declined", "alice", null);
+        publisher.sent.clear();
+        processor.reannounce(open.itemId(), open.digest(), LandedRefs.NONE);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, split -> assertThat(split.messageId())
+                        .isEqualTo("is-" + open.itemId()));
     }
 }

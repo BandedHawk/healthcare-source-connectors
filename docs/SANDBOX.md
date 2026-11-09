@@ -432,4 +432,4 @@ Checked again since: see the end of this section.
   and the item was audited `stage.item_reopened` and completed again under its old ID (dropped downstream as a
   repeat). Harmless here, but it shows the gap in STAGES.md §15.6f's known limit: 3,547 convert rows and every split
   row from before (ci) carry completion 0, so reopening a failure of one would reuse message IDs already sent.
-  Not fixed: nothing is released, so only the sandbox has such rows.
+  Fixed in revision (cj): each start numbers such rows 1 (STAGES.md §15.6f).
