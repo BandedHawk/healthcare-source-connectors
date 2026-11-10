@@ -169,7 +169,7 @@ public final class StageStatusCommand<C extends StageAdmin>
         {
             text += StatusParts.more("more than " + STALE.toHours()
                     + " h behind: the duties pod is down, or catching up on"
-                    + " an outage (convert.reconcile_catching_up;"
+                    + " an outage (stage.reconcile_catching_up;"
                     + " STAGES.md §9)");
         }
         return text;

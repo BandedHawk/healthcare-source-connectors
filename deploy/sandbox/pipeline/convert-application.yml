@@ -23,21 +23,26 @@ sdh:
       type: kafka
       uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}"
     registry-schema: convert_${ICEBERG_PREFIX}
-  storage:
-    catalog-name: sdh
-    namespace: ${ICEBERG_PREFIX}
-    catalog:
-      type: jdbc
-      uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
-      jdbc.user: convert_${ICEBERG_PREFIX}
-      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
-      jdbc.schema-version: V1
-      warehouse: s3://sdh-silver/warehouse
-      io-impl: org.apache.iceberg.aws.s3.S3FileIO
-      # The convert stage's key may use only the silver bucket.
-      s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
-            access-key-id: convert-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
-      client: { region: us-east-1 }
+    # Reads split_records and stores in records (the convert stage's defaults), both in the silver bucket: the
+    # sink has no catalog of its own, so it shares the source's (STAGES.md §17.7).
+    source:
+      catalog-name: sdh
+      namespace: ${ICEBERG_PREFIX}
+      catalog:
+        type: jdbc
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        jdbc.user: convert_${ICEBERG_PREFIX}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://sdh-silver/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        # The convert stage's key may use only the silver bucket.
+        s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
+              access-key-id: convert-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+        client: { region: us-east-1 }
+    sink:
+      catalog-name: sdh
+      namespace: ${ICEBERG_PREFIX}
   lease:
     jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: convert_${ICEBERG_PREFIX} }
   crypto:

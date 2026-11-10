@@ -663,7 +663,14 @@ class PipelineDemo
     {
         Map<String, String> settings = common(pipeline);
         settings.put("sdh.connector-id", "convert-" + pipeline);
-        settings.put("sdh.storage.namespace", pipeline.replace('-', '_'));
+        // A record stage names its tables in sdh.stage, not sdh.storage
+        // (STAGES.md §17.7): split_records and records by default.
+        settings.keySet().removeIf(key -> key.startsWith("sdh.storage."));
+        stack.catalog().forEach((key, value) -> settings.put(
+                "sdh.stage.source.catalog[" + key + "]", value));
+        String namespace = pipeline.replace('-', '_');
+        settings.put("sdh.stage.source.namespace", namespace);
+        settings.put("sdh.stage.sink.namespace", namespace);
         settings.put("sdh.crypto.keys.records-kek", TestKeys.RECORDS);
         settings.put("sdh.crypto.keys.signing.kid",
                 TestKeys.CONVERT_SIGNER_KID);

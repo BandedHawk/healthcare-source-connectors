@@ -13,7 +13,7 @@ sdh:
       uri: "kafka:sdh.split.claims?brokers=kafka:9093&groupId=convert-stage&securityProtocol=SSL"
       batch: { max-messages: 100 }   # the default here: records are claimed, converted and committed together
       artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }   # artemis only
-    output:                       # where record.stored, record.failed and item.converted go: downstream readers
+    output:                       # where record.stored and item.converted go: downstream readers
       type: kafka                 # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
       uri: "kafka:sdh.records.claims?brokers=kafka:9093&securityProtocol=SSL"
     dlq:                          # where record.conflict goes: a record stored before, now with other output
@@ -26,26 +26,32 @@ sdh:
     claim: { ttl: 60s, renew-interval: 15s, busy-poll: 1s }
     registry-schema: sdh_stage    # Postgres schema of the stage's registry, in the lease database
     send-timeout: 30s
+    source:                       # where split records are read: the split stage's table
+      catalog-name: sdh           # also checked in messages: a record.split naming another table is refused
+      namespace: sdh_ingest
+      table: split_records        # the default
+      catalog:                    # Iceberg catalog properties, passed through unchanged
+        type: rest                # rest | jdbc
+        uri: https://polaris:8181/api/catalog
+        warehouse: sdh            # the Polaris catalog name
+        rest.auth.type: oauth2
+        credential: "sdh-convert:${POLARIS_CLIENT_SECRET}"   # client id:secret, secret from the environment
+        scope: PRINCIPAL_ROLE:ALL
+        oauth2-server-uri: https://polaris:8181/api/catalog/v1/oauth/tokens
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO   # or ...gcp.gcs.GCSFileIO, ...azure.adlsv2.ADLSFileIO
+        s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
+        client: { region: us-east-1 }
+    sink:                         # where converted records are stored, shared by every pod
+      catalog-name: sdh
+      namespace: sdh_ingest
+      table: records              # the default
+      # catalog: { ... }          # unset: the source's catalog
+      # kek: records-kek          # unset: sdh.crypto.keys.records-kek
   convert:
     options:                      # format options as for the split stage (sdh.split.options), for every format
       namespace: urn:hl7-org:v3
     max-bytes: 64MB               # a larger record is stored as split, CONVERT_TOO_LARGE
     # memory: 1GB                 # heap the conversions running at once may share; unset = a share of the heap
-  storage:
-    catalog-name: sdh             # also sent in messages; a record.split naming another catalog is refused
-    namespace: sdh_ingest         # holds records, which every pod appends to
-    # split-namespace: sdh_split  # where split_records is, if not in the same namespace
-    catalog:                      # Iceberg catalog properties, passed through unchanged
-      type: rest                  # rest | jdbc
-      uri: https://polaris:8181/api/catalog
-      warehouse: sdh              # the Polaris catalog name
-      rest.auth.type: oauth2
-      credential: "sdh-convert:${POLARIS_CLIENT_SECRET}"   # client id:secret, secret from the environment
-      scope: PRINCIPAL_ROLE:ALL
-      oauth2-server-uri: https://polaris:8181/api/catalog/v1/oauth/tokens
-      io-impl: org.apache.iceberg.aws.s3.S3FileIO   # or ...gcp.gcs.GCSFileIO, ...azure.adlsv2.ADLSFileIO
-      s3: { endpoint: "https://seaweedfs:8333", path-style-access: true }
-      client: { region: us-east-1 }
   reconcile:                      # split records whose record.split was lost are converted anyway, by one pod
     enabled: true
     grace: 10m

@@ -333,9 +333,9 @@ intake has results on.
   worker as if received. A record claimed but never stored, its claim expired, counts as missing: its message may
   have been lost with the batch that claimed it, and the worker takes the claim over (built 2026-11-07, §10). An
   item whose records are all stored and whose total came, but which wasn't completed, the batch that would have
-  completed it lost, is completed (`convert.item_completion_recovered`). An item whose `item.split` never arrived
+  completed it lost, is completed (`stage.item_completion_recovered`). An item whose `item.split` never arrived
   can't be completed this way (its producer's references are in landing); it is audited
-  (`convert.item_total_missing`, once per item), for an operator to recover by hand (§13.2).
+  (`stage.item_total_missing`, once per item), for an operator to recover by hand (§13.2).
 - **The reconciler's watermark** (decided 2026-11-07 with the user). Each run looks back `sdh.reconcile.lookback`
   (2 days), so a record split longer ago than that, whose `record.split` was lost while the stage was down (an SQS
   queue keeps messages 4 days by default; a queue purged during an outage), was never looked at again. So the
@@ -345,7 +345,7 @@ intake has results on.
   record IDs are all a run holds in memory, never more), and moves `checked_to` to the end of each day once it is
   done, so a run cut short resumes where it stopped. Normally `checked_to` is minutes old and the lookback
   decides, as before. After an outage longer than the lookback, the first run catches up on the days in between
-  (`convert.reconcile_catching_up` at its start, `convert.reconcile_caught_up` at its end, each with
+  (`stage.reconcile_catching_up` at its start, `stage.reconcile_caught_up` at its end, each with
   `sdh.count`, the days to check). With no row yet (a stage that has never reconciled, or one upgraded to this),
   a run starts at the lookback: nothing older is checked then. Full scans were rejected: they hold every record
   ID ever kept.
@@ -356,19 +356,23 @@ intake has results on.
   its queue (`BacklogWatch`: the age is from the commit of the snapshot its `record.split` names; a snapshot
   expired from the table is old), in `stage_backlog.seen_at`, at most once a minute per pod, by the database's
   clock. While that is within `sdh.reconcile.backlog-quiet` (15 minutes), a run rebuilds nothing and leaves the
-  watermark, audited `convert.reconcile_deferred` (`sdh.count`: minutes waited). Since every pod notes it, a
+  watermark, audited `stage.reconcile_deferred` (`sdh.count`: minutes waited). Since every pod notes it, a
   partition still draining anywhere holds the run back, and a queue that delivers nothing (one stuck, or empty)
   doesn't. After waiting `sdh.reconcile.max-deferral` (6 hours), a run goes ahead anyway,
-  `convert.reconcile_deferral_capped`, so a queue that is always behind can't hide a real loss for long; then it
+  `stage.reconcile_deferral_capped`, so a queue that is always behind can't hide a real loss for long; then it
   waits again. At startup the pods haven't received anything yet, so a pod newly holding the duties waits one
   `backlog-quiet` whatever the queue shows (`sdh.reason` `STARTING`; `BACKLOG` otherwise). The wait is counted
   from when this pod took the duties. `sdh.reconcile.backlog-quiet: 0s` turns waiting off. (The first build of
   this never ended the wait at startup on a stage that had never seen a backlog; fixed 2026-11-07, revision (bu).) A drained-queue signal
   from the brokers was rejected: there is none common to the seven.
-- **Settings:** `sdh.stage.*` (§7); `sdh.convert.options`, `.max-bytes`, `.memory`; `sdh.storage` for `records`
-  and the catalog `split_records` is read from; `sdh.results` as before; `sdh.lease` for the duties lease.
+- **Settings:** `sdh.stage.*` (§7); `sdh.convert.options`, `.max-bytes`, `.memory`; `sdh.stage.source` and
+  `sdh.stage.sink` for `split_records` and `records` (§17.7, replacing `sdh.storage` since §17 step 3);
+  `sdh.results` as before; `sdh.lease` for the duties lease.
 
-**As built (2026-11-06):**
+**As built (2026-11-06):** since §17 step 3 (§17.8c) the classes named here are the shared record stage's
+(`RecordStageProcessor`, `RecordStageRuntime`, `RecordReconciler`, `SourceInputs`), with the conversion in
+`ConvertTransform`; `sdh.storage.split-namespace` became `sdh.stage.source.namespace`, `sdh.convert.autostart`
+became `sdh.stage.autostart`, and the audit events moved from `convert.*` to `stage.*`, with `sdh.stage`.
 - `ConvertProcessor` is the stage's `StageProcessor`; `ConvertRuntime` wires it with keys from
   `KeyMaterial.forStage` (the records KEK, signing, recipient and inbox keys; no landing KEK) and a `QueueReader`
   built without message keys, which only reads records (the worker opens the messages). `sdh.storage.split-namespace`
@@ -381,7 +385,7 @@ intake has results on.
 - The registry keeps the received `item.split` in `total_message` on the item's row; the worker opens it again for
   `itemComplete` and the new `itemCompleted` step, which runs after the item-complete message is sent and before
   the item is marked complete. If it no longer opens (its key retired), `stage.item_total_unreadable` is audited,
-  `item.converted` names the intake `unknown`, and no result is sent (`convert.result_not_sent`).
+  `item.converted` names the intake `unknown`, and no result is sent (`stage.result_not_sent`).
 - A failed record's row keeps `message_index` and `message_refs_enc` (`RecordBatchWriter.place`), read back by
   `CommittedRecords.failed(table, item, keys)`.
 - **Two copies of a record.** A worker that loses its claim between checking it and committing can append a record
@@ -391,7 +395,7 @@ intake has results on.
   with `StageFailures` deciding what is fatal. The reconciler hands rebuilt messages to
   `StageWorker.handleOpened`, using the registry's `knownRecords` and `completed`. A rebuilt `record.split` has no
   queue message, so a failed record found this way is reported without one, and audited
-  `convert.placement_unknown` (stage, item, record number, error code) for the operator (§12). A record of a
+  `stage.placement_unknown` (stage, item, record number, error code) for the operator (§12). A record of a
   batch of one message, or of a file, loses nothing.
 - `ResultReporter` moved here: built from `item.split` and the failed rows; a `CONVERT_*` code is put down to
   `convert`, any other to `split`.
@@ -578,7 +582,7 @@ Each step builds and passes its tests before the next.
 - **A redelivered record stored as `CONVERT_SKIPPED`** (§9). Resolved 2026-11-06: versions, comparing at the stored
   attempt, and recovery by hand from a stage changed in flight (§6, §13).
 - **A reconciled record has no queue message** (§9). Resolved 2026-11-06: its gap is audited
-  (`convert.placement_unknown`), and nothing new is stored. Producer results are not guaranteed (DESIGN §5.3.8):
+  (`stage.placement_unknown`), and nothing new is stored. Producer results are not guaranteed (DESIGN §5.3.8):
   the operator finds problems from what the pipeline records and resolves them with the producer, by steps both
   agree (§13.3). Rejected for now: keeping `message_index` and `message_refs_enc` on every `split_records` row of a
   batch, until a producer needs results to be complete.
@@ -684,7 +688,7 @@ one and not at the next after a grace, found by a query over the audit events: `
 `stage.item_completed{stage=split}`, then `stage.item_completed{stage=split}` without `{stage=convert}`, and so on.
 This also finds an item with no records (an empty file, or one that failed before its first record), which the
 convert stage's reconciler can't see, since it starts from `split_records`. The reconciler adds
-`convert.item_total_missing` (item, count of records) once per item for an item whose records are all converted
+`stage.item_total_missing` (item, count of records) once per item for an item whose records are all converted
 but whose `item.split` never came.
 
 **Recovering: replay the item from the last stage it ended at.** A replay sends all of a stage's output for one
@@ -721,7 +725,7 @@ Per stage, a replay sends:
 
 **Limits:** only what is still kept can be replayed (records past retention can't be rebuilt), and a rebuilt record
 message names no queue message, so if a record that was missing fails at the next stage, the producer's result
-names no message for it (audited `convert.placement_unknown`; §13.3).
+names no message for it (audited `stage.placement_unknown`; §13.3).
 
 **Built so far:** landing's replay (2026-11-07), which recovers a lost `item.landed` or `item.split` on every
 broker. It rebuilds the message from the item's summary row: the one first sent, naming the table's current
@@ -741,12 +745,12 @@ producer find its own data, but a producer must not rely on them being complete.
 
 **Where results can have gaps:**
 - **A record reached its stage by reconciling** (§9): its result names no queue message. Audited
-  `convert.placement_unknown`, with the item and record number.
+  `stage.placement_unknown`, with the item and record number.
 - **A replay** (§13.2) sends no result unless the operator asks.
 - **An item lost between stages** has no result until it is recovered (§13.2).
 
 **Placing a record by hand,** until the problem report exists (§12): the record number of
-`convert.placement_unknown` gives its byte offset from its row in `split_records`; the message it is in is the last
+`stage.placement_unknown` gives its byte offset from its row in `split_records`; the message it is in is the last
 of the landed item's message index that starts at or before it, and its broker ID is that entry of the item's
 `message_refs_enc`. Only the split stage's key (`landed-items-kek`) opens it, so this is done under the operator's
 account, and recorded in the ticket.
@@ -771,7 +775,7 @@ this section is what the operator needs to know to recognise it and follow it.
   quiet for 15 minutes does it check the days it missed, and by then what it finds is what was really lost. Records
   lost during the outage are therefore converted only after the backlog has drained.
 - **Unless the backlog takes longer than `sdh.reconcile.max-deferral`** (6 hours). Then the reconciler goes ahead
-  anyway (`convert.reconcile_deferral_capped`), and the old overlap returns for that run: it rebuilds records still
+  anyway (`stage.reconcile_deferral_capped`), and the old overlap returns for that run: it rebuilds records still
   queued and converts them itself, serially, on the duties pod, while the other pods read the same records off the
   queue. Each record is still converted once (whichever claims it first stores it; the other copy is a duplicate,
   acknowledged and dropped, §6), but the backlog drains more slowly, the duties pod is busy (its CPU, and its memory
@@ -780,7 +784,7 @@ this section is what the operator needs to know to recognise it and follow it.
   `max-deferral` for the restart.
 - **A rebuilt record that fails loses its placement.** A record that failed conversion, and that the reconciler
   reached before its queue message, has no queue message to name in the producer's result: audited
-  `convert.placement_unknown` (§13.3). With the wait, this is mostly a record whose message really was lost, or one
+  `stage.placement_unknown` (§13.3). With the wait, this is mostly a record whose message really was lost, or one
   reached by a run that went ahead after the most wait. The record and its error are stored as for any other; only
   the result's pointer to the producer's message is missing, and it can be placed by hand (§13.3).
 - **An upgrade to the watermark starts at the lookback.** A stage with no `stage_reconcile` row yet (first started,
@@ -791,23 +795,23 @@ this section is what the operator needs to know to recognise it and follow it.
 - `sdh-admin status` (convert): the `reconciler` line shows how far it has checked and how long ago that is.
   Normally under half an hour. More than an hour behind, it warns: the duties pod is down (the `duties` line says
   who holds the lease, and when it was renewed), it is waiting for a backlog, or it is catching up.
-- `convert.reconcile_deferred` at each run that waits, with `sdh.reason` (`STARTING` or `BACKLOG`) and
+- `stage.reconcile_deferred` at each run that waits, with `sdh.reason` (`STARTING` or `BACKLOG`) and
   `sdh.count`, the minutes waited so far. After a long outage, expect `STARTING` once, then `BACKLOG` every
-  `sdh.reconcile.interval` until the queue drains. `convert.reconcile_deferral_capped` means it stopped waiting
+  `sdh.reconcile.interval` until the queue drains. `stage.reconcile_deferral_capped` means it stopped waiting
   after `sdh.reconcile.max-deferral`: the backlog is draining more slowly than that, or the queue is always behind
   by more than the grace, which on a normal day calls for more pods.
-- `convert.reconcile_catching_up` at the start of a run that looks further back than the lookback, and
-  `convert.reconcile_caught_up` at its end, each with `sdh.count`, the days checked. A `catching_up` with no
+- `stage.reconcile_catching_up` at the start of a run that looks further back than the lookback, and
+  `stage.reconcile_caught_up` at its end, each with `sdh.count`, the days checked. A `catching_up` with no
   `caught_up` after it means the run stopped part-way (the pod restarted, or lost the lease): the next run picks
   up from the last day checked. The `convert.reconciled` log line ends every run, with `days=`.
-- `convert.records_recovered` per item rebuilt, with `sdh.count`. Any at all means a `record.split` was lost
-  (§13.2), unless it follows `convert.reconcile_deferral_capped`: then many are records still on the queue.
-- `convert.item_completion_recovered` per item completed by the reconciler, with `sdh.count`, its records: all
+- `stage.records_recovered` per item rebuilt, with `sdh.count`. Any at all means a `record.split` was lost
+  (§13.2), unless it follows `stage.reconcile_deferral_capped`: then many are records still on the queue.
+- `stage.item_completion_recovered` per item completed by the reconciler, with `sdh.count`, its records: all
   were stored with its total, but the batch that would have completed it was lost (§10). Nothing to do; any at
   all is worth comparing with `stage.batch_failed` at the time.
-- `convert.placement_unknown` per failed record rebuilt (§13.3): each needs placing by hand if the producer is to
+- `stage.placement_unknown` per failed record rebuilt (§13.3): each needs placing by hand if the producer is to
   be told where it was.
-- `convert.item_total_missing`: an item whose records are all converted but whose `item.split` never came; replay
+- `stage.item_total_missing`: an item whose records are all converted but whose `item.split` never came; replay
   it from landing (§13.2). During catch-up this can appear for an item whose `item.split` is still queued behind its
   records; it is reported once, and needs action only if the item still hasn't completed (no
   `stage.item_completed{stage=convert}`) once the queue has drained.
@@ -1033,7 +1037,7 @@ sandbox); the commands; the docs (READMEs, DEPLOYMENT.md, DESIGN.md).
   `StageReleases` keeps `stage_release` and `stage_release_accept` in the stage's registry schema; `PartWay` is
   what each stage finds part way (`StageRegistry.partWay`, `ItemCheckpoints.partWay`). Each runtime opens its gate
   after its tables and calls it first in `start()`; closing the runtime ends the wait, and nothing starts.
-- The convert release is `ConvertProcessor.versions`: each mapping `ConverterRegistry.mappings()` loads, and
+- The convert release is `ConvertTransform.versions` (`ConvertProcessor.versions` until §17 step 3): each mapping `ConverterRegistry.mappings()` loads, and
   `none`, with the build and the settings digest, as `version(message)` stamps them.
 - **The Deployments' strategy is now a rolling update that adds a pod first** (`maxSurge: 1`,
   `maxUnavailable: 0`), not `Recreate`. Under `Recreate` every old pod stops before a new one starts, so a new pod
@@ -1478,7 +1482,7 @@ held item; `reprocess` is designed first, for review, and built after (§15.8).
   from its checkpoint; its records keep the version that made each, so the item is made under two, and its
   `item.split` names both. `--close`: the checkpoint goes to `CLOSED` (ended; not resumed, reconciled or counted
   held), `split.item_closed` audited; nothing is sent downstream, where the records already sent stay and the item
-  stays incomplete (`convert.item_total_missing`), since it never finished splitting. Closing is for an item the
+  stays incomplete (`stage.item_total_missing`), since it never finished splitting. Closing is for an item the
   operator lands again with landing's `resubmit` (§13.5), whose new item links to it. A request for an item not
   `HELD` is refused by the command, and again when applied if the item moved on in between, saying why in the
   request's row (`status --item`) and audit (`split.release_refused`).
@@ -1764,7 +1768,7 @@ failure is the open one.
   generation stopped and the one that stopped it, the run, records cut so far, the offset reached) and sends the
   older generation's `item.split` with result `INTERRUPTED` and its count, so every stage after knows how many of
   its records to expect, accounts for each, and doesn't report the item's total missing
-  (`convert.item_total_missing`). Counted in `sdh.split.generations_interrupted`. A `HELD` item reprocessed this
+  (`stage.item_total_missing`). Counted in `sdh.split.generations_interrupted`. A `HELD` item reprocessed this
   way needs no `release`; a `CLOSED` one may be reprocessed too, in place of landing it again.
 - **At the convert and transform stages**, a record is processed in one step and can't be cut short. A record in
   progress when its next revision is queued finishes; whichever is stored second is judged by §15.8.3, so the
@@ -1963,7 +1967,7 @@ Worked out in planning, as consequences of what was decided:
   `ReprocessInputs` (a stage's input: the current object at each place of an item's newest generation, failed or
   not, with the message it would have been sent as), the worker's queueing (`StageWorker.reprocess`, run each
   renewal interval with the corrections), and the command (`ReprocessCommand`, over `ReprocessAdmin`). The convert
-  stage gives `ConvertInputs` (`split_records`, with the split stage's corrections) and turns it on only when both
+  stage gives `SourceInputs` (`ConvertInputs` until §17 step 3: `split_records`, with the split stage's corrections) and turns it on only when both
   `sdh.stage.reprocess` (its own input, as a queue to send to) and its own public keys are configured; one without
   the other stops it at start.
 - **The counter** is `<schema>.stage_revision` (`Revisions`, connector-core), shared by `correct`, `retry` and
@@ -2551,6 +2555,28 @@ Tests: `RecordStageProcessorTest` (in memory, as the convert and the transform s
 worker on embedded Postgres as the transform stage: results across three tables, an incomplete result,
 `stage.results_twice`, the reconciler), `ResultReporterTest` (ported) and `StageTablesTest`, all with a test
 transform, `UpperTransform`.
+
+### 17.8c Step 3 as built (2026-11-10)
+
+`convert-stage` is now its application, `ConvertTransform`, `ConvertConfiguration` (its settings and the
+transform as a bean) and `ConvertAdmin` (the library's CLI with its transform); it depends on
+`connector-record-stage` alone. `ConvertProcessor`, `ConvertReconciler`, `ConvertInputs`, `BacklogWatch`,
+`ResultReporter`, `ConvertRuntime` and `ConvertAdminContext` are gone.
+- **`ConvertTransform`** holds what `ConvertProcessor.prepare` and `convert` did: a splitter's error, a format with
+  no converter, the third claim (`CONVERT_SKIPPED`, still audited `convert.record_skipped`) and a record over
+  `sdh.convert.max-bytes` are stored as split; otherwise the record's converter runs, with the memory its
+  `memoryFactor` asks for. Its versions are those `ConvertProcessor` stamped, digest included, so a pod of this
+  build and one of the build before stamp the same versions and pass each other's drain check (§14.4a).
+- **`ConvertProperties`** implements `RecordStageSettings`; `sdh.convert` keeps `options`, `max-bytes` and
+  `memory`. `sdh.storage` and `sdh.convert.autostart` are gone, with no aliases (§17.9): an old configuration
+  stops at start (`sdh.stage.source.catalog is required`).
+- **Moved with it:** the kit's `application.yml.example`, the sandbox's `convert-application.yml`, `ItSupport`
+  (the ITs) and the demo name `sdh.stage.source` and `sdh.stage.sink`; the kit README, DEPLOYMENT and `status`'s
+  reconciler hint name the `stage.*` events.
+- **Tests:** `ConvertProcessorTest` and `ConvertStageTest` check what they did, through the library
+  (`ConvertStages` builds it), with the events' new names. Two checks of package-private parts moved to the
+  library's `RecordStageTest` (the backlog watch, and the days a catch-up covers); `ResultReporterTest` moved in
+  step 2.
 
 ### 17.9 Decided after review (2026-11-10, with the user)
 

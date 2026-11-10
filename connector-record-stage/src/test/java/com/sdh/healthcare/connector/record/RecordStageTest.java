@@ -573,4 +573,74 @@ class RecordStageTest
                 .hasSize(1);
         assertThat(registry.completed(List.of(item))).containsExactly(item);
     }
+
+    /**
+     * A record off the queue is noted as backlog only if it was committed
+     * more than the grace ago; one the reconciler rebuilt isn't; and a
+     * snapshot no longer in the table was expired, so is old. Moved from
+     * the convert stage's tests.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void notesABacklogOnlyForOldRecordsOffTheQueue() throws Exception
+    {
+        List<RecordStored> messages = converted("{\"a\":1}");
+        // The snapshot is stamped with the real time, not STORED_AT.
+        Instant now = Instant.now();
+        processorAt(now).classify(messages.get(0));
+        assertThat(registry.sinceBacklog()).as("committed just now")
+                .isEmpty();
+
+        RecordStageProcessor later =
+                processorAt(now.plus(Duration.ofHours(1)));
+        later.rebuilding(List.of(messages.get(0)));
+        later.classify(messages.get(0));
+        assertThat(registry.sinceBacklog()).as("rebuilt").isEmpty();
+        later.rebuilt(List.of(messages.get(0)));
+        later.classify(messages.get(0));
+        assertThat(registry.sinceBacklog()).as("an hour old").isPresent();
+
+        BacklogWatch watch = new BacklogWatch(records, registry,
+                Duration.ofMinutes(10), Clock.systemUTC());
+        assertThat(watch.committedAt(-1L)).hasValue(Instant.EPOCH);
+        assertThat(watch.committedAt(messages.get(0).storage().snapshotId()))
+                .hasValueSatisfying(at -> assertThat(at)
+                        .isBetween(now.minusSeconds(60), now));
+    }
+
+    /**
+     * A catching-up run goes a day at a time: the days it covers are
+     * counted whole. Moved from the convert stage's tests.
+     */
+    @Test
+    void countsTheDaysACatchUpCovers()
+    {
+        Instant after = STORED_AT.plus(Duration.ofDays(5));
+        assertThat(RecordReconciler.days(after, after)).isZero();
+        assertThat(RecordReconciler.days(after,
+                after.plus(Duration.ofHours(25)))).isEqualTo(2);
+    }
+
+    /**
+     * A processor like the test's, with no results and a backlog watch at
+     * a time.
+     *
+     * @param now the time the watch sees
+     * @return the processor
+     */
+    RecordStageProcessor processorAt(Instant now)
+    {
+        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
+        return new RecordStageProcessor(
+                new UpperTransform(StageMessages.TRANSFORM), reader,
+                new RecordStageProcessor.Tables(
+                        new RecordTable("prod", NS, "records", records),
+                        new RecordStageProcessor.Sink(
+                                new RecordTable("prod", NS, GOLD, gold), kms,
+                                KEK, new RecordIds(new byte[32])),
+                        List.of()),
+                64L << 20, null, clock, new BacklogWatch(records, registry,
+                        Duration.ofMinutes(10), clock));
+    }
 }

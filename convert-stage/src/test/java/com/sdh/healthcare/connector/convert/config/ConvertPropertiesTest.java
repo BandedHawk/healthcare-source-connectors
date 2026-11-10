@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.convert.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.sdh.healthcare.connector.record.config.RecordStageSettings;
 import java.time.Duration;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -53,19 +54,19 @@ class ConvertPropertiesTest
     @Test
     void theReconcilerWaitsForABacklogByDefault()
     {
-        ConvertProperties.Reconcile defaults = new Binder(
+        RecordStageSettings.Reconcile defaults = new Binder(
                 new MapConfigurationPropertySource(
                         Map.of("sdh.reconcile.enabled", "true")))
-                .bind("sdh.reconcile", ConvertProperties.Reconcile.class)
+                .bind("sdh.reconcile", RecordStageSettings.Reconcile.class)
                 .get();
         assertThat(defaults.backlogQuiet()).isEqualTo(Duration.ofMinutes(15));
         assertThat(defaults.maxDeferral()).isEqualTo(Duration.ofHours(6));
 
-        ConvertProperties.Reconcile set = new Binder(
+        RecordStageSettings.Reconcile set = new Binder(
                 new MapConfigurationPropertySource(Map.of(
                         "sdh.reconcile.backlog-quiet", "0s",
                         "sdh.reconcile.max-deferral", "1h")))
-                .bind("sdh.reconcile", ConvertProperties.Reconcile.class)
+                .bind("sdh.reconcile", RecordStageSettings.Reconcile.class)
                 .get();
         assertThat(set.backlogQuiet()).isZero();
         assertThat(set.maxDeferral()).isEqualTo(Duration.ofHours(1));

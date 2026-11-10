@@ -376,22 +376,22 @@ So the first start after a long outage is slower than usual:
   converts records still on the queue, one at a time on the duties pod, while the other pods read them off the
   queue. Each record is still converted once, and the second copy is dropped as a duplicate. But the backlog drains
   more slowly, and a failed record it reaches first can't be placed in the producer's result
-  (`convert.placement_unknown`; the record and its error are stored as usual, and the event's record number places
+  (`stage.placement_unknown`; the record and its error are stored as usual, and the event's record number places
   it by hand). After that run it waits again. If you expect a longer drain, raise `max-deferral` for the restart.
 
-What to watch:
+What to watch (each event below carries `sdh.stage` = `convert`):
 - **`status`'s `reconciler` line:** how far it has checked and how long ago. More than an hour behind, it warns: the
   duties pod is down (see the `duties` line), or it is waiting for the backlog or catching up.
-- **`convert.reconcile_deferred`** (audit, `sdh.reason` `STARTING` or `BACKLOG`, `sdh.count` = minutes waited): a run
+- **`stage.reconcile_deferred`** (audit, `sdh.reason` `STARTING` or `BACKLOG`, `sdh.count` = minutes waited): a run
   that waited. Expect `STARTING` once after each start, and `BACKLOG` while a backlog drains.
-- **`convert.reconcile_deferral_capped`:** it stopped waiting after `max-deferral`. On a normal day this means the
+- **`stage.reconcile_deferral_capped`:** it stopped waiting after `max-deferral`. On a normal day this means the
   queue is always more than the grace behind: add pods.
-- **`convert.reconcile_catching_up` and `convert.reconcile_caught_up`** (audit, `sdh.count` = days): the start and
+- **`stage.reconcile_catching_up` and `stage.reconcile_caught_up`** (audit, `sdh.count` = days): the start and
   end of a catch-up. A start with no end means the pod stopped part-way; the next run resumes from the last day
   checked.
-- **`convert.records_recovered`:** a message was lost, unless it follows `reconcile_deferral_capped` (then it is
+- **`stage.records_recovered`:** a message was lost, unless it follows `reconcile_deferral_capped` (then it is
   mostly queued records).
-- **`convert.item_total_missing`:** an item whose records are all converted but whose `item.split` hasn't come. Act
+- **`stage.item_total_missing`:** an item whose records are all converted but whose `item.split` hasn't come. Act
   only if it is still incomplete once the queue has drained: reprocess it at the split stage
   (`reprocess --item-id`), which cuts it again as its next generation.
 - **Outage length against queue retention** (Kafka and Pub/Sub 7 days by default, SQS 4): longer, and queued

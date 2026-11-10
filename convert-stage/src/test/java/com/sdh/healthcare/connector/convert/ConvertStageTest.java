@@ -23,6 +23,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSpli
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.message.Lineage;
+import com.sdh.healthcare.connector.contract.message.StageMessages;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.failure.FailureReason;
@@ -36,6 +37,9 @@ import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.RecordInput;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.reader.QueueReader;
+import com.sdh.healthcare.connector.record.RecordReconciler;
+import com.sdh.healthcare.connector.record.RecordStageProcessor;
+import com.sdh.healthcare.connector.record.SourceInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageRegistry;
 import com.sdh.healthcare.connector.stage.StageWorker;
@@ -79,8 +83,9 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests for the convert stage as it runs: the shared worker with the
- * {@link ConvertProcessor}, its registry on a real Postgres, and the
- * {@link ConvertReconciler}.
+ * shared record stage's {@link RecordStageProcessor} and the
+ * {@link ConvertTransform}, its registry on a real Postgres, and the
+ * {@link RecordReconciler}.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -137,10 +142,10 @@ class ConvertStageTest
     StageRegistry registry;
 
     /** The stage's processor, as the worker runs it. */
-    ConvertProcessor processor;
+    RecordStageProcessor processor;
 
     /** The worker. */
-    StageWorker<ConvertProcessor.Prepared> worker;
+    StageWorker<RecordStageProcessor.Prepared> worker;
 
     /** What the stage sent. */
     final List<OutboundMessage> sent =
@@ -200,16 +205,12 @@ class ConvertStageTest
                 .expectedCatalogName("prod").keyProvider(kms).build();
         schema = "convert_test_" + SCHEMAS.incrementAndGet();
         registry = new StageRegistry(postgres.getPostgresDatabase(), schema,
-                ConvertProcessor.STAGE, "pod-a", Duration.ofSeconds(10));
+                "convert", "pod-a", Duration.ofSeconds(10));
         registry.createTablesIfMissing();
         Clock clock = Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC);
-        processor = new ConvertProcessor(reader,
-                ConverterRegistry.load(),
-                new ConvertProcessor.Settings(Map.of("csv.header", "true"),
-                        1 << 20, 64L << 20, "prod", NS, "test-build"),
-                new ConvertProcessor.Storage(records, kms, KEK,
-                        new RecordIds(new byte[32])),
-                null, clock);
+        processor = ConvertStages.processor(transform(), reader,
+                ConvertStages.tables(NS, splitRecords, records, kms, KEK),
+                null, clock, null);
         MessagePublisher publisher = message ->
         {
             sent.add(message);
@@ -581,7 +582,9 @@ class ConvertStageTest
                 received(messages.get(1)), received(total))))
                 .isEqualTo(BatchHandler.Outcome.DONE);
         worker.close();
-        ConvertInputs inputs = new ConvertInputs(splitRecords, "prod", NS);
+        SourceInputs inputs = new SourceInputs(
+                ConvertStages.source(NS, splitRecords),
+                StageMessages.CONVERT);
         assertThat(inputs.current(item)).hasSize(2).allSatisfy(input ->
         {
             assertThat(input.failed()).isFalse();
@@ -591,7 +594,7 @@ class ConvertStageTest
                 Collections.synchronizedList(new ArrayList<>());
         ReprocessStore runs = new ReprocessStore(
                 postgres.getPostgresDatabase(), schema,
-                ConvertProcessor.STAGE, Duration.ofSeconds(10));
+                "convert", Duration.ofSeconds(10));
         MessageOpener opener = new MessageOpener(
                 Map.of("convert", recipient.getPrivate()),
                 Map.of("split", (ECPublicKey) splitSigner.getPublic(),
@@ -680,11 +683,8 @@ class ConvertStageTest
         assertThat(worker.handleOpened(List.of(messages.get(0))))
                 .isEqualTo(BatchHandler.Outcome.DONE);
 
-        assertThat(new ConvertReconciler(splitRecords, registry, worker,
-                processor, "prod", NS, Duration.ofMinutes(10),
-                Duration.ofDays(2),
-                Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC))
-                .reconcile()).isEqualTo(1);
+        assertThat(reconcilerAt(SPLIT_AT.plusSeconds(3600)).reconcile())
+                .isEqualTo(1);
         assertThat(registry.knownRecords(item)).containsExactlyInAnyOrder(
                 messages.get(0).recordId(), corrected);
     }
@@ -703,10 +703,8 @@ class ConvertStageTest
         List<RecordSplit> messages = split("1,2", "3,4");
         assertThat(worker.handleOpened(List.of(messages.get(0))))
                 .isEqualTo(BatchHandler.Outcome.DONE);
-        ConvertReconciler reconciler = new ConvertReconciler(splitRecords,
-                registry, worker, processor, "prod", NS, Duration.ofMinutes(10),
-                Duration.ofDays(2),
-                Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC));
+        RecordReconciler reconciler =
+                reconcilerAt(SPLIT_AT.plusSeconds(3600));
 
         assertThat(reconciler.reconcile()).isEqualTo(1);
         assertThat(registry.knownRecords(item)).containsExactlyInAnyOrder(
@@ -725,7 +723,7 @@ class ConvertStageTest
             assertThat(reconciler.reconcile()).isZero();
             assertThat(reconciler.reconcile()).isZero();
             assertThat(events.getFinishedLogRecordItems().stream()
-                    .filter(event -> "sdh.audit.convert.item_total_missing"
+                    .filter(event -> "sdh.audit.stage.item_total_missing"
                             .equals(event.getEventName())))
                     .singleElement().satisfies(event -> assertThat(
                             event.getAttributes().asMap()).containsEntry(
@@ -748,10 +746,7 @@ class ConvertStageTest
                 .findFirst().orElseThrow();
         assertThat(stored.itemId()).isEqualTo(item);
         // A record split more recently than the grace isn't looked at.
-        ConvertReconciler early = new ConvertReconciler(splitRecords,
-                registry, worker, processor, "prod", NS, Duration.ofMinutes(10),
-                Duration.ofDays(2),
-                Clock.fixed(SPLIT_AT.plusSeconds(60), ZoneOffset.UTC));
+        RecordReconciler early = reconcilerAt(SPLIT_AT.plusSeconds(60));
         assertThat(early.reconcile()).isZero();
     }
 
@@ -773,11 +768,11 @@ class ConvertStageTest
         assertThat(worker.handle(List.of(received(total))))
                 .isEqualTo(BatchHandler.Outcome.DONE);
         StageRegistry stopped = new StageRegistry(
-                postgres.getPostgresDatabase(), schema, ConvertProcessor.STAGE,
+                postgres.getPostgresDatabase(), schema, "convert",
                 "pod-z", Duration.ofSeconds(10));
         String held = messages.get(1).recordId();
         stopped.claim(held, item, Duration.ofMinutes(5));
-        ConvertReconciler reconciler = reconcilerAt(SPLIT_AT.plusSeconds(3600));
+        RecordReconciler reconciler = reconcilerAt(SPLIT_AT.plusSeconds(3600));
         assertThat(reconciler.reconcile()).as("its claim lives").isZero();
 
         stopped.release();
@@ -837,7 +832,7 @@ class ConvertStageTest
                     .map(event -> event.getEventName())
                     .filter(name -> name.contains("completion_recovered")))
                     .containsExactly(
-                            "sdh.audit.convert.item_completion_recovered");
+                            "sdh.audit.stage.item_completion_recovered");
         }
         finally
         {
@@ -872,10 +867,8 @@ class ConvertStageTest
     void auditsARebuiltRecordThatFailsWithoutItsMessage() throws Exception
     {
         List<RecordSplit> messages = split("1,2", "3", "5,6", "8");
-        ConvertReconciler reconciler = new ConvertReconciler(splitRecords,
-                registry, worker, processor, "prod", NS,
-                Duration.ofMinutes(10), Duration.ofDays(2),
-                Clock.fixed(SPLIT_AT.plusSeconds(3600), ZoneOffset.UTC));
+        RecordReconciler reconciler =
+                reconcilerAt(SPLIT_AT.plusSeconds(3600));
         InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
         try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
                 .setLoggerProvider(SdkLoggerProvider.builder()
@@ -891,7 +884,7 @@ class ConvertStageTest
                     .isEqualTo(BatchHandler.Outcome.DONE);
             assertThat(reconciler.reconcile()).isEqualTo(3);
             assertThat(events.getFinishedLogRecordItems().stream()
-                    .filter(event -> "sdh.audit.convert.placement_unknown"
+                    .filter(event -> "sdh.audit.stage.placement_unknown"
                             .equals(event.getEventName())))
                     .singleElement().satisfies(event -> assertThat(
                             event.getAttributes().asMap())
@@ -938,7 +931,7 @@ class ConvertStageTest
                 .build())
         {
             Telemetry.install(sdk);
-            ConvertReconciler reconciler = reconcilerAt(after);
+            RecordReconciler reconciler = reconcilerAt(after);
             assertThat(reconciler.reconcile()).isEqualTo(2);
             assertThat(registry.checkedTo())
                     .hasValue(after.minus(Duration.ofMinutes(10)));
@@ -946,10 +939,10 @@ class ConvertStageTest
                     .isZero();
             assertThat(events.getFinishedLogRecordItems().stream()
                     .map(event -> event.getEventName())
-                    .filter(name -> name.startsWith("sdh.audit.convert."
+                    .filter(name -> name.startsWith("sdh.audit.stage."
                             + "reconcile_")))
-                    .containsExactly("sdh.audit.convert.reconcile_catching_up",
-                            "sdh.audit.convert.reconcile_caught_up");
+                    .containsExactly("sdh.audit.stage.reconcile_catching_up",
+                            "sdh.audit.stage.reconcile_caught_up");
             assertThat(events.getFinishedLogRecordItems().stream()
                     .filter(event -> event.getEventName()
                             .endsWith("reconcile_catching_up")))
@@ -962,41 +955,6 @@ class ConvertStageTest
             Telemetry.install(OpenTelemetry.noop());
         }
         assertThat(sentOf("record.stored")).isEqualTo(2);
-        assertThat(ConvertReconciler.days(after, after)).isZero();
-        assertThat(ConvertReconciler.days(after,
-                after.plus(Duration.ofHours(25)))).isEqualTo(2);
-    }
-
-    /**
-     * A record off the queue is noted as backlog only if it was committed
-     * more than the grace ago; one the reconciler rebuilt isn't; and a
-     * snapshot no longer in the table was expired, so is old.
-     */
-    @Test
-    void notesABacklogOnlyForOldRecordsOffTheQueue()
-    {
-        List<RecordSplit> messages = split("1,2", "3,4");
-        // The snapshot is stamped with the real time, not SPLIT_AT.
-        Instant now = Instant.now();
-        processorAt(now).classify(messages.get(0));
-        assertThat(registry.sinceBacklog()).as("committed just now")
-                .isEmpty();
-
-        ConvertProcessor later = processorAt(now.plus(Duration.ofHours(1)));
-        later.rebuilding(List.of(messages.get(0)));
-        later.classify(messages.get(0));
-        assertThat(registry.sinceBacklog()).as("rebuilt").isEmpty();
-        later.rebuilt(List.of(messages.get(0)));
-        later.classify(messages.get(0));
-        assertThat(registry.sinceBacklog()).as("an hour old").isPresent();
-
-        BacklogWatch watch = new BacklogWatch(
-                IngestTables.splitRecords(catalog, NS), registry,
-                Duration.ofMinutes(10), Clock.systemUTC());
-        assertThat(watch.committedAt(-1L)).hasValue(Instant.EPOCH);
-        assertThat(watch.committedAt(messages.get(0).storage().snapshotId()))
-                .hasValueSatisfying(at -> assertThat(at)
-                        .isBetween(now.minusSeconds(60), now));
     }
 
     /**
@@ -1020,9 +978,9 @@ class ConvertStageTest
                 .build())
         {
             Telemetry.install(sdk);
-            ConvertReconciler reconciler = reconcilerAt(
+            RecordReconciler reconciler = reconcilerAt(
                     SPLIT_AT.plus(Duration.ofHours(1)),
-                    new ConvertReconciler.Deferral(Duration.ofMinutes(15),
+                    new RecordReconciler.Deferral(Duration.ofMinutes(15),
                             Duration.ofMillis(300)));
             assertThat(reconciler.reconcile()).isZero();
             assertThat(registry.knownRecords(item)).isEmpty();
@@ -1068,9 +1026,9 @@ class ConvertStageTest
                 .build())
         {
             Telemetry.install(sdk);
-            ConvertReconciler reconciler = reconcilerAt(
+            RecordReconciler reconciler = reconcilerAt(
                     SPLIT_AT.plus(Duration.ofHours(1)),
-                    new ConvertReconciler.Deferral(Duration.ofMillis(250),
+                    new RecordReconciler.Deferral(Duration.ofMillis(250),
                             Duration.ofHours(6)));
             assertThat(reconciler.reconcile()).isZero();
             assertThat(registry.knownRecords(item)).isEmpty();
@@ -1096,9 +1054,9 @@ class ConvertStageTest
     void endsTheWaitAtStartupWithNoBacklogEverSeen() throws Exception
     {
         split("1,2", "3,4");
-        ConvertReconciler reconciler = reconcilerAt(
+        RecordReconciler reconciler = reconcilerAt(
                 SPLIT_AT.plus(Duration.ofHours(1)),
-                new ConvertReconciler.Deferral(Duration.ofMillis(250),
+                new RecordReconciler.Deferral(Duration.ofMillis(250),
                         Duration.ofHours(6)));
         assertThat(reconciler.reconcile()).isZero();
         Thread.sleep(300);
@@ -1116,7 +1074,7 @@ class ConvertStageTest
     {
         return events.getFinishedLogRecordItems().stream()
                 .filter(event -> event.getEventName()
-                        .startsWith("sdh.audit.convert.reconcile_defer"))
+                        .startsWith("sdh.audit.stage.reconcile_defer"))
                 .map(event -> event.getEventName().endsWith("capped")
                         ? "capped"
                         : event.getAttributes()
@@ -1125,22 +1083,14 @@ class ConvertStageTest
     }
 
     /**
-     * A processor like the test's, with a backlog watch at a time.
+     * The stage's transform, with CSV headers on.
      *
-     * @param now the time the watch sees
-     * @return the processor
+     * @return it
      */
-    ConvertProcessor processorAt(Instant now)
+    static ConvertTransform transform()
     {
-        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
-        return new ConvertProcessor(reader, ConverterRegistry.load(),
-                new ConvertProcessor.Settings(Map.of("csv.header", "true"),
-                        1 << 20, 64L << 20, "prod", NS, "test-build"),
-                new ConvertProcessor.Storage(records, kms, KEK,
-                        new RecordIds(new byte[32])),
-                null, clock, new BacklogWatch(
-                        IngestTables.splitRecords(catalog, NS), registry,
-                        Duration.ofMinutes(10), clock));
+        return ConvertStages.transform(Map.of("csv.header", "true"), 1 << 20,
+                "test-build");
     }
 
     /**
@@ -1151,13 +1101,13 @@ class ConvertStageTest
      * @param deferral when it waits for a backlog
      * @return the reconciler
      */
-    ConvertReconciler reconcilerAt(Instant now,
-            ConvertReconciler.Deferral deferral)
+    RecordReconciler reconcilerAt(Instant now,
+            RecordReconciler.Deferral deferral)
     {
-        return new ConvertReconciler(splitRecords, registry, worker,
-                processor, "prod", NS, Duration.ofMinutes(10),
-                Duration.ofDays(2), Clock.fixed(now, ZoneOffset.UTC),
-                deferral);
+        return new RecordReconciler(ConvertStages.source(NS, splitRecords),
+                StageMessages.CONVERT, registry, worker, processor,
+                Duration.ofMinutes(10), Duration.ofDays(2),
+                Clock.fixed(now, ZoneOffset.UTC), deferral);
     }
 
     /**
@@ -1167,10 +1117,11 @@ class ConvertStageTest
      * @param now the time it runs at
      * @return the reconciler
      */
-    ConvertReconciler reconcilerAt(Instant now)
+    RecordReconciler reconcilerAt(Instant now)
     {
-        return new ConvertReconciler(splitRecords, registry, worker,
-                processor, "prod", NS, Duration.ofMinutes(10),
-                Duration.ofDays(2), Clock.fixed(now, ZoneOffset.UTC));
+        return new RecordReconciler(ConvertStages.source(NS, splitRecords),
+                StageMessages.CONVERT, registry, worker, processor,
+                Duration.ofMinutes(10), Duration.ofDays(2),
+                Clock.fixed(now, ZoneOffset.UTC));
     }
 }

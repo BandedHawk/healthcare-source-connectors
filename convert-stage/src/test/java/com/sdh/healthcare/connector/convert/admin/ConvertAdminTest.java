@@ -10,7 +10,6 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.contract.message.MessageType;
-import com.sdh.healthcare.connector.convert.ConvertProcessor;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.stage.StageRegistry;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
@@ -57,7 +56,7 @@ class ConvertAdminTest
         postgres = EmbeddedPostgres.start();
         StageRegistry registry = new StageRegistry(
                 postgres.getPostgresDatabase(), "sdh_stage",
-                ConvertProcessor.STAGE, "pod-a", Duration.ofSeconds(10));
+                "convert", "pod-a", Duration.ofSeconds(10));
         registry.createTablesIfMissing();
         registry.expect(ITEM, 2);
         registry.claim("r1", ITEM, Duration.ofMinutes(5));

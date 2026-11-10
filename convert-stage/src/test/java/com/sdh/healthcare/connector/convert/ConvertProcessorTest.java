@@ -26,6 +26,7 @@ import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.RecordInput;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import com.sdh.healthcare.connector.reader.QueueReader;
+import com.sdh.healthcare.connector.record.RecordStageProcessor;
 import com.sdh.healthcare.connector.stage.ItemProgress;
 import com.sdh.healthcare.connector.stage.StageInput;
 import com.sdh.healthcare.connector.stage.StageOutput;
@@ -46,7 +47,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link ConvertProcessor}, on an in-memory catalog: records are
+ * Tests for the convert stage's {@link ConvertTransform} on the shared
+ * {@link RecordStageProcessor}, on an in-memory catalog: records are
  * written to {@code split_records} as the split stage writes them, then
  * converted, stored in {@code records} and read back.
  *
@@ -124,14 +126,27 @@ class ConvertProcessorTest
      * @param maxBytes the largest record converted
      * @return the processor
      */
-    ConvertProcessor processor(long maxBytes)
+    RecordStageProcessor processor(long maxBytes)
     {
-        return new ConvertProcessor(reader, ConverterRegistry.load(),
-                new ConvertProcessor.Settings(Map.of("csv.header", "true"),
-                        maxBytes, 64L << 20, "prod", NS, "test-build"),
-                new ConvertProcessor.Storage(records, kms, KEK,
-                        new RecordIds(new byte[32])),
-                null, Clock.fixed(NOW, ZoneOffset.UTC));
+        return processor(Map.of("csv.header", "true"), maxBytes,
+                "test-build");
+    }
+
+    /**
+     * A processor with no results.
+     *
+     * @param options  format options
+     * @param maxBytes the largest record converted
+     * @param build    the build named in versions
+     * @return the processor
+     */
+    RecordStageProcessor processor(Map<String, String> options,
+            long maxBytes, String build)
+    {
+        return ConvertStages.processor(ConvertStages.transform(options,
+                maxBytes, build), reader, ConvertStages.tables(NS,
+                        splitRecords, records, kms, KEK),
+                null, Clock.fixed(NOW, ZoneOffset.UTC), null);
     }
 
     /**
@@ -180,10 +195,10 @@ class ConvertProcessorTest
      * @return the messages announcing them
      * @throws Exception if one can't be processed or committed
      */
-    static List<ConnectorMessage> run(ConvertProcessor processor,
+    static List<ConnectorMessage> run(RecordStageProcessor processor,
             List<RecordSplit> messages, int attempt) throws Exception
     {
-        List<StageOutput<ConvertProcessor.Prepared>> outputs =
+        List<StageOutput<RecordStageProcessor.Prepared>> outputs =
                 new ArrayList<>();
         for (RecordSplit message : messages)
         {
@@ -251,9 +266,9 @@ class ConvertProcessorTest
         List<String> errors = new ArrayList<>();
         errors.add(null);
         List<RecordSplit> first = split(errors, HEADER + "1,2\n");
-        ConvertProcessor skipping = processor(1 << 20);
-        StageOutput<ConvertProcessor.Prepared> skipped = skipping.process(
-                first.get(0), ConvertProcessor.SKIP_ON_ATTEMPT);
+        RecordStageProcessor skipping = processor(1 << 20);
+        StageOutput<RecordStageProcessor.Prepared> skipped = skipping.process(
+                first.get(0), ConvertTransform.SKIP_ON_ATTEMPT);
         assertThat(skipped.failed()).isTrue();
         assertThat(skipped.errorCode())
                 .isEqualTo(ErrorCode.CONVERT_SKIPPED.name());
@@ -278,13 +293,13 @@ class ConvertProcessorTest
         List<String> errors = new ArrayList<>();
         errors.add(null);
         RecordSplit message = split(errors, HEADER + "1,2\n").get(0);
-        ConvertProcessor processor = processor(1 << 20);
-        StageOutput<ConvertProcessor.Prepared> once =
+        RecordStageProcessor processor = processor(1 << 20);
+        StageOutput<RecordStageProcessor.Prepared> once =
                 processor.process(message, 1);
-        StageOutput<ConvertProcessor.Prepared> twice =
+        StageOutput<RecordStageProcessor.Prepared> twice =
                 processor.process(message, 2);
-        StageOutput<ConvertProcessor.Prepared> skipped =
-                processor.process(message, ConvertProcessor.SKIP_ON_ATTEMPT);
+        StageOutput<RecordStageProcessor.Prepared> skipped =
+                processor.process(message, ConvertTransform.SKIP_ON_ATTEMPT);
         assertThat(once.digest()).isEqualTo(twice.digest())
                 .isNotEqualTo(skipped.digest());
         assertThat(once.failed()).isFalse();
@@ -305,19 +320,14 @@ class ConvertProcessorTest
         List<String> errors = new ArrayList<>();
         errors.add(null);
         RecordSplit message = split(errors, HEADER + "1,2\n").get(0);
-        StageOutput<ConvertProcessor.Prepared> stored = processor(1 << 20)
-                .process(message, ConvertProcessor.SKIP_ON_ATTEMPT);
-        ConvertProcessor rebuilt = new ConvertProcessor(reader,
-                ConverterRegistry.load(),
-                new ConvertProcessor.Settings(Map.of("csv.header", "true"),
-                        1 << 20, 64L << 20, "prod", NS, "another-build"),
-                new ConvertProcessor.Storage(records, kms, KEK,
-                        new RecordIds(new byte[32])),
-                null, Clock.fixed(NOW, ZoneOffset.UTC));
+        StageOutput<RecordStageProcessor.Prepared> stored = processor(1 << 20)
+                .process(message, ConvertTransform.SKIP_ON_ATTEMPT);
+        RecordStageProcessor rebuilt = processor(
+                Map.of("csv.header", "true"), 1 << 20, "another-build");
         assertThat(rebuilt.version(message))
                 .isNotEqualTo(processor(1 << 20).version(message));
-        StageOutput<ConvertProcessor.Prepared> again = rebuilt.process(
-                message, ConvertProcessor.SKIP_ON_ATTEMPT);
+        StageOutput<RecordStageProcessor.Prepared> again = rebuilt.process(
+                message, ConvertTransform.SKIP_ON_ATTEMPT);
         assertThat(again.digest()).isEqualTo(stored.digest());
         assertThat(again.value().error())
                 .isEqualTo(ErrorCode.CONVERT_SKIPPED);
@@ -341,21 +351,14 @@ class ConvertProcessorTest
                 .doesNotContain("csv.header")
                 .isEqualTo(processor(1 << 20).version(message))
                 .isNotEqualTo(processor(1 << 19).version(message));
-        ConvertProcessor otherOptions = new ConvertProcessor(reader,
-                ConverterRegistry.load(),
-                new ConvertProcessor.Settings(Map.of("csv.header", "false"),
-                        1 << 20, 32L << 20, "other", NS, "test-build"),
-                new ConvertProcessor.Storage(records, kms, KEK,
-                        new RecordIds(new byte[32])),
-                null, Clock.fixed(NOW, ZoneOffset.UTC));
+        RecordStageProcessor otherOptions = processor(
+                Map.of("csv.header", "false"), 1 << 20, "test-build");
         assertThat(otherOptions.version(message)).isNotEqualTo(version);
-        ConvertProcessor otherMemory = new ConvertProcessor(reader,
-                ConverterRegistry.load(),
-                new ConvertProcessor.Settings(Map.of("csv.header", "true"),
-                        1 << 20, 32L << 20, "other", NS, "test-build"),
-                new ConvertProcessor.Storage(records, kms, KEK,
-                        new RecordIds(new byte[32])),
-                null, Clock.fixed(NOW, ZoneOffset.UTC));
+        RecordStageProcessor otherMemory = new RecordStageProcessor(
+                ConvertStages.transform(Map.of("csv.header", "true"),
+                        1 << 20, "test-build"), reader,
+                ConvertStages.tables(NS, splitRecords, records, kms, KEK),
+                32L << 20, null, Clock.fixed(NOW, ZoneOffset.UTC), null);
         assertThat(otherMemory.version(message)).isEqualTo(version);
     }
 
@@ -370,17 +373,10 @@ class ConvertProcessorTest
         List<String> errors = new ArrayList<>();
         errors.add(null);
         RecordSplit message = split(errors, HEADER + "1,2\n").get(0);
-        ConvertProcessor.Settings settings = new ConvertProcessor.Settings(
-                Map.of("csv.header", "true"), 1 << 20, 32L << 20, "other",
-                NS, "test-build");
-        ConvertProcessor processor = new ConvertProcessor(reader,
-                ConverterRegistry.load(), settings,
-                new ConvertProcessor.Storage(records, kms, KEK,
-                        new RecordIds(new byte[32])),
-                null, Clock.fixed(NOW, ZoneOffset.UTC));
-        String version = processor.version(message);
-        assertThat(ConvertProcessor.versions(ConverterRegistry.load(),
-                settings))
+        ConvertTransform transform = ConvertStages.transform(
+                Map.of("csv.header", "true"), 1 << 20, "test-build");
+        String version = processor(1 << 20).version(message);
+        assertThat(transform.versions())
                 .contains(version, "test-build/none/"
                         + version.substring(version.lastIndexOf('/') + 1))
                 .hasSize(ConverterRegistry.load().mappings().size() + 1);
@@ -394,7 +390,7 @@ class ConvertProcessorTest
     @Test
     void classifiesAndCompletesItems()
     {
-        ConvertProcessor processor = processor(1 << 20);
+        RecordStageProcessor processor = processor(1 << 20);
         ItemSplit total = new ItemSplit(item, "claims", 3, 1, 100, "digest",
                 "ref-1", null, null, NOW, NOW);
         assertThat(processor.classify(total))
@@ -408,8 +404,8 @@ class ConvertProcessorTest
                         List.of(), 1, 1, null, "ref-1", null));
         assertThat(((ItemConverted) processor.itemComplete(
                 new ItemProgress(item, 3, 3, 1))).intake())
-                .isEqualTo(ConvertProcessor.UNKNOWN_INTAKE);
-        assertThat(ConvertProcessor.splitError("PARSE_FROM_THE_FUTURE"))
+                .isEqualTo(RecordStageProcessor.UNKNOWN_INTAKE);
+        assertThat(ConvertTransform.splitError("PARSE_FROM_THE_FUTURE"))
                 .isEqualTo(ErrorCode.PARSE_UNRECOGNISED);
     }
 }

@@ -188,9 +188,13 @@ final class ItSupport
         settings.put("sdh.stage.registry-schema", "sdh_convert");
         settings.put("sdh.stage.ready-port", "0");
         settings.put("sdh.convert.options[csv.header]", "true");
-        settings.put("sdh.storage.catalog-name", TestLanding.CATALOG);
+        // A record stage names its tables in sdh.stage (STAGES.md §17.7):
+        // split_records and records by default, the sink in the source's
+        // catalog.
+        settings.put("sdh.stage.source.catalog-name", TestLanding.CATALOG);
         catalog.forEach((key, value) -> settings.put(
-                "sdh.storage.catalog[" + key + "]", value));
+                "sdh.stage.source.catalog[" + key + "]", value));
+        settings.put("sdh.stage.sink.catalog-name", TestLanding.CATALOG);
         settings.put("sdh.lease.jdbc.url", lease.get(0));
         settings.put("sdh.lease.jdbc.username", lease.get(1));
         settings.put("sdh.lease.jdbc.password", lease.get(2));

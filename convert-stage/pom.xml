@@ -43,14 +43,10 @@
 
   <dependencies>
     <dependency>
-      <!-- The worker, registry, duties and input from any broker (STAGES.md §7). -->
+      <!-- Everything but the conversion: the worker, source and sink, reconciler, results, runtime and admin
+           (STAGES.md §17). -->
       <groupId>com.sdh.healthcare</groupId>
-      <artifactId>connector-stage</artifactId>
-    </dependency>
-    <dependency>
-      <!-- Reads split records from split_records, as any downstream reader does (STAGES.md §9). -->
-      <groupId>com.sdh.healthcare</groupId>
-      <artifactId>connector-queue-reader</artifactId>
+      <artifactId>connector-record-stage</artifactId>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
