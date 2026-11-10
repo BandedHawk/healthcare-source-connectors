@@ -10,6 +10,7 @@ import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.ContractVersion;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Cause;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemEnd;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReprocess;
@@ -18,11 +19,12 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordConflict;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordReprocess;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordTransformed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemTransformed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
@@ -78,8 +80,8 @@ public final class PayloadCodec
                 {
                     case RecordStored stored when stored.mapping() != null ->
                             payload.put("mapping", stored.mapping());
-                    case RecordFailed failed ->
-                            payload.put("errorCode", failed.errorCode());
+                    case RecordTransformed mapped ->
+                            payload.put("mapping", mapped.mapping());
                     case RecordSplit split when split.errorCode() != null ->
                             payload.put("errorCode", split.errorCode());
                     default ->
@@ -87,12 +89,8 @@ public final class PayloadCodec
                         // Stored as split: no mapping.
                     }
                 }
-                SourcePosition errorAt = switch (record)
-                {
-                    case RecordFailed failed -> failed.errorAt();
-                    case RecordSplit split -> split.errorAt();
-                    default -> null;
-                };
+                SourcePosition errorAt = record instanceof RecordSplit split
+                        ? split.errorAt() : null;
                 if (errorAt != null)
                 {
                     payload.put("errorLine", errorAt.line());
@@ -106,26 +104,15 @@ public final class PayloadCodec
                 }
                 payload.put("storage", storageFields(record.storage()));
                 putIfSet(payload, "version", record.version());
-                putIfSet(payload, "resolves", switch (record)
-                {
-                    case RecordSplit split -> split.resolves();
-                    case RecordStored stored -> stored.resolves();
-                    default -> null;
-                });
+                putIfSet(payload, "resolves", record.resolves());
                 putLineage(payload, record.lineage());
                 if (record.superseded())
                 {
                     payload.put("superseded", true);
                 }
-                Cause cause = switch (record)
+                if (record.cause() != null)
                 {
-                    case RecordStored stored -> stored.cause();
-                    case RecordSplit split -> split.cause();
-                    default -> null;
-                };
-                if (cause != null)
-                {
-                    putCause(payload, cause);
+                    putCause(payload, record.cause());
                 }
                 if (record instanceof RecordSplit split
                         && split.message() >= 0)
@@ -224,27 +211,31 @@ public final class PayloadCodec
                     payload.put("interrupted", true);
                 }
             }
-            case ItemConverted converted ->
+            // item.converted and item.transformed (STAGES.md §17.4); the
+            // split stage's end is above.
+            case ItemEnd end ->
             {
-                payload.put("intake", converted.intake());
-                payload.put("recordCount", converted.recordCount());
+                payload.put("intake", end.intake());
+                payload.put("recordCount", end.recordCount());
                 payload.put("failedRecordCount",
-                        converted.failedRecordCount());
+                        end.failedRecordCount());
                 payload.put("completedAt",
-                        converted.completedAt().toString());
-                if (!converted.versions().isEmpty())
+                        end.completedAt().toString());
+                if (!end.versions().isEmpty())
                 {
-                    payload.put("versions", converted.versions());
+                    payload.put("versions", end.versions());
                 }
-                if (converted.generation() > 1)
+                if (end.generation() > 1)
                 {
-                    payload.put("generation", converted.generation());
+                    payload.put("generation", end.generation());
                 }
-                if (converted.completion() > 1)
+                if (end.completion() > 1)
                 {
-                    payload.put("completion", converted.completion());
+                    payload.put("completion", end.completion());
                 }
-                putIfSet(payload, "sameAs", converted.sameAs());
+                putIfSet(payload, "sameAs", end.sameAs());
+                putIfSet(payload, "producerRef", end.producerRef());
+                putIfSet(payload, "replaces", end.replaces());
             }
             case ItemProgressed progressed ->
             {
@@ -342,7 +333,7 @@ public final class PayloadCodec
                             lineage(payload),
                             Boolean.TRUE.equals(payload.get("superseded")),
                             cause(payload));
-                    case RECORD_FAILED -> new RecordFailed(
+                    case RECORD_TRANSFORMED -> new RecordTransformed(
                             text(payload, "recordId"),
                             itemId,
                             number(payload, "seq"),
@@ -350,15 +341,16 @@ public final class PayloadCodec
                             number(payload, "sourceLength"),
                             text(payload, "format"),
                             text(payload, "contentType"),
-                            text(payload, "errorCode"),
+                            text(payload, "mapping"),
                             number(payload, "plaintextLength"),
                             Math.toIntExact(number(payload, "chunkCount")),
                             storage(payload),
                             origin(payload),
-                            position(payload, "errorLine", "errorColumn"),
                             (String) payload.get("version"),
+                            (String) payload.get("resolves"),
                             lineage(payload),
-                            Boolean.TRUE.equals(payload.get("superseded")));
+                            Boolean.TRUE.equals(payload.get("superseded")),
+                            cause(payload));
                     case ITEM_LANDED -> new ItemLanded(
                             itemId,
                             text(payload, "intake"),
@@ -451,7 +443,21 @@ public final class PayloadCodec
                             texts(payload, "versions"),
                             completion(payload, 1),
                             generation(payload),
-                            uuid(payload, "sameAs"));
+                            uuid(payload, "sameAs"),
+                            (String) payload.get("producerRef"),
+                            uuid(payload, "replaces"));
+                    case ITEM_TRANSFORMED -> new ItemTransformed(
+                            itemId,
+                            text(payload, "intake"),
+                            number(payload, "recordCount"),
+                            number(payload, "failedRecordCount"),
+                            Instant.parse(text(payload, "completedAt")),
+                            texts(payload, "versions"),
+                            completion(payload, 1),
+                            generation(payload),
+                            uuid(payload, "sameAs"),
+                            (String) payload.get("producerRef"),
+                            uuid(payload, "replaces"));
                     case ITEM_PROGRESS -> new ItemProgressed(
                             itemId,
                             text(payload, "intake"),

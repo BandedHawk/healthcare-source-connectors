@@ -960,9 +960,9 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                 StageRegistry.Current older = registry.current(
                         input.itemId(), input.seq(), input.lineage())
                         .orElse(null);
-                if (message instanceof ConnectorMessage.RecordStored stored)
+                if (message instanceof ConnectorMessage.RecordInStorage record)
                 {
-                    message = stored.withCause(new ConnectorMessage.Cause(
+                    message = record.withCause(new ConnectorMessage.Cause(
                             ConnectorMessage.Cause.REPROCESS, runId,
                             older == null ? null : older.messageKey()));
                 }

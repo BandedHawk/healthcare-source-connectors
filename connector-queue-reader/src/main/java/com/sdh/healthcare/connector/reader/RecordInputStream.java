@@ -21,7 +21,7 @@ import static com.sdh.healthcare.connector.contract.table.RecordsTable.SEQ;
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordLocation;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -53,8 +53,8 @@ final class RecordInputStream extends InputStream
     /** What {@link #check} returns for a row of another copy. */
     private static final int OTHER_COPY = -1;
 
-    /** The message announcing the record. */
-    private final RecordInStorage message;
+    /** Where the record is, as its message or row gives it. */
+    private final RecordLocation location;
 
     /** The batch data keys unwrapped so far. */
     private final BatchKeyCache keys;
@@ -93,19 +93,19 @@ final class RecordInputStream extends InputStream
      * Starts the scan of a record's rows.
      *
      * @param table   the records table
-     * @param message the message announcing the record
+     * @param location where the record is
      * @param keys    the batch data keys unwrapped so far
      */
-    private RecordInputStream(Table table, RecordInStorage message,
+    private RecordInputStream(Table table, RecordLocation location,
             BatchKeyCache keys)
     {
-        this.message = message;
+        this.location = location;
         this.keys = keys;
-        long dayStart = TimeUnit.SECONDS.toMicros(message.storage()
+        long dayStart = TimeUnit.SECONDS.toMicros(location.storage()
                 .ingestedDate().atStartOfDay(ZoneOffset.UTC).toEpochSecond());
         Expression filter = Expressions.and(
-                Expressions.equal(ITEM_ID, message.itemId()),
-                Expressions.equal(SEQ, message.seq()),
+                Expressions.equal(ITEM_ID, location.itemId()),
+                Expressions.equal(SEQ, location.seq()),
                 Expressions.greaterThanOrEqual(INGESTED_AT, dayStart),
                 Expressions.lessThan(INGESTED_AT,
                         dayStart + TimeUnit.DAYS.toMicros(1)));
@@ -121,14 +121,14 @@ final class RecordInputStream extends InputStream
      * Opens a record for reading.
      *
      * @param table   the records table
-     * @param message the message announcing the record
+     * @param location where the record is
      * @param keys    the batch data keys unwrapped so far
      * @return the stream
      */
-    static RecordInputStream open(Table table, RecordInStorage message,
+    static RecordInputStream open(Table table, RecordLocation location,
             BatchKeyCache keys)
     {
-        return new RecordInputStream(table, message, keys);
+        return new RecordInputStream(table, location, keys);
     }
 
     /**
@@ -185,12 +185,12 @@ final class RecordInputStream extends InputStream
     {
         while (position >= current.length)
         {
-            if (nextIndex >= message.chunkCount())
+            if (nextIndex >= location.chunkCount())
             {
-                if (delivered != message.plaintextLength())
+                if (delivered != location.plaintextLength())
                 {
                     throw new ChunkIntegrityException(
-                            "SplitRecord length mismatch");
+                            "Record length mismatch");
                 }
                 return false;
             }
@@ -203,7 +203,7 @@ final class RecordInputStream extends InputStream
                     {
                         throw new RecordNotFoundException();
                     }
-                    throw new ChunkIntegrityException("SplitRecord incomplete");
+                    throw new ChunkIntegrityException("Record incomplete");
                 }
                 Record row = rowIterator.next();
                 sawRows = true;
@@ -225,9 +225,9 @@ final class RecordInputStream extends InputStream
                 }
             }
             int expected = RecordCrypto.expectedChunkLength(
-                    message.plaintextLength(), nextIndex);
-            current = RecordCrypto.decryptChunk(recordKey, message.itemId(),
-                    message.seq(), nextIndex, message.chunkCount(), expected,
+                    location.plaintextLength(), nextIndex);
+            current = RecordCrypto.decryptChunk(recordKey, location.itemId(),
+                    location.seq(), nextIndex, location.chunkCount(), expected,
                     stored);
             position = 0;
             delivered += current.length;
@@ -237,27 +237,28 @@ final class RecordInputStream extends InputStream
     }
 
     /**
-     * Checks a row against the message and sets up the record key on the
-     * first row. The record's chunks are read from the batch of the first
-     * row: a row of the same record in another batch is a second copy of
-     * it, appended by a stage worker that lost its claim (STAGES.md §6), and
-     * is skipped. Every append holds whole records, so each copy is
+     * Checks a row against the record's location, and sets up the record
+     * key on the first row. The record's chunks are read from the batch of
+     * the first row: a row of the same record in another batch is a second
+     * copy of it, appended by a stage worker that lost its claim (STAGES.md
+     * §6), and is skipped. Every append holds whole records, so each copy is
      * complete, and the same record ID means the same bytes.
      *
      * @param row the row
      * @return the row's chunk index; {@link #OTHER_COPY} for a row of
      *         another copy
-     * @throws ChunkIntegrityException if the row doesn't match the message,
+     * @throws ChunkIntegrityException if the row doesn't match the location,
      *         or its index is out of range
      */
     private int check(Record row)
     {
-        if (!message.recordId().equals(row.getField(RECORD_ID))
-                || message.chunkCount() != (Integer) row.getField(CHUNK_COUNT)
-                || message.plaintextLength()
+        if (!location.recordId().equals(row.getField(RECORD_ID))
+                || location.chunkCount() != (Integer) row.getField(CHUNK_COUNT)
+                || location.plaintextLength()
                         != (Long) row.getField(PLAINTEXT_LENGTH))
         {
-            throw new ChunkIntegrityException("Row does not match message");
+            throw new ChunkIntegrityException(
+                    "Row does not match the record's location");
         }
         UUID rowBatch = (UUID) row.getField(BATCH_ID);
         if (recordKey == null)
@@ -269,7 +270,7 @@ final class RecordInputStream extends InputStream
             try
             {
                 recordKey = RecordCrypto.recordKey(batchKey,
-                        message.itemId(), message.seq());
+                        location.itemId(), location.seq());
             }
             finally
             {
@@ -281,7 +282,7 @@ final class RecordInputStream extends InputStream
             return OTHER_COPY;
         }
         int index = (Integer) row.getField(CHUNK_INDEX);
-        if (index < 0 || index >= message.chunkCount())
+        if (index < 0 || index >= location.chunkCount())
         {
             throw new ChunkIntegrityException("Chunk index out of range");
         }

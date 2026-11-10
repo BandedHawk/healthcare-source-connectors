@@ -329,17 +329,15 @@ final class ConvertAdminContext
                 .orElseThrow(() -> new IllegalStateException("The failed"
                         + " record isn't in " + RecordsTable.DEFAULT_NAME));
         long snapshot = table.currentSnapshot().snapshotId();
-        ConnectorMessage.RecordInStorage message =
-                (ConnectorMessage.RecordInStorage) ConvertProcessor
-                        .recordMessage(itemId, row, new StorageRef(
-                                properties.storage().catalogName(),
-                                properties.storage().namespace(),
-                                RecordsTable.DEFAULT_NAME, row.ingestedDate(),
-                                snapshot, row.kekRef()));
+        ConnectorMessage.RecordLocation location = ConvertProcessor.location(
+                itemId, row, new StorageRef(properties.storage().catalogName(),
+                        properties.storage().namespace(),
+                        RecordsTable.DEFAULT_NAME, row.ingestedDate(),
+                        snapshot, row.kekRef()));
         try (QueueReader reader = QueueReader.builder().catalog(catalog)
                 .keyProvider(keys().wrap()).build())
         {
-            return reader.readRecord(message,
+            return reader.readRecord(location,
                     (int) Math.min(Integer.MAX_VALUE - 8,
                             maxCorrectionBytes()));
         }

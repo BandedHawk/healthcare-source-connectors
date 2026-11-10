@@ -31,9 +31,9 @@ import java.util.UUID;
 public sealed interface ConnectorMessage permits
         ConnectorMessage.RecordInStorage, ConnectorMessage.ItemLanded,
         ConnectorMessage.ItemReceived, ConnectorMessage.ItemResult,
-        ConnectorMessage.RecordConflict, ConnectorMessage.ItemSplit,
-        ConnectorMessage.ItemConverted, ConnectorMessage.ItemProgressed,
-        ConnectorMessage.RecordReprocess, ConnectorMessage.ItemReprocess
+        ConnectorMessage.RecordConflict, ConnectorMessage.ItemEnd,
+        ConnectorMessage.ItemProgressed, ConnectorMessage.RecordReprocess,
+        ConnectorMessage.ItemReprocess
 {
 
     /**
@@ -101,12 +101,15 @@ public sealed interface ConnectorMessage permits
     }
 
     /**
-     * A record in storage, readable with connector-queue-reader: stored
-     * ({@link RecordStored}) or kept in its original form after failing
-     * conversion ({@link RecordFailed}).
+     * A record a stage stored and sends on, readable with
+     * connector-queue-reader: as the split stage cut it
+     * ({@link RecordSplit}), as the convert stage made it
+     * ({@link RecordStored}), or as the transform stage mapped it
+     * ({@link RecordTransformed}). A record a stage failed is kept in its
+     * fail store and not sent (STAGES.md §15.1).
      */
     sealed interface RecordInStorage extends ConnectorMessage
-            permits RecordStored, RecordFailed, RecordSplit
+            permits RecordStored, RecordSplit, RecordTransformed
     {
 
         /**
@@ -185,6 +188,17 @@ public sealed interface ConnectorMessage permits
         StorageRef storage();
 
         /**
+         * Where the record is, for a reader.
+         *
+         * @return its location
+         */
+        default RecordLocation location()
+        {
+            return new RecordLocation(recordId(), itemId(), seq(),
+                    plaintextLength(), chunkCount(), storage());
+        }
+
+        /**
          * Where the record's text came from in the file, as lines and
          * columns, to turn a position in the record (such as one a mapping
          * reports) into one in the file ({@link RecordOrigin#toFile}).
@@ -229,6 +243,118 @@ public sealed interface ConnectorMessage permits
          * @return the message
          */
         RecordInStorage withLineage(Lineage lineage, boolean superseded);
+
+        /**
+         * For a record made by an operator's correction or retry, the
+         * failure it resolves (STAGES.md §15.6e).
+         *
+         * @return the failed record's id, or for a correction of an item as
+         *         a whole the item's id; null otherwise
+         */
+        String resolves();
+
+        /**
+         * Why the record was made again (STAGES.md §15.8.7).
+         *
+         * @return the cause; null when first made
+         */
+        Cause cause();
+
+        /**
+         * The same message, made again for a reason: what a stage sends for
+         * the output of a reprocess or a correction (STAGES.md §15.8.7).
+         *
+         * @param cause why it was made again; null when first made
+         * @return the message, with the cause
+         */
+        RecordInStorage withCause(Cause cause);
+    }
+
+    /**
+     * A stage finished an item: every record of it the stage will make is
+     * stored and announced, and none of its failures is open (STAGES.md
+     * §5, §15.6). It carries the producer's references on from the stage
+     * before, so whichever stage sends the producer's result has them
+     * (STAGES.md §17.4).
+     */
+    sealed interface ItemEnd extends ConnectorMessage
+            permits ItemSplit, ItemConverted, ItemTransformed
+    {
+
+        /**
+         * The intake the item came in through.
+         *
+         * @return the intake's name
+         */
+        String intake();
+
+        /**
+         * The item's records at this stage, failed ones included.
+         *
+         * @return the count
+         */
+        long recordCount();
+
+        /**
+         * Those of its records that failed and were declined, or for the
+         * split stage the pieces it couldn't parse.
+         *
+         * @return the count
+         */
+        long failedRecordCount();
+
+        /**
+         * When the stage finished it.
+         *
+         * @return the time
+         */
+        Instant completedAt();
+
+        /**
+         * The stage's versions the item's records were made under, in the
+         * order first used.
+         *
+         * @return the versions; empty if not known
+         */
+        List<String> versions();
+
+        /**
+         * Which completion of the item at the stage this is, from 1
+         * (STAGES.md §15.6e), counted within its generation.
+         *
+         * @return the completion
+         */
+        int completion();
+
+        /**
+         * The item's generation it is the end of, from 1 (STAGES.md
+         * §15.8).
+         *
+         * @return the generation
+         */
+        int generation();
+
+        /**
+         * The earlier item of the intake with the same content, the
+         * earliest still landed (STAGES.md §15.5a).
+         *
+         * @return its id; null if none
+         */
+        UUID sameAs();
+
+        /**
+         * The producer's own reference for the item, from landing.
+         *
+         * @return the reference; null if none, or not carried on
+         */
+        String producerRef();
+
+        /**
+         * The item the producer said this one replaces.
+         *
+         * @return its id; null if none
+         */
+        UUID replaces();
     }
 
     /**
@@ -490,11 +616,12 @@ public sealed interface ConnectorMessage permits
         }
 
         /**
-         * The same message, made again for a reason (STAGES.md §15.8.7).
+         * {@inheritDoc}
          *
-         * @param cause why it was made again; null when first made
-         * @return the message, with the cause
+         * @param cause {@inheritDoc}
+         * @return {@inheritDoc}
          */
+        @Override
         public RecordStored withCause(Cause cause)
         {
             return new RecordStored(recordId, itemId, seq, sourceOffset,
@@ -505,35 +632,39 @@ public sealed interface ConnectorMessage permits
     }
 
     /**
-     * A record couldn't be converted to JSON (design §6.4). It is stored as
-     * split, in its original format, for remediation, and the rest of the
-     * file carries on. Read it like any record.
+     * The transform stage mapped a record and stored the output in its
+     * sink, such as a FHIR bundle in gold (STAGES.md §17.6). Read it with
+     * connector-queue-reader, as any record.
      *
-     * @param recordId        the record's id
-     * @param itemId          the id of its file
-     * @param seq             its number in the file, from 0
-     * @param sourceOffset    where it starts in the file, in bytes
-     * @param sourceLength    how many bytes of the file it covers
-     * @param format          the name of the file's format
-     * @param contentType     the media type of the original format, such as
-     *                        {@code text/csv}
-     * @param errorCode       why conversion failed, such as
-     *                        {@code CONVERT_CSV_FIELD_COUNT}
+     * @param recordId        the output's id
+     * @param itemId          the id of its item
+     * @param seq             its number in the item, from 0
+     * @param sourceOffset    where its source starts in the item, in bytes
+     * @param sourceLength    how many bytes of the item it covers
+     * @param format          the name of the item's format
+     * @param contentType     what the stored bytes are, such as
+     *                        {@code application/fhir+json}
+     * @param mapping         the WSTL set it was mapped with, with its
+     *                        digest
      * @param plaintextLength the stored length before compression and
      *                        encryption
      * @param chunkCount      how many encrypted chunks it is stored in
      * @param storage         where it is stored
-     * @param origin          where the record's text came from in the file;
+     * @param origin          where its source's text came from in the item;
      *                        null if the splitter gave none
-     * @param errorAt         where in the file conversion failed, as a line
-     *                        and column; null if not known
-     * @param version         the convert stage's version that failed it;
+     * @param version         the transform stage's version that made it;
      *                        null if not known
+     * @param resolves        for an output of an operator's correction or
+     *                        retry, the failed record it resolves
+     *                        (STAGES.md §15.6e); null otherwise
      * @param lineage         where it stands in its line (STAGES.md
      *                        §15.8.2); null for the first of everything
      * @param superseded      whether superseded on arrival (§15.8.3)
+     * @param cause           why it was made again, for an output of a
+     *                        reprocess or correction (§15.8.7); null when
+     *                        first made
      */
-    record RecordFailed(
+    record RecordTransformed(
             String recordId,
             UUID itemId,
             long seq,
@@ -541,134 +672,48 @@ public sealed interface ConnectorMessage permits
             long sourceLength,
             String format,
             String contentType,
-            String errorCode,
+            String mapping,
             long plaintextLength,
             int chunkCount,
             StorageRef storage,
             RecordOrigin origin,
-            SourcePosition errorAt,
             String version,
+            String resolves,
             Lineage lineage,
-            boolean superseded)
+            boolean superseded,
+            Cause cause)
             implements RecordInStorage
     {
 
         /**
          * Reads no lineage as the first.
          */
-        public RecordFailed
+        public RecordTransformed
         {
             lineage = Lineage.orFirst(lineage);
         }
 
         /**
-         * A message of the first lineage, not superseded.
-         *
-         * @param recordId        the record's id
-         * @param itemId          the id of its file
-         * @param seq             its number in the file, from 0
-         * @param sourceOffset    where it starts in the file, in bytes
-         * @param sourceLength    how many bytes of the file it covers
-         * @param format          the name of the file's format
-         * @param contentType     the media type of the original format
-         * @param errorCode       why conversion failed
-         * @param plaintextLength the stored length before compression and
-         *                        encryption
-         * @param chunkCount      how many encrypted chunks it is stored in
-         * @param storage         where it is stored
-         * @param origin          where the record's text came from
-         * @param errorAt         where conversion failed
-         * @param version         the convert stage's version, or null
-         */
-        public RecordFailed(String recordId, UUID itemId, long seq,
-                long sourceOffset, long sourceLength, String format,
-                String contentType, String errorCode, long plaintextLength,
-                int chunkCount, StorageRef storage, RecordOrigin origin,
-                SourcePosition errorAt, String version)
-        {
-            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
-                    contentType, errorCode, plaintextLength, chunkCount,
-                    storage, origin, errorAt, version, null, false);
-        }
-
-        /**
-         * A message with no version.
-         *
-         * @param recordId        the record's id
-         * @param itemId          the id of its file
-         * @param seq             its number in the file, from 0
-         * @param sourceOffset    where it starts in the file, in bytes
-         * @param sourceLength    how many bytes of the file it covers
-         * @param format          the name of the file's format
-         * @param contentType     the media type of the original format
-         * @param errorCode       why conversion failed
-         * @param plaintextLength the stored length before compression and
-         *                        encryption
-         * @param chunkCount      how many encrypted chunks it is stored in
-         * @param storage         where it is stored
-         * @param origin          where the record's text came from
-         * @param errorAt         where conversion failed
-         */
-        public RecordFailed(String recordId, UUID itemId, long seq,
-                long sourceOffset, long sourceLength, String format,
-                String contentType, String errorCode, long plaintextLength,
-                int chunkCount, StorageRef storage, RecordOrigin origin,
-                SourcePosition errorAt)
-        {
-            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
-                    contentType, errorCode, plaintextLength, chunkCount,
-                    storage, origin, errorAt, null);
-        }
-
-        /**
-         * A message without positions, for a record the splitter gave
-         * none.
-         *
-         * @param recordId        the record's id
-         * @param itemId          the id of its file
-         * @param seq             its number in the file, from 0
-         * @param sourceOffset    where it starts in the file, in bytes
-         * @param sourceLength    how many bytes of the file it covers
-         * @param format          the name of the file's format
-         * @param contentType     the media type of the original format
-         * @param errorCode       why conversion failed
-         * @param plaintextLength the stored length before compression and
-         *                        encryption
-         * @param chunkCount      how many encrypted chunks it is stored in
-         * @param storage         where it is stored
-         */
-        public RecordFailed(String recordId, UUID itemId, long seq,
-                long sourceOffset, long sourceLength, String format,
-                String contentType, String errorCode, long plaintextLength,
-                int chunkCount, StorageRef storage)
-        {
-            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
-                    contentType, errorCode, plaintextLength, chunkCount,
-                    storage, null, null, null);
-        }
-
-        /**
          * {@inheritDoc}
          *
-         * @return {@link MessageType#RECORD_FAILED}
+         * @return {@link MessageType#RECORD_TRANSFORMED}
          */
         @Override
         public MessageType type()
         {
-            return MessageType.RECORD_FAILED;
+            return MessageType.RECORD_TRANSFORMED;
         }
 
         /**
          * {@inheritDoc}
          *
-         * @return "rec-", the item id and the record id: the same content
-         *         in another item is a record of its own there; then the
-         *         lineage's suffix ({@link Lineage#suffix})
+         * @return "tr-", the item id and the record id; then the lineage's
+         *         suffix ({@link Lineage#suffix})
          */
         @Override
         public String messageId()
         {
-            return "rec-" + itemId + "-" + recordId + lineage.suffix();
+            return "tr-" + itemId + "-" + recordId + lineage.suffix();
         }
 
         /**
@@ -679,12 +724,28 @@ public sealed interface ConnectorMessage permits
          * @return {@inheritDoc}
          */
         @Override
-        public RecordFailed withLineage(Lineage lineage, boolean superseded)
+        public RecordTransformed withLineage(Lineage lineage,
+                boolean superseded)
         {
-            return new RecordFailed(recordId, itemId, seq, sourceOffset,
-                    sourceLength, format, contentType, errorCode,
-                    plaintextLength, chunkCount, storage, origin, errorAt,
-                    version, lineage, superseded);
+            return new RecordTransformed(recordId, itemId, seq, sourceOffset,
+                    sourceLength, format, contentType, mapping,
+                    plaintextLength, chunkCount, storage, origin, version,
+                    resolves, lineage, superseded, cause);
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @param cause {@inheritDoc}
+         * @return {@inheritDoc}
+         */
+        @Override
+        public RecordTransformed withCause(Cause cause)
+        {
+            return new RecordTransformed(recordId, itemId, seq, sourceOffset,
+                    sourceLength, format, contentType, mapping,
+                    plaintextLength, chunkCount, storage, origin, version,
+                    resolves, lineage, superseded, cause);
         }
     }
 
@@ -1395,11 +1456,12 @@ public sealed interface ConnectorMessage permits
         }
 
         /**
-         * The same record, cut again for a cause.
+         * {@inheritDoc}
          *
-         * @param why the cause; null for a first cut
-         * @return the message
+         * @param why {@inheritDoc}
+         * @return {@inheritDoc}
          */
+        @Override
         public RecordSplit withCause(Cause why)
         {
             return new RecordSplit(recordId, itemId, seq, sourceOffset,
@@ -1451,7 +1513,7 @@ public sealed interface ConnectorMessage permits
             String producerRef, UUID replaces, Problem failure,
             Instant startedAt, Instant completedAt, List<String> versions,
             int completion, int generation, boolean interrupted, UUID sameAs)
-            implements ConnectorMessage
+            implements ItemEnd
     {
 
         /**
@@ -1651,12 +1713,40 @@ public sealed interface ConnectorMessage permits
      * @param sameAs            the earlier item of the intake with the same
      *                          content, the earliest still landed, if any
      *                          (STAGES.md §15.5a); null if none
+     * @param producerRef       the producer's own reference for it, carried
+     *                          on from the item's end at the split stage
+     *                          (STAGES.md §17.4); null if none
+     * @param replaces          the item it replaces, carried on the same
+     *                          way; null if none
      */
     record ItemConverted(UUID itemId, String intake, long recordCount,
             long failedRecordCount, Instant completedAt, List<String> versions,
-            int completion, int generation, UUID sameAs)
-            implements ConnectorMessage
+            int completion, int generation, UUID sameAs, String producerRef,
+            UUID replaces)
+            implements ItemEnd
     {
+
+        /**
+         * The message without the producer's references.
+         *
+         * @param itemId            as in the record, above
+         * @param intake            as in the record, above
+         * @param recordCount       as in the record, above
+         * @param failedRecordCount as in the record, above
+         * @param completedAt       as in the record, above
+         * @param versions          as in the record, above
+         * @param completion        as in the record, above
+         * @param generation        as in the record, above
+         * @param sameAs            as in the record, above
+         */
+        public ItemConverted(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, Instant completedAt,
+                List<String> versions, int completion, int generation,
+                UUID sameAs)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, completedAt,
+                    versions, completion, generation, sameAs, null, null);
+        }
 
         /**
          * The message with no {@code sameAs}: an item that is no copy.
@@ -1770,11 +1860,81 @@ public sealed interface ConnectorMessage permits
     }
 
     /**
+     * The transform stage stored every record of an item (STAGES.md §5,
+     * §17).
+     *
+     * @param itemId            the item's id
+     * @param intake            the intake it came in through
+     * @param recordCount       its records, failed ones included
+     * @param failedRecordCount those that failed and were declined
+     * @param completedAt       when the last was stored
+     * @param versions          the transform stage's versions its records
+     *                          were made under, in the order first used;
+     *                          empty if not known
+     * @param completion        which completion of the item at the
+     *                          transform stage this is, from 1 (STAGES.md
+     *                          §15.6e), counted within its generation
+     * @param generation        the item's generation it is the end of, from
+     *                          1 (STAGES.md §15.8)
+     * @param sameAs            the earlier item of the intake with the same
+     *                          content, the earliest still landed, if any
+     *                          (STAGES.md §15.5a); null if none
+     * @param producerRef       the producer's own reference for it, carried
+     *                          on from {@code item.converted}; null if none
+     * @param replaces          the item it replaces; null if none
+     */
+    record ItemTransformed(UUID itemId, String intake, long recordCount,
+            long failedRecordCount, Instant completedAt, List<String> versions,
+            int completion, int generation, UUID sameAs, String producerRef,
+            UUID replaces)
+            implements ItemEnd
+    {
+
+        /**
+         * Copies the versions; a completion or generation not given is the
+         * first.
+         */
+        public ItemTransformed
+        {
+            versions = versions == null ? List.of() : List.copyOf(versions);
+            completion = Math.max(1, completion);
+            generation = Math.max(1, generation);
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#ITEM_TRANSFORMED}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.ITEM_TRANSFORMED;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "ic-transform-" and the item id; from its second
+         *         generation {@code ~g} and its number; and from its second
+         *         completion {@code ~c} and the completion's number
+         */
+        @Override
+        public String messageId()
+        {
+            return "ic-transform-" + itemId
+                    + ConnectorMessage.generationSuffix(generation)
+                    + ConnectorMessage.completionSuffix(completion, 1);
+        }
+    }
+
+    /**
      * A stage has handled every record of an item once, and some failed and
      * are open: neither passed nor declined (STAGES.md §15.6). It is sent in
      * place of the item-complete message ({@code item.split},
-     * {@code item.converted}), and again whenever its counts change, until
-     * nothing is open; failures themselves are not sent downstream (§15.1).
+     * {@code item.converted}, {@code item.transformed}), and again whenever
+     * its counts change, until nothing is open; failures themselves are not
+     * sent downstream (§15.1).
      * A later stage takes it as a total still to grow: it handles the
      * records passed so far, and completes only on the item-complete
      * message.
@@ -1985,6 +2145,26 @@ public sealed interface ConnectorMessage permits
             java.time.LocalDate ingestedDate,
             long snapshotId,
             String kekRef)
+    {
+    }
+
+    /**
+     * Where one record is, and what a reader checks it against: all that
+     * connector-queue-reader needs to read it (STAGES.md §17.4). Every
+     * record message gives one ({@link RecordInStorage#location}); a stage
+     * makes one from a stored row to read a record no message announced,
+     * such as a failed one an operator exports.
+     *
+     * @param recordId        the record's id
+     * @param itemId          the id of its item
+     * @param seq             its number in the item, from 0
+     * @param plaintextLength the stored length before compression and
+     *                        encryption
+     * @param chunkCount      how many encrypted chunks it is stored in
+     * @param storage         where it is stored
+     */
+    record RecordLocation(String recordId, UUID itemId, long seq,
+            long plaintextLength, int chunkCount, StorageRef storage)
     {
     }
 

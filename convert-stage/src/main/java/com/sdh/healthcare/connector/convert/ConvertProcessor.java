@@ -12,7 +12,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConver
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordLocation;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
@@ -70,9 +70,10 @@ import org.slf4j.LoggerFactory;
  * The convert stage's work on each record (STAGES.md §9): read it from
  * {@code split_records}, convert it to JSON with its format's converter
  * (design §6.4), store it in the shared {@code records} table, and announce
- * it with {@code record.stored}, or {@code record.failed} when it is stored
- * as split with an error. Once all of an item's records are stored it
- * sends {@code item.converted}, then the producer's result.
+ * it with {@code record.stored}. A record stored as split with an error is
+ * kept in the fail store and not sent (STAGES.md §15.1). Once all of an
+ * item's records are stored it sends {@code item.converted}, then the
+ * producer's result.
  * <p>
  * A record is stored as split, not converted, when the splitter couldn't
  * parse it (with the splitter's error), when it is larger than the most
@@ -880,30 +881,21 @@ public final class ConvertProcessor
     }
 
     /**
-     * The message announcing a stored record.
+     * The message announcing a stored record: one stored without an
+     * error, since a failed record is kept in the fail store and not sent
+     * (STAGES.md §15.1).
      *
      * @param record   the record
      * @param ref      where it is stored
      * @param version  the stage's version that made it
      * @param resolves for a correction or retry, the failed record it
      *                 resolves; null otherwise
-     * @return {@code record.failed} if it has an error, else
-     *         {@code record.stored}
+     * @return its {@code record.stored}
      */
-    private static ConnectorMessage.RecordInStorage message(
-            WrittenRecord record, StorageRef ref, String version,
-            String resolves)
+    private static RecordStored message(WrittenRecord record, StorageRef ref,
+            String version, String resolves)
     {
         Representation representation = record.representation();
-        if (record.error() != null)
-        {
-            return new RecordFailed(record.recordId(), record.itemId(),
-                    record.seq(), record.sourceOffset(),
-                    record.sourceLength(), record.format(),
-                    representation.contentType(), record.error().name(),
-                    record.plaintextLength(), record.chunkCount(), ref,
-                    record.origin(), record.errorAt(), version);
-        }
         return new RecordStored(record.recordId(), record.itemId(),
                 record.seq(), record.sourceOffset(), record.sourceLength(),
                 record.format(), representation.contentType(),
@@ -912,33 +904,21 @@ public final class ConvertProcessor
     }
 
     /**
-     * A stored record's {@code record.stored} or {@code record.failed},
-     * rebuilt from its row of {@code records} as the stage first sent it,
-     * but for the snapshot it names.
+     * Where a stored record is, from its row of {@code records}, for
+     * reading it with the reader's own code: such as a failed record,
+     * which no message announced.
      *
      * @param itemId its item
      * @param row    its row
      * @param ref    where it is stored: the row's day and KEK, and a
      *               snapshot that holds it
-     * @return {@code record.failed} if it has an error, else
-     *         {@code record.stored}
+     * @return its location
      */
-    public static ConnectorMessage recordMessage(UUID itemId,
+    public static RecordLocation location(UUID itemId,
             CommittedRecords.Row row, StorageRef ref)
     {
-        if (row.errorCode() != null)
-        {
-            return new RecordFailed(row.recordId(), itemId, row.seq(),
-                    row.sourceOffset(), row.sourceLength(), row.format(),
-                    row.contentType(), row.errorCode(), row.plaintextLength(),
-                    row.chunkCount(), ref, row.origin(), row.errorAt(),
-                    row.stageVersion(), row.lineage(), false);
-        }
-        return new RecordStored(row.recordId(), itemId, row.seq(),
-                row.sourceOffset(), row.sourceLength(), row.format(),
-                row.contentType(), row.mapping(), row.plaintextLength(),
-                row.chunkCount(), ref, row.origin(), row.stageVersion(),
-                row.correctionOf(), row.lineage(), false);
+        return new RecordLocation(row.recordId(), itemId, row.seq(),
+                row.plaintextLength(), row.chunkCount(), ref);
     }
 
     /**
@@ -953,10 +933,14 @@ public final class ConvertProcessor
                 ? split.intake() : UNKNOWN_INTAKE;
         ResultReporter.Facts facts = ResultReporter.Facts.of(
                 progress.total());
+        // The producer's references go on, for a later stage's result
+        // (STAGES.md §17.4).
         return new ItemConverted(progress.itemId(), intake, progress.done(),
                 progress.unresolved(), clock.instant(), progress.versions(),
                 progress.nextCompletion(), progress.generation(),
-                facts == null ? null : facts.sameAs());
+                facts == null ? null : facts.sameAs(),
+                facts == null ? null : facts.producerRef(),
+                facts == null ? null : facts.replaces());
     }
 
     /**

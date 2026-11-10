@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordLocation;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import java.io.IOException;
@@ -47,9 +48,9 @@ import org.apache.iceberg.catalog.TableIdentifier;
  *     case RecordStored stored -> {
  *         try (InputStream input = reader.openRecord(stored)) { ... }
  *     }
- *     // Kept in its original format (failed.contentType()), for
- *     // remediation.
- *     case RecordFailed failed -> { ... }
+ *     // An item's records are all here: none failed, or every failure
+ *     // was declined (STAGES.md §15.6).
+ *     case ItemConverted done -> { ... }
  *     default -> { }
  * }
  * }</pre>
@@ -192,25 +193,40 @@ public final class QueueReader implements AutoCloseable
     }
 
     /**
+     * Streams the plaintext of the record a message announces.
+     *
+     * @param message the message announcing the record
+     * @return a stream of the record's plaintext
+     * @throws RecordNotFoundException if the record is not (or no longer)
+     *                                  in the table
+     * @see #openRecord(RecordLocation)
+     */
+    public InputStream openRecord(RecordInStorage message)
+    {
+        return openRecord(message.location());
+    }
+
+    /**
      * Streams the plaintext of a stored record. Every chunk is authenticated
      * as it is read, and the stream fails if any chunk is missing,
      * duplicated, out of place or of the wrong length. It holds at most one
      * decrypted chunk (8 MiB) in memory, plus any chunks the scan returns
      * ahead of order.
      *
-     * @param message the message announcing the record
+     * @param location where the record is: from its message, or made from
+     *                 a stored row by a stage
      * @return a stream of the record's plaintext
      * @throws RecordNotFoundException if the record is not (or no longer)
      *                                  in the table
      */
-    public InputStream openRecord(RecordInStorage message)
+    public InputStream openRecord(RecordLocation location)
     {
-        Table table = table(message.storage());
-        return RecordInputStream.open(table, message, keys);
+        Table table = table(location.storage());
+        return RecordInputStream.open(table, location, keys);
     }
 
     /**
-     * Reads a whole record into memory.
+     * Reads the whole record a message announces into memory.
      *
      * @param message  the message announcing the record
      * @param maxBytes the largest record to read
@@ -218,15 +234,31 @@ public final class QueueReader implements AutoCloseable
      * @throws IllegalArgumentException if the record is larger than
      *                                  {@code maxBytes}
      * @throws UncheckedIOException     if the record can't be read
+     * @see #readRecord(RecordLocation, int)
      */
     public byte[] readRecord(RecordInStorage message, int maxBytes)
     {
-        if (message.plaintextLength() > maxBytes)
+        return readRecord(message.location(), maxBytes);
+    }
+
+    /**
+     * Reads a whole record into memory.
+     *
+     * @param location where the record is
+     * @param maxBytes the largest record to read
+     * @return the record's plaintext
+     * @throws IllegalArgumentException if the record is larger than
+     *                                  {@code maxBytes}
+     * @throws UncheckedIOException     if the record can't be read
+     */
+    public byte[] readRecord(RecordLocation location, int maxBytes)
+    {
+        if (location.plaintextLength() > maxBytes)
         {
             throw new IllegalArgumentException(
-                    "SplitRecord is larger than maxBytes");
+                    "Record is larger than maxBytes");
         }
-        try (InputStream input = openRecord(message))
+        try (InputStream input = openRecord(location))
         {
             return input.readAllBytes();
         }

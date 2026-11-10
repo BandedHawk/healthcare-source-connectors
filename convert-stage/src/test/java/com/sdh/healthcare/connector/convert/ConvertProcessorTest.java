@@ -388,8 +388,8 @@ class ConvertProcessorTest
 
     /**
      * The stage takes {@code record.split} and {@code item.split}, and
-     * completes an item with its counts and the intake from its
-     * {@code item.split}.
+     * completes an item with its counts, and the intake and producer's
+     * references from its {@code item.split} (STAGES.md §17.4).
      */
     @Test
     void classifiesAndCompletesItems()
@@ -404,7 +404,8 @@ class ConvertProcessorTest
 
         assertThat(processor.itemComplete(
                 new ItemProgress(item, 3, 3, 1, total)))
-                .isEqualTo(new ItemConverted(item, "claims", 3, 1, NOW));
+                .isEqualTo(new ItemConverted(item, "claims", 3, 1, NOW,
+                        List.of(), 1, 1, null, "ref-1", null));
         assertThat(((ItemConverted) processor.itemComplete(
                 new ItemProgress(item, 3, 3, 1))).intake())
                 .isEqualTo(ConvertProcessor.UNKNOWN_INTAKE);

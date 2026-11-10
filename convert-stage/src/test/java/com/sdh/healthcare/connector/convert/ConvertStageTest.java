@@ -343,7 +343,6 @@ class ConvertStageTest
         assertThat(worker.handle(batch))
                 .isEqualTo(BatchHandler.Outcome.DONE);
         assertThat(sentOf("record.stored")).isEqualTo(2);
-        assertThat(sentOf("record.failed")).isZero();
         assertThat(sentOf("item.converted")).isEqualTo(1);
         assertThat(registry.completed(List.of(item))).containsExactly(item);
         // Each record, its row and the item name the version that made
@@ -392,7 +391,6 @@ class ConvertStageTest
                 received(total), received(messages.get(1)))))
                 .isEqualTo(BatchHandler.Outcome.DONE);
         assertThat(sentOf("record.stored")).isEqualTo(1);
-        assertThat(sentOf("record.failed")).isZero();
         assertThat(sentOf("item.converted")).isZero();
         assertThat(sentOf("item.progress")).isEqualTo(1);
         assertThat(registry.completed(List.of(item))).isEmpty();

@@ -45,8 +45,8 @@ public final class ConversionException extends Exception
     private static final long serialVersionUID = 1L;
 
     /**
-     * What went wrong, as a stable code: the one recorded with the record and
-     * reported in its {@code record.failed} message and audit event.
+     * What went wrong, as a stable code: the one recorded with the record,
+     * in the fail store and in its {@code record.failed} audit event.
      *
      * @serial
      */

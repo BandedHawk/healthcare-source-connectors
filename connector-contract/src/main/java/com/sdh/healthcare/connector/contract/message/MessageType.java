@@ -24,9 +24,6 @@ public enum MessageType
     /** A record was stored. */
     RECORD_STORED("record.stored"),
 
-    /** A record failed conversion, and was stored as split. */
-    RECORD_FAILED("record.failed"),
-
     /** A landing node landed an item, for its splitter. */
     ITEM_LANDED("item.landed"),
 
@@ -44,6 +41,12 @@ public enum MessageType
 
     /** The convert stage stored every record of an item. */
     ITEM_CONVERTED("item.converted"),
+
+    /** The transform stage mapped a record and stored the output. */
+    RECORD_TRANSFORMED("record.transformed"),
+
+    /** The transform stage stored every record of an item. */
+    ITEM_TRANSFORMED("item.transformed"),
 
     /**
      * A stage handled every record of an item once, and some failed and are

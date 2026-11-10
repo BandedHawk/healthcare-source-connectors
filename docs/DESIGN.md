@@ -141,6 +141,8 @@ Revision 2026-11-10 (cp), built and tried on the sandbox: exact copies ([STAGES.
 
 Revision 2026-11-10 (cq), built: the drain check ([STAGES.md](STAGES.md) §14.4a, decided with the user, replacing §14.4). A split or convert pod starts work only once its release (every version it stamps) is let in: the current or previous release, one whose new versions are already in flight, one with no item part way under a version it wouldn't stamp, or one an operator accepted (`version --accept`, with an encrypted reason, `stage.version_forced`). Until then it is not ready: its ready port (`sdh.stage.ready-port`, 8081, a `tcpSocket` probe) opens only once let in. Work waiting on an operator never holds a change; `drain-check` lists it with the items part way. The stages' Deployments move from `Recreate` to a rolling update that adds a pod first, so the old pods finish the items while the new one waits ([DEPLOYMENT.md](DEPLOYMENT.md), "Changing a stage's version").
 
+Revision 2026-11-10 (cr), built: step 1 of the shared record stage, the contract ([STAGES.md](STAGES.md) §17.8, decided with the user). `record.failed` is removed: no stage has sent a failed record since the fail store (revision (ce)), and its last use, reading a failed row for `failures export`, is now a `RecordLocation` (record ID, item ID, seq, length, chunk count, storage ref) that every record message gives (`location()`) and `QueueReader.openRecord`/`readRecord` take. `record.transformed` and `item.transformed` are added for the transform stage; `item.converted` carries `producerRef` and `replaces` on from `item.split`, so a later stage can send the producer's result. The record messages share `resolves`, `cause` and `withCause` (the worker sets a reprocess's cause on any of them), and the item ends an `ItemEnd` interface; `StageMessages` says, per record stage, what it takes and makes. Still 3.0: nothing released.
+
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
 
 Revision 2026-11-03 (at): built step 3b of landing: the landing node ships like the splitter, as a distribution kit and tarball (`landing-connector-<v>`), a customer image (`sdh/landing-connector`) and a service image (`sdh/landing-connector-service`), each with its SBOM, signature and scan (§14.1, §14.3–§14.5). The shared Docker files moved to the top-level `docker/`; `build-image.sh` takes the application; `sign-release.sh` signs both tarballs and all four images into `target/release/`. The splitter's images and kit lose the inbound directory, and `restore` in a container goes to `/tmp`, read out through `kubectl debug`. The splitter's Kafka consumer keeps automatic commits, one message per poll (§5.3.12). `ContainerImageItBase`, the Kubernetes run and the demo now run both stages: landing as an active node and a standby, with failover of each stage (§15).
@@ -476,7 +478,7 @@ flowchart LR
   S -->|record.split, item.split| C[Convert stage<br/>records in parallel]
   V --> C
   C --> U[(sdh_ingest<br/>records)]
-  C -->|record.stored, record.failed, item.converted| D[Downstream queue]
+  C -->|record.stored, item.converted| D[Downstream queue]
 ```
 
 As built since step 4 ([STAGES.md](STAGES.md)): the second stage below is two, the split stage and the convert stage, each a set of pods that work in parallel. The decisions below are as they were taken.
@@ -1624,25 +1626,26 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
 | Type | When | Payload (inside encryption) |
 |---|---|---|
 | `record.stored` | after batch commit | messageId, itemId, recordId, seq, sourceOffset, sourceLength, format, contentType, mapping (when converted), plaintextLength, chunkCount, storage ref (catalog, namespace, table, ingested date, snapshotId, kekRef), origin (recordLine, recordColumn, sourceLine, sourceColumn), version, and when set: resolves, superseded, cause (with runId and revisionOf), generation and line |
-| `record.failed` | after batch commit; like `record.stored`, keyed by record ID, so no order between records (STAGES.md §1) | as `record.stored`, with errorCode instead of mapping, and errorLine and errorColumn when the failure has a place, and no resolves or cause; the record is stored in its original form (§6.4) |
 | `item.landed` | landing node to its splitter, after the item's commit (§5.3.6) | itemId, intake, kind, size, itemDigest, landedAt, storage, and when set: replaces, sameAs |
 | `item.received` | landing node to the producer, after `item.landed` (§5.3.8) | itemId, intake, kind, size, sha256, landedAt, and when set: producerRef, replaces, messageIds, messageReplaces, sameAs |
 | `record.split` | split stage to the convert stage, after the record's commit (STAGES.md §4) | as `record.stored`, without mapping, with errorCode (and errorLine and errorColumn) for a piece the splitter couldn't parse, stored as it was; for a batch of queue messages, message, messageRef and messageReplaces |
 | `item.split` | split stage to the convert stage, once all of an item's records are sent and none of its failures is open (STAGES.md §15.6) | itemId, intake, recordCount (failed included), failedRecordCount, itemSize, itemDigest, startedAt, completedAt, versions, completion, generation, and when set: producerRef, replaces, failure (a problem, if the item couldn't be split to its end), interrupted, sameAs |
 | `item.progress` | a stage, in place of its item-complete message, while some of an item's failures are open, and again when its counts change (STAGES.md §15.6) | itemId, intake, stage, recordCount, passedCount, openCount, declinedCount, reportedAt, versions, completion, generation, and when set: failure, producerRef, replaces, sameAs |
-| `item.converted` | convert stage to readers, once all of an item's records are stored and none of its failures is open | itemId, intake, recordCount, failedRecordCount, completedAt, versions, completion, generation, and when set: sameAs |
+| `item.converted` | convert stage to readers, once all of an item's records are stored and none of its failures is open | itemId, intake, recordCount, failedRecordCount, completedAt, versions, completion, generation, and when set: sameAs, producerRef, replaces (carried on from `item.split`, STAGES.md §17.4) |
+| `record.transformed` | transform stage to readers, after batch commit (STAGES.md §17) | as `record.stored`; contentType such as `application/fhir+json`, and mapping the WSTL set with its digest |
+| `item.transformed` | transform stage to readers, once all of an item's records are stored and none of its failures is open | as `item.converted` |
 | `record.conflict` | a stage to its dead-letter queue, when a record it stored comes again with different output (STAGES.md §6) | itemId, recordId, stage, storedDigest, newDigest, foundAt; no content |
 | `item.reprocess` | the split stage to its own input, for a reprocess run (STAGES.md §15.8.4) | landed (the item's `item.landed`, as landing kept it, with no sameAs), generation, runId |
 | `record.reprocess` | a stage to its own input, for a reprocess run (STAGES.md §15.8.4) | record (the stage's input record, at its new line), runId |
 | `item.result` | the last stage to the producer, when an item is finished or while failures are open (§5.3.8) | itemId, intake, status (`completed`, `failed` or `incomplete`), recordCount, failedRecordCount, failure, problemCount, part, partCount, problems (code, stage, seq, offset, line, column, message, messageRef, messageReplaces), producerRef, replaces, finishedAt, completion, and when set: sameAs |
 
-- **No `item.failed` message:** a failed record is `record.failed`, and an item's failures are counted in its item-complete message; anything more is reported through OpenTelemetry only, as agreed. An item that never finishes a stage has no item-complete message from it (STAGES.md §13.2).
+- **No `item.failed` message:** a failed record is kept in its stage's fail store and not sent (STAGES.md §15.1), and an item's failures are counted in its `item.progress` and item-complete message; anything more is reported through OpenTelemetry only, as agreed. An item that never finishes a stage has no item-complete message from it (STAGES.md §13.2).
 - **Change from earlier discussion:** the "duplicates skipped" count is **not** included in the item-complete messages. Counting it would require checking every record against all previously stored IDs, which is too expensive at this scale. Duplicate handling stays downstream.
 - **Exact copies (`sameAs`, STAGES.md §15.5a):** an item with the same content as an earlier item of the intake is processed in full, as an item of its own. Landing names the earliest such item still in its ledger, other than the one the copy replaces, as `sameAs`, and every message about the copy carries it on. It is information only: a reader may use it to link the two, never to skip the copy.
 - **Unencrypted broker metadata** is limited to: `messageId`, `type`, `itemId`, and the content type `application/jose`.
 - **Message IDs** (`[~gN]` is added for a generation after the first, `[~rN.N]` for a revision's line, `[~cN]` for a completion after the first; STAGES.md §15.6e, §15.8.2):
-  - `record.stored` and `record.failed`: `rec-<itemId>-<recordId>[~gN][~rN.N]`; `record.split`: `sp-<itemId>-<recordId>[~gN][~rN.N]`. The item is part of the ID because a record ID comes from the content alone (§7.3): the same document in two items is a record of each, and must reach the next stage for both, past the brokers' duplicate detection (decided 2026-11-05). A reader that wants each document once drops repeats by `recordId`.
-  - `item.split`: `is-<itemId>[~gN][~cN]`; `item.converted`: `ic-convert-<itemId>[~gN][~cN]`; `item.progress`: `ip-<stage>-<itemId>-<recordCount>-<passedCount>-<openCount>-<declinedCount>[~gN][~cN]`, so new counts are a new message; `record.conflict`: `rc-` and a SHA-256 of the stage, item ID, record ID and new digest, so the ID fits every broker's limit (128 characters on SQS and Service Bus).
+  - `record.stored`: `rec-<itemId>-<recordId>[~gN][~rN.N]`; `record.split`: `sp-<itemId>-<recordId>[~gN][~rN.N]`; `record.transformed`: `tr-<itemId>-<recordId>[~gN][~rN.N]`. The item is part of the ID because a record ID comes from the content alone (§7.3): the same document in two items is a record of each, and must reach the next stage for both, past the brokers' duplicate detection (decided 2026-11-05). A reader that wants each document once drops repeats by `recordId`.
+  - `item.split`: `is-<itemId>[~gN][~cN]`; `item.converted`: `ic-convert-<itemId>[~gN][~cN]`; `item.transformed`: `ic-transform-<itemId>[~gN][~cN]`; `item.progress`: `ip-<stage>-<itemId>-<recordCount>-<passedCount>-<openCount>-<declinedCount>[~gN][~cN]`, so new counts are a new message; `record.conflict`: `rc-` and a SHA-256 of the stage, item ID, record ID and new digest, so the ID fits every broker's limit (128 characters on SQS and Service Bus).
   - `item.reprocess`: `ri-<itemId>[~gN]`; `record.reprocess`: `rp-<itemId>-<recordId>[~gN][~rN.N]`.
   - `item.landed`: `il-<itemId>`; `item.received`: `rc-<itemId>`; `item.result`: `rs-<itemId>-<part>[~cN]` when completed, `rs-<itemId>-incomplete-<recordCount>-<failedRecordCount>-<problemCount>-<part>[~cN]` while incomplete, and `rs-<itemId>-<part>` when failed.
 - **Contract 2.0** (from 1.0): added `contentType`, `mapping`, `record.failed` and `failedRecordCount`. It's a major version because a 1.x reader can't handle the new message type.
@@ -1655,7 +1658,8 @@ Every message is **JWS (ES256, signed by this service, `typ: sdh-msg+jws`) neste
   - for the stages' versions (STAGES.md §15.4a): `version` on record messages, `versions` on item-complete messages and `item.progress`;
   - for failures and corrections (§15.6): `item.progress`, the `incomplete` status of `item.result`, `completion` on item ends and results, `resolves` on `record.stored` and `record.split`, and `message`, `messageRef` and `messageReplaces` on `record.split`;
   - for reprocessing and revisions (§15.8): `generation`, `line`, `superseded` and `cause` (with `runId` and `revisionOf`) on records, `generation` and `interrupted` on item ends, and the `item.reprocess` and `record.reprocess` messages, which stay within a stage;
-  - for exact copies (§15.5a, decided 2026-11-10): `sameAs` on `item.landed`, `item.received`, `item.split`, `item.progress`, `item.converted` and `item.result`, and in the push receipt (§5.3.8).
+  - for exact copies (§15.5a, decided 2026-11-10): `sameAs` on `item.landed`, `item.received`, `item.split`, `item.progress`, `item.converted` and `item.result`, and in the push receipt (§5.3.8);
+  - for the shared record stage (§17, decided 2026-11-10): `record.transformed` and `item.transformed`, and `producerRef` and `replaces` on `item.converted`; `record.failed`, added in 2.0, removed, since no stage sends a failed record (§15.1).
 
 ### 10.2 Consuming messages: `connector-queue-reader`
 
@@ -1670,10 +1674,11 @@ QueueReader reader = QueueReader.builder()
     .keyProvider(kmsKeyProvider)                                 // unwrap rights on the records KEK only
     .build();
 
-ConnectorMessage m = reader.decode(brokerMessageBody);           // RecordStored | RecordFailed | ItemConverted
+ConnectorMessage m = reader.decode(brokerMessageBody);           // RecordStored | ItemConverted | ItemProgressed | ...
 if (m instanceof RecordStored s) {
     try (InputStream in = reader.openRecord(s)) { ... }         // or reader.readRecord(s, maxBytes)
 }
+reader.readRecord(location, maxBytes);                           // a RecordLocation: from a message, or made from a stored row
 
 reader.decodeNew(brokerMessageBody)                              // empty for a message decoded recently
       .ifPresent(message -> ...);
@@ -1683,7 +1688,7 @@ reader.decodeNew(brokerMessageBody)                              // empty for a 
 - **Decoding:** decrypts and verifies messages. Only the algorithms listed in §10.1 are accepted, and keys are chosen by `kid` from fixed lists, so a message header can't pick a weaker algorithm or key. Rejections give a `MessageRejectedException.Reason`, never payload content.
 - **Record lookup:** queries `records` for the record's `item_id`, `seq` and `ingested_at` day, which allows partition pruning. It refreshes its cached table if the message names a snapshot it hasn't seen yet.
 - **Keys:** unwraps each batch data key once and caches it by `batch_id`, then derives the record key.
-- **Streaming:** decrypts chunk by chunk, holding one 8 MiB chunk in memory plus any chunks the scan returns early. Each row is checked against the message (record ID, chunk count, length). The stream fails if a chunk is missing, duplicated, out of range, from another batch, or the wrong length.
+- **Streaming:** decrypts chunk by chunk, holding one 8 MiB chunk in memory plus any chunks the scan returns early. Each row is checked against the record's location, as its message or a stored row gives it (record ID, chunk count, length). The stream fails if a chunk is missing, duplicated, out of range, from another batch, or the wrong length.
 - **Broker-neutral:** the consumer passes in the message body from whatever broker client it uses.
 - **Repeats** (revision (cc)): delivery is at least once. A stage sends a message again after a crash, under the same contract `messageId` (a record's is its item and record IDs), sealed again; a reprocess is never a repeat, as its generation or revision is in its ID ([STAGES.md](STAGES.md) §15.8.2). `decodeNew` drops a message whose ID the reader has decoded recently: the last `repeatMemory` IDs (default 100,000, about 15 MiB), the oldest forgotten first. `decode` returns every message. The memory is the process's own, so a consumer that must never process a record twice across its own restarts keeps the record IDs it has processed itself.
 
@@ -1695,7 +1700,7 @@ reader.decodeNew(brokerMessageBody)                              // empty for a 
 
 `sdh.queue.type` selects the adapter, and `sdh.queue.uri` is a full Camel endpoint URI, so any component option can be set at run time. All client libraries are included in the single build.
 
-The **key** each adapter orders and partitions by is the record's ID for a message about a record (`record.split`, `record.stored`, `record.failed`, `record.conflict`), so an item's records spread over partitions and workers, and the item's ID for every other message (STAGES.md §4). A record ID is a keyed hash, and is already a record message's `messageId`, so it shows nothing more.
+The **key** each adapter orders and partitions by is the record's ID for a message about a record (`record.split`, `record.stored`, `record.transformed`, `record.conflict`), so an item's records spread over partitions and workers, and the item's ID for every other message (STAGES.md §4). A record ID is a keyed hash, and is already a record message's `messageId`, so it shows nothing more.
 
 | `type` | Camel component | Ordering key | Broker-side dedup |
 |---|---|---|---|

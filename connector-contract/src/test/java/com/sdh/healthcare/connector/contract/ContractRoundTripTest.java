@@ -117,19 +117,10 @@ class ContractRoundTripTest
                         "application/json", "csv-row/1", 30, 1, ref),
                 new RecordStored("ID2", itemId, 1, 30, 20, "fhir",
                         "application/fhir+json", null, 20, 1, ref),
-                new ConnectorMessage.RecordFailed("ID3", itemId, 2, 50, 20,
-                        "csv", "text/csv", "CONVERT_CSV_FIELD_COUNT", 40, 1,
-                        ref),
                 new RecordStored("ID4", itemId, 3, 70, 20, "ccda",
                         "application/json", "ccda/2", 30, 1, ref,
                         new RecordOrigin(new SourcePosition(2, 1),
                                 new SourcePosition(41, 5))),
-                new ConnectorMessage.RecordFailed("ID5", itemId, 4, 90, 20,
-                        "ccda", "application/xml", "CONVERT_XML_MALFORMED",
-                        40, 1, ref,
-                        new RecordOrigin(new SourcePosition(2, 1),
-                                new SourcePosition(60, 1)),
-                        new SourcePosition(75, 12)),
                 new ConnectorMessage.ItemLanded(itemId, "claims-sftp", "file",
                         999, "digest", java.time.Instant.EPOCH,
                         new StorageRef("cat", "sdh_landing", "landed_items",
@@ -185,9 +176,6 @@ class ContractRoundTripTest
                 new RecordStored("ID9", itemId, 7, 150, 20, "ccda",
                         "application/json", "ccda/2", 30, 1, ref, null,
                         "0.1.0@2026-11-08T10:00:00Z/ccda/2/3f9a0c1d22b7"),
-                new ConnectorMessage.RecordFailed("ID10", itemId, 8, 170, 20,
-                        "csv", "text/csv", "CONVERT_CSV_FIELD_COUNT", 40, 1,
-                        ref, null, null, "0.1.0@x/csv-row/1/ab"),
                 new ConnectorMessage.RecordSplit("ID11", itemId, 9, 190, 20,
                         "ccda", "application/xml", 20, 1, ref, null, null,
                         null, -1, null, null, "0.1.0@x/ccda/1/cd"),
@@ -211,7 +199,27 @@ class ContractRoundTripTest
                 new ConnectorMessage.ItemResult(itemId, "claims",
                         ConnectorMessage.ItemResult.INCOMPLETE, 7, 2, null, 2,
                         1, 1, java.util.List.of(), null, null,
-                        java.time.Instant.EPOCH)))
+                        java.time.Instant.EPOCH),
+                // The producer's references carried on (STAGES.md §17.4).
+                new ConnectorMessage.ItemConverted(itemId, "claims", 7, 0,
+                        java.time.Instant.EPOCH, java.util.List.of(), 1, 1,
+                        null, "claims-2026-11.csv", UUID.randomUUID()),
+                // The transform stage's (STAGES.md §17.4).
+                new ConnectorMessage.RecordTransformed("ID12", itemId, 0, 10,
+                        20, "ccda", "application/fhir+json",
+                        "us-core-6.1@3f9a0c1d", 900, 1, ref,
+                        new RecordOrigin(new SourcePosition(2, 1),
+                                new SourcePosition(41, 5)),
+                        "0.1.0@x/us-core-6.1@3f9a0c1d/ab", null,
+                        new Lineage(1, java.util.List.of(1, 1, 2)), false,
+                        new ConnectorMessage.Cause(
+                                ConnectorMessage.Cause.REPROCESS,
+                                UUID.randomUUID(), "ID11")),
+                new ConnectorMessage.ItemTransformed(itemId, "claims", 7, 1,
+                        java.time.Instant.EPOCH,
+                        java.util.List.of("0.1.0@x/us-core-6.1@3f9a0c1d/ab"),
+                        2, 1, UUID.randomUUID(), "claims-2026-11.csv",
+                        null)))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
                     .isEqualTo(message);
@@ -227,7 +235,15 @@ class ContractRoundTripTest
                         "version");
         assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemConverted(
                 itemId, "claims", 1, 0, java.time.Instant.EPOCH)))
-                .doesNotContainKey("versions");
+                .doesNotContainKeys("versions", "producerRef", "replaces");
+        assertThat(new ConnectorMessage.RecordTransformed("ID12", itemId, 0,
+                10, 20, "ccda", "application/fhir+json", "us-core-6.1@3f9a",
+                900, 1, ref, null, "v", null, null, false, null).messageId())
+                .isEqualTo("tr-" + itemId + "-ID12");
+        assertThat(new ConnectorMessage.ItemTransformed(itemId, "claims", 7,
+                0, java.time.Instant.EPOCH, null, 2, 3, null, null, null)
+                .messageId())
+                .isEqualTo("ic-transform-" + itemId + "~g3~c2");
         assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemProgressed(
                 itemId, "claims", "convert", 3, 2, 1, 0, null, null, null,
                 java.time.Instant.EPOCH, null)))
@@ -353,11 +369,9 @@ class ContractRoundTripTest
                 "ID2", itemId, 1, 30, 20, "ccda", "application/xml", 20, 1,
                 ref, null, null, null, -1, null, null, "v", null,
                 new Lineage(3, java.util.List.of()), false);
-        ConnectorMessage.RecordFailed failed =
-                new ConnectorMessage.RecordFailed("ID3", itemId, 2, 50, 20,
-                        "csv", "text/csv", "CONVERT_CSV_FIELD_COUNT", 20, 1,
-                        ref, null, null, "v",
-                        new Lineage(1, java.util.List.of(2)), false);
+        RecordStored corrected = new RecordStored("ID3", itemId, 2, 50, 20,
+                "csv", "application/json", "csv-row/1", 20, 1, ref, null, "v",
+                null, new Lineage(1, java.util.List.of(2)), false);
         ConnectorMessage.ItemSplit secondGeneration =
                 new ConnectorMessage.ItemSplit(itemId, "claims", 7, 1, 999,
                         "digest", null, null, null, at, at,
@@ -370,7 +384,7 @@ class ContractRoundTripTest
                         "convert", 7, 6, 1, 0, null, null, null, at,
                         java.util.List.of(), 0, 3);
         for (ConnectorMessage message : java.util.List.of(stored, split,
-                failed, secondGeneration, converted, progressed))
+                corrected, secondGeneration, converted, progressed))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
                     .isEqualTo(message);
@@ -381,7 +395,7 @@ class ContractRoundTripTest
         assertThat(stored.messageId())
                 .isEqualTo("rec-" + itemId + "-ID1~g2~r1.3");
         assertThat(split.messageId()).isEqualTo("sp-" + itemId + "-ID2~g3");
-        assertThat(failed.messageId())
+        assertThat(corrected.messageId())
                 .isEqualTo("rec-" + itemId + "-ID3~r2");
         assertThat(secondGeneration.messageId())
                 .isEqualTo("is-" + itemId + "~g2~c2");

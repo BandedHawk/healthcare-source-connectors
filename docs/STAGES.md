@@ -2483,6 +2483,24 @@ Each step builds, passes its tests and, where it says, is tried on the sandbox:
    that nothing was lost in the move.
 4. **The transformer** (§11, step 6), on the published module.
 
+### 17.8a Step 1 as built (2026-11-10)
+
+- **`RecordLocation`** (record ID, item ID, seq, plaintext length, chunk count, storage ref), given by every record
+  message's `location()`; `QueueReader.openRecord` and `readRecord` take one, and their record-message forms pass
+  `location()`. The convert stage's `failures export` reads a failed row through `ConvertProcessor.location`.
+- **`record.failed` removed** (`RecordFailed`, `MessageType.RECORD_FAILED`); the convert stage makes only
+  `record.stored`. `RecordInStorage` permits `RecordSplit`, `RecordStored` and `RecordTransformed`, and gains
+  `resolves()`, `cause()` and `withCause()`; `StageWorker` sets a reprocess's cause on any of them.
+- **`ItemEnd`,** sealed, for `item.split`, `item.converted` and `item.transformed`: intake, counts, completedAt,
+  versions, completion, generation, sameAs, producerRef, replaces. `item.converted` gains `producerRef` and
+  `replaces` (its earlier constructors leave them null), and the convert stage fills them from `item.split`.
+- **`record.transformed`** (`tr-<itemId>-<recordId>`, the fields of `record.stored`) and **`item.transformed`**
+  (`ic-transform-<itemId>`, the fields of `item.converted`).
+- **`StageMessages`** (`CONVERT`, `TRANSFORM`): the stage's name and the stage before's, the types it takes and
+  sends, `takes(message)` (the stage before's record, item end and `item.progress`), and factories for its record
+  message and item end.
+- **Tests:** `StageMessagesTest`; `ContractRoundTripTest` with the new messages and `item.converted`'s references.
+
 ### 17.9 Decided after review (2026-11-10, with the user)
 
 1. **Audit names. Decided 2026-11-10 with the user: renamed `stage.*`,** with `sdh.stage`, as the library's own

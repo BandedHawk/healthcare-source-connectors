@@ -12,7 +12,6 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
@@ -929,17 +928,6 @@ class PipelineDemo
                     record.sourceLength(), record.sourceOffset(),
                     WORK.relativize(out)));
             excerpt(pretty, 12);
-        }
-        else if (record instanceof RecordFailed failed)
-        {
-            Path out = Files.write(dir.resolve(
-                    "record-" + record.seq() + ".original.xml"), content);
-            say(String.format(Locale.ROOT, "--- %s, record %d: NOT"
-                    + " converted (%s); stored in its original form,"
-                    + " %,d bytes at offset %,d -> %s", file.name(),
-                    record.seq(), failed.errorCode(), content.length,
-                    record.sourceOffset(), WORK.relativize(out)));
-            excerpt(new String(content, UTF_8), 8);
         }
     }
 

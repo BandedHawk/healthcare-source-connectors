@@ -22,8 +22,8 @@ public final class ContractVersion
 
     /**
      * The major version. 3: what was a section is a record
-     * ({@code record.stored}, {@code record.failed}, the {@code records}
-     * table), and what was a file's ID is an item's ({@code itemId}).
+     * ({@code record.stored}, the {@code records} table), and what was a
+     * file's ID is an item's ({@code itemId}).
      * Nothing was released under 2, so 3 doesn't read 2.x messages.
      * <p>
      * Under 2 (2.0 to 2.4), the contract gained: each record's content type
@@ -37,7 +37,8 @@ public final class ContractVersion
      * message each message replaces. All of it is part of 3.0, except
      * {@code file.started} and {@code file.completed}: under 3 the stages
      * send {@code item.split} and {@code item.converted} instead
-     * (STAGES.md §4).
+     * (STAGES.md §4); and {@code record.failed}: under 3 a record a stage
+     * fails is kept in its fail store, and not sent (STAGES.md §15.1).
      */
     public static final int MAJOR = 3;
 
