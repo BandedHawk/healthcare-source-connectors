@@ -35,6 +35,7 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
+import com.sdh.healthcare.connector.stage.DrainGate;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
@@ -119,6 +120,9 @@ public final class ConvertRuntime implements AutoCloseable
     /** The shared {@code records} table. */
     private final Table records;
 
+    /** Lets this pod's release in before it takes work (STAGES.md §14.4a). */
+    private final DrainGate gate;
+
     /**
      * What a set-up runtime holds.
      *
@@ -128,11 +132,12 @@ public final class ConvertRuntime implements AutoCloseable
      * @param health    whether the broker answers
      * @param duties    the reconciler and maintenance
      * @param records   the {@code records} table
+     * @param gate      the drain check
      */
     private record Parts(List<AutoCloseable> resources,
             StageWorker<ConvertProcessor.Prepared> worker,
             StageReceiver receiver, StageHealth health, StageDuties duties,
-            Table records)
+            Table records, DrainGate gate)
     {
     }
 
@@ -149,6 +154,7 @@ public final class ConvertRuntime implements AutoCloseable
         this.health = parts.health();
         this.duties = parts.duties();
         this.records = parts.records();
+        this.gate = parts.gate();
     }
 
     /**
@@ -205,6 +211,11 @@ public final class ConvertRuntime implements AutoCloseable
             registry.createTablesIfMissing();
             // Its open failures, for alerting (STAGES.md §15.6).
             registry.failureStore().gauges(Duration.ofMinutes(1));
+            ConverterRegistry converters = ConverterRegistry.load();
+            DrainGate gate = DrainGate.open(dataSource, stage,
+                    ConvertProcessor.STAGE,
+                    ConvertProcessor.versions(converters, convertSettings),
+                    registry::partWay);
 
             Catalog catalog = CatalogUtil.buildIcebergCatalog(
                     storageSettings.catalogName(), catalogProperties, null);
@@ -251,7 +262,7 @@ public final class ConvertRuntime implements AutoCloseable
                             registry, reconcile.grace(), clock)
                     : null;
             ConvertProcessor processor = new ConvertProcessor(reader,
-                    ConverterRegistry.load(), convertSettings,
+                    converters, convertSettings,
                     new ConvertProcessor.Storage(records, keys.wrap(),
                             recordsKek, ids, splitRecords), results, clock,
                     backlog);
@@ -301,10 +312,12 @@ public final class ConvertRuntime implements AutoCloseable
                             new ReentrantLock(), dutiesFatal, clock),
                     fatal);
             opened.add(duties);
+            // Last, so closed first: shutting down stops a held pod's wait.
+            opened.add(gate);
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.STAGE, ConvertProcessor.STAGE));
             return new ConvertRuntime(new Parts(List.copyOf(opened), worker,
-                    receiver, health, duties, records));
+                    receiver, health, duties, records, gate));
         }
         catch (Exception | Error failure)
         {
@@ -321,7 +334,7 @@ public final class ConvertRuntime implements AutoCloseable
      * @throws IllegalArgumentException if the largest record is not
      *                                  positive
      */
-    static ConvertProcessor.Settings convertSettings(
+    public static ConvertProcessor.Settings convertSettings(
             ConvertProperties properties)
     {
         ConvertProperties.Convert convert = properties.convert();
@@ -402,12 +415,19 @@ public final class ConvertRuntime implements AutoCloseable
     }
 
     /**
-     * Starts the worker's claim renewal, the duties, then the input.
+     * Waits until the drain check lets this pod's release in (STAGES.md
+     * §14.4a), then starts the worker's claim renewal, the duties and the
+     * input. Nothing starts if the runtime is closed while it waits.
      *
      * @throws Exception if the input route can't start
      */
     public void start() throws Exception
     {
+        if (!gate.awaitLetIn())
+        {
+            LOG.info("convert.not_started");
+            return;
+        }
         worker.start();
         duties.start();
         receiver.start();

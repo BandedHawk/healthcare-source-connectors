@@ -55,7 +55,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.SortedSet;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.iceberg.AppendFiles;
@@ -89,6 +91,9 @@ public final class ConvertProcessor
 
     /** The stage's name, in the registry, leases and audit events. */
     public static final String STAGE = "convert";
+
+    /** The mapping named in the version of records stored as split. */
+    public static final String NO_MAPPING = "none";
 
     /**
      * The claim on which a record is stored unconverted: two workers
@@ -390,8 +395,30 @@ public final class ConvertProcessor
     {
         RecordSplit split = (RecordSplit) message;
         String mapping = converters.get(split.format())
-                .map(RecordConverter::mapping).orElse("none");
+                .map(RecordConverter::mapping).orElse(NO_MAPPING);
         return settings.build() + "/" + mapping + "/" + settingsDigest;
+    }
+
+    /**
+     * Every version a pod with these converters and settings stamps, its
+     * release (STAGES.md §14.4a): one for each converter's mapping, and
+     * one for records stored as split.
+     *
+     * @param converters the converters
+     * @param settings   how records are converted
+     * @return the versions, sorted
+     */
+    public static SortedSet<String> versions(ConverterRegistry converters,
+            Settings settings)
+    {
+        String digest = settingsDigest(settings);
+        SortedSet<String> versions = new TreeSet<>();
+        for (String mapping : converters.mappings())
+        {
+            versions.add(settings.build() + "/" + mapping + "/" + digest);
+        }
+        versions.add(settings.build() + "/" + NO_MAPPING + "/" + digest);
+        return versions;
     }
 
     /**

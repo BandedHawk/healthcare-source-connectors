@@ -818,6 +818,39 @@ public final class ReprocessStore
     }
 
     /**
+     * How many objects of the stage's runs are still to be processed
+     * ({@code PENDING} or {@code QUEUED}), for the drain check's list of
+     * work waiting on an operator (STAGES.md §14.4a).
+     *
+     * @return how many
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public long waiting()
+    {
+        String sql = """
+                SELECT count(*) FROM %1$s o JOIN %2$s r
+                    ON r.run_id = o.run_id
+                 WHERE r.stage = ? AND o.state IN ('PENDING', 'QUEUED')"""
+                .formatted(objects, runs);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(timeout);
+            select.setString(1, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                rows.next();
+                return rows.getLong(1);
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Reprocess store unavailable",
+                    failure);
+        }
+    }
+
+    /**
      * Ends the runs with nothing left to do: every object refused,
      * cancelled or done. Each is audited {@code stage.reprocess_done},
      * with its counts.

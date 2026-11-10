@@ -108,6 +108,7 @@ final class ItSupport
         settings.put("sdh.stage.input.uri",
                 "kafka:sdh.landed?brokers=localhost:1&groupId=split");
         settings.put("sdh.stage.registry-schema", "sdh_split");
+        settings.put("sdh.stage.ready-port", "0");
         settings.put("sdh.stage.output.type", "camel");
         settings.put("sdh.stage.output.uri", output);
         settings.put("sdh.split.format", "csv");
@@ -183,6 +184,7 @@ final class ItSupport
         settings.put("sdh.stage.dlq.uri",
                 "kafka:sdh-convert-dlq?brokers=" + brokers);
         settings.put("sdh.stage.registry-schema", "sdh_convert");
+        settings.put("sdh.stage.ready-port", "0");
         settings.put("sdh.convert.options[csv.header]", "true");
         settings.put("sdh.storage.catalog-name", TestLanding.CATALOG);
         catalog.forEach((key, value) -> settings.put(

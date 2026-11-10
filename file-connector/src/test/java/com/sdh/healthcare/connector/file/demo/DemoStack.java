@@ -121,6 +121,7 @@ interface DemoStack extends AutoCloseable
         catalog().forEach((key, value) -> settings.put(
                 "sdh.storage.catalog[" + key + "]", value));
         settings.putAll(lease());
+        settings.put("sdh.stage.ready-port", "0");
         return settings;
     }
 

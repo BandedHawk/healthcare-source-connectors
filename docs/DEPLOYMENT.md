@@ -68,6 +68,18 @@ Every message carries its contract version, `"v": "<major>.<minor>"` (§10.2).
 - `ContractVersionTest`: a later minor version, with unknown fields, is read; an earlier minor version, without `replaces`, is read with it unset; another major version, or none, is refused with `UNSUPPORTED_VERSION`, and that is distinct from a bad payload.
 - `FileConnectorApplicationTest.takesOtherMinorsHoldsALaterMajorAndRejectsAnEarlier`: the split stage takes and splits items sent with a later and an earlier minor version. A later major version is neither acknowledged nor fatal. On a queue it is tried again in place, and holds back the message behind it. An earlier major version is rejected and acknowledged. Reconciling still gets both items split. `StageWorkerTest` checks the same for the convert stage's worker.
 
+## Changing a stage's version
+
+Decided 2026-11-10 ([STAGES.md](STAGES.md) §14.4a). Each record names the version of the stage that made it, and an item is made under one version: a split or convert pod starts work only once the *drain check* lets its release in (each stage's README, "Changing the version"). A pod of a new release waits, not ready, while any item is part way under a version it wouldn't stamp; the old pods go on and finish those items. So:
+1. **Deploy with a rolling update that adds a pod first** (`maxSurge: 1`, `maxUnavailable: 0`, as the READMEs' Deployments). Under `Recreate` no old pod would be left to finish the items, and a new pod held back would wait for good.
+2. **Pause what feeds the stage, and wait until `drain-check` lists nothing part way.** Pods already running aren't checked, so with input still flowing the old pods may begin new items under the old version during the rollout, and those items would be made under both (recorded, §14.3).
+3. **Deploy, and check that the new pods are ready** (`stage.version_changed`, with how). A pod held back audits `stage.version_blocked`; `drain-check` in it says what holds it.
+4. **Resume.**
+
+Work waiting on an operator (open failures, held split items, pending corrections, queued reprocessing) never holds a change: it is made, when it runs, under the version running then. A rollback to the release current before is always let in. If a change can't wait, `version --accept` in the held pod lets it in, with a reason, audited `stage.version_forced`; the split stage then holds an item begun under another version for an operator (`release`).
+
+**Tested by:** `DrainGateTest` (each way a release is let in, a held one waiting until accepted, the ready port), `StageRegistryTest.anUnfinishedItemIsPartWayUnderItsOutputsVersions`, `ItemCheckpointsTest.countsTheItemsPartWayAndHeldByVersion` and `DrainCommandsTest`; tried in the sandbox ([SANDBOX.md](SANDBOX.md)).
+
 ## Scaling
 
 Decided 2026-11-07 ([STAGES.md](STAGES.md) §10).

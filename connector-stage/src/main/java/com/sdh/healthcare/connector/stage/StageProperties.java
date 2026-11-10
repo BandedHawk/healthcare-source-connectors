@@ -30,6 +30,11 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param reprocess      the stage's own input, to send reprocess messages
  *                       to (STAGES.md §15.8.4); unset if the stage doesn't
  *                       reprocess
+ * @param readyPort      the plain TCP port opened once the pod's release
+ *                       is let in, for its {@code readinessProbe}
+ *                       (STAGES.md §14.4a); below 0 for none
+ * @param versionCheckInterval how often a pod held back by the drain check
+ *                       looks again
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -38,7 +43,9 @@ public record StageProperties(ReceiveProperties input,
         @DefaultValue("4") int concurrency, @DefaultValue Claim claim,
         @DefaultValue("sdh_stage") String registrySchema,
         @DefaultValue("30s") Duration sendTimeout,
-        CommonSettings.Queue reprocess)
+        CommonSettings.Queue reprocess,
+        @DefaultValue("8081") int readyPort,
+        @DefaultValue("1m") Duration versionCheckInterval)
 {
 
     /** Where the settings are configured, to name them in errors. */

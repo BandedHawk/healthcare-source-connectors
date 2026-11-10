@@ -1742,6 +1742,74 @@ public final class StageRegistry
     }
 
     /**
+     * The items part way here (STAGES.md §14.4a), by version: not complete,
+     * with records not all handled yet (the total not known, or fewer done
+     * than expected), under each version their current records were stored
+     * with. Records from before versions were kept name none, and are left
+     * out.
+     *
+     * @param first how many item IDs to give for each version
+     * @return a line per version
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<PartWay.Items> partWay(int first)
+    {
+        String sql = """
+                SELECT r.output_version, count(DISTINCT i.item_id),
+                       (array_agg(DISTINCT i.item_id ORDER BY i.item_id))
+                           [1:?]
+                  FROM %1$s i
+                  JOIN %2$s r ON r.stage = i.stage AND r.item_id = i.item_id
+                             AND r.generation = i.generation
+                 WHERE i.stage = ? AND i.completed_at IS NULL
+                   AND (i.expected IS NULL OR i.done < i.expected)
+                   AND NOT r.late AND r.output_version IS NOT NULL
+                 GROUP BY r.output_version
+                 ORDER BY r.output_version""".formatted(items, records);
+        List<PartWay.Items> found = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setInt(1, first);
+            select.setString(2, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(new PartWay.Items(rows.getString(1),
+                            rows.getLong(2), uuids(rows.getArray(3))));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Registry unavailable", failure);
+        }
+    }
+
+    /**
+     * Reads an array of UUIDs.
+     *
+     * @param array the array; null for none
+     * @return the UUIDs
+     * @throws SQLException if it can't be read
+     */
+    private static List<UUID> uuids(java.sql.Array array) throws SQLException
+    {
+        List<UUID> list = new ArrayList<>();
+        if (array != null)
+        {
+            for (Object each : (Object[]) array.getArray())
+            {
+                list.add((UUID) each);
+            }
+        }
+        return list;
+    }
+
+    /**
      * Notes that an item is an exact copy of an earlier one (STAGES.md
      * §15.5a), as the stage before's total for it says: the earlier item's
      * open failures here are flagged resent, as

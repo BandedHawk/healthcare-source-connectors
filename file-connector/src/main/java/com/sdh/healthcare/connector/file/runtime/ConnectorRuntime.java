@@ -48,6 +48,8 @@ import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
+import com.sdh.healthcare.connector.stage.DrainGate;
+import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.StageProperties;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageReceiver;
@@ -154,6 +156,9 @@ public final class ConnectorRuntime implements AutoCloseable
     /** Makes IDs and MACs with the stage's ID key. */
     private final RecordIds ids;
 
+    /** Lets this pod's release in before it takes work (STAGES.md §14.4a). */
+    private final DrainGate gate;
+
     /**
      * The tables the runtime uses.
      *
@@ -187,6 +192,7 @@ public final class ConnectorRuntime implements AutoCloseable
      * @param tables         the tables
      * @param keys           the keys
      * @param ids            makes IDs and MACs
+     * @param gate           the drain check
      */
     private record Parts(HikariDataSource dataSource, Catalog catalog,
             Catalog landingCatalog, ClosablePublisher publisher,
@@ -194,7 +200,7 @@ public final class ConnectorRuntime implements AutoCloseable
             ItemProcessor processor, ItemSplitter splitter,
             SplitCorrections corrections, SplitReprocess reprocess,
             StageReceiver receiver, StageHealth health, StageDuties duties,
-            Tables tables, KeyMaterial keys, RecordIds ids)
+            Tables tables, KeyMaterial keys, RecordIds ids, DrainGate gate)
     {
     }
 
@@ -221,6 +227,7 @@ public final class ConnectorRuntime implements AutoCloseable
         this.tables = parts.tables();
         this.keys = parts.keys();
         this.ids = parts.ids();
+        this.gate = parts.gate();
     }
 
     /**
@@ -300,6 +307,13 @@ public final class ConnectorRuntime implements AutoCloseable
                     stage.registrySchema(), new CheckpointCodec(ids),
                     Duration.ofSeconds(10));
             checkpoints.createTableIfMissing();
+            DrainGate gate = DrainGate.open(dataSource, stage,
+                    ItemProcessor.STAGE,
+                    List.of(version(splitters, format, split)),
+                    first -> checkpoints.partWay(first).stream()
+                            .map(items -> new PartWay.Items(items.version(),
+                                    items.count(), items.first()))
+                            .toList());
 
             landingCatalog = landingCatalogProperties == null ? catalog
                     : CatalogUtil.buildIcebergCatalog(
@@ -410,7 +424,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     processor, splitter, correcting, reprocess, receiver,
                     health, duties,
                     new Tables(splitRecords, landedItems, checkpoints), keys,
-                    ids));
+                    ids, gate));
         }
         catch (Exception | Error failure)
         {
@@ -573,12 +587,20 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
-     * Starts the duties, then the input (design §5.3.6).
+     * Waits until the drain check lets this pod's release in (STAGES.md
+     * §14.4a), then starts the duties, the corrections and the input
+     * (design §5.3.6). Nothing starts if the runtime is closed while it
+     * waits.
      *
      * @throws Exception if the input route can't start
      */
     public void start() throws Exception
     {
+        if (!gate.awaitLetIn())
+        {
+            LOG.info("split.not_started");
+            return;
+        }
         duties.start();
         corrections.start();
         receiver.start();
@@ -672,6 +694,7 @@ public final class ConnectorRuntime implements AutoCloseable
     @Override
     public void close()
     {
+        gate.close();
         receiver.close();
         corrections.close();
         duties.close();

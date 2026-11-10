@@ -257,6 +257,9 @@ Deploying it is then one more Deployment in `sdh-fhir`.
 - **Landing updates:** the landing pod is replaced by stopping it first (`Recreate`): it is ready only once it
   holds the lease, so a rolling update can't make a new pod ready while the old one lives: tried, it waited
   until it timed out. Producers are refused for the restart's length, and retry.
+- **Stage rollouts while scaled to two:** a split or convert rollout adds a pod first (`maxSurge: 1`), but each
+  stage's two pods must be on different nodes and there are two, so while KEDA has a stage at two pods the new pod
+  can't be placed and the rollout waits until KEDA scales it back to one. Roll out with the pipeline idle.
 - **One workstation:** the cluster and the build VM don't run at once (Memory, above).
 - **The registry** (minikube's addon) keeps images only in its container, so a restart empties it; `up` pushes
   them again from the first node's Docker, where they are kept on disk.
@@ -513,3 +516,17 @@ Checked again since: see the end of this section.
   `resent=1 last=...` and `--item-id` the line `resent as <copy>`. No content in any log; no pod restarted. Not
   tried here: a resubmit with the same content (it names no `sameAs` when its replaced item is the only match;
   tested), a queue batch and a file intake (only push runs here).
+- **The drain check (2026-11-10, revision (cq); STAGES.md §14.4a).** Deployed over the existing data with the new
+  images, as a rolling update, each stage at one pod: both stages let in `first` (`stage.version_changed`), ready on
+  the port 8081 probe, and `check` passed (5 items split and converted). `drain-check` in each showed the release
+  (one version at the split stage, six at the convert stage: five mappings and `none`), nothing part way, and the
+  earlier builds' open failures listed apart. Then, with one synthetic unfinished item added to the convert
+  registry (ID `00000000-0000-4000-8000-00000000d7a1`, one of two records stored, no content), a setting changed
+  (`SDH_CONVERT_MAXBYTES=65MB`) made a new release: its pod ran but wasn't ready, audited `stage.version_blocked`
+  (count 1, no item IDs), while the old pod went on; `drain-check` in it named the item under the old version.
+  `version --accept` there, with a reason on standard input, was audited `stage.version_forced` (no reason), the
+  reason kept encrypted, and within the minute the pod was let in `forced` and the rollout finished.
+  `rollout undo` brought the first release back, let in `previous` with the item still part way. With the synthetic
+  rows removed, another change (66MB) was let in `drained`; removing the setting brought the first release back
+  (`previous`), and `check` passed again. No pod restarted. Not tried here: a held split pod (tested), and a rollout
+  with a stage at two pods (above).

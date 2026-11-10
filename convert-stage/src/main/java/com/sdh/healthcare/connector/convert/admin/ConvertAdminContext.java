@@ -13,6 +13,8 @@ import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.convert.ConvertInputs;
 import com.sdh.healthcare.connector.convert.ConvertProcessor;
 import com.sdh.healthcare.connector.convert.config.ConvertProperties;
+import com.sdh.healthcare.connector.convert.runtime.ConvertRuntime;
+import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
@@ -21,15 +23,19 @@ import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.RegistryReport;
+import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageBuild;
+import com.sdh.healthcare.connector.stage.StageRegistry;
+import com.sdh.healthcare.connector.stage.StageReleases;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
-import com.sdh.healthcare.connector.stage.admin.ReprocessAdmin;
+import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
 import com.sdh.healthcare.connector.stage.admin.StageAdmin;
 import java.io.PrintStream;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.iceberg.CatalogUtil;
@@ -48,7 +54,7 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * @since 0.1.0
  */
 final class ConvertAdminContext
-        implements StageAdmin, ReprocessAdmin, AutoCloseable
+        implements StageAdmin, DrainAdmin, AutoCloseable
 {
 
     /** The stage's settings. */
@@ -190,6 +196,39 @@ final class ConvertAdminContext
     public String version()
     {
         return StageBuild.identity(ConvertProcessor.class);
+    }
+
+    /** Every converter's mapping, and records stored as split. */
+    @Override
+    public Collection<String> releaseVersions()
+    {
+        return ConvertProcessor.versions(ConverterRegistry.load(),
+                ConvertRuntime.convertSettings(properties));
+    }
+
+    @Override
+    public StageReleases stageReleases()
+    {
+        return new StageReleases(database.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public StageReleases stageReleasesToChange()
+    {
+        return new StageReleases(writing.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    /** The registry's unfinished items with output, as the pods find. */
+    @Override
+    public PartWay partWay()
+    {
+        return new StageRegistry(database.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                "admin", Duration.ofSeconds(10))::partWay;
     }
 
     @Override

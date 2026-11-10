@@ -360,6 +360,33 @@ class ConvertProcessorTest
     }
 
     /**
+     * The release names every version the stage stamps: the one of each
+     * converter's records, and the one of records stored as split
+     * (STAGES.md §14.4a).
+     */
+    @Test
+    void theReleaseHoldsEveryVersionStamped()
+    {
+        List<String> errors = new ArrayList<>();
+        errors.add(null);
+        RecordSplit message = split(errors, HEADER + "1,2\n").get(0);
+        ConvertProcessor.Settings settings = new ConvertProcessor.Settings(
+                Map.of("csv.header", "true"), 1 << 20, 32L << 20, "other",
+                NS, "test-build");
+        ConvertProcessor processor = new ConvertProcessor(reader,
+                ConverterRegistry.load(), settings,
+                new ConvertProcessor.Storage(records, kms, KEK,
+                        new RecordIds(new byte[32])),
+                null, Clock.fixed(NOW, ZoneOffset.UTC));
+        String version = processor.version(message);
+        assertThat(ConvertProcessor.versions(ConverterRegistry.load(),
+                settings))
+                .contains(version, "test-build/none/"
+                        + version.substring(version.lastIndexOf('/') + 1))
+                .hasSize(ConverterRegistry.load().mappings().size() + 1);
+    }
+
+    /**
      * The stage takes {@code record.split} and {@code item.split}, and
      * completes an item with its counts and the intake from its
      * {@code item.split}.

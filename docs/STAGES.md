@@ -935,6 +935,9 @@ and `namesItsVersionOnEveryRecord`, `StageWorkerTest.takesARecordUnderAnotherVer
 
 ### 14.4 The drain check, and a change that is forced
 
+**Replaced by §14.4a (decided 2026-11-10):** a new version waits only while an item is part way under another,
+not for everything to be finished; work waiting on an operator never holds it.
+
 **What "drained" is, for a stage:** nothing of its input that it hasn't finished, judged from storage and the
 registries rather than the broker, since seven brokers don't share a way of telling how much is queued:
 - **split:** every item landed for its intake has a split row that is `COMPLETED` or `FAILED` (the reconciler's
@@ -969,6 +972,82 @@ keeps a forced change from corrupting data is the rest of this section, which ho
 
 What it can't recover is the old version's output, if that was the wrong output: it is already stored and sent,
 and only §14.5 replaces it.
+
+### 14.4a The drain check, as decided (2026-11-10, with the user)
+
+**Why §14.4 changed.** Since it was written, failures wait for people (§15.3): an open failure, a held split item,
+a pending correction or a queued reprocess may wait for days, so "nothing unfinished" could hold a change without
+end. What the check protects is that an item is made under one version, and that holds without an empty queue.
+Also found: the convert stage stamps a version per format (its build, the format's mapping and the settings
+digest, §14.2), and the stages' images have no shell, so a readiness probe can't be a command.
+
+**The rules:**
+1. **A pod's release** is the set of versions it stamps: at the split stage its one version, at the convert stage
+   one per format it converts, and one for formats with no converter (mapping `none`). It is named by a digest of
+   the versions, sorted. The stage keeps each release let in (`stage_release`: the versions, the digest, when, and
+   how it was let in), the newest being the stage's current one.
+2. **Part way** is an item with output under a version that the stage would still add to without an operator:
+   - **split:** an item whose checkpoint is `SPLITTING`, `ARCHIVING` or `FAILING`, under the checkpoint's version;
+   - **convert:** an item not complete whose records aren't all handled yet (its total not known, or fewer done
+     and failed than expected), under each version its current records were stored with.
+   Not part way, so never holding a change (decided): an item that has waited only on landing or the stage before
+   (no output yet: it is made wholly under the new version), an open failure, a held split item, a pending
+   correction or retry, and a queued reprocess. Each of those is made, when it runs, under the version running
+   then, and stamped so (§14.3).
+3. **At start, before it takes any work** (its input, duties and sweeps), a pod checks its release:
+   - the current release, or none yet (the first start with this check): let in;
+   - the release current before it (a rollback, or an old pod restarted during a rollout): let in, and current
+     again (decided);
+   - each of its versions that the current release hasn't is a version some item is part way under (a version in
+     flight): let in (decided);
+   - otherwise, if no item is part way under a version it wouldn't stamp: let in, `drained` (decided: a change of
+     one format's mapping waits only on that format's items);
+   - otherwise, if an operator accepted its release (rule 5): let in, `forced`;
+   - otherwise it is **blocked**: it takes no work, audits `stage.version_blocked` (its release, how many items
+     are part way and under how many versions, no item IDs), and checks again every
+     `sdh.stage.version-check-interval` (a minute), auditing again only when that changes.
+   A release let in is recorded, current, and audited `stage.version_changed` (how). Only a starting pod checks:
+   one already running goes on, so for the overlap of a rollout both releases may take new items, each item's
+   records then naming both (§14.3). The deploy procedure (§14.6 item 4) pauses upstream, which leaves nothing
+   for the overlap; a pod can't tell a rollback from a restart, so stopping running pods would only make
+   restarts during a rollout flap.
+4. **Ready only once let in** (decided): a pod opens a plain TCP port (`sdh.stage.ready-port`, 8081) once let in,
+   and its `readinessProbe` is a `tcpSocket` check on it, as landing's push port is. A blocked pod is not ready,
+   so a rolling update holds, and the old pods go on finishing the items part way.
+5. **Forced** (decided): `sdh-admin version --accept`, run in a blocked pod, accepts that pod's release, with the
+   operator and a reason on standard input, kept encrypted (as a failure's, under the stage's KEK, bound to the
+   acceptance), audited `stage.version_forced` without the reason. The pod is let in at its next check. What then
+   holds the data together is §14.3: the split stage holds an item begun under another version, and every row
+   names its version.
+6. **`sdh-admin drain-check`** (read only, on any pod) prints the pod's release and whether it would be let in,
+   the current and previous releases, the items part way by version (counts, and the first item IDs), and the
+   work waiting on an operator by version: open failures, held items, pending corrections, queued reprocess
+   objects. `sdh-admin version` lists the releases let in.
+
+**Built in this order, with tests, then tried on the sandbox:** the release store and the gate in the stage
+library; the split and convert stages' part-way queries and releases; the ready port and the probes (kits and
+sandbox); the commands; the docs (READMEs, DEPLOYMENT.md, DESIGN.md).
+
+**As built (2026-11-10):**
+- `DrainGate` (connector-stage) decides in the order of rule 3, waits in `awaitLetIn()` and opens the ready port;
+  `StageReleases` keeps `stage_release` and `stage_release_accept` in the stage's registry schema; `PartWay` is
+  what each stage finds part way (`StageRegistry.partWay`, `ItemCheckpoints.partWay`). Each runtime opens its gate
+  after its tables and calls it first in `start()`; closing the runtime ends the wait, and nothing starts.
+- The convert release is `ConvertProcessor.versions`: each mapping `ConverterRegistry.mappings()` loads, and
+  `none`, with the build and the settings digest, as `version(message)` stamps them.
+- **The Deployments' strategy is now a rolling update that adds a pod first** (`maxSurge: 1`,
+  `maxUnavailable: 0`), not `Recreate`. Under `Recreate` every old pod stops before a new one starts, so a new pod
+  held back would wait with nothing left to finish the items. `Recreate` was kept so that no two builds ran at
+  once, because a record received again under another build was checked again; since §14.6 item 2 (2026-11-08) a
+  redelivery is a duplicate whatever its version, so that reason is gone.
+- Settings: `sdh.stage.ready-port` (8081; below 0 for none, 0 for any free port, as the tests use) and
+  `sdh.stage.version-check-interval` (1 minute).
+- Commands, at both stages: `drain-check` and `version [--accept]` (`DrainCheckCommand`, `VersionCommand`, over
+  `DrainAdmin`). `drain-check` lists open failures by state and version, the split stage's held items, and the
+  reprocess objects waiting; pending corrections show as failures in `REVISION_PENDING`.
+- Tested by `DrainGateTest`, `DrainCommandsTest`, `StageRegistryTest.anUnfinishedItemIsPartWayUnderItsOutputsVersions`,
+  `ItemCheckpointsTest.countsTheItemsPartWayAndHeldByVersion` and
+  `ConvertProcessorTest.theReleaseHoldsEveryVersionStamped`.
 
 ### 14.5 Processing again under another version: the operator's choice
 
@@ -1476,7 +1555,7 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
    split stage's `release` (built 2026-11-09, §15.6c–§15.6f); then `reprocess`, with generations and revisions,
    decided 2026-11-09 (§15.8, its own order of building in §15.8.10).
 4. **Exact copies** (§15.5, replaced by §15.5a) at landing and at the stages.
-5. **The drain check** (§14.4).
+5. **The drain check** (§14.4, replaced by §14.4a).
 
 ### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 to 5 built)
 

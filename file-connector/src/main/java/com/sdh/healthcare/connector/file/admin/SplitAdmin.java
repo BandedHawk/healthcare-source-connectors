@@ -9,8 +9,10 @@ package com.sdh.healthcare.connector.file.admin;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
+import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
 import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
+import com.sdh.healthcare.connector.stage.admin.VersionCommand;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -56,7 +58,9 @@ public final class SplitAdmin
                 new ArrayList<>(List.of(
                         new RestoreCommand(), new SplitStatusCommand(),
                         new ReleaseCommand(),
-                        new ReprocessCommand<SplitAdminContext>()));
+                        new ReprocessCommand<SplitAdminContext>(),
+                        new DrainCheckCommand<SplitAdminContext>(),
+                        new VersionCommand<SplitAdminContext>()));
         commands.addAll(FailureCommands.<SplitAdminContext>all());
         return List.copyOf(commands);
     }

@@ -33,13 +33,16 @@ import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.StageReleases;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
-import com.sdh.healthcare.connector.stage.admin.ReprocessAdmin;
+import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
 import java.io.PrintStream;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
@@ -63,7 +66,7 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
+final class SplitAdminContext implements DrainAdmin, AutoCloseable
 {
 
     /** The stage's settings. */
@@ -455,6 +458,57 @@ final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
         String format = properties.split().format();
         return ConnectorRuntime.version(SplitterRegistry.load(), format,
                 ConnectorRuntime.splitConfig(properties.split(), format));
+    }
+
+    /** The one version a pod with these settings cuts under. */
+    @Override
+    public Collection<String> releaseVersions()
+    {
+        return List.of(version());
+    }
+
+    @Override
+    public StageReleases stageReleases()
+    {
+        return new StageReleases(database.dataSource(),
+                properties.stage().registrySchema(), ItemProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public StageReleases stageReleasesToChange()
+    {
+        return new StageReleases(writing.dataSource(),
+                properties.stage().registrySchema(), ItemProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    /** The items being split, archived or failed, as the pods find. */
+    @Override
+    public PartWay partWay() throws Exception
+    {
+        ItemCheckpoints checkpoints = checkpoints();
+        return first -> items(checkpoints.partWay(first));
+    }
+
+    /** The items held at the split stage (STAGES.md §15.6d). */
+    @Override
+    public List<PartWay.Items> held(int first) throws Exception
+    {
+        return items(checkpoints().held(first));
+    }
+
+    /**
+     * The checkpoints' items by version, as the drain check takes them.
+     *
+     * @param byVersion the items, by version
+     * @return the same
+     */
+    private static List<PartWay.Items> items(
+            List<ItemCheckpoints.ByVersion> byVersion)
+    {
+        return byVersion.stream().map(each -> new PartWay.Items(
+                each.version(), each.count(), each.first())).toList();
     }
 
     @Override

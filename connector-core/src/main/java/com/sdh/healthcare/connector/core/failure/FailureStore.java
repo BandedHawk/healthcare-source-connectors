@@ -922,6 +922,58 @@ public final class FailureStore
     }
 
     /**
+     * The stage's open failures by state and the version they failed
+     * under, for the drain check's list of work waiting on an operator
+     * (STAGES.md §14.4a). A failure from before versions were kept names
+     * {@code unknown}.
+     *
+     * @return per state and version, how many
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<OpenByVersion> openByVersion()
+    {
+        String sql = """
+                SELECT state, COALESCE(failed_version, 'unknown'), count(*)
+                  FROM %s
+                 WHERE stage = ? AND state IN %s
+                 GROUP BY 1, 2 ORDER BY 1, 2""".formatted(table,
+                State.OPEN_SQL);
+        List<OpenByVersion> found = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(new OpenByVersion(
+                            State.valueOf(rows.getString(1)),
+                            rows.getString(2), rows.getLong(3)));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Fail store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Open failures counted by state and version.
+     *
+     * @param state   their state
+     * @param version the version they failed under
+     * @param count   how many
+     */
+    public record OpenByVersion(State state, String version, long count)
+    {
+    }
+
+    /**
      * Notes that an exact copy of an item came in (STAGES.md §15.5a): each
      * of the item's open failures at this stage counts it, with when, and
      * gains an event naming the copy, which leaves its state as it is.

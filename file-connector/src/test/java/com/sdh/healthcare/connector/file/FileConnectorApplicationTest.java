@@ -155,6 +155,7 @@ class FileConnectorApplicationTest
         registry.add("sdh.stage.input.uri",
                 () -> "kafka:sdh.landed?brokers=localhost:1&groupId=split");
         registry.add("sdh.stage.registry-schema", () -> "sdh_split");
+        registry.add("sdh.stage.ready-port", () -> "0");
         registry.add("sdh.split.format", () -> "csv");
         registry.add("sdh.storage.catalog-name", () -> "sdh");
         registry.add("sdh.storage.commit.max-records", () -> "5");

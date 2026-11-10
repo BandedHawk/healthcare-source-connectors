@@ -148,7 +148,9 @@ kind: Deployment
 metadata: { name: file-connector }
 spec:
   replicas: 2                          # any number: items are split in parallel
-  strategy: { type: Recreate }         # no two builds at once: a record received again under another is checked again
+  strategy:                            # a new pod first, ready once the drain check lets it in; the old ones finish meanwhile
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   selector: { matchLabels: { app: file-connector } }
   template:
     metadata: { labels: { app: file-connector } }
@@ -170,6 +172,11 @@ spec:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
+          ports:
+            - { name: ready, containerPort: 8081 }   # sdh.stage.ready-port: opened once the pod's release is let in
+          readinessProbe:
+            tcpSocket: { port: ready }
+            periodSeconds: 10
           resources: { limits: { memory: 2Gi } }   # the heap is half the limit; the rest is the JVM's own memory and operator commands
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
@@ -182,7 +189,8 @@ spec:
 ```
 
 There is no HTTP health endpoint. The process is the health signal: it exits on conditions it can't safely continue
-from, and Kubernetes restarts it.
+from, and Kubernetes restarts it. The pod is ready once the drain check lets its release in (see "Changing the
+version" below): until then it takes no work, and a rolling update waits on it while the old pods finish.
 
 ### Autoscaling
 
@@ -363,6 +371,42 @@ pod applies within a renewal interval, under the item's lease (`split.released` 
 item that is no longer held is refused (`split.release_refused`). `status --item` lists the requests and what each
 came to, without the reasons.
 
+
+### Changing the version
+
+The stage stamps each record and checkpoint with its version (STAGES.md §14.2): the build, the splitter, and a
+digest of the split settings; that version is a pod's *release*. Each pod checks it when it starts, before it takes
+any work (STAGES.md §14.4a), and is let in if it is:
+- the stage's current release, or the first;
+- the release current before it: a rollback;
+- the version some item is being split under already: a rollout begun;
+- a version no item is being split under but its own: the stage has *drained*. An item is part way while it is
+  being split, archived or failed (`SPLITTING`, `ARCHIVING`, `FAILING`). An item waiting only on landing, a held
+  item (`HELD`, see `release`), and work waiting on an operator (open failures, queued reprocessing) never hold a
+  release; `drain-check` lists held items apart;
+- one an operator accepted (`version --accept`, below).
+
+Otherwise it waits: not ready, taking no work, audited `stage.version_blocked` (how many items hold it, never which),
+and checking again every `sdh.stage.version-check-interval` (1 minute). Pods already running aren't checked: they
+go on finishing the items part way, so the rolling update waits on the new pod until they have. A release let in is
+audited `stage.version_changed`, with how.
+
+To change the version: pause what feeds the stage, wait until `drain-check` lists nothing part way, deploy, and
+resume. `drain-check` (read only, in any pod) prints the pod's release and whether it would be let in now, the
+current and previous releases, the items part way by version (counts and the first item IDs), and the work waiting
+on an operator, which never holds a release back:
+
+```sh
+kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args drain-check --operator alice
+```
+
+`version` lists the releases let in, newest first. If a new pod waits and the change can't wait, accept its release
+in that pod (a pod that isn't ready still takes `kubectl exec`), with the reason on standard input, kept encrypted
+as a failure's reason is; it is audited `stage.version_forced`, and the pod is let in at its next check:
+
+```sh
+kubectl exec -i <new pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args version --accept --operator alice < reason.txt
+```
 
 ### Troubleshooting
 

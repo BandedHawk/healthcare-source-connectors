@@ -573,6 +573,92 @@ public final class ItemCheckpoints
     }
 
     /**
+     * The items part way at the split stage (STAGES.md §14.4a), by the
+     * version of their checkpoint: {@code SPLITTING}, {@code ARCHIVING} or
+     * {@code FAILING}. A held item waits for an operator, and isn't counted.
+     * Rows from before versions were kept name none, and are left out.
+     *
+     * @param first how many item IDs to give for each version
+     * @return per version: the version, how many items and the first IDs
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<ByVersion> partWay(int first)
+    {
+        return byVersion("state IN ('SPLITTING', 'ARCHIVING', 'FAILING')",
+                first);
+    }
+
+    /**
+     * The items held across versions, by the version they were begun
+     * under (STAGES.md §14.3), for the drain check's list of work waiting
+     * on an operator.
+     *
+     * @param first how many item IDs to give for each version
+     * @return per version: the version, how many items and the first IDs
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<ByVersion> held(int first)
+    {
+        return byVersion("state = 'HELD'", first);
+    }
+
+    /**
+     * Items counted by version.
+     *
+     * @param version the version
+     * @param count   how many items
+     * @param first   the first of them, by ID
+     */
+    public record ByVersion(String version, long count, List<UUID> first)
+    {
+    }
+
+    /**
+     * Counts the items in some states by version.
+     *
+     * @param where which items, as SQL on the table's columns
+     * @param first how many item IDs to give for each version
+     * @return per version
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<ByVersion> byVersion(String where, int first)
+    {
+        String sql = """
+                SELECT version, count(*),
+                       (array_agg(item_id ORDER BY item_id))[1:?]
+                  FROM %s
+                 WHERE %s AND version IS NOT NULL
+                 GROUP BY version ORDER BY version""".formatted(table, where);
+        List<ByVersion> found = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setInt(1, first);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    List<UUID> ids = new ArrayList<>();
+                    for (Object each
+                            : (Object[]) rows.getArray(3).getArray())
+                    {
+                        ids.add((UUID) each);
+                    }
+                    found.add(new ByVersion(rows.getString(1),
+                            rows.getLong(2), ids));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
      * Notes the earlier item an item is an exact copy of (STAGES.md
      * §15.5a), as its {@code item.landed} named it. The first noted stays.
      *

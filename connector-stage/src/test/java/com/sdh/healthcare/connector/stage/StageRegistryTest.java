@@ -254,6 +254,45 @@ class StageRegistryTest
     }
 
     /**
+     * An item is part way under each version of its output while it isn't
+     * done; one done, or with no output yet, isn't (STAGES.md §14.4a).
+     */
+    @Test
+    void anUnfinishedItemIsPartWayUnderItsOutputsVersions()
+    {
+        UUID done = UUID.randomUUID();
+        UUID untouched = UUID.randomUUID();
+        first.expect(item, 3, new byte[] {1});
+        first.expect(done, 1, new byte[] {1});
+        first.expect(untouched, 2, new byte[] {1});
+        stored("r1", item, "v1");
+        stored("r2", item, "v2");
+        stored("d1", done, "v1");
+
+        assertThat(first.partWay(5)).containsExactly(
+                new PartWay.Items("v1", 1, List.of(item)),
+                new PartWay.Items("v2", 1, List.of(item)));
+        assertThat(first.partWay(0)).extracting(PartWay.Items::first)
+                .containsOnly(List.of());
+    }
+
+    /**
+     * Stores a record under a version.
+     *
+     * @param recordId the record
+     * @param itemId   its item
+     * @param version  the version
+     */
+    void stored(String recordId, UUID itemId, String version)
+    {
+        first.claim(recordId, itemId, LONG);
+        first.store(List.of(new StageRegistry.Entry(recordId, itemId,
+                "d-" + recordId, version, false, new OutboundMessage(
+                        "m-" + recordId, MessageType.RECORD_STORED, itemId,
+                        recordId, new byte[] {1}))));
+    }
+
+    /**
      * A total from the stage before's item.progress may grow, and is
      * replaced by the final one, which is then kept (STAGES.md §15.6).
      */

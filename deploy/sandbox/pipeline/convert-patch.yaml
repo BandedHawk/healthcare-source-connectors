@@ -15,6 +15,12 @@ spec:
               topologyKey: kubernetes.io/hostname
       containers:
         - name: convert-stage
+          # Ready once the drain check lets its release in (docs/STAGES.md §14.4a), as the README's Deployment.
+          ports:
+            - { name: ready, containerPort: 8081 }
+          readinessProbe:
+            tcpSocket: { port: ready }
+            periodSeconds: 10
           resources:
             requests: { cpu: 250m, memory: 1Gi }
             limits: { memory: 1Gi }

@@ -9,9 +9,11 @@ package com.sdh.healthcare.connector.convert.admin;
 import com.sdh.healthcare.connector.convert.config.ConvertProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
+import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
 import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
+import com.sdh.healthcare.connector.stage.admin.VersionCommand;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -56,7 +58,8 @@ public final class ConvertAdmin
     {
         List<AdminCommand<ConvertAdminContext>> commands =
                 new ArrayList<>(List.of(new StageStatusCommand<>(),
-                        new ReprocessCommand<>()));
+                        new ReprocessCommand<>(), new DrainCheckCommand<>(),
+                        new VersionCommand<>()));
         commands.addAll(FailureCommands.<ConvertAdminContext>all());
         return List.copyOf(commands);
     }

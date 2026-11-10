@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.core.checkpoint;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 import com.sdh.healthcare.connector.core.TestPostgres;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
@@ -157,6 +158,52 @@ class ItemCheckpointsTest
                 .containsExactly(item, archiving);
         assertThat(checkpoints.stalled(
                 Instant.now().minus(Duration.ofMinutes(1)))).isEmpty();
+    }
+
+    /**
+     * Items being split, archived or failed are part way under the version
+     * they were begun under; held ones are listed apart, and finished ones
+     * and those of no known version not at all (STAGES.md §14.4a).
+     */
+    @Test
+    void countsTheItemsPartWayAndHeldByVersion()
+    {
+        UUID archiving = UUID.randomUUID();
+        UUID other = UUID.randomUUID();
+        UUID held = UUID.randomUUID();
+        UUID done = UUID.randomUUID();
+        UUID unknown = UUID.randomUUID();
+        checkpoints.save(begun(item, "v1"), new Held(1));
+        checkpoints.save(begun(archiving, "v1")
+                .withState(Checkpoint.State.ARCHIVING), new Held(1));
+        checkpoints.save(begun(other, "v2"), new Held(1));
+        checkpoints.save(begun(held, "v0")
+                .withState(Checkpoint.State.HELD), new Held(1));
+        checkpoints.save(begun(done, "v1")
+                .withState(Checkpoint.State.COMPLETED), new Held(1));
+        checkpoints.save(start(unknown), new Held(1));
+
+        List<ItemCheckpoints.ByVersion> partWay = checkpoints.partWay(1);
+        assertThat(partWay).extracting(ItemCheckpoints.ByVersion::version,
+                ItemCheckpoints.ByVersion::count).containsExactly(
+                        tuple("v1", 2L), tuple("v2", 1L));
+        assertThat(partWay.get(0).first()).singleElement()
+                .isIn(item, archiving);
+        assertThat(checkpoints.held(5)).containsExactly(
+                new ItemCheckpoints.ByVersion("v0", 1, List.of(held)));
+    }
+
+    /**
+     * A new checkpoint for an item begun under a version.
+     *
+     * @param itemId  the item
+     * @param version the version
+     * @return the checkpoint
+     */
+    static Checkpoint begun(UUID itemId, String version)
+    {
+        return Checkpoint.start(itemId, "item:" + itemId, "csv", 100,
+                Instant.parse("2026-11-05T10:00:00Z"), version);
     }
 
     /**

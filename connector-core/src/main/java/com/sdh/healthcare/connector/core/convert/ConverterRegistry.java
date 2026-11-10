@@ -10,6 +10,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.ServiceLoader;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 /**
  * The record converters the connector can use, each found by the name of the
@@ -157,5 +159,20 @@ public final class ConverterRegistry
     public Optional<RecordConverter> get(String format)
     {
         return Optional.ofNullable(byFormat.get(format));
+    }
+
+    /**
+     * The mappings of the converters, each once.
+     *
+     * @return the mappings, sorted
+     */
+    public SortedSet<String> mappings()
+    {
+        SortedSet<String> mappings = new TreeSet<>();
+        for (RecordConverter converter : byFormat.values())
+        {
+            mappings.add(converter.mapping());
+        }
+        return mappings;
     }
 }

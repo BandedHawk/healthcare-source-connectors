@@ -197,7 +197,19 @@ public enum Attr
      * What an operator asked of an item, such as {@code RESUME} for a held
      * split item (STAGES.md §15.6e).
      */
-    ACTION("sdh.action");
+    ACTION("sdh.action"),
+
+    /**
+     * A stage's release, the digest of the versions its pod stamps
+     * (STAGES.md §14.4a): never a version's settings.
+     */
+    RELEASE("sdh.release"),
+
+    /** How a stage's release was let in, such as {@code drained}. */
+    LET_IN_BY("sdh.let_in_by"),
+
+    /** How many versions something names, a number. */
+    VERSION_COUNT("sdh.version_count");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and
