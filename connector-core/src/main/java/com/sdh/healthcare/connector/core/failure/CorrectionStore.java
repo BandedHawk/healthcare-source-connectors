@@ -614,14 +614,33 @@ public final class CorrectionStore
      */
     public void finish(Outcome outcome)
     {
+        finish(outcome, true);
+    }
+
+    /**
+     * Notes a correction's outcome as {@link #finish(Outcome)} does,
+     * choosing whether one that failed is recorded as a failure of its
+     * own: not for one never processed, as a whole-item correction a newer
+     * generation came before (STAGES.md §15.8.5), or for a generation whose
+     * failure the stage records itself.
+     *
+     * @param outcome       what it came to
+     * @param recordFailure whether to record one that failed as a failure
+     * @throws FailureStore.RefusedException if the correction isn't
+     *                                       pending
+     * @throws IllegalStateException         if the database can't be
+     *                                       reached
+     */
+    public void finish(Outcome outcome, boolean recordFailure)
+    {
         Finished finished;
         try (Connection connection = dataSource.getConnection())
         {
             connection.setAutoCommit(false);
             try
             {
-                finished = finish(connection, schema(), stage, outcome, true,
-                        timeout);
+                finished = finish(connection, schema(), stage, outcome,
+                        recordFailure, timeout);
                 connection.commit();
             }
             catch (SQLException | RuntimeException failure)
@@ -936,9 +955,15 @@ public final class CorrectionStore
                 // From the place's counter, so a reprocess queued meanwhile
                 // never shares its line (STAGES.md §15.8.4).
                 Lineage failed = changed.before().failure().lineage();
-                Lineage revision = Revisions.next(connection, schema(),
-                        stage, itemId, seq, failed,
-                        failed.revision(Lineage.stageOf(stage)), timeout);
+                // At the split stage, the item as a whole is cut again as
+                // its next generation (STAGES.md §15.8.5).
+                Lineage revision = generational(stage, seq)
+                        ? Lineage.of(Revisions.nextGeneration(connection,
+                                schema(), stage, itemId, timeout), List.of())
+                        : Revisions.next(connection, schema(), stage, itemId,
+                                seq, failed,
+                                failed.revision(Lineage.stageOf(stage)),
+                                timeout);
                 try (PreparedStatement select =
                         connection.prepareStatement(next))
                 {
@@ -1018,12 +1043,71 @@ public final class CorrectionStore
                  WHERE stage = ? AND state = 'PENDING'
                  ORDER BY submitted_at
                  LIMIT ?""".formatted(table);
+        return readPending(sql, select ->
+        {
+            select.setString(1, stage);
+            select.setInt(2, limit);
+        });
+    }
+
+    /**
+     * Finds one correction still pending (STAGES.md §15.8.5): the one a
+     * generation is cut from, when it is resumed.
+     *
+     * @param itemId     the item
+     * @param seq        the failure's number
+     * @param correction the correction's number
+     * @return it; empty if it isn't pending
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Optional<Pending> find(UUID itemId, long seq, int correction)
+    {
+        String sql = """
+                SELECT item_id, seq, correction, submitted_by, submitted_at,
+                       content_enc, content_key, content_kek, content_length,
+                       kind, record_id, generation, line
+                  FROM %s
+                 WHERE stage = ? AND item_id = ? AND seq = ?
+                   AND correction = ? AND state = 'PENDING'"""
+                .formatted(table);
+        return readPending(sql, select ->
+        {
+            select.setString(1, stage);
+            select.setObject(2, itemId);
+            select.setLong(3, seq);
+            select.setInt(4, correction);
+        }).stream().findFirst();
+    }
+
+    /** Sets a query's parameters. */
+    @FunctionalInterface
+    private interface Parameters
+    {
+
+        /**
+         * Sets them.
+         *
+         * @param select the query
+         * @throws SQLException if one can't be set
+         */
+        void set(PreparedStatement select) throws SQLException;
+    }
+
+    /**
+     * Reads corrections as {@link #pending(int)} lists them.
+     *
+     * @param sql        the query, selecting the columns pending reads
+     * @param parameters sets its parameters
+     * @return the corrections
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Pending> readPending(String sql, Parameters parameters)
+    {
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
         {
             select.setQueryTimeout(timeout);
-            select.setString(1, stage);
-            select.setInt(2, limit);
+            parameters.set(select);
             List<Pending> found = new ArrayList<>();
             try (ResultSet rows = select.executeQuery())
             {
@@ -1161,6 +1245,21 @@ public final class CorrectionStore
                     timeout);
         }
         return new Finished(superseded, added);
+    }
+
+    /**
+     * Whether a correction at a number makes its item's next generation
+     * rather than a revision (STAGES.md §15.8.5): one of the item as a
+     * whole, at the split stage.
+     *
+     * @param stage the stage
+     * @param seq   the number
+     * @return true if it does
+     */
+    public static boolean generational(String stage, long seq)
+    {
+        return seq == FailureStore.WHOLE_ITEM
+                && Lineage.stageOf(stage) == Lineage.SPLIT;
     }
 
     /**

@@ -185,6 +185,18 @@ class ItemProcessorTest
      */
     ItemProcessor processor() throws Exception
     {
+        return processor(Interruptions.NONE);
+    }
+
+    /**
+     * A processor that looks for newer generations as given.
+     *
+     * @param interruptions says when a newer generation is queued
+     * @return the processor
+     * @throws Exception if the signer can't be made
+     */
+    ItemProcessor processor(Interruptions interruptions) throws Exception
+    {
         RecordIds ids = new RecordIds(IdKeys.loadOrCreateShared(records,
                 keys, RECORDS_KEK));
         PipelineSettings settings = PipelineSettings.defaults("splitter",
@@ -199,6 +211,7 @@ class ItemProcessorTest
                         .getPrivate()), "connector", recipient.getPublic(),
                         "downstream"), publisher, Clock.systemUTC());
         open.add(pipeline);
+        pipeline.setInterruptions(interruptions);
         return new ItemProcessor(pipeline, "claims", failures(),
                 corrections());
     }
@@ -784,11 +797,12 @@ class ItemProcessorTest
 
     /**
      * A correction of an item that couldn't be split to its end is the
-     * whole item: the records already stored must come out of it the same,
-     * and the rest are stored after them, marked as correcting the item,
-     * as the split stage's next revision of it (STAGES.md §15.8.5); those
-     * kept keep their own. The item then ends in {@code item.split} with no
-     * failure.
+     * item's next generation (STAGES.md §15.8.5): cut from the start of the
+     * correction, each record of the new generation, caused by the
+     * correction, resolving the item. The item then ends in
+     * {@code item.split} of that generation with no failure, and the
+     * generation before's failure is superseded; its rows are kept as
+     * they were.
      *
      * @throws Exception if the test fails
      */
@@ -828,57 +842,60 @@ class ItemProcessorTest
         }
 
         assertThat(outcome.passed()).isTrue();
+        Lineage second = Lineage.of(2, List.of());
         List<RecordSplit> split = messages().stream()
                 .filter(RecordSplit.class::isInstance)
                 .map(RecordSplit.class::cast).toList();
-        assertThat(split).isNotEmpty();
         assertThat(split).extracting(RecordSplit::seq)
-                .allMatch(seq -> seq >= kept);
-        // Each resolves the item's failure (STAGES.md §15.6e).
-        assertThat(split).extracting(RecordSplit::resolves)
-                .containsOnly(item.itemId().toString());
-        Lineage second = Lineage.FIRST.nextRevision(Lineage.SPLIT);
-        assertThat(split).extracting(RecordSplit::lineage)
-                .containsOnly(second);
+                .containsExactly(0L, 1L, 2L, 3L, 4L);
+        assertThat(split).allSatisfy(record ->
+        {
+            // Each resolves the item's failure (STAGES.md §15.6e).
+            assertThat(record.resolves())
+                    .isEqualTo(item.itemId().toString());
+            assertThat(record.lineage()).isEqualTo(second);
+            assertThat(record.cause().kind())
+                    .isEqualTo(ConnectorMessage.Cause.CORRECTION);
+        });
         assertThat(messages().getLast()).isInstanceOfSatisfying(
                 ItemSplit.class, end ->
                 {
-                    assertThat(end.recordCount())
-                            .isEqualTo(kept + split.size());
+                    assertThat(end.recordCount()).isEqualTo(5);
+                    assertThat(end.generation()).isEqualTo(2);
                     assertThat(end.failure()).isNull();
                 });
-        // The stage's end counts the records the correction added.
         assertThat(ended).singleElement().satisfies(event -> assertThat(
                         event.getAttributes().asMap())
                         .containsEntry(AttributeKey.stringKey("sdh.result"),
                                 "COMPLETED")
                         .containsEntry(AttributeKey.longKey("sdh.count"),
-                                kept + split.size()));
-        assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
-                .hasValueSatisfying(stored -> assertThat(stored.state())
+                                5L));
+        assertThat(failures().failures(item.itemId()))
+                .filteredOn(stored -> stored.failure().lineage()
+                        .generation() == 1)
+                .singleElement().satisfies(stored -> assertThat(
+                        stored.state())
                         .isEqualTo(FailureStore.State.SUPERSEDED));
+        assertThat(processor.checkpoint(item.itemId())).hasValueSatisfying(
+                checkpoint -> assertThat(checkpoint.generation())
+                        .isEqualTo(2));
         records.refresh();
-        assertThat(CommittedRecords.corrections(records, item.itemId()))
-                .isNotEmpty().allSatisfy(row ->
-                {
-                    assertThat(row.correctionOf())
-                            .isEqualTo(item.itemId().toString());
-                    assertThat(row.lineage()).isEqualTo(second);
-                });
-        assertThat(CommittedRecords.all(records, item.itemId()))
-                .filteredOn(row -> row.seq() < kept)
+        assertThat(CommittedRecords.all(records, item.itemId(), 1))
                 .extracting(CommittedRecords.Row::lineage)
                 .containsOnly(Lineage.FIRST);
+        assertThat(CommittedRecords.all(records, item.itemId(), 2))
+                .hasSize(5);
     }
 
     /**
-     * A correction of the whole item that changes a record already stored
-     * fails: only what failed is corrected.
+     * A correction of the whole item may change what passed before: it is
+     * a generation of its own, cut from the correction, so the records
+     * before are superseded, not compared (STAGES.md §15.8.5).
      *
      * @throws Exception if the test fails
      */
     @Test
-    void failsACorrectionOfAnItemThatChangesWhatPassed() throws Exception
+    void correctsAnItemChangingWhatPassed() throws Exception
     {
         LandedItem item = land("1,ok\n2,ok\n3,ok\n4,ok\n5,\"never closed\n");
         ItemProcessor processor = processor();
@@ -889,25 +906,18 @@ class ItemProcessorTest
                         "1,changed\n2,ok\n3,ok\n4,ok\n5,\"now closed\"\n"),
                 item.digest(), LandedRefs.NONE, lease());
 
-        assertThat(outcome.passed()).isFalse();
-        assertThat(outcome.errorCode())
-                .isEqualTo(ErrorCode.CORRECTION_CHANGES_PASSED.name());
-        assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
-                .hasValueSatisfying(stored ->
-                {
-                    // The revision's own failure (STAGES.md §15.8.5).
-                    assertThat(stored.state())
-                            .isEqualTo(FailureStore.State.FAILED);
-                    assertThat(stored.failure().lineage().revision(
-                            Lineage.SPLIT)).isEqualTo(2);
-                });
+        assertThat(outcome.passed()).isTrue();
+        records.refresh();
+        assertThat(CommittedRecords.all(records, item.itemId(), 2))
+                .hasSize(5);
     }
 
     /**
-     * A retry of an item that failed as a whole splits the item again,
-     * unchanged: one that fails again supersedes the failure it was made
-     * for, and its own failure, of the next revision, is the one open
-     * (STAGES.md §15.8.5); it stores nothing.
+     * A retry of an item that failed as a whole cuts it again, unchanged,
+     * as its next generation: one that fails again supersedes the failure
+     * it was made for, and its own failure, of the new generation, is the
+     * one open (STAGES.md §15.8.5). What it cut before the bad row is sent
+     * as that generation's.
      *
      * @throws Exception if the test fails
      */
@@ -926,11 +936,22 @@ class ItemProcessorTest
                 item.digest(), LandedRefs.NONE, lease());
 
         assertThat(outcome.passed()).isFalse();
-        assertThat(failures().failure(item.itemId(), FailureStore.WHOLE_ITEM))
-                .hasValueSatisfying(stored -> assertThat(stored.state())
-                        .isEqualTo(FailureStore.State.FAILED));
-        assertThat(messages()).singleElement()
-                .isInstanceOf(ItemProgressed.class);
+        assertThat(failures().failures(item.itemId()))
+                .filteredOn(stored -> stored.failure().seq()
+                        == FailureStore.WHOLE_ITEM)
+                .extracting(stored -> stored.failure().lineage().generation(),
+                        FailureStore.Stored::state)
+                .containsExactlyInAnyOrder(
+                        org.assertj.core.groups.Tuple.tuple(1,
+                                FailureStore.State.SUPERSEDED),
+                        org.assertj.core.groups.Tuple.tuple(2,
+                                FailureStore.State.FAILED));
+        assertThat(messages()).filteredOn(RecordSplit.class::isInstance)
+                .extracting(message -> ((RecordSplit) message).lineage())
+                .isNotEmpty().containsOnly(Lineage.of(2, List.of()));
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemProgressed.class, progressed -> assertThat(
+                        progressed.generation()).isEqualTo(2));
         assertThat(corrections().list(item.itemId(), FailureStore.WHOLE_ITEM))
                 .singleElement().satisfies(retry ->
                 {
@@ -938,9 +959,154 @@ class ItemProcessorTest
                             .isEqualTo(CorrectionStore.Kind.RETRY);
                     assertThat(retry.errorCode()).startsWith("PARSE_");
                 });
-        records.refresh();
-        assertThat(CommittedRecords.corrections(records, item.itemId()))
-                .isEmpty();
+    }
+
+    /**
+     * A reprocess of an item split to its end cuts it again from the start
+     * as its next generation (STAGES.md §15.8.4): each record of the new
+     * generation, caused by the run, and its end of that generation. The
+     * same reprocess taken again is a repeat, and an older one, taken
+     * after, is superseded.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void reprocessesAnItemAsItsNextGeneration() throws Exception
+    {
+        LandedItem item = land("1,a\n2,b\n3,c\n4,d\n");
+        ItemProcessor processor = processor();
+        assertThat(process(processor, item).result())
+                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        publisher.sent.clear();
+        UUID runId = UuidV7.next(System.currentTimeMillis());
+
+        ItemProcessor.Outcome outcome = reprocess(processor, item, 2, runId);
+
+        assertThat(outcome.result())
+                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        assertThat(outcome.recordCount()).isEqualTo(4);
+        assertThat(messages()).filteredOn(RecordSplit.class::isInstance)
+                .hasSize(4).allSatisfy(message ->
+                {
+                    RecordSplit record = (RecordSplit) message;
+                    assertThat(record.lineage())
+                            .isEqualTo(Lineage.of(2, List.of()));
+                    assertThat(record.cause().kind())
+                            .isEqualTo(ConnectorMessage.Cause.REPROCESS);
+                    assertThat(record.cause().runId()).isEqualTo(runId);
+                });
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, end ->
+                {
+                    assertThat(end.generation()).isEqualTo(2);
+                    assertThat(end.interrupted()).isFalse();
+                });
+
+        assertThat(reprocess(processor, item, 2, runId).result())
+                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        assertThat(reprocess(processor, item, 3, runId).result())
+                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        assertThat(reprocess(processor, item, 2, runId).result())
+                .isEqualTo(ItemProcessor.Result.SUPERSEDED);
+        assertThat(processor.checkpoint(item.itemId())).hasValueSatisfying(
+                checkpoint -> assertThat(checkpoint.generation())
+                        .isEqualTo(3));
+    }
+
+    /**
+     * A newer generation queued while an item is split stops it after the
+     * batch under way (STAGES.md §15.8.6): its checkpoint is
+     * {@code INTERRUPTED}, and its end, {@code item.split}, says so, with
+     * what it cut. The newer generation then cuts the item from the start.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void interruptsAGenerationForANewerOne() throws Exception
+    {
+        LandedItem item = land("1,a\n2,b\n3,c\n4,d\n5,e\n6,f\n7,g\n");
+        ItemProcessor processor = processor(
+                (itemId, generation) -> generation == 1 ? 2 : 0);
+
+        ItemProcessor.Outcome first = process(processor, item);
+
+        assertThat(first.result())
+                .isEqualTo(ItemProcessor.Result.INTERRUPTED);
+        assertThat(processor.checkpoint(item.itemId())).hasValueSatisfying(
+                checkpoint -> assertThat(checkpoint.state())
+                        .isEqualTo(Checkpoint.State.INTERRUPTED));
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, end ->
+                {
+                    assertThat(end.interrupted()).isTrue();
+                    assertThat(end.generation()).isEqualTo(1);
+                    assertThat(end.recordCount()).isEqualTo(3);
+                });
+
+        ItemProcessor.Outcome second = reprocess(processor, item, 2,
+                UuidV7.next(System.currentTimeMillis()));
+
+        assertThat(second.result())
+                .isEqualTo(ItemProcessor.Result.COMPLETED);
+        assertThat(second.recordCount()).isEqualTo(7);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemSplit.class, end ->
+                {
+                    assertThat(end.interrupted()).isFalse();
+                    assertThat(end.generation()).isEqualTo(2);
+                    assertThat(end.recordCount()).isEqualTo(7);
+                });
+    }
+
+    /**
+     * A correction of the whole item whose generation is older than the
+     * item's by the time it is applied, a reprocess having come first,
+     * isn't cut: it fails, {@code CORRECTION_SUPERSEDED}, and no failure is
+     * added (STAGES.md §15.8.5).
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void failsACorrectionAReprocessSuperseded() throws Exception
+    {
+        LandedItem item = land("1,ok\n2,ok\n3,ok\n4,ok\n5,\"never closed\n");
+        ItemProcessor processor = processor();
+        process(processor, item);
+        CorrectionStore.Pending correction = submit(item.itemId(),
+                FailureStore.WHOLE_ITEM,
+                "1,ok\n2,ok\n3,ok\n4,ok\n5,\"now closed\"\n");
+        reprocess(processor, item, 3, UuidV7.next(System.currentTimeMillis()));
+        int failuresBefore = failures().failures(item.itemId()).size();
+
+        CorrectionStore.Outcome outcome = processor.correct(correction,
+                item.digest(), LandedRefs.NONE, lease());
+
+        assertThat(outcome.passed()).isFalse();
+        assertThat(outcome.errorCode())
+                .isEqualTo(ErrorCode.CORRECTION_SUPERSEDED.name());
+        assertThat(failures().failures(item.itemId()))
+                .hasSize(failuresBefore);
+        assertThat(processor.checkpoint(item.itemId())).hasValueSatisfying(
+                checkpoint -> assertThat(checkpoint.generation())
+                        .isEqualTo(3));
+    }
+
+    /**
+     * Reprocesses a landed item as a generation.
+     *
+     * @param processor  the processor
+     * @param item       the item
+     * @param generation the generation
+     * @param runId      the run
+     * @return the outcome
+     * @throws Exception if processing throws
+     */
+    ItemProcessor.Outcome reprocess(ItemProcessor processor, LandedItem item,
+            int generation, UUID runId) throws Exception
+    {
+        return processor.reprocess(item.itemId(), item.digest(),
+                () -> LandedItemSource.open(landed, item.itemId(), keys),
+                lease(), LandedRefs.NONE, generation, runId);
     }
 
     /**

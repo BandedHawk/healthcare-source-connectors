@@ -225,6 +225,30 @@ public final class ReprocessStore
     }
 
     /**
+     * Makes the tables, for a stage with no stage registry (the split
+     * stage, STAGES.md §15.8.4); a registry makes them itself.
+     *
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void createTablesIfMissing()
+    {
+        try (Connection connection = dataSource.getConnection();
+                java.sql.Statement statement = connection.createStatement())
+        {
+            statement.setQueryTimeout(timeout);
+            for (String ddl : ddls(schema))
+            {
+                statement.execute(ddl);
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException(
+                    "Could not create the reprocess tables", failure);
+        }
+    }
+
+    /**
      * The statements that make the tables.
      *
      * @param schema the stage's registry schema
@@ -265,6 +289,11 @@ public final class ReprocessStore
                   finished_at timestamptz,
                   PRIMARY KEY (run_id, item_id, seq)
                 )""".formatted(objects(schema)),
+                // Added 2026-11-09 (STAGES.md §15.8.4): the generation an
+                // item reprocessed at the split stage is given; null for a
+                // record, whose line keeps its input's generation.
+                "ALTER TABLE " + objects(schema)
+                        + " ADD COLUMN IF NOT EXISTS made_generation integer",
                 "CREATE INDEX IF NOT EXISTS reprocess_object_state ON "
                         + objects(schema) + " (stage, state)",
                 "CREATE INDEX IF NOT EXISTS reprocess_object_place ON "
@@ -400,7 +429,7 @@ public final class ReprocessStore
                    FOR UPDATE SKIP LOCKED""".formatted(objects);
         String queued = """
                 UPDATE %s SET state = 'QUEUED', line = ?,
-                       queued_at = clock_timestamp()
+                       made_generation = ?, queued_at = clock_timestamp()
                  WHERE run_id = ? AND item_id = ? AND seq = ?"""
                 .formatted(objects);
         String refused = """
@@ -464,14 +493,30 @@ public final class ReprocessStore
                                 reason});
                             continue;
                         }
-                        Lineage line = Revisions.next(connection, schema,
-                                stage, chosen.itemId(), chosen.seq(),
-                                chosen.input(), 0, timeout);
+                        // An item at the split stage is given its next
+                        // generation, a record its place's next revision.
+                        boolean generational = CorrectionStore.generational(
+                                stage, chosen.seq());
+                        Lineage line = generational
+                                ? Lineage.of(Revisions.nextGeneration(
+                                        connection, schema, stage,
+                                        chosen.itemId(), timeout), List.of())
+                                : Revisions.next(connection, schema, stage,
+                                        chosen.itemId(), chosen.seq(),
+                                        chosen.input(), 0, timeout);
                         queue.setArray(1, FailureStore.line(connection,
                                 line));
-                        queue.setObject(2, runId);
-                        queue.setObject(3, chosen.itemId());
-                        queue.setLong(4, chosen.seq());
+                        if (generational)
+                        {
+                            queue.setInt(2, line.generation());
+                        }
+                        else
+                        {
+                            queue.setNull(2, java.sql.Types.INTEGER);
+                        }
+                        queue.setObject(3, runId);
+                        queue.setObject(4, chosen.itemId());
+                        queue.setLong(5, chosen.seq());
                         queue.executeUpdate();
                         run.setObject(1, runId);
                         run.executeUpdate();
@@ -519,7 +564,8 @@ public final class ReprocessStore
     {
         String sql = """
                 SELECT run_id, item_id, seq, generation, input_line,
-                       record_id, line
+                       record_id, line,
+                       COALESCE(made_generation, generation)
                   FROM %s
                  WHERE stage = ? AND state = 'QUEUED' AND sent_at IS NULL
                    AND queued_at < clock_timestamp() - ?::interval
@@ -541,7 +587,7 @@ public final class ReprocessStore
                             rows.getLong(3), FailureStore.lineage(rows, 4),
                             rows.getString(6));
                     found.add(new Queued(rows.getObject(1, UUID.class),
-                            chosen, lineOf(rows, 4, 7)));
+                            chosen, lineOf(rows, 8, 7)));
                 }
             }
             return found;
@@ -683,6 +729,95 @@ public final class ReprocessStore
     }
 
     /**
+     * Notes what came of an item reprocessed at the split stage (STAGES.md
+     * §15.8.4), once its generation's end is sent: {@code stored} if it
+     * was split to its end, {@code failed} if it failed as a whole, or
+     * {@code interrupted} if a newer generation stopped it. Audited
+     * {@code stage.reprocessed} and counted. An object not queued under
+     * that generation, or already done, is left as it is.
+     *
+     * @param runId      the run
+     * @param itemId     the item
+     * @param generation the generation it was given
+     * @param outcome    what came of it
+     * @return whether an object was noted
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public boolean noteGeneration(UUID runId, UUID itemId, int generation,
+            String outcome)
+    {
+        String sql = """
+                UPDATE %s SET state = 'DONE', outcome = ?,
+                       finished_at = clock_timestamp()
+                 WHERE run_id = ? AND item_id = ? AND seq = -1
+                   AND stage = ? AND state = 'QUEUED'
+                   AND made_generation = ?""".formatted(objects);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(timeout);
+            update.setString(1, outcome);
+            update.setObject(2, runId);
+            update.setObject(3, itemId);
+            update.setString(4, stage);
+            update.setInt(5, generation);
+            if (update.executeUpdate() != 1)
+            {
+                return false;
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Reprocess store unavailable",
+                    failure);
+        }
+        Telemetry telemetry = Telemetry.get();
+        telemetry.audit("stage.reprocessed", Fields.of(Attr.STAGE, stage)
+                .with(Attr.RUN_ID, runId).with(Attr.ITEM_ID, itemId)
+                .with(Attr.SEQ, -1).with(Attr.GENERATION, generation)
+                .with(Attr.CAUSE, CAUSE).with(Attr.OUTCOME, outcome));
+        telemetry.reprocessed(stage, CAUSE, outcome);
+        return true;
+    }
+
+    /**
+     * The newest generation queued for an item at the split stage and not
+     * yet done (STAGES.md §15.8.6): one past the generation being split
+     * stops it between batches.
+     *
+     * @param itemId     the item
+     * @param generation the generation being split
+     * @return the newer generation; 0 if none is queued
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public int newerQueued(UUID itemId, int generation)
+    {
+        String sql = """
+                SELECT COALESCE(max(made_generation), 0) FROM %s
+                 WHERE stage = ? AND item_id = ? AND seq = -1
+                   AND state = 'QUEUED' AND made_generation > ?"""
+                .formatted(objects);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(timeout);
+            select.setString(1, stage);
+            select.setObject(2, itemId);
+            select.setInt(3, generation);
+            try (ResultSet rows = select.executeQuery())
+            {
+                rows.next();
+                return rows.getInt(1);
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Reprocess store unavailable",
+                    failure);
+        }
+    }
+
+    /**
      * Ends the runs with nothing left to do: every object refused,
      * cancelled or done. Each is audited {@code stage.reprocess_done},
      * with its counts.
@@ -785,7 +920,8 @@ public final class ReprocessStore
     {
         String sql = """
                 SELECT item_id, seq, generation, input_line, record_id,
-                       state, line, reason, outcome, output_id, same_output
+                       state, line, reason, outcome, output_id, same_output,
+                       COALESCE(made_generation, generation)
                   FROM %s WHERE run_id = ? AND stage = ?
                  ORDER BY item_id, seq""".formatted(objects);
         List<Listed> found = new ArrayList<>();
@@ -805,7 +941,7 @@ public final class ReprocessStore
                             FailureStore.lineage(rows, 3), rows.getString(5)),
                             ObjectState.valueOf(rows.getString(6)),
                             rows.getArray(7) == null ? null
-                                    : lineOf(rows, 3, 7),
+                                    : lineOf(rows, 12, 7),
                             rows.getString(8), rows.getString(9),
                             rows.getString(10),
                             same == null ? null : (Boolean) same));

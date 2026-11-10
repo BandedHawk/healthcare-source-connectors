@@ -12,6 +12,9 @@ import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import java.io.PrintStream;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -66,7 +69,9 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     {
         return """
                 reprocess (--item-id <id>[,<id>...] [--seq <n>]
-                           | --made-by <version> [--item-id <id>[,...]])
+                           | --made-by <version> [--item-id <id>[,...]]
+                           | --landed-from <time> --landed-to <time>
+                             [--intake <name>] [--item-id <id>[,...]])
                           [--dry-run]
                 reprocess --status --run <id>
                 reprocess --cancel --run <id>
@@ -74,7 +79,11 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
                     objects of the stage's input chosen: the current piece
                     at each place of the items given (--seq for one), or
                     those whose current output here was made by a version
-                    (--made-by). Each is the next revision of its place,
+                    (--made-by). At the split stage each is a whole item,
+                    its next generation cut from the item as landed, and
+                    --seq is refused; there items landed in a range of
+                    time (ISO-8601, the end excluded) may be chosen too.
+                    Elsewhere each is the next revision of its place,
                     stored and sent on as any record, saying it was
                     reprocessed; a place that holds something newer by the
                     time it is queued is refused. The reason is read from
@@ -87,7 +96,8 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     @Override
     public Set<String> options()
     {
-        return Set.of("item-id", "seq", "made-by", "run");
+        return Set.of("item-id", "seq", "made-by", "run", "landed-from",
+                "landed-to", "intake");
     }
 
     @Override
@@ -108,7 +118,8 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
             if (status && cancel || arguments.flag("dry-run")
                     || arguments.option("item-id").isPresent()
                     || arguments.option("seq").isPresent()
-                    || arguments.option("made-by").isPresent())
+                    || arguments.option("made-by").isPresent()
+                    || landed(arguments))
             {
                 throw new AdminArgs.UsageException("--status and --cancel"
                         + " take --run alone");
@@ -150,12 +161,25 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
         String madeBy = arguments.option("made-by").orElse(null);
         Long seq = arguments.option("seq").map(FailureCommands::seq)
                 .orElse(null);
-        if (itemIds.isEmpty() && madeBy == null)
+        Landed landed = landedRange(arguments);
+        if (context.wholeItems() && seq != null)
         {
-            throw new AdminArgs.UsageException("Choose by --item-id or"
-                    + " --made-by");
+            throw new AdminArgs.UsageException("--seq is refused at the "
+                    + context.stage() + " stage: a reprocess there is of"
+                    + " the whole item, its next generation");
         }
-        if (seq != null && (itemIds.size() != 1 || madeBy != null))
+        if (landed != null && madeBy != null)
+        {
+            throw new AdminArgs.UsageException("Choose by --made-by or by"
+                    + " landing time, not both");
+        }
+        if (itemIds.isEmpty() && madeBy == null && landed == null)
+        {
+            throw new AdminArgs.UsageException("Choose by --item-id,"
+                    + " --made-by or --landed-from and --landed-to");
+        }
+        if (seq != null && (itemIds.size() != 1 || madeBy != null
+                || landed != null))
         {
             throw new AdminArgs.UsageException("--seq takes one --item-id"
                     + " and no --made-by");
@@ -170,10 +194,10 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
             throw new AdminArgs.UsageException("--made-by must be a version"
                     + " as the stage stores it");
         }
-        String selector = selector(itemIds, seq, madeBy);
+        String selector = selector(itemIds, seq, madeBy, landed);
         audit.add(Attr.SELECTOR, selector);
         List<ReprocessStore.Chosen> chosen = chosen(context, itemIds, seq,
-                madeBy);
+                madeBy, landed);
         audit.add(Attr.COUNT, chosen.size());
         ReprocessStore runs = arguments.flag("dry-run")
                 ? context.reprocessRuns() : context.reprocessRunsToChange();
@@ -227,29 +251,36 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
      * @param itemIds the items; empty for any, with a version
      * @param seq     one record number; null for all
      * @param madeBy  the version; null for any
+     * @param landed  the landing times; null for any
      * @return the objects, by item then record number
      * @throws Exception if the input or the registry can't be read
      */
     private List<ReprocessStore.Chosen> chosen(C context, List<UUID> itemIds,
-            Long seq, String madeBy) throws Exception
+            Long seq, String madeBy, Landed landed) throws Exception
     {
         ReprocessInputs inputs = context.reprocessInputs();
         Map<UUID, Set<Long>> places = new LinkedHashMap<>();
-        if (madeBy == null)
+        if (madeBy != null)
         {
-            for (UUID itemId : itemIds)
+            places.putAll(context.madeBy(madeBy, itemIds, MAX_OBJECTS + 1));
+        }
+        else if (landed != null)
+        {
+            Set<UUID> narrowed = new LinkedHashSet<>(itemIds);
+            for (UUID itemId : context.landedBetween(landed.intake(),
+                    landed.from(), landed.to(), MAX_OBJECTS + 1))
             {
-                places.put(itemId, null);
+                if (narrowed.isEmpty() || narrowed.contains(itemId))
+                {
+                    places.put(itemId, null);
+                }
             }
         }
         else
         {
-            List<Object[]> made = context.reprocessRuns().madeBy(madeBy,
-                    itemIds, MAX_OBJECTS + 1);
-            for (Object[] place : made)
+            for (UUID itemId : itemIds)
             {
-                places.computeIfAbsent((UUID) place[0],
-                        item -> new LinkedHashSet<>()).add((Long) place[1]);
+                places.put(itemId, null);
             }
         }
         List<ReprocessStore.Chosen> chosen = new ArrayList<>();
@@ -360,8 +391,8 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
         if (pending > 0)
         {
             out.println("warning: " + pending + " correction(s) pending at"
-                    + " these places: each, processed after, supersedes"
-                    + " what the reprocess makes");
+                    + " these places: of a correction and a reprocess, the"
+                    + " one processed after supersedes the other");
         }
     }
 
@@ -378,21 +409,114 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     }
 
     /**
-     * What a run chose by, as kept with it: item IDs, a number and a
-     * version only.
+     * A range of landing times chosen.
+     *
+     * @param intake the intake given; null for the stage's own
+     * @param from   the first instant, included
+     * @param to     the last instant, excluded
+     */
+    private record Landed(String intake, Instant from, Instant to)
+    {
+    }
+
+    /**
+     * Whether any of the landing-time options is given.
+     *
+     * @param arguments the options
+     * @return whether one is
+     */
+    private static boolean landed(AdminArgs arguments)
+    {
+        return arguments.option("landed-from").isPresent()
+                || arguments.option("landed-to").isPresent()
+                || arguments.option("intake").isPresent();
+    }
+
+    /**
+     * Reads the range of landing times chosen.
+     *
+     * @param arguments the options
+     * @return the range; null if none is given
+     * @throws AdminArgs.UsageException if it is given in part, a time
+     *                                  isn't ISO-8601, or it is empty
+     */
+    private static Landed landedRange(AdminArgs arguments)
+    {
+        if (!landed(arguments))
+        {
+            return null;
+        }
+        String from = arguments.option("landed-from").orElse(null);
+        String to = arguments.option("landed-to").orElse(null);
+        if (from == null || to == null)
+        {
+            throw new AdminArgs.UsageException("--landed-from and"
+                    + " --landed-to go together, and --intake with them");
+        }
+        Instant start = instant(from, "--landed-from");
+        Instant end = instant(to, "--landed-to");
+        if (!start.isBefore(end))
+        {
+            throw new AdminArgs.UsageException("--landed-from must be before"
+                    + " --landed-to");
+        }
+        String intake = arguments.option("intake").orElse(null);
+        if (intake != null && !VERSION.matcher(intake).matches())
+        {
+            throw new AdminArgs.UsageException("--intake must be an"
+                    + " intake's name");
+        }
+        return new Landed(intake, start, end);
+    }
+
+    /**
+     * Reads an instant.
+     *
+     * @param text   the instant as typed, ISO-8601 with its offset
+     * @param option its option, for the message
+     * @return the instant
+     * @throws AdminArgs.UsageException if it isn't one
+     */
+    private static Instant instant(String text, String option)
+    {
+        try
+        {
+            return OffsetDateTime.parse(text).toInstant();
+        }
+        catch (DateTimeParseException notTime)
+        {
+            throw new AdminArgs.UsageException(option + " must be an"
+                    + " ISO-8601 time with its offset, such as"
+                    + " 2026-11-09T00:00:00Z");
+        }
+    }
+
+    /**
+     * What a run chose by, as kept with it: item IDs, a number, a version,
+     * an intake and times only.
      *
      * @param itemIds the items
      * @param seq     the record number, or null
      * @param madeBy  the version, or null
+     * @param landed  the landing times, or null
      * @return the text
      */
     private static String selector(List<UUID> itemIds, Long seq,
-            String madeBy)
+            String madeBy, Landed landed)
     {
         StringBuilder text = new StringBuilder();
         if (madeBy != null)
         {
             text.append("--made-by ").append(madeBy);
+        }
+        if (landed != null)
+        {
+            text.append("--landed-from ").append(landed.from())
+                    .append(" --landed-to ").append(landed.to());
+            if (landed.intake() != null)
+            {
+                text.append(" --intake ").append(landed.intake());
+            }
         }
         if (!itemIds.isEmpty())
         {

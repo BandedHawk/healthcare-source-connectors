@@ -307,7 +307,7 @@ class ThroughputPerf
                     .isEqualTo(ItemProcessor.Result.COMPLETED);
             assertThat(outcome.recordCount())
                     .isEqualTo(generated.records());
-            assertThat(pipeline.failedRecordCount(outcome.itemId()))
+            assertThat(pipeline.failedRecordCount(outcome.itemId(), 1))
                     .as("records the splitter couldn't parse").isZero();
             assertThat(publisher.count.get())
                     .as("records + item.split")

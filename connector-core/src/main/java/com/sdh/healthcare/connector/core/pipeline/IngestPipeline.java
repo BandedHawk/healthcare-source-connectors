@@ -180,6 +180,9 @@ public final class IngestPipeline implements AutoCloseable
     /** Test hooks between the steps of a batch; none by default. */
     private PipelineHooks hooks = PipelineHooks.NONE;
 
+    /** Tells, between batches, whether a newer generation waits. */
+    private Interruptions interruptions = Interruptions.NONE;
+
     /**
      * Creates the pipeline and its thread pools, checking that the split and
      * conversion settings suit the format.
@@ -231,6 +234,17 @@ public final class IngestPipeline implements AutoCloseable
     void setHooks(PipelineHooks hooks)
     {
         this.hooks = hooks;
+    }
+
+    /**
+     * Sets what tells, between batches, whether a newer generation of the
+     * item being split waits (STAGES.md §15.8.6).
+     *
+     * @param interruptions the check; {@link Interruptions#NONE} for none
+     */
+    public void setInterruptions(Interruptions interruptions)
+    {
+        this.interruptions = interruptions;
     }
 
     /**
@@ -309,7 +323,50 @@ public final class IngestPipeline implements AutoCloseable
     public SplitResult split(SeekableByteSource source, UUID itemId,
             LeaseToken lease, LandedRefs refs) throws Exception
     {
+        return split(source, itemId, lease, refs, null);
+    }
+
+    /**
+     * Runs the split phase for a landed item, as
+     * {@link #split(SeekableByteSource, UUID, LeaseToken, LandedRefs)}
+     * does, or starts a later generation of it (STAGES.md §15.8): a
+     * generation past the checkpoint's replaces it, and is cut from the
+     * start of the source given, counts from 0.
+     *
+     * @param source the item's bytes, or the content a correction cuts
+     * @param itemId the item's ID
+     * @param lease  the item's lease, held by the caller
+     * @param refs   what landing kept about the item
+     * @param cut    the generation to start, if it is past the item's;
+     *               null to go on with the item's own
+     * @return the outcome
+     * @throws IllegalStateException    if the item is archiving or failing,
+     *                                  or, for a new generation, hasn't
+     *                                  ended
+     * @throws SplitException           if the item is too large, can't be
+     *                                  split, or has stopped workers too
+     *                                  often
+     * @throws ItemInterruptedException if a newer generation waits, between
+     *                                  batches
+     * @throws Exception                if storage or the broker fails
+     *                                  beyond retrying
+     */
+    public SplitResult split(SeekableByteSource source, UUID itemId,
+            LeaseToken lease, LandedRefs refs, Checkpoint.Cut cut)
+            throws Exception
+    {
         Checkpoint current = resume(itemId, lease).orElse(null);
+        boolean fresh = cut != null && (current == null
+                || current.generation() < cut.generation());
+        if (fresh && current != null && !current.state().ended())
+        {
+            throw new IllegalStateException("Item " + itemId + " is "
+                    + current.state() + ", not ended");
+        }
+        if (fresh)
+        {
+            current = null;
+        }
         if (current != null && current.state() == Checkpoint.State.ARCHIVING)
         {
             return new SplitResult(current.itemId(), current.recordCount(),
@@ -359,12 +416,14 @@ public final class IngestPipeline implements AutoCloseable
             }
             current = Checkpoint.start(itemId, itemFingerprint(itemId),
                     settings.format(), source.size(), clock.instant(),
-                    settings.version());
+                    settings.version(), cut == null ? Checkpoint.Cut.FIRST
+                            : cut);
             commitCheckpoint(current, lease);
             Telemetry.get().audit("item.started",
                     Fields.of(Attr.ITEM_ID, current.itemId())
                             .with(Attr.FORMAT, current.format())
-                            .with(Attr.BYTES, current.itemSize()));
+                            .with(Attr.BYTES, current.itemSize())
+                            .with(Attr.GENERATION, current.generation()));
         }
         Checkpoint attempt = current;
         try
@@ -524,7 +583,8 @@ public final class IngestPipeline implements AutoCloseable
         }
         table.refresh();
         Checkpoint settled =
-                CommittedRecords.has(table, itemId, pending.committedSeq())
+                CommittedRecords.has(table, itemId, pending.generation(),
+                        pending.committedSeq())
                         ? pending : stored.get().checkpoint();
         checkpoints.save(settled, lease);
         Telemetry.get().audit("batch.settled",
@@ -577,7 +637,7 @@ public final class IngestPipeline implements AutoCloseable
                 if (batch == null)
                 {
                     batch = new Batch(current.itemId(), current.format(),
-                            refs);
+                            refs, current.cut());
                 }
                 batch.add(seq++, origins.withOrigin(next.get()), source);
                 if (batch.full())
@@ -587,6 +647,16 @@ public final class IngestPipeline implements AutoCloseable
                     current = outcome.checkpoint();
                     inFlightPublish = outcome.publish();
                     batch = null;
+                    int newer = newer(current);
+                    if (newer > 0)
+                    {
+                        // Stopped between batches, everything committed
+                        // sent first (STAGES.md §15.8.6).
+                        await(inFlightPublish, current.publishedSeq());
+                        inFlightPublish = null;
+                        throw new ItemInterruptedException(current.itemId(),
+                                newer);
+                    }
                 }
             }
             if (batch != null)
@@ -634,6 +704,30 @@ public final class IngestPipeline implements AutoCloseable
                     // anything committed but not acknowledged.
                 }
             }
+        }
+    }
+
+    /**
+     * The newer generation waiting for an item being split, if any; a
+     * check that fails is audited and taken as none, so splitting goes on.
+     *
+     * @param current the item's checkpoint
+     * @return the newer generation; 0 if none
+     */
+    private int newer(Checkpoint current)
+    {
+        try
+        {
+            return interruptions.newer(current.itemId(),
+                    current.generation());
+        }
+        catch (Exception unknown)
+        {
+            Telemetry.get().audit("split.interruption_unknown",
+                    Fields.of(Attr.ITEM_ID, current.itemId())
+                            .with(Attr.REASON,
+                                    unknown.getClass().getSimpleName()));
+            return 0;
         }
     }
 
@@ -722,18 +816,24 @@ public final class IngestPipeline implements AutoCloseable
         /** What landing kept about the item, to place its records. */
         private final LandedRefs refs;
 
+        /** The generation its records are of, and what made it. */
+        private final Checkpoint.Cut cut;
+
         /**
          * Starts a batch and its trace span.
          *
          * @param itemId the id of the item being split
          * @param format the name of its format
          * @param refs   what landing kept about the item
+         * @param cut    the generation its records are of
          */
-        Batch(UUID itemId, String format, LandedRefs refs)
+        Batch(UUID itemId, String format, LandedRefs refs,
+                Checkpoint.Cut cut)
         {
             this.itemId = itemId;
             this.format = format;
             this.refs = refs;
+            this.cut = cut;
             this.span = Telemetry.get().span("split.batch",
                     Fields.of(Attr.ITEM_ID, itemId).with(Attr.FORMAT, format));
         }
@@ -752,6 +852,13 @@ public final class IngestPipeline implements AutoCloseable
                 throws Exception
         {
             long length = record.plaintextLength();
+            if (cut.generation() > 1)
+            {
+                // Its generation and cause on its rows (STAGES.md
+                // §15.8.2, §15.8.7).
+                writer.lineage(itemId, seq, generationLineage(cut));
+                writer.cause(itemId, seq, cut.cause(), cut.runId());
+            }
             if (record.failure() != null)
             {
                 addUnsplit(seq, record, source);
@@ -989,8 +1096,12 @@ public final class IngestPipeline implements AutoCloseable
             {
                 if (record.error() == null)
                 {
-                    messages.add(message(record, ref, batch.refs,
-                            settings.version()));
+                    // A generation cut from a correction of the item as a
+                    // whole resolves the item (STAGES.md §15.8.5).
+                    messages.add(stamped(message(record, ref, batch.refs,
+                            settings.version(), batch.cut.correction() > 0
+                                    ? record.itemId().toString() : null),
+                            batch.cut));
                 }
                 else
                 {
@@ -1042,7 +1153,7 @@ public final class IngestPipeline implements AutoCloseable
     {
         table.refresh();
         return CommittedRecords.has(table, next.itemId(),
-                next.committedSeq());
+                next.generation(), next.committedSeq());
     }
 
     /**
@@ -1107,6 +1218,37 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     // ---- publishing ----
+
+    /**
+     * The lineage of a generation's records as first cut (STAGES.md
+     * §15.8.2).
+     *
+     * @param cut the generation
+     * @return its lineage
+     */
+    static Lineage generationLineage(Checkpoint.Cut cut)
+    {
+        return Lineage.of(cut.generation(), List.of());
+    }
+
+    /**
+     * A record's message with its generation and cause, for a generation
+     * past the first (STAGES.md §15.8.7).
+     *
+     * @param message the message
+     * @param cut     the generation it is of
+     * @return the message, as it is sent
+     */
+    static RecordSplit stamped(RecordSplit message, Checkpoint.Cut cut)
+    {
+        if (cut.generation() == 1)
+        {
+            return message;
+        }
+        return message.withLineage(generationLineage(cut), false)
+                .withCause(new ConnectorMessage.Cause(cut.cause(),
+                        cut.runId(), null));
+    }
 
     /**
      * The message announcing a record written in a batch: a
@@ -1175,13 +1317,10 @@ public final class IngestPipeline implements AutoCloseable
      * passes ({@code CORRECTION_RECORD_COUNT} otherwise). It is stored
      * under the piece's item and number, in its place in the item, marked
      * as correcting the failed row.</li>
-     * <li>The item as a whole ({@code -1}): the correction is the whole
-     * item, split from its start. The records already stored must come out
-     * of it unchanged, byte for byte ({@code CORRECTION_CHANGES_PASSED}
-     * otherwise: only what failed is corrected), and every record after
-     * them must pass. Those are stored, numbered on from the item's, their
-     * places those in the correction, marked as correcting the item.</li>
      * </ul>
+     * A correction of the item as a whole is its next generation instead
+     * (STAGES.md §15.8.5), cut by {@link #split(SeekableByteSource, UUID,
+     * LeaseToken, LandedRefs, Checkpoint.Cut)}.
      * What it stores is the split stage's next revision of what failed
      * (STAGES.md §15.8.5), on its rows and messages; a record kept from
      * before keeps its own, and isn't sent again.
@@ -1193,12 +1332,19 @@ public final class IngestPipeline implements AutoCloseable
      * @param refs       what landing kept about the item
      * @param lease      the item's lease
      * @return what it came to, and the messages to send
-     * @throws Exception if storage fails; the correction is tried again
+     * @throws IllegalArgumentException if it is of the item as a whole
+     * @throws Exception                if storage fails; the correction is
+     *                                  tried again
      */
     public CorrectionSplit splitCorrection(Checkpoint checkpoint,
             CorrectionStore.Pending pending, LandedRefs refs,
             LeaseToken lease) throws Exception
     {
+        if (pending.seq() < 0)
+        {
+            throw new IllegalArgumentException("A correction of the item as"
+                    + " a whole is its next generation");
+        }
         UUID itemId = checkpoint.itemId();
         String version = settings.version();
         String format = checkpoint.format();
@@ -1228,83 +1374,43 @@ public final class IngestPipeline implements AutoCloseable
             table.refresh();
             Map<Long, CommittedRecords.Row> stored = new TreeMap<>();
             for (CommittedRecords.Row row : CommittedRecords.all(table,
-                    itemId))
+                    itemId, checkpoint.generation()))
             {
                 stored.put(row.seq(), row);
             }
             RecordBatchWriter writer = new RecordBatchWriter(table, keys,
                     settings.kekRef(), ids, clock.instant())
                     .stageVersion(version);
-            if (pending.seq() >= 0)
+            CommittedRecords.Row original = stored.get(pending.seq());
+            if (original == null || original.errorCode() == null)
             {
-                CommittedRecords.Row original = stored.get(pending.seq());
-                if (original == null || original.errorCode() == null)
-                {
-                    throw new IllegalStateException("The failed piece isn't"
-                            + " in " + tableName);
-                }
-                if (split.size() != 1)
-                {
-                    return failedCorrection(pending,
-                            ErrorCode.CORRECTION_RECORD_COUNT, version);
-                }
-                SplitRecord record = split.get(0);
-                if (record.failure() != null)
-                {
-                    return failedCorrection(pending, record.failure().code(),
-                            version);
-                }
-                SplitRecord lineage = SplitRecord.ofRange(
-                        original.sourceOffset(), original.sourceLength(),
-                        ResumePoint.at(original.sourceOffset()
-                                + original.sourceLength()))
-                        .withOrigin(original.origin());
-                // The piece's next revision at this stage (STAGES.md
-                // §15.8.5), as its message says.
-                writer.correction(itemId, pending.seq(), original.recordId());
-                writer.lineage(itemId, pending.seq(), revision(pending));
-                writer.addBytes(itemId, pending.seq(), format, lineage,
-                        record.readAll(source), Representation.raw(format),
-                        null, -1, null);
+                throw new IllegalStateException("The failed piece isn't"
+                        + " in " + tableName);
             }
-            else
+            if (split.size() != 1)
             {
-                long kept = checkpoint.recordCount();
-                if (split.size() < kept)
-                {
-                    return failedCorrection(pending,
-                            ErrorCode.CORRECTION_CHANGES_PASSED, version);
-                }
-                for (int seq = 0; seq < kept; seq++)
-                {
-                    CommittedRecords.Row row = stored.get((long) seq);
-                    SplitRecord record = split.get(seq);
-                    boolean passed = row != null && row.errorCode() == null;
-                    if (row == null || (passed && record.failure() != null)
-                            || !row.recordId().equals(RecordIds.encode(ids
-                                    .newMac().doFinal(record.readAll(
-                                            source)))))
-                    {
-                        return failedCorrection(pending,
-                                ErrorCode.CORRECTION_CHANGES_PASSED, version);
-                    }
-                }
-                for (int seq = (int) kept; seq < split.size(); seq++)
-                {
-                    if (split.get(seq).failure() != null)
-                    {
-                        return failedCorrection(pending,
-                                split.get(seq).failure().code(), version);
-                    }
-                }
-                for (int seq = (int) kept; seq < split.size(); seq++)
-                {
-                    SplitRecord record = split.get(seq);
-                    writer.correction(itemId, seq, itemId.toString());
-                    writer.lineage(itemId, seq, revision(pending));
-                    writer.add(itemId, seq, format, record, source);
-                }
+                return failedCorrection(pending,
+                        ErrorCode.CORRECTION_RECORD_COUNT, version);
             }
+            SplitRecord piece = split.get(0);
+            if (piece.failure() != null)
+            {
+                return failedCorrection(pending, piece.failure().code(),
+                        version);
+            }
+            SplitRecord lineage = SplitRecord.ofRange(
+                    original.sourceOffset(), original.sourceLength(),
+                    ResumePoint.at(original.sourceOffset()
+                            + original.sourceLength()))
+                    .withOrigin(original.origin());
+            // The piece's next revision at this stage (STAGES.md
+            // §15.8.5), as its message says.
+            writer.correction(itemId, pending.seq(), original.recordId());
+            writer.lineage(itemId, pending.seq(), revision(pending));
+            writer.cause(itemId, pending.seq(), cause(pending), null);
+            writer.addBytes(itemId, pending.seq(), format, lineage,
+                    piece.readAll(source), Representation.raw(format),
+                    null, -1, null);
             if (writer.written().isEmpty())
             {
                 writer.close();
@@ -1319,15 +1425,16 @@ public final class IngestPipeline implements AutoCloseable
                     tableName, writer.ingestedDate(), snapshot.snapshotId(),
                     writer.kekRef());
             // Each names what it resolves (STAGES.md §15.6e): the failed
-            // piece, or the item for a correction of it as a whole.
-            String resolves = pending.seq() >= 0
-                    ? stored.get(pending.seq()).recordId() : itemId.toString();
+            // piece.
+            String resolves = stored.get(pending.seq()).recordId();
             List<ConnectorMessage> messages = new ArrayList<>();
             for (WrittenRecord record : writer.written())
             {
                 RecordSplit made = message(record, ref, refs, version,
                         resolves);
-                messages.add(made.withLineage(revision(pending), false));
+                messages.add(made.withLineage(revision(pending), false)
+                        .withCause(new ConnectorMessage.Cause(cause(pending),
+                                null, null)));
             }
             Telemetry.get().recordsStored(messages.size(), format);
             return new CorrectionSplit(new CorrectionStore.Outcome(pending,
@@ -1338,6 +1445,18 @@ public final class IngestPipeline implements AutoCloseable
         {
             Arrays.fill(content, (byte) 0);
         }
+    }
+
+    /**
+     * The content a correction or retry of an item as a whole holds, to
+     * cut as the item's next generation (STAGES.md §15.8.5), decrypted.
+     *
+     * @param pending the correction
+     * @return its content
+     */
+    public SeekableByteSource correctionSource(CorrectionStore.Pending pending)
+    {
+        return SeekableByteSource.of(pending.open(keys));
     }
 
     /**
@@ -1352,6 +1471,20 @@ public final class IngestPipeline implements AutoCloseable
     {
         return pending.lineage() != null ? pending.lineage()
                 : Lineage.FIRST.nextRevision(Lineage.SPLIT);
+    }
+
+    /**
+     * Why a correction's output was made (STAGES.md §15.8.7): a retry is a
+     * reprocess, anything else a correction.
+     *
+     * @param pending the correction
+     * @return {@code reprocess} or {@code correction}
+     */
+    static String cause(CorrectionStore.Pending pending)
+    {
+        return pending.kind() == CorrectionStore.Kind.RETRY
+                ? ConnectorMessage.Cause.REPROCESS
+                : ConnectorMessage.Cause.CORRECTION;
     }
 
     /**
@@ -1370,10 +1503,10 @@ public final class IngestPipeline implements AutoCloseable
     {
         UUID itemId = checkpoint.itemId();
         List<CommittedRecords.Row> rows = new ArrayList<>();
-        for (CommittedRecords.Row row : correctionRows(itemId))
+        for (CommittedRecords.Row row : correctionRows(itemId,
+                checkpoint.generation()))
         {
-            if (pending.seq() >= 0 ? row.seq() == pending.seq()
-                    : row.seq() >= checkpoint.recordCount())
+            if (row.seq() == pending.seq())
             {
                 rows.add(row);
             }
@@ -1415,40 +1548,46 @@ public final class IngestPipeline implements AutoCloseable
      * Reads an item's rows made from operators' corrections (STAGES.md
      * §15.6d).
      *
-     * @param itemId the item
+     * @param itemId     the item
+     * @param generation its generation
      * @return the rows, by record number
      */
-    public List<CommittedRecords.Row> correctionRows(UUID itemId)
+    public List<CommittedRecords.Row> correctionRows(UUID itemId,
+            int generation)
     {
         table.refresh();
-        return CommittedRecords.corrections(table, itemId);
+        return CommittedRecords.corrections(table, itemId, generation);
     }
 
     /**
      * Counts a file's committed records that failed conversion and are
      * stored in their original form.
      *
-     * @param itemId the file's id
+     * @param itemId     the file's id
+     * @param generation its generation
      * @return how many there are
      */
-    public long failedRecordCount(UUID itemId)
+    public long failedRecordCount(UUID itemId, int generation)
     {
         table.refresh();
-        return CommittedRecords.countFailed(table, itemId);
+        return CommittedRecords.countFailed(table, itemId, generation);
     }
 
     /**
      * Reads the rows of an item's committed records that the splitter
      * couldn't parse, for its fail store (STAGES.md §15.3).
      *
-     * @param itemId the item
+     * @param itemId     the item
+     * @param generation its generation
      * @return the rows, in sequence order
      */
-    public List<CommittedRecords.Row> failedRows(UUID itemId)
+    public List<CommittedRecords.Row> failedRows(UUID itemId,
+            int generation)
     {
         table.refresh();
         List<CommittedRecords.Row> failed = new ArrayList<>();
-        for (CommittedRecords.Row row : CommittedRecords.all(table, itemId))
+        for (CommittedRecords.Row row : CommittedRecords.all(table, itemId,
+                generation))
         {
             if (!SplitMessages.announced(row))
             {
@@ -1461,13 +1600,15 @@ public final class IngestPipeline implements AutoCloseable
     /**
      * Reads a file's stored records that failed conversion.
      *
-     * @param itemId the file
+     * @param itemId     the file
+     * @param generation its generation
      * @return them, in sequence order
      */
-    public List<CommittedRecords.Failed> failedRecords(UUID itemId)
+    public List<CommittedRecords.Failed> failedRecords(UUID itemId,
+            int generation)
     {
         table.refresh();
-        return CommittedRecords.failed(table, itemId);
+        return CommittedRecords.failed(table, itemId, generation, null);
     }
 
     /**
@@ -1488,8 +1629,8 @@ public final class IngestPipeline implements AutoCloseable
         long snapshotId = table.currentSnapshot().snapshotId();
         List<ConnectorMessage> messages = new ArrayList<>();
         for (CommittedRecords.Row row : CommittedRecords.read(table,
-                current.itemId(), current.publishedSeq(),
-                current.committedSeq()))
+                current.itemId(), current.generation(),
+                current.publishedSeq(), current.committedSeq()))
         {
             if (!SplitMessages.announced(row))
             {
@@ -1497,8 +1638,8 @@ public final class IngestPipeline implements AutoCloseable
             }
             StorageRef ref = new StorageRef(settings.catalogName(), namespace,
                     tableName, row.ingestedDate(), snapshotId, row.kekRef());
-            messages.add(SplitMessages.recordSplit(current.itemId(), row,
-                    ref, refs));
+            messages.add(SplitMessages.recordSplit(current, row, ref,
+                    refs));
         }
         Telemetry.get().audit("publish.republish",
                 Fields.of(Attr.ITEM_ID, current.itemId())

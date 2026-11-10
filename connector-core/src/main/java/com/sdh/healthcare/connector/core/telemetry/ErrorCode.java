@@ -305,9 +305,18 @@ public enum ErrorCode
     /**
      * An operator's correction of an item that couldn't be split to the end
      * would change a record that was already stored: only what failed is
-     * corrected (STAGES.md §15.1, rule 5; §15.6d).
+     * corrected (STAGES.md §15.1, rule 5; §15.6d). No longer raised: a
+     * correction of the item as a whole is its next generation (§15.8.5);
+     * kept to read failures recorded before.
      */
     CORRECTION_CHANGES_PASSED,
+
+    /**
+     * An operator's correction or retry of an item as a whole wasn't cut,
+     * since a newer generation of the item came first (STAGES.md §15.8.5):
+     * the edit is kept, and no failure is added.
+     */
+    CORRECTION_SUPERSEDED,
 
     /**
      * A stage's batch couldn't be finished (storage, the registry or the

@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint.Failure;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
@@ -64,7 +65,68 @@ public final class SplitMessages
                 row.contentType(), row.plaintextLength(), row.chunkCount(),
                 ref, row.origin(), row.errorCode(), row.errorAt(), message,
                 refs.messageRef(message), refs.messageReplaced(message),
-                row.stageVersion(), row.correctionOf(), row.lineage(), false);
+                row.stageVersion(), row.correctionOf(), row.lineage(), false,
+                cause(row));
+    }
+
+    /**
+     * The {@code record.split} for a committed row of a checkpoint's
+     * generation, as it was first sent: a generation cut from an operator's
+     * correction of the whole item names the item as what its records
+     * resolve (STAGES.md §15.8.5), which its rows don't keep.
+     *
+     * @param checkpoint the item's checkpoint, of the row's generation
+     * @param row        the record's row
+     * @param ref        where it is stored
+     * @param refs       what landing kept about the item
+     * @return the message
+     */
+    public static RecordSplit recordSplit(Checkpoint checkpoint,
+            CommittedRecords.Row row, StorageRef ref, LandedRefs refs)
+    {
+        RecordSplit message = recordSplit(checkpoint.itemId(), row, ref,
+                refs);
+        if (checkpoint.cut().correction() == 0 || message.resolves() != null
+                || row.errorCode() != null)
+        {
+            return message;
+        }
+        return new RecordSplit(message.recordId(), message.itemId(),
+                message.seq(), message.sourceOffset(), message.sourceLength(),
+                message.format(), message.contentType(),
+                message.plaintextLength(), message.chunkCount(),
+                message.storage(), message.origin(), message.errorCode(),
+                message.errorAt(), message.message(), message.messageRef(),
+                message.messageReplaces(), message.version(),
+                checkpoint.itemId().toString(), message.lineage(),
+                message.superseded(), message.cause());
+    }
+
+    /**
+     * Why a row's record was cut again (STAGES.md §15.8.7), as its row
+     * keeps it.
+     *
+     * @param row the record's row
+     * @return the cause; null for a record of a first cut
+     */
+    static ConnectorMessage.Cause cause(CommittedRecords.Row row)
+    {
+        return row.cause() == null ? null : new ConnectorMessage.Cause(
+                row.cause(), row.runId() == null ? null
+                        : UUID.fromString(row.runId()), null);
+    }
+
+    /**
+     * The lineage of a checkpoint's generation as a whole (STAGES.md
+     * §15.8.2), for its failure.
+     *
+     * @param checkpoint the checkpoint
+     * @return the lineage; null for the first generation
+     */
+    static Lineage lineage(Checkpoint checkpoint)
+    {
+        return checkpoint.generation() == 1 ? null
+                : Lineage.of(checkpoint.generation(), List.of());
     }
 
     /**
@@ -99,13 +161,15 @@ public final class SplitMessages
         {
             failures.add(new FailureStore.Failure(checkpoint.itemId(),
                     FailureStore.WHOLE_ITEM, null, failure.code().name(),
-                    failure.offset(), checkpoint.version()));
+                    failure.offset(), checkpoint.version(),
+                    lineage(checkpoint)));
         }
         for (CommittedRecords.Row row : failed)
         {
             failures.add(new FailureStore.Failure(checkpoint.itemId(),
                     row.seq(), row.recordId(), row.errorCode(),
-                    row.sourceOffset(), row.stageVersion()));
+                    row.sourceOffset(), row.stageVersion(),
+                    row.lineage().first() ? null : row.lineage()));
         }
         return failures;
     }
@@ -245,17 +309,22 @@ public final class SplitMessages
         long failed = failedCount - corrected.pieces();
         long passed = records - failed;
         Problem problem = corrected.wholeItem() ? null : split.failure();
-        if (counts.open() == 0)
+        boolean interrupted =
+                checkpoint.state() == Checkpoint.State.INTERRUPTED;
+        if (counts.open() == 0 || interrupted)
         {
+            // An interrupted generation's end is always item.split, saying
+            // so: a total of its records so far, still open (§15.8.6).
             return new ItemSplit(split.itemId(), intake, passed, failed,
                     split.itemSize(), digest, split.producerRef(),
                     split.replaces(), problem, split.startedAt(),
-                    split.completedAt(), split.versions(), completion);
+                    split.completedAt(), split.versions(), completion,
+                    checkpoint.generation(), interrupted);
         }
         return new ItemProgressed(split.itemId(), intake, STAGE, records,
                 passed, counts.open(), counts.declined(), problem,
                 split.producerRef(), split.replaces(), split.completedAt(),
-                split.versions(), completion);
+                split.versions(), completion, checkpoint.generation());
     }
 
     /**
@@ -304,6 +373,7 @@ public final class SplitMessages
                 checkpoint.itemSize(), digest, refs.producerRef(),
                 refs.replaces(), problem, checkpoint.startedAt(), finishedAt,
                 checkpoint.version() == null ? List.of()
-                        : List.of(checkpoint.version()));
+                        : List.of(checkpoint.version()), 1,
+                checkpoint.generation());
     }
 }

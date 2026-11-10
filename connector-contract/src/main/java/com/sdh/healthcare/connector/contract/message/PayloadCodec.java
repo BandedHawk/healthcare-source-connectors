@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Cause;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReprocess;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReceived;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemResult;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
@@ -116,10 +117,15 @@ public final class PayloadCodec
                 {
                     payload.put("superseded", true);
                 }
-                if (record instanceof RecordStored stored
-                        && stored.cause() != null)
+                Cause cause = switch (record)
                 {
-                    putCause(payload, stored.cause());
+                    case RecordStored stored -> stored.cause();
+                    case RecordSplit split -> split.cause();
+                    default -> null;
+                };
+                if (cause != null)
+                {
+                    putCause(payload, cause);
                 }
                 if (record instanceof RecordSplit split
                         && split.message() >= 0)
@@ -209,6 +215,10 @@ public final class PayloadCodec
                 {
                     payload.put("completion", split.completion());
                 }
+                if (split.interrupted())
+                {
+                    payload.put("interrupted", true);
+                }
             }
             case ItemConverted converted ->
             {
@@ -264,6 +274,12 @@ public final class PayloadCodec
             {
                 payload.put("runId", reprocess.runId().toString());
                 payload.put("record", toJson(reprocess.record()));
+            }
+            case ItemReprocess reprocess ->
+            {
+                payload.put("runId", reprocess.runId().toString());
+                payload.put("generation", reprocess.generation());
+                payload.put("landed", toJson(reprocess.landed()));
             }
             case RecordConflict conflict ->
             {
@@ -396,7 +412,8 @@ public final class PayloadCodec
                             (String) payload.get("version"),
                             (String) payload.get("resolves"),
                             lineage(payload),
-                            Boolean.TRUE.equals(payload.get("superseded")));
+                            Boolean.TRUE.equals(payload.get("superseded")),
+                            cause(payload));
                     case ITEM_SPLIT -> new ItemSplit(
                             itemId,
                             text(payload, "intake"),
@@ -413,7 +430,8 @@ public final class PayloadCodec
                             Instant.parse(text(payload, "completedAt")),
                             texts(payload, "versions"),
                             completion(payload, 1),
-                            generation(payload));
+                            generation(payload),
+                            Boolean.TRUE.equals(payload.get("interrupted")));
                     case ITEM_CONVERTED -> new ItemConverted(
                             itemId,
                             text(payload, "intake"),
@@ -442,6 +460,10 @@ public final class PayloadCodec
                             generation(payload));
                     case RECORD_REPROCESS -> new RecordReprocess(
                             reprocessed(payload),
+                            UUID.fromString(text(payload, "runId")));
+                    case ITEM_REPROCESS -> new ItemReprocess(
+                            landedInside(payload),
+                            Math.toIntExact(number(payload, "generation")),
                             UUID.fromString(text(payload, "runId")));
                     case RECORD_CONFLICT -> new RecordConflict(
                             text(payload, "recordId"),
@@ -507,6 +529,29 @@ public final class PayloadCodec
                     "record.reprocess holds no record");
         }
         return record;
+    }
+
+    /**
+     * Reads the item an item reprocess message holds: an
+     * {@code item.landed} of its own, with its own contract version and
+     * message ID.
+     *
+     * @param payload the reprocess message's payload
+     * @return the item
+     * @throws IllegalArgumentException if it holds no item, or another type
+     *                                  of message
+     */
+    @SuppressWarnings("unchecked")
+    private static ItemLanded landedInside(Map<String, Object> payload)
+    {
+        if (!(payload.get("landed") instanceof Map<?, ?> fields)
+                || !(fromJson((Map<String, Object>) fields)
+                        instanceof ItemLanded landed))
+        {
+            throw new IllegalArgumentException(
+                    "item.reprocess holds no item");
+        }
+        return landed;
     }
 
     /**

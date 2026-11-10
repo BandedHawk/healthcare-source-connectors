@@ -39,6 +39,7 @@ import com.sdh.healthcare.connector.file.split.SplitCorrections;
 import com.sdh.healthcare.connector.file.split.LandedItemsTable;
 import com.sdh.healthcare.connector.file.split.SplitHandler;
 import com.sdh.healthcare.connector.file.split.SplitReconciler;
+import com.sdh.healthcare.connector.file.split.SplitReprocess;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
@@ -48,6 +49,7 @@ import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
 import com.sdh.healthcare.connector.stage.StageProperties;
+import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageReceiver;
 import com.zaxxer.hikari.HikariDataSource;
 import java.time.Clock;
@@ -116,6 +118,9 @@ public final class ConnectorRuntime implements AutoCloseable
     /** Sends messages. */
     private final ClosablePublisher publisher;
 
+    /** Sends reprocesses to the stage's own input; null if it doesn't. */
+    private final ClosablePublisher reprocessPublisher;
+
     /** Splits, stores and publishes. */
     private final IngestPipeline pipeline;
 
@@ -127,6 +132,9 @@ public final class ConnectorRuntime implements AutoCloseable
 
     /** Applies operators' corrections. */
     private final SplitCorrections corrections;
+
+    /** The stage's reprocess; null if it doesn't reprocess. */
+    private final SplitReprocess reprocess;
 
     /** Takes {@code item.landed} messages off the broker. */
     private final StageReceiver receiver;
@@ -166,10 +174,13 @@ public final class ConnectorRuntime implements AutoCloseable
      * @param catalog        the stage's catalog
      * @param landingCatalog the landing catalog
      * @param publisher      sends messages
+     * @param reprocessing   sends reprocesses to the stage's own input;
+     *                       null if it doesn't reprocess
      * @param pipeline       splits, stores and publishes
      * @param processor      takes items through the pipeline
      * @param splitter       splits one item at a time
      * @param corrections    applies operators' corrections
+     * @param reprocess      the stage's reprocess; null if it doesn't
      * @param receiver       takes messages off the broker
      * @param health         whether the broker answers
      * @param duties         the reconciler and maintenance
@@ -179,11 +190,11 @@ public final class ConnectorRuntime implements AutoCloseable
      */
     private record Parts(HikariDataSource dataSource, Catalog catalog,
             Catalog landingCatalog, ClosablePublisher publisher,
-            IngestPipeline pipeline, ItemProcessor processor,
-            ItemSplitter splitter, SplitCorrections corrections,
-            StageReceiver receiver, StageHealth health,
-            StageDuties duties, Tables tables, KeyMaterial keys,
-            RecordIds ids)
+            ClosablePublisher reprocessing, IngestPipeline pipeline,
+            ItemProcessor processor, ItemSplitter splitter,
+            SplitCorrections corrections, SplitReprocess reprocess,
+            StageReceiver receiver, StageHealth health, StageDuties duties,
+            Tables tables, KeyMaterial keys, RecordIds ids)
     {
     }
 
@@ -198,10 +209,12 @@ public final class ConnectorRuntime implements AutoCloseable
         this.catalog = parts.catalog();
         this.landingCatalog = parts.landingCatalog();
         this.publisher = parts.publisher();
+        this.reprocessPublisher = parts.reprocessing();
         this.pipeline = parts.pipeline();
         this.processor = parts.processor();
         this.splitter = parts.splitter();
         this.corrections = parts.corrections();
+        this.reprocess = parts.reprocess();
         this.receiver = parts.receiver();
         this.health = parts.health();
         this.duties = parts.duties();
@@ -261,6 +274,7 @@ public final class ConnectorRuntime implements AutoCloseable
         Catalog catalog = null;
         Catalog landingCatalog = null;
         ClosablePublisher publisher = null;
+        ClosablePublisher reprocessPublisher = null;
         IngestPipeline pipeline = null;
         StageReceiver receiver = null;
         try
@@ -331,20 +345,44 @@ public final class ConnectorRuntime implements AutoCloseable
             HoldReleases releases = new HoldReleases(dataSource,
                     stage.registrySchema(), Duration.ofSeconds(10));
             releases.createTableIfMissing();
+            // Operators' reprocess runs (§15.8.4), where the stage has its
+            // own keys and input.
+            ReprocessStore reprocessRuns = new ReprocessStore(dataSource,
+                    stage.registrySchema(), ItemProcessor.STAGE,
+                    Duration.ofSeconds(10));
+            reprocessRuns.createTablesIfMissing();
+            CommonSettings.Queue reprocessQueue = reprocessQueue(stage, keys);
+            SplitReprocess reprocess = null;
+            if (reprocessQueue != null)
+            {
+                reprocessPublisher = publisher(camel, reprocessQueue);
+                KeyMaterial.Self self = keys.self();
+                reprocess = new SplitReprocess(new SplitReprocess.Parts(
+                        reprocessRuns, new MessageSealer(keys.signer(),
+                                keys.signerKid(), self.inbox(),
+                                self.inboxKid()), reprocessPublisher,
+                        self.signerKid()),
+                        new SplitReprocess.Items(checkpoints, landedItems,
+                                releases, landing.storage().catalogName(),
+                                landing.storage().namespace(),
+                                stage.sendTimeout(), leaseSettings.ttl()));
+                pipeline.setInterruptions(reprocess::newer);
+            }
             ItemProcessor processor = new ItemProcessor(pipeline, intake,
                     failures, corrections);
             ItemSplitter splitter = new ItemSplitter(processor, landedItems,
                     keys.wrap(), leases, properties.connectorId(),
                     leaseSettings);
             SplitCorrections correcting = new SplitCorrections(corrections,
-                    releases, splitter, leaseSettings.renewInterval(),
-                    leaseSettings.ttl());
+                    releases, splitter, reprocess,
+                    leaseSettings.renewInterval(), leaseSettings.ttl());
 
             StageHealth health = new StageHealth();
             receiver = new StageReceiver(camel, input,
                     new SplitHandler(splitter, keys.inbox(), intake,
                             landing.storage().catalogName(),
-                            landing.storage().namespace(), fatal),
+                            landing.storage().namespace(), fatal,
+                            reprocess),
                     health, Fields.of(Attr.INTAKE, intake),
                     properties.retry().initialBackoff(), MAX_BACKOFF);
 
@@ -368,8 +406,9 @@ public final class ConnectorRuntime implements AutoCloseable
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.FORMAT, format).with(Attr.INTAKE, intake));
             return new ConnectorRuntime(new Parts(dataSource, catalog,
-                    landingCatalog, publisher, pipeline, processor, splitter,
-                    correcting, receiver, health, duties,
+                    landingCatalog, publisher, reprocessPublisher, pipeline,
+                    processor, splitter, correcting, reprocess, receiver,
+                    health, duties,
                     new Tables(splitRecords, landedItems, checkpoints), keys,
                     ids));
         }
@@ -380,6 +419,7 @@ public final class ConnectorRuntime implements AutoCloseable
             {
                 pipeline.close();
             }
+            closeQuietly(reprocessPublisher);
             closeQuietly(publisher);
             if (landingCatalog != catalog)
             {
@@ -390,6 +430,53 @@ public final class ConnectorRuntime implements AutoCloseable
             keys.close();
             throw failure;
         }
+    }
+
+    /**
+     * The stage's own input, if it reprocesses (STAGES.md §15.8.4): only
+     * once its own keys ({@code sdh.crypto.keys.inbox.public-pem},
+     * {@code sdh.crypto.keys.signing.public-pem}) and its own input
+     * ({@code sdh.stage.reprocess}) are both configured.
+     *
+     * @param stage the stage's settings
+     * @param keys  the stage's keys
+     * @return the queue; null if it doesn't reprocess
+     * @throws IllegalArgumentException if only one of the two is configured
+     */
+    static CommonSettings.Queue reprocessQueue(StageProperties stage,
+            KeyMaterial keys)
+    {
+        CommonSettings.Queue queue = stage.reprocessQueue();
+        KeyMaterial.Self self = keys.self();
+        if (queue == null && self == null)
+        {
+            return null;
+        }
+        if (queue == null || self == null)
+        {
+            throw new IllegalArgumentException("A reprocess needs both "
+                    + StageProperties.PREFIX + ".reprocess and the stage's"
+                    + " own public keys (sdh.crypto.keys.inbox.public-pem,"
+                    + " sdh.crypto.keys.signing.public-pem)");
+        }
+        return queue;
+    }
+
+    /**
+     * Opens a publisher to a queue.
+     *
+     * @param camel the Camel context
+     * @param queue the queue's settings
+     * @return the publisher
+     * @throws Exception if it can't be opened
+     */
+    private static ClosablePublisher publisher(CamelContext camel,
+            CommonSettings.Queue queue) throws Exception
+    {
+        QueueType type = QueueType.of(queue.type());
+        Publishers.configureBroker(camel, type, queue.artemis().brokerUrl(),
+                queue.artemis().username(), queue.artemis().password());
+        return Publishers.create(camel, type, type.effectiveUri(queue.uri()));
     }
 
     /**
@@ -443,7 +530,7 @@ public final class ConnectorRuntime implements AutoCloseable
      * @param split     the split settings
      * @return the version
      */
-    static String version(SplitterRegistry splitters, String format,
+    public static String version(SplitterRegistry splitters, String format,
             SplitConfig split)
     {
         return StageBuild.identity(ConnectorRuntime.class) + "/" + format
@@ -529,6 +616,16 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
+     * The stage's reprocess (STAGES.md §15.8.4).
+     *
+     * @return it; null if the stage doesn't reprocess
+     */
+    public SplitReprocess reprocess()
+    {
+        return reprocess;
+    }
+
+    /**
      * Whether the input broker answers.
      *
      * @return the health
@@ -579,6 +676,7 @@ public final class ConnectorRuntime implements AutoCloseable
         corrections.close();
         duties.close();
         pipeline.close();
+        closeQuietly(reprocessPublisher);
         closeQuietly(publisher);
         keys.close();
         if (landingCatalog != catalog)

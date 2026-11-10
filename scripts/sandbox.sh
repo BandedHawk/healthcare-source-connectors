@@ -685,6 +685,7 @@ deploy_pipeline() {
   kc -n "$n" create configmap landing-config --from-file=application.yml="$work/landing-application.yml" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
   apply_secret "$n" splitter-keys --from-file=inbox.pem="$STATE/keys/$p-inbox.pem" \
+    --from-file=inbox-public.pem="$STATE/keys/$p-inbox-public.pem" \
     --from-file=recipient.pem="$STATE/keys/$p-convert-inbox-public.pem" \
     --from-file=landing-signer.pem="$STATE/keys/$p-landing-signing-public.pem" \
     --from-file=vault-token="$STATE/secrets/vault-token-splitter-$p"

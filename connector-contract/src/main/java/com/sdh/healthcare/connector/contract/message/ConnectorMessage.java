@@ -33,7 +33,7 @@ public sealed interface ConnectorMessage permits
         ConnectorMessage.ItemReceived, ConnectorMessage.ItemResult,
         ConnectorMessage.RecordConflict, ConnectorMessage.ItemSplit,
         ConnectorMessage.ItemConverted, ConnectorMessage.ItemProgressed,
-        ConnectorMessage.RecordReprocess
+        ConnectorMessage.RecordReprocess, ConnectorMessage.ItemReprocess
 {
 
     /**
@@ -1086,6 +1086,9 @@ public sealed interface ConnectorMessage permits
      * @param lineage         where it stands in its line (STAGES.md
      *                        §15.8.2); null for the first of everything
      * @param superseded      whether superseded on arrival (§15.8.3)
+     * @param cause           why it was cut again, for a generation made by
+     *                        a reprocess or an operator's correction
+     *                        (STAGES.md §15.8.7); null for a first cut
      */
     record RecordSplit(
             String recordId,
@@ -1107,7 +1110,8 @@ public sealed interface ConnectorMessage permits
             String version,
             String resolves,
             Lineage lineage,
-            boolean superseded)
+            boolean superseded,
+            Cause cause)
             implements RecordInStorage
     {
 
@@ -1117,6 +1121,45 @@ public sealed interface ConnectorMessage permits
         public RecordSplit
         {
             lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A message of a first cut.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its item
+         * @param seq             its number in the item, from 0
+         * @param sourceOffset    where it starts in the item, in bytes
+         * @param sourceLength    how many bytes of the item it covers
+         * @param format          the name of the item's format
+         * @param contentType     what the stored bytes are
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where its text came from in the item
+         * @param errorCode       why the splitter couldn't parse it, or null
+         * @param errorAt         where in the item that was, or null
+         * @param message         its message in a batch, or -1
+         * @param messageRef      that message's broker ID, or null
+         * @param messageReplaces the message it replaces, or null
+         * @param version         the split stage's version, or null
+         * @param resolves        the failure it resolves, or null
+         * @param lineage         where it stands in its line, or null
+         * @param superseded      whether superseded on arrival
+         */
+        public RecordSplit(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, long plaintextLength, int chunkCount,
+                StorageRef storage, RecordOrigin origin, String errorCode,
+                SourcePosition errorAt, int message, String messageRef,
+                String messageReplaces, String version, String resolves,
+                Lineage lineage, boolean superseded)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, plaintextLength, chunkCount, storage, origin,
+                    errorCode, errorAt, message, messageRef, messageReplaces,
+                    version, resolves, lineage, superseded, null);
         }
 
         /**
@@ -1262,7 +1305,22 @@ public sealed interface ConnectorMessage permits
                     sourceLength, format, contentType, plaintextLength,
                     chunkCount, storage, origin, errorCode, errorAt, message,
                     messageRef, messageReplaces, version, resolves, lineage,
-                    superseded);
+                    superseded, cause);
+        }
+
+        /**
+         * The same record, cut again for a cause.
+         *
+         * @param why the cause; null for a first cut
+         * @return the message
+         */
+        public RecordSplit withCause(Cause why)
+        {
+            return new RecordSplit(recordId, itemId, seq, sourceOffset,
+                    sourceLength, format, contentType, plaintextLength,
+                    chunkCount, storage, origin, errorCode, errorAt, message,
+                    messageRef, messageReplaces, version, resolves, lineage,
+                    superseded, why);
         }
     }
 
@@ -1295,12 +1353,15 @@ public sealed interface ConnectorMessage permits
      *                          §15.6e), counted within its generation
      * @param generation        the item's generation it is the end of, from
      *                          1 (STAGES.md §15.8)
+     * @param interrupted       whether the generation was stopped part way
+     *                          for a newer one (STAGES.md §15.8.6): its
+     *                          records so far, a total still open
      */
     record ItemSplit(UUID itemId, String intake, long recordCount,
             long failedRecordCount, long itemSize, String itemDigest,
             String producerRef, UUID replaces, Problem failure,
             Instant startedAt, Instant completedAt, List<String> versions,
-            int completion, int generation)
+            int completion, int generation, boolean interrupted)
             implements ConnectorMessage
     {
 
@@ -1313,6 +1374,35 @@ public sealed interface ConnectorMessage permits
             versions = versions == null ? List.of() : List.copyOf(versions);
             completion = Math.max(1, completion);
             generation = Math.max(1, generation);
+        }
+
+        /**
+         * The end of a generation split to its end, or failed.
+         *
+         * @param itemId            the item's id
+         * @param intake            the intake it came in through
+         * @param recordCount       its records, failed ones included
+         * @param failedRecordCount the pieces the splitter couldn't parse
+         * @param itemSize          the item's size, in bytes
+         * @param itemDigest        its keyed digest, as landed
+         * @param producerRef       the producer's reference, or null
+         * @param replaces          the item it replaces, or null
+         * @param failure           why it couldn't be split further, or null
+         * @param startedAt         when the split stage started on it
+         * @param completedAt       when it finished
+         * @param versions          the versions, in the order first used
+         * @param completion        which completion this is, from 1
+         * @param generation        the generation, from 1
+         */
+        public ItemSplit(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, long itemSize, String itemDigest,
+                String producerRef, UUID replaces, Problem failure,
+                Instant startedAt, Instant completedAt, List<String> versions,
+                int completion, int generation)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, itemSize,
+                    itemDigest, producerRef, replaces, failure, startedAt,
+                    completedAt, versions, completion, generation, false);
         }
 
         /**
@@ -1826,6 +1916,74 @@ public sealed interface ConnectorMessage permits
         public String orderingKey()
         {
             return record.recordId();
+        }
+    }
+
+    /**
+     * An item to split again, as its next generation (STAGES.md §15.8.4),
+     * sent by the split stage to its own input, signed by itself: the
+     * item's {@code item.landed} as landing kept it, the generation the
+     * reprocess gives it, and the run that asked for it. It is partitioned
+     * as the item's {@code item.landed} is.
+     *
+     * @param landed     the item, as landed
+     * @param generation the generation to cut, from 2
+     * @param runId      the reprocess run
+     */
+    record ItemReprocess(ItemLanded landed, int generation, UUID runId)
+            implements ConnectorMessage
+    {
+
+        /**
+         * Checks each is given, and the generation is past the first.
+         *
+         * @throws NullPointerException     if the item or run is null
+         * @throws IllegalArgumentException if the generation is below 2
+         */
+        public ItemReprocess
+        {
+            java.util.Objects.requireNonNull(landed, "landed");
+            java.util.Objects.requireNonNull(runId, "runId");
+            if (generation < 2)
+            {
+                throw new IllegalArgumentException(
+                        "A reprocess makes generation 2 or later");
+            }
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#ITEM_REPROCESS}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.ITEM_REPROCESS;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "ri-", the item id and the generation's suffix: one per
+         *         generation of the item
+         */
+        @Override
+        public String messageId()
+        {
+            return "ri-" + landed.itemId()
+                    + ConnectorMessage.generationSuffix(generation);
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return the item's id
+         */
+        @Override
+        public UUID itemId()
+        {
+            return landed.itemId();
         }
     }
 }

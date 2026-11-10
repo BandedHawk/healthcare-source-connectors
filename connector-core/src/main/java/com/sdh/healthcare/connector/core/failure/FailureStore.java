@@ -1349,6 +1349,45 @@ public final class FailureStore
     }
 
     /**
+     * Supersedes the failures of an item's generations before one, in a
+     * transaction of its own, and audits them (STAGES.md §15.8.3): for a
+     * stage with no stage registry (the split stage), when it starts the
+     * item's next generation.
+     *
+     * @param itemId     the item
+     * @param generation the newer generation
+     * @return the failures superseded, as they were
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<Stored> supersedeBefore(UUID itemId, int generation)
+    {
+        List<Stored> superseded;
+        try (Connection connection = dataSource.getConnection())
+        {
+            connection.setAutoCommit(false);
+            try
+            {
+                superseded = supersedeGeneration(connection, table, stage,
+                        itemId, generation, queryTimeoutSeconds);
+                connection.commit();
+            }
+            catch (SQLException | RuntimeException failure)
+            {
+                connection.rollback();
+                throw failure;
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Fail store unavailable",
+                    failure);
+        }
+        auditSuperseded(stage, superseded, Superseded.GENERATION,
+                "g" + generation);
+        return superseded;
+    }
+
+    /**
      * Supersedes the failure at a number that a correction or retry was
      * waiting for (STAGES.md §15.8.5), by the revision it made, whether or
      * not that revision passed, as {@link #supersedeRevision} does. Finds

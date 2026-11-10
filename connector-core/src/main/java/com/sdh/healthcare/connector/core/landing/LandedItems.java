@@ -168,6 +168,55 @@ public final class LandedItems
     }
 
     /**
+     * The items of an intake fully landed in a range of time (STAGES.md
+     * §15.8.4), by their summary rows' {@value LandingTables#LANDED_AT},
+     * earliest first.
+     *
+     * @param table  the {@value LandingTables#LANDED_ITEMS} table
+     * @param intake the intake
+     * @param from   the first instant, included
+     * @param to     the last instant, excluded
+     * @param limit  the most returned
+     * @return the items
+     * @throws IOException if the table can't be read
+     */
+    public static List<UUID> landedBetween(Table table, String intake,
+            Instant from, Instant to, int limit) throws IOException
+    {
+        table.refresh();
+        if (table.currentSnapshot() == null)
+        {
+            return List.of();
+        }
+        List<Record> found = new ArrayList<>();
+        try (CloseableIterable<Record> summaries = IcebergGenerics.read(table)
+                .where(Expressions.and(
+                        Expressions.equal(CHUNK_INDEX, SUMMARY_ROW),
+                        Expressions.equal(INTAKE, intake),
+                        Expressions.greaterThanOrEqual(LANDED_AT,
+                                ChronoUnit.MICROS.between(Instant.EPOCH,
+                                        from)),
+                        Expressions.lessThan(LANDED_AT, ChronoUnit.MICROS
+                                .between(Instant.EPOCH, to))))
+                .select(ITEM_ID, LANDED_AT)
+                .build())
+        {
+            for (Record row : summaries)
+            {
+                found.add(row.copy());
+            }
+        }
+        found.sort(Comparator.comparing(
+                row -> (OffsetDateTime) row.getField(LANDED_AT)));
+        List<UUID> items = new ArrayList<>();
+        for (int index = 0; index < found.size() && index < limit; index++)
+        {
+            items.add((UUID) found.get(index).getField(ITEM_ID));
+        }
+        return items;
+    }
+
+    /**
      * Where retention must keep rows from so that no item is purged in part
      * (design §5.3.13). An item's chunks are committed in batches, each
      * stamped with its own {@value LandingTables#LANDED_AT}, so an item

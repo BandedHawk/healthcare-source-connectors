@@ -110,7 +110,46 @@ public final class CheckpointCodec
             // Left out when not known, as restarts.
             fields.put("version", checkpoint.version());
         }
+        Checkpoint.Cut cut = checkpoint.cut();
+        if (cut.generation() > 1)
+        {
+            // Left out for the first generation (STAGES.md §15.8), so
+            // checkpoints written before generations still verify.
+            fields.put("generation", cut.generation());
+            fields.put("cause", cut.cause());
+            if (cut.runId() != null)
+            {
+                fields.put("runId", cut.runId().toString());
+            }
+            if (cut.correction() > 0)
+            {
+                fields.put("correction", cut.correction());
+            }
+        }
         return fields;
+    }
+
+    /**
+     * Reads which generation a checkpoint is of, as {@link #canonical}
+     * writes it.
+     *
+     * @param fields the checkpoint's fields
+     * @return the generation; the first if none is written
+     * @throws ParseException if a field is of the wrong type
+     */
+    private static Checkpoint.Cut cut(Map<String, Object> fields)
+            throws ParseException
+    {
+        if (!fields.containsKey("generation"))
+        {
+            return Checkpoint.Cut.FIRST;
+        }
+        String runId = JSONObjectUtils.getString(fields, "runId");
+        return new Checkpoint.Cut(JSONObjectUtils.getInt(fields, "generation"),
+                JSONObjectUtils.getString(fields, "cause"),
+                runId == null ? null : UUID.fromString(runId),
+                fields.containsKey("correction")
+                        ? JSONObjectUtils.getInt(fields, "correction") : 0);
     }
 
     /**
@@ -151,7 +190,8 @@ public final class CheckpointCodec
                     failure,
                     fields.containsKey("restarts")
                             ? JSONObjectUtils.getInt(fields, "restarts") : 0,
-                    JSONObjectUtils.getString(fields, "version"));
+                    JSONObjectUtils.getString(fields, "version"),
+                    cut(fields));
         }
         catch (ParseException malformed)
         {

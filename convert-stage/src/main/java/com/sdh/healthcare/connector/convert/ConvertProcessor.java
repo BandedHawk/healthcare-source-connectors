@@ -364,9 +364,11 @@ public final class ConvertProcessor
             case RecordSplit split -> new StageInput.RecordInput(
                     split.recordId(), split.itemId(), split.seq(),
                     split.lineage());
+            // An interrupted generation's is an open total, as an
+            // item.progress is (STAGES.md §15.8.6).
             case ItemSplit item -> new StageInput.ItemTotal(item.itemId(),
-                    item.recordCount(), false, item.completion(),
-                    item.generation());
+                    item.recordCount(), item.interrupted(),
+                    item.completion(), item.generation());
             // The split stage has failures open: the records passed so far
             // (STAGES.md §15.6).
             case ItemProgressed progressed -> new StageInput.ItemTotal(
@@ -508,14 +510,18 @@ public final class ConvertProcessor
         long seq = correction.seq();
         Table records = storage.records();
         records.refresh();
-        CommittedRecords.Row original = CommittedRecords.all(records, itemId)
-                .stream()
+        // The failure's own generation (STAGES.md §15.8); every one for a
+        // correction submitted before lineages were kept.
+        int generation = correction.lineage() == null ? 0
+                : correction.lineage().generation();
+        CommittedRecords.Row original = CommittedRecords.all(records, itemId,
+                generation).stream()
                 .filter(row -> row.seq() == seq && row.errorCode() != null)
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("The failed"
                         + " record isn't in " + RecordsTable.DEFAULT_NAME));
         CommittedRecords.Failed placed = CommittedRecords.failed(records,
-                itemId, storage.keys()).stream()
+                itemId, generation, storage.keys()).stream()
                 .filter(failed -> failed.seq() == seq)
                 .findFirst().orElse(null);
         byte[] content = correction.open(storage.keys());
@@ -931,7 +937,15 @@ public final class ConvertProcessor
                 : records.currentSnapshot().snapshotId();
         List<ConnectorMessage> messages = new ArrayList<>();
         Set<String> versions = new LinkedHashSet<>();
+        // The newest generation only (STAGES.md §15.8): the ones before
+        // are superseded downstream.
+        int generation = 0;
         for (CommittedRecords.Row row : CommittedRecords.all(records, itemId))
+        {
+            generation = Math.max(generation, row.lineage().generation());
+        }
+        for (CommittedRecords.Row row : CommittedRecords.all(records, itemId,
+                generation))
         {
             if (row.errorCode() != null)
             {
@@ -950,7 +964,7 @@ public final class ConvertProcessor
         // originals; each resolves a failure (STAGES.md §15.6c).
         Set<Long> corrected = new java.util.TreeSet<>();
         for (CommittedRecords.Row row : CommittedRecords.corrections(records,
-                itemId))
+                itemId, generation))
         {
             if (row.errorCode() == null)
             {
@@ -1084,6 +1098,9 @@ public final class ConvertProcessor
         }
         Table records = storage.records();
         records.refresh();
+        // The report's generation only (STAGES.md §15.8): its first may be
+        // of a later one, if the first was interrupted.
+        int generation = progress.generation();
         // By sequence number: a row of records names a piece the splitter
         // couldn't parse when it was sent on before 2026-11-08, so it is
         // the same failure as its row of split_records.
@@ -1094,14 +1111,15 @@ public final class ConvertProcessor
             Table splitRecords = storage.splitRecords();
             splitRecords.refresh();
             for (CommittedRecords.Failed piece : CommittedRecords.failed(
-                    splitRecords, progress.itemId(), storage.keys()))
+                    splitRecords, progress.itemId(), generation,
+                    storage.keys()))
             {
                 failed.put(piece.seq(), piece);
             }
             // A piece corrected at the split stage came here as a record
             // (STAGES.md §15.6d): counted in done, not a problem.
             for (CommittedRecords.Row row : CommittedRecords.corrections(
-                    splitRecords, progress.itemId()))
+                    splitRecords, progress.itemId(), generation))
             {
                 if (row.errorCode() == null)
                 {
@@ -1111,7 +1129,7 @@ public final class ConvertProcessor
             splitFailed = failed.size();
         }
         for (CommittedRecords.Failed record : CommittedRecords.failed(
-                records, progress.itemId(), storage.keys()))
+                records, progress.itemId(), generation, storage.keys()))
         {
             if (failed.put(record.seq(), record) != null)
             {
@@ -1121,7 +1139,7 @@ public final class ConvertProcessor
         // A failure an operator's correction resolved is no longer a
         // problem of the item's (STAGES.md §15.6c).
         for (CommittedRecords.Row row : CommittedRecords.corrections(records,
-                progress.itemId()))
+                progress.itemId(), generation))
         {
             if (row.errorCode() == null)
             {

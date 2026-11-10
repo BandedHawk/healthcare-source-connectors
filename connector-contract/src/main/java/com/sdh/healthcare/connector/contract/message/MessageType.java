@@ -61,7 +61,13 @@ public enum MessageType
      * A stage's own request to process a record again (STAGES.md §15.8.4),
      * on its own input, signed by itself.
      */
-    RECORD_REPROCESS("record.reprocess");
+    RECORD_REPROCESS("record.reprocess"),
+
+    /**
+     * The split stage's own request to split an item again, as its next
+     * generation (STAGES.md §15.8.4), on its own input, signed by itself.
+     */
+    ITEM_REPROCESS("item.reprocess");
 
     /** The name used on the queue. */
     private final String wireName;

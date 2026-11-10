@@ -24,7 +24,8 @@ import org.slf4j.LoggerFactory;
  * applied by a pod that stopped before sending it. It also applies
  * operators' requests to end the hold on an item held across versions
  * (§15.6e), which are applied as corrections are, by a pod under the
- * item's lease.
+ * item's lease. Where the stage reprocesses, it queues and sends the
+ * objects of operators' reprocess runs too (§15.8.4).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -47,6 +48,9 @@ public final class SplitCorrections implements AutoCloseable
 
     /** Applies them under the items' leases. */
     private final ItemSplitter splitter;
+
+    /** The stage's reprocess; null if it doesn't reprocess. */
+    private final SplitReprocess reprocess;
 
     /** How often to look. */
     private final Duration interval;
@@ -86,6 +90,27 @@ public final class SplitCorrections implements AutoCloseable
     public SplitCorrections(CorrectionStore store, HoldReleases releases,
             ItemSplitter splitter, Duration interval, Duration unsentAfter)
     {
+        this(store, releases, splitter, null, interval, unsentAfter);
+    }
+
+    /**
+     * Creates the loop, applying requests to release held items and
+     * queueing reprocess runs too, not yet started.
+     *
+     * @param store       the correction store
+     * @param releases    the requests to release held items
+     * @param splitter    applies them under the items' leases
+     * @param reprocess   the stage's reprocess; null if it doesn't
+     *                    reprocess
+     * @param interval    how often to look
+     * @param unsentAfter how long an item's end may go unsent after its
+     *                    correction, before it is sent again
+     */
+    public SplitCorrections(CorrectionStore store, HoldReleases releases,
+            ItemSplitter splitter, SplitReprocess reprocess,
+            Duration interval, Duration unsentAfter)
+    {
+        this.reprocess = reprocess;
         this.store = store;
         this.releases = releases;
         this.splitter = splitter;
@@ -111,6 +136,7 @@ public final class SplitCorrections implements AutoCloseable
             applyPending();
             sweep();
             applyReleases();
+            queueReprocess();
         }
         catch (InterruptedException interrupted)
         {
@@ -180,6 +206,18 @@ public final class SplitCorrections implements AutoCloseable
             }
         }
         return applied;
+    }
+
+    /**
+     * Queues and sends a batch of reprocess runs' objects, if the stage
+     * reprocesses.
+     *
+     * @return how many were sent
+     * @throws Exception if storage or the broker fails
+     */
+    public int queueReprocess() throws Exception
+    {
+        return reprocess == null ? 0 : reprocess.queueAndSend();
     }
 
     /**

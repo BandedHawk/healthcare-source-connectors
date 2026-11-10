@@ -1400,7 +1400,7 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
 4. **Exact copies** (§15.5) at landing and at the stages.
 5. **The drain check** (§14.4).
 
-### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 to 3 built)
+### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 to 4 built)
 
 Worked out with the user on 2026-11-09, in place of the proposal first written here. It replaces `replay`
 (§13.2), the outcomes of §15.4 and the matching of §15.4a, and changes how corrections and retries are recorded
@@ -1842,6 +1842,116 @@ Left from step 3:
 - A `record.reprocess` rebuilt from `split_records` knows no queue message its record is in, so a reprocessed
   record of a message batch that fails names no message (as the reconciler's rebuilt records, §9).
 - `RecordStored` of a correction doesn't yet carry a `cause`; its row does.
+
+**Step 4 as planned (2026-11-09, with the user).** The split stage's reprocess, in the split stage
+(file-connector, connector-core), reusing the run tables and the command of step 3. Settled with the user:
+- **An interrupted generation's end at a later stage** is an open total, as `item.progress` is: its records are
+  counted, so no total is reported missing, but the item stays incomplete there, and no item end and no producer
+  result is sent for that generation. A newer generation always follows, since the split stage interrupts one
+  only to start the next.
+- **The producer's result** is sent for an item's first report at the convert stage, whatever its generation, if
+  no report of the item was sent before. So an item whose first cut was interrupted still gets one result; an item
+  already reported gets nothing for a reprocess (§15.8.7 unchanged otherwise).
+- **The landing-time selector** (`--intake --landed-from --landed-to`) is the split stage's only; later stages
+  choose by item or version.
+- **No `--seq` at the split stage:** a reprocess there is of the whole item, its next generation. One record is
+  reprocessed at the convert stage; a failed piece is still retried or corrected as now.
+
+Worked out in planning, as consequences of what was decided:
+- **The generation on the checkpoint.** `Checkpoint` gains `generation` (from 1; one written before reads 1), the
+  `cause` and run that made it, and, for a whole-item correction, which correction it cuts. `split_item` gains
+  `generation` and `version` in plain text, for queries. A new generation replaces the item's checkpoint: cut from
+  the start, counts from 0, completion numbers starting again. Its rows of `split_records` carry `generation`,
+  `cause` and `run_id`, and its `record.split` messages the generation and cause. Everything that reads an item's
+  rows of `split_records` at the split stage reads only the checkpoint's generation: settling a batch at resume,
+  sending again what wasn't acknowledged, failed pieces, corrections, the reconciler.
+- **Generation numbers** come from the counter of step 3 (`stage_revision`), at the item's whole-item place
+  (`seq -1`): one more than the higher of the counter and the checkpoint's generation, taken by queueing a
+  reprocess and by submitting a whole-item correction or retry, so the two never share a generation.
+- **Queueing,** as at the convert stage, each renewal interval, by the loop that applies corrections and releases
+  (`SplitCorrections`). An object is refused `superseded` if the item is now past the generation chosen,
+  `past_retention` if the item is no longer in `landed_items`, and `release_pending` if a hold release is waiting
+  (§15.8.4). Its message, `item.reprocess`, holds the item's `item.landed` rebuilt from `landed_items`, the
+  generation and the run, sealed to the split stage itself and signed by it, and goes to its own input
+  (`sdh.stage.reprocess`, the landed topic), keyed by item as landing keys it.
+- **Signers:** the split stage takes `item.reprocess` only when signed by itself and `item.landed` only when signed
+  by another (landing), as the convert stage does (`stage.message_rejected` `wrong_signer`).
+- **Taking an `item.reprocess`,** under the item's lease (another pod holding it means try again later, as now):
+  - the item already at that generation or past it: a repeat, resumed if in progress, otherwise done;
+  - `SPLITTING` or `HELD` at an older generation: interrupted (below), then the new generation starts;
+  - `ARCHIVING` or `FAILING`: its cut is over, so it is finished as now first, then the new generation starts;
+  - `COMPLETED`, `FAILED`, `CLOSED` or `INTERRUPTED`: the new generation starts.
+  The new generation is cut from the start of the landed item under the version running now; its failures are
+  recorded at its generation, those of the generations before superseded (`GENERATION`, `failure.superseded`),
+  and `stage.generation_started` audited. When its end is sent, the object's outcome is noted (`stored` if it
+  completed, `failed` if it failed as a whole) and `stage.reprocessed` audited and counted.
+- **Interruption.** A pod splitting an item looks, after each batch is committed and sent, for a newer generation
+  queued for it. If there is one it stops there: the checkpoint becomes `INTERRUPTED` (a new state), audited
+  `split.generation_interrupted` (item, generation, the generation and run that stopped it, records cut, offset)
+  and counted (`sdh.split.generations_interrupted`), and the generation's end is sent: `item.split` with
+  `interrupted: true`, its counts and generation. The lease is let go, and the `item.reprocess`, tried again,
+  starts the new generation. If the pod stopped instead, the pod that takes the reprocess finds the item
+  `SPLITTING` at the older generation and interrupts it itself, after settling a batch left part way. A `HELD`
+  item is interrupted the same way, needing no `release`.
+- **Later stages** take `item.split` with `interrupted` as an open total of its generation (above); the newer
+  generation's first message supersedes it there (`stage.generation_superseded`, step 1). The contract's
+  `ItemSplit` gains `interrupted`, left out when false.
+- **The command,** on the split stage's admin: `--item-id` (one or more), `--made-by <version>` (items whose current
+  generation was cut under it), and `--landed-from <time> --landed-to <time>` (items landed in that range, from
+  `landed_items`; `--intake`, if given, must be the stage's own), each narrowed by `--item-id` if given. `--seq`
+  is refused. `--dry-run`, `--status`, `--cancel` and the limit of 100,000 objects as at the convert stage; a
+  whole-item correction pending is warned about.
+- **Whole-item corrections and retries become generations** (§15.8.5, left from step 2). `correct --seq -1` and
+  `retry --seq -1` note the item's next generation when submitted. A pod applies one as it does a reprocess, but
+  only to an item whose splitting has ended, as now: the new generation is cut from the start of the
+  correction's content (a retry's is the item as landed), with cause `correction` or `reprocess`, its records
+  resolving the item. It may cut any number of records, and pieces may fail, each a failure of the new
+  generation. The correction is `PASSED` if the cut reached the end, `FAILED` if the item failed as a whole,
+  that failure the new generation's own. `CORRECTION_CHANGES_PASSED` goes. A generation cut from a correction is
+  resumed from the correction's content, which its checkpoint names. One whose generation is older than the
+  item's by the time it is applied (a reprocess came first) isn't cut: it ends `FAILED`
+  (`CORRECTION_SUPERSEDED`), its edit kept and readable, and no failure added.
+- **The sandbox:** the split pods get their own inbox public key and `sdh.stage.reprocess` on `<pipeline>.landed`.
+
+**Step 4 as built (2026-11-09; tried on the sandbox, SANDBOX.md).** As planned, with these choices made in building:
+
+- **Where it lives.** The split stage's part is in file-connector: `SplitReprocess` (queueing, sending, noting
+  outcomes, and telling the pipeline of a newer generation), `ItemSplitter.reprocess` (under the item's lease),
+  `SplitHandler` (the signer checks) and the loop that applies corrections and releases (`SplitCorrections`), which
+  queues a batch each renewal interval. `ItemProcessor.reprocess` and the pipeline's generations are in
+  connector-core. As at the convert stage, the stage reprocesses only once both `sdh.stage.reprocess` and its own
+  public keys are configured; one without the other stops it at start.
+- **The run tables at the split stage.** The split stage has no stage registry, so `ReprocessStore` makes its own
+  tables (`createTablesIfMissing`). An object of the split stage is the item at its whole-item place (`seq -1`); its
+  record ID is the item's ID. `reprocess_object` gains `made_generation`, the generation the object was given, read
+  in place of the line for a split object.
+- **Interruption** is asked of the run tables (`Interruptions`, `ReprocessStore.newerQueued`): an object of the item
+  `QUEUED` with a higher generation than the one being split. Its message need not have been sent yet. A whole-item
+  correction or retry never interrupts: it is applied only to an item whose splitting has ended.
+- **Outcomes** are noted when the generation's end is sent: `stored` (the item split to its end), `failed` (failed as
+  a whole), `interrupted` (a newer generation stopped it), or `superseded` (a newer one was there first).
+- **Later stages.** The stage registry's item row gains `reported`: whether any report of the item was sent here,
+  in any generation. A new generation starts its counts again, but not this. Rows from before are backfilled from
+  their counts (`progress_key` set, or a completion). The producer's step runs on the first report only, whatever
+  its generation. An interrupted generation's total is noted as looked at, with nothing sent, and audited
+  `item.progress` with `result=INTERRUPTED`. The producer's result counts the failures of the report's generation
+  only.
+- **Reading by generation.** Also reading only one generation: the split stage's `replay` (the checkpoint's), the
+  convert stage's replay (the newest), `export` of a failed piece (the newest generation's), and a correction at the
+  convert stage (its failure's).
+- **The command.** `ReprocessAdmin` gains `wholeItems`, `madeBy` and `landedBetween`, with defaults for the stages
+  after. `--landed-from` and `--landed-to` are ISO-8601 times with their offsets, the end excluded, read from the
+  summary rows of `landed_items` (`LandedItems.landedBetween`), earliest first. `--made-by` reads `split_item`'s
+  plain `version`. A run at the split stage is asked under the stage's full version (build, splitter and settings),
+  as its checkpoints keep it.
+- **Fixed on the way:** records sent again after a restart (or as a failing item ended) were rebuilt from their rows,
+  which don't keep what a correction's generation resolves, so they went without it. They are now rebuilt with the
+  checkpoint (`SplitMessages.recordSplit(Checkpoint, …)`), as `replay` does.
+- **Tests:** contract round trips; at the split stage, a reprocess as the next generation, a repeat and an older one
+  superseded, an interruption, a correction as a generation, a failed retry, and a correction a reprocess
+  superseded; at a later stage, an interrupted generation's end; the command's whole-item and landing-time choices;
+  and, in the app test, a run queued, sent to the stage's own input, taken and noted, and an `item.landed` signed by
+  the stage itself refused. Not tested on its own: a pod interrupting an item another pod left `SPLITTING`.
 
 ## 16. Items with no records (decided and built 2026-11-09)
 

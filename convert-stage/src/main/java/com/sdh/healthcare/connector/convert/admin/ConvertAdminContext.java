@@ -394,10 +394,11 @@ final class ConvertAdminContext
     {
         Table table = records();
         table.refresh();
+        // The newest generation's, if the record failed in more than one.
         CommittedRecords.Row row = CommittedRecords.all(table, itemId)
                 .stream()
                 .filter(each -> each.seq() == seq && each.errorCode() != null)
-                .findFirst()
+                .reduce((older, newer) -> newer)
                 .orElseThrow(() -> new IllegalStateException("The failed"
                         + " record isn't in " + RecordsTable.DEFAULT_NAME));
         long snapshot = table.currentSnapshot().snapshotId();

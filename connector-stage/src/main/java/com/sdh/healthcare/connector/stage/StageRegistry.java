@@ -458,6 +458,16 @@ public final class StageRegistry
             statement.execute("ALTER TABLE " + items
                     + " ADD COLUMN IF NOT EXISTS upstream_completion integer"
                     + " NOT NULL DEFAULT 0");
+            // Added 2026-11-09 (STAGES.md §15.8.7): whether a report of the
+            // item was sent here, in any generation; a new generation
+            // starts its counts again, but not this. An item reported
+            // before it was kept shows it by its counts.
+            statement.execute("ALTER TABLE " + items
+                    + " ADD COLUMN IF NOT EXISTS reported boolean"
+                    + " NOT NULL DEFAULT false");
+            statement.execute("UPDATE " + items + " SET reported = true"
+                    + " WHERE NOT reported AND (progress_key IS NOT NULL"
+                    + " OR completion > 0)");
             // Added 2026-11-09 (STAGES.md §15.8): each record's place and
             // lineage, so the stage can tell which object at a place is
             // current, and whether one arrived after a newer one; and each
@@ -1685,9 +1695,11 @@ public final class StageRegistry
      *                    its failures after then is looked at again
      * @param total    the message that gave its total, sealed as received;
      *                 null if it wasn't kept
+     * @param reported whether a report of it was sent here before, in any
+     *                 generation (STAGES.md §15.8.7)
      */
     public record DueItem(ItemProgress progress, byte[] total,
-            String progressKey, Instant readAt)
+            String progressKey, Instant readAt, boolean reported)
     {
 
         /**
@@ -1698,7 +1710,23 @@ public final class StageRegistry
          */
         public DueItem(ItemProgress progress, byte[] total)
         {
-            this(progress, total, null, null);
+            this(progress, total, null, null, false);
+        }
+
+        /**
+         * An item, its reports known only by its counts.
+         *
+         * @param progress    its counts
+         * @param total       the message that gave its total, or null
+         * @param progressKey the counts of its last {@code item.progress}
+         *                    here; null if none
+         * @param readAt      when its counts were read
+         */
+        public DueItem(ItemProgress progress, byte[] total,
+                String progressKey, Instant readAt)
+        {
+            this(progress, total, progressKey, readAt, progressKey != null
+                    || progress.completion() > 0);
         }
 
         /**
@@ -1963,7 +1991,7 @@ public final class StageRegistry
                            AND f.state = 'SUPERSEDED'
                            AND COALESCE(f.superseded_how, 'REVISION')
                                = 'REVISION'),
-                       i.completion, i.generation
+                       i.completion, i.generation, i.reported
                   FROM %1$s i
                  WHERE i.stage = ? AND i.item_id = ANY (?)
                    AND i.completed_at IS NULL AND i.expected IS NOT NULL
@@ -1992,7 +2020,8 @@ public final class StageRegistry
                             .withCompletion(rows.getInt(13))
                             .withGeneration(rows.getInt(14)),
                             rows.getBytes(5), rows.getString(8),
-                            rows.getTimestamp(11).toInstant()));
+                            rows.getTimestamp(11).toInstant(),
+                            rows.getBoolean(15)));
                 }
             }
             return due;
@@ -2030,9 +2059,27 @@ public final class StageRegistry
      */
     public void markProgressed(UUID itemId, String key, Instant readAt)
     {
+        markProgressed(itemId, key, readAt, true);
+    }
+
+    /**
+     * Notes the counts of an item looked at, and when they were read, and
+     * whether a report of them was sent: none is for an interrupted
+     * generation's total (STAGES.md §15.8.6).
+     *
+     * @param itemId the item's id
+     * @param key    its counts, as {@link ItemProgress#progressKey}
+     * @param readAt when they were read; null for now
+     * @param sent   whether a report was sent
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void markProgressed(UUID itemId, String key, Instant readAt,
+            boolean sent)
+    {
         String sql = """
                 UPDATE %s SET progress_key = ?,
-                       progress_at = COALESCE(?, clock_timestamp())
+                       progress_at = COALESCE(?, clock_timestamp()),
+                       reported = reported OR ?
                  WHERE stage = ? AND item_id = ? AND completed_at IS NULL"""
                 .formatted(items);
         try (Connection connection = dataSource.getConnection();
@@ -2042,8 +2089,9 @@ public final class StageRegistry
             update.setString(1, key);
             update.setTimestamp(2, readAt == null ? null
                     : Timestamp.from(readAt));
-            update.setString(3, stage);
-            update.setObject(4, itemId);
+            update.setBoolean(3, sent);
+            update.setString(4, stage);
+            update.setObject(5, itemId);
             update.executeUpdate();
         }
         catch (SQLException failure)
@@ -2201,7 +2249,7 @@ public final class StageRegistry
     {
         String sql = """
                 UPDATE %s SET completed_at = clock_timestamp(),
-                       completion = completion + 1
+                       completion = completion + 1, reported = true
                  WHERE stage = ? AND item_id = ? AND completed_at IS NULL"""
                 .formatted(items);
         try (Connection connection = dataSource.getConnection();

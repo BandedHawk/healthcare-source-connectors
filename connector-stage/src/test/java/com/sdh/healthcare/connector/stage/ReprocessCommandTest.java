@@ -24,6 +24,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.PrintStream;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -76,6 +77,12 @@ class ReprocessCommandTest
 
         /** What the command reads as its standard input. */
         byte[] input = REASON.getBytes(UTF_8);
+
+        /** Whether it reprocesses whole items, as the split stage does. */
+        boolean whole;
+
+        /** The landing times asked for, as {@code [from, to]}. */
+        final List<Instant> landedAsked = new ArrayList<>();
 
         /** Creates the context. */
         Context()
@@ -145,6 +152,27 @@ class ReprocessCommandTest
         public String version()
         {
             return "v2";
+        }
+
+        @Override
+        public boolean wholeItems()
+        {
+            return whole;
+        }
+
+        /** The test's item, as landed in any range, at a split stage. */
+        @Override
+        public List<UUID> landedBetween(String intake, Instant from,
+                Instant to, int limit) throws Exception
+        {
+            if (!whole)
+            {
+                return ReprocessAdmin.super.landedBetween(intake, from, to,
+                        limit);
+            }
+            landedAsked.add(from);
+            landedAsked.add(to);
+            return List.of(item);
         }
     }
 
@@ -256,6 +284,61 @@ class ReprocessCommandTest
         assertThat(run("--made-by", "v1", "--dry-run"))
                 .contains("Would reprocess 1 object(s)")
                 .contains(item + " seq 0 g1 r1");
+    }
+
+    /**
+     * At a stage that reprocesses whole items, {@code --seq} is refused,
+     * and items are chosen by landing time too.
+     *
+     * @throws Exception if it fails
+     */
+    @Test
+    void choosesWholeItemsByLandingTime() throws Exception
+    {
+        context.whole = true;
+        pieces.clear();
+        pieces.add(new ReprocessInputs.Input(new ReprocessStore.Chosen(item,
+                -1, Lineage.FIRST, item.toString()), false, null));
+
+        assertThatThrownBy(() -> run("--item-id", item.toString(), "--seq",
+                "1")).isInstanceOf(AdminArgs.UsageException.class)
+                .hasMessageContaining("whole item");
+        assertThat(run("--landed-from", "2026-11-01T00:00:00Z",
+                "--landed-to", "2026-11-02T00:00:00+01:00", "--dry-run"))
+                .contains("Would reprocess 1 object(s)")
+                .contains("--landed-from 2026-11-01T00:00:00Z")
+                .contains(item + " seq -1 g1");
+        assertThat(context.landedAsked).containsExactly(
+                Instant.parse("2026-11-01T00:00:00Z"),
+                Instant.parse("2026-11-01T23:00:00Z"));
+    }
+
+    /**
+     * Landing time is the split stage's only, and given whole.
+     */
+    @Test
+    void refusesLandingTimeOutOfPlace()
+    {
+        assertThatThrownBy(() -> run("--landed-from",
+                "2026-11-01T00:00:00Z", "--landed-to",
+                "2026-11-02T00:00:00Z", "--dry-run"))
+                .isInstanceOf(AdminArgs.UsageException.class)
+                .hasMessageContaining("split stage only");
+        context.whole = true;
+        assertThatThrownBy(() -> run("--landed-from",
+                "2026-11-01T00:00:00Z", "--dry-run"))
+                .isInstanceOf(AdminArgs.UsageException.class);
+        assertThatThrownBy(() -> run("--landed-from",
+                "2026-11-02T00:00:00Z", "--landed-to",
+                "2026-11-01T00:00:00Z", "--dry-run"))
+                .isInstanceOf(AdminArgs.UsageException.class);
+        assertThatThrownBy(() -> run("--landed-from", "yesterday",
+                "--landed-to", "2026-11-01T00:00:00Z", "--dry-run"))
+                .isInstanceOf(AdminArgs.UsageException.class);
+        assertThatThrownBy(() -> run("--made-by", "v1", "--landed-from",
+                "2026-11-01T00:00:00Z", "--landed-to",
+                "2026-11-02T00:00:00Z"))
+                .isInstanceOf(AdminArgs.UsageException.class);
     }
 
     /** Mistakes in the choice are usage errors. */

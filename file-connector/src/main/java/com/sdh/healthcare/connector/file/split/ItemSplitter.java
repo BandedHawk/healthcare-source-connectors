@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.file.split;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
@@ -131,6 +132,51 @@ public final class ItemSplitter
                     () -> LandedItemSource.open(landedItems.get(), itemId,
                             keys), lease, refs);
             LOG.info("split.item_done result={} records={}",
+                    outcome.result(), outcome.recordCount());
+            return outcome;
+        }
+        finally
+        {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Splits an item again as its next generation, for a reprocess run
+     * (STAGES.md §15.8.4), under the item's lease: interrupting the
+     * generation before if it is part way (§15.8.6), or finishing it if its
+     * cut is over; then notes what came of the run's object. Waits while
+     * this pod splits another.
+     *
+     * @param reprocess the message taken
+     * @param runs      notes what came of it; null to note nothing
+     * @return how the generation ended
+     * @throws LeaseHeldException   if another pod holds the item's lease;
+     *                              try again later, once that pod has seen
+     *                              the newer generation and stopped
+     * @throws InterruptedException if interrupted while waiting
+     * @throws Exception            if storage or the broker fails, or the
+     *                              item's lease was lost; try again later
+     */
+    public ItemProcessor.Outcome reprocess(
+            ConnectorMessage.ItemReprocess reprocess, SplitReprocess runs)
+            throws Exception
+    {
+        UUID itemId = reprocess.itemId();
+        lock.lockInterruptibly();
+        try (LeaseKeeper lease = lease(itemId))
+        {
+            Landed landed = landed(itemId);
+            ItemProcessor.Outcome outcome = processor.reprocess(itemId,
+                    landed.digest(), () -> LandedItemSource.open(
+                            landedItems.get(), itemId, keys), lease,
+                    landed.refs(), reprocess.generation(),
+                    reprocess.runId());
+            if (runs != null)
+            {
+                runs.note(reprocess, outcome);
+            }
+            LOG.info("split.reprocess_done result={} records={}",
                     outcome.result(), outcome.recordCount());
             return outcome;
         }

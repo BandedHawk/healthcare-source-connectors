@@ -28,6 +28,9 @@ sdh:
       type: kafka                 # kafka | sqs | pubsub | servicebus | eventhubs | artemis | rabbitmq | camel
       uri: "kafka:sdh.split.claims?brokers=kafka:9093&securityProtocol=SSL"
       artemis: { broker-url: "tcp://artemis:61617?sslEnabled=true", username: sdh }
+    reprocess:                    # the stage's own input, which a reprocess sends to; unset: no reprocess
+      type: kafka
+      uri: "kafka:sdh.landing.claims?brokers=kafka:9093&securityProtocol=SSL"
     registry-schema: sdh_stage    # Postgres schema of the items' checkpoints (split_item), in the lease database
   split:
     format: ccda                  # ccda | xml | x12 | edifact | fhir | csv | delimited | parquet | <plugin>
@@ -66,9 +69,11 @@ sdh:
       records-kek: records-kek/1                            # keystore alias, or the KMS key ref
       landed-items-kek: landed-items-kek/1                  # unwrap only: reads landed items
       signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
+      #   to reprocess, with a local key: public-pem: /run/secrets/signing-public.pem, sha256: "cd34..."
       # signing: { kid: connector-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
       recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }
       inbox: { kid: splitter-2026, pem: /run/secrets/inbox.pem }   # item.landed is encrypted to this; passphrase: env
+      #   to reprocess: public-pem: /run/secrets/inbox-public.pem, sha256: "ef56..."   # the stage seals to itself
       landing-signer: { kid: landing-2026, pem: /run/secrets/landing-signer.pem }   # the landing node's public key
     aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
     gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC

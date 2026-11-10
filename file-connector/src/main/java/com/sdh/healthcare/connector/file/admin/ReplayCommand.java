@@ -171,8 +171,10 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
         Table splitRecords = context.splitRecords();
         splitRecords.refresh();
         audit.add(Attr.TABLE, IngestTables.SPLIT_RECORDS);
+        // The checkpoint's generation only (STAGES.md §15.8).
+        int generation = checkpoint.generation();
         List<CommittedRecords.Row> rows =
-                CommittedRecords.all(splitRecords, itemId);
+                CommittedRecords.all(splitRecords, itemId, generation);
         long snapshotId = splitRecords.currentSnapshot() == null ? -1
                 : splitRecords.currentSnapshot().snapshotId();
         String catalog = properties.storage().catalogName();
@@ -191,7 +193,7 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
             {
                 continue;
             }
-            messages.add(SplitMessages.recordSplit(itemId, row,
+            messages.add(SplitMessages.recordSplit(checkpoint, row,
                     new StorageRef(catalog, namespace,
                             IngestTables.SPLIT_RECORDS, row.ingestedDate(),
                             snapshotId, row.kekRef()), refs));
@@ -199,7 +201,8 @@ final class ReplayCommand implements AdminCommand<SplitAdminContext>
         // Operators' corrections that passed (STAGES.md §15.6d): sent with
         // the rest, and counted in the item's end.
         List<CommittedRecords.Row> corrections =
-                CommittedRecords.corrections(splitRecords, itemId);
+                CommittedRecords.corrections(splitRecords, itemId,
+                        generation);
         if (!endOnly)
         {
             for (CommittedRecords.Row row : corrections)

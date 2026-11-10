@@ -21,8 +21,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -144,6 +146,14 @@ public final class ItemCheckpoints
             statement.execute("ALTER TABLE " + table
                     + " ADD COLUMN IF NOT EXISTS completed boolean"
                     + " NOT NULL DEFAULT false");
+            // Added 2026-11-09 (STAGES.md §15.8): the generation the
+            // checkpoint is of, and the version cutting it, in plain text
+            // for queries; a row from before is of the first generation.
+            statement.execute("ALTER TABLE " + table
+                    + " ADD COLUMN IF NOT EXISTS generation integer"
+                    + " NOT NULL DEFAULT 1");
+            statement.execute("ALTER TABLE " + table
+                    + " ADD COLUMN IF NOT EXISTS version text");
         }
         catch (SQLException failure)
         {
@@ -248,7 +258,10 @@ public final class ItemCheckpoints
 
     /**
      * Writes an item's checkpoint, dropping any pending one. The first
-     * state after {@code SPLITTING} also notes when splitting ended.
+     * state after {@code SPLITTING} also notes when splitting ended. A
+     * checkpoint of a later generation than the row's (STAGES.md §15.8)
+     * starts the item's end again: when it ended, and its completions,
+     * are of its generation.
      *
      * @param checkpoint the checkpoint
      * @param lease      the item's lease
@@ -261,22 +274,35 @@ public final class ItemCheckpoints
         boolean ended = state == Checkpoint.State.ARCHIVING
                 || state == Checkpoint.State.FAILING
                 || state == Checkpoint.State.COMPLETED
-                || state == Checkpoint.State.FAILED;
+                || state == Checkpoint.State.FAILED
+                || state == Checkpoint.State.INTERRUPTED;
         String sql = """
                 INSERT INTO %1$s AS s
                        (item_id, epoch, checkpoint, pending, state, ended_at,
-                        updated_at)
+                        updated_at, generation, version)
                 VALUES (?, ?, ?, NULL, ?,
                         CASE WHEN ? THEN clock_timestamp() END,
-                        clock_timestamp())
+                        clock_timestamp(), ?, ?)
                 ON CONFLICT (item_id) DO UPDATE
                    SET epoch = EXCLUDED.epoch,
                        checkpoint = EXCLUDED.checkpoint,
                        pending = NULL,
                        state = EXCLUDED.state,
-                       ended_at = COALESCE(s.ended_at, EXCLUDED.ended_at),
-                       updated_at = EXCLUDED.updated_at
-                 WHERE s.epoch <= EXCLUDED.epoch""".formatted(table);
+                       ended_at = CASE
+                           WHEN EXCLUDED.generation > s.generation
+                                THEN EXCLUDED.ended_at
+                           ELSE COALESCE(s.ended_at, EXCLUDED.ended_at) END,
+                       completion = CASE
+                           WHEN EXCLUDED.generation > s.generation THEN 0
+                           ELSE s.completion END,
+                       completed = s.completed
+                           AND EXCLUDED.generation <= s.generation,
+                       updated_at = EXCLUDED.updated_at,
+                       generation = EXCLUDED.generation,
+                       version = EXCLUDED.version
+                 WHERE s.epoch <= EXCLUDED.epoch
+                   AND s.generation <= EXCLUDED.generation"""
+                .formatted(table);
         write(sql, checkpoint, lease, ended);
     }
 
@@ -302,7 +328,8 @@ public final class ItemCheckpoints
                    SET epoch = ?, checkpoint = ?,
                        updated_at = clock_timestamp()
                  WHERE item_id = ? AND epoch <= ?
-                   AND state = 'SPLITTING'""".formatted(table);
+                   AND state = 'SPLITTING' AND generation = ?"""
+                .formatted(table);
         lease.checkHeld();
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement update = connection.prepareStatement(sql))
@@ -312,6 +339,7 @@ public final class ItemCheckpoints
             update.setString(2, codec.encode(checkpoint));
             update.setObject(3, checkpoint.itemId());
             update.setLong(4, lease.epoch());
+            update.setInt(5, checkpoint.generation());
             if (update.executeUpdate() != 1)
             {
                 throw new LeaseLostException(LeaseLostException.Reason.FENCED);
@@ -338,7 +366,8 @@ public final class ItemCheckpoints
         String sql = """
                 UPDATE %s
                    SET epoch = ?, pending = ?, updated_at = clock_timestamp()
-                 WHERE item_id = ? AND epoch <= ?""".formatted(table);
+                 WHERE item_id = ? AND epoch <= ? AND generation = ?"""
+                .formatted(table);
         lease.checkHeld();
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement update = connection.prepareStatement(sql))
@@ -348,6 +377,7 @@ public final class ItemCheckpoints
             update.setString(2, codec.encode(next));
             update.setObject(3, next.itemId());
             update.setLong(4, lease.epoch());
+            update.setInt(5, next.generation());
             if (update.executeUpdate() != 1)
             {
                 throw new LeaseLostException(LeaseLostException.Reason.FENCED);
@@ -517,6 +547,91 @@ public final class ItemCheckpoints
     }
 
     /**
+     * The generations of some items (STAGES.md §15.8), as their rows hold
+     * them.
+     *
+     * @param itemIds the items
+     * @return each one's generation; those never started are left out
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Map<UUID, Integer> generations(Collection<UUID> itemIds)
+    {
+        Map<UUID, Integer> found = new HashMap<>();
+        if (itemIds.isEmpty())
+        {
+            return found;
+        }
+        String sql = "SELECT item_id, generation FROM " + table
+                + " WHERE item_id = ANY (?)";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setArray(1, connection.createArrayOf("uuid",
+                    itemIds.toArray()));
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.put(rows.getObject(1, UUID.class), rows.getInt(2));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The items whose current generation was begun under a version
+     * (STAGES.md §15.8.4), oldest change first. An item whose row hasn't
+     * been written since versions were kept in plain text isn't found.
+     *
+     * @param version the version
+     * @param itemIds narrows it to these items; empty for any
+     * @param limit   the most returned
+     * @return the items
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<UUID> madeBy(String version, Collection<UUID> itemIds,
+            int limit)
+    {
+        String sql = "SELECT item_id FROM " + table + " WHERE version = ?"
+                + (itemIds.isEmpty() ? "" : " AND item_id = ANY (?)")
+                + " ORDER BY updated_at, item_id LIMIT ?";
+        List<UUID> found = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            int index = 1;
+            select.setString(index++, version);
+            if (!itemIds.isEmpty())
+            {
+                select.setArray(index++, connection.createArrayOf("uuid",
+                        itemIds.toArray()));
+            }
+            select.setInt(index, limit);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(rows.getObject(1, UUID.class));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
      * Runs a fenced write of a checkpoint.
      *
      * @param sql        the statement: item, epoch, checkpoint, state,
@@ -540,6 +655,8 @@ public final class ItemCheckpoints
             upsert.setString(3, codec.encode(checkpoint));
             upsert.setString(4, checkpoint.state().name());
             upsert.setBoolean(5, ended);
+            upsert.setInt(6, checkpoint.generation());
+            upsert.setString(7, checkpoint.version());
             if (upsert.executeUpdate() != 1)
             {
                 throw new LeaseLostException(LeaseLostException.Reason.FENCED);

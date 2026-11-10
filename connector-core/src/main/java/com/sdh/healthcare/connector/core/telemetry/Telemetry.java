@@ -161,6 +161,12 @@ public final class Telemetry
     private final LongCounter itemsHeld;
 
     /**
+     * Generations the split stage stopped part way for a newer one
+     * (STAGES.md §15.8.6).
+     */
+    private final LongCounter generationsInterrupted;
+
+    /**
      * Failures a stage recorded in its fail store, by stage (STAGES.md
      * §15.3).
      */
@@ -260,6 +266,12 @@ public final class Telemetry
                 .setUnit("{item}")
                 .setDescription("Items held part way, begun under another"
                         + " version of the split stage")
+                .build();
+        generationsInterrupted = meter.counterBuilder(
+                "sdh.split.generations_interrupted")
+                .setUnit("{generation}")
+                .setDescription("Generations of items stopped part way for"
+                        + " a newer one")
                 .build();
         failuresRecorded = meter.counterBuilder("sdh.stage.failures")
                 .setUnit("{failure}")
@@ -632,6 +644,15 @@ public final class Telemetry
     public void itemHeld()
     {
         itemsHeld.add(1);
+    }
+
+    /**
+     * Counts a generation the split stage stopped part way for a newer one
+     * (STAGES.md §15.8.6).
+     */
+    public void generationInterrupted()
+    {
+        generationsInterrupted.add(1);
     }
 
     /**

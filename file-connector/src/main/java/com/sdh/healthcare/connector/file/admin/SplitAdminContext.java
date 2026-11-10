@@ -20,7 +20,10 @@ import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
+import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
+import com.sdh.healthcare.connector.core.landing.LandedItems;
+import com.sdh.healthcare.connector.core.split.SplitterRegistry;
 import com.sdh.healthcare.connector.core.landing.LandedRefs;
 import com.sdh.healthcare.connector.core.pipeline.SplitMessages;
 import com.sdh.healthcare.connector.core.storage.CommittedRecords;
@@ -34,10 +37,17 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
-import com.sdh.healthcare.connector.stage.admin.FailureAdmin;
+import com.sdh.healthcare.connector.stage.ReprocessInputs;
+import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.admin.AdminArgs;
+import com.sdh.healthcare.connector.stage.admin.ReprocessAdmin;
 import java.io.PrintStream;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Set;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.camel.CamelContext;
@@ -52,14 +62,15 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * What the split stage's admin commands read from, each part opened only
  * when a command needs it. Strictly read-only: tables are loaded, never
  * created; ID keys are never created; leases are inspected, never taken;
- * the database connection is read-only (design §11.4). Only
- * {@code decline} and {@code reopen} write, to the fail store, over a
- * connection of their own.
+ * the database connection is read-only (design §11.4). Only the commands
+ * that change the stage's tables ({@code decline}, {@code reopen},
+ * {@code correct}, {@code retry}, {@code release}, {@code reprocess}) write,
+ * over a connection of their own.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class SplitAdminContext implements FailureAdmin, AutoCloseable
+final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
 {
 
     /** The stage's settings. */
@@ -405,10 +416,11 @@ final class SplitAdminContext implements FailureAdmin, AutoCloseable
         }
         Table table = splitRecords();
         table.refresh();
+        // The newest generation's, if the piece failed in more than one.
         CommittedRecords.Row row = CommittedRecords.all(table, itemId)
                 .stream()
                 .filter(each -> each.seq() == seq && each.errorCode() != null)
-                .findFirst()
+                .reduce((older, newer) -> newer)
                 .orElseThrow(() -> new IllegalStateException("The failed"
                         + " piece isn't in " + IngestTables.SPLIT_RECORDS));
         long snapshot = table.currentSnapshot().snapshotId();
@@ -433,6 +445,99 @@ final class SplitAdminContext implements FailureAdmin, AutoCloseable
     {
         ReplayCommand.send(this, itemId, true, Clock.systemUTC(), audit,
                 out);
+    }
+
+    @Override
+    public ReprocessStore reprocessRuns()
+    {
+        return new ReprocessStore(database.dataSource(),
+                properties.stage().registrySchema(), ItemProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public ReprocessStore reprocessRunsToChange()
+    {
+        return new ReprocessStore(writing.dataSource(),
+                properties.stage().registrySchema(), ItemProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    /**
+     * The stage's input, as the split stage reprocesses it (STAGES.md
+     * §15.8.4): each item once, at its whole-item place, under its current
+     * generation; an item never split has none.
+     */
+    @Override
+    public ReprocessInputs reprocessInputs() throws Exception
+    {
+        ItemCheckpoints checkpoints = checkpoints();
+        return itemId ->
+        {
+            Integer generation = checkpoints.generations(List.of(itemId))
+                    .get(itemId);
+            if (generation == null)
+            {
+                return List.of();
+            }
+            return List.of(new ReprocessInputs.Input(
+                    new ReprocessStore.Chosen(itemId,
+                            FailureStore.WHOLE_ITEM,
+                            Lineage.of(generation, List.of()),
+                            itemId.toString()), false, null));
+        };
+    }
+
+    /**
+     * The split stage's version, as its checkpoints keep it: the build,
+     * the splitter and the split settings (STAGES.md §14.2).
+     */
+    @Override
+    public String version()
+    {
+        String format = properties.split().format();
+        return ConnectorRuntime.version(SplitterRegistry.load(), format,
+                ConnectorRuntime.splitConfig(properties.split(), format));
+    }
+
+    @Override
+    public boolean wholeItems()
+    {
+        return true;
+    }
+
+    /**
+     * The items whose current generation was cut under a version, each at
+     * its whole-item place.
+     */
+    @Override
+    public Map<UUID, Set<Long>> madeBy(String version, List<UUID> itemIds,
+            int limit) throws Exception
+    {
+        Map<UUID, Set<Long>> places = new LinkedHashMap<>();
+        for (UUID itemId : checkpoints().madeBy(version, itemIds, limit))
+        {
+            places.put(itemId, Set.of(FailureStore.WHOLE_ITEM));
+        }
+        return places;
+    }
+
+    /**
+     * The items landed in the range, from {@code landed_items}; the intake,
+     * if given, must be the stage's own.
+     */
+    @Override
+    public List<UUID> landedBetween(String intake, Instant from, Instant to,
+            int limit) throws Exception
+    {
+        String own = properties.landing().intake();
+        if (intake != null && !intake.equals(own))
+        {
+            throw new AdminArgs.UsageException("--intake must be the"
+                    + " stage's own, " + own);
+        }
+        return LandedItems.landedBetween(landedItems(), own, from, to,
+                limit);
     }
 
     /**

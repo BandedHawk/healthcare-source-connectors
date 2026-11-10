@@ -33,6 +33,9 @@ import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.file.split.SplitHandler;
+import com.sdh.healthcare.connector.contract.message.Lineage;
+import com.sdh.healthcare.connector.core.failure.FailureReason;
+import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.file.split.SplitReconciler;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
@@ -86,6 +89,9 @@ class FileConnectorApplicationTest
 
     /** Where the stage's messages go. */
     static final String OUT_QUEUE = "seda:sdh-out?size=100000";
+
+    /** The stage's own input, for its reprocesses (STAGES.md §15.8.4). */
+    static final String REPROCESS_QUEUE = "seda:sdh-reprocess?size=1000";
 
     /** The test's key files. */
     static final TestKeys KEYS;
@@ -181,6 +187,17 @@ class FileConnectorApplicationTest
                 KEYS.landingSignerPem::toString);
         registry.add("sdh.stage.output.type", () -> "camel");
         registry.add("sdh.stage.output.uri", () -> OUT_QUEUE);
+        // The stage's own keys and input: it reprocesses.
+        registry.add("sdh.stage.reprocess.type", () -> "camel");
+        registry.add("sdh.stage.reprocess.uri", () -> REPROCESS_QUEUE);
+        registry.add("sdh.crypto.keys.inbox.public-pem",
+                KEYS.inboxPublicPem::toString);
+        String inboxPin = KeyMaterial.fingerprint(KEYS.inbox.getPublic());
+        registry.add("sdh.crypto.keys.inbox.sha256", () -> inboxPin);
+        registry.add("sdh.crypto.keys.signing.public-pem",
+                KEYS.splitSignerPem::toString);
+        String signingPin = KeyMaterial.fingerprint(KEYS.signing.getPublic());
+        registry.add("sdh.crypto.keys.signing.sha256", () -> signingPin);
         registry.add("sdh.retry.max-attempts", () -> "2");
         registry.add("sdh.retry.initial-backoff", () -> "10ms");
     }
@@ -331,6 +348,65 @@ class FileConnectorApplicationTest
                 Clock.systemUTC()).run(runtime.tables().splitRecords(),
                         RecordsTable.INGESTED_AT, Optional.empty(), false);
         assertThat(report.compactedFiles()).isGreaterThanOrEqualTo(2);
+        assertThat(FATAL).isEmpty();
+    }
+
+    /**
+     * An operator's reprocess of a split item (STAGES.md §15.8.4): the
+     * stage's loop queues its object as the item's next generation and
+     * sends {@code item.reprocess} to the stage's own input, sealed to
+     * itself; taken, it cuts the item again from the start, each record
+     * and the end of that generation, and the object's outcome is noted.
+     * An {@code item.landed} signed by the stage itself is refused.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void reprocessesAnItemAsItsNextGeneration() throws Exception
+    {
+        TestLanding landing = new TestLanding(catalogProperties(),
+                runtime.keys().wrap(), KEYS, INTAKE);
+        LandedItem item = landing.land(csv(4, "r"), "r-green.csv");
+        SplitHandler handler = handler();
+        assertThat(handle(handler, landing.announcement(item)))
+                .isEqualTo(Outcome.DONE);
+        drain();
+        ReprocessStore runs = new ReprocessStore(PG.getPostgresDatabase(),
+                "sdh_split", "split", Duration.ofSeconds(10));
+        UUID runId = runs.record("--item-id " + item.itemId(), "alice", "v",
+                id -> FailureReason.seal(runtime.keys().wrap(),
+                        TestKeys.RECORDS, id, -2, 1,
+                        "Synthetic reprocess reason 5d1e"),
+                List.of(new ReprocessStore.Chosen(item.itemId(), -1,
+                        Lineage.FIRST, item.itemId().toString())));
+
+        assertThat(runtime.corrections().queueReprocess()).isEqualTo(1);
+        String sent = camel.createConsumerTemplate().receiveBody(
+                REPROCESS_QUEUE, 2000, String.class);
+        assertThat(sent).isNotNull();
+        assertThat(handle(handler, sent.getBytes(UTF_8)))
+                .isEqualTo(Outcome.DONE);
+
+        List<ConnectorMessage> messages = drain();
+        assertThat(of(messages, RecordSplit.class)).hasSize(4)
+                .allSatisfy(record -> assertThat(record.lineage())
+                        .isEqualTo(Lineage.of(2, List.of())));
+        assertThat(of(messages, ItemSplit.class)).singleElement()
+                .satisfies(end ->
+                {
+                    assertThat(end.generation()).isEqualTo(2);
+                    assertThat(end.recordCount()).isEqualTo(4);
+                });
+        assertThat(runs.objects(runId)).singleElement().satisfies(object ->
+                assertThat(object.outcome()).isEqualTo("stored"));
+
+        MessageSealer self = new MessageSealer(
+                new ECDSASigner((ECPrivateKey) KEYS.signing.getPrivate()),
+                TestKeys.SPLIT_SIGNER_KID, KEYS.inbox.getPublic(),
+                TestKeys.INBOX_KID);
+        assertThat(handle(handler, self.seal(item.message("sdh",
+                LandingTables.DEFAULT_NAMESPACE)))).isEqualTo(Outcome.DONE);
+        assertThat(drain()).isEmpty();
         assertThat(FATAL).isEmpty();
     }
 
@@ -499,7 +575,8 @@ class FileConnectorApplicationTest
     SplitHandler handler()
     {
         return new SplitHandler(runtime.splitter(), runtime.keys().inbox(),
-                INTAKE, "sdh", LandingTables.DEFAULT_NAMESPACE, FATAL::add);
+                INTAKE, "sdh", LandingTables.DEFAULT_NAMESPACE, FATAL::add,
+                runtime.reprocess());
     }
 
     /**

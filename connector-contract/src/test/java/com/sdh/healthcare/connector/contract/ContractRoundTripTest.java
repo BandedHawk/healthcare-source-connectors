@@ -19,6 +19,7 @@ import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.Lineage;
+import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
@@ -402,6 +403,59 @@ class ContractRoundTripTest
         assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemSplit(itemId,
                 "claims", 7, 1, 999, "digest", null, null, null, at, at)))
                 .doesNotContainKey("generation");
+    }
+
+    /**
+     * The split stage's reprocess (STAGES.md §15.8.4, §15.8.6) round-trips:
+     * an {@code item.reprocess} holding its {@code item.landed}, an
+     * interrupted generation's {@code item.split}, and a record cut in a
+     * reprocessed generation, with its cause. {@code interrupted} is left
+     * out when false.
+     */
+    @Test
+    void splitReprocessRoundTrips()
+    {
+        UUID itemId = UUID.randomUUID();
+        UUID runId = UUID.randomUUID();
+        java.time.Instant at = java.time.Instant.EPOCH;
+        ConnectorMessage.ItemLanded landed = new ConnectorMessage.ItemLanded(
+                itemId, "claims-sftp", "file", 999, "digest", at,
+                new StorageRef("cat", "sdh_landing", "landed_items",
+                        LocalDate.of(2026, 11, 9), 43L, "kek-2"));
+        ConnectorMessage.ItemReprocess reprocess =
+                new ConnectorMessage.ItemReprocess(landed, 3, runId);
+        ConnectorMessage.ItemSplit interrupted =
+                new ConnectorMessage.ItemSplit(itemId, "claims", 4, 0, 999,
+                        "digest", null, null, null, at, at,
+                        java.util.List.of(), 1, 2, true);
+        ConnectorMessage.RecordSplit cut = new ConnectorMessage.RecordSplit(
+                "ID1", itemId, 0, 0, 20, "ccda", "application/xml", 20, 1,
+                new StorageRef("cat", "sdh_ingest", "split_records",
+                        LocalDate.of(2026, 11, 9), 42L, "kek-1"), null, null,
+                null, -1, null, null, "v", null,
+                new Lineage(3, java.util.List.of()), false)
+                .withCause(new ConnectorMessage.Cause(
+                        ConnectorMessage.Cause.REPROCESS, runId, null));
+        for (ConnectorMessage message : java.util.List.of(reprocess,
+                interrupted, cut))
+        {
+            assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
+                    .isEqualTo(message);
+        }
+
+        assertThat(reprocess.type()).isEqualTo(MessageType.ITEM_REPROCESS);
+        assertThat(reprocess.itemId()).isEqualTo(itemId);
+        assertThat(reprocess.messageId()).isEqualTo("ri-" + itemId + "~g3");
+        assertThat(PayloadCodec.toJson(interrupted))
+                .containsEntry("interrupted", true);
+        assertThat(PayloadCodec.toJson(cut))
+                .containsEntry("cause", ConnectorMessage.Cause.REPROCESS)
+                .containsEntry("runId", runId.toString());
+        assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemSplit(itemId,
+                "claims", 7, 1, 999, "digest", null, null, null, at, at)))
+                .doesNotContainKey("interrupted");
+        assertThatThrownBy(() -> new ConnectorMessage.ItemReprocess(landed,
+                1, runId)).isInstanceOf(IllegalArgumentException.class);
     }
 
     /**

@@ -338,6 +338,12 @@ final class StageTestSupport
                         new StageInput.ItemTotal(progressed.itemId(),
                                 progressed.passedCount(), true,
                                 progressed.completion());
+                // As the convert stage takes the split stage's end: an
+                // interrupted generation's is an open total.
+                case ConnectorMessage.ItemSplit split ->
+                        new StageInput.ItemTotal(split.itemId(),
+                                split.recordCount(), split.interrupted(),
+                                split.completion(), split.generation());
                 default -> new StageInput.Unwanted("wrong_type");
             };
         }

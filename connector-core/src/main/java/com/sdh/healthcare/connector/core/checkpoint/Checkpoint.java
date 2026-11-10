@@ -45,6 +45,9 @@ import java.util.UUID;
  * @param version      the split stage's version the file was begun under
  *                     (STAGES.md §14): only that version resumes it; null
  *                     for one begun before versions were kept
+ * @param cut          which generation of the item this is, and what made
+ *                     it (STAGES.md §15.8): the first cut, a reprocess or
+ *                     an operator's correction
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -61,7 +64,8 @@ public record Checkpoint(
         Instant startedAt,
         Failure failure,
         int restarts,
-        String version)
+        String version,
+        Cut cut)
 {
 
     /** The prefix of the table property that holds a checkpoint. */
@@ -99,7 +103,14 @@ public record Checkpoint(
          * STAGES.md §15.6e), to be landed again: not resumed, reconciled or
          * announced. Its records already stored stay.
          */
-        CLOSED;
+        CLOSED,
+
+        /**
+         * Stopped part way for the item's next generation (STAGES.md
+         * §15.8.6): its records cut so far stay, and its end says it was
+         * interrupted. Not resumed or reconciled.
+         */
+        INTERRUPTED;
 
         /**
          * Tells whether this state must be finished (or abandoned) before
@@ -111,6 +122,19 @@ public record Checkpoint(
         public boolean inProgress()
         {
             return this == SPLITTING || this == ARCHIVING || this == FAILING;
+        }
+
+        /**
+         * Tells whether a generation in this state is over, so the item's
+         * next may start (STAGES.md §15.8.4).
+         *
+         * @return true for {@code COMPLETED}, {@code FAILED},
+         *         {@code ABANDONED}, {@code CLOSED} and {@code INTERRUPTED}
+         */
+        public boolean ended()
+        {
+            return this == COMPLETED || this == FAILED || this == ABANDONED
+                    || this == CLOSED || this == INTERRUPTED;
         }
     }
 
@@ -167,6 +191,7 @@ public record Checkpoint(
      */
     public Checkpoint
     {
+        cut = cut == null ? Cut.FIRST : cut;
         Objects.requireNonNull(itemId);
         Objects.requireNonNull(fingerprint);
         Objects.requireNonNull(format);
@@ -222,9 +247,107 @@ public record Checkpoint(
     public static Checkpoint start(UUID itemId, String fingerprint,
             String format, long itemSize, Instant startedAt, String version)
     {
+        return start(itemId, fingerprint, format, itemSize, startedAt,
+                version, Cut.FIRST);
+    }
+
+    /**
+     * The checkpoint of a generation not yet split (STAGES.md §15.8): the
+     * item's first, or a later one, which replaces the item's checkpoint.
+     *
+     * @param itemId      the file's ID
+     * @param fingerprint its keyed fingerprint
+     * @param format      its format's name
+     * @param itemSize    its size, in bytes
+     * @param startedAt   when the generation was started
+     * @param version     the split stage's version; null if not known
+     * @param cut         the generation, and what made it
+     * @return the checkpoint
+     */
+    public static Checkpoint start(UUID itemId, String fingerprint,
+            String format, long itemSize, Instant startedAt, String version,
+            Cut cut)
+    {
         return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.SPLITTING, ResumePoint.START, 0, -1, -1, startedAt,
-                null, 0, version);
+                null, 0, version, cut);
+    }
+
+    /**
+     * A checkpoint of an item's first generation.
+     *
+     * @param itemId       the file's ID
+     * @param fingerprint  the file's keyed fingerprint
+     * @param format       the name of the file's format
+     * @param itemSize     the file's size, in bytes
+     * @param state        where the file is in its life
+     * @param resumeAt     where splitting continues after a restart
+     * @param nextSeq      the seq of the next record to be produced
+     * @param committedSeq the last seq whose data is committed; -1 if none
+     * @param publishedSeq the last seq acknowledged; -1 if none
+     * @param startedAt    when the file was started
+     * @param failure      why the file is being failed, or null
+     * @param restarts     how many times splitting has been resumed
+     * @param version      the split stage's version, or null
+     */
+    public Checkpoint(UUID itemId, String fingerprint, String format,
+            long itemSize, State state, ResumePoint resumeAt, long nextSeq,
+            long committedSeq, long publishedSeq, Instant startedAt,
+            Failure failure, int restarts, String version)
+    {
+        this(itemId, fingerprint, format, itemSize, state, resumeAt, nextSeq,
+                committedSeq, publishedSeq, startedAt, failure, restarts,
+                version, Cut.FIRST);
+    }
+
+    /**
+     * Which generation of its item a checkpoint is of (STAGES.md §15.8),
+     * and what made it.
+     *
+     * @param generation the generation, from 1
+     * @param cause      {@code reprocess} or {@code correction}; null for
+     *                   the item's first cut
+     * @param runId      the reprocess run that asked for it; null if none
+     * @param correction for a generation cut from an operator's correction
+     *                   or retry of the item as a whole, its number, whose
+     *                   content is cut; 0 if it is cut from the landed item
+     */
+    public record Cut(int generation, String cause, UUID runId,
+            int correction)
+    {
+
+        /** The item's first generation, cut from the item as landed. */
+        public static final Cut FIRST = new Cut(1, null, null, 0);
+
+        /**
+         * Checks the numbers.
+         *
+         * @throws IllegalArgumentException if the generation is below 1, the
+         *                                  correction below 0, or a later
+         *                                  generation names no cause
+         */
+        public Cut
+        {
+            if (generation < 1 || correction < 0)
+            {
+                throw new IllegalArgumentException("Invalid generation");
+            }
+            if (generation > 1 && cause == null)
+            {
+                throw new IllegalArgumentException(
+                        "A later generation has a cause");
+            }
+        }
+    }
+
+    /**
+     * The item's generation this checkpoint is of.
+     *
+     * @return the generation, from 1
+     */
+    public int generation()
+    {
+        return cut.generation();
     }
 
     /**
@@ -253,7 +376,7 @@ public record Checkpoint(
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resume, lastSeq + 1, lastSeq,
                 Math.max(publishedSeq, published), startedAt, failure, 0,
-                version);
+                version, cut);
     }
 
     /**
@@ -266,7 +389,7 @@ public record Checkpoint(
     {
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
-                failure, restarts + 1, version);
+                failure, restarts + 1, version, cut);
     }
 
     /**
@@ -284,7 +407,7 @@ public record Checkpoint(
         }
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
-                failure, restarts - 1, version);
+                failure, restarts - 1, version, cut);
     }
 
     /**
@@ -298,7 +421,7 @@ public record Checkpoint(
         return new Checkpoint(itemId, fingerprint, format, itemSize, state,
                 resumeAt, nextSeq, committedSeq,
                 Math.max(publishedSeq, published), startedAt, failure,
-                restarts, version);
+                restarts, version, cut);
     }
 
     /**
@@ -312,7 +435,7 @@ public record Checkpoint(
     {
         return new Checkpoint(itemId, fingerprint, format, itemSize, next,
                 resumeAt, nextSeq, committedSeq, publishedSeq, startedAt,
-                null, restarts, version);
+                null, restarts, version, cut);
     }
 
     /**
@@ -332,7 +455,7 @@ public record Checkpoint(
         }
         return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.SPLITTING, resumeAt, nextSeq, committedSeq,
-                publishedSeq, startedAt, null, restarts, next);
+                publishedSeq, startedAt, null, restarts, next, cut);
     }
 
     /**
@@ -345,7 +468,7 @@ public record Checkpoint(
     {
         return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.FAILING, resumeAt, nextSeq, committedSeq, publishedSeq,
-                startedAt, why, restarts, version);
+                startedAt, why, restarts, version, cut);
     }
 
     /**
@@ -362,7 +485,19 @@ public record Checkpoint(
         }
         return new Checkpoint(itemId, fingerprint, format, itemSize,
                 State.FAILED, resumeAt, nextSeq, committedSeq, publishedSeq,
-                startedAt, failure, restarts, version);
+                startedAt, failure, restarts, version, cut);
+    }
+
+    /**
+     * Stopped part way for a newer generation (STAGES.md §15.8.6).
+     *
+     * @return the checkpoint, {@code INTERRUPTED}
+     */
+    public Checkpoint interrupted()
+    {
+        return new Checkpoint(itemId, fingerprint, format, itemSize,
+                State.INTERRUPTED, resumeAt, nextSeq, committedSeq,
+                publishedSeq, startedAt, null, restarts, version, cut);
     }
 
     /**

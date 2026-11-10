@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
+import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -54,7 +55,8 @@ public final class SplitAdmin
         List<AdminCommand<SplitAdminContext>> commands =
                 new ArrayList<>(List.of(new ReplayCommand(),
                         new RestoreCommand(), new SplitStatusCommand(),
-                        new ReleaseCommand()));
+                        new ReleaseCommand(),
+                        new ReprocessCommand<SplitAdminContext>()));
         commands.addAll(FailureCommands.<SplitAdminContext>all());
         return List.copyOf(commands);
     }

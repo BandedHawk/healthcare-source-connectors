@@ -480,3 +480,12 @@ Checked again since: see the end of this section.
   same_output=true`), and the run ended (`stage.reprocess_done count=1`). `--status --run` shows `DONE ... as g1
   r1.2: stored, the same output`; `status --item` shows the item still 1 of 1, complete, with two records sent. No
   pod restarted.
+- **Reprocess at the split stage (2026-11-09, STAGES.md §15.8.10 step 4).** The splitter pods started with their
+  own inbox public key and `sdh.stage.reprocess` on `ccda-push.landed`; `check` passes (5 items split and
+  converted). `reprocess --item-id <id> --dry-run` listed the whole item (`seq -1 g1 r1`) and recorded nothing;
+  `--seq 0` was refused, as whole items have no seq. Run with a synthetic reason, a pod queued the item as its next
+  generation (`stage.reprocess_queued`), sent it to its own input, took it back, split it again
+  (`stage.generation_started`, `item.split count=1`) and noted it (`stage.reprocessed`), and the run ended
+  (`stage.reprocess_done count=1`). `--status --run` shows `DONE, as g2 r1: stored`. The convert stage superseded
+  generation 1 (`stage.generation_superseded`), started generation 2 and completed it. No pod restarted. Interruption
+  by a newer generation was not tried here (the items split in one batch); it is covered by the tests.

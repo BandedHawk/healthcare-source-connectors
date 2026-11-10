@@ -64,6 +64,9 @@ require the signature before the image runs.
   Cloud KMS is available but untested against the live service; contact Smile Digital Health before relying on
   it in production. Besides its own keys, the connector needs `landed-items-kek` (to read landed items), its inbox
   key pair (the landing node encrypts `item.landed` to the public half) and the landing node's signing public key.
+  To reprocess (below), it also needs its inbox key's public half, pinned by its SHA-256
+  (`sdh.crypto.keys.inbox.public-pem`, `.sha256`), and, with a local signing key, that key's public half
+  (`sdh.crypto.keys.signing.public-pem`, `.sha256`); a KMS gives its own.
 - A landing node for the intake, and the queue it sends `item.landed` on (`sdh.stage.input`).
 
 Run as many instances per intake as you like. Each splits one item at a time, under that item's lease, so items are
@@ -91,7 +94,7 @@ Records are stored as split, in their original form. Conversion to JSON and the 
 ```sh
 bin/file-connector                         # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/file-connector        # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, replay, failures, decline, reopen, export, correct, retry, release
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, replay, failures, decline, reopen, export, correct, retry, release, reprocess
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The connector exits with
@@ -280,26 +283,63 @@ whether or not it passes (STAGES.md §15.8.5):
 - a piece's correction must give exactly one record, the piece's next revision at this stage (`g1 r2`, then `r3`,
   …); it is stored in `split_records` at the piece's number and place, with `correction_of` naming the failed row,
   which stays;
-- the item's correction is the whole item, edited: the records already stored must come out of it unchanged, and
-  those after them are stored, with `correction_of` the item's ID, as the item's next revision at this stage
-  (`g1 r2`); the records kept from before keep theirs.
+- the item's correction is the whole item, edited, and is cut as the item's next generation (`g2`, then `g3`, …;
+  STAGES.md §15.8.5): from its start, every record of it stored in `split_records` with `cause` `correction`, and
+  sent on with that generation, each naming the item as what it resolves. The records of the generation before are
+  kept, and superseded downstream. A correction whose generation is older than the item's when a pod comes to it (a
+  reprocess came first) isn't cut: it fails, `CORRECTION_SUPERSEDED`, its edit kept.
 
 If it passes, the new records are sent on as `record.split` with their revision, and the item's end is
 sent again (`item.split` once nothing else is open, its failed count without the corrected piece). If it fails
-(`CORRECTION_RECORD_COUNT`, `CORRECTION_CHANGES_PASSED`, or the splitter's code), nothing is stored, and the
+(`CORRECTION_RECORD_COUNT`, or the splitter's code), nothing is stored for a piece, and the
 revision is a failure of its own, `FAILED`, which you correct in turn. `failures --item-id` shows each failure with
 its revision, its own changes (a failure superseded is changed by `pipeline`), and each correction submitted for it,
 the revision it makes and what it came to. Delete `failed.jwe` and your edits when you're done. `restore` also gives a landed item whole, into the pod.
 
 `retry --item-id <id> --seq <n>` processes what failed again, unchanged, for a failure that wasn't the data's (a
 limit raised, the stage fixed): it needs no input, and takes a failure that is `FAILED`, as `correct` does. A pod
-splits it within a renewal interval, under the rules above, as the next revision; if it fails, its own failure, with
-the retry's error code, is the one open.
+splits it within a renewal interval, under the rules above, as the next revision (for `--seq -1`, the next
+generation, cut from the item as landed); if it fails, its own failure, with the retry's error code, is the one
+open.
 
 A record that passed by a correction or retry names the failure it resolves in its `record.split` (`resolves`).
 Reopening a failure of an item already complete (`reopen`) makes it incomplete again: the stage sends
 `item.progress`, which the convert stage takes as reopening its own item, and once nothing is open the item
 completes again, under a message ID of its own (`~c2`, `~c3`, …; STAGES.md §15.6e).
+
+#### Reprocess
+
+`reprocess` splits whole items again, from the start of the item as landed, under the version running now
+(STAGES.md §15.8.4): `--item-id <id>[,<id>...]`, `--made-by <version>` (the items whose current generation was cut
+under that version, which `status --item` shows), or `--landed-from <time> --landed-to <time>` (the items landed in
+that range, ISO-8601 with the offset, such as `2026-11-09T00:00:00Z`, the end excluded; `--intake`, if given, must be
+the stage's own). `--item-id` narrows the other two. `--seq` is refused: one record is reprocessed at the convert
+stage. `--dry-run` lists what would be chosen and records nothing. Otherwise the reason is read from standard input,
+as for `decline`, kept encrypted, and the run's ID printed:
+
+```sh
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args reprocess --landed-from 2026-11-01T00:00:00Z --landed-to 2026-11-02T00:00:00Z --operator alice < reason.txt
+```
+
+Within a renewal interval the pods queue the run's items, a batch at a time, each as its next generation (`g2`,
+`g3`, …), and send each as `item.reprocess` to the stage's own input (`sdh.stage.reprocess`, the same queue as
+`sdh.stage.input`), sealed to and signed by the stage itself; the stage takes `item.reprocess` only when signed by its
+own key, and `item.landed` only when signed by another. An item is refused if it is past the generation chosen
+(`superseded`), no longer in landing (`past_retention`), or has a `release` waiting (`release_pending`).
+
+The new generation is cut from the start of the item. Its records are stored with `cause` `reprocess` and the run's
+ID, sent on as `record.split` with their generation and cause, and its end as `item.split` of that generation; the
+failures of the generations before are superseded. An item still being split when its next generation is queued is
+stopped after the batch under way (`INTERRUPTED`, `split.generation_interrupted`, counted by
+`sdh.split.generations_interrupted`), its end sent with `interrupted: true`, and then cut again; a `HELD` item is
+interrupted the same way, with no `release`. The convert stage counts an interrupted generation's records but sends
+nothing for it, and the producer hears of the item once, at its first report there, whatever its generation. A
+whole-item correction pending for an item chosen is warned of: of the two, the one processed after supersedes the
+other. `reprocess --status --run <id>` lists the run item by item (queued, refused and why, stored, failed or
+interrupted); `reprocess --cancel --run <id>` cancels what isn't yet queued. Audited as `admin.reprocess`, then
+`stage.reprocess_queued`, `stage.reprocess_refused`, `stage.generation_started`, `stage.reprocessed` and
+`stage.reprocess_done`, and counted by `sdh.stage.reprocessed`. Without `sdh.stage.reprocess` and the stage's own
+public keys the pods queue nothing, and the runs wait.
 
 #### Held items
 

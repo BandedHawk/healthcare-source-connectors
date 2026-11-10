@@ -838,6 +838,71 @@ class StageWorkerTest
     }
 
     /**
+     * An interrupted generation's end is an open total (STAGES.md
+     * §15.8.6): its records are counted, but no item end is sent and the
+     * processor's steps don't run. The newer generation's end completes
+     * the item, and, the item never reported before, is its first report,
+     * so the processor's step runs for it (§15.8.7).
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void takesAnInterruptedGenerationsEndAsAnOpenTotal()
+            throws InterruptedException
+    {
+        StageTestSupport.TestProcessor processor = processor();
+        StageWorker<String> worker = worker("pod-a", processor);
+        List<BrokerMessage> first = new ArrayList<>(List.of(
+                StageTestSupport.record(item, 0),
+                StageTestSupport.record(item, 1)));
+        first.add(StageTestSupport.received(splitEnd(2, 1, true)));
+
+        assertThat(worker.handle(first))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+
+        assertThat(sentItems()).isEmpty();
+        assertThat(sentProgress()).isEmpty();
+        assertThat(processor.completed).isEmpty();
+        assertThat(processor.progressed).isEmpty();
+        assertThat(audit.attributes("item.progress"))
+                .containsEntry("sdh.result", "INTERRUPTED");
+
+        Lineage second = Lineage.of(2, List.of());
+        List<BrokerMessage> next = new ArrayList<>();
+        for (int seq = 0; seq < 3; seq++)
+        {
+            next.add(StageTestSupport.received(new RecordStored("rec-" + item
+                    + "-" + seq, item, seq, seq * 10L, 10, "csv",
+                    "application/json", "csv-row/1", 10, 1,
+                    StageTestSupport.REF, null, null, null, second, false)));
+        }
+        next.add(StageTestSupport.received(splitEnd(3, 2, false)));
+
+        assertThat(worker.handle(next)).isEqualTo(BatchHandler.Outcome.DONE);
+
+        assertThat(sentItems()).singleElement().satisfies(done ->
+                assertThat(done.recordCount()).isEqualTo(3));
+        assertThat(processor.completed).singleElement().satisfies(done ->
+                assertThat(done.generation()).isEqualTo(2));
+    }
+
+    /**
+     * The split stage's end of a generation of this test's item.
+     *
+     * @param records     how many records it cut
+     * @param generation  the generation
+     * @param interrupted whether a newer one stopped it
+     * @return the message
+     */
+    ConnectorMessage.ItemSplit splitEnd(long records, int generation,
+            boolean interrupted)
+    {
+        return new ConnectorMessage.ItemSplit(item, "claims", records, 0, 99,
+                "digest", null, null, null, Instant.EPOCH, Instant.EPOCH,
+                List.of(), 1, generation, interrupted);
+    }
+
+    /**
      * A message that can't be trusted is dropped, one of another type is
      * acknowledged unprocessed, one of a later major version holds the
      * batch back, and one of an earlier major version is rejected and

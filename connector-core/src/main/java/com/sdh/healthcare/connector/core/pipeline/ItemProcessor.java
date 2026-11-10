@@ -94,7 +94,19 @@ public final class ItemProcessor
          * The item was held, and an operator closed it, to land it again
          * (STAGES.md §15.6e): nothing more is done with it.
          */
-        CLOSED
+        CLOSED,
+
+        /**
+         * The generation was stopped part way for a newer one (STAGES.md
+         * §15.8.6); its end says so.
+         */
+        INTERRUPTED,
+
+        /**
+         * A newer generation of the item was there first (STAGES.md
+         * §15.8.3): nothing was done.
+         */
+        SUPERSEDED
     }
 
     /**
@@ -213,6 +225,10 @@ public final class ItemProcessor
         {
             throw new IllegalStateException("No correction store");
         }
+        if (CorrectionStore.generational(STAGE, pending.seq()))
+        {
+            return correctAsGeneration(pending, digest, refs, lease);
+        }
         Checkpoint checkpoint = ended(pending.itemId());
         IngestPipeline.CorrectionSplit split = pipeline.splitCorrection(
                 checkpoint, pending, refs, lease);
@@ -309,9 +325,17 @@ public final class ItemProcessor
      */
     private boolean wholeItemCorrected(UUID itemId)
     {
-        return failures != null && failures.failure(itemId,
-                FailureStore.WHOLE_ITEM).map(stored -> stored.state()
-                        == FailureStore.State.SUPERSEDED).orElse(false);
+        int generation = pipeline.checkpoint(itemId)
+                .map(Checkpoint::generation).orElse(1);
+        // Only a revision of the item's own generation, as corrections of
+        // it were before they made generations (STAGES.md §15.8.5).
+        return failures != null && failures.failures(itemId).stream()
+                .anyMatch(stored -> stored.failure().seq()
+                        == FailureStore.WHOLE_ITEM
+                        && stored.failure().lineage().generation()
+                                == generation
+                        && stored.state() == FailureStore.State.SUPERSEDED
+                        && !stored.failure().lineage().first());
     }
 
     /**
@@ -333,7 +357,19 @@ public final class ItemProcessor
      */
     public long failedRecordCount(UUID itemId)
     {
-        return pipeline.failedRecordCount(itemId);
+        return pipeline.failedRecordCount(itemId, generationOf(itemId));
+    }
+
+    /**
+     * An item's current generation at this stage (STAGES.md §15.8).
+     *
+     * @param itemId the item
+     * @return its checkpoint's generation; 1 if it was never started
+     */
+    private int generationOf(UUID itemId)
+    {
+        return pipeline.checkpoint(itemId).map(Checkpoint::generation)
+                .orElse(1);
     }
 
     /**
@@ -344,7 +380,7 @@ public final class ItemProcessor
      */
     public List<CommittedRecords.Failed> failedRecords(UUID itemId)
     {
-        return pipeline.failedRecords(itemId);
+        return pipeline.failedRecords(itemId, generationOf(itemId));
     }
 
     /**
@@ -381,6 +417,65 @@ public final class ItemProcessor
     public Outcome process(UUID itemId, String digest, Opener opener,
             LeaseToken lease, LandedRefs refs) throws Exception
     {
+        return traced(itemId, () -> run(itemId, new Landing(digest, refs),
+                opener, lease, null));
+    }
+
+    /**
+     * Splits an item again as its next generation, for a reprocess run
+     * (STAGES.md §15.8.4): the generation before is finished first if its
+     * cut is over, or interrupted if not (§15.8.6); then the new one is
+     * cut from the start of the item as landed, under the version running
+     * now. A generation already started is a repeat: it is resumed, or its
+     * end sent again. One older than the item's is superseded, and nothing
+     * is done.
+     *
+     * @param itemId     the item's ID
+     * @param digest     the item's digest, from landing
+     * @param opener     opens the item's bytes, if they are needed
+     * @param lease      the item's lease, held by the caller
+     * @param refs       what landing kept about the item for its result
+     * @param generation the generation to cut, from 2
+     * @param runId      the run that asked for it
+     * @return how the generation ended
+     * @throws Exception if storage or the broker fails; the reprocess is
+     *                   tried again later
+     */
+    public Outcome reprocess(UUID itemId, String digest, Opener opener,
+            LeaseToken lease, LandedRefs refs, int generation, UUID runId)
+            throws Exception
+    {
+        Checkpoint.Cut cut = new Checkpoint.Cut(generation,
+                ConnectorMessage.Cause.REPROCESS, runId, 0);
+        return traced(itemId, () -> generation(itemId,
+                new Landing(digest, refs), opener, lease, cut));
+    }
+
+    /** Work on an item that gives how it ended. */
+    @FunctionalInterface
+    private interface Work
+    {
+
+        /**
+         * Does it.
+         *
+         * @return how it ended
+         * @throws Exception if it fails
+         */
+        Outcome run() throws Exception;
+    }
+
+    /**
+     * Does work on an item in its trace span, counted as an item in
+     * progress.
+     *
+     * @param itemId the item
+     * @param work   the work
+     * @return how it ended
+     * @throws Exception if the work fails
+     */
+    private Outcome traced(UUID itemId, Work work) throws Exception
+    {
         Telemetry telemetry = Telemetry.get();
         Span span = telemetry.span("ingest.item",
                 Fields.of(Attr.ITEM_ID, itemId)
@@ -388,8 +483,7 @@ public final class ItemProcessor
         telemetry.itemStartedProcessing();
         try (Scope ignored = span.makeCurrent())
         {
-            Outcome outcome = run(itemId, new Landing(digest, refs), opener,
-                    lease);
+            Outcome outcome = work.run();
             span.setAttribute(Attr.RESULT.key(), outcome.result().name());
             if (outcome.failure() != null)
             {
@@ -412,20 +506,29 @@ public final class ItemProcessor
     }
 
     /**
-     * Takes an item on from wherever its checkpoint is.
+     * Takes an item on from wherever its checkpoint is, or starts a
+     * generation of it past the checkpoint's.
      *
      * @param itemId  the item's ID
      * @param landing what came with it from landing
-     * @param opener  opens its bytes
+     * @param opener  opens its bytes, or, for a generation cut from a
+     *                correction, the correction's
      * @param lease   its lease
+     * @param cut     a generation to start, past the checkpoint's, whose
+     *                generation before has ended; null to go on with the
+     *                item's own
      * @return how it ended
      * @throws Exception if storage or the broker fails
      */
     private Outcome run(UUID itemId, Landing landing, Opener opener,
-            LeaseToken lease) throws Exception
+            LeaseToken lease, Checkpoint.Cut cut) throws Exception
     {
         Optional<ItemCheckpoints.Stored> stored = pipeline.stored(itemId);
-        if (stored.isPresent())
+        boolean fresh = cut != null && (stored.isEmpty()
+                || stored.get().checkpoint().generation()
+                        < cut.generation());
+        Opener source = opener;
+        if (stored.isPresent() && !fresh)
         {
             Checkpoint checkpoint = stored.get().checkpoint();
             Instant endedAt = stored.get().endedAt();
@@ -442,6 +545,12 @@ public final class ItemProcessor
                     announce(checkpoint, landing, endedAt);
                     return new Outcome(itemId, Result.FAILED,
                             checkpoint.recordCount(), checkpoint.failure());
+                }
+                case INTERRUPTED ->
+                {
+                    announce(checkpoint, landing, endedAt);
+                    return new Outcome(itemId, Result.INTERRUPTED,
+                            checkpoint.recordCount(), null);
                 }
                 case FAILING ->
                 {
@@ -466,20 +575,32 @@ public final class ItemProcessor
                 default ->
                 {
                     // SPLITTING, or ABANDONED from before contract 3.0:
-                    // split (again) below.
+                    // split (again) below, from what its generation is
+                    // cut from.
+                    source = sourceOf(checkpoint, opener);
                 }
             }
         }
+        if (fresh)
+        {
+            started(itemId, cut);
+        }
         IngestPipeline.SplitResult split;
         long size = 0;
-        try (SeekableByteSource source = opener.open())
+        try (SeekableByteSource bytes = source.open())
         {
-            size = source.size();
-            split = pipeline.split(source, itemId, lease, landing.refs());
+            size = bytes.size();
+            split = pipeline.split(bytes, itemId, lease, landing.refs(),
+                    fresh ? cut : null);
         }
         catch (ItemHeldException held)
         {
             return new Outcome(itemId, Result.HELD, 0, null);
+        }
+        catch (ItemInterruptedException interrupted)
+        {
+            return interrupt(pipeline.checkpoint(itemId).orElseThrow(),
+                    landing, lease, interrupted.newer());
         }
         catch (Exception failure)
         {
@@ -487,10 +608,209 @@ public final class ItemProcessor
             {
                 throw failure;
             }
-            return fail(failingCheckpoint(itemId, size, failure), landing,
-                    lease);
+            return fail(failingCheckpoint(itemId, size, failure,
+                    fresh ? cut : null), landing, lease);
         }
         return finishCompletion(split.checkpoint(), landing, lease);
+    }
+
+    /**
+     * Starts an item's next generation (STAGES.md §15.8.4), or goes on
+     * with it if started: the generation before is finished if its cut is
+     * over, interrupted if it is part way or held (§15.8.6), and its end
+     * sent again if it was interrupted already, in case a pod stopped
+     * before sending it; then the new one is cut.
+     *
+     * @param itemId  the item
+     * @param landing what came with it from landing
+     * @param opener  opens what the generation is cut from
+     * @param lease   its lease
+     * @param cut     the generation
+     * @return how the generation ended; {@code SUPERSEDED} if the item is
+     *         past it
+     * @throws Exception if storage or the broker fails
+     */
+    private Outcome generation(UUID itemId, Landing landing, Opener opener,
+            LeaseToken lease, Checkpoint.Cut cut) throws Exception
+    {
+        Optional<ItemCheckpoints.Stored> stored = pipeline.stored(itemId);
+        if (stored.isPresent())
+        {
+            Checkpoint current = stored.get().checkpoint();
+            if (current.generation() > cut.generation())
+            {
+                return new Outcome(itemId, Result.SUPERSEDED, 0, null);
+            }
+            if (current.generation() == cut.generation())
+            {
+                return run(itemId, landing, opener, lease, null);
+            }
+            switch (current.state())
+            {
+                case SPLITTING, HELD -> interrupt(pipeline.resume(itemId,
+                        lease).orElseThrow(), landing, lease,
+                        cut.generation());
+                case ARCHIVING -> finishCompletion(current, landing, lease);
+                case FAILING -> finishFailure(current, landing, lease);
+                case INTERRUPTED -> announce(current, landing,
+                        stored.get().endedAt());
+                default ->
+                {
+                    // Ended: its end was sent.
+                }
+            }
+        }
+        return run(itemId, landing, opener, lease, cut);
+    }
+
+    /**
+     * Notes a generation started (STAGES.md §15.8.3): the failures of the
+     * generations before are superseded, and
+     * {@code stage.generation_started} is audited. Done again, changing
+     * nothing more, if the pod stops before the generation's checkpoint
+     * is written.
+     *
+     * @param itemId the item
+     * @param cut    the generation
+     */
+    private void started(UUID itemId, Checkpoint.Cut cut)
+    {
+        if (cut.generation() == 1)
+        {
+            return;
+        }
+        if (failures != null)
+        {
+            failures.supersedeBefore(itemId, cut.generation());
+        }
+        Telemetry.get().audit("stage.generation_started",
+                Fields.of(Attr.STAGE, STAGE).with(Attr.ITEM_ID, itemId)
+                        .with(Attr.GENERATION, cut.generation())
+                        .with(Attr.CAUSE, cut.cause())
+                        .with(Attr.RUN_ID, cut.runId()));
+    }
+
+    /**
+     * Ends a generation part way for a newer one (STAGES.md §15.8.6): any
+     * records committed but not acknowledged are sent, the checkpoint is
+     * {@code INTERRUPTED}, audited {@code split.generation_interrupted}
+     * and counted, and the generation's end sent, saying it was
+     * interrupted.
+     *
+     * @param current the generation's checkpoint, any batch part way
+     *                settled
+     * @param landing what came with the item from landing
+     * @param lease   its lease
+     * @param newer   the generation that stopped it
+     * @return how it ended
+     * @throws Exception if storage or the broker fails
+     */
+    private Outcome interrupt(Checkpoint current, Landing landing,
+            LeaseToken lease, int newer) throws Exception
+    {
+        if (current.committedSeq() > current.publishedSeq())
+        {
+            pipeline.announceCommitted(current, landing.refs());
+        }
+        Checkpoint ended = current.published(current.committedSeq())
+                .interrupted();
+        pipeline.commitCheckpoint(ended, lease);
+        Telemetry telemetry = Telemetry.get();
+        telemetry.auditWarn("split.generation_interrupted",
+                Fields.of(Attr.ITEM_ID, ended.itemId())
+                        .with(Attr.GENERATION, ended.generation())
+                        .with(Attr.SUPERSEDED_BY, "g" + newer)
+                        .with(Attr.COUNT, ended.recordCount())
+                        .with(Attr.OFFSET, ended.resumeAt().offset()));
+        telemetry.generationInterrupted();
+        Ended announced = announce(ended, landing,
+                endedAt(ended.itemId()));
+        auditEnded(announced, Result.INTERRUPTED);
+        return new Outcome(ended.itemId(), Result.INTERRUPTED,
+                ended.recordCount(), null);
+    }
+
+    /**
+     * What a generation part way is cut from: the item as landed, or, for
+     * one cut from a correction of the item as a whole (STAGES.md
+     * §15.8.5), the correction's content, still pending.
+     *
+     * @param current the generation's checkpoint
+     * @param landed  opens the item as landed
+     * @return what opens it
+     * @throws IllegalStateException if the correction isn't pending
+     */
+    private Opener sourceOf(Checkpoint current, Opener landed)
+    {
+        int correction = current.cut().correction();
+        if (correction == 0)
+        {
+            return landed;
+        }
+        if (corrections == null)
+        {
+            throw new IllegalStateException("No correction store");
+        }
+        CorrectionStore.Pending pending = corrections.find(
+                current.itemId(), FailureStore.WHOLE_ITEM, correction)
+                .orElseThrow(() -> new IllegalStateException("The"
+                        + " correction the generation is cut from isn't"
+                        + " pending"));
+        return () -> pipeline.correctionSource(pending);
+    }
+
+    /**
+     * Applies an operator's correction or retry of an item as a whole
+     * (STAGES.md §15.8.5): it is cut as the item's next generation, the
+     * number noted when it was submitted, from its content (a retry's is
+     * the item as landed), and passes if the cut reaches the end. One whose
+     * generation is older than the item's, since a reprocess came first,
+     * isn't cut: it ends {@code CORRECTION_SUPERSEDED}, its edit kept. A
+     * failure of the generation is the stage's own, recorded at its end,
+     * so none is added for the correction.
+     *
+     * @param pending the correction
+     * @param digest  the item's digest, from landing
+     * @param refs    what landing kept about the item
+     * @param lease   the item's lease
+     * @return what it came to
+     * @throws Exception if storage or the broker fails
+     */
+    private CorrectionStore.Outcome correctAsGeneration(
+            CorrectionStore.Pending pending, String digest, LandedRefs refs,
+            LeaseToken lease) throws Exception
+    {
+        UUID itemId = pending.itemId();
+        Checkpoint current = pipeline.checkpoint(itemId)
+                .orElseThrow(() -> new IllegalStateException(
+                        "The item was never split"));
+        int generation = pending.lineage() != null
+                && pending.lineage().generation() > 1
+                        ? pending.lineage().generation()
+                        : current.generation() + 1;
+        CorrectionStore.Outcome outcome;
+        if (current.generation() > generation)
+        {
+            outcome = new CorrectionStore.Outcome(pending, false, null,
+                    ErrorCode.CORRECTION_SUPERSEDED.name(), version());
+        }
+        else
+        {
+            Checkpoint.Cut cut = new Checkpoint.Cut(generation,
+                    IngestPipeline.cause(pending), null,
+                    pending.correction());
+            Outcome ended = generation(itemId, new Landing(digest, refs),
+                    () -> pipeline.correctionSource(pending), lease, cut);
+            boolean passed = ended.result() == Result.COMPLETED;
+            String code = passed ? null
+                    : ended.failure() != null ? ended.failure().code().name()
+                    : ErrorCode.CORRECTION_SUPERSEDED.name();
+            outcome = new CorrectionStore.Outcome(pending, passed, null,
+                    code, version());
+        }
+        corrections.finish(outcome, false);
+        corrections.markNotified(itemId);
+        return outcome;
     }
 
     /**
@@ -579,7 +899,8 @@ public final class ItemProcessor
             Instant endedAt) throws Exception
     {
         UUID itemId = checkpoint.itemId();
-        List<CommittedRecords.Row> failed = pipeline.failedRows(itemId);
+        List<CommittedRecords.Row> failed = pipeline.failedRows(itemId,
+                checkpoint.generation());
         FailureStore.Counts counts;
         if (failures == null)
         {
@@ -593,10 +914,13 @@ public final class ItemProcessor
         SplitMessages.Corrected corrected = corrections == null
                 ? SplitMessages.Corrected.NONE
                 : SplitMessages.Corrected.of(checkpoint,
-                        pipeline.correctionRows(itemId),
+                        pipeline.correctionRows(itemId,
+                                checkpoint.generation()),
                         wholeItemCorrected(itemId));
         // Numbered before it is sent (STAGES.md §15.6e).
-        int completion = pipeline.announced(itemId, counts.open() == 0);
+        // An interrupted generation's end is a completion of its own.
+        int completion = pipeline.announced(itemId, counts.open() == 0
+                || checkpoint.state() == Checkpoint.State.INTERRUPTED);
         ConnectorMessage message = SplitMessages.itemEnd(checkpoint, intake,
                 failed.size(), counts, landing.digest(), landing.refs(),
                 endedAt, pipeline.clock().instant(), corrected, completion);
@@ -645,17 +969,23 @@ public final class ItemProcessor
      * @param itemId  the item
      * @param size    its size, if it was opened
      * @param failure why it can't be
+     * @param cut     the generation being started, if its checkpoint may
+     *                not be written yet; null for the item's own
      * @return the checkpoint
      */
     private Checkpoint failingCheckpoint(UUID itemId, long size,
-            Exception failure)
+            Exception failure, Checkpoint.Cut cut)
     {
         Instant now = pipeline.clock().instant();
         Checkpoint base = pipeline.checkpoint(itemId)
-                .filter(current -> current.state().inProgress())
+                .filter(current -> current.state().inProgress()
+                        && (cut == null
+                                || current.generation() == cut.generation()))
                 .orElseGet(() -> Checkpoint.start(itemId,
                         IngestPipeline.itemFingerprint(itemId),
-                        pipeline.settings().format(), size, now));
+                        pipeline.settings().format(), size, now,
+                        cut == null ? null : pipeline.settings().version(),
+                        cut == null ? Checkpoint.Cut.FIRST : cut));
         ErrorCode code = ErrorCode.SOURCE_READ_FAILED;
         String stage = "landing";
         long offset = base.resumeAt().offset();

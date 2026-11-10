@@ -13,9 +13,11 @@ import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException.Reason;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemReprocess;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
@@ -32,6 +34,10 @@ import org.slf4j.LoggerFactory;
  * message, checks it, and splits its item. A message must be
  * {@code item.landed}, sealed to the split stage and signed by the landing
  * node, for the stage's intake, and point at the landing table it reads.
+ * Where the stage reprocesses, it takes {@code item.reprocess} too, signed
+ * by the stage itself, and splits the item's next generation (STAGES.md
+ * §15.8.4); an {@code item.landed} it signed, or an {@code item.reprocess}
+ * another did, is refused ({@code wrong_signer}).
  * One that fails a check is refused, audited and acknowledged: delivering
  * it again won't change it. One of a contract major version this stage
  * can't read is held instead, and tried again, so that no item is
@@ -73,6 +79,9 @@ public final class SplitHandler implements BatchHandler
     /** Stops the process on a fatal error. */
     private final FatalExit fatal;
 
+    /** The stage's reprocess; null if it doesn't reprocess. */
+    private final SplitReprocess reprocess;
+
     /**
      * Creates a handler.
      *
@@ -87,6 +96,27 @@ public final class SplitHandler implements BatchHandler
             String intake, String catalogName, String namespace,
             FatalExit fatal)
     {
+        this(splitter, opener, intake, catalogName, namespace, fatal, null);
+    }
+
+    /**
+     * Creates a handler that takes {@code item.reprocess} too (STAGES.md
+     * §15.8.4).
+     *
+     * @param splitter    splits the items
+     * @param opener      decrypts and verifies messages
+     * @param intake      the intake the stage serves
+     * @param catalogName the landing catalog's name
+     * @param namespace   the landing namespace
+     * @param fatal       stops the process on a fatal error
+     * @param reprocess   the stage's reprocess; null if it doesn't
+     *                    reprocess
+     */
+    public SplitHandler(ItemSplitter splitter, MessageOpener opener,
+            String intake, String catalogName, String namespace,
+            FatalExit fatal, SplitReprocess reprocess)
+    {
+        this.reprocess = reprocess;
         this.splitter = splitter;
         this.opener = opener;
         this.intake = intake;
@@ -128,10 +158,10 @@ public final class SplitHandler implements BatchHandler
      */
     Outcome handle(byte[] body) throws InterruptedException
     {
-        ConnectorMessage message;
+        MessageOpener.Opened opened;
         try
         {
-            message = opener.open(body);
+            opened = opener.openSigned(body);
         }
         catch (MessageRejectedException rejected)
         {
@@ -149,36 +179,87 @@ public final class SplitHandler implements BatchHandler
             }
             return reject(rejected.reason().name());
         }
+        ConnectorMessage message = opened.message();
+        boolean self = reprocess != null
+                && reprocess.selfKid().equals(opened.signerKid());
+        if (message instanceof ItemReprocess again)
+        {
+            // Only the stage itself asks for a reprocess, and an item lands
+            // only from another (STAGES.md §15.8.4).
+            if (!self)
+            {
+                return wrongSigner(message);
+            }
+            if (!intake.equals(again.landed().intake()))
+            {
+                return reject("OTHER_INTAKE");
+            }
+            if (!checked(again.landed()))
+            {
+                return reject("OTHER_STORAGE");
+            }
+            return split(() -> splitter.reprocess(again, reprocess));
+        }
         if (!(message instanceof ItemLanded landed))
         {
             return reject("NOT_ITEM_LANDED");
+        }
+        if (self)
+        {
+            return wrongSigner(message);
         }
         if (!intake.equals(landed.intake()))
         {
             return reject("OTHER_INTAKE");
         }
-        StorageRef storage = landed.storage();
-        if (storage == null || !catalogName.equals(storage.catalog())
-                || !namespace.equals(storage.namespace())
-                || !LandingTables.LANDED_ITEMS.equals(storage.table()))
+        if (!checked(landed))
         {
             return reject("OTHER_STORAGE");
         }
-        return split(landed);
+        return split(() -> splitter.split(landed.itemId(),
+                landed.itemDigest()));
+    }
+
+    /**
+     * Whether an item's message points at the landing table this stage
+     * reads. Its intake is checked by the caller.
+     *
+     * @param landed the item's message
+     * @return whether its storage is the stage's landing table
+     */
+    private boolean checked(ItemLanded landed)
+    {
+        StorageRef storage = landed.storage();
+        return storage != null && catalogName.equals(storage.catalog())
+                && namespace.equals(storage.namespace())
+                && LandingTables.LANDED_ITEMS.equals(storage.table());
+    }
+
+    /** Splitting an item, as a message asks. */
+    @FunctionalInterface
+    private interface Split
+    {
+
+        /**
+         * Does it.
+         *
+         * @throws Exception if it fails
+         */
+        void run() throws Exception;
     }
 
     /**
      * Splits an item, and says what becomes of its message.
      *
-     * @param landed the item's message
+     * @param work the splitting
      * @return {@code DONE}, {@code RETRY} or {@code FATAL}
      * @throws InterruptedException if interrupted while waiting
      */
-    private Outcome split(ItemLanded landed) throws InterruptedException
+    private Outcome split(Split work) throws InterruptedException
     {
         try
         {
-            splitter.split(landed.itemId(), landed.itemDigest());
+            work.run();
             return Outcome.DONE;
         }
         catch (InterruptedException interrupted)
@@ -216,6 +297,23 @@ public final class SplitHandler implements BatchHandler
     public static Optional<String> fatalReason(Throwable failure)
     {
         return StageFailures.fatalReason(failure);
+    }
+
+    /**
+     * Audits a message refused for its signer, as the other stages do.
+     *
+     * @param message the message
+     * @return {@code DONE}: it is acknowledged
+     */
+    private Outcome wrongSigner(ConnectorMessage message)
+    {
+        Telemetry.get().auditError("stage.message_rejected",
+                Fields.of(Attr.STAGE, ItemProcessor.STAGE)
+                        .with(Attr.ERROR_CODE, ErrorCode.MESSAGE_REJECTED)
+                        .with(Attr.INTAKE, intake)
+                        .with(Attr.REASON, "wrong_signer")
+                        .with(Attr.MESSAGE_TYPE, message.type().wireName()));
+        return Outcome.DONE;
     }
 
     /**

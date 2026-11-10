@@ -1041,6 +1041,25 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         {
             ItemProgress progress = due.progress().withTotal(total(due));
             boolean first = firstReport(due);
+            if (interrupted(progress))
+            {
+                // An interrupted generation's total is an open total: its
+                // records are counted, but no end or result is sent for
+                // it; the newer generation follows (STAGES.md §15.8.6).
+                if (due.progressChanged())
+                {
+                    registry.markProgressed(progress.itemId(),
+                            progress.progressKey(), due.readAt(), false);
+                    Telemetry.get().audit("item.progress",
+                            Fields.of(Attr.STAGE, processor.stage())
+                                    .with(Attr.ITEM_ID, progress.itemId())
+                                    .with(Attr.GENERATION,
+                                            progress.generation())
+                                    .with(Attr.COUNT, progress.passed())
+                                    .with(Attr.RESULT, "INTERRUPTED"));
+                }
+                continue;
+            }
             if (!progress.complete())
             {
                 if (due.progressChanged())
@@ -1074,11 +1093,12 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
 
     /**
      * Whether an item's report is its first here: nothing reported of it
-     * before, in its first generation. Only then does the processor's step
-     * after it run, which sends the producer's result: any later report
-     * follows an operator's action (a correction, retry, decline, reopen
-     * or reprocess), and none of those sends the producer anything
-     * (STAGES.md §15.8.7).
+     * before, in any generation. Only then does the processor's step after
+     * it run, which sends the producer's result: any later report follows
+     * an operator's action (a correction, retry, decline, reopen or
+     * reprocess), and none of those sends the producer anything (STAGES.md
+     * §15.8.7). An item whose first generation was interrupted before it
+     * was reported has its first report in a later one.
      *
      * @param due the item
      * @return true if it is the first
@@ -1086,8 +1106,21 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     private static boolean firstReport(StageRegistry.DueItem due)
     {
         ItemProgress progress = due.progress();
-        return due.progressKey() == null && progress.completion() == 0
-                && progress.generation() == 1;
+        return !due.reported() && due.progressKey() == null
+                && progress.completion() == 0;
+    }
+
+    /**
+     * Whether an item's total is of a generation the stage before
+     * interrupted (STAGES.md §15.8.6).
+     *
+     * @param progress the item, with its total
+     * @return whether it is
+     */
+    private static boolean interrupted(ItemProgress progress)
+    {
+        return progress.total() instanceof ConnectorMessage.ItemSplit split
+                && split.interrupted();
     }
 
     /**

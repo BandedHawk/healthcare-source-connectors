@@ -680,7 +680,7 @@ class IngestPipelineTest
         IngestPipeline.SplitResult result =
                 split(pipeline, SeekableByteSource.of(file));
         assertThat(result.recordCount()).isEqualTo(CSV_ROWS);
-        assertThat(pipeline.failedRecordCount(result.itemId())).isZero();
+        assertThat(pipeline.failedRecordCount(result.itemId(), 1)).isZero();
     }
 
     /**

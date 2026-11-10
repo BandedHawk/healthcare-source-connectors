@@ -122,6 +122,94 @@ public final class Revisions
     }
 
     /**
+     * Gives an item's next generation at the split stage (STAGES.md
+     * §15.8.4), in the caller's transaction, its counter's row locked until
+     * it commits: shared by a reprocess when queued and a correction or
+     * retry of the item as a whole when submitted. The counter is the
+     * item's whole-item place ({@code seq -1}) with no generation; a number
+     * given is never below the generation the stage's checkpoint, its
+     * failures and its corrections already hold.
+     *
+     * @param connection the transaction's connection
+     * @param schema     the stage's registry schema
+     * @param stage      the stage
+     * @param itemId     the item
+     * @param timeout    how long a statement may run, in seconds
+     * @return the generation, from 2
+     * @throws SQLException if a statement fails
+     */
+    public static int nextGeneration(Connection connection, String schema,
+            String stage, UUID itemId, int timeout) throws SQLException
+    {
+        int floor = 1;
+        if (exists(connection, schema + ".split_item", timeout))
+        {
+            floor = Math.max(floor, highest(connection, "SELECT max("
+                    + "generation) FROM " + schema + ".split_item"
+                    + " WHERE item_id = ?", null, itemId, timeout));
+        }
+        for (String table : List.of("stage_failure", "stage_correction"))
+        {
+            if (exists(connection, schema + "." + table, timeout))
+            {
+                floor = Math.max(floor, highest(connection, "SELECT max("
+                        + "generation) FROM " + schema + "." + table
+                        + " WHERE stage = ? AND item_id = ?", stage, itemId,
+                        timeout));
+            }
+        }
+        String upsert = """
+                INSERT INTO %s AS r (stage, item_id, seq, generation,
+                       before, last)
+                VALUES (?, ?, -1, 0, 'g', ?)
+                ON CONFLICT (stage, item_id, seq, generation, before)
+                DO UPDATE SET last = GREATEST(r.last + 1, EXCLUDED.last)
+                RETURNING last""".formatted(table(schema));
+        try (PreparedStatement add = connection.prepareStatement(upsert))
+        {
+            add.setQueryTimeout(timeout);
+            add.setString(1, stage);
+            add.setObject(2, itemId);
+            add.setInt(3, floor + 1);
+            try (ResultSet rows = add.executeQuery())
+            {
+                rows.next();
+                return rows.getInt(1);
+            }
+        }
+    }
+
+    /**
+     * Reads one number.
+     *
+     * @param connection the connection
+     * @param sql        the query: the stage, if given, then the item
+     * @param stage      the stage; null if the query takes none
+     * @param itemId     the item
+     * @param timeout    how long a statement may run, in seconds
+     * @return the number; 0 if none
+     * @throws SQLException if the statement fails
+     */
+    private static int highest(Connection connection, String sql,
+            String stage, UUID itemId, int timeout) throws SQLException
+    {
+        try (PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(timeout);
+            int index = 1;
+            if (stage != null)
+            {
+                select.setString(index++, stage);
+            }
+            select.setObject(index, itemId);
+            try (ResultSet rows = select.executeQuery())
+            {
+                return rows.next() ? rows.getInt(1) : 0;
+            }
+        }
+    }
+
+    /**
      * The line before a stage, as text: the revisions of the stages
      * before it, such as {@code 1} for the convert stage's input as first
      * cut, or nothing at the split stage.

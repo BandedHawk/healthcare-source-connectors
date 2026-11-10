@@ -701,10 +701,10 @@ class AdminCommandsTest
 
     /**
      * An item the split stage failed as a whole is exported, encrypted to
-     * the operator's key, and corrected: the stage's loop splits the
-     * correction, keeps the records already stored, stores the rest marked
-     * as correcting the item, and the failure is {@code SUPERSEDED}
-     * (STAGES.md §15.6d). Its own item, so the others' failures stay.
+     * the operator's key, and corrected: the stage's loop cuts the
+     * correction as the item's next generation, every record of it, and
+     * the failure is {@code SUPERSEDED} (STAGES.md §15.6d, §15.8.5). Its
+     * own item, so the others' failures stay.
      *
      * @throws Exception if the test fails to run
      */
@@ -761,9 +761,9 @@ class AdminCommandsTest
         org.apache.iceberg.Table records = runtime.tables().splitRecords();
         records.refresh();
         assertThat(com.sdh.healthcare.connector.core.storage.CommittedRecords
-                .corrections(records, item.itemId())).isNotEmpty()
-                .allSatisfy(row -> assertThat(row.correctionOf())
-                        .isEqualTo(itemId));
+                .all(records, item.itemId(), 2)).hasSize(7)
+                .allSatisfy(row -> assertThat(row.cause())
+                        .isEqualTo("correction"));
         assertThat(runtime.corrections().sweep()).isZero();
     }
 

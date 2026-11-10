@@ -91,13 +91,17 @@ public final class CommittedRecords
      * @param lineage         where it stands in its line (STAGES.md
      *                        §15.8.2); the first of everything for a row
      *                        that keeps none
+     * @param cause           why it was made again: {@code reprocess} or
+     *                        {@code correction} (STAGES.md §15.8.7); null
+     *                        for a record made the first time
+     * @param runId           the reprocess run that made it; null if none
      */
     public record Row(String recordId, long seq, long sourceOffset,
             long sourceLength, String format, String contentType,
             String mapping, String errorCode, long plaintextLength,
             int chunkCount, LocalDate ingestedDate, String kekRef,
             RecordOrigin origin, SourcePosition errorAt, String stageVersion,
-            String correctionOf, Lineage lineage)
+            String correctionOf, Lineage lineage, String cause, String runId)
     {
 
         /**
@@ -106,6 +110,40 @@ public final class CommittedRecords
         public Row
         {
             lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A row of a record made the first time.
+         *
+         * @param recordId        the record's id
+         * @param seq             its number in the file, from 0
+         * @param sourceOffset    where it starts in the file, in bytes
+         * @param sourceLength    how many bytes of the file it covers
+         * @param format          the name of the file's format
+         * @param contentType     what the stored bytes are
+         * @param mapping         the JSON mapping, or null
+         * @param errorCode       why it failed, or null
+         * @param plaintextLength the stored length before encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param ingestedDate    the day it was written, in UTC
+         * @param kekRef          which key encryption key wrapped its key
+         * @param origin          where its text came from, or null
+         * @param errorAt         where it failed, or null
+         * @param stageVersion    the version of the stage that wrote it
+         * @param correctionOf    the failed record it corrects, or null
+         * @param lineage         where it stands in its line, or null
+         */
+        public Row(String recordId, long seq, long sourceOffset,
+                long sourceLength, String format, String contentType,
+                String mapping, String errorCode, long plaintextLength,
+                int chunkCount, LocalDate ingestedDate, String kekRef,
+                RecordOrigin origin, SourcePosition errorAt,
+                String stageVersion, String correctionOf, Lineage lineage)
+        {
+            this(recordId, seq, sourceOffset, sourceLength, format,
+                    contentType, mapping, errorCode, plaintextLength,
+                    chunkCount, ingestedDate, kekRef, origin, errorAt,
+                    stageVersion, correctionOf, lineage, null, null);
         }
     }
 
@@ -121,11 +159,70 @@ public final class CommittedRecords
         List<String> columns = new ArrayList<>(List.of(SEQ, SOURCE_OFFSET,
                 ERROR_CODE, ERROR_LINE, ERROR_COLUMN, MESSAGE_INDEX,
                 MESSAGE_REFS_ENC, BDK_WRAPPED, KEK_REF));
-        if (table.schema().findField(CORRECTION_OF) != null)
+        for (String optional : List.of(CORRECTION_OF, GENERATION))
         {
-            columns.add(CORRECTION_OF);
+            if (table.schema().findField(optional) != null)
+            {
+                columns.add(optional);
+            }
         }
         return columns.toArray(String[]::new);
+    }
+
+    /**
+     * The columns that place a row: its number and, if the table has it
+     * yet, its generation.
+     *
+     * @param table the table
+     * @return the columns
+     */
+    private static String[] placeColumns(Table table)
+    {
+        return table.schema().findField(GENERATION) == null
+                ? new String[] {SEQ} : new String[] {SEQ, GENERATION};
+    }
+
+    /**
+     * A row's generation (STAGES.md §15.8): 1 if the table or the row has
+     * none.
+     *
+     * @param row a row of the table
+     * @return the generation
+     */
+    private static int generationOf(Record row)
+    {
+        if (row.struct().field(GENERATION) == null)
+        {
+            return 1;
+        }
+        Integer generation = (Integer) row.getField(GENERATION);
+        return generation == null ? 1 : generation;
+    }
+
+    /**
+     * Whether a row is of a generation.
+     *
+     * @param row        a row of the table
+     * @param generation the generation, or 0 for any
+     * @return true if it is
+     */
+    private static boolean of(Record row, int generation)
+    {
+        return generation == 0 || generationOf(row) == generation;
+    }
+
+    /**
+     * Orders rows by generation, then number, so each generation's records
+     * are apart: their numbers are only comparable within one (STAGES.md
+     * §15.8.2).
+     *
+     * @param generation the generation
+     * @param seq        the number
+     * @return the key
+     */
+    private static String placeKey(int generation, long seq)
+    {
+        return String.format("%010d/%020d", generation, seq);
     }
 
     /**
@@ -139,7 +236,8 @@ public final class CommittedRecords
     private static String[] rowColumns(Table table)
     {
         List<String> columns = new ArrayList<>(Arrays.asList(ROW_COLUMNS));
-        for (String optional : List.of(CORRECTION_OF, GENERATION, LINE))
+        for (String optional : List.of(CORRECTION_OF, GENERATION, LINE,
+                CAUSE, RUN_ID))
         {
             if (table.schema().findField(optional) != null)
             {
@@ -204,6 +302,26 @@ public final class CommittedRecords
     public static List<Row> read(Table table, UUID itemId, long afterSeq,
             long uptoSeq)
     {
+        return read(table, itemId, 1, afterSeq, uptoSeq);
+    }
+
+    /**
+     * Reads the committed records of one generation of an item (STAGES.md
+     * §15.8) in a range of sequence numbers.
+     *
+     * @param table      the {@code records} table
+     * @param itemId     the item's id
+     * @param generation the generation
+     * @param afterSeq   the range's start, not included
+     * @param uptoSeq    the range's end, included
+     * @return the records with {@code afterSeq < seq <= uptoSeq}, in
+     *         sequence order
+     * @throws UncheckedIOException  if the table can't be read
+     * @throws IllegalStateException if a record in the range isn't there
+     */
+    public static List<Row> read(Table table, UUID itemId, int generation,
+            long afterSeq, long uptoSeq)
+    {
         List<Row> found = new ArrayList<>();
         if (uptoSeq <= afterSeq)
         {
@@ -221,7 +339,8 @@ public final class CommittedRecords
             for (Record row : rows)
             {
                 Row read = row(row);
-                if (read.correctionOf() == null)
+                if (read.correctionOf() == null
+                        && read.lineage().generation() == generation)
                 {
                     found.add(read);
                 }
@@ -242,8 +361,9 @@ public final class CommittedRecords
     }
 
     /**
-     * Reads every committed record of an item, in sequence order: one row
-     * per record, the first copy if a record was committed twice.
+     * Reads every committed record of an item, by generation then sequence
+     * number: one row per record, the first copy if a record was committed
+     * twice.
      *
      * @param table  the table
      * @param itemId the item's id
@@ -252,7 +372,23 @@ public final class CommittedRecords
      */
     public static List<Row> all(Table table, UUID itemId)
     {
-        Map<Long, Row> found = new TreeMap<>();
+        return all(table, itemId, 0);
+    }
+
+    /**
+     * Reads every committed record of one generation of an item (STAGES.md
+     * §15.8), in sequence order, as {@link #all(Table, UUID)} does.
+     *
+     * @param table      the table
+     * @param itemId     the item's id
+     * @param generation the generation; 0 for every generation, by
+     *                   generation then number
+     * @return the records
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static List<Row> all(Table table, UUID itemId, int generation)
+    {
+        Map<String, Row> found = new TreeMap<>();
         try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
                 .where(Expressions.and(
                         Expressions.equal(ITEM_ID, itemId),
@@ -263,9 +399,11 @@ public final class CommittedRecords
             for (Record row : rows)
             {
                 Row read = row(row);
-                if (read.correctionOf() == null)
+                if (read.correctionOf() == null && (generation == 0
+                        || read.lineage().generation() == generation))
                 {
-                    found.putIfAbsent(read.seq(), read);
+                    found.putIfAbsent(placeKey(read.lineage().generation(),
+                            read.seq()), read);
                 }
             }
         }
@@ -288,6 +426,22 @@ public final class CommittedRecords
      */
     public static List<Row> corrections(Table table, UUID itemId)
     {
+        return corrections(table, itemId, 0);
+    }
+
+    /**
+     * Reads the records of one generation of an item made from operators'
+     * corrections, as {@link #corrections(Table, UUID)} does.
+     *
+     * @param table      the table
+     * @param itemId     the item's id
+     * @param generation the generation; 0 for every generation
+     * @return the records
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static List<Row> corrections(Table table, UUID itemId,
+            int generation)
+    {
         if (table.schema().findField(CORRECTION_OF) == null)
         {
             return List.of();
@@ -304,8 +458,13 @@ public final class CommittedRecords
             for (Record row : rows)
             {
                 Row read = row(row);
-                found.putIfAbsent(String.format("%020d", read.seq()) + "/"
-                        + read.recordId(), read);
+                if (generation != 0
+                        && read.lineage().generation() != generation)
+                {
+                    continue;
+                }
+                found.putIfAbsent(placeKey(read.lineage().generation(),
+                        read.seq()) + "/" + read.recordId(), read);
             }
         }
         catch (IOException error)
@@ -393,7 +552,11 @@ public final class CommittedRecords
                 (String) row.getField(STAGE_VERSION),
                 row.struct().field(CORRECTION_OF) == null ? null
                         : (String) row.getField(CORRECTION_OF),
-                lineage(row));
+                lineage(row),
+                row.struct().field(CAUSE) == null ? null
+                        : (String) row.getField(CAUSE),
+                row.struct().field(RUN_ID) == null ? null
+                        : (String) row.getField(RUN_ID));
     }
 
     /**
@@ -426,15 +589,39 @@ public final class CommittedRecords
      */
     public static boolean has(Table table, UUID itemId, long seq)
     {
+        return has(table, itemId, 1, seq);
+    }
+
+    /**
+     * Tells whether a record of one generation of an item is committed, as
+     * {@link #has(Table, UUID, long)} does.
+     *
+     * @param table      the table
+     * @param itemId     the item's id
+     * @param generation the generation
+     * @param seq        the record's sequence number
+     * @return true if its first chunk is in the table
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static boolean has(Table table, UUID itemId, int generation,
+            long seq)
+    {
         try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
                 .where(Expressions.and(
                         Expressions.equal(ITEM_ID, itemId),
                         Expressions.equal(SEQ, seq),
                         Expressions.equal(CHUNK_INDEX, 0)))
-                .select(SEQ)
+                .select(placeColumns(table))
                 .build())
         {
-            return rows.iterator().hasNext();
+            for (Record row : rows)
+            {
+                if (of(row, generation))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
         catch (IOException error)
         {
@@ -485,18 +672,36 @@ public final class CommittedRecords
      */
     public static long countFailed(Table table, UUID itemId)
     {
+        return countFailed(table, itemId, 0);
+    }
+
+    /**
+     * Counts one generation's committed records that failed, as
+     * {@link #countFailed(Table, UUID)} does.
+     *
+     * @param table      the {@code records} table
+     * @param itemId     the file's id
+     * @param generation the generation; 0 for every generation
+     * @return how many there are
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static long countFailed(Table table, UUID itemId, int generation)
+    {
         long count = 0;
         try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
                 .where(Expressions.and(
                         Expressions.equal(ITEM_ID, itemId),
                         Expressions.equal(CHUNK_INDEX, 0),
                         Expressions.notNull(ERROR_CODE)))
-                .select(SEQ)
+                .select(placeColumns(table))
                 .build())
         {
-            for (Record ignored : rows)
+            for (Record row : rows)
             {
-                count++;
+                if (of(row, generation))
+                {
+                    count++;
+                }
             }
         }
         catch (IOException error)
@@ -536,7 +741,28 @@ public final class CommittedRecords
     public static List<Failed> failed(Table table, UUID itemId,
             KeyProvider keys)
     {
-        Map<Long, Failed> found = new TreeMap<>();
+        return failed(table, itemId, 0, keys);
+    }
+
+    /**
+     * Reads one generation's committed records that failed, as
+     * {@link #failed(Table, UUID, KeyProvider)} does.
+     *
+     * @param table      the table
+     * @param itemId     the item
+     * @param generation the generation; 0 for every generation, by
+     *                   generation then number
+     * @param keys       unwraps the rows' data keys; null to leave the
+     *                   broker IDs unread
+     * @return the records
+     * @throws UncheckedIOException    if the table can't be read
+     * @throws ChunkIntegrityException if the broker IDs don't decrypt or
+     *                                 parse
+     */
+    public static List<Failed> failed(Table table, UUID itemId,
+            int generation, KeyProvider keys)
+    {
+        Map<String, Failed> found = new TreeMap<>();
         try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
                 .where(Expressions.and(
                         Expressions.equal(ITEM_ID, itemId),
@@ -554,15 +780,18 @@ public final class CommittedRecords
                     // original's (STAGES.md §15.6c).
                     continue;
                 }
-                if (found.containsKey((Long) row.getField(SEQ)))
+                String place = placeKey(generationOf(row),
+                        (Long) row.getField(SEQ));
+                if (!of(row, generation) || found.containsKey(place))
                 {
-                    // A second copy of the record (STAGES.md §6).
+                    // Another generation's, or a second copy of the record
+                    // (STAGES.md §6).
                     continue;
                 }
                 Integer message = (Integer) row.getField(MESSAGE_INDEX);
                 List<String> refs = keys == null ? null
                         : messageRefs(row, itemId, keys);
-                found.put((Long) row.getField(SEQ), new Failed(
+                found.put(place, new Failed(
                         (Long) row.getField(SEQ),
                         (Long) row.getField(SOURCE_OFFSET),
                         (String) row.getField(ERROR_CODE),
