@@ -11,7 +11,6 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -235,11 +234,8 @@ abstract class ObjectStoreItBase
                     ItSupport.drain(camel, fixture.output(), reader);
             List<RecordSplit> records = ItSupport.of(messages,
                     RecordSplit.class);
-            List<ItemSplit> items = ItSupport.of(messages, ItemSplit.class);
-            assertThat(items).extracting(ItemSplit::itemId)
-                    .containsExactly(good.itemId(), bad.itemId());
-            assertThat(items.get(1).failure().code())
-                    .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+            ItSupport.assertGoodSplitBadOpen(messages, good.itemId(),
+                    bad.itemId());
             assertThat(records).hasSize(30);
             ItSupport.assertSplitRecords(reader, records, header, rows);
             assertThat(new String(landing.restore(good.itemId()), UTF_8))

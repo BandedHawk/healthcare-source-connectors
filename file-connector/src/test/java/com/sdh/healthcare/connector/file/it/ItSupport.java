@@ -12,6 +12,8 @@ import com.sdh.healthcare.connector.broker.receive.BatchHandler.Outcome;
 import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
@@ -313,6 +315,31 @@ final class ItSupport
                     StandardCharsets.UTF_8)).as("record " + record.seq())
                     .isEqualTo(header + rows.get((int) record.seq()));
         }
+    }
+
+    /**
+     * The split stage's ends for a good item and one it couldn't parse:
+     * the good one is split; the bad one fails as a whole and stays open
+     * for an operator, so it is reported in progress, never split
+     * (STAGES.md §15.6).
+     *
+     * @param messages the split stage's output
+     * @param good     the good item
+     * @param bad      the item with an unterminated quote
+     */
+    static void assertGoodSplitBadOpen(List<ConnectorMessage> messages,
+            UUID good, UUID bad)
+    {
+        assertThat(of(messages, ItemSplit.class))
+                .extracting(ItemSplit::itemId).containsExactly(good);
+        assertThat(of(messages, ItemProgressed.class)).singleElement()
+                .satisfies(progress ->
+                {
+                    assertThat(progress.itemId()).isEqualTo(bad);
+                    assertThat(progress.stage()).isEqualTo("split");
+                    assertThat(progress.failure().code())
+                            .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+                });
     }
 
     /**

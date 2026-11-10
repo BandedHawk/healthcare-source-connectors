@@ -43,6 +43,7 @@ import com.sdh.healthcare.connector.broker.receive.EventHubsSupport;
 import com.sdh.healthcare.connector.broker.receive.ReceiveProperties;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import io.grpc.ManagedChannel;
@@ -104,8 +105,10 @@ import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
  * One worker claims a batch and stops part-way, its commit failing, as a
  * pod would that is killed; two more then run at once, wait out its claims
  * and take them over, and between them store every record exactly once and
- * complete the item. The output is kept in memory: sending on each broker
- * is tested by {@code file-connector}'s broker tests.
+ * report the item: a fifth of its records fail, so it stays open for an
+ * operator and is reported in progress, not completed (STAGES.md §15.6).
+ * The output is kept in memory: sending on each broker is tested by
+ * {@code file-connector}'s broker tests.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -632,14 +635,19 @@ class StageWorkerIT
         try (Node other = new Node("pod-b", settings, setup, second);
                 Node another = new Node("pod-c", settings, setup, third))
         {
-            await(() -> !completions().isEmpty(), "the item completes");
+            await(() -> !progress().isEmpty(),
+                    "the item is reported in progress");
         }
         assertThat(committed).hasSize(RECORDS).doesNotHaveDuplicates();
-        assertThat(completions()).allSatisfy(done ->
+        assertThat(progress()).allSatisfy(reported ->
         {
-            assertThat(done.recordCount()).isEqualTo(RECORDS);
-            assertThat(done.failedRecordCount()).isEqualTo(RECORDS / 5);
+            assertThat(reported.recordCount()).isEqualTo(RECORDS);
+            assertThat(reported.passedCount())
+                    .isEqualTo(RECORDS - RECORDS / 5);
+            assertThat(reported.openCount()).isEqualTo(RECORDS / 5);
         });
+        // Its failures are open, so it isn't complete.
+        assertThat(completions()).isEmpty();
         // The first worker's claims were taken over, as second attempts.
         List<Integer> attempts = new ArrayList<>();
         attempts.addAll(second.attempts.values());
@@ -657,6 +665,18 @@ class StageWorkerIT
         return output.opened().stream()
                 .filter(ItemConverted.class::isInstance)
                 .map(ItemConverted.class::cast).toList();
+    }
+
+    /**
+     * The item-progress messages sent.
+     *
+     * @return the messages
+     */
+    List<ItemProgressed> progress()
+    {
+        return output.opened().stream()
+                .filter(ItemProgressed.class::isInstance)
+                .map(ItemProgressed.class::cast).toList();
     }
 
     /**

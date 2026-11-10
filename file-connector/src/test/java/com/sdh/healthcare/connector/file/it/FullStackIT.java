@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -385,8 +385,8 @@ class FullStackIT
             file.append(row);
         }
         // One record with a missing field: the split stage passes it on,
-        // and the convert stage stores it in its original form, while the
-        // file still completes (design §6.4).
+        // and the convert stage keeps it in its fail store, open for an
+        // operator, so the file is reported in progress (STAGES.md §15).
         String shortRow = "30," + MARKER + "-short\n";
         file.append(shortRow);
         TestLanding landing = new TestLanding(catalogProperties(),
@@ -420,11 +420,12 @@ class FullStackIT
             }
 
             // Downstream: Kafka → connector-queue-reader → records from S3.
-            // 30 × record.stored, 1 × record.failed, 2 × item.converted
-            // (the bad file's has no records).
+            // 30 × record.stored and an item.progress for each file: both
+            // have an open failure, so neither completes (STAGES.md §15.6),
+            // and the failed record stays in the fail store (§15.1).
             consumer.subscribe(List.of(RECORDS_TOPIC));
             long until = System.currentTimeMillis() + 180_000;
-            while (messages.size() < 33
+            while (messages.size() < 32
                     && System.currentTimeMillis() < until)
             {
                 for (ConsumerRecord<String, String> consumed :
@@ -446,22 +447,26 @@ class FullStackIT
             }
             assertThat(records).allSatisfy(record ->
                     assertThat(record.mapping()).isEqualTo("csv-row/1"));
-            RecordFailed failed = ItSupport.of(messages, RecordFailed.class)
-                    .getFirst();
-            assertThat(failed.errorCode()).isEqualTo("CONVERT_CSV_FIELD_COUNT");
-            assertThat(failed.seq()).isEqualTo(30);
-            assertThat(new String(reader.readRecord(failed, 1 << 20), UTF_8))
-                    .isEqualTo(header + shortRow);
-            List<ItemConverted> items =
-                    ItSupport.of(messages, ItemConverted.class);
-            assertThat(items).extracting(ItemConverted::itemId)
+            assertThat(ItSupport.of(messages, ItemConverted.class))
+                    .as("no item completes with a failure open").isEmpty();
+            List<ItemProgressed> progress =
+                    ItSupport.of(messages, ItemProgressed.class);
+            assertThat(progress).extracting(ItemProgressed::itemId)
                     .containsExactlyInAnyOrder(good.itemId(), bad.itemId());
-            ItemConverted done = items.stream()
+            ItemProgressed open = progress.stream()
                     .filter(item -> item.itemId().equals(good.itemId()))
                     .findFirst().orElseThrow();
-            assertThat(done.recordCount()).isEqualTo(31);
-            assertThat(done.failedRecordCount()).isEqualTo(1);
-            assertThat(new String(landing.restore(done.itemId()), UTF_8))
+            assertThat(open.stage()).isEqualTo("convert");
+            assertThat(open.recordCount()).isEqualTo(31);
+            assertThat(open.passedCount()).isEqualTo(30);
+            assertThat(open.openCount()).isEqualTo(1);
+            ItemProgressed unsplit = progress.stream()
+                    .filter(item -> item.itemId().equals(bad.itemId()))
+                    .findFirst().orElseThrow();
+            assertThat(unsplit.failure().code())
+                    .isEqualTo("PARSE_UNTERMINATED_QUOTE");
+            assertThat(unsplit.failure().stage()).isEqualTo("split");
+            assertThat(new String(landing.restore(good.itemId()), UTF_8))
                     .isEqualTo(file.toString());
 
             // Maintenance on real S3, on the split stage's table, once both

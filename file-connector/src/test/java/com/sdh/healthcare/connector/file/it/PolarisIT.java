@@ -15,7 +15,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
@@ -448,9 +447,8 @@ class PolarisIT
                     ItSupport.drain(camel, OUTPUT, reader);
             List<RecordSplit> records = ItSupport.of(messages,
                     RecordSplit.class);
-            assertThat(ItSupport.of(messages, ItemSplit.class))
-                    .extracting(ItemSplit::itemId)
-                    .containsExactly(good.itemId(), bad.itemId());
+            ItSupport.assertGoodSplitBadOpen(messages, good.itemId(),
+                    bad.itemId());
             assertThat(records).hasSize(30);
             ItSupport.assertSplitRecords(reader, records, header, rows);
             assertThat(new String(landing.restore(good.itemId()), UTF_8))

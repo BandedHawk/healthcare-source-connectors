@@ -20,6 +20,7 @@ import com.github.dockerjava.api.model.Volume;
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.reader.QueueReader;
@@ -647,8 +648,8 @@ abstract class ContainerImageItBase
 
     /**
      * How many items the convert stage has completed, by downstream
-     * message: every item, a failed one too, ends with
-     * {@code item.converted}.
+     * message: {@code item.converted}. An item with an open failure isn't
+     * complete; it is reported by {@code item.progress} (STAGES.md §15.6).
      *
      * @param messages the messages read
      * @return the number of items
@@ -657,6 +658,23 @@ abstract class ContainerImageItBase
     {
         return messages.stream().filter(ItemConverted.class::isInstance)
                 .count();
+    }
+
+    /**
+     * The items reported in progress because they couldn't be split, by
+     * downstream message.
+     *
+     * @param messages the messages read
+     * @return their progress messages
+     */
+    static List<ItemProgressed> unsplit(List<ConnectorMessage> messages)
+    {
+        return messages.stream().filter(ItemProgressed.class::isInstance)
+                .map(ItemProgressed.class::cast)
+                .filter(progress -> progress.failure() != null
+                        && "PARSE_UNTERMINATED_QUOTE"
+                                .equals(progress.failure().code()))
+                .toList();
     }
 
     /**
@@ -988,17 +1006,19 @@ abstract class ContainerImageItBase
         String bad = HEADER + "1," + MARKER + ",\"never closed\n";
         deliver("bad.csv", bad);
         awaitLanded(2);
-        // 2 × item.converted (the bad file's has no records), 20 records.
-        awaitMessages(messages -> completed(messages) == 2
+        // The good file: item.converted and 20 records. The bad one fails
+        // to split as a whole and stays open for an operator: item.progress
+        // carrying the split stage's failure, and no item.converted.
+        awaitMessages(messages -> completed(messages) == 1
+                && !unsplit(messages).isEmpty()
                 && messages.stream().filter(RecordStored.class::isInstance)
                         .count() == 20);
-        List<ItemConverted> items = MESSAGES.stream()
+        UUID goodId = MESSAGES.stream()
                 .filter(ItemConverted.class::isInstance)
-                .map(ItemConverted.class::cast).toList();
-        UUID goodId = items.stream().filter(item -> item.recordCount() == 20)
+                .map(ItemConverted.class::cast)
+                .filter(item -> item.recordCount() == 20)
                 .findFirst().orElseThrow().itemId();
-        UUID badId = items.stream().filter(item -> item.recordCount() == 0)
-                .findFirst().orElseThrow().itemId();
+        UUID badId = unsplit(MESSAGES).getFirst().itemId();
         for (RecordStored record : MESSAGES.stream()
                 .filter(RecordStored.class::isInstance)
                 .map(RecordStored.class::cast).toList())
@@ -1026,7 +1046,7 @@ abstract class ContainerImageItBase
         assertThat(admin(convert, "status")).startsWith("0:")
                 .containsPattern("duties: +convert/convert-stage/duties held"
                         + " by .+, epoch 1,")
-                .containsPattern("items: +0 in progress, 2 complete")
+                .containsPattern("items: +1 in progress, 1 complete")
                 .contains("admin.status operator=it-operator");
 
         // 3. Landing failover: the active node dies (SIGKILL, no lease
@@ -1039,7 +1059,7 @@ abstract class ContainerImageItBase
         awaitLanded(3);
         assertThat(STANDBY_LOG.toUtf8String())
                 .contains("Started LandingConnectorApplication");
-        awaitMessages(messages -> completed(messages) == 3);
+        awaitMessages(messages -> completed(messages) == 2);
 
         // 4. The split stage restarts (as a pod restart would) and splits
         // the next file, which the convert stage converts.
@@ -1057,7 +1077,7 @@ abstract class ContainerImageItBase
                 .as("split stage restarted").hasSize(3);
         deliver("last.csv", csv("c", 2, new ArrayList<>()));
         awaitLanded(4);
-        awaitMessages(messages -> completed(messages) == 4);
+        awaitMessages(messages -> completed(messages) == 3);
         assertThat(admin(app, "status")).startsWith("0:")
                 .containsPattern(
                         "duties: +split/file-connector/duties held by .+,"
