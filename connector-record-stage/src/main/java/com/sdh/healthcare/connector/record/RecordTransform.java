@@ -85,13 +85,62 @@ public interface RecordTransform
         }
 
         /**
-         * The step failed on the record: it is stored as it came.
+         * The step failed on the record: it is stored as it came. Where is
+         * given in bytes, as a converter finds it, or as a line and column,
+         * as a mapping's issue gives it (STAGES.md §17.10.4); the stage
+         * puts either down to the line and column in the item.
          *
          * @param code     why
-         * @param position where in the record it failed, in bytes, from 0
+         * @param position where in the record it failed, in bytes, from 0;
+         *                 -1 if given as a line and column, or not known
+         * @param at       where in the record it failed, as a line and
+         *                 column; null if given in bytes, or not known
          */
-        record Failed(ErrorCode code, long position) implements Result
+        record Failed(ErrorCode code, long position, SourcePosition at)
+                implements Result
         {
+
+            /**
+             * Checks where it is given once at most.
+             *
+             * @throws IllegalArgumentException if it is given both ways, or
+             *                                  the byte is before 0 but not
+             *                                  -1
+             */
+            public Failed
+            {
+                if (position < -1 || position >= 0 && at != null)
+                {
+                    throw new IllegalArgumentException(
+                            "Where a record failed is in bytes or a line"
+                                    + " and column, not both");
+                }
+            }
+
+            /**
+             * Failed at a byte of the record.
+             *
+             * @param code     why
+             * @param position where in the record it failed, in bytes,
+             *                 from 0
+             */
+            public Failed(ErrorCode code, long position)
+            {
+                this(code, position, null);
+            }
+
+            /**
+             * Failed at a line and column of the record.
+             *
+             * @param code     why
+             * @param inRecord where in the record it failed; null if not
+             *                 known
+             * @return the result
+             */
+            public static Failed at(ErrorCode code, SourcePosition inRecord)
+            {
+                return new Failed(code, -1, inRecord);
+            }
         }
     }
 

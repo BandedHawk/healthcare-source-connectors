@@ -351,9 +351,9 @@
                 <phase>verify</phase>
                 <goals><goal>exec</goal></goals>
                 <configuration>
-                  <executable>${maven.multiModuleProjectDirectory}/scripts/build-image.sh</executable>
+                  <executable>${sdh.build-image}</executable>
                   <arguments>
-                    <argument>${project.artifactId}</argument>
+                    <argument>${project.basedir}</argument>
                     <argument>customer</argument>
                   </arguments>
                   <environmentVariables>
@@ -367,9 +367,9 @@
                 <phase>verify</phase>
                 <goals><goal>exec</goal></goals>
                 <configuration>
-                  <executable>${maven.multiModuleProjectDirectory}/scripts/build-image.sh</executable>
+                  <executable>${sdh.build-image}</executable>
                   <arguments>
-                    <argument>${project.artifactId}</argument>
+                    <argument>${project.basedir}</argument>
                     <argument>service</argument>
                   </arguments>
                   <environmentVariables>

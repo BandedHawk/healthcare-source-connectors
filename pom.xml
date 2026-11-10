@@ -29,6 +29,8 @@
     <module>connector-runtime</module>
     <module>connector-stage</module>
     <module>connector-record-stage</module>
+    <!-- The build files a project built on this one shares (STAGES.md §17.10.10): licence policy, image bases. -->
+    <module>connector-build-kit</module>
     <!-- Before file-connector: its image tests (-Pit) run the landing node's packaged jar and kit. -->
     <module>landing-connector</module>
     <!-- Before file-connector, whose ThirdPartyAttributionIT checks every application's packaged jar. -->
@@ -37,6 +39,12 @@
   </modules>
 
   <properties>
+    <!-- Where the licence policy (licenses.xml, the overrides, the attribution template) and the image script are.
+         This repository's own by default; a project with this pom as its parent unpacks connector-build-kit and
+         points both there (STAGES.md §17.10.10, point 1), since ${maven.multiModuleProjectDirectory} is then its
+         folder, not this one. -->
+    <sdh.license.dir>${maven.multiModuleProjectDirectory}/src/license</sdh.license.dir>
+    <sdh.build-image>${maven.multiModuleProjectDirectory}/scripts/build-image.sh</sdh.build-image>
     <!-- Fail on a license text that can't be fetched (design §14.2); true in -Pdist and -Pimages. -->
     <license.strict>false</license.strict>
     <!-- -Pimages: stop the sdh-it VM once the images are built (true), or keep it running (false). -->
@@ -539,7 +547,7 @@
           <configuration>
             <excludedScopes>test,provided,system</excludedScopes>
             <excludedGroups>^com\.sdh\.</excludedGroups>
-            <licensesConfigFile>${maven.multiModuleProjectDirectory}/src/license/licenses.xml</licensesConfigFile>
+            <licensesConfigFile>${sdh.license.dir}/licenses.xml</licensesConfigFile>
             <licenseMerges>
               <licenseMerge>Apache-2.0|The Apache Software License, Version 2.0|Apache License, Version 2.0|The Apache License, Version 2.0|Apache License 2.0|Apache 2.0|Apache 2|apache 2|AL 2.0</licenseMerge>
               <!-- The Bouncy Castle Licence is the MIT text (SPDX lists Bouncy Castle as MIT). -->
@@ -619,10 +627,10 @@
                 <!-- Always regenerate: the gmavenplus step rewrites the file, so the plugin's up-to-date check would
                      otherwise keep a stale, already-processed copy. -->
                 <force>true</force>
-                <overrideUrl>file://${maven.multiModuleProjectDirectory}/src/license/override-THIRD-PARTY.properties</overrideUrl>
+                <overrideUrl>file://${sdh.license.dir}/override-THIRD-PARTY.properties</overrideUrl>
                 <!-- A dependency without a license in its POM fails the build; add it to the override file. -->
                 <failOnMissing>true</failOnMissing>
-                <fileTemplate>${maven.multiModuleProjectDirectory}/src/license/third-party.ftl</fileTemplate>
+                <fileTemplate>${sdh.license.dir}/third-party.ftl</fileTemplate>
               </configuration>
             </execution>
           </executions>
@@ -641,8 +649,8 @@
               <configuration>
                 <properties>
                   <property>
-                    <name>rootDir</name>
-                    <value>${maven.multiModuleProjectDirectory}</value>
+                    <name>licenseDir</name>
+                    <value>${sdh.license.dir}</value>
                   </property>
                   <!-- true (-Pdist, -Pimages, the release script): a license text that can't be fetched fails the
                        build instead of leaving a placeholder sentence in the artifact. -->
@@ -771,9 +779,9 @@
                         end < 0 ? "" : text.substring(end + apacheEnd.length()).trim()
                     }
                     def copyrights = new Properties()
-                    new File(rootDir, "src/license/copyrights.properties").withReader("UTF-8") { copyrights.load(it) }
+                    new File(licenseDir, "copyrights.properties").withReader("UTF-8") { copyrights.load(it) }
                     def together = new Properties()
-                    new File(rootDir, "src/license/licenses-apply-together.properties").withReader("UTF-8") { together.load(it) }
+                    new File(licenseDir, "licenses-apply-together.properties").withReader("UTF-8") { together.load(it) }
                     def missingCopyright = []
                     // Components that packaging adds without their being dependencies (Spring Boot's jar mode
                     // tools), from src/license/bundled-by-packaging.properties, copied to target/packaging-extras.
@@ -781,7 +789,7 @@
                         [groupId: a.groupId, artifactId: a.artifactId, version: a.version, file: a.file]
                     }
                     def extras = new Properties()
-                    new File(rootDir, "src/license/bundled-by-packaging.properties").withReader("UTF-8") { extras.load(it) }
+                    new File(licenseDir, "bundled-by-packaging.properties").withReader("UTF-8") { extras.load(it) }
                     def extrasDir = new File(project.build.directory, "packaging-extras")
                     extras.stringPropertyNames().sort().each { String ga ->
                         def (String extraGroup, String extraArtifact) = ga.split(":")

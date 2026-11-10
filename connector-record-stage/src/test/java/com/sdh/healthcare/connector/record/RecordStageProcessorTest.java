@@ -8,6 +8,8 @@ package com.sdh.healthcare.connector.record;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
@@ -21,6 +23,8 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStor
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordTransformed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.message.StageMessages;
+import com.sdh.healthcare.connector.contract.position.RecordOrigin;
+import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
@@ -31,6 +35,7 @@ import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.RecordInput;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord;
+import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.stage.ItemProgress;
 import com.sdh.healthcare.connector.stage.StageInput;
@@ -432,6 +437,80 @@ class RecordStageProcessorTest
                     assertThat(row.stageVersion())
                             .isEqualTo(UpperTransform.VERSION);
                 });
+    }
+
+    /**
+     * A failure the transform gives as a line and column of the record, as
+     * a mapping's issue does, is stored at that place in the item, moved by
+     * the record's origin; one with no place, or a record with no origin,
+     * is stored with none.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void storesAFailureGivenAsALineAndColumnAtItsPlaceInTheItem()
+            throws Exception
+    {
+        RecordOrigin origin = new RecordOrigin(SourcePosition.START,
+                new SourcePosition(10, 5));
+        List<RecordStored> messages = new ArrayList<>();
+        List<RecordStored> converted = converted("{\"check\":1}",
+                "{\"nowhere\":2}", "{\"check\":3}");
+        for (int seq = 0; seq < converted.size(); seq++)
+        {
+            messages.add(withOrigin(converted.get(seq),
+                    seq < 2 ? origin : null));
+        }
+        List<ConnectorMessage> sent = run(transform(), messages);
+
+        assertThat(sent).containsOnlyNulls();
+        gold.refresh();
+        assertThat(CommittedRecords.failed(gold, item, kms))
+                .extracting(Failed::seq, Failed::errorCode, Failed::errorAt)
+                .containsExactly(
+                        tuple(0L, "TRANSFORM_CHECK_FAILED",
+                                new SourcePosition(11, 3)),
+                        tuple(1L, "TRANSFORM_FAILED", null),
+                        tuple(2L, "TRANSFORM_CHECK_FAILED", null));
+    }
+
+    /**
+     * Where a record failed is given in bytes or as a line and column, not
+     * both.
+     */
+    @Test
+    void takesWhereARecordFailedOneWayAtMost()
+    {
+        assertThat(new RecordTransform.Result.Failed(
+                ErrorCode.CONVERT_FAILED, 4).at()).isNull();
+        assertThat(RecordTransform.Result.Failed.at(
+                ErrorCode.TRANSFORM_FAILED, null).position()).isEqualTo(-1);
+        assertThatThrownBy(() -> new RecordTransform.Result.Failed(
+                ErrorCode.TRANSFORM_FAILED, 0, SourcePosition.START))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new RecordTransform.Result.Failed(
+                ErrorCode.TRANSFORM_FAILED, -2, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * A record message with another origin.
+     *
+     * @param stored the message
+     * @param origin its origin; null for none
+     * @return the message with it
+     */
+    private static RecordStored withOrigin(RecordStored stored,
+            RecordOrigin origin)
+    {
+        return new RecordStored(stored.recordId(), stored.itemId(),
+                stored.seq(), stored.sourceOffset(), stored.sourceLength(),
+                stored.format(), stored.contentType(), stored.mapping(),
+                stored.plaintextLength(), stored.chunkCount(),
+                stored.storage(), origin, stored.version(), stored.resolves(),
+                stored.lineage(), stored.superseded(), stored.cause(),
+                stored.message(), stored.messageRef(),
+                stored.messageReplaces());
     }
 
     /**

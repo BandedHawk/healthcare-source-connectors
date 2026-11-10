@@ -280,6 +280,44 @@ public enum ErrorCode
     CONVERT_FAILED,
 
     /**
+     * A record the transform stage's WSTL set doesn't read: not JSON, or of
+     * a mapping the set doesn't list (a record the convert stage had no
+     * converter for, say). It is stored in gold as it came (STAGES.md
+     * §17.10.3).
+     */
+    TRANSFORM_UNSUPPORTED,
+
+    /**
+     * Not mapped, because two transform workers stopped part-way through
+     * this record (it is on its third claim), and mapping it may be what
+     * stops them. It is stored in gold as it came (STAGES.md §17.10.3).
+     */
+    TRANSFORM_SKIPPED,
+
+    /**
+     * A record larger than {@code sdh.transform.max-bytes}: mapping it
+     * would need too much memory. It is stored in gold as it came
+     * (STAGES.md §17.10.3).
+     */
+    TRANSFORM_TOO_LARGE,
+
+    /**
+     * The record failed one of the WSTL set's data checks, such as a rule
+     * of US Core: the mapping stopped at its first error. It is stored in
+     * gold as it came, at the issue's line and column when the record has
+     * them; the issue's text is never stored, and the operator's
+     * {@code report} command makes it again (STAGES.md §17.10.4).
+     */
+    TRANSFORM_CHECK_FAILED,
+
+    /**
+     * The mapping failed in a way that isn't a data check: an error in the
+     * WSTL set or the runtime, not in the record. It is stored in gold as it
+     * came, like any failure (STAGES.md §17.10.3).
+     */
+    TRANSFORM_FAILED,
+
+    /**
      * A stage had already stored a record, and produced different output
      * for it when it came again: the converter or the mapping changed
      * between the two. No longer raised: since 2026-11-08 a record received

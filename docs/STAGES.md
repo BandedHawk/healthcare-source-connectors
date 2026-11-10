@@ -2738,6 +2738,21 @@ Small, and each tested here before the transformer uses it:
 - No message changes: `record.transformed`, `item.transformed` and `StageMessages.TRANSFORM` are in the contract
   since step 1.
 
+**4a as built (2026-11-10; DESIGN.md revision (cu)):**
+- `RecordTransform.Result.Failed` has a record line and column, `at`, beside the byte (`Failed.at(code, inRecord)`,
+  one or the other); the stage moves it to the item's with the record's origin, and stores none without one.
+  `UpperTransform` fails `check` at line 2, column 3; tested by
+  `RecordStageProcessorTest.storesAFailureGivenAsALineAndColumnAtItsPlaceInTheItem` and
+  `takesWhereARecordFailedOneWayAtMost`.
+- `TRANSFORM_UNSUPPORTED`, `TRANSFORM_SKIPPED`, `TRANSFORM_TOO_LARGE`, `TRANSFORM_CHECK_FAILED`, `TRANSFORM_FAILED` in
+  `ErrorCode`.
+- The root `pom.xml`'s paths are two properties, `sdh.license.dir` and `sdh.build-image`; `connector-build-kit`
+  installs `connector-build-kit-<version>.zip` (`src/license/`, `docker/`, `build-image.sh`, `minikube-env.sh`,
+  `minikube-home.sh`, a README saying how a project uses it). `build-image.sh` takes a module's folder and finds that
+  project's `mvnw`; the `images` profiles pass `${project.basedir}`. Tried with a throwaway project outside this
+  repository on the installed parent and kit: its jar carries its own `LICENSE` and `NOTICE` and attribution from the
+  kit's policy; the script resolves its module and Maven; convert-stage's two images build through the profile.
+
 #### 17.10.7 Running it: kit, images, sandbox
 
 - **Kit and images** as the other stages': `transform-stage-<version>.tar.gz` with `bin/`, `config/`, the README's

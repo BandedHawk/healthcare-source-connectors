@@ -12,9 +12,13 @@
 #   SDH_JAVA_IMAGE=eclipse-temurin:25-jre scripts/build-image.sh customer   # another Java 25 base
 #   SDH_SKIP_MAVEN=1 scripts/build-image.sh        # reuse what <module>/target already holds
 #   SDH_IT_STOP=1 scripts/build-image.sh           # stop the VM afterwards
+#   scripts/build-image.sh ../healthcare-data-transformer/transform-stage customer   # a module of another project
 #
 # The application is file-connector (also: split, splitter; the default; its images are named split-stage, as
-# decided in STAGES.md §11), landing-connector (also: landing) or convert-stage (also: convert).
+# decided in STAGES.md §11), landing-connector (also: landing) or convert-stage (also: convert), or the folder of a
+# module, here or in a project built on this one, which names the image (STAGES.md §17.10.10). Such a project runs
+# this script from connector-build-kit, unpacked: docker/ and the minikube scripts are the kit's, Maven is the
+# project's own (the nearest mvnw above the module).
 # service:  <module>/Dockerfile, from the packaged jar (full Ubuntu/Temurin image with a shell).
 # customer: the distribution kit's container/Dockerfile on a shell-less Java 25 base (distroless by default), then
 #           docker/customer-inventory.Dockerfile adds the OS package inventory.
@@ -22,13 +26,31 @@
 # Extra arguments go to `docker build` (for the customer image, to the first build).
 set -euo pipefail
 
+# This repository's root, or the unpacked build kit's: where docker/ and the minikube scripts are.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="file-connector"
+APP_DIR=""
 case "${1:-}" in
   file-connector|split|splitter) APP="file-connector"; shift ;;
   landing-connector|landing) APP="landing-connector"; shift ;;
   convert-stage|convert) APP="convert-stage"; shift ;;
+  service|customer|"") ;;
+  *)
+    if [[ -f "$1/pom.xml" ]]; then
+      APP_DIR="$(cd "$1" && pwd)"
+      APP="$(basename "$APP_DIR")"
+      shift
+    fi
+    ;;
 esac
+APP_DIR="${APP_DIR:-$ROOT/$APP}"
+# The project the module is in: the nearest folder above it with a Maven wrapper.
+PROJECT="$APP_DIR"
+while [[ ! -x "$PROJECT/mvnw" ]]; do
+  [[ "$PROJECT" != "/" ]] || { echo "No mvnw above $APP_DIR" >&2; exit 1; }
+  PROJECT="$(dirname "$PROJECT")"
+done
+MODULE="$(realpath --relative-to="$PROJECT" "$APP_DIR")"
 # The image's name: the module's, but for the split stage, which kept its module name.
 NAME="$APP"
 [[ "$APP" == "file-connector" ]] && NAME="split-stage"
@@ -41,25 +63,26 @@ fi
 source "$ROOT/docker/base-images.env"
 
 if [[ "${SDH_SKIP_MAVEN:-0}" != "1" ]]; then
-  (cd "$ROOT" && ./mvnw -q -pl "$APP" -am package -DskipTests)
+  (cd "$PROJECT" && ./mvnw -q -pl "$MODULE" -am package -DskipTests)
 fi
-VERSION="$(cd "$ROOT" && ./mvnw -q -N help:evaluate -Dexpression=project.version -DforceStdout)"
+VERSION="$(cd "$PROJECT" && ./mvnw -q -f "$MODULE/pom.xml" help:evaluate -Dexpression=project.version \
+  -DforceStdout)"
 
 source "$ROOT/scripts/minikube-env.sh"
 
 status=0
 if [[ "$VARIANT" == "service" ]]; then
   IMAGE="${SDH_IMAGE:-sdh/$NAME-service:$VERSION}"
-  jars=("$ROOT/$APP/target/$APP"-*.jar)
+  jars=("$APP_DIR/target/$APP"-*.jar)
   if [[ ${#jars[@]} -ne 1 || ! -f "${jars[0]}" ]]; then
     echo "Expected exactly one $APP/target/$APP-*.jar, found: ${jars[*]}" >&2
     exit 1
   fi
   docker build --build-arg JRE_IMAGE="$TEMURIN_JRE_IMAGE" --build-arg JDK_IMAGE="$TEMURIN_JDK_IMAGE" \
-    -t "$IMAGE" "$@" "$ROOT/$APP" || status=$?
+    -t "$IMAGE" "$@" "$APP_DIR" || status=$?
 else
   IMAGE="${SDH_IMAGE:-sdh/$NAME:$VERSION}"
-  KIT="$ROOT/$APP/target/$APP-$VERSION-dist-dir/$APP-$VERSION"
+  KIT="$APP_DIR/target/$APP-$VERSION-dist-dir/$APP-$VERSION"
   if [[ ! -f "$KIT/container/Dockerfile" ]]; then
     echo "No distribution kit at $KIT; package $APP first" >&2
     exit 1

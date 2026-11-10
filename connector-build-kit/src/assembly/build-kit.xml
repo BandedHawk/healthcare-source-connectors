@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The build kit (STAGES.md §17.10.10, point 1): this repository's shared build files, laid out as they are here, so
+     a project that unpacks it points sdh.license.dir at <kit>/src/license and sdh.build-image at
+     <kit>/scripts/build-image.sh. -->
+<assembly xmlns="http://maven.apache.org/ASSEMBLY/2.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/ASSEMBLY/2.2.0 https://maven.apache.org/xsd/assembly-2.2.0.xsd">
+  <id>build-kit</id>
+  <formats>
+    <format>zip</format>
+  </formats>
+  <includeBaseDirectory>false</includeBaseDirectory>
+  <fileSets>
+    <fileSet>
+      <directory>${project.basedir}/../src/license</directory>
+      <outputDirectory>src/license</outputDirectory>
+      <fileMode>0644</fileMode>
+    </fileSet>
+    <fileSet>
+      <directory>${project.basedir}/../docker</directory>
+      <outputDirectory>docker</outputDirectory>
+      <fileMode>0644</fileMode>
+    </fileSet>
+    <fileSet>
+      <directory>${project.basedir}/../scripts</directory>
+      <outputDirectory>scripts</outputDirectory>
+      <includes>
+        <include>build-image.sh</include>
+        <include>minikube-env.sh</include>
+        <include>minikube-home.sh</include>
+      </includes>
+      <fileMode>0755</fileMode>
+    </fileSet>
+    <fileSet>
+      <directory>${project.basedir}/src/kit</directory>
+      <outputDirectory/>
+      <fileMode>0644</fileMode>
+    </fileSet>
+  </fileSets>
+</assembly>

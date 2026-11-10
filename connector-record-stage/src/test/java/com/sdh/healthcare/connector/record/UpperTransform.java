@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInSt
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.StageMessages;
+import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.util.Locale;
@@ -23,7 +24,9 @@ import java.util.TreeSet;
  * piece the splitter couldn't parse is stored as it came with its error,
  * a record of format {@code raw} as it came with none, and one larger than
  * {@link #MAX_BYTES} as it came, too large. A record that says
- * {@code bad} fails there; one that says {@code boom} throws.
+ * {@code bad} fails there; one that says {@code check} fails at line 2,
+ * column 3 of the record, as a mapping's issue gives it, and one that says
+ * {@code nowhere} fails with no place; one that says {@code boom} throws.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -112,6 +115,15 @@ final class UpperTransform implements RecordTransform
         if (text.contains("boom"))
         {
             throw new IllegalStateException("a bug");
+        }
+        if (text.contains("check"))
+        {
+            return Result.Failed.at(ErrorCode.TRANSFORM_CHECK_FAILED,
+                    new SourcePosition(2, 3));
+        }
+        if (text.contains("nowhere"))
+        {
+            return Result.Failed.at(ErrorCode.TRANSFORM_FAILED, null);
         }
         int bad = text.indexOf("bad");
         if (bad >= 0)

@@ -558,9 +558,8 @@ public final class RecordStageProcessor
             }
             case RecordTransform.Result.Failed failed -> output(
                     new Prepared(input, raw, transform.asIs(input),
-                            failed.code(), failed.position(),
-                            lineAndColumn(input, raw, failed.position()),
-                            null, null),
+                            failed.code(), Math.max(0, failed.position()),
+                            failedAt(input, raw, failed), null, null),
                     digest(raw, failed.code(), null));
         };
     }
@@ -946,6 +945,28 @@ public final class RecordStageProcessor
             }
         }
         return seqs;
+    }
+
+    /**
+     * Where in the item a record failed, given in bytes or as a line and
+     * column of the record.
+     *
+     * @param input  the record's message
+     * @param raw    its bytes, as it came
+     * @param failed how it failed
+     * @return the position in the item; null if not known, or the record
+     *         has no origin
+     */
+    private static SourcePosition failedAt(RecordInStorage input,
+            byte[] raw, RecordTransform.Result.Failed failed)
+    {
+        if (failed.at() != null)
+        {
+            return input.origin() == null ? null
+                    : input.origin().toFile(failed.at());
+        }
+        return failed.position() < 0 ? null
+                : lineAndColumn(input, raw, failed.position());
     }
 
     /**
