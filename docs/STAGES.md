@@ -1400,7 +1400,7 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
 4. **Exact copies** (§15.5) at landing and at the stages.
 5. **The drain check** (§14.4).
 
-### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 and 2 built)
+### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 to 3 built)
 
 Worked out with the user on 2026-11-09, in place of the proposal first written here. It replaces `replay`
 (§13.2), the outcomes of §15.4 and the matching of §15.4a, and changes how corrections and retries are recorded
@@ -1756,7 +1756,92 @@ Left from step 2:
 - `retry` of a failed revision processes what failed first (the record as split), not the corrected content
   that failed; correct it again to try an edit.
 - A reprocess (step 3) must take its revision number past any correction still pending at the place, so the two
-  never share a line.
+  never share a line. Settled in step 3, by the shared counter.
+
+**Step 3 as planned (2026-11-09, with the user).** At the convert stage, in the stage library, so the transformer
+gets it as built. Settled with the user:
+- **The stage's own keys.** A reprocess message is sealed to the stage itself and signed by it, so the stage is
+  given its own inbox public key and signing public key (`sdh.crypto.keys.inbox.public-pem`,
+  `sdh.crypto.keys.signing.public-pem`), each pinned by its SHA-256 as the recipient's is; a KMS signing key's
+  public half comes from the KMS. The opener trusts the stage's own signing key alongside the stage before's, and
+  says which signed: the worker takes `record.reprocess` only when signed by its own stage, and every other type
+  only when signed by the stage before.
+- **Selectors:** `--item-id <id>` (repeatable), with `--seq <n>` for one record, and `--made-by <version>`. The
+  landing-time selector (`--intake --landed-from --landed-to`) waits for the split stage in step 4, which reads
+  `landed_items`: `split_records` holds neither intake nor landing time.
+- **What `--item-id` chooses:** the item's current objects in the input, `split_records` (the newest generation
+  and line at each place, failed pieces left out), whether or not this stage has seen them, so a record whose
+  message was lost is processed as new and flagged as a reprocess. `--made-by` chooses this stage's current rows
+  made by that version, and reads each one's input at its place in `split_records`.
+
+Worked out in planning, as consequences of what was decided:
+- **Revision numbers come from one counter per place** (`<schema>.stage_revision`: stage, item, seq, generation,
+  the line before this stage, the last revision given here), taken under its row's lock by `correct` and `retry`
+  when submitted and by queueing a reprocess, and never below what is stored there, failed, or noted by a pending
+  correction. So a correction and a reprocess never share a line, whichever comes first; this settles the item
+  left from step 2.
+- **Queueing.** Each renewal interval, every pod takes up to a batch of a run's objects not yet queued,
+  `FOR UPDATE SKIP LOCKED`, so no two pods take the same one; checks it (refused `superseded` if its input's place
+  now holds something newer than when the run was made, `past_retention` if the input can't be read); gives it its
+  line from the counter; and commits that before sending, so a pod that stops between the two resends it, at the
+  next interval, under the same line and message ID. The message (`record.reprocess`) holds the `record.split` as
+  the reconciler rebuilds it from `split_records` (§9), at the line given, with the run ID and cause `reprocess`.
+  It is sent on the stage's own input topic, keyed by record ID as the split stage keys it, so it shares the
+  record's partition.
+- **Processing.** The worker takes the `record.split` inside as any record, at its line, through the currency rule
+  (§15.8.3); its `record.stored` carries `cause`, `runId` and `revisionOf` (the record it supersedes at the place,
+  when there is one), and its row of `records` gains `cause` and `run_id` (fields 31 and 32). The object's outcome
+  (`stored` or `failed`, the output's record ID, `same_output`) is noted in `reprocess_object` in the registry's
+  transaction, and the run is `DONE` once every object is refused, cancelled or has an outcome
+  (`stage.reprocess_done`).
+- **The command** records nothing with `--dry-run`, which needs no reason; otherwise it records the run and its
+  objects in one transaction, prints the run's ID, and warns of corrections still pending at the places chosen.
+  `--status --run <id>` lists the run object by object; `--cancel --run <id>` cancels what isn't yet queued.
+- **Brokers:** the sandbox's Kafka has no authentication yet (SANDBOX.md), so the convert pods can write their
+  own input topic as they are; the send rights of each broker are step 5.
+
+**Step 3 as built (2026-11-09; tried on the sandbox, SANDBOX.md).** As planned, with these choices made in building:
+
+- **Where it lives.** The stage library holds all of it but reading the input: `ReprocessStore` (the run tables),
+  `ReprocessInputs` (a stage's input: the current object at each place of an item's newest generation, failed or
+  not, with the message it would have been sent as), the worker's queueing (`StageWorker.reprocess`, run each
+  renewal interval with the corrections), and the command (`ReprocessCommand`, over `ReprocessAdmin`). The convert
+  stage gives `ConvertInputs` (`split_records`, with the split stage's corrections) and turns it on only when both
+  `sdh.stage.reprocess` (its own input, as a queue to send to) and its own public keys are configured; one without
+  the other stops it at start.
+- **The counter** is `<schema>.stage_revision` (`Revisions`, connector-core), shared by `correct`, `retry` and
+  queueing; its floor is what `stage_record`, `stage_failure` and `stage_correction` already hold at the place.
+- **Queueing.** A batch of 100 objects per pod per interval, oldest run first. Each object is checked against the
+  input as read in that interval: refused `superseded` if the item has a newer generation or its place a newer line,
+  `past_retention` if its piece isn't there. Its line is committed with its state, then it is sent and marked sent.
+  One queued but unsent after the claim's life is sent again under the same line, so the same message ID
+  (`rp-<item>-<recordId><suffix>`); one whose piece is gone by then is refused. A run is `QUEUED` once an object is,
+  and `DONE` when none is pending or queued (`stage.reprocess_done`, with counts stored, failed and refused).
+- **Signers.** The worker opens each message with the signer's kid: `record.reprocess` is taken only from the
+  stage's own kid, any other type only from another (the stage before's); anything else is rejected,
+  `stage.message_rejected` `wrong_signer`.
+- **Processing.** The `record.split` inside is classified and claimed as any record, at its line, so a reprocess
+  delivered twice is a duplicate. The processor is given the cause (`StageProcessor.process` with a `Cause`), which
+  convert keeps on the row (`cause`, `run_id`); a correction's row now says `correction`. Before sealing, the worker
+  reads the object it would supersede (`StageRegistry.current`): its message key is `revisionOf`, and its digest
+  decides `same_output`. The object's outcome is noted in the registry's transaction, and `stage.reprocessed` audited
+  and counted (`sdh.stage.reprocessed` by stage, cause and outcome) once committed.
+- **The command.** `--item-id` takes one or more IDs, comma-separated (the shared argument parser takes each option
+  once). `--made-by` reads this stage's current stored or failed rows of that version, narrowed by `--item-id`, and
+  chooses the current piece at each of their places. At most 100,000 objects a run. The run's reason is sealed
+  under the run's ID (record number -2), as a failure's is. The command is audited `admin.reprocess`, with the
+  selector, the count and the run's ID.
+- **Fixed on the way:** the records writer kept a record's lineage, cause and `correction_of` by place, never
+  cleared, so a second record of the same place in one batch (a reprocess and a late original) could take the
+  first's. Each is now given, or cleared, for every record.
+- **The sandbox:** the convert pods get their inbox public key (`inbox-public.pem`, pinned) and
+  `sdh.stage.reprocess` on `<pipeline>.split`; their signing key's public half comes from Vault.
+
+Left from step 3:
+- The time selector (`--intake --landed-from --landed-to`) is step 4's.
+- A `record.reprocess` rebuilt from `split_records` knows no queue message its record is in, so a reprocessed
+  record of a message batch that fails names no message (as the reconciler's rebuilt records, §9).
+- `RecordStored` of a correction doesn't yet carry a `cause`; its row does.
 
 ## 16. Items with no records (decided and built 2026-11-09)
 

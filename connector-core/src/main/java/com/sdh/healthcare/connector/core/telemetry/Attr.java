@@ -138,6 +138,30 @@ public enum Attr
     /** An item's generation, from 1 (STAGES.md §15.8). */
     GENERATION("sdh.generation"),
 
+    /** A reprocess run's ID (STAGES.md §15.8.4). */
+    RUN_ID("sdh.run_id"),
+
+    /**
+     * Why an object was made again (STAGES.md §15.8.7): {@code reprocess}
+     * or {@code correction}.
+     */
+    CAUSE("sdh.cause"),
+
+    /**
+     * What a reprocess run chose by: {@code item}, {@code record} or
+     * {@code made_by}; never the values given.
+     */
+    SELECTOR("sdh.selector"),
+
+    /** What came of an object reprocessed: {@code stored} or {@code failed}. */
+    OUTCOME("sdh.outcome"),
+
+    /**
+     * Whether a reprocess's output is the same as what it supersedes, by
+     * digest (STAGES.md §15.8.2).
+     */
+    SAME_OUTPUT("sdh.same_output"),
+
     /** How many workers have claimed a record. */
     ATTEMPTS("sdh.attempts"),
 
@@ -152,6 +176,9 @@ public enum Attr
 
     /** How many of an item's failures are open: neither passed nor declined. */
     OPEN_COUNT("sdh.open_count"),
+
+    /** How many of a reprocess run's objects were refused (§15.8.4). */
+    REFUSED_COUNT("sdh.refused_count"),
 
     /**
      * The broker's ID of a received message, such as

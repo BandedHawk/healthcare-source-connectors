@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.convert.BacklogWatch;
+import com.sdh.healthcare.connector.convert.ConvertInputs;
 import com.sdh.healthcare.connector.convert.ConvertProcessor;
 import com.sdh.healthcare.connector.convert.ConvertReconciler;
 import com.sdh.healthcare.connector.convert.ResultReporter;
@@ -34,6 +35,7 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
+import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
@@ -253,11 +255,19 @@ public final class ConvertRuntime implements AutoCloseable
                     new ConvertProcessor.Storage(records, keys.wrap(),
                             recordsKek, ids, splitRecords), results, clock,
                     backlog);
+            StageWorker.Reprocessing reprocessing = reprocessing(camel,
+                    stage, keys, new ReprocessStore(dataSource,
+                            stage.registrySchema(), ConvertProcessor.STAGE,
+                            Duration.ofSeconds(10)),
+                    new ConvertInputs(splitRecords,
+                            storageSettings.catalogName(),
+                            storageSettings.effectiveSplitNamespace()),
+                    opened);
             StageWorker<ConvertProcessor.Prepared> worker =
                     new StageWorker<>(processor, registry, keys.inbox(),
                             new MessageSealer(keys.signer(), keys.signerKid(),
                                     keys.recipient(), keys.recipientKid()),
-                            publisher, workerSettings);
+                            publisher, workerSettings, reprocessing);
             opened.add(worker);
             StageHealth health = new StageHealth();
             StageReceiver receiver = new StageReceiver(camel,
@@ -330,6 +340,48 @@ public final class ConvertRuntime implements AutoCloseable
                 memory, properties.storage().catalogName(),
                 properties.storage().namespace(),
                 StageBuild.identity(ConvertRuntime.class));
+    }
+
+    /**
+     * How the stage reprocesses (STAGES.md §15.8.4): only once its own
+     * keys ({@code sdh.crypto.keys.inbox.public-pem},
+     * {@code sdh.crypto.keys.signing.public-pem}) and its own input
+     * ({@code sdh.stage.reprocess}) are both configured.
+     *
+     * @param camel  the Camel context
+     * @param stage  the stage's settings
+     * @param keys   the stage's keys
+     * @param store  its runs
+     * @param inputs its input
+     * @param opened what to close with the runtime; the publisher is added
+     * @return how it reprocesses; null if it doesn't
+     * @throws IllegalArgumentException if only one of the two is configured
+     * @throws Exception                if the publisher can't be started
+     */
+    private static StageWorker.Reprocessing reprocessing(CamelContext camel,
+            StageProperties stage, KeyMaterial keys, ReprocessStore store,
+            ConvertInputs inputs, List<AutoCloseable> opened)
+            throws Exception
+    {
+        CommonSettings.Queue queue = stage.reprocessQueue();
+        KeyMaterial.Self self = keys.self();
+        if (queue == null && self == null)
+        {
+            return null;
+        }
+        if (queue == null || self == null)
+        {
+            throw new IllegalArgumentException("A reprocess needs both "
+                    + StageProperties.PREFIX + ".reprocess and the stage's"
+                    + " own public keys (sdh.crypto.keys.inbox.public-pem,"
+                    + " sdh.crypto.keys.signing.public-pem)");
+        }
+        ClosablePublisher publisher = publisher(camel, queue);
+        opened.add(publisher);
+        return new StageWorker.Reprocessing(store, inputs,
+                new MessageSealer(keys.signer(), keys.signerKid(),
+                        self.inbox(), self.inboxKid()),
+                publisher, self.signerKid());
     }
 
     /**

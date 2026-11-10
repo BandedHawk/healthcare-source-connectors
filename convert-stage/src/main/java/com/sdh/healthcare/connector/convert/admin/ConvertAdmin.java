@@ -10,14 +10,16 @@ import com.sdh.healthcare.connector.convert.config.ConvertProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
+import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 /**
- * The convert stage's operator commands (design §11.4): {@code status}, on
- * the shared {@link AdminCli}.
+ * The convert stage's operator commands (design §11.4): {@code status},
+ * {@code replay}, {@code reprocess} and those for its fail store, on the
+ * shared {@link AdminCli}.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -52,8 +54,9 @@ public final class ConvertAdmin
      */
     static List<AdminCommand<ConvertAdminContext>> commands()
     {
-        List<AdminCommand<ConvertAdminContext>> commands = new ArrayList<>(List.of(
-                new StageStatusCommand<>(), new ReplayCommand()));
+        List<AdminCommand<ConvertAdminContext>> commands =
+                new ArrayList<>(List.of(new StageStatusCommand<>(),
+                        new ReplayCommand(), new ReprocessCommand<>()));
         commands.addAll(FailureCommands.<ConvertAdminContext>all());
         return List.copyOf(commands);
     }

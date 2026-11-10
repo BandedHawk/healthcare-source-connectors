@@ -472,3 +472,11 @@ Checked again since: see the end of this section.
   with the revision it makes (`correction 1 FAILED ... as g1 r1.2`, `correction 2 PASSED ... as g1 r1.3, made
   ...`). A new synthetic C-CDA broken off part way, corrected as a whole, was superseded by `g1 r2`, and its record
   reached the convert stage as `g1 r2.1` and completed. `check` passes. No pod restarted.
+- **Reprocess at the convert stage (2026-11-09, STAGES.md §15.8.10 step 3).** The convert pods started with their
+  own inbox public key and `sdh.stage.reprocess` on `ccda-push.split`; `check` passes. `reprocess --item-id <id>
+  --dry-run` listed the item's one piece (`seq 0 g1 r1`) and recorded nothing. Run with a synthetic reason, it printed
+  the run's ID; within a renewal interval a pod queued the object as `g1 r1.2` (`stage.reprocess_queued`), sent it
+  to its own input, took it back (signed by itself) and stored it (`stage.reprocessed outcome=stored
+  same_output=true`), and the run ended (`stage.reprocess_done count=1`). `--status --run` shows `DONE ... as g1
+  r1.2: stored, the same output`; `status --item` shows the item still 1 of 1, complete, with two records sent. No
+  pod restarted.

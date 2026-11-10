@@ -193,11 +193,14 @@ public final class StageRegistry
      * @param lineage  the lineage the stage made it under (STAGES.md
      *                 §15.8.2): with the place, what decides whether it is
      *                 current (§15.8.3)
+     * @param reprocess for a record a reprocess made again (§15.8.4), its
+     *                 run, whose object's outcome is noted in the same
+     *                 transaction; null otherwise
      */
     public record Entry(String recordId, UUID itemId, String digest,
             String version, boolean failed, OutboundMessage message,
             FailureStore.Failure failure, CorrectionStore.Outcome correction,
-            long seq, Lineage lineage)
+            long seq, Lineage lineage, Reprocessed reprocess)
     {
 
         /**
@@ -206,6 +209,29 @@ public final class StageRegistry
         public Entry
         {
             lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * An entry not made by a reprocess.
+         *
+         * @param recordId   the record's id
+         * @param itemId     the id of its item
+         * @param digest     its output's digest
+         * @param version    the version its output was made with
+         * @param failed     whether it failed
+         * @param message    the message it is to be sent as, sealed
+         * @param failure    the failure to record, or null
+         * @param correction what a correction came to, or null
+         * @param seq        its place in its item's generation, or -1
+         * @param lineage    the lineage it was made under
+         */
+        public Entry(String recordId, UUID itemId, String digest,
+                String version, boolean failed, OutboundMessage message,
+                FailureStore.Failure failure,
+                CorrectionStore.Outcome correction, long seq, Lineage lineage)
+        {
+            this(recordId, itemId, digest, version, failed, message, failure,
+                    correction, seq, lineage, null);
         }
 
         /**
@@ -275,6 +301,30 @@ public final class StageRegistry
         {
             return Key.of(itemId, recordId, lineage);
         }
+    }
+
+    /**
+     * What a reprocess made of an object (STAGES.md §15.8.4).
+     *
+     * @param runId      the run
+     * @param sameOutput whether the output's digest is that of the object
+     *                   it supersedes at its place; null if it supersedes
+     *                   nothing
+     */
+    public record Reprocessed(UUID runId, Boolean sameOutput)
+    {
+    }
+
+    /**
+     * The object a record would supersede at its place: stored, current,
+     * and older than the record.
+     *
+     * @param messageKey the key of the message it was sent as, its
+     *                   output's record ID; null if it failed
+     * @param digest     its output's digest
+     */
+    public record Current(String messageKey, String digest)
+    {
     }
 
     /**
@@ -439,6 +489,11 @@ public final class StageRegistry
             for (String ddl : FailureStore.ddls(failures,
                     failures.substring(0, failures.indexOf('.'))
                             + ".stage_failure_event"))
+            {
+                statement.execute(ddl);
+            }
+            // Added 2026-11-09 (STAGES.md §15.8.4): reprocess runs.
+            for (String ddl : ReprocessStore.ddls(schema()))
             {
                 statement.execute(ddl);
             }
@@ -772,6 +827,7 @@ public final class StageRegistry
                 Set<Key> marked = new HashSet<>();
                 List<FailureStore.Failure> failed = new ArrayList<>();
                 List<Entry> corrections = new ArrayList<>();
+                List<Entry> reprocessed = new ArrayList<>();
                 Currency currency = new Currency(connection);
                 try (PreparedStatement update =
                         connection.prepareStatement(mark);
@@ -841,6 +897,18 @@ public final class StageRegistry
                         {
                             failed.add(entry.failure());
                         }
+                        if (entry.reprocess() != null
+                                && ReprocessStore.noteOutcome(connection,
+                                        schema(), entry.reprocess().runId(),
+                                        entry.itemId(), entry.seq(),
+                                        entry.lineage(), message == null,
+                                        message == null ? null
+                                                : message.key(),
+                                        entry.reprocess().sameOutput(),
+                                        queryTimeoutSeconds))
+                        {
+                            reprocessed.add(entry);
+                        }
                     }
                 }
                 currency.flush();
@@ -867,6 +935,7 @@ public final class StageRegistry
                 connection.commit();
                 FailureStore.audit(stage, added);
                 currency.audit(late);
+                auditReprocessed(reprocessed);
                 for (int index = 0; index < corrections.size(); index++)
                 {
                     CorrectionStore.audit(stage,
@@ -879,6 +948,82 @@ public final class StageRegistry
             {
                 connection.rollback();
                 throw failure;
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Audits each object a reprocess made again, {@code stage.reprocessed},
+     * and counts it, once stored.
+     *
+     * @param reprocessed the entries
+     */
+    private void auditReprocessed(List<Entry> reprocessed)
+    {
+        Telemetry telemetry = Telemetry.get();
+        for (Entry entry : reprocessed)
+        {
+            String outcome = entry.message() == null ? "failed" : "stored";
+            Fields fields = Fields.of(Attr.STAGE, stage)
+                    .with(Attr.RUN_ID, entry.reprocess().runId())
+                    .with(Attr.ITEM_ID, entry.itemId())
+                    .with(Attr.SEQ, entry.seq())
+                    .with(Attr.LINEAGE, entry.lineage())
+                    .with(Attr.CAUSE, ReprocessStore.CAUSE)
+                    .with(Attr.OUTCOME, outcome);
+            if (entry.reprocess().sameOutput() != null)
+            {
+                fields = fields.with(Attr.SAME_OUTPUT,
+                        entry.reprocess().sameOutput());
+            }
+            telemetry.audit("stage.reprocessed", fields);
+            telemetry.reprocessed(stage, ReprocessStore.CAUSE, outcome);
+        }
+    }
+
+    /**
+     * The object a record would supersede at its place (STAGES.md
+     * §15.8.3): stored there, not superseded nor late, with an older line
+     * in the same generation. Read before the record is stored, so another
+     * stored meanwhile may be the one it supersedes in the end; this is for
+     * what the record says it is a revision of.
+     *
+     * @param itemId  the item
+     * @param seq     the record's number
+     * @param lineage the record's lineage
+     * @return the object; empty if there is none
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Optional<Current> current(UUID itemId, long seq, Lineage lineage)
+    {
+        String sql = """
+                SELECT message_key, output_digest FROM %s
+                 WHERE stage = ? AND item_id = ? AND generation = ?
+                   AND seq = ? AND state <> 'CLAIMED' AND NOT late
+                   AND superseded_at IS NULL
+                   AND line < COALESCE(string_to_array(NULLIF(?, ''),
+                           '.')::integer[], '{}')
+                 ORDER BY line DESC LIMIT 1""".formatted(records);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            select.setObject(2, itemId);
+            select.setInt(3, lineage.generation());
+            select.setLong(4, seq);
+            select.setString(5, lineage.lineText());
+            try (ResultSet rows = select.executeQuery())
+            {
+                return rows.next()
+                        ? Optional.of(new Current(rows.getString(1),
+                                rows.getString(2)))
+                        : Optional.empty();
             }
         }
         catch (SQLException failure)

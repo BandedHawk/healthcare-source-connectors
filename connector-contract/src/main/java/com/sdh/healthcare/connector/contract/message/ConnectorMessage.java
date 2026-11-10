@@ -32,7 +32,8 @@ public sealed interface ConnectorMessage permits
         ConnectorMessage.RecordInStorage, ConnectorMessage.ItemLanded,
         ConnectorMessage.ItemReceived, ConnectorMessage.ItemResult,
         ConnectorMessage.RecordConflict, ConnectorMessage.ItemSplit,
-        ConnectorMessage.ItemConverted, ConnectorMessage.ItemProgressed
+        ConnectorMessage.ItemConverted, ConnectorMessage.ItemProgressed,
+        ConnectorMessage.RecordReprocess
 {
 
     /**
@@ -260,6 +261,9 @@ public sealed interface ConnectorMessage permits
      * @param lineage         where it stands in its line (STAGES.md
      *                        §15.8.2); null for the first of everything
      * @param superseded      whether superseded on arrival (§15.8.3)
+     * @param cause           why it was made again, for an output of a
+     *                        reprocess or correction (§15.8.7); null when
+     *                        first made
      */
     record RecordStored(
             String recordId,
@@ -277,7 +281,8 @@ public sealed interface ConnectorMessage permits
             String version,
             String resolves,
             Lineage lineage,
-            boolean superseded)
+            boolean superseded,
+            Cause cause)
             implements RecordInStorage
     {
 
@@ -287,6 +292,44 @@ public sealed interface ConnectorMessage permits
         public RecordStored
         {
             lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A message first made, with no cause.
+         *
+         * @param recordId        the record's id
+         * @param itemId          the id of its file
+         * @param seq             its number in the file, from 0
+         * @param sourceOffset    where it starts in the file, in bytes
+         * @param sourceLength    how many bytes of the file it covers
+         * @param format          the name of the file's format
+         * @param contentType     what the stored bytes are
+         * @param mapping         the JSON mapping it was converted with; null
+         *                        when stored as split
+         * @param plaintextLength the stored length before compression and
+         *                        encryption
+         * @param chunkCount      how many encrypted chunks it is stored in
+         * @param storage         where it is stored
+         * @param origin          where the record's text came from in the
+         *                        file; null if the splitter gave none
+         * @param version         the convert stage's version that made it;
+         *                        null if not known
+         * @param resolves        the failed record a correction or retry
+         *                        resolves; null otherwise
+         * @param lineage         where it stands in its line; null for the
+         *                        first of everything
+         * @param superseded      whether superseded on arrival
+         */
+        public RecordStored(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, String mapping, long plaintextLength,
+                int chunkCount, StorageRef storage, RecordOrigin origin,
+                String version, String resolves, Lineage lineage,
+                boolean superseded)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, mapping, plaintextLength, chunkCount, storage,
+                    origin, version, resolves, lineage, superseded, null);
         }
 
         /**
@@ -443,7 +486,21 @@ public sealed interface ConnectorMessage permits
             return new RecordStored(recordId, itemId, seq, sourceOffset,
                     sourceLength, format, contentType, mapping,
                     plaintextLength, chunkCount, storage, origin, version,
-                    resolves, lineage, superseded);
+                    resolves, lineage, superseded, cause);
+        }
+
+        /**
+         * The same message, made again for a reason (STAGES.md §15.8.7).
+         *
+         * @param cause why it was made again; null when first made
+         * @return the message, with the cause
+         */
+        public RecordStored withCause(Cause cause)
+        {
+            return new RecordStored(recordId, itemId, seq, sourceOffset,
+                    sourceLength, format, contentType, mapping,
+                    plaintextLength, chunkCount, storage, origin, version,
+                    resolves, lineage, superseded, cause);
         }
     }
 
@@ -1664,5 +1721,111 @@ public sealed interface ConnectorMessage permits
             long snapshotId,
             String kekRef)
     {
+    }
+
+    /**
+     * Why an output was made again (STAGES.md §15.8.7): by a reprocess,
+     * with the run that asked for it, or by an operator's correction; and
+     * the record it supersedes at its place, when the stage held one.
+     *
+     * @param kind       {@link #REPROCESS} or {@link #CORRECTION}
+     * @param runId      the reprocess run; null for a correction
+     * @param revisionOf the record ID of the object it supersedes at the
+     *                   same place; null if the stage held none
+     */
+    record Cause(String kind, UUID runId, String revisionOf)
+    {
+
+        /** Made again by a reprocess, or a retry. */
+        public static final String REPROCESS = "reprocess";
+
+        /** Made from an operator's correction. */
+        public static final String CORRECTION = "correction";
+
+        /**
+         * Checks the kind.
+         *
+         * @throws IllegalArgumentException if it isn't one of the two
+         */
+        public Cause
+        {
+            if (!REPROCESS.equals(kind) && !CORRECTION.equals(kind))
+            {
+                throw new IllegalArgumentException("Unknown cause: " + kind);
+            }
+        }
+    }
+
+    /**
+     * A record to process again at a stage (STAGES.md §15.8.4), sent by
+     * the stage to its own input, signed by itself: the stage's input as
+     * it was stored (a {@code record.split} at the convert stage, a
+     * {@code record.stored} at the transformer), at the line the reprocess
+     * gives it, and the run that asked for it. It is partitioned as the
+     * record's own messages are.
+     *
+     * @param record the input record, at its new line
+     * @param runId  the reprocess run
+     */
+    record RecordReprocess(RecordInStorage record, UUID runId)
+            implements ConnectorMessage
+    {
+
+        /**
+         * Checks both are given.
+         *
+         * @throws NullPointerException if either is null
+         */
+        public RecordReprocess
+        {
+            java.util.Objects.requireNonNull(record, "record");
+            java.util.Objects.requireNonNull(runId, "runId");
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return {@link MessageType#RECORD_REPROCESS}
+         */
+        @Override
+        public MessageType type()
+        {
+            return MessageType.RECORD_REPROCESS;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return "rp-", the item id, the record id and the line's suffix:
+         *         one per revision of the place
+         */
+        @Override
+        public String messageId()
+        {
+            return "rp-" + record.itemId() + "-" + record.recordId()
+                    + record.lineage().suffix();
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return the record's item
+         */
+        @Override
+        public UUID itemId()
+        {
+            return record.itemId();
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return the record's id, as for its other messages
+         */
+        @Override
+        public String orderingKey()
+        {
+            return record.recordId();
+        }
     }
 }

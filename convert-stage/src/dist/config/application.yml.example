@@ -19,6 +19,9 @@ sdh:
     dlq:                          # where record.conflict goes: a record stored before, now with other output
       type: kafka
       uri: "kafka:sdh.convert.dlq?brokers=kafka:9093&securityProtocol=SSL"
+    reprocess:                    # the stage's own input, which a reprocess sends to; unset: no reprocess
+      type: kafka
+      uri: "kafka:sdh.split.claims?brokers=kafka:9093&securityProtocol=SSL"
     concurrency: 4                # records a pod converts at once
     claim: { ttl: 60s, renew-interval: 15s, busy-poll: 1s }
     registry-schema: sdh_stage    # Postgres schema of the stage's registry, in the lease database
@@ -62,9 +65,11 @@ sdh:
     keys:
       records-kek: records-kek/1  # reads split_records and writes records; no landing KEK
       signing: { kid: convert-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
+      #   to reprocess, with a local key: public-pem: /run/secrets/signing-public.pem, sha256: "cd34..."
       # signing: { kid: convert-2026, key-ref: "arn:aws:kms:eu-west-1:123456789012:key/…" }   # KMS
       recipient: { kid: downstream-2026, pem: /run/secrets/recipient.pem, sha256: "ab12..." }   # downstream readers
       inbox: { kid: convert-inbox-2026, pem: /run/secrets/inbox.pem }   # the split stage seals to this; passphrase: env
+      #   to reprocess: public-pem: /run/secrets/inbox-public.pem, sha256: "ef56..."   # the stage seals to itself
       landing-signer: { kid: split-2026, pem: /run/secrets/split-signer.pem }   # the split stage's public key
     aws: { region: eu-west-1 }                              # aws-kms; credentials: default chain
     gcp: { endpoint: "europe-west1-kms.googleapis.com:443" }  # gcp-kms; credentials: ADC

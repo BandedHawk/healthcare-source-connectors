@@ -694,6 +694,7 @@ deploy_pipeline() {
   kc -n "$n" create configmap splitter-config --from-file=application.yml="$work/splitter-application.yml" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
   apply_secret "$n" convert-keys --from-file=inbox.pem="$STATE/keys/$p-convert-inbox.pem" \
+    --from-file=inbox-public.pem="$STATE/keys/$p-convert-inbox-public.pem" \
     --from-file=recipient.pem="$STATE/keys/$p-fhir-recipient-public.pem" \
     --from-file=split-signer.pem="$STATE/keys/$p-splitter-signing-public.pem" \
     --from-file=vault-token="$STATE/secrets/vault-token-convert-$p"

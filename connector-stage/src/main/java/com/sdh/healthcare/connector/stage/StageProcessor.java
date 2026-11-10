@@ -77,6 +77,25 @@ public interface StageProcessor<O>
             throws InterruptedException;
 
     /**
+     * Processes a record made again for a reason (STAGES.md §15.8.4): as
+     * {@link #process}, with the cause to keep with what it stores, so a
+     * row made by a reprocess says so. Calls {@link #process}, keeping no
+     * cause, unless overridden.
+     *
+     * @param message the record's message
+     * @param attempt how many workers have claimed the record
+     * @param cause   why it is made again; its {@code revisionOf} is not
+     *                known yet, and is null
+     * @return the output, or the failed record
+     * @throws InterruptedException if interrupted
+     */
+    default StageOutput<O> process(ConnectorMessage message, int attempt,
+            ConnectorMessage.Cause cause) throws InterruptedException
+    {
+        return process(message, attempt);
+    }
+
+    /**
      * Stores outputs, in one commit, and makes the message each is sent as:
      * null for a failed output, which isn't sent on (§15.1).
      * The commit must be one append that is safe to retry when another

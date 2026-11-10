@@ -329,7 +329,8 @@ final class StageTestSupport
             return switch (message)
             {
                 case RecordStored stored -> new StageInput.RecordInput(
-                        stored.recordId(), stored.itemId(), stored.seq());
+                        stored.recordId(), stored.itemId(), stored.seq(),
+                        stored.lineage());
                 case ItemConverted completed -> new StageInput.ItemTotal(
                         completed.itemId(), completed.recordCount(), false,
                         completed.completion());

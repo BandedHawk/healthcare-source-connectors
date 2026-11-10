@@ -63,7 +63,9 @@ public key is what you trust.
 - Keys: a local keystore and PEM files, or a KMS (AWS KMS, Azure Key Vault or HashiCorp Vault Transit). The stage
   needs `records-kek` (to read split records and write records; it never reads landed items), its own signing key,
   the downstream readers' public key, its inbox key pair (the split stage encrypts its messages to the public half)
-  and the split stage's signing public key (`sdh.crypto.keys.landing-signer`).
+  and the split stage's signing public key (`sdh.crypto.keys.landing-signer`). To reprocess (below), it also needs
+  its inbox key's public half, pinned by its SHA-256 (`sdh.crypto.keys.inbox.public-pem`, `.sha256`), and, with a
+  local signing key, that key's public half (`sdh.crypto.keys.signing.public-pem`, `.sha256`); a KMS gives its own.
 - The split stage, and the queue it sends `record.split` and `item.split` on (`sdh.stage.input`).
 
 Run as many instances as you like. Each converts records as they arrive, claiming each one first, so records are
@@ -281,6 +283,34 @@ raised, the converter fixed): it needs no input, and takes a failure that is `FA
 as a correction does, and is stored, sent and superseded the same way; if it fails, its own failure, with the retry's
 error code, is the one open. A record that passed by a correction or retry names the failure it resolves in its
 `record.stored` (`resolves`).
+
+
+#### Reprocess
+
+`reprocess` converts again, under the version running now, records an operator chooses (STAGES.md §15.8.4):
+`--item-id <id>[,<id>...]` the current piece at each place of the items in `split_records` (`--seq <n>` for one),
+whether or not this stage has seen it, or `--made-by <version>` (with `--item-id` to narrow it) those whose current
+row here was made by that version (`status --item` and `failures --item-id` show versions). `--dry-run` lists what
+would be chosen and records nothing. Otherwise the reason is read from standard input, as for `decline`, kept
+encrypted, and the run's ID printed:
+
+```sh
+kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args reprocess --item-id <id> --operator alice < reason.txt
+```
+
+The run's objects are a fixed list. Within a renewal interval the pods queue them, a batch at a time, each as its
+place's next revision here (`g1 r1.2`, as a correction would be), and send each as `record.reprocess` to the
+stage's own input (`sdh.stage.reprocess`, the same queue as `sdh.stage.input`), sealed to and signed by the stage
+itself; the stage takes `record.reprocess` only when signed by its own key. A place that holds something newer by
+then is refused (`superseded`), as is a piece no longer stored (`past_retention`). Each is converted, stored as a new
+row of `records` (with `cause` `reprocess` and `run_id`), and sent on as `record.stored` with its revision and
+`cause` (`kind`, `runId`, and `revisionOf`, the record it supersedes here). The producer hears nothing. A correction
+still pending at a place chosen is warned of: processed after, it supersedes what the reprocess made.
+`reprocess --status --run <id>` lists the run object by object (queued, refused and why, stored or failed, and
+whether the output is the same as what it superseded); `reprocess --cancel --run <id>` cancels what isn't yet
+queued. Audited as `admin.reprocess`, then `stage.reprocess_queued`, `stage.reprocess_refused`, `stage.reprocessed`
+and `stage.reprocess_done`, and counted by `sdh.stage.reprocessed`. Without `sdh.stage.reprocess` and the stage's
+own public keys the pods queue nothing, and the runs wait.
 
 
 ### After an outage

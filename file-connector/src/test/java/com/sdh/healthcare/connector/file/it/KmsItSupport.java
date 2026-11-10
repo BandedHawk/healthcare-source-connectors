@@ -72,12 +72,13 @@ final class KmsItSupport
                 new CommonSettings.Keystore(null, null),
                 new CommonSettings.Keys(recordsKek, landedKek,
                         new CommonSettings.Signing("connector-kms", null,
-                                null, signingKeyRef),
+                                null, signingKeyRef, null, null),
                         new CommonSettings.Recipient("downstream-2026",
                                 keys.recipientPem, KeyMaterial.fingerprint(
                                         keys.recipient.getPublic())),
                         new CommonSettings.InboxKey(TestKeys.INBOX_KID,
-                                keys.inboxPem, TestKeys.INBOX_PASSPHRASE),
+                                keys.inboxPem, TestKeys.INBOX_PASSPHRASE,
+                                null, null),
                         new CommonSettings.Signer(TestKeys.LANDING_SIGNER_KID,
                                 keys.landingSignerPem)),
                 aws, new CommonSettings.Gcp(null), vault);

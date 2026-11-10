@@ -149,6 +149,12 @@ public final class Telemetry
     private final LongCounter supersededOnArrival;
 
     /**
+     * Objects a reprocess processed again, by stage, cause and outcome
+     * (STAGES.md §15.8.8).
+     */
+    private final LongCounter reprocessed;
+
+    /**
      * Items the split stage held, begun under another of its versions
      * (STAGES.md §14.3).
      */
@@ -238,6 +244,11 @@ public final class Telemetry
                 .setUnit("{record}")
                 .setDescription("Records received again under a different"
                         + " version than they were stored with, by stage")
+                .build();
+        reprocessed = meter.counterBuilder("sdh.stage.reprocessed")
+                .setUnit("{record}")
+                .setDescription("Objects processed again by a reprocess, by"
+                        + " stage, cause and outcome")
                 .build();
         supersededOnArrival = meter.counterBuilder(
                 "sdh.stage.superseded_on_arrival")
@@ -592,6 +603,19 @@ public final class Telemetry
     {
         supersededOnArrival.add(1,
                 Fields.of(Attr.STAGE, stage).toAttributes());
+    }
+
+    /**
+     * Counts an object a reprocess processed again (STAGES.md §15.8.8).
+     *
+     * @param stage   the stage
+     * @param cause   why: {@code reprocess}
+     * @param outcome {@code stored} or {@code failed}
+     */
+    public void reprocessed(String stage, String cause, String outcome)
+    {
+        reprocessed.add(1, Fields.of(Attr.STAGE, stage).with(Attr.CAUSE, cause)
+                .with(Attr.OUTCOME, outcome).toAttributes());
     }
 
     /**

@@ -210,11 +210,11 @@ public final class TestKeys
     {
         return new CommonSettings.Keys(RECORDS, LANDED,
                 new CommonSettings.Signing("connector-2026", signingPem,
-                        SIGNING_PASSPHRASE, signingKeyRef),
+                        SIGNING_PASSPHRASE, signingKeyRef, null, null),
                 new CommonSettings.Recipient("downstream-2026", recipientPem,
                         recipientPin),
                 new CommonSettings.InboxKey(INBOX_KID, inboxPem,
-                        INBOX_PASSPHRASE),
+                        INBOX_PASSPHRASE, null, null),
                 new CommonSettings.Signer(LANDING_SIGNER_KID,
                         landingSignerPem));
     }

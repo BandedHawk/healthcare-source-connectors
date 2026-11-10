@@ -17,6 +17,11 @@ sdh:
     dlq:
       type: kafka
       uri: "kafka:${PIPELINE}.convert.dlq?brokers=${KAFKA_BROKERS}"
+    # The stage's own input, which a reprocess sends its objects to, sealed to the stage itself (STAGES.md
+    # §15.8.4). Kafka has no authentication here yet, so the pods may write it as they are.
+    reprocess:
+      type: kafka
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}"
     registry-schema: convert_${ICEBERG_PREFIX}
   storage:
     catalog-name: sdh
@@ -43,7 +48,10 @@ sdh:
       records-kek: ${PIPELINE}-records
       signing: { kid: convert-${PIPELINE}, key-ref: ${PIPELINE}-convert-signing }
       recipient: { kid: fhir-${PIPELINE}, pem: /run/secrets/recipient.pem, sha256: "${RECIPIENT_SHA256}" }
-      inbox: { kid: convert-${PIPELINE}-inbox, pem: /run/secrets/inbox.pem }
+      # Its public half too, pinned, so the stage can seal a reprocess to itself; the signing key's comes from
+      # Vault.
+      inbox: { kid: convert-${PIPELINE}-inbox, pem: /run/secrets/inbox.pem, public-pem: /run/secrets/inbox-public.pem,
+               sha256: "${CONVERT_INBOX_SHA256}" }
       landing-signer: { kid: splitter-${PIPELINE}, pem: /run/secrets/split-signer.pem }
   telemetry:
     otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }

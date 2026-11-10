@@ -189,6 +189,9 @@ public final class RecordBatchWriter implements AutoCloseable
     /** The lineage of each record that isn't the first (§15.8.2). */
     private final Map<Placed, Lineage> lineages = new HashMap<>();
 
+    /** Why each record made again was (§15.8.7), and its run's ID. */
+    private final Map<Placed, String[]> causes = new HashMap<>();
+
     /**
      * A record's versions.
      *
@@ -294,11 +297,35 @@ public final class RecordBatchWriter implements AutoCloseable
      *
      * @param itemId       the record's item
      * @param seq          its number in the item
-     * @param correctionOf the ID of the failed record it corrects
+     * @param correctionOf the ID of the failed record it corrects; null
+     *                     for a record not made from one, which clears
+     *                     what an earlier record of its place was given
      */
     public void correction(UUID itemId, long seq, String correctionOf)
     {
         corrections.put(new Placed(itemId, seq), correctionOf);
+    }
+
+    /**
+     * Gives why a record was made again (STAGES.md §15.8.7), kept on its
+     * rows ({@code cause}, {@code run_id}).
+     *
+     * @param itemId the record's item
+     * @param seq    its number in the item
+     * @param cause  {@code reprocess} or {@code correction}; null for a
+     *               record made the first time, which clears what an
+     *               earlier record of its place in the batch was given
+     * @param runId  the reprocess run; null for a correction
+     */
+    public void cause(UUID itemId, long seq, String cause, UUID runId)
+    {
+        if (cause == null)
+        {
+            causes.remove(new Placed(itemId, seq));
+            return;
+        }
+        causes.put(new Placed(itemId, seq), new String[] {cause,
+            runId == null ? null : runId.toString()});
     }
 
     /**
@@ -312,7 +339,12 @@ public final class RecordBatchWriter implements AutoCloseable
      */
     public void lineage(UUID itemId, long seq, Lineage lineage)
     {
-        if (!lineage.first())
+        // Two records of one place may be in a batch, each given its own.
+        if (lineage.first())
+        {
+            lineages.remove(new Placed(itemId, seq));
+        }
+        else
         {
             lineages.put(new Placed(itemId, seq), lineage);
         }
@@ -744,6 +776,10 @@ public final class RecordBatchWriter implements AutoCloseable
                 : lineage.generation());
         row.setField(LINE, lineage == null || lineage.line().isEmpty() ? null
                 : lineage.lineText());
+        String[] cause = causes.get(new Placed(record.itemId(),
+                record.seq()));
+        row.setField(CAUSE, cause == null ? null : cause[0]);
+        row.setField(RUN_ID, cause == null ? null : cause[1]);
         writer.write(row);
     }
 

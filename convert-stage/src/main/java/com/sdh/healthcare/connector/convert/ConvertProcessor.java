@@ -120,11 +120,35 @@ public final class ConvertProcessor
      * @param correctionOf   for an operator's correction, the ID of the
      *                       failed row of {@code records} it corrects
      *                       (STAGES.md §15.6c); null otherwise
+     * @param cause          why it was made again, kept on its row
+     *                       (§15.8.7); null for a record made the first
+     *                       time, or from a correction
      */
     public record Prepared(RecordSplit split, byte[] bytes,
             Representation representation, ErrorCode error,
-            long errorPosition, SourcePosition errorAt, String correctionOf)
+            long errorPosition, SourcePosition errorAt, String correctionOf,
+            ConnectorMessage.Cause cause)
     {
+
+        /**
+         * A record, perhaps a correction, made for no other cause.
+         *
+         * @param split          the message it came in
+         * @param bytes          what to store, or null
+         * @param representation what the stored bytes are
+         * @param error          why it isn't converted, or null
+         * @param errorPosition  where in the record it failed, or -1
+         * @param errorAt        where in the item it failed, or null
+         * @param correctionOf   the failed row it corrects, or null
+         */
+        public Prepared(RecordSplit split, byte[] bytes,
+                Representation representation, ErrorCode error,
+                long errorPosition, SourcePosition errorAt,
+                String correctionOf)
+        {
+            this(split, bytes, representation, error, errorPosition, errorAt,
+                    correctionOf, null);
+        }
 
         /**
          * A record, not a correction.
@@ -153,7 +177,19 @@ public final class ConvertProcessor
         Prepared correcting(String of)
         {
             return new Prepared(split, bytes, representation, error,
-                    errorPosition, errorAt, of);
+                    errorPosition, errorAt, of, cause);
+        }
+
+        /**
+         * The same record, made again for a cause.
+         *
+         * @param why the cause
+         * @return the record
+         */
+        Prepared causedBy(ConnectorMessage.Cause why)
+        {
+            return new Prepared(split, bytes, representation, error,
+                    errorPosition, errorAt, correctionOf, why);
         }
     }
 
@@ -420,6 +456,22 @@ public final class ConvertProcessor
                             .with(Attr.ERROR_CODE, output.value().error()));
         }
         return output;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Its row of {@code records} keeps the cause and the run (STAGES.md
+     * §15.8.7).
+     */
+    @Override
+    public StageOutput<Prepared> process(ConnectorMessage message,
+            int attempt, ConnectorMessage.Cause cause)
+            throws InterruptedException
+    {
+        StageOutput<Prepared> output = process(message, attempt);
+        return new StageOutput<>(output.digest(), output.failed(),
+                output.value().causedBy(cause), output.errorCode());
     }
 
     /**
@@ -752,10 +804,20 @@ public final class ConvertProcessor
         writer.versions(split.itemId(), split.seq(), version(split),
                 split.version());
         writer.lineage(split.itemId(), split.seq(), split.lineage());
-        if (prepared.correctionOf() != null)
+        // Each given, or cleared, for every record: two of one place may
+        // be in a batch.
+        writer.correction(split.itemId(), split.seq(),
+                prepared.correctionOf());
+        if (prepared.cause() != null)
         {
-            writer.correction(split.itemId(), split.seq(),
-                    prepared.correctionOf());
+            writer.cause(split.itemId(), split.seq(), prepared.cause().kind(),
+                    prepared.cause().runId());
+        }
+        else
+        {
+            writer.cause(split.itemId(), split.seq(),
+                    prepared.correctionOf() == null ? null
+                            : ConnectorMessage.Cause.CORRECTION, null);
         }
         if (prepared.error() != null && split.message() >= 0)
         {

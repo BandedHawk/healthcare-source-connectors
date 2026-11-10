@@ -27,6 +27,9 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *                       the lease database
  * @param sendTimeout    the longest to wait for the broker to take a
  *                       message
+ * @param reprocess      the stage's own input, to send reprocess messages
+ *                       to (STAGES.md §15.8.4); unset if the stage doesn't
+ *                       reprocess
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -34,7 +37,8 @@ public record StageProperties(ReceiveProperties input,
         CommonSettings.Queue output, CommonSettings.Queue dlq,
         @DefaultValue("4") int concurrency, @DefaultValue Claim claim,
         @DefaultValue("sdh_stage") String registrySchema,
-        @DefaultValue("30s") Duration sendTimeout)
+        @DefaultValue("30s") Duration sendTimeout,
+        CommonSettings.Queue reprocess)
 {
 
     /** Where the settings are configured, to name them in errors. */
@@ -94,6 +98,34 @@ public record StageProperties(ReceiveProperties input,
             throw new IllegalArgumentException(PREFIX + ": "
                     + invalid.getMessage(), invalid);
         }
+    }
+
+    /**
+     * The checked reprocess queue.
+     *
+     * @return the queue; null if none is configured
+     * @throws IllegalArgumentException if it is configured in part
+     */
+    public CommonSettings.Queue reprocessQueue()
+    {
+        if (reprocess == null || (blank(reprocess.type())
+                && blank(reprocess.uri())))
+        {
+            return null;
+        }
+        requireQueue(reprocess, "reprocess");
+        return reprocess;
+    }
+
+    /**
+     * Whether a setting is unset.
+     *
+     * @param value the setting
+     * @return true if it is null or blank
+     */
+    private static boolean blank(String value)
+    {
+        return value == null || value.isBlank();
     }
 
     /**

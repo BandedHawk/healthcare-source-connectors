@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.contract.message;
 
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.ContractVersion;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Cause;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConverted;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemLanded;
@@ -18,6 +19,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordConflict;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordFailed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordReprocess;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
@@ -113,6 +115,11 @@ public final class PayloadCodec
                 if (record.superseded())
                 {
                     payload.put("superseded", true);
+                }
+                if (record instanceof RecordStored stored
+                        && stored.cause() != null)
+                {
+                    putCause(payload, stored.cause());
                 }
                 if (record instanceof RecordSplit split
                         && split.message() >= 0)
@@ -253,6 +260,11 @@ public final class PayloadCodec
                     payload.put("completion", progressed.completion());
                 }
             }
+            case RecordReprocess reprocess ->
+            {
+                payload.put("runId", reprocess.runId().toString());
+                payload.put("record", toJson(reprocess.record()));
+            }
             case RecordConflict conflict ->
             {
                 payload.put("recordId", conflict.recordId());
@@ -306,7 +318,8 @@ public final class PayloadCodec
                             (String) payload.get("version"),
                             (String) payload.get("resolves"),
                             lineage(payload),
-                            Boolean.TRUE.equals(payload.get("superseded")));
+                            Boolean.TRUE.equals(payload.get("superseded")),
+                            cause(payload));
                     case RECORD_FAILED -> new RecordFailed(
                             text(payload, "recordId"),
                             itemId,
@@ -427,6 +440,9 @@ public final class PayloadCodec
                             texts(payload, "versions"),
                             completion(payload, 0),
                             generation(payload));
+                    case RECORD_REPROCESS -> new RecordReprocess(
+                            reprocessed(payload),
+                            UUID.fromString(text(payload, "runId")));
                     case RECORD_CONFLICT -> new RecordConflict(
                             text(payload, "recordId"),
                             itemId,
@@ -441,6 +457,56 @@ public final class PayloadCodec
                     "messageId does not match payload");
         }
         return message;
+    }
+
+    /**
+     * Writes why a record was made again (STAGES.md §15.8.7): its cause,
+     * the run, and the record it supersedes, each only when set.
+     *
+     * @param payload the payload
+     * @param cause   the cause
+     */
+    private static void putCause(Map<String, Object> payload, Cause cause)
+    {
+        payload.put("cause", cause.kind());
+        putIfSet(payload, "runId",
+                cause.runId() == null ? null : cause.runId().toString());
+        putIfSet(payload, "revisionOf", cause.revisionOf());
+    }
+
+    /**
+     * Reads why a record was made again, as {@link #putCause} writes it.
+     *
+     * @param payload the payload
+     * @return the cause; null if none is given
+     */
+    private static Cause cause(Map<String, Object> payload)
+    {
+        Object kind = payload.get("cause");
+        return kind == null ? null : new Cause((String) kind,
+                uuid(payload, "runId"), (String) payload.get("revisionOf"));
+    }
+
+    /**
+     * Reads the record a reprocess message holds: a record message of its
+     * own, with its own contract version and message ID.
+     *
+     * @param payload the reprocess message's payload
+     * @return the record
+     * @throws IllegalArgumentException if it holds no record, or another
+     *                                  type of message
+     */
+    @SuppressWarnings("unchecked")
+    private static RecordInStorage reprocessed(Map<String, Object> payload)
+    {
+        if (!(payload.get("record") instanceof Map<?, ?> fields)
+                || !(fromJson((Map<String, Object>) fields)
+                        instanceof RecordInStorage record))
+        {
+            throw new IllegalArgumentException(
+                    "record.reprocess holds no record");
+        }
+        return record;
     }
 
     /**

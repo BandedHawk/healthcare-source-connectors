@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import com.sdh.healthcare.connector.convert.ConvertInputs;
 import com.sdh.healthcare.connector.convert.ConvertProcessor;
 import com.sdh.healthcare.connector.convert.config.ConvertProperties;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
@@ -20,14 +21,18 @@ import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.storage.CommittedRecords;
+import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.sdh.healthcare.connector.stage.RegistryReport;
+import com.sdh.healthcare.connector.stage.ReprocessInputs;
+import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
-import com.sdh.healthcare.connector.stage.admin.FailureAdmin;
+import com.sdh.healthcare.connector.stage.admin.ReprocessAdmin;
 import com.sdh.healthcare.connector.stage.admin.StageAdmin;
 import java.io.PrintStream;
 import java.time.Duration;
@@ -51,7 +56,7 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * @since 0.1.0
  */
 final class ConvertAdminContext
-        implements StageAdmin, FailureAdmin, AutoCloseable
+        implements StageAdmin, ReprocessAdmin, AutoCloseable
 {
 
     /** The stage's settings. */
@@ -164,6 +169,59 @@ final class ConvertAdminContext
                     + RecordsTable.DEFAULT_NAME
                     + " does not exist: the stage has never run here");
         }
+    }
+
+    /**
+     * The stage's input, {@code split_records}, which must exist.
+     *
+     * @return the table
+     * @throws IllegalStateException if the table doesn't exist
+     */
+    Table splitRecords()
+    {
+        records();
+        String namespace = properties.storage().effectiveSplitNamespace();
+        try
+        {
+            return catalog.loadTable(TableIdentifier.of(namespace,
+                    IngestTables.SPLIT_RECORDS));
+        }
+        catch (NoSuchTableException missing)
+        {
+            throw new IllegalStateException("Table "
+                    + IngestTables.SPLIT_RECORDS
+                    + " does not exist: the split stage has never run here");
+        }
+    }
+
+    @Override
+    public ReprocessStore reprocessRuns()
+    {
+        return new ReprocessStore(database.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public ReprocessStore reprocessRunsToChange()
+    {
+        return new ReprocessStore(writing.dataSource(),
+                properties.stage().registrySchema(), ConvertProcessor.STAGE,
+                Duration.ofSeconds(10));
+    }
+
+    @Override
+    public ReprocessInputs reprocessInputs()
+    {
+        return new ConvertInputs(splitRecords(),
+                properties.storage().catalogName(),
+                properties.storage().effectiveSplitNamespace());
+    }
+
+    @Override
+    public String version()
+    {
+        return StageBuild.identity(ConvertProcessor.class);
     }
 
     /**

@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -91,6 +92,9 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     /** The most corrections a worker processes in an interval. */
     static final int CORRECTION_LIMIT = 10;
 
+    /** The most reprocess objects a worker queues in an interval. */
+    static final int REPROCESS_LIMIT = 100;
+
     /** Logs the worker's own events; never a body or a record id. */
     private static final Logger LOG = LoggerFactory.getLogger(
             StageWorker.class);
@@ -112,6 +116,9 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
 
     /** How the worker runs. */
     private final Settings settings;
+
+    /** Queues and takes reprocess runs' objects; null if it doesn't. */
+    private final Reprocessing reprocessing;
 
     /** Processes records, several at a time. */
     private final ExecutorService workers;
@@ -172,15 +179,33 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     }
 
     /**
+     * How a worker reprocesses (STAGES.md §15.8.4): the stage's runs, its
+     * input, and how it sends to itself.
+     *
+     * @param store     the stage's runs
+     * @param inputs    the stage's input, as the stage before stored it
+     * @param sealer    seals to the stage's own inbox, signed by itself
+     * @param publisher sends to the stage's own input
+     * @param selfKid   the ID of the stage's own signing key: the only
+     *                  signer of a {@code record.reprocess} taken, and one
+     *                  no other type is taken from
+     */
+    public record Reprocessing(ReprocessStore store, ReprocessInputs inputs,
+            MessageSealer sealer, MessagePublisher publisher, String selfKid)
+    {
+    }
+
+    /**
      * A record of the batch, with its message.
      *
-     * @param input   what the processor read in it
+     * @param input    what the processor read in it
      * @param message  the message
      * @param brokerId the broker's ID of the message it came in; null if
      *                 none, or if it was rebuilt rather than received
+     * @param runId    the reprocess run it was sent for; null if none
      */
     private record Pending(StageInput.RecordInput input,
-            ConnectorMessage message, String brokerId)
+            ConnectorMessage message, String brokerId, UUID runId)
     {
     }
 
@@ -233,6 +258,28 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             MessageOpener opener, MessageSealer sealer,
             MessagePublisher output, Settings settings)
     {
+        this(processor, registry, opener, sealer, output, settings, null);
+    }
+
+    /**
+     * Creates a worker that reprocesses. {@link #start} starts renewing
+     * its claims and queueing its runs.
+     *
+     * @param processor    the stage's own work
+     * @param registry     the claims and item rows
+     * @param opener       opens received messages; it must trust the
+     *                     stage's own signing key if it reprocesses
+     * @param sealer       seals the messages the stage sends
+     * @param output       sends the stage's messages
+     * @param settings     how the worker runs
+     * @param reprocessing how it reprocesses; null if it doesn't
+     */
+    public StageWorker(StageProcessor<O> processor, StageRegistry registry,
+            MessageOpener opener, MessageSealer sealer,
+            MessagePublisher output, Settings settings,
+            Reprocessing reprocessing)
+    {
+        this.reprocessing = reprocessing;
         this.processor = processor;
         this.registry = registry;
         this.opener = opener;
@@ -259,8 +306,90 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         revisiter.scheduleWithFixedDelay(() ->
         {
             applyCorrections();
+            reprocess();
             revisit();
         }, period, period, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Queues reprocess runs' objects (STAGES.md §15.8.4), if the stage
+     * reprocesses: sends again those given their lines but never sent (a
+     * pod stopped between the two), under the same lines and message IDs;
+     * takes a batch not yet queued, which no other pod takes, checks each
+     * against the stage's input now, and gives each its line; sends each as
+     * a {@code record.reprocess} to the stage's own input, sealed to itself;
+     * and ends the runs with nothing left. An object whose input is gone
+     * before it is sent is refused. A failure is logged, and tried again at
+     * the next interval. Run each renewal interval once {@link #start}ed;
+     * public for a stage's own tests.
+     */
+    public void reprocess()
+    {
+        if (reprocessing == null)
+        {
+            return;
+        }
+        try
+        {
+            ReprocessStore store = reprocessing.store();
+            Map<UUID, List<ReprocessInputs.Input>> current = new HashMap<>();
+            List<ReprocessStore.Queued> queued = new ArrayList<>(
+                    store.unsent(settings.claimTtl(), REPROCESS_LIMIT));
+            queued.addAll(store.queue(REPROCESS_LIMIT,
+                    chosen -> ReprocessInputs.refusal(chosen,
+                            inputs(current, chosen.itemId()))));
+            List<OutboundMessage> sends = new ArrayList<>();
+            List<ReprocessStore.Queued> sent = new ArrayList<>();
+            for (ReprocessStore.Queued each : queued)
+            {
+                inputs(current, each.chosen().itemId());
+                ConnectorMessage.RecordInStorage record =
+                        ReprocessInputs.rebuild(each, current);
+                if (record == null)
+                {
+                    store.refuse(each, ReprocessStore.PAST_RETENTION);
+                    continue;
+                }
+                ConnectorMessage message = new ConnectorMessage
+                        .RecordReprocess(record, each.runId());
+                sends.add(OutboundMessage.of(message,
+                        reprocessing.sealer().seal(message)));
+                sent.add(each);
+            }
+            send(reprocessing.publisher(), sends);
+            store.markSent(sent);
+            store.finishRuns();
+        }
+        catch (InterruptedException interrupted)
+        {
+            Thread.currentThread().interrupt();
+        }
+        catch (Exception failure)
+        {
+            LOG.warn("stage.reprocess_failed stage={} reason={}",
+                    processor.stage(), failure.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * An item's current input, read once an interval.
+     *
+     * @param current what is read so far, by item
+     * @param itemId  the item
+     * @return its current objects
+     * @throws Exception if the input can't be read
+     */
+    private List<ReprocessInputs.Input> inputs(
+            Map<UUID, List<ReprocessInputs.Input>> current, UUID itemId)
+            throws Exception
+    {
+        List<ReprocessInputs.Input> found = current.get(itemId);
+        if (found == null)
+        {
+            found = reprocessing.inputs().current(itemId);
+            current.put(itemId, found);
+        }
+        return found;
     }
 
     /**
@@ -431,8 +560,21 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         {
             try
             {
-                opened.add(new Opened(opener.open(received.body()),
-                        received.body(), received.messageId()));
+                MessageOpener.Opened signed =
+                        opener.openSigned(received.body());
+                if (!signedRightly(signed))
+                {
+                    // A reprocess comes from the stage itself, and every
+                    // other type from the stage before (STAGES.md §15.8.4).
+                    Telemetry.get().auditError("stage.message_rejected",
+                            stageFields(ErrorCode.MESSAGE_REJECTED)
+                                    .with(Attr.REASON, "wrong_signer")
+                                    .with(Attr.MESSAGE_TYPE, signed.message()
+                                            .type().wireName()));
+                    continue;
+                }
+                opened.add(new Opened(signed.message(), received.body(),
+                        received.messageId()));
             }
             catch (MessageRejectedException rejected)
             {
@@ -454,6 +596,22 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             }
         }
         return run(opened);
+    }
+
+    /**
+     * Whether a message was signed by the one it may come from: a
+     * {@code record.reprocess} by the stage itself, if it reprocesses, and
+     * any other type by another key the opener trusts, the stage before's.
+     *
+     * @param signed the message and its signer
+     * @return true if so
+     */
+    private boolean signedRightly(MessageOpener.Opened signed)
+    {
+        boolean self = reprocessing != null
+                && reprocessing.selfKid().equals(signed.signerKid());
+        return self == signed.message()
+                instanceof ConnectorMessage.RecordReprocess;
     }
 
     /**
@@ -540,6 +698,14 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             for (Opened received : batch)
             {
                 ConnectorMessage message = received.message();
+                UUID runId = null;
+                if (message instanceof ConnectorMessage.RecordReprocess again)
+                {
+                    // Its input at the line the run gave it, taken as any
+                    // record of that line (STAGES.md §15.8.4).
+                    runId = again.runId();
+                    message = again.record();
+                }
                 switch (processor.classify(message))
                 {
                     case StageInput.RecordInput input ->
@@ -547,7 +713,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                         // The same record twice in one batch is one record.
                         records.putIfAbsent(input.key(),
                                 new Pending(input, message,
-                                        received.brokerId()));
+                                        received.brokerId(), runId));
                         items.add(input.itemId());
                     }
                     case StageInput.ItemTotal total ->
@@ -691,9 +857,14 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             case StageRegistry.Owned owned ->
             {
                 String version = processor.version(record.message());
-                yield new Result<>(record, Found.OWNED,
-                        processor.process(record.message(), owned.attempts()),
-                        null, version);
+                StageOutput<O> output = record.runId() == null
+                        ? processor.process(record.message(), owned.attempts())
+                        : processor.process(record.message(), owned.attempts(),
+                                new ConnectorMessage.Cause(
+                                        ConnectorMessage.Cause.REPROCESS,
+                                        record.runId(), null));
+                yield new Result<>(record, Found.OWNED, output, null,
+                        version);
             }
             case StageRegistry.Stored stored when stored.mine() ->
                     new Result<>(record, Found.MINE, null, stored, null);
@@ -773,13 +944,31 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                 message = record.withLineage(input.lineage(),
                         late.contains(index));
             }
+            StageRegistry.Reprocessed again = null;
+            UUID runId = result.pending().runId();
+            if (runId != null)
+            {
+                // Says what it is a revision of, and whether its output is
+                // the same (STAGES.md §15.8.7).
+                StageRegistry.Current older = registry.current(
+                        input.itemId(), input.seq(), input.lineage())
+                        .orElse(null);
+                if (message instanceof ConnectorMessage.RecordStored stored)
+                {
+                    message = stored.withCause(new ConnectorMessage.Cause(
+                            ConnectorMessage.Cause.REPROCESS, runId,
+                            older == null ? null : older.messageKey()));
+                }
+                again = new StageRegistry.Reprocessed(runId, older == null
+                        ? null : made.digest().equals(older.digest()));
+            }
             entries.add(new StageRegistry.Entry(input.recordId(),
                     input.itemId(), made.digest(), result.version(),
                     made.failed(),
                     made.failed() || message == null ? null
                             : outbound(message),
                     made.failed() ? failure(result) : null, null,
-                    input.seq(), input.lineage()));
+                    input.seq(), input.lineage(), again));
         }
         return entries;
     }

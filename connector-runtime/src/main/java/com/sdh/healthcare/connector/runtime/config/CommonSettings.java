@@ -162,8 +162,13 @@ public final class CommonSettings
      * @param kid        the key ID the landing node puts in message headers
      * @param pem        the PEM file
      * @param passphrase its passphrase, from the environment
+     * @param publicPem  its public half's PEM file, for a stage that sends
+     *                   to itself (a reprocess, STAGES.md §15.8.4); null
+     *                   if it doesn't
+     * @param sha256     the public half's pinned fingerprint, in hex
      */
-    public record InboxKey(String kid, Path pem, String passphrase)
+    public record InboxKey(String kid, Path pem, String passphrase,
+            Path publicPem, String sha256)
     {
     }
 
@@ -186,9 +191,14 @@ public final class CommonSettings
      * @param pem        the PEM file, for {@code local}
      * @param passphrase its passphrase, from the environment
      * @param keyRef     the key's reference, for a KMS
+     * @param publicPem  its public half's PEM file, for {@code local}, for a
+     *                   stage that verifies its own messages (a reprocess,
+     *                   STAGES.md §15.8.4); null if it doesn't. A KMS
+     *                   gives its own.
+     * @param sha256     the public half's pinned fingerprint, in hex
      */
     public record Signing(@DefaultValue("connector") String kid, Path pem,
-            String passphrase, String keyRef)
+            String passphrase, String keyRef, Path publicPem, String sha256)
     {
     }
 

@@ -172,6 +172,19 @@ public final class RecordsTable
      */
     public static final String LINE = "line";
 
+    /**
+     * Why the record was made again (STAGES.md §15.8.7): {@code reprocess}
+     * or {@code correction}; null when first made, or written before
+     * causes were kept.
+     */
+    public static final String CAUSE = "cause";
+
+    /**
+     * The reprocess run that made the record (STAGES.md §15.8.4), as a
+     * UUID's text; null unless a reprocess made it.
+     */
+    public static final String RUN_ID = "run_id";
+
     /** The table's columns, with their Iceberg field ids. */
     public static final Schema SCHEMA = new Schema(
             required(1, RECORD_ID, Types.StringType.get()),
@@ -217,7 +230,12 @@ public final class RecordsTable
             optional(29, GENERATION, Types.IntegerType.get(),
                     "the generation of the record's item"),
             optional(30, LINE, Types.StringType.get(),
-                    "the record's revision per stage"));
+                    "the record's revision per stage"),
+            optional(31, CAUSE, Types.StringType.get(),
+                    "why the record was made again: reprocess or"
+                            + " correction"),
+            optional(32, RUN_ID, Types.StringType.get(),
+                    "the reprocess run that made the record"));
 
     /** The partitioning: by the day each row was written. */
     public static final PartitionSpec SPEC =

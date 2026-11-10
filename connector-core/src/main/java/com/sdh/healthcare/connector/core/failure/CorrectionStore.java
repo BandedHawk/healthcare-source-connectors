@@ -157,14 +157,16 @@ public final class CorrectionStore
     }
 
     /**
-     * The statements that make the table.
+     * The statements that make the table, and the revision counters
+     * corrections take their numbers from ({@link Revisions}).
      *
      * @param table the table, with its schema
      * @return the statements, in order
      */
     public static List<String> ddls(String table)
     {
-        return List.of("""
+        return List.of(Revisions.ddl(table.substring(0,
+                table.indexOf('.'))), """
                 CREATE TABLE IF NOT EXISTS %s (
                   stage            text        NOT NULL,
                   item_id          uuid        NOT NULL,
@@ -886,7 +888,8 @@ public final class CorrectionStore
     /**
      * Submits a correction or a retry: stores its content, encrypted, with
      * the revision it makes, the failed object's line with this stage's
-     * revision one more, and moves its failure to {@code REVISION_PENDING},
+     * next revision from the place's counter ({@link Revisions}), and moves
+     * its failure to {@code REVISION_PENDING},
      * in one transaction. Audited {@code failure.correction_submitted} or
      * {@code failure.retry_submitted}, with no content.
      *
@@ -930,8 +933,12 @@ public final class CorrectionStore
                         stage, itemId, seq, CORRECTABLE,
                         FailureStore.State.REVISION_PENDING, kind.action(),
                         operator, null, null, timeout);
-                Lineage revision = changed.before().failure().lineage()
-                        .nextRevision(Lineage.stageOf(stage));
+                // From the place's counter, so a reprocess queued meanwhile
+                // never shares its line (STAGES.md §15.8.4).
+                Lineage failed = changed.before().failure().lineage();
+                Lineage revision = Revisions.next(connection, schema(),
+                        stage, itemId, seq, failed,
+                        failed.revision(Lineage.stageOf(stage)), timeout);
                 try (PreparedStatement select =
                         connection.prepareStatement(next))
                 {

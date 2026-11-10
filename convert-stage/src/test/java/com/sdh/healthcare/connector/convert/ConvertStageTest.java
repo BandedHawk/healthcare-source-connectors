@@ -25,6 +25,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef
 import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.convert.ConverterRegistry;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.core.failure.FailureReason;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
@@ -36,6 +37,7 @@ import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.stage.RegistryReport;
+import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageRegistry;
 import com.sdh.healthcare.connector.stage.StageWorker;
 import io.opentelemetry.api.OpenTelemetry;
@@ -66,7 +68,10 @@ import javax.crypto.KeyGenerator;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.data.IcebergGenerics;
+import org.apache.iceberg.data.Record;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
+import org.apache.iceberg.io.CloseableIterable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -505,6 +510,104 @@ class ConvertStageTest
         assertThat(again).hasSize(3);
         assertThat(((ItemConverted) again.get(2)).failedRecordCount())
                 .isZero();
+    }
+
+    /**
+     * A reprocess of a record (STAGES.md §15.8.4) reads its piece from
+     * {@code split_records}, the current one at its place, and sends it to
+     * the stage itself; taken back, it is converted again as the record's
+     * next revision here: a new row of {@code records} with the cause and
+     * the run, and a {@code record.stored} saying what it is a revision
+     * of.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void reprocessesARecordFromItsPiece() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2", "3,4");
+        ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
+                null, null, null, SPLIT_AT, SPLIT_AT);
+        assertThat(worker.handle(List.of(received(messages.get(0)),
+                received(messages.get(1)), received(total))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        worker.close();
+        ConvertInputs inputs = new ConvertInputs(splitRecords, "prod", NS);
+        assertThat(inputs.current(item)).hasSize(2).allSatisfy(input ->
+        {
+            assertThat(input.failed()).isFalse();
+            assertThat(input.chosen().input()).isEqualTo(Lineage.FIRST);
+        });
+        List<OutboundMessage> self =
+                Collections.synchronizedList(new ArrayList<>());
+        ReprocessStore runs = new ReprocessStore(
+                postgres.getPostgresDatabase(), schema,
+                ConvertProcessor.STAGE, Duration.ofSeconds(10));
+        MessageOpener opener = new MessageOpener(
+                Map.of("convert", recipient.getPrivate()),
+                Map.of("split", (ECPublicKey) splitSigner.getPublic(),
+                        "convert-self", (ECPublicKey) signer.getPublic()));
+        worker = new StageWorker<>(processor, registry, opener,
+                new MessageSealer(
+                        new ECDSASigner((ECPrivateKey) signer.getPrivate()),
+                        "convert", downstream.getPublic(), "transform"),
+                message ->
+                {
+                    sent.add(message);
+                    return CompletableFuture.completedFuture(null);
+                },
+                new StageWorker.Settings(2, Duration.ofMinutes(1),
+                        Duration.ofSeconds(15), Duration.ofMillis(50),
+                        Duration.ofSeconds(5)),
+                new StageWorker.Reprocessing(runs, inputs, new MessageSealer(
+                        new ECDSASigner((ECPrivateKey) signer.getPrivate()),
+                        "convert-self", recipient.getPublic(), "convert"),
+                        message ->
+                        {
+                            self.add(message);
+                            return CompletableFuture.completedFuture(null);
+                        }, "convert-self"));
+        UUID runId = runs.record("--item-id " + item + " --seq 1", "alice",
+                "test-build", id -> FailureReason.seal(kms, KEK, id, -2, 1,
+                        "synthetic reason"),
+                List.of(inputs.current(item).get(1).chosen()));
+        worker.reprocess();
+        assertThat(self).hasSize(1);
+        assertThat(worker.handle(List.of(new BrokerMessage(
+                self.get(0).body(), self.get(0).messageId(), Map.of()))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+
+        Lineage next = Lineage.FIRST.withRevision(Lineage.CONVERT, 2);
+        records.refresh();
+        List<Record> rows = new ArrayList<>();
+        try (CloseableIterable<Record> read =
+                IcebergGenerics.read(records).build())
+        {
+            read.forEach(rows::add);
+        }
+        assertThat(rows).hasSize(3)
+                .filteredOn(row -> row.getField("cause") != null)
+                .singleElement().satisfies(row ->
+                {
+                    assertThat(row.getField("seq")).isEqualTo(1L);
+                    assertThat(row.getField("cause")).isEqualTo("reprocess");
+                    assertThat(row.getField("run_id"))
+                            .isEqualTo(runId.toString());
+                    assertThat(row.getField("line")).isEqualTo("1.2");
+                });
+        MessageOpener downstreamOpener = new MessageOpener(
+                Map.of("transform", downstream.getPrivate()),
+                Map.of("convert", (ECPublicKey) signer.getPublic()));
+        RecordStored made = (RecordStored) downstreamOpener.open(
+                sent.getLast().body());
+        assertThat(made.lineage()).isEqualTo(next);
+        assertThat(made.cause().runId()).isEqualTo(runId);
+        assertThat(made.cause().revisionOf()).isNotNull();
+        assertThat(runs.objects(runId)).singleElement().satisfies(object ->
+        {
+            assertThat(object.outcome()).isEqualTo("stored");
+            assertThat(object.sameOutput()).isTrue();
+        });
     }
 
     /**

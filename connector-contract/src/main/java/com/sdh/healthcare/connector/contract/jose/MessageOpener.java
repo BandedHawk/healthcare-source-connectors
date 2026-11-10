@@ -71,6 +71,16 @@ public final class MessageOpener
     }
 
     /**
+     * A message opened, with the key that signed it.
+     *
+     * @param message   the message
+     * @param signerKid the ID of the trusted key that signed it
+     */
+    public record Opened(ConnectorMessage message, String signerKid)
+    {
+    }
+
+    /**
      * Decrypts a message, verifies its signature, and reads its payload.
      *
      * @param body the JWE compact serialisation, as ASCII bytes
@@ -79,6 +89,21 @@ public final class MessageOpener
      *                                  reason says why
      */
     public ConnectorMessage open(byte[] body) throws MessageRejectedException
+    {
+        return openSigned(body).message();
+    }
+
+    /**
+     * Decrypts a message, verifies its signature, and reads its payload,
+     * saying which trusted key signed it: for a reader that trusts more
+     * than one, and takes some types from one only (STAGES.md §15.8.4).
+     *
+     * @param body the JWE compact serialisation, as ASCII bytes
+     * @return the message and its signer
+     * @throws MessageRejectedException if it can't be trusted or read; the
+     *                                  reason says why
+     */
+    public Opened openSigned(byte[] body) throws MessageRejectedException
     {
         JWEObject jwe;
         try
@@ -119,8 +144,9 @@ public final class MessageOpener
         {
             throw new MessageRejectedException(Reason.ALGORITHM_NOT_ALLOWED);
         }
-        ECPublicKey signerKey =
-                trustedSigners.get(jws.getHeader().getKeyID());
+        String signerKid = jws.getHeader().getKeyID();
+        ECPublicKey signerKey = signerKid == null ? null
+                : trustedSigners.get(signerKid);
         if (signerKey == null)
         {
             throw new MessageRejectedException(Reason.UNKNOWN_SIGNER);
@@ -140,7 +166,8 @@ public final class MessageOpener
 
         try
         {
-            return PayloadCodec.fromJson(jws.getPayload().toJSONObject());
+            return new Opened(PayloadCodec.fromJson(
+                    jws.getPayload().toJSONObject()), signerKid);
         }
         catch (RuntimeException failure)
         {

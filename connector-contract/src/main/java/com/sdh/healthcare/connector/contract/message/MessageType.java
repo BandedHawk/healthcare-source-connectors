@@ -55,7 +55,13 @@ public enum MessageType
      * A stage stored a record before, and has now produced different output
      * for it; for the stage's dead-letter queue.
      */
-    RECORD_CONFLICT("record.conflict");
+    RECORD_CONFLICT("record.conflict"),
+
+    /**
+     * A stage's own request to process a record again (STAGES.md §15.8.4),
+     * on its own input, signed by itself.
+     */
+    RECORD_REPROCESS("record.reprocess");
 
     /** The name used on the queue. */
     private final String wireName;

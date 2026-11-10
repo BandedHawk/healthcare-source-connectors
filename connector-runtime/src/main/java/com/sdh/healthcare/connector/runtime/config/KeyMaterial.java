@@ -6,12 +6,18 @@
  */
 package com.sdh.healthcare.connector.runtime.config;
 
+import com.nimbusds.jose.EncryptionMethod;
 import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JWEAlgorithm;
+import com.nimbusds.jose.JWEHeader;
+import com.nimbusds.jose.JWEObject;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.JWSObject;
 import com.nimbusds.jose.JWSSigner;
 import com.nimbusds.jose.Payload;
+import com.nimbusds.jose.crypto.ECDHDecrypter;
+import com.nimbusds.jose.crypto.ECDHEncrypter;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.nimbusds.jose.crypto.ECDSAVerifier;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
@@ -88,15 +94,33 @@ import org.slf4j.LoggerFactory;
  * @param recipientKid the recipient key's ID
  * @param inbox        opens {@code item.landed} messages; null for a
  *                     landing node
+ * @param self         the stage's own public keys, to seal and sign
+ *                     messages to itself (a reprocess, STAGES.md §15.8.4);
+ *                     null if they aren't configured
  * @param resources    closed with the key material
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
         String signerKid, PublicKey recipient, String recipientKid,
-        MessageOpener inbox, List<AutoCloseable> resources)
+        MessageOpener inbox, Self self, List<AutoCloseable> resources)
         implements AutoCloseable
 {
+
+    /**
+     * A stage's own public keys (STAGES.md §15.8.4): its inbox key's, which
+     * it seals messages to itself with, and its signing key's, which its
+     * opener trusts so that it can verify them.
+     *
+     * @param inbox     the inbox key's public half
+     * @param inboxKid  the inbox key's ID
+     * @param signing   the signing key's public half
+     * @param signerKid the signing key's ID
+     */
+    public record Self(PublicKey inbox, String inboxKid, ECPublicKey signing,
+            String signerKid)
+    {
+    }
 
     /** Logs the KMS signing key's fingerprint, for readers. */
     private static final Logger LOG =
@@ -417,6 +441,8 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
             }
 
             JWSSigner signer;
+            // Its public half, for a stage that verifies its own messages.
+            ECPublicKey ownSigning = null;
             if ("local".equals(crypto.signProvider()))
             {
                 Path signingPem = require(keys.signing().pem(),
@@ -433,6 +459,15 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
                             "Signing key must be EC P-256 (ES256)");
                 }
                 signer = new ECDSASigner(ecSigning);
+                if (keys.signing().publicPem() != null)
+                {
+                    ownSigning = ecPublic(pinnedKey(
+                            new CommonSettings.Recipient(keys.signing().kid(),
+                                    keys.signing().publicPem(),
+                                    keys.signing().sha256()),
+                            "sdh.crypto.keys.signing.public"), "Signing");
+                    probeSigner(signer, ownSigning);
+                }
             }
             else
             {
@@ -451,6 +486,7 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
                 }
                 signer = new KmsJwsSigner(kms, keyRef);
                 probeSigner(signer, ecPublic);
+                ownSigning = ecPublic;
                 LOG.info("crypto.signing_key provider={} kid={} sha256={}"
                         + " (configure readers with this public key)",
                         crypto.signProvider(), keys.signing().kid(),
@@ -459,11 +495,12 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
 
             PublicKey recipient =
                     pinnedKey(keys.recipient(), "sdh.crypto.keys.recipient");
-            MessageOpener opener = inbox ? inboxOpener(keys) : null;
+            Self self = inbox ? self(keys, ownSigning) : null;
+            MessageOpener opener = inbox ? inboxOpener(keys, self) : null;
             return new KeyMaterial(wrap, signer, keys.signing().kid(),
                     recipient, require(keys.recipient().kid(),
                             "sdh.crypto.keys.recipient.kid"),
-                    opener, List.copyOf(resources));
+                    opener, self, List.copyOf(resources));
         }
         catch (Exception | Error failure)
         {
@@ -498,16 +535,107 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
     }
 
     /**
-     * Builds the opener of {@code item.landed} messages: the splitter's own
-     * private key, and the landing node's signing public key.
+     * A stage's own public keys, if its inbox key's public half is
+     * configured: that, pinned, and its signing key's public half, which
+     * must then be known too (configured, or from the KMS).
+     *
+     * @param keys    the key settings
+     * @param signing the signing key's public half; null if not known
+     * @return the keys; null if the inbox key's public half isn't
+     *         configured
+     * @throws IOException              if a key file can't be read
+     * @throws GeneralSecurityException if a key isn't the one pinned, or
+     *                                  the signing key's public half isn't
+     *                                  known
+     */
+    private static Self self(CommonSettings.Keys keys, ECPublicKey signing)
+            throws IOException, GeneralSecurityException
+    {
+        if (keys.inbox().publicPem() == null)
+        {
+            return null;
+        }
+        if (signing == null)
+        {
+            throw new GeneralSecurityException("sdh.crypto.keys.signing"
+                    + ".public-pem is required with sdh.crypto.keys.inbox"
+                    + ".public-pem");
+        }
+        String inboxKid = require(keys.inbox().kid(),
+                "sdh.crypto.keys.inbox.kid");
+        PublicKey inbox = pinnedKey(new CommonSettings.Recipient(inboxKid,
+                keys.inbox().publicPem(), keys.inbox().sha256()),
+                "sdh.crypto.keys.inbox.public");
+        return new Self(ecPublic(inbox, "Inbox"), inboxKid, signing,
+                keys.signing().kid());
+    }
+
+    /**
+     * A public key, as EC P-256.
+     *
+     * @param key  the key
+     * @param what what it is, for errors
+     * @return the key
+     * @throws GeneralSecurityException if it isn't EC P-256
+     */
+    private static ECPublicKey ecPublic(PublicKey key, String what)
+            throws GeneralSecurityException
+    {
+        if (!(key instanceof ECPublicKey ec) || !isP256(ec.getParams()))
+        {
+            throw new GeneralSecurityException(what
+                    + " public key must be EC P-256");
+        }
+        return ec;
+    }
+
+    /**
+     * Checks that an inbox key's public half is its private half's: a
+     * probe sealed to the one opens with the other.
+     *
+     * @param inbox   the private half
+     * @param pub     the public half
+     * @throws GeneralSecurityException if it doesn't open
+     */
+    private static void probeInbox(ECPrivateKey inbox, PublicKey pub)
+            throws GeneralSecurityException
+    {
+        try
+        {
+            JWEObject jwe = new JWEObject(new JWEHeader(
+                    JWEAlgorithm.ECDH_ES_A256KW, EncryptionMethod.A256GCM),
+                    new Payload("sdh-inbox-probe"));
+            jwe.encrypt(new ECDHEncrypter((ECPublicKey) pub));
+            JWEObject read = JWEObject.parse(jwe.serialize());
+            read.decrypt(new ECDHDecrypter(inbox));
+            if (!"sdh-inbox-probe".equals(read.getPayload().toString()))
+            {
+                throw new GeneralSecurityException("Inbox probe differs");
+            }
+        }
+        catch (JOSEException | java.text.ParseException failure)
+        {
+            throw new GeneralSecurityException("sdh.crypto.keys.inbox"
+                    + ".public-pem isn't the inbox key's public half",
+                    failure);
+        }
+    }
+
+    /**
+     * Builds the opener of messages from the stage before: the stage's own
+     * inbox private key, and the signing public key of the stage before
+     * (for the splitter, the landing node's), with the stage's own when it
+     * sends to itself.
      *
      * @param keys the key settings
+     * @param self the stage's own public keys; null if not configured
      * @return the opener
      * @throws IOException              if a key file can't be read
-     * @throws GeneralSecurityException if a key isn't EC P-256
+     * @throws GeneralSecurityException if a key isn't EC P-256, or the
+     *                                  inbox key's public half isn't its
      */
-    private static MessageOpener inboxOpener(CommonSettings.Keys keys)
-            throws IOException, GeneralSecurityException
+    private static MessageOpener inboxOpener(CommonSettings.Keys keys,
+            Self self) throws IOException, GeneralSecurityException
     {
         Path pem = require(keys.inbox().pem(), "sdh.crypto.keys.inbox.pem");
         checkPrivate(pem);
@@ -526,11 +654,24 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
             throw new GeneralSecurityException(
                     "Landing signing key must be EC P-256 (ES256)");
         }
+        String upstreamKid = require(keys.landingSigner().kid(),
+                "sdh.crypto.keys.landing-signer.kid");
+        Map<String, ECPublicKey> signers = new LinkedHashMap<>();
+        signers.put(upstreamKid, ecSigner);
+        if (self != null)
+        {
+            probeInbox(ecKey, self.inbox());
+            if (self.signerKid().equals(upstreamKid))
+            {
+                throw new GeneralSecurityException("The stage's signing key"
+                        + " ID is the stage before's: " + upstreamKid);
+            }
+            signers.put(self.signerKid(), self.signing());
+        }
         return new MessageOpener(
                 Map.of(require(keys.inbox().kid(),
                         "sdh.crypto.keys.inbox.kid"), key),
-                Map.of(require(keys.landingSigner().kid(),
-                        "sdh.crypto.keys.landing-signer.kid"), ecSigner));
+                signers);
     }
 
     /**
