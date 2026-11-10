@@ -550,7 +550,7 @@ Each step builds and passes its tests before the next.
        signing key. Design §11, §14, §15.3 and SANDBOX.md describe the stages.
 5. **KEDA** in the sandbox, with a scaling demonstration (a large batch spread across workers). Done 2026-11-07
    (SANDBOX.md, "Checked").
-6. **The transformer** in `healthcare-data-transformer`, on the published library.
+6. **The transformer** in `healthcare-data-transformer`, on the published library: proposed in §17.10.
 
 ## 12. Open for review
 
@@ -2485,7 +2485,7 @@ Each step builds, passes its tests and, where it says, is tried on the sandbox:
 3. **`convert-stage` on it:** only its application, `RecordTransform` and `sdh.convert.*` left. Its tests, the
    `-Pit` suite and the sandbox run unchanged in what they check (the audit names of §17.3 aside): the proof
    that nothing was lost in the move.
-4. **The transformer** (§11, step 6), on the published module.
+4. **The transformer** (§11, step 6), on the published module: proposed in §17.10.
 
 ### 17.8a Step 1 as built (2026-11-10)
 
@@ -2600,3 +2600,220 @@ transform as a bean) and `ConvertAdmin` (the library's CLI with its transform); 
 4. **The convert stage's old `sdh.storage` names. Decided 2026-11-10 with the user: moved in the same change,**
    with no aliases (§17.7). Every place that sets them is in this repository and nothing is released, as for the
    rename of §2; step 3 then proves the stage on the settings the transformer will use.
+
+### 17.10 Step 4: the transform stage (proposed 2026-11-10; its six points decided the same day, with the user)
+
+What step 4 builds, and the decisions it needs first. Nothing here is built. §17.6 left the stage itself to this
+step; the library side (§17.2 to §17.7) is built and proven by the convert stage (§17.8c). The six points that
+needed the user are decided in §17.10.10; the rest is proposed.
+
+#### 17.10.1 Where it is built
+
+- **A new repository, `healthcare-data-transformer`** (§1, decided 2026-11-05). Its folder exists and is empty, not
+  yet a git repository; the user makes it one. It depends on all three of the others, and nothing depends on it, so
+  the repositories' order holds: harmonization, then connectors, then mapping, then the transformer.
+- **One module to start, `transform-stage`:** its application, its `RecordTransform` and `sdh.transform.*`, as
+  `convert-stage` has (§17.3), and its operator command `report` (§17.10.4). The rest comes from
+  `connector-record-stage`.
+- **From this repository:** `connector-record-stage` and what it brings (`connector-stage`, `connector-broker`,
+  `connector-core`, `connector-contract`, `connector-runtime`), at a version. **From harmonization:**
+  `whistle-runtime`, for the engine and `Checks`. **From mapping, for tests only:** the US Core set,
+  `sdh.mapping:ccda-us-core-6.1:tar.gz`, and the four sample documents' JSON. The stage never builds a set in; it
+  is given one at run time (§17.10.2).
+- **"Published" means installed into a Maven repository at a version,** as mapping takes `connector-core` today
+  (`mvn install`, `0.1.0-SNAPSHOT`). A shared remote repository, and releases, can come later without changing the
+  design.
+- **The build around the code** (the licence check, the attribution check, the SBOM, the distribution kit and the
+  images, with their locked-down settings) is set up in this repository's root `pom.xml`, `docker/` and
+  `scripts/build-image.sh`. The transformer needs the same, or its kit and images differ from the other stages'
+  (§17.10.10, point 1: decided, the parent and a build kit).
+
+#### 17.10.2 The WSTL set, at run time
+
+- **What a set is:** a directory or a `.tar.gz` with `main.wstl` at its root and everything it imports, as
+  mapping's US Core package is (74 KB). Named by `sdh.transform.wstl` (a path); in Kubernetes a ConfigMap mounted
+  read only, so a new set is a new ConfigMap and a rollout, never a new image.
+- **Loaded once, at start:** the engine's initialised builder (`Engine.Builder(...).initialize(meta)`, with
+  `Checks.setMode(meta, FAIL_FAST)`), as quickrun does; each record gets its own engine from it
+  (`initialized.build()`), closed after. A set that won't load stops the stage's start (`stage.not_started`),
+  before it takes any message: a broken set fails no records.
+- **Its digest:** SHA-256 over every file in the set, in path order, each as its path, a NUL, its length and its
+  bytes. A changed file in the set is a new digest, so a new version (§14.2), and the drain check (§14.4a) holds it
+  until the stage is drained, as for a converter's change.
+- **What it says about itself:** a set must say its name and version, which input mappings it reads, and what it
+  makes. The US Core package has none of this today (`main.wstl`, `README.md` and `LICENSE`). Decided (§17.10.10,
+  point 2): a small `wstl-set.json` at the set's root, written by mapping's packaging:
+
+  ```json
+  { "name": "ccda-us-core-6.1", "version": "1.0.0",
+    "reads": ["ccda/1", "ccda/2"],
+    "makes": { "contentType": "application/fhir+json", "mapping": "fhir-r4/us-core-6.1" } }
+  ```
+
+- **A set must be deterministic:** the same input gives the same output, byte for byte. The US Core set is (no
+  clock, random or UUID calls: resource IDs are hashes of content, and the bundle's timestamp is the document's).
+  The stage can't check this; a set that isn't shows up as `record.conflict` (§14.3) and in reprocess runs that
+  come out `different` (§15.8). The set's README says so.
+
+#### 17.10.3 The stage's `RecordTransform`
+
+| | |
+|---|---|
+| Stage name, messages | `transform`; takes `record.stored` and `item.converted`, makes `record.transformed` and `item.transformed` (built in step 1) |
+| Version (§14.2) | `<build>/<set name>@<set version>/<set digest, 12 hex>/<settings digest>` |
+| `versions()` | that one version: a stage runs one set |
+| Output | the bundle's bytes, `Representation("application/fhir+json", "<makes.mapping>")` |
+| As it came | the silver JSON, with its own representation (`application/json`, its input mapping) |
+
+`plan`, in order, for a record:
+1. **Not something the set reads:** not JSON, or a mapping not in `reads` (a raw record the convert stage had no
+   converter for, say). Kept as it came, failed `TRANSFORM_UNSUPPORTED`. Gold then holds only bundles and failures,
+   never unmapped data passed off as mapped (§17.10.10, point 3: decided).
+2. **Tried three times already:** kept as it came, `TRANSFORM_SKIPPED`, audited `transform.record_skipped`, as the
+   convert stage's rule (a record that crashes the pod each time stops crashing it).
+3. **Larger than `sdh.transform.max-bytes`:** kept as it came, `TRANSFORM_TOO_LARGE`.
+4. Otherwise **applied,** with the memory `ceil(length × memory factor)` from the shared budget.
+
+`apply` deserialises the JSON, builds an engine and maps it:
+- **A bundle:** `Made`, serialised compactly (not pretty-printed: the stored bytes are the output digest).
+- **A data check failed** (`Checks.failure(e)` gives the issue): `Failed`, `TRANSFORM_CHECK_FAILED`, at the issue's
+  line and column when the input has them (`ccda/2`; none for `ccda/1`).
+- **Anything else the mapping throws,** including `StackOverflowError` (deep recursion in a set): `Failed`,
+  `TRANSFORM_FAILED`, with no place. It is a fault in the set or the runtime, not in the data, and stays open for an
+  operator like any failure.
+- `unexpected()` is `TRANSFORM_FAILED`. An `OutOfMemoryError` is not caught: the budget is there to prevent it, and
+  a pod it kills counts an attempt (rule 2).
+
+Five new codes in `ErrorCode` (`connector-core`): `TRANSFORM_UNSUPPORTED`, `TRANSFORM_SKIPPED`,
+`TRANSFORM_TOO_LARGE`, `TRANSFORM_CHECK_FAILED` and `TRANSFORM_FAILED`.
+
+#### 17.10.4 A failure's issue, and the report command
+
+- **Where:** an issue's line and column are where its element starts in the record (the converter's `#line` and
+  `#col`, record-relative). `RecordTransform.Result.Failed` gives a byte offset today, which the library turns into
+  the record's line and column and then the item's (`origin.toFile`). It gains a second form that gives the record's
+  line and column directly; the library maps it to the item's the same way, so a transform failure's
+  `error_line` and `error_column` are a place in the landed file, as a convert failure's are.
+- **What, not stored:** an issue's text and its `where` quote the document (a code, a date, an entry's ID: seven of
+  the US Core set's fifteen error checks put a value in their message), so they are never logged, audited or put in
+  a metric, and are not kept in gold. The failed row keeps the code and the place; the text is made again on demand,
+  which a deterministic set (§17.10.2) gives exactly.
+- **`transform-stage.jar admin report --record <id> [--item <id>]`:** reads the failed row from gold (as
+  `failures export` does), maps it again in **report** mode (`Checks.Mode.REPORT`), and prints every issue (severity,
+  where, message, the item's line and column) to the operator's terminal, in one pass rather than one error at a
+  time: the remediation the report mode was made for. Run as `SDH_OPERATOR`, audited `transform.report_run` with
+  the record ID and the issue count, never the text. It needs the gold KEK, as `failures export` does.
+
+#### 17.10.5 Settings
+
+```yaml
+sdh:
+  transform:
+    wstl: /etc/sdh/wstl           # the set: a directory or a .tar.gz (§17.10.2)
+    max-bytes: 64MB               # larger records are kept as they came, TRANSFORM_TOO_LARGE
+    memory:                       # the heap the mappings running at once may use; unset for a share of the heap
+    memory-factor: 20             # heap per byte of input, measured (§17.10.8)
+  stage:
+    source: { table: records, ... }        # the convert stage's sink, in silver
+    sink:   { table: fhir, kek: fhir-kek, catalog: { ... } }   # gold: its own catalog and bucket
+```
+
+The settings digest in the version covers the settings that change output: here only `max-bytes`, which decides
+which records are kept as they came. The set has its own digest; `memory` and `memory-factor` change only how many
+records are mapped at once. The check mode is always fail-fast in the stage, so it is not a setting.
+
+**Results move to the transform stage** (§17.5): `sdh.results.enabled` on there and off at the convert stage, with
+`sdh.results.upstream` naming `split_records` (the convert stage's source) so a split failure is reported too. Reading
+an upstream table's failed rows needs its catalog and the unwrap of its KEK (`message_refs_enc`), so the transform
+stage is given read access to bronze's `split_records` as well as silver (§17.10.7).
+
+#### 17.10.6 Changes in this repository first
+
+Small, and each tested here before the transformer uses it:
+- `RecordTransform.Result.Failed` with a record line and column (§17.10.4), and the library storing it.
+- The five `TRANSFORM_*` codes.
+- Installing what the transformer depends on, with the root `pom.xml` as their parent, and the build kit
+  `connector-build-kit` (§17.10.10, point 1); the root pom's paths to those files become properties a child can
+  point elsewhere, and `scripts/build-image.sh` takes a module's folder, not only a name in this repository.
+- No message changes: `record.transformed`, `item.transformed` and `StageMessages.TRANSFORM` are in the contract
+  since step 1.
+
+#### 17.10.7 Running it: kit, images, sandbox
+
+- **Kit and images** as the other stages': `transform-stage-<version>.tar.gz` with `bin/`, `config/`, the README's
+  Deployment and the attribution; `sdh/transform-stage` (customer) and `-service`, locked down the same way. The WSTL
+  set is not in either.
+- **Sandbox:** the namespace `sdh-fhir` and per pipeline the secret and ConfigMap `fhir-<pipeline>` are ready
+  (SANDBOX.md, "The FHIR stage"): the convert stage's records are already sealed to its key. To add: the set as a
+  ConfigMap; an output topic `<pipeline>.fhir`; the consumer key pair its own messages are sealed to (§17.10.10,
+  point 4); read access to bronze for results; KEDA as for the others; results moved off the convert stage; and
+  `check` following an item to `item.transformed` and its result. The images are built in the sdh-it VM, as now,
+  from the transformer's folder.
+- **Memory:** the host has no room as the sandbox is (SANDBOX.md "Memory": 74 MiB spare). `sdh-fhir`'s quota (3
+  CPUs, 4 GB) was reserved before the budget was measured. The sums are redone before any pod is added, with the
+  measured memory factor; a smaller stage pair elsewhere may have to give way (§17.10.10, point 5).
+
+#### 17.10.8 Tests
+
+- **In the transformer:** the `RecordTransform` on the four samples' JSON with the US Core set (a bundle each,
+  matching mapping's baselines); a data check failing (`fixtures/epic-gender-u.json`) at its line and column; an
+  unsupported input; too large; a set that won't load; the version changing with one byte of the set. The stage on
+  embedded Postgres and an in-memory catalog, as `ConvertStageTest`. The report command on a failed row. The kit's
+  and image's settings start, as the other stages' tests do.
+- **Engines at once:** a test mapping the samples on many threads from one initialised builder, comparing each
+  output with the serial one. Quickrun only ever builds engines one after another; `Checks` keeps issues per engine
+  for this reason, but it has not been tried concurrently.
+- **Memory factor:** measured on the samples (heap per byte of JSON, peak) with harmonization's benchmark module,
+  and set with headroom.
+- **End to end:** the sandbox's `check` to `item.transformed`, and a document that fails a US Core check reported to
+  the producer by the transform stage. An `-Pit`-style suite in the transformer can come later; the sandbox is the
+  end-to-end proof for now.
+
+#### 17.10.9 Order of building
+
+Each part builds and passes its tests before the next:
+- **4a, here:** §17.10.6, with the library's tests.
+- **4b, mapping:** `wstl-set.json` in the US Core package (point 2).
+- **4c, transformer:** the repository (made by the user), its build (point 1), `transform-stage` with its
+  `RecordTransform`, settings, application and tests (§17.10.8, without the end-to-end).
+- **4d, transformer:** `report`, the kit and the images.
+- **4e, sandbox:** memory sums first, then the deployment and `check` (§17.10.7).
+
+#### 17.10.10 Decided (2026-11-10, with the user)
+
+1. **How the transformer gets this repository's build. Decided 2026-11-10 with the user: the root `pom.xml` as its
+   parent, and a build kit.** The parent alone isn't one copy: it names files by this repository's own path
+   (`${maven.multiModuleProjectDirectory}`), which in the transformer is the transformer's. So this repository also
+   installs a small artifact, `connector-build-kit` (a zip: `src/license/` with the licence policy, overrides and
+   attribution template; `docker/` with the base-image pins, accepted vulnerabilities and the inventory
+   Dockerfile; `scripts/build-image.sh`), and the transformer's build unpacks it to `target/build-kit` and points
+   the same properties there. One copy of the licence policy and the base images for every stage. Rejected: copying
+   the files (the licence policy and base images would drift apart), and copying everything (Spring Boot, Camel and
+   plugin versions too).
+2. **How a set says what it is. Decided 2026-11-10 with the user: `wstl-set.json` in the set** (§17.10.2), written
+   by mapping's packaging from its pom (name, version) and what the set declares it reads and makes. It travels
+   with the set and is under its digest, so it can't disagree with the set mounted. A set without one doesn't load
+   (`stage.not_started`). Rejected: stage settings, with which an operator could mount one set and describe
+   another; and settings that narrow what the set reads, not needed for now.
+3. **A record the set doesn't read. Decided 2026-11-10 with the user: failed, `TRANSFORM_UNSUPPORTED`,** kept in
+   gold as it came, in the fail store and the producer's result, whether it is raw (no converter upstream) or
+   converted to a mapping the set doesn't list. Gold holds only bundles and failures, and a misrouted pipeline
+   shows at once. Rejected: passing it on as it came (the convert stage's rule), and failing only the wrong
+   mappings.
+4. **Who reads gold, and the key `record.transformed` is sealed to. Decided 2026-11-10 with the user: a consumer
+   key pair.** Every stage seals its messages to the next reader's recipient key, and the setting is required.
+   Nothing reads gold's messages yet, so the sandbox makes a key pair `<pipeline>-consumer`, kept in its state
+   like the other stages' keys; the stage seals to its public half and sends to `<pipeline>.fhir`. No reader is
+   built now: one added later is given the private half and can be replayed to (§13.2). Rejected: letting a record
+   stage run with no output queue (a library change for a passing need), and holding the sandbox deployment until
+   a reader is designed.
+5. **Room in the sandbox. Decided 2026-11-10 with the user: measure, then decide.** The VMs have 74 MiB spare and
+   the busier worker 81 MiB (SANDBOX.md "Memory"), so a transform pod fits only if something gives way. The
+   mapping's heap per byte is measured in 4c; the SANDBOX.md sums are redone with the user before 4e. The likely
+   outcome: the split and convert stages held to one pod each in the sandbox, which frees 2,560 MiB for one or two
+   transform pods, and `scale-demo` then shows the transform stage scaling. Rejected for now: one pod per stage
+   decided before measuring, and trimming the split pods (they used 1,170 of 1,536 MiB under load).
+6. **Code style in the transformer. Decided 2026-11-10 with the user: this repository's** (Allman braces, 80
+   columns, full Javadoc, strict doclint), since it is built on this repository's library and parent and its
+   classes have `convert-stage`'s shape. Rejected: Google style, as harmonization's and mapping's Java, which
+   matches the code it calls rather than the library it extends.
