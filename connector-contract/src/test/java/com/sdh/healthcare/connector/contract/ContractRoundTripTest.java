@@ -219,7 +219,27 @@ class ContractRoundTripTest
                         java.time.Instant.EPOCH,
                         java.util.List.of("0.1.0@x/us-core-6.1@3f9a0c1d/ab"),
                         2, 1, UUID.randomUUID(), "claims-2026-11.csv",
-                        null)))
+                        null),
+                // Each stage carries the queue message on, and the item's
+                // failure and whether a result was sent (STAGES.md §17.4,
+                // §17.5).
+                new RecordStored("ID13", itemId, 8, 170, 20, "hl7v2",
+                        "application/json", "hl7v2/1", 30, 1, ref, null, "v",
+                        null, null, false, null, 4, "m-5", "m-2"),
+                new ConnectorMessage.RecordTransformed("ID14", itemId, 8, 170,
+                        20, "hl7v2", "application/fhir+json", "w@1", 90, 1,
+                        ref, null, "v", null, null, false, null, 4, "m-5",
+                        null),
+                new ConnectorMessage.ItemConverted(itemId, "claims", 2, 0,
+                        java.time.Instant.EPOCH, java.util.List.of(), 1, 1,
+                        null, null, null, new ConnectorMessage.Problem(
+                                "PARSE_XML_MALFORMED", "split", -1, 300,
+                                null, -1, null, null), true),
+                new ConnectorMessage.ItemTransformed(itemId, "claims", 2, 0,
+                        java.time.Instant.EPOCH, java.util.List.of(), 1, 1,
+                        null, null, null, new ConnectorMessage.Problem(
+                                "PARSE_XML_MALFORMED", "split", -1, 300,
+                                null, -1, null, null), true)))
         {
             assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
                     .isEqualTo(message);
@@ -235,7 +255,15 @@ class ContractRoundTripTest
                         "version");
         assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemConverted(
                 itemId, "claims", 1, 0, java.time.Instant.EPOCH)))
-                .doesNotContainKeys("versions", "producerRef", "replaces");
+                .doesNotContainKeys("versions", "producerRef", "replaces",
+                        "failure", "resultsSent");
+        assertThat(PayloadCodec.toJson(new RecordStored("ID9", itemId, 7,
+                150, 20, "ccda", "application/json", "ccda/2", 30, 1, ref)))
+                .doesNotContainKeys("message", "messageRef",
+                        "messageReplaces");
+        assertThat(new ConnectorMessage.ItemSplit(itemId, "claims", 1, 0, 9,
+                "d", null, null, null, java.time.Instant.EPOCH,
+                java.time.Instant.EPOCH).resultsSent()).isFalse();
         assertThat(new ConnectorMessage.RecordTransformed("ID12", itemId, 0,
                 10, 20, "ccda", "application/fhir+json", "us-core-6.1@3f9a",
                 900, 1, ref, null, "v", null, null, false, null).messageId())

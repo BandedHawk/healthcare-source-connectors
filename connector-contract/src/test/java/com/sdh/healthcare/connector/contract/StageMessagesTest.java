@@ -15,6 +15,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemEnd;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemTransformed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordLocation;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
@@ -114,28 +115,37 @@ class StageMessagesTest
         {
             RecordInStorage record = stage.record("ID3", itemId, 4, 30, 20,
                     "ccda", "application/json", "m/1", 40, 1, ref, null, "v",
-                    null, lineage);
+                    null, lineage, 3, "broker-3", "broker-1");
             assertThat(record.type()).isEqualTo(stage.record());
             assertThat(record.lineage()).isEqualTo(lineage);
             assertThat(record.superseded()).isFalse();
             assertThat(record.cause()).isNull();
+            assertThat(record.message()).isEqualTo(3);
+            assertThat(record.messageRef()).isEqualTo("broker-3");
+            assertThat(record.messageReplaces()).isEqualTo("broker-1");
             UUID replaces = UUID.randomUUID();
+            Problem cut = new Problem("SPLIT_TOO_DEEP", "split", 4, 30, null,
+                    -1, null, null);
             ItemEnd end = stage.itemEnd(itemId, "claims", 5, 1,
                     Instant.EPOCH, List.of("v"), 1, 1, null, "a.xml",
-                    replaces);
+                    replaces, cut, true);
             assertThat(end.type()).isEqualTo(stage.end());
             assertThat(end.producerRef()).isEqualTo("a.xml");
             assertThat(end.replaces()).isEqualTo(replaces);
+            assertThat(end.failure()).isEqualTo(cut);
+            assertThat(end.resultsSent()).isTrue();
+            // Declined records aren't sent on (STAGES.md §15.6).
+            assertThat(end.passedCount()).isEqualTo(4);
         }
         assertThat(StageMessages.CONVERT.record("ID3", itemId, 4, 30, 20,
                 "ccda", "application/json", "ccda/2", 40, 1, ref, null, "v",
-                null, null)).isInstanceOf(RecordStored.class);
+                null, null, -1, null, null)).isInstanceOf(RecordStored.class);
         assertThat(StageMessages.TRANSFORM.record("ID3", itemId, 4, 30, 20,
                 "ccda", "application/fhir+json", "us-core-6.1@ab", 40, 1, ref,
-                null, "v", null, null))
+                null, "v", null, null, -1, null, null))
                 .isInstanceOf(RecordTransformed.class);
         assertThat(StageMessages.TRANSFORM.itemEnd(itemId, "claims", 5, 0,
-                Instant.EPOCH, null, 1, 1, null, null, null))
+                Instant.EPOCH, null, 1, 1, null, null, null, null, false))
                 .isInstanceOf(ItemTransformed.class);
         assertThat(StageMessages.TRANSFORM.end())
                 .isEqualTo(MessageType.ITEM_TRANSFORMED);

@@ -114,13 +114,13 @@ public final class PayloadCodec
                 {
                     putCause(payload, record.cause());
                 }
-                if (record instanceof RecordSplit split
-                        && split.message() >= 0)
+                // Carried on by every stage (STAGES.md §17.4).
+                if (record.message() >= 0)
                 {
-                    payload.put("message", split.message());
-                    putIfSet(payload, "messageRef", split.messageRef());
+                    payload.put("message", record.message());
+                    putIfSet(payload, "messageRef", record.messageRef());
                     putIfSet(payload, "messageReplaces",
-                            split.messageReplaces());
+                            record.messageReplaces());
                 }
             }
             case ItemLanded landed ->
@@ -236,6 +236,14 @@ public final class PayloadCodec
                 putIfSet(payload, "sameAs", end.sameAs());
                 putIfSet(payload, "producerRef", end.producerRef());
                 putIfSet(payload, "replaces", end.replaces());
+                if (end.failure() != null)
+                {
+                    payload.put("failure", problemFields(end.failure()));
+                }
+                if (end.resultsSent())
+                {
+                    payload.put("resultsSent", true);
+                }
             }
             case ItemProgressed progressed ->
             {
@@ -332,7 +340,10 @@ public final class PayloadCodec
                             (String) payload.get("resolves"),
                             lineage(payload),
                             Boolean.TRUE.equals(payload.get("superseded")),
-                            cause(payload));
+                            cause(payload),
+                            messageIndex(payload),
+                            (String) payload.get("messageRef"),
+                            (String) payload.get("messageReplaces"));
                     case RECORD_TRANSFORMED -> new RecordTransformed(
                             text(payload, "recordId"),
                             itemId,
@@ -350,7 +361,10 @@ public final class PayloadCodec
                             (String) payload.get("resolves"),
                             lineage(payload),
                             Boolean.TRUE.equals(payload.get("superseded")),
-                            cause(payload));
+                            cause(payload),
+                            messageIndex(payload),
+                            (String) payload.get("messageRef"),
+                            (String) payload.get("messageReplaces"));
                     case ITEM_LANDED -> new ItemLanded(
                             itemId,
                             text(payload, "intake"),
@@ -405,9 +419,7 @@ public final class PayloadCodec
                             origin(payload),
                             (String) payload.get("errorCode"),
                             position(payload, "errorLine", "errorColumn"),
-                            payload.get("message") instanceof Number index
-                                    ? Math.toIntExact(index.longValue())
-                                    : -1,
+                            messageIndex(payload),
                             (String) payload.get("messageRef"),
                             (String) payload.get("messageReplaces"),
                             (String) payload.get("version"),
@@ -445,7 +457,11 @@ public final class PayloadCodec
                             generation(payload),
                             uuid(payload, "sameAs"),
                             (String) payload.get("producerRef"),
-                            uuid(payload, "replaces"));
+                            uuid(payload, "replaces"),
+                            payload.get("failure") instanceof Map<?, ?> failure
+                                    ? problem((Map<String, Object>) failure)
+                                    : null,
+                            Boolean.TRUE.equals(payload.get("resultsSent")));
                     case ITEM_TRANSFORMED -> new ItemTransformed(
                             itemId,
                             text(payload, "intake"),
@@ -457,7 +473,11 @@ public final class PayloadCodec
                             generation(payload),
                             uuid(payload, "sameAs"),
                             (String) payload.get("producerRef"),
-                            uuid(payload, "replaces"));
+                            uuid(payload, "replaces"),
+                            payload.get("failure") instanceof Map<?, ?> failure
+                                    ? problem((Map<String, Object>) failure)
+                                    : null,
+                            Boolean.TRUE.equals(payload.get("resultsSent")));
                     case ITEM_PROGRESS -> new ItemProgressed(
                             itemId,
                             text(payload, "intake"),
@@ -525,6 +545,18 @@ public final class PayloadCodec
         Object kind = payload.get("cause");
         return kind == null ? null : new Cause((String) kind,
                 uuid(payload, "runId"), (String) payload.get("revisionOf"));
+    }
+
+    /**
+     * The number of the queue message a record starts in.
+     *
+     * @param payload the message's fields
+     * @return the number; -1 if not given
+     */
+    private static int messageIndex(Map<String, Object> payload)
+    {
+        return payload.get("message") instanceof Number index
+                ? Math.toIntExact(index.longValue()) : -1;
     }
 
     /**

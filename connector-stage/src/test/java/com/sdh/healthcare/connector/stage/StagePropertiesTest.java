@@ -65,7 +65,11 @@ class StagePropertiesTest
             StageProperties.Claim claim)
     {
         return new StageProperties(input, output, dlq, 4, claim, "sdh_stage",
-                Duration.ofSeconds(30), null, -1, Duration.ofMinutes(1));
+                Duration.ofSeconds(30), null, -1, Duration.ofMinutes(1),
+                new StageProperties.TableSettings(null, null, null, null,
+                        null),
+                new StageProperties.TableSettings(null, null, null, null,
+                        null), true);
     }
 
     /** The input is checked as any receiver's, named by the stage. */

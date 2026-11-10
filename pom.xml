@@ -28,6 +28,7 @@
     <module>connector-broker</module>
     <module>connector-runtime</module>
     <module>connector-stage</module>
+    <module>connector-record-stage</module>
     <!-- Before file-connector: its image tests (-Pit) run the landing node's packaged jar and kit. -->
     <module>landing-connector</module>
     <!-- Before file-connector, whose ThirdPartyAttributionIT checks every application's packaged jar. -->
@@ -301,6 +302,11 @@
       <dependency>
         <groupId>com.sdh.healthcare</groupId>
         <artifactId>connector-stage</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sdh.healthcare</groupId>
+        <artifactId>connector-record-stage</artifactId>
         <version>${project.version}</version>
       </dependency>
 

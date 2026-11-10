@@ -127,12 +127,28 @@ public final class IngestTables
      */
     public static Table sharedRecords(Catalog catalog, String namespace)
     {
+        return shared(catalog, namespace, RecordsTable.DEFAULT_NAME);
+    }
+
+    /**
+     * Creates or loads a table of records that every worker of a stage
+     * appends to, such as a record stage's sink (STAGES.md §17.7): the
+     * {@code records} columns, with more commit retries, as for
+     * {@code split_records}.
+     *
+     * @param catalog   the Iceberg catalog
+     * @param namespace the namespace the table is in, created if missing
+     * @param name      the table's name
+     * @return the table
+     */
+    public static Table shared(Catalog catalog, String namespace,
+            String name)
+    {
         Map<String, String> properties = new HashMap<>(PROPERTIES);
         properties.put(TableProperties.COMMIT_NUM_RETRIES,
                 SHARED_COMMIT_RETRIES);
-        return create(catalog, namespace, RecordsTable.DEFAULT_NAME,
-                RecordsTable.SCHEMA, RecordsTable.SPEC,
-                RecordsTable.SORT_ORDER, properties);
+        return create(catalog, namespace, name, RecordsTable.SCHEMA,
+                RecordsTable.SPEC, RecordsTable.SORT_ORDER, properties);
     }
 
     /**

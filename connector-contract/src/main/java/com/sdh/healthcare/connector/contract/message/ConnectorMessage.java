@@ -268,6 +268,31 @@ public sealed interface ConnectorMessage permits
          * @return the message, with the cause
          */
         RecordInStorage withCause(Cause cause);
+
+        /**
+         * For an item that is a batch of queue messages, the number of the
+         * message the record starts in: given by the split stage and
+         * carried on by every stage after it, so a failure at any stage
+         * names its message (STAGES.md §17.4).
+         *
+         * @return the message's number, from 0; -1 if the item isn't a
+         *         batch, or the message isn't known
+         */
+        int message();
+
+        /**
+         * That message's broker ID.
+         *
+         * @return the ID; null if not a batch, or not kept
+         */
+        String messageRef();
+
+        /**
+         * The earlier message that message replaces, as its producer said.
+         *
+         * @return its ID; null if none
+         */
+        String messageReplaces();
     }
 
     /**
@@ -302,6 +327,18 @@ public sealed interface ConnectorMessage permits
          * @return the count
          */
         long failedRecordCount();
+
+        /**
+         * The records it sent on, which the stage after it waits for. The
+         * split stage counts only those in {@link #recordCount()} (its
+         * declined pieces are in {@link #failedRecordCount()} besides);
+         * the convert and transform stages count every record handled
+         * there, declined ones included, so theirs is the one less the
+         * other.
+         *
+         * @return the count
+         */
+        long passedCount();
 
         /**
          * When the stage finished it.
@@ -355,6 +392,28 @@ public sealed interface ConnectorMessage permits
          * @return its id; null if none
          */
         UUID replaces();
+
+        /**
+         * Why the item as a whole couldn't be split further, carried on
+         * from {@code item.split} (STAGES.md §17.4), so a later stage's
+         * result says the item failed.
+         *
+         * @return the failure; null if it was split to the end
+         */
+        Problem failure();
+
+        /**
+         * Whether the stage that sent it, or one before it, sent the
+         * producer its result (STAGES.md §17.5), so a stage with results
+         * on as well can say the producer is told twice.
+         *
+         * @return true if a result was sent; false for {@code item.split},
+         *         since the split stage sends none
+         */
+        default boolean resultsSent()
+        {
+            return false;
+        }
     }
 
     /**
@@ -390,6 +449,12 @@ public sealed interface ConnectorMessage permits
      * @param cause           why it was made again, for an output of a
      *                        reprocess or correction (§15.8.7); null when
      *                        first made
+     * @param message         for an item that is a batch of queue messages,
+     *                        the number of the message the record starts
+     *                        in, from 0, carried on from the split stage;
+     *                        -1 otherwise
+     * @param messageRef      that message's broker ID; null if none
+     * @param messageReplaces the earlier message it replaces; null if none
      */
     record RecordStored(
             String recordId,
@@ -408,7 +473,10 @@ public sealed interface ConnectorMessage permits
             String resolves,
             Lineage lineage,
             boolean superseded,
-            Cause cause)
+            Cause cause,
+            int message,
+            String messageRef,
+            String messageReplaces)
             implements RecordInStorage
     {
 
@@ -418,6 +486,41 @@ public sealed interface ConnectorMessage permits
         public RecordStored
         {
             lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A message of an item that is no batch of queue messages, or whose
+         * message isn't known.
+         *
+         * @param recordId        as in the record, above
+         * @param itemId          as in the record, above
+         * @param seq             as in the record, above
+         * @param sourceOffset    as in the record, above
+         * @param sourceLength    as in the record, above
+         * @param format          as in the record, above
+         * @param contentType     as in the record, above
+         * @param mapping         as in the record, above
+         * @param plaintextLength as in the record, above
+         * @param chunkCount      as in the record, above
+         * @param storage         as in the record, above
+         * @param origin          as in the record, above
+         * @param version         as in the record, above
+         * @param resolves        as in the record, above
+         * @param lineage         as in the record, above
+         * @param superseded      as in the record, above
+         * @param cause           as in the record, above
+         */
+        public RecordStored(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, String mapping, long plaintextLength,
+                int chunkCount, StorageRef storage, RecordOrigin origin,
+                String version, String resolves, Lineage lineage,
+                boolean superseded, Cause cause)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, mapping, plaintextLength, chunkCount, storage,
+                    origin, version, resolves, lineage, superseded, cause, -1,
+                    null, null);
         }
 
         /**
@@ -612,7 +715,8 @@ public sealed interface ConnectorMessage permits
             return new RecordStored(recordId, itemId, seq, sourceOffset,
                     sourceLength, format, contentType, mapping,
                     plaintextLength, chunkCount, storage, origin, version,
-                    resolves, lineage, superseded, cause);
+                    resolves, lineage, superseded, cause, message, messageRef,
+                    messageReplaces);
         }
 
         /**
@@ -627,7 +731,8 @@ public sealed interface ConnectorMessage permits
             return new RecordStored(recordId, itemId, seq, sourceOffset,
                     sourceLength, format, contentType, mapping,
                     plaintextLength, chunkCount, storage, origin, version,
-                    resolves, lineage, superseded, cause);
+                    resolves, lineage, superseded, cause, message, messageRef,
+                    messageReplaces);
         }
     }
 
@@ -663,6 +768,12 @@ public sealed interface ConnectorMessage permits
      * @param cause           why it was made again, for an output of a
      *                        reprocess or correction (§15.8.7); null when
      *                        first made
+     * @param message         for an item that is a batch of queue messages,
+     *                        the number of the message the record starts
+     *                        in, from 0, carried on from the split stage;
+     *                        -1 otherwise
+     * @param messageRef      that message's broker ID; null if none
+     * @param messageReplaces the earlier message it replaces; null if none
      */
     record RecordTransformed(
             String recordId,
@@ -681,7 +792,10 @@ public sealed interface ConnectorMessage permits
             String resolves,
             Lineage lineage,
             boolean superseded,
-            Cause cause)
+            Cause cause,
+            int message,
+            String messageRef,
+            String messageReplaces)
             implements RecordInStorage
     {
 
@@ -691,6 +805,41 @@ public sealed interface ConnectorMessage permits
         public RecordTransformed
         {
             lineage = Lineage.orFirst(lineage);
+        }
+
+        /**
+         * A message of an item that is no batch of queue messages, or whose
+         * message isn't known.
+         *
+         * @param recordId        as in the record, above
+         * @param itemId          as in the record, above
+         * @param seq             as in the record, above
+         * @param sourceOffset    as in the record, above
+         * @param sourceLength    as in the record, above
+         * @param format          as in the record, above
+         * @param contentType     as in the record, above
+         * @param mapping         as in the record, above
+         * @param plaintextLength as in the record, above
+         * @param chunkCount      as in the record, above
+         * @param storage         as in the record, above
+         * @param origin          as in the record, above
+         * @param version         as in the record, above
+         * @param resolves        as in the record, above
+         * @param lineage         as in the record, above
+         * @param superseded      as in the record, above
+         * @param cause           as in the record, above
+         */
+        public RecordTransformed(String recordId, UUID itemId, long seq,
+                long sourceOffset, long sourceLength, String format,
+                String contentType, String mapping, long plaintextLength,
+                int chunkCount, StorageRef storage, RecordOrigin origin,
+                String version, String resolves, Lineage lineage,
+                boolean superseded, Cause cause)
+        {
+            this(recordId, itemId, seq, sourceOffset, sourceLength, format,
+                    contentType, mapping, plaintextLength, chunkCount, storage,
+                    origin, version, resolves, lineage, superseded, cause, -1,
+                    null, null);
         }
 
         /**
@@ -730,7 +879,8 @@ public sealed interface ConnectorMessage permits
             return new RecordTransformed(recordId, itemId, seq, sourceOffset,
                     sourceLength, format, contentType, mapping,
                     plaintextLength, chunkCount, storage, origin, version,
-                    resolves, lineage, superseded, cause);
+                    resolves, lineage, superseded, cause, message, messageRef,
+                    messageReplaces);
         }
 
         /**
@@ -745,7 +895,8 @@ public sealed interface ConnectorMessage permits
             return new RecordTransformed(recordId, itemId, seq, sourceOffset,
                     sourceLength, format, contentType, mapping,
                     plaintextLength, chunkCount, storage, origin, version,
-                    resolves, lineage, superseded, cause);
+                    resolves, lineage, superseded, cause, message, messageRef,
+                    messageReplaces);
         }
     }
 
@@ -1680,6 +1831,17 @@ public sealed interface ConnectorMessage permits
         /**
          * {@inheritDoc}
          *
+         * @return {@link #recordCount()}: the records sent on
+         */
+        @Override
+        public long passedCount()
+        {
+            return recordCount;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
          * @return "is-" and the item id; from its second generation
          *         {@code ~g} and the generation's number; and from its
          *         second completion {@code ~c} and the completion's number
@@ -1718,13 +1880,44 @@ public sealed interface ConnectorMessage permits
      *                          (STAGES.md §17.4); null if none
      * @param replaces          the item it replaces, carried on the same
      *                          way; null if none
+     * @param failure           why the item as a whole couldn't be split
+     *                          further, carried on from {@code item.split};
+     *                          null if none
+     * @param resultsSent       whether this stage, or one before it, sent
+     *                          the producer its result (STAGES.md §17.5)
      */
     record ItemConverted(UUID itemId, String intake, long recordCount,
             long failedRecordCount, Instant completedAt, List<String> versions,
             int completion, int generation, UUID sameAs, String producerRef,
-            UUID replaces)
+            UUID replaces, Problem failure, boolean resultsSent)
             implements ItemEnd
     {
+
+        /**
+         * The message of an item split to its end, with no result sent
+         * yet.
+         *
+         * @param itemId            as in the record, above
+         * @param intake            as in the record, above
+         * @param recordCount       as in the record, above
+         * @param failedRecordCount as in the record, above
+         * @param completedAt       as in the record, above
+         * @param versions          as in the record, above
+         * @param completion        as in the record, above
+         * @param generation        as in the record, above
+         * @param sameAs            as in the record, above
+         * @param producerRef       as in the record, above
+         * @param replaces          as in the record, above
+         */
+        public ItemConverted(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, Instant completedAt,
+                List<String> versions, int completion, int generation,
+                UUID sameAs, String producerRef, UUID replaces)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, completedAt,
+                    versions, completion, generation, sameAs, producerRef,
+                    replaces, null, false);
+        }
 
         /**
          * The message without the producer's references.
@@ -1846,6 +2039,17 @@ public sealed interface ConnectorMessage permits
         /**
          * {@inheritDoc}
          *
+         * @return the records handled less those declined
+         */
+        @Override
+        public long passedCount()
+        {
+            return recordCount - failedRecordCount;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
          * @return "ic-convert-" and the item id; from its second
          *         generation {@code ~g} and its number; and from its second
          *         completion {@code ~c} and the completion's number
@@ -1882,13 +2086,44 @@ public sealed interface ConnectorMessage permits
      * @param producerRef       the producer's own reference for it, carried
      *                          on from {@code item.converted}; null if none
      * @param replaces          the item it replaces; null if none
+     * @param failure           why the item as a whole couldn't be split
+     *                          further, carried on from {@code item.split};
+     *                          null if none
+     * @param resultsSent       whether this stage, or one before it, sent
+     *                          the producer its result (STAGES.md §17.5)
      */
     record ItemTransformed(UUID itemId, String intake, long recordCount,
             long failedRecordCount, Instant completedAt, List<String> versions,
             int completion, int generation, UUID sameAs, String producerRef,
-            UUID replaces)
+            UUID replaces, Problem failure, boolean resultsSent)
             implements ItemEnd
     {
+
+        /**
+         * The message of an item split to its end, with no result sent
+         * yet.
+         *
+         * @param itemId            as in the record, above
+         * @param intake            as in the record, above
+         * @param recordCount       as in the record, above
+         * @param failedRecordCount as in the record, above
+         * @param completedAt       as in the record, above
+         * @param versions          as in the record, above
+         * @param completion        as in the record, above
+         * @param generation        as in the record, above
+         * @param sameAs            as in the record, above
+         * @param producerRef       as in the record, above
+         * @param replaces          as in the record, above
+         */
+        public ItemTransformed(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, Instant completedAt,
+                List<String> versions, int completion, int generation,
+                UUID sameAs, String producerRef, UUID replaces)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, completedAt,
+                    versions, completion, generation, sameAs, producerRef,
+                    replaces, null, false);
+        }
 
         /**
          * Copies the versions; a completion or generation not given is the
@@ -1910,6 +2145,17 @@ public sealed interface ConnectorMessage permits
         public MessageType type()
         {
             return MessageType.ITEM_TRANSFORMED;
+        }
+
+        /**
+         * {@inheritDoc}
+         *
+         * @return the records handled less those declined
+         */
+        @Override
+        public long passedCount()
+        {
+            return recordCount - failedRecordCount;
         }
 
         /**

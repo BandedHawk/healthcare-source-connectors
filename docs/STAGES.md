@@ -2501,6 +2501,57 @@ Each step builds, passes its tests and, where it says, is tried on the sandbox:
   message and item end.
 - **Tests:** `StageMessagesTest`; `ContractRoundTripTest` with the new messages and `item.converted`'s references.
 
+### 17.8b Step 2 as built (2026-11-10)
+
+`connector-record-stage` (package `com.sdh.healthcare.connector.record`), on `connector-stage` and
+`connector-queue-reader`. The convert stage doesn't use it yet (step 3).
+- **`RecordTransform`,** what a stage gives: its `StageMessages`, the version it stamps on a record and every
+  version it may stamp (for the drain check, §14.4a), the largest record it takes, and per record a **plan**:
+  `AsIs` (store it as it came, with an error or none, such as a piece the splitter couldn't parse) or `Apply`
+  (with the memory it needs), then `apply`, which gives `Made` (bytes and representation) or `Failed` (a code
+  and the byte it failed at). A bug, any exception from `apply`, fails that record alone with the transform's
+  `unexpected()` code and logs `stage.unexpected` (no content).
+- **`RecordStageProcessor`,** the `StageProcessor` for any record stage: takes the stage before's record
+  messages, its item end and its `item.progress` (§17.4); refuses a record message that names any table but the
+  source (`stage.message_rejected`, reason `WRONG_SOURCE`, the source check); stores each record in the sink and
+  sends the stage's record message, or keeps a failure on its row and in the fail store; corrects as the convert
+  stage did. An item end waits only for the records the stage before sent on (`ItemEnd.passedCount()`:
+  `item.split` counts only those, `item.converted` every record it handled, failed ones included).
+- **`RecordReconciler`, `BacklogWatch`, `SourceInputs`, `ResultReporter`,** ported from the convert stage onto
+  any source. A rebuilt record is named by the version on its row (the convert stage gave none). Audit events
+  are named for the library, with the stage as an attribute: `stage.reconcile_catching_up`,
+  `stage.reconcile_caught_up`, `stage.reconcile_deferred`, `stage.reconcile_deferral_capped`,
+  `stage.item_total_missing`, `stage.records_recovered`, `stage.item_completion_recovered`,
+  `stage.backlog_not_noted`, `stage.placement_unknown`.
+- **Results (§17.5)** gather an item's failures from `sdh.results.upstream` (a list of stage, namespace and
+  table, earliest first, in the source's catalog), then the source and the sink, each put down to the stage
+  whose table it is in; a record failed with the same code in a later table keeps the earlier stage. The result
+  counts every record of the item: those handled here and those that failed before and never came.
+- **Runtime and admin:** `RecordStageRuntime.create(settings, transform, camel, fatalExit)`, an auto-configuration
+  that starts one whenever the application has a `RecordTransform` bean (`sdh.stage.autostart`, default true,
+  replaces `sdh.convert.autostart`), and `RecordStageAdmin.cli(...)` with `status`, `reprocess`, `drain-check`,
+  `version` and the fail store's commands. Settings are `RecordStageSettings`, which a stage's own properties
+  implement.
+- **Source and sink (§17.7):** `sdh.stage.source` and `sdh.stage.sink`, each `catalog` (Iceberg properties),
+  `catalog-name`, `namespace`, `table` and, for the sink, `kek`. The convert stage defaults to `split_records`
+  into `records`, the transform stage to `records` into a sink it must name; both to `sdh` and `sdh_ingest`.
+  The source's catalog is required; the sink uses it unless it has its own. The sink's KEK defaults to
+  `sdh.crypto.keys.records-kek`. Maintenance runs on the sink.
+
+Contract gaps found and filled (decided with the user, still 3.0):
+- **`record.stored` and `record.transformed` carry the queue message on** (`message`, `messageRef`,
+  `messageReplaces`, as `record.split` does), so a record that fails at a later stage keeps the producer's
+  message on its row, and its problem names it.
+- **Item ends carry the item's `failure` on,** so a later stage's result reports a whole-item failure.
+- **`item.converted` and `item.transformed` carry `resultsSent`,** true when that stage sent the producer's
+  result or one before it did. A stage that sends results after one before already did audits
+  `stage.results_twice`: results are meant for one stage, the last. The convert stage sets it from step 3.
+
+Tests: `RecordStageProcessorTest` (in memory, as the convert and the transform stage), `RecordStageTest` (the
+worker on embedded Postgres as the transform stage: results across three tables, an incomplete result,
+`stage.results_twice`, the reconciler), `ResultReporterTest` (ported) and `StageTablesTest`, all with a test
+transform, `UpperTransform`.
+
 ### 17.9 Decided after review (2026-11-10, with the user)
 
 1. **Audit names. Decided 2026-11-10 with the user: renamed `stage.*`,** with `sdh.stage`, as the library's own

@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemConver
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemEnd;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemTransformed;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.Problem;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordInStorage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordStored;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordTransformed;
@@ -201,6 +202,10 @@ public enum StageMessages
      *                        resolves; null otherwise
      * @param lineage         where it stands in its line; null for the
      *                        first of everything
+     * @param message         the queue message the record starts in, from
+     *                        0, carried on from its input; -1 if none
+     * @param messageRef      that message's broker ID; null if none
+     * @param messageReplaces the earlier message it replaces; null if none
      * @return {@code record.stored} or {@code record.transformed}, not
      *         superseded and with no cause
      */
@@ -208,18 +213,21 @@ public enum StageMessages
             long sourceOffset, long sourceLength, String format,
             String contentType, String mapping, long plaintextLength,
             int chunkCount, StorageRef storage, RecordOrigin origin,
-            String version, String resolves, Lineage lineage)
+            String version, String resolves, Lineage lineage, int message,
+            String messageRef, String messageReplaces)
     {
         return switch (this)
         {
             case CONVERT -> new RecordStored(recordId, itemId, seq,
                     sourceOffset, sourceLength, format, contentType, mapping,
                     plaintextLength, chunkCount, storage, origin, version,
-                    resolves, lineage, false, null);
+                    resolves, lineage, false, null, message, messageRef,
+                    messageReplaces);
             case TRANSFORM -> new RecordTransformed(recordId, itemId, seq,
                     sourceOffset, sourceLength, format, contentType, mapping,
                     plaintextLength, chunkCount, storage, origin, version,
-                    resolves, lineage, false, null);
+                    resolves, lineage, false, null, message, messageRef,
+                    messageReplaces);
         };
     }
 
@@ -240,21 +248,28 @@ public enum StageMessages
      * @param producerRef       the producer's reference, carried on; null if
      *                          none
      * @param replaces          the item it replaces; null if none
+     * @param failure           why the item as a whole couldn't be split
+     *                          further, carried on; null if none
+     * @param resultsSent       whether this stage, or one before it, sent
+     *                          the producer its result
      * @return {@code item.converted} or {@code item.transformed}
      */
     public ItemEnd itemEnd(UUID itemId, String intake, long recordCount,
             long failedRecordCount, Instant completedAt,
             List<String> versions, int completion, int generation,
-            UUID sameAs, String producerRef, UUID replaces)
+            UUID sameAs, String producerRef, UUID replaces, Problem failure,
+            boolean resultsSent)
     {
         return switch (this)
         {
             case CONVERT -> new ItemConverted(itemId, intake, recordCount,
                     failedRecordCount, completedAt, versions, completion,
-                    generation, sameAs, producerRef, replaces);
+                    generation, sameAs, producerRef, replaces, failure,
+                    resultsSent);
             case TRANSFORM -> new ItemTransformed(itemId, intake,
                     recordCount, failedRecordCount, completedAt, versions,
-                    completion, generation, sameAs, producerRef, replaces);
+                    completion, generation, sameAs, producerRef, replaces,
+                    failure, resultsSent);
         };
     }
 }

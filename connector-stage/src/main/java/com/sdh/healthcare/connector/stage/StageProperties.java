@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.broker.receive.ReceiveProperties;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
@@ -35,6 +36,12 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *                       (STAGES.md §14.4a); below 0 for none
  * @param versionCheckInterval how often a pod held back by the drain check
  *                       looks again
+ * @param source         for a record stage, the table it reads records
+ *                       from (STAGES.md §17.7); unset for its default
+ * @param sink           for a record stage, the table it stores what it
+ *                       makes in; unset for its default
+ * @param autostart      false to leave the input and duties stopped, for
+ *                       tests that hand messages to the worker themselves
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -45,7 +52,9 @@ public record StageProperties(ReceiveProperties input,
         @DefaultValue("30s") Duration sendTimeout,
         CommonSettings.Queue reprocess,
         @DefaultValue("8081") int readyPort,
-        @DefaultValue("1m") Duration versionCheckInterval)
+        @DefaultValue("1m") Duration versionCheckInterval,
+        @DefaultValue TableSettings source, @DefaultValue TableSettings sink,
+        @DefaultValue("true") boolean autostart)
 {
 
     /** Where the settings are configured, to name them in errors. */
@@ -63,6 +72,33 @@ public record StageProperties(ReceiveProperties input,
             @DefaultValue("15s") Duration renewInterval,
             @DefaultValue("1s") Duration busyPoll)
     {
+    }
+
+    /**
+     * A table of records a record stage reads from or stores in (STAGES.md
+     * §17.7), with the columns of {@code RecordsTable.SCHEMA}. A setting
+     * left unset takes the stage's default.
+     *
+     * @param catalog     Iceberg catalog properties, passed through as they
+     *                    are; for the sink, unset for the source's
+     * @param catalogName the catalog's name, also put in messages
+     * @param namespace   the table's namespace
+     * @param table       the table's name
+     * @param kek         for the sink, the KEK its data keys are wrapped
+     *                    with; for the source, unused: each row names its
+     *                    own
+     */
+    public record TableSettings(Map<String, String> catalog,
+            String catalogName, String namespace, String table, String kek)
+    {
+
+        /**
+         * No catalog properties is none, not null.
+         */
+        public TableSettings
+        {
+            catalog = catalog == null ? Map.of() : Map.copyOf(catalog);
+        }
     }
 
     /**
