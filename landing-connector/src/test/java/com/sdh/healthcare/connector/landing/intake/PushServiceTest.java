@@ -566,6 +566,68 @@ class PushServiceTest
     }
 
     /**
+     * A push with the same content as earlier items is landed as an item
+     * of its own and names the earliest of them, on its message, its
+     * receipt and its result (STAGES.md §15.5a); a resubmission doesn't
+     * name the item it replaces, and a repeated push gets the same
+     * receipt, before and after a restart.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void namesTheEarlierItemACopyIsTheSameAs() throws Exception
+    {
+        PushService service = service(0);
+        UUID first = push(service, "a", null, "same").receipt().itemId();
+        assertThat(sameAs(0)).isNull();
+        PushService.Result second = push(service, "a", null, "same");
+        assertThat(second.receipt().sameAs()).isEqualTo(first);
+        assertThat(sameAs(1)).isEqualTo(first);
+        PushService.Result third = push(service, "a", "k-1", "same");
+        assertThat(third.receipt().sameAs()).isEqualTo(first);
+        assertThat(third.receipt().toJson())
+                .contains("\"sameAs\":\"" + first + "\"");
+        assertThat(push(service, "a", "k-1", "same").receipt())
+                .isEqualTo(third.receipt());
+
+        MessageOpener opener = new MessageOpener(
+                Map.of("producer", producer.getPrivate()),
+                Map.of("connector", (ECPublicKey) signing.getPublic()));
+        assertThat(((ConnectorMessage.ItemReceived) opener.open(
+                results.get(1).body())).sameAs()).isEqualTo(first);
+
+        UUID solo = push(service, "a", null, "solo").receipt().itemId();
+        PushService.Result resent = service.receive(new PushService.Push(
+                "a", null, 4, null, solo),
+                new ByteArrayInputStream("solo".getBytes()));
+        assertThat(resent.receipt().sameAs()).isNull();
+        assertThat(sameAs(sent.size() - 1)).isNull();
+        assertThat(push(service, "a", null, "solo").receipt().sameAs())
+                .isEqualTo(solo);
+
+        PushService restarted = service(0);
+        assertThat(push(restarted, "a", "k-1", "same").receipt())
+                .isEqualTo(third.receipt());
+        assertThat(sameAs(sent.size() - 1)).isEqualTo(solo);
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * The {@code sameAs} of a landed message the service sent.
+     *
+     * @param index which message, in the order sent
+     * @return its {@code sameAs}; null if none
+     * @throws Exception if the message can't be opened
+     */
+    private UUID sameAs(int index) throws Exception
+    {
+        return ((ConnectorMessage.ItemLanded) new MessageOpener(
+                Map.of("downstream", recipient.getPrivate()),
+                Map.of("connector", (ECPublicKey) signing.getPublic()))
+                .open(sent.get(index).body())).sameAs();
+    }
+
+    /**
      * An error that means the node can't go on stops it, and the push is
      * told to try later.
      *

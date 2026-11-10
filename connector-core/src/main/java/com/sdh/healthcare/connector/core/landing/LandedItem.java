@@ -46,12 +46,28 @@ public record LandedItem(UUID itemId, String intake, ItemKind kind,
     public ConnectorMessage.ItemLanded message(String catalog,
             String namespace)
     {
+        return message(catalog, namespace, null);
+    }
+
+    /**
+     * The {@code item.landed} message for this item, naming the earlier
+     * item it is an exact copy of (STAGES.md §15.5a).
+     *
+     * @param catalog   the name of the landing catalog
+     * @param namespace the landing namespace
+     * @param sameAs    the earliest earlier item of the intake with the same
+     *                  content still in the ledger; null if none
+     * @return the message, ready to seal
+     */
+    public ConnectorMessage.ItemLanded message(String catalog,
+            String namespace, UUID sameAs)
+    {
         return new ConnectorMessage.ItemLanded(itemId, intake,
                 kind.wireName(), size, digest, landedAt,
                 new ConnectorMessage.StorageRef(catalog, namespace,
                         LandingTables.LANDED_ITEMS,
                         landedAt.atOffset(ZoneOffset.UTC).toLocalDate(),
                         snapshotId, kekRef),
-                replaces);
+                replaces, sameAs);
     }
 }

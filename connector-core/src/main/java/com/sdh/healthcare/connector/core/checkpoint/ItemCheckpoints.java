@@ -82,6 +82,12 @@ public final class ItemCheckpoints
     /** The table, with its schema. */
     private final String table;
 
+    /**
+     * The table of the items that are exact copies (STAGES.md §15.5a),
+     * with its schema.
+     */
+    private final String copies;
+
     /** Writes and verifies checkpoints. */
     private final CheckpointCodec codec;
 
@@ -108,6 +114,7 @@ public final class ItemCheckpoints
         }
         this.dataSource = dataSource;
         this.table = schema + ".split_item";
+        this.copies = schema + ".split_copy";
         this.codec = codec;
         this.queryTimeoutSeconds =
                 (int) Math.max(1, queryTimeout.toSeconds());
@@ -164,6 +171,15 @@ public final class ItemCheckpoints
                     + " DEFAULT clock_timestamp()");
             statement.execute("ALTER TABLE " + table
                     + " ALTER COLUMN announced_at DROP DEFAULT");
+            // Added 2026-11-10 (STAGES.md §15.5a): the earlier item each
+            // copy is the same as, from its item.landed, so every end sent
+            // for it names that item.
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS %s (
+                      item_id  uuid        PRIMARY KEY,
+                      same_as  uuid        NOT NULL,
+                      noted_at timestamptz NOT NULL
+                    )""".formatted(copies));
         }
         catch (SQLException failure)
         {
@@ -547,6 +563,65 @@ public final class ItemCheckpoints
             {
                 rows.next();
                 return rows.getTimestamp(1).toInstant();
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Notes the earlier item an item is an exact copy of (STAGES.md
+     * §15.5a), as its {@code item.landed} named it. The first noted stays.
+     *
+     * @param itemId the item
+     * @param sameAs the earlier item
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void noteSameAs(UUID itemId, UUID sameAs)
+    {
+        String sql = """
+                INSERT INTO %s (item_id, same_as, noted_at)
+                VALUES (?, ?, clock_timestamp())
+                ON CONFLICT (item_id) DO NOTHING""".formatted(copies);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement insert = connection.prepareStatement(sql))
+        {
+            insert.setQueryTimeout(queryTimeoutSeconds);
+            insert.setObject(1, itemId);
+            insert.setObject(2, sameAs);
+            insert.executeUpdate();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The earlier item an item is an exact copy of, as noted by
+     * {@link #noteSameAs}.
+     *
+     * @param itemId the item
+     * @return the earlier item; empty if none was noted
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Optional<UUID> sameAs(UUID itemId)
+    {
+        String sql = "SELECT same_as FROM " + copies + " WHERE item_id = ?";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setObject(1, itemId);
+            try (ResultSet rows = select.executeQuery())
+            {
+                return rows.next()
+                        ? Optional.of(rows.getObject(1, UUID.class))
+                        : Optional.empty();
             }
         }
         catch (SQLException failure)

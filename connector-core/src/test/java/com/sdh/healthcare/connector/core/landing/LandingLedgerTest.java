@@ -398,4 +398,30 @@ class LandingLedgerTest
         assertThat(LedgerIndex.digestPrefix("777777777777xyz"))
                 .isEqualTo((1L << 60) - 1);
     }
+
+    /**
+     * The item a copy is the same as is the earliest earlier one, by
+     * UUIDv7 order compared unsigned, leaving out the item it replaces and
+     * any landed after it.
+     */
+    @Test
+    void choosesTheEarliestEarlierItemAsTheOriginal()
+    {
+        UUID low = new UUID(0x0000_0000_0001_7000L, 1);
+        UUID mid = new UUID(0x0000_0000_0002_7000L, 1);
+        UUID copy = new UUID(0x0000_0000_0003_7000L, 1);
+        UUID later = new UUID(0x0000_0000_0004_7000L, 1);
+        UUID highBit = new UUID(0x8000_0000_0000_7000L, 1);
+
+        assertThat(LandingLedger.earliest(List.of(later, mid, low, copy),
+                copy, null)).contains(low);
+        assertThat(LandingLedger.earliest(List.of(mid, low), copy, low))
+                .contains(mid);
+        assertThat(LandingLedger.earliest(List.of(low), copy, low)).isEmpty();
+        assertThat(LandingLedger.earliest(List.of(later, copy), copy, null))
+                .isEmpty();
+        // Unsigned: a top bit set is later, not earlier.
+        assertThat(LandingLedger.earliest(List.of(highBit, copy), later,
+                null)).contains(copy);
+    }
 }

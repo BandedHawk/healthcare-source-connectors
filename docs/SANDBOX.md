@@ -501,3 +501,15 @@ Checked again since: see the end of this section.
   a pod sent `item.progress` with the failure open, and the convert stage reopened the item (`stage.item_reopened
   reason=upstream`). Each end went once. No pod restarted. Not tried here: a landed item never split chosen by
   `reprocess` (a lost `item.landed` can't be made without changing the broker), which the tests cover.
+- **Exact copies (2026-11-10, revision (cp); STAGES.md §15.5a).** Deployed over the existing data: the split stage
+  made `split_copy`, both fail stores `resent_count`, `resent_at` and `resent_by`. `check` passes: the five samples,
+  each pushed in earlier tries, were landed again with `sameAs` in the push receipt naming the earliest earlier
+  item (one landed 2026-11-06, `item.duplicate_content` counting up to 19), noted in `split_copy`, and split and
+  converted in full. A synthetic C-CDA of 162 bytes broken off part way failed at the split stage
+  (`PARSE_UNBALANCED_ELEMENT`); one of 176 bytes with an undeclared entity split and failed conversion
+  (`CONVERT_XML_MALFORMED`). Pushed again, each copy's receipt named its original, and each was processed in full
+  and failed again on its own; the original's failure, at the stage it failed at, became `resent_count` 1 with an
+  event by `pipeline` naming the copy (`failure.resent`, with `sdh.copy_id`), the copy's own 0. `failures` showed
+  `resent=1 last=...` and `--item-id` the line `resent as <copy>`. No content in any log; no pod restarted. Not
+  tried here: a resubmit with the same content (it names no `sameAs` when its replaced item is the only match;
+  tested), a queue batch and a file intake (only push runs here).

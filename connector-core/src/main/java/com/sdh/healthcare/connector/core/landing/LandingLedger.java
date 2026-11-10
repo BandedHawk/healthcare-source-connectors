@@ -309,6 +309,67 @@ public final class LandingLedger
     }
 
     /**
+     * The item a landed item is an exact copy of (STAGES.md §15.5a): the
+     * earliest item landed before it with the same digest that is still in
+     * the ledger, leaving out the item it replaces. Item IDs are UUIDv7, so
+     * the earliest has the lowest ID. As it only looks at earlier items,
+     * asking again, after a crash, gives the same answer while that item is
+     * kept.
+     *
+     * @param itemId   the item
+     * @param digest   its digest
+     * @param replaces the item it replaces; null if none
+     * @return the earlier item; empty if there is none
+     * @throws IOException if the table can't be read
+     */
+    public Optional<UUID> earliestCopy(UUID itemId, String digest,
+            UUID replaces) throws IOException
+    {
+        return earliest(itemsWithDigest(digest), itemId, replaces);
+    }
+
+    /**
+     * The earliest of some items landed before an item, leaving out the
+     * item it replaces.
+     *
+     * @param items    the items, in any order
+     * @param itemId   the item
+     * @param replaces the item it replaces; null if none
+     * @return the earliest of them; empty if none is earlier
+     */
+    public static Optional<UUID> earliest(List<UUID> items, UUID itemId,
+            UUID replaces)
+    {
+        UUID found = null;
+        for (UUID other : items)
+        {
+            if (!other.equals(replaces) && before(other, itemId)
+                    && (found == null || before(other, found)))
+            {
+                found = other;
+            }
+        }
+        return Optional.ofNullable(found);
+    }
+
+    /**
+     * Tells whether one UUIDv7 comes before another, comparing them as
+     * unsigned numbers, as their time order needs.
+     *
+     * @param one   the one
+     * @param other the other
+     * @return true if {@code one} is lower
+     */
+    private static boolean before(UUID one, UUID other)
+    {
+        int high = Long.compareUnsigned(one.getMostSignificantBits(),
+                other.getMostSignificantBits());
+        return high != 0 ? high < 0
+                : Long.compareUnsigned(one.getLeastSignificantBits(),
+                        other.getLeastSignificantBits()) < 0;
+    }
+
+    /**
      * The IDs of the entries that match a filter.
      *
      * @param filter which entries

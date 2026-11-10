@@ -320,12 +320,13 @@ public final class SplitMessages
                     split.itemSize(), digest, split.producerRef(),
                     split.replaces(), problem, split.startedAt(),
                     split.completedAt(), split.versions(), completion,
-                    checkpoint.generation(), interrupted);
+                    checkpoint.generation(), interrupted, split.sameAs());
         }
         return new ItemProgressed(split.itemId(), intake, STAGE, records,
                 passed, counts.open(), counts.declined(), problem,
                 split.producerRef(), split.replaces(), split.completedAt(),
-                split.versions(), completion, checkpoint.generation());
+                split.versions(), completion, checkpoint.generation(),
+                split.sameAs());
     }
 
     /**
@@ -375,6 +376,6 @@ public final class SplitMessages
                 refs.replaces(), problem, checkpoint.startedAt(), finishedAt,
                 checkpoint.version() == null ? List.of()
                         : List.of(checkpoint.version()), 1,
-                checkpoint.generation());
+                checkpoint.generation(), false, refs.sameAs());
     }
 }

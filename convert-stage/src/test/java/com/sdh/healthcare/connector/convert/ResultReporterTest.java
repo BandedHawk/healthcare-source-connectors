@@ -178,6 +178,25 @@ class ResultReporterTest
     }
 
     /**
+     * The result of an exact copy names the earlier item it is the same as
+     * (STAGES.md §15.5a), from the split stage's message.
+     */
+    @Test
+    void namesTheEarlierItemACopyIsTheSameAs()
+    {
+        UUID earlier = UUID.randomUUID();
+        ConnectorMessage.ItemProgressed progressed =
+                new ConnectorMessage.ItemProgressed(ITEM, "claims", "split",
+                        1, 1, 0, 0, null, null, null, AT, List.of(), 0, 1,
+                        earlier);
+        assertThat(ResultReporter.parts(ResultReporter.Facts.of(progressed),
+                ItemResult.INCOMPLETE, 1, List.of(), AT,
+                ResultReporter.PART_SIZE, ResultReporter.PART_BYTES))
+                .singleElement().satisfies(part -> assertThat(part.sameAs())
+                        .isEqualTo(earlier));
+    }
+
+    /**
      * Even with the longest broker IDs and links, each sealed part fits
      * the smallest broker limit, 256 KB; parts are cut by bytes as well as
      * by count.

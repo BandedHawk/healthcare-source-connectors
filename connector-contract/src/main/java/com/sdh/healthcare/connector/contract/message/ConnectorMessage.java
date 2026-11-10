@@ -708,12 +708,35 @@ public sealed interface ConnectorMessage permits
      * @param replaces   the earlier item its producer said it replaces, a
      *                   link only: both are kept in full (design §5.3.8);
      *                   null if none, or before contract 2.3
+     * @param sameAs     the earlier item of the intake with the same
+     *                   content, the earliest still landed, if any
+     *                   (STAGES.md §15.5a); null if none
      */
     record ItemLanded(UUID itemId, String intake, String kind, long size,
             String itemDigest, Instant landedAt, StorageRef storage,
-            UUID replaces)
+            UUID replaces, UUID sameAs)
             implements ConnectorMessage
     {
+
+        /**
+         * The message with no {@code sameAs}: an item that is no copy.
+         *
+         * @param itemId     as in the record, above
+         * @param intake     as in the record, above
+         * @param kind       as in the record, above
+         * @param size       as in the record, above
+         * @param itemDigest as in the record, above
+         * @param landedAt   as in the record, above
+         * @param storage    as in the record, above
+         * @param replaces   as in the record, above
+         */
+        public ItemLanded(UUID itemId, String intake, String kind, long size,
+                String itemDigest, Instant landedAt, StorageRef storage,
+                UUID replaces)
+        {
+            this(itemId, intake, kind, size, itemDigest, landedAt, storage,
+                    replaces, null);
+        }
 
         /**
          * An item that replaces nothing.
@@ -782,16 +805,41 @@ public sealed interface ConnectorMessage permits
      *                        null
      * @param messageReplaces for a message batch, the earlier message each
      *                        message replaces, as its producer said, as
+     * @param sameAs          the earlier item of the intake with the same
+     *                        content, the earliest still landed, if any
+     *                        (STAGES.md §15.5a); null if none
      *                        {@code <itemId>/<messageId>} (null for one that
      *                        replaces none); null if none does, and for other
      *                        items
      */
     record ItemReceived(UUID itemId, String intake, String kind, long size,
-            String sha256, Instant landedAt, String producerRef,
-            UUID replaces, List<String> messageIds,
-            List<String> messageReplaces)
+            String sha256, Instant landedAt, String producerRef, UUID replaces,
+            List<String> messageIds, List<String> messageReplaces, UUID sameAs)
             implements ConnectorMessage
     {
+
+        /**
+         * The message with no {@code sameAs}: an item that is no copy.
+         *
+         * @param itemId          as in the record, above
+         * @param intake          as in the record, above
+         * @param kind            as in the record, above
+         * @param size            as in the record, above
+         * @param sha256          as in the record, above
+         * @param landedAt        as in the record, above
+         * @param producerRef     as in the record, above
+         * @param replaces        as in the record, above
+         * @param messageIds      as in the record, above
+         * @param messageReplaces as in the record, above
+         */
+        public ItemReceived(UUID itemId, String intake, String kind, long size,
+                String sha256, Instant landedAt, String producerRef,
+                UUID replaces, List<String> messageIds,
+                List<String> messageReplaces)
+        {
+            this(itemId, intake, kind, size, sha256, landedAt, producerRef,
+                    replaces, messageIds, messageReplaces, null);
+        }
 
         /**
          * Copies the message IDs, which may hold nulls.
@@ -806,6 +854,9 @@ public sealed interface ConnectorMessage permits
          * @param replaces        the item it replaces, or null
          * @param messageIds      the message IDs, or null
          * @param messageReplaces the messages' links, or null
+         * @param sameAs          the earlier item of the intake with the same
+         *                        content, the earliest still landed, if any
+         *                        (STAGES.md §15.5a); null if none
          */
         public ItemReceived
         {
@@ -869,14 +920,46 @@ public sealed interface ConnectorMessage permits
      *                          otherwise how many came before it, so a
      *                          result after an operator reopened a failure
      *                          isn't taken for a repeat (STAGES.md §15.6e)
+     * @param sameAs            the earlier item of the intake with the same
+     *                          content, the earliest still landed, if any
+     *                          (STAGES.md §15.5a); null if none
      */
     record ItemResult(UUID itemId, String intake, String status,
             long recordCount, long failedRecordCount, Problem failure,
-            long problemCount, int part, int partCount,
-            List<Problem> problems, String producerRef, UUID replaces,
-            Instant finishedAt, int completion)
+            long problemCount, int part, int partCount, List<Problem> problems,
+            String producerRef, UUID replaces, Instant finishedAt,
+            int completion, UUID sameAs)
             implements ConnectorMessage
     {
+
+        /**
+         * The message with no {@code sameAs}: an item that is no copy.
+         *
+         * @param itemId            as in the record, above
+         * @param intake            as in the record, above
+         * @param status            as in the record, above
+         * @param recordCount       as in the record, above
+         * @param failedRecordCount as in the record, above
+         * @param failure           as in the record, above
+         * @param problemCount      as in the record, above
+         * @param part              as in the record, above
+         * @param partCount         as in the record, above
+         * @param problems          as in the record, above
+         * @param producerRef       as in the record, above
+         * @param replaces          as in the record, above
+         * @param finishedAt        as in the record, above
+         * @param completion        as in the record, above
+         */
+        public ItemResult(UUID itemId, String intake, String status,
+                long recordCount, long failedRecordCount, Problem failure,
+                long problemCount, int part, int partCount,
+                List<Problem> problems, String producerRef, UUID replaces,
+                Instant finishedAt, int completion)
+        {
+            this(itemId, intake, status, recordCount, failedRecordCount,
+                    failure, problemCount, part, partCount, problems,
+                    producerRef, replaces, finishedAt, completion, null);
+        }
 
         /** The status of an item whose records were all stored. */
         public static final String COMPLETED = "completed";
@@ -909,6 +992,9 @@ public sealed interface ConnectorMessage permits
          * @param finishedAt        when it was finished
          * @param completion        its completion's number, or those
          *                          before it
+         * @param sameAs            the earlier item of the intake with the same
+         *                          content, the earliest still landed, if any
+         *                          (STAGES.md §15.5a); null if none
          */
         public ItemResult
         {
@@ -1356,14 +1442,48 @@ public sealed interface ConnectorMessage permits
      * @param interrupted       whether the generation was stopped part way
      *                          for a newer one (STAGES.md §15.8.6): its
      *                          records so far, a total still open
+     * @param sameAs            the earlier item of the intake with the same
+     *                          content, the earliest still landed, if any
+     *                          (STAGES.md §15.5a); null if none
      */
     record ItemSplit(UUID itemId, String intake, long recordCount,
             long failedRecordCount, long itemSize, String itemDigest,
             String producerRef, UUID replaces, Problem failure,
             Instant startedAt, Instant completedAt, List<String> versions,
-            int completion, int generation, boolean interrupted)
+            int completion, int generation, boolean interrupted, UUID sameAs)
             implements ConnectorMessage
     {
+
+        /**
+         * The message with no {@code sameAs}: an item that is no copy.
+         *
+         * @param itemId            as in the record, above
+         * @param intake            as in the record, above
+         * @param recordCount       as in the record, above
+         * @param failedRecordCount as in the record, above
+         * @param itemSize          as in the record, above
+         * @param itemDigest        as in the record, above
+         * @param producerRef       as in the record, above
+         * @param replaces          as in the record, above
+         * @param failure           as in the record, above
+         * @param startedAt         as in the record, above
+         * @param completedAt       as in the record, above
+         * @param versions          as in the record, above
+         * @param completion        as in the record, above
+         * @param generation        as in the record, above
+         * @param interrupted       as in the record, above
+         */
+        public ItemSplit(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, long itemSize, String itemDigest,
+                String producerRef, UUID replaces, Problem failure,
+                Instant startedAt, Instant completedAt, List<String> versions,
+                int completion, int generation, boolean interrupted)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, itemSize,
+                    itemDigest, producerRef, replaces, failure, startedAt,
+                    completedAt, versions, completion, generation, interrupted,
+                    null);
+        }
 
         /**
          * Copies the versions; a completion or generation not given is the
@@ -1528,12 +1648,35 @@ public sealed interface ConnectorMessage permits
      *                          counted within its generation
      * @param generation        the item's generation it is the end of, from
      *                          1 (STAGES.md §15.8)
+     * @param sameAs            the earlier item of the intake with the same
+     *                          content, the earliest still landed, if any
+     *                          (STAGES.md §15.5a); null if none
      */
     record ItemConverted(UUID itemId, String intake, long recordCount,
             long failedRecordCount, Instant completedAt, List<String> versions,
-            int completion, int generation)
+            int completion, int generation, UUID sameAs)
             implements ConnectorMessage
     {
+
+        /**
+         * The message with no {@code sameAs}: an item that is no copy.
+         *
+         * @param itemId            as in the record, above
+         * @param intake            as in the record, above
+         * @param recordCount       as in the record, above
+         * @param failedRecordCount as in the record, above
+         * @param completedAt       as in the record, above
+         * @param versions          as in the record, above
+         * @param completion        as in the record, above
+         * @param generation        as in the record, above
+         */
+        public ItemConverted(UUID itemId, String intake, long recordCount,
+                long failedRecordCount, Instant completedAt,
+                List<String> versions, int completion, int generation)
+        {
+            this(itemId, intake, recordCount, failedRecordCount, completedAt,
+                    versions, completion, generation, null);
+        }
 
         /**
          * Copies the versions; a completion or generation not given is the
@@ -1660,14 +1803,46 @@ public sealed interface ConnectorMessage permits
      *                      counted within its generation
      * @param generation    the item's generation it reports on, from 1
      *                      (STAGES.md §15.8)
+     * @param sameAs        the earlier item of the intake with the same
+     *                      content, the earliest still landed, if any
+     *                      (STAGES.md §15.5a); null if none
      */
     record ItemProgressed(UUID itemId, String intake, String stage,
             long recordCount, long passedCount, long openCount,
             long declinedCount, Problem failure, String producerRef,
             UUID replaces, Instant reportedAt, List<String> versions,
-            int completion, int generation)
+            int completion, int generation, UUID sameAs)
             implements ConnectorMessage
     {
+
+        /**
+         * The message with no {@code sameAs}: an item that is no copy.
+         *
+         * @param itemId        as in the record, above
+         * @param intake        as in the record, above
+         * @param stage         as in the record, above
+         * @param recordCount   as in the record, above
+         * @param passedCount   as in the record, above
+         * @param openCount     as in the record, above
+         * @param declinedCount as in the record, above
+         * @param failure       as in the record, above
+         * @param producerRef   as in the record, above
+         * @param replaces      as in the record, above
+         * @param reportedAt    as in the record, above
+         * @param versions      as in the record, above
+         * @param completion    as in the record, above
+         * @param generation    as in the record, above
+         */
+        public ItemProgressed(UUID itemId, String intake, String stage,
+                long recordCount, long passedCount, long openCount,
+                long declinedCount, Problem failure, String producerRef,
+                UUID replaces, Instant reportedAt, List<String> versions,
+                int completion, int generation)
+        {
+            this(itemId, intake, stage, recordCount, passedCount, openCount,
+                    declinedCount, failure, producerRef, replaces, reportedAt,
+                    versions, completion, generation, null);
+        }
 
         /**
          * Copies the versions; a generation not given is the first.

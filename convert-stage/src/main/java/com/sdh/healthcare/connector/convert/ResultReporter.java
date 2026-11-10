@@ -90,10 +90,27 @@ public final class ResultReporter
      * @param failure     why it couldn't be split further; null if none
      * @param producerRef the producer's reference; null if none
      * @param replaces    the item it replaces; null if none
+     * @param sameAs      the earlier item it is an exact copy of (STAGES.md
+     *                    §15.5a); null if none
      */
     public record Facts(UUID itemId, String intake, Problem failure,
-            String producerRef, UUID replaces)
+            String producerRef, UUID replaces, UUID sameAs)
     {
+
+        /**
+         * The facts of an item that is no copy.
+         *
+         * @param itemId      as in the record, above
+         * @param intake      as in the record, above
+         * @param failure     as in the record, above
+         * @param producerRef as in the record, above
+         * @param replaces    as in the record, above
+         */
+        public Facts(UUID itemId, String intake, Problem failure,
+                String producerRef, UUID replaces)
+        {
+            this(itemId, intake, failure, producerRef, replaces, null);
+        }
 
         /**
          * The facts in the message that gave an item's total.
@@ -107,11 +124,11 @@ public final class ResultReporter
             {
                 case ItemSplit split -> new Facts(split.itemId(),
                         split.intake(), split.failure(), split.producerRef(),
-                        split.replaces());
+                        split.replaces(), split.sameAs());
                 case ItemProgressed progressed -> new Facts(
                         progressed.itemId(), progressed.intake(),
                         progressed.failure(), progressed.producerRef(),
-                        progressed.replaces());
+                        progressed.replaces(), progressed.sameAs());
                 case null, default -> null;
             };
         }
@@ -265,7 +282,7 @@ public final class ResultReporter
                     problems.size(), part + 1, partCount,
                     problems.subList(starts.get(part), starts.get(part + 1)),
                     facts.producerRef(), facts.replaces(), finishedAt,
-                    completion));
+                    completion, facts.sameAs()));
         }
         return parts;
     }

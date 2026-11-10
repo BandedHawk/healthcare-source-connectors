@@ -356,6 +356,12 @@ public final class FailureStore
                         + " superseded_how text",
                 "ALTER TABLE " + table + " ADD COLUMN IF NOT EXISTS"
                         + " superseded_by text",
+                // Added 2026-11-10 (STAGES.md §15.5a): how often an exact
+                // copy of the item came in while the failure was open.
+                "ALTER TABLE " + table + " ADD COLUMN IF NOT EXISTS"
+                        + " resent_count integer NOT NULL DEFAULT 0",
+                "ALTER TABLE " + table + " ADD COLUMN IF NOT EXISTS"
+                        + " resent_at timestamptz",
                 """
                 DO $$
                 BEGIN
@@ -396,7 +402,11 @@ public final class FailureStore
                 "ALTER TABLE " + events + " ADD COLUMN IF NOT EXISTS"
                         + " generation integer",
                 "ALTER TABLE " + events + " ADD COLUMN IF NOT EXISTS"
-                        + " line integer[]");
+                        + " line integer[]",
+                // Added 2026-11-10 (STAGES.md §15.5a): the copy an event
+                // that notes one names; null for a change of state.
+                "ALTER TABLE " + events + " ADD COLUMN IF NOT EXISTS"
+                        + " resent_by uuid");
     }
 
     /**
@@ -735,7 +745,7 @@ public final class FailureStore
     {
         String sql = """
                 SELECT event, at, operator, from_state, to_state, reason_enc,
-                       reason_key, reason_kek, generation, line
+                       reason_key, reason_kek, generation, line, resent_by
                   FROM %s
                  WHERE stage = ? AND item_id = ? AND seq = ?
                  ORDER BY event""".formatted(events);
@@ -758,7 +768,8 @@ public final class FailureStore
                             rows.getString(4), rows.getString(5),
                             sealed == null ? null : new FailureReason(sealed,
                                     rows.getBytes(7), rows.getString(8)),
-                            lineage(rows, 9)));
+                            lineage(rows, 9),
+                            rows.getObject(11, UUID.class)));
                 }
             }
             return found;
@@ -783,9 +794,12 @@ public final class FailureStore
      * @param reason   why, encrypted; null if none was given
      * @param lineage  the lineage of the failure it changed: a number's
      *                 failures, one per revision, share its events
+     * @param resentBy for an event that notes an exact copy of the item
+     *                 (STAGES.md §15.5a), the copy; null for a change of
+     *                 state
      */
     public record Event(int event, Instant at, String operator, String from,
-            String to, FailureReason reason, Lineage lineage)
+            String to, FailureReason reason, Lineage lineage, UUID resentBy)
     {
     }
 
@@ -802,7 +816,7 @@ public final class FailureStore
         String sql = """
                 SELECT item_id, seq, record_id, error_code, source_offset,
                        failed_version, state, failed_at, changed_at,
-                       changed_by, generation, line
+                       changed_by, generation, line, resent_count, resent_at
                   FROM %s
                  WHERE stage = ?%s
                  ORDER BY failed_at DESC, item_id, seq
@@ -844,7 +858,7 @@ public final class FailureStore
         String sql = """
                 SELECT item_id, seq, record_id, error_code, source_offset,
                        failed_version, state, failed_at, changed_at,
-                       changed_by, generation, line
+                       changed_by, generation, line, resent_count, resent_at
                   FROM %s
                  WHERE stage = ? AND item_id = ?
                  ORDER BY seq, generation, line""".formatted(table);
@@ -886,7 +900,9 @@ public final class FailureStore
                 rows.getString(6), lineage(rows, 11)),
                 State.valueOf(rows.getString(7))),
                 rows.getTimestamp(8).toInstant(),
-                rows.getTimestamp(9).toInstant(), rows.getString(10));
+                rows.getTimestamp(9).toInstant(), rows.getString(10),
+                rows.getInt(13), rows.getTimestamp(14) == null ? null
+                        : rows.getTimestamp(14).toInstant());
     }
 
     /**
@@ -895,11 +911,161 @@ public final class FailureStore
      * @param stored    the failure and its state
      * @param failedAt  when it failed
      * @param changedAt when its state last changed
-     * @param changedBy who changed it last; null if no operator has
+     * @param changedBy   who changed it last; null if no operator has
+     * @param resentCount how many exact copies of the item came in while
+     *                    it was open (STAGES.md §15.5a)
+     * @param resentAt    when the last did; null if none has
      */
     public record Listed(Stored stored, Instant failedAt, Instant changedAt,
-            String changedBy)
+            String changedBy, int resentCount, Instant resentAt)
     {
+    }
+
+    /**
+     * Notes that an exact copy of an item came in (STAGES.md §15.5a): each
+     * of the item's open failures at this stage counts it, with when, and
+     * gains an event naming the copy, which leaves its state as it is.
+     * Noting the same copy again does nothing. The event's operator is
+     * {@code pipeline}. Audited {@code failure.resent}, once committed.
+     *
+     * @param itemId the earlier item, the original
+     * @param copy   the copy
+     * @return the failures noted, as they were
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<Stored> markResent(UUID itemId, UUID copy)
+    {
+        List<Stored> noted;
+        try (Connection connection = dataSource.getConnection())
+        {
+            connection.setAutoCommit(false);
+            try
+            {
+                noted = markResentIn(connection, table, events, stage,
+                        itemId, copy, queryTimeoutSeconds);
+                connection.commit();
+            }
+            catch (SQLException | RuntimeException failure)
+            {
+                connection.rollback();
+                throw failure;
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Fail store unavailable",
+                    failure);
+        }
+        auditResent(stage, itemId, copy, noted);
+        return noted;
+    }
+
+    /**
+     * Notes an exact copy of an item within a caller's transaction, as
+     * {@link #markResent} does. Not audited: the caller audits once it
+     * commits ({@link #auditResent}).
+     *
+     * @param connection the transaction's connection
+     * @param table      the failures' table, with its schema
+     * @param events     the events' table, with its schema
+     * @param stage      the stage
+     * @param itemId     the earlier item, the original
+     * @param copy       the copy
+     * @param timeout    how long a statement may run, in seconds
+     * @return the failures noted, as they were
+     * @throws SQLException if a statement fails
+     */
+    public static List<Stored> markResentIn(Connection connection,
+            String table, String events, String stage, UUID itemId,
+            UUID copy, int timeout) throws SQLException
+    {
+        String update = """
+                UPDATE %1$s f
+                   SET resent_count = resent_count + 1,
+                       resent_at = clock_timestamp()
+                 WHERE stage = ? AND item_id = ? AND state IN %3$s
+                   AND NOT EXISTS (
+                       SELECT 1 FROM %2$s e
+                        WHERE e.stage = f.stage AND e.item_id = f.item_id
+                          AND e.seq = f.seq AND e.resent_by = ?
+                          AND e.generation = f.generation
+                          AND e.line = f.line)
+             RETURNING seq, record_id, error_code, source_offset,
+                       failed_version, state, generation, line"""
+                .formatted(table, events, State.OPEN_SQL);
+        String insert = """
+                INSERT INTO %1$s (stage, item_id, seq, event, at, operator,
+                       from_state, to_state, generation, line, resent_by)
+                SELECT ?, ?, ?, COALESCE(max(event), 0) + 1,
+                       clock_timestamp(), 'pipeline', ?, ?, ?, ?, ?
+                  FROM %1$s
+                 WHERE stage = ? AND item_id = ? AND seq = ?"""
+                .formatted(events);
+        List<Stored> noted = new ArrayList<>();
+        try (PreparedStatement set = connection.prepareStatement(update))
+        {
+            set.setQueryTimeout(timeout);
+            set.setString(1, stage);
+            set.setObject(2, itemId);
+            set.setObject(3, copy);
+            try (ResultSet rows = set.executeQuery())
+            {
+                while (rows.next())
+                {
+                    noted.add(new Stored(new Failure(itemId,
+                            rows.getLong(1), rows.getString(2),
+                            rows.getString(3), rows.getLong(4),
+                            rows.getString(5), lineage(rows, 7)),
+                            State.valueOf(rows.getString(6))));
+                }
+            }
+        }
+        for (Stored each : noted)
+        {
+            try (PreparedStatement add = connection.prepareStatement(insert))
+            {
+                long seq = each.failure().seq();
+                add.setQueryTimeout(timeout);
+                add.setString(1, stage);
+                add.setObject(2, itemId);
+                add.setLong(3, seq);
+                add.setString(4, each.state().name());
+                add.setString(5, each.state().name());
+                add.setInt(6, each.failure().lineage().generation());
+                add.setArray(7, line(connection, each.failure().lineage()));
+                add.setObject(8, copy);
+                add.setString(9, stage);
+                add.setObject(10, itemId);
+                add.setLong(11, seq);
+                add.executeUpdate();
+            }
+        }
+        return noted;
+    }
+
+    /**
+     * Audits the failures an exact copy was noted for, once committed:
+     * {@code failure.resent}, with no content.
+     *
+     * @param stage  the stage
+     * @param itemId the earlier item, the original
+     * @param copy   the copy
+     * @param noted  the failures noted, as they were
+     */
+    public static void auditResent(String stage, UUID itemId, UUID copy,
+            List<Stored> noted)
+    {
+        for (Stored each : noted)
+        {
+            Telemetry.get().audit("failure.resent",
+                    Fields.of(Attr.STAGE, stage).with(Attr.ITEM_ID, itemId)
+                            .with(Attr.SEQ, each.failure().seq())
+                            .with(Attr.STATE, each.state().name())
+                            .with(Attr.COPY_ID, copy)
+                            .with(Attr.OPERATOR, "pipeline")
+                            .with(Attr.ERROR_CODE,
+                                    each.failure().errorCode()));
+        }
     }
 
     /**

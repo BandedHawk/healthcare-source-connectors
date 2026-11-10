@@ -1026,7 +1026,8 @@ revision, and a reprocess is always stored and sent.
    failed correction names the original it was for, so none is left without an owner.
 5. **Only what a stage failed is corrected.** An object that passed a stage can't be corrected at it; one that has
    passed to the end is corrected in the FHIR repository.
-6. **An exact copy is noted and discarded, not stored again:** an item or document the same as one stored, as
+6. **An exact copy is noted and discarded, not stored again** (for items, replaced by §15.5a: a copy is processed in
+   full, and only recognised): an item or document the same as one stored, as
    proven by its keyed digest, is recorded as having arrived (when, from whom, under what name, the object it is the
    same as) and its bytes aren't stored a second time. Documents are whole: a document (a record: one
    `ClinicalDocument`, one transaction set) is compared whole, never its parts.
@@ -1142,6 +1143,9 @@ rewritten into a success, and the success is never stored over it.** Both stay, 
 
 ### 15.5 Exact copies
 
+**Replaced by §15.5a (decided 2026-11-10):** an exact copy is processed in full at every stage; landing only
+recognises it and says so. What follows is kept as first decided.
+
 - **At landing:** an item with the same `item_digest` as one stored is recorded as an arrival: a row of its own
   (a new ID for the arrival, `same_as_item_id`, when, the source reference, the producer's reference), audited
   `item.duplicate_content`, with no bytes stored and nothing announced. The producer's receipt and result name the
@@ -1153,6 +1157,80 @@ rewritten into a success, and the success is never stored over it.** Both stay, 
   HMAC-SHA-256 of the record's bytes (§7.3 of DESIGN.md), so equal IDs prove equal content; a document differing in
   a byte (a header timestamp) is a different document.
 - **Not discarded:** a forced retry, correction or reprocess (§15.4).
+
+### 15.5a Exact copies, as decided (2026-11-10, with the user)
+
+**Why §15.5 changed.** An output depends on the input's bytes and on the version of the stage that made it (§14.2):
+the same bytes under a newer splitter, converter or mapping may come out differently, and an item that failed
+under the old version may pass under the new. So a copy can be "the same" as the earlier item only at a stage whose
+version hasn't changed since, and that holds stage by stage: landing can't judge it, as it doesn't know the stages'
+versions, and a stage that ended a copy unprocessed would leave a changed stage after it nothing to process. Also
+found: landing knows an item's digest only once its bytes are stored, so "no bytes stored" means deleting committed
+rows; an item not announced is split anyway by the split stage's reconciler, and shows as missing in the audit
+check that every item ended at every stage (§13.2); and landing can't reach the stages' fail stores.
+
+**The rules** (replacing §15.1 rule 6 for items, and §15.5):
+1. **Every copy is processed in full,** at every stage, under the version running then, as an item of its own: its
+   bytes landed and kept, split, converted and transformed like any other. Nothing is skipped because it is a copy,
+   as nothing is for a reprocess (§15.8.1 rule 1). Two items with the same content may then have different outputs,
+   each made by the version that took it.
+2. **Landing recognises a copy and says so.** An item landed with the same `item_digest` as an earlier item of the
+   intake is given `sameAs`, the earliest such item still in the ledger (item IDs are UUIDv7, so the lowest), not
+   counting the item it `replaces`: a resubmit of an item isn't a copy of it. `item.duplicate_content` is audited
+   as now, naming it. `sameAs` goes on the item's `item.landed`, its receipt (`item.received`, and a push's HTTP
+   receipt) and, through the stages, its item messages and its producer result.
+3. **Records are not matched across items** ("copy per item" stays, §11 step 4b). A record's ID comes from its content
+   alone (DESIGN.md §7.3), so a system after the pipeline spots repeated documents by `recordId`, as it handles
+   meaning (§15.1 rule 10).
+4. **The earlier item's failures are flagged `resent`.** Each stage, when it learns an item is a copy (the split
+   stage from `item.landed`, a later stage from `item.split` or its counterpart), flags each open failure
+   (`FAILED`, `REVISION_PENDING`) it holds for the item named by `sameAs`: a count and the last time, an event naming
+   the copy, audited `failure.resent`. This tells an operator the producer sent it again; the copy's own
+   processing is unaffected, and its own failures are its own. Nothing else changes state.
+5. **Unchanged:** a forced retry, correction or reprocess (§15.8); landing's `resubmit` (§13.5); the producer's
+   result, one per item at its first report (§15.8.7), now naming `sameAs` for a copy.
+6. **Not compared:** a stage doesn't say whether a copy's output came out the same as the earlier item's (no
+   `same_output` for copies, decided): that would mean reading the earlier item's rows at every stage, and the
+   record IDs let anyone compare later.
+
+**The contract** (3.0, unreleased, so added under it; DESIGN.md §10.1, brought up to date with every field 3.0
+has gained since the stages were built, decided): `sameAs` (an item ID, left out when unset)
+on `item.landed`, `item.received`, `item.split`, `item.progress`, `item.converted` and `item.result`, and on a
+push's receipt. The split stage carries it from `item.landed` to its item messages, as it carries `replaces`; the
+convert stage from those to its own and the producer's result.
+
+**Built in this order, with tests, then tried on the sandbox:** the contract and its round trips; landing's
+`sameAs` (files, pushes and message batches, chosen when the message is built, so a message sent again after a
+crash names the same item); the stages carrying it; the fail store's `resent` (`stage_failure` gains `resent_count`
+and `resent_at`, shown by `failures`); the docs: DESIGN.md §10.1, §5.3.3 and the READMEs.
+
+**As built (2026-11-10, DESIGN.md revision (cp); tried on the sandbox the same day, SANDBOX.md "Exact copies"):**
+- **Landing.** `LandingLedger.earliestCopy` gives the item, from the ledger's items with the same digest: only those
+  with a lower ID (compared unsigned, as UUIDv7 time order needs), leaving out the replaced item, so the answer
+  doesn't change when later copies land. A newly landed item gets it from the duplicate check, which reads the
+  ledger only when the digest index says there may be a match; an item announced again at startup, or a resubmit
+  recorded before, is looked up once. The announcer puts it on `item.landed` and `item.received`; a push's receipt
+  has it, the receipt replayed for a repeated `Idempotency-Key` too (looked up, with the replaced item from the
+  summary row, `ItemLander.replacesOf`). A receipt given while the ledger entry was deferred by a storage error
+  leaves it out; the item's messages, sent once the entry is written, still name it.
+- **Split stage.** The `sameAs` of an `item.landed` is kept in a table of its own beside the checkpoints,
+  `split_copy` (item, earlier item, when noted; the first noted stays), before the item is split; noting it flags the
+  earlier item's open failures. Every end sent for the copy reads it from there, so ends sent again after a decline,
+  a correction or a reprocess name it too. An `item.reprocess` holds the item as landing kept it, with no `sameAs`,
+  and flags nothing. An item the reconciler splits before its `item.landed` arrives names it from when that message
+  is taken.
+- **Convert stage.** The worker flags the earlier item's open failures when a total of the copy's first generation
+  names it (`item.split` or `item.progress`), so a reprocess of the copy flags nothing; a total taken again flags
+  nothing more. `item.converted`, `item.progress` and `item.result` carry it from the total.
+- **Fail store.** `stage_failure` has `resent_count` and `resent_at`; `stage_failure_event` has `resent_by`, the
+  copy, on an event that leaves the state as it was, by `pipeline`. Only `FAILED` and `REVISION_PENDING` failures
+  of the earlier item, not superseded, are flagged, each once per copy. Audited `failure.resent`, with
+  `sdh.copy_id`. `sdh-admin failures` shows `resent=<n> last=<time>`, and with `--item-id` an event line
+  `resent as <copy>`.
+- **Tests:** the contract round trips; the ledger's choice (earliest, earlier only, unsigned, not the replaced
+  item); pushes (receipt, messages, a resubmit, a repeated key, a restart); the split stage (flagged once, a
+  declined failure left alone, the copy's end naming it); the convert stage (flagged once from a copy's total, its
+  `item.progress` naming it) and the result.
 
 ### 15.6 Items: progress and completion
 
@@ -1397,7 +1475,7 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
 3. **Operator commands:** `failures` (list, show, export), `correct`, `retry`, `decline`, `reopen`, and the
    split stage's `release` (built 2026-11-09, §15.6c–§15.6f); then `reprocess`, with generations and revisions,
    decided 2026-11-09 (§15.8, its own order of building in §15.8.10).
-4. **Exact copies** (§15.5) at landing and at the stages.
+4. **Exact copies** (§15.5, replaced by §15.5a) at landing and at the stages.
 5. **The drain check** (§14.4).
 
 ### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 to 5 built)

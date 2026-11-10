@@ -568,6 +568,20 @@ public final class ItemLander
     }
 
     /**
+     * The item a fully landed item replaces, from its summary row.
+     *
+     * @param itemId the item
+     * @return the item it replaces; empty if none, or if it isn't fully
+     *         landed
+     * @throws IOException if the table can't be read
+     */
+    public Optional<UUID> replacesOf(UUID itemId) throws IOException
+    {
+        return LandedItems.summary(table, itemId)
+                .flatMap(LandedItems::replaces);
+    }
+
+    /**
      * A new SHA-256 digest.
      *
      * @return the digest

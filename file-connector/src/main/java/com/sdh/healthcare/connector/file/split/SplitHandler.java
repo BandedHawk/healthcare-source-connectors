@@ -217,7 +217,7 @@ public final class SplitHandler implements BatchHandler
             return reject("OTHER_STORAGE");
         }
         return split(() -> splitter.split(landed.itemId(),
-                landed.itemDigest()));
+                landed.itemDigest(), landed.sameAs()));
     }
 
     /**

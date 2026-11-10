@@ -354,6 +354,37 @@ public final class ItemProcessor
     }
 
     /**
+     * Takes note that an item is an exact copy of an earlier one, as its
+     * {@code item.landed} says (STAGES.md §15.5a): keeps the earlier item,
+     * so each end sent for the copy names it, and flags the earlier item's
+     * open failures here resent. The copy itself is split in full, as any
+     * item is. Noting it again does nothing more.
+     *
+     * @param itemId the copy
+     * @param sameAs the earlier item
+     */
+    public void noteCopy(UUID itemId, UUID sameAs)
+    {
+        pipeline.noteSameAs(itemId, sameAs);
+        if (failures != null)
+        {
+            failures.markResent(sameAs, itemId);
+        }
+    }
+
+    /**
+     * The earlier item an item is an exact copy of, as noted by
+     * {@link #noteCopy}.
+     *
+     * @param itemId the item
+     * @return the earlier item; empty if it is no copy, or none was noted
+     */
+    public Optional<UUID> sameAs(UUID itemId)
+    {
+        return pipeline.sameAs(itemId);
+    }
+
+    /**
      * Reads an item's checkpoint.
      *
      * @param itemId the item

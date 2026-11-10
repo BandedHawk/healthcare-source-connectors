@@ -243,7 +243,9 @@ reconciler, or reprocessed there (`reprocess --item-id` on the convert stage), w
 
 `failures` lists the stage's open failures, newest first, by item, record number (`-1` is the item as a whole),
 state, error code and offset; `--all` lists every state, and `--item-id <id>` one item's, with each change: who,
-when, and whether a reason was given. It shows no content.
+when, and whether a reason was given. It shows no content. A failure whose item the producer sent again as an exact
+copy shows `resent=<n>` and when the last came, and its changes include `resent as <copy>`: the copy is processed
+in full on its own, so its outcome may differ under the stage's current version.
 
 `decline --item-id <id> --seq <n>` records that a failure won't be corrected; `reopen` takes that back. Each needs a
 reason, read from standard input, never the command line, so it stays out of shell histories and the cluster's

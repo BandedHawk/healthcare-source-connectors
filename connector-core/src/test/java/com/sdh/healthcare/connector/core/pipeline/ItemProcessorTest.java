@@ -580,6 +580,64 @@ class ItemProcessorTest
     }
 
     /**
+     * An exact copy of an item that failed flags the original's open
+     * failures resent, once however often it is noted, and is split in
+     * full itself, its end naming the original (STAGES.md §15.5a).
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void flagsTheOriginalsOpenFailuresWhenACopyComesIn() throws Exception
+    {
+        String content = "1,ok\n2,\"never closed\n";
+        LandedItem original = land(content);
+        ItemProcessor processor = processor();
+        process(processor, original);
+        LandedItem copy = land(content);
+
+        processor.noteCopy(copy.itemId(), original.itemId());
+        processor.noteCopy(copy.itemId(), original.itemId());
+        assertThat(processor.sameAs(copy.itemId()))
+                .contains(original.itemId());
+        assertThat(processor.sameAs(original.itemId())).isEmpty();
+        FailureStore failures = failures();
+        assertThat(failures.listItem(original.itemId())).singleElement()
+                .satisfies(listed ->
+                {
+                    assertThat(listed.resentCount()).isEqualTo(1);
+                    assertThat(listed.resentAt()).isNotNull();
+                    assertThat(listed.stored().state())
+                            .isEqualTo(FailureStore.State.FAILED);
+                });
+        assertThat(failures.events(original.itemId(),
+                FailureStore.WHOLE_ITEM))
+                .extracting(FailureStore.Event::resentBy)
+                .containsExactly(copy.itemId());
+
+        publisher.sent.clear();
+        ItemProcessor.Outcome outcome = processor.process(copy.itemId(),
+                copy.digest(), () -> LandedItemSource.open(landed,
+                        copy.itemId(), keys), lease(),
+                LandedRefs.NONE.withSameAs(original.itemId()));
+        assertThat(outcome.result()).isEqualTo(ItemProcessor.Result.FAILED);
+        assertThat(messages().getLast()).isInstanceOfSatisfying(
+                ItemProgressed.class, progress -> assertThat(
+                        progress.sameAs()).isEqualTo(original.itemId()));
+        assertThat(failures.listItem(copy.itemId())).singleElement()
+                .satisfies(listed -> assertThat(listed.resentCount())
+                        .isZero());
+
+        // A declined failure is closed: a later copy leaves it alone.
+        failures.change(original.itemId(), FailureStore.WHOLE_ITEM,
+                java.util.Set.of(FailureStore.State.FAILED),
+                FailureStore.State.DECLINED, "declined", "alice", null);
+        processor.noteCopy(land(content).itemId(), original.itemId());
+        assertThat(failures.listItem(original.itemId())).singleElement()
+                .satisfies(listed -> assertThat(listed.resentCount())
+                        .isEqualTo(1));
+    }
+
+    /**
      * An empty or blank item fails as a whole (STAGES.md §16), for an
      * operator to decide; declined, it completes with no records. A
      * whole-item correction that is itself blank fails the same way.

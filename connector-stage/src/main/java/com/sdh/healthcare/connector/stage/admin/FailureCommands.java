@@ -226,9 +226,11 @@ public final class FailureCommands
                         {
                             continue;
                         }
-                        out.println("  " + event.at() + " " + event.from()
-                                + " -> " + event.to() + " by "
-                                + event.operator()
+                        out.println("  " + event.at() + " "
+                                + (event.resentBy() == null
+                                        ? event.from() + " -> " + event.to()
+                                        : "resent as " + event.resentBy())
+                                + " by " + event.operator()
                                 + (event.reason() == null ? ""
                                         : " (reason kept, encrypted)"));
                     }
@@ -299,8 +301,9 @@ public final class FailureCommands
          *
          * @param failure the failure
          * @return item, record number, lineage (STAGES.md §15.8.8), state,
-         *         error code, place, version, when it failed, and who
-         *         changed it last
+         *         error code, place, version, when it failed, who changed
+         *         it last, and how often an exact copy of the item came in
+         *         while it was open (§15.5a)
          */
         private static String line(FailureStore.Listed failure)
         {
@@ -314,7 +317,10 @@ public final class FailureCommands
                             : " changed=" + failure.changedAt() + " by "
                                     + failure.changedBy())
                     + (what.version() == null ? ""
-                            : " version=" + what.version());
+                            : " version=" + what.version())
+                    + (failure.resentCount() == 0 ? ""
+                            : " resent=" + failure.resentCount() + " last="
+                                    + failure.resentAt());
         }
     }
 

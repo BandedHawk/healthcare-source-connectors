@@ -721,6 +721,13 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                         registry.expect(total.itemId(), total.expected(),
                                 received.body(), total.partial(),
                                 total.completion(), total.generation());
+                        // An exact copy flags the original's open failures
+                        // (STAGES.md §15.5a); a reprocess of it doesn't.
+                        if (total.sameAs() != null
+                                && total.generation() == 1)
+                        {
+                            registry.noteCopy(total.itemId(), total.sameAs());
+                        }
                         items.add(total.itemId());
                     }
                     case StageInput.Unwanted unwanted ->

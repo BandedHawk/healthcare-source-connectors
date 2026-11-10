@@ -89,9 +89,12 @@ public sealed interface StageInput
      *                   (STAGES.md §15.8): one of an earlier generation than
      *                   the item's here is stale, and one of a later moves
      *                   the item to it
+     * @param sameAs     the earlier item the item is an exact copy of, as
+     *                   the stage before's total names it (STAGES.md
+     *                   §15.5a); null if none
      */
     record ItemTotal(UUID itemId, long expected, boolean partial,
-            int completion, int generation)
+            int completion, int generation, UUID sameAs)
             implements StageInput
     {
 
@@ -101,6 +104,22 @@ public sealed interface StageInput
         public ItemTotal
         {
             generation = Math.max(1, generation);
+        }
+
+        /**
+         * A total of an item that is no copy.
+         *
+         * @param itemId     the item's id
+         * @param expected   how many records of it the stage will receive,
+         *                   or has so far
+         * @param partial    whether it is from {@code item.progress}
+         * @param completion the stage before's completion number
+         * @param generation the item's generation the total is of
+         */
+        public ItemTotal(UUID itemId, long expected, boolean partial,
+                int completion, int generation)
+        {
+            this(itemId, expected, partial, completion, generation, null);
         }
 
         /**

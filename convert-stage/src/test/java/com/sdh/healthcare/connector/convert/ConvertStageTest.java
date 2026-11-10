@@ -434,6 +434,64 @@ class ConvertStageTest
     }
 
     /**
+     * An exact copy of an item whose record failed here is converted in
+     * full (STAGES.md §15.5a): its total names the original, whose open
+     * failure is flagged resent, once however often the total comes; the
+     * copy's own end names the original too.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void flagsTheOriginalsFailureWhenACopyComesIn() throws Exception
+    {
+        List<RecordSplit> messages = split("1,2", "3");
+        ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
+                "claims.csv", null, null, SPLIT_AT, SPLIT_AT);
+        assertThat(worker.handle(List.of(received(messages.get(0)),
+                received(total), received(messages.get(1)))))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+
+        UUID copy = UUID.randomUUID();
+        List<RecordSplit> copied = splitFor(copy, "1,2", "3");
+        ItemSplit copyTotal = new ItemSplit(copy, "claims", 2, 0, 20,
+                "digest", "claims.csv", null, null, SPLIT_AT, SPLIT_AT,
+                List.of(), 1, 1, false, item);
+        sent.clear();
+        for (int round = 0; round < 2; round++)
+        {
+            assertThat(worker.handle(List.of(received(copied.get(0)),
+                    received(copyTotal), received(copied.get(1)))))
+                    .isEqualTo(BatchHandler.Outcome.DONE);
+        }
+        var failures = registry.failureStore();
+        assertThat(failures.listItem(item)).singleElement()
+                .satisfies(listed -> assertThat(listed.resentCount())
+                        .isEqualTo(1));
+        assertThat(failures.events(item, 1))
+                .extracting(event -> event.resentBy())
+                .containsExactly(copy);
+        assertThat(failures.listItem(copy)).singleElement()
+                .satisfies(listed -> assertThat(listed.resentCount())
+                        .isZero());
+
+        MessageOpener opener = new MessageOpener(
+                Map.of("transform", downstream.getPrivate()),
+                Map.of("convert", (ECPublicKey) signer.getPublic()));
+        ConnectorMessage.ItemProgressed progress = null;
+        for (OutboundMessage message : sent)
+        {
+            if (opener.open(message.body())
+                    instanceof ConnectorMessage.ItemProgressed opened)
+            {
+                progress = opened;
+            }
+        }
+        assertThat(progress).isNotNull();
+        assertThat(progress.itemId()).isEqualTo(copy);
+        assertThat(progress.sameAs()).isEqualTo(item);
+    }
+
+    /**
      * An operator's correction of a record that failed conversion is
      * converted by the worker as the record was (STAGES.md §15.6c): stored
      * as a new row of records, marked correction_of the failed one, which

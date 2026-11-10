@@ -1742,6 +1742,46 @@ public final class StageRegistry
     }
 
     /**
+     * Notes that an item is an exact copy of an earlier one (STAGES.md
+     * §15.5a), as the stage before's total for it says: the earlier item's
+     * open failures here are flagged resent, as
+     * {@link FailureStore#markResent} does. Noting it again does nothing
+     * more.
+     *
+     * @param itemId the copy
+     * @param sameAs the earlier item
+     * @return how many failures were flagged
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public int noteCopy(UUID itemId, UUID sameAs)
+    {
+        List<FailureStore.Stored> noted;
+        try (Connection connection = dataSource.getConnection())
+        {
+            connection.setAutoCommit(false);
+            try
+            {
+                noted = FailureStore.markResentIn(connection, failures,
+                        FailureStore.eventsTable(failures.substring(0,
+                                failures.indexOf('.'))),
+                        stage, sameAs, itemId, queryTimeoutSeconds);
+                connection.commit();
+            }
+            catch (SQLException | RuntimeException failure)
+            {
+                connection.rollback();
+                throw failure;
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Registry unavailable", failure);
+        }
+        FailureStore.auditResent(stage, sameAs, itemId, noted);
+        return noted.size();
+    }
+
+    /**
      * Notes how many records an item has. The first total given is kept: a
      * repeat of the same message gives the same one.
      *

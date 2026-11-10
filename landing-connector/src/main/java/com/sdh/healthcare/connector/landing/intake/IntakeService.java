@@ -143,6 +143,12 @@ public final class IntakeService implements LandingIntake
     /** A landed item whose message isn't acknowledged yet; or null. */
     private LandedItem unannounced;
 
+    /**
+     * The earlier item {@link #unannounced} is an exact copy of (STAGES.md
+     * §15.5a); null if none.
+     */
+    private UUID unannouncedSameAs;
+
     /** Whether the source is answering, for events and gauges. */
     private final IntakeHealth health;
 
@@ -470,6 +476,7 @@ public final class IntakeService implements LandingIntake
                 throw failure;
             }
             LandedItem item = landed.item();
+            UUID sameAs;
             if (!landed.recorded())
             {
                 boolean seenContent =
@@ -477,12 +484,14 @@ public final class IntakeService implements LandingIntake
                 storage.ledger().record(
                         List.of(LandingLedger.Entry.of(item)));
                 storage.index().add(item.source().key(), item.digest());
-                if (seenContent)
-                {
-                    reportDuplicate(item);
-                }
+                sameAs = seenContent ? reportDuplicate(item) : null;
+            }
+            else
+            {
+                sameAs = sameAs(storage, item);
             }
             unannounced = item;
+            unannouncedSameAs = sameAs;
             announcePending();
             return landed;
         }
@@ -598,6 +607,7 @@ public final class IntakeService implements LandingIntake
             }
         }
         unannounced = lander.lastLanded().orElse(null);
+        unannouncedSameAs = sameAs(storage, unannounced);
         announcePending();
         recovered = true;
         LOG.info("intake.recovered resume={} ledger_entries={}",
@@ -645,11 +655,9 @@ public final class IntakeService implements LandingIntake
                 storage.index().mayHaveContent(landed.digest());
         storage.ledger().record(List.of(LandingLedger.Entry.of(landed)));
         storage.index().add(landed.source().key(), landed.digest());
-        if (seenContent)
-        {
-            reportDuplicate(landed);
-        }
+        UUID sameAs = seenContent ? reportDuplicate(landed) : null;
         unannounced = landed;
+        unannouncedSameAs = sameAs;
         announcePending();
         source.afterLanding(listed);
         readiness.forget(listed.ref());
@@ -683,8 +691,9 @@ public final class IntakeService implements LandingIntake
     {
         if (unannounced != null)
         {
-            announcer.announce(unannounced);
+            announcer.announce(unannounced, unannouncedSameAs);
             unannounced = null;
+            unannouncedSameAs = null;
         }
     }
 
@@ -694,28 +703,34 @@ public final class IntakeService implements LandingIntake
      * same content again on purpose.
      *
      * @param landed the new item
+     * @return the earlier item it is an exact copy of; null if none
      * @throws Exception if the ledger can't be read
      */
-    private void reportDuplicate(LandedItem landed) throws Exception
+    private UUID reportDuplicate(LandedItem landed) throws Exception
     {
-        reportDuplicate(storage, intake, landed);
+        return reportDuplicate(storage, intake, landed);
     }
 
     /**
      * Warns that a landed item has the same content as items landed
-     * before, if the ledger confirms it.
+     * before, if the ledger confirms it, and finds the one it is an exact
+     * copy of (STAGES.md §15.5a).
      *
      * @param storage the landing storage
      * @param intake  the intake's name
      * @param landed  the new item
+     * @return the earliest earlier item with the same content, other than
+     *         the one it replaces; null if none
      * @throws Exception if the ledger can't be read
      */
-    static void reportDuplicate(Storage storage, String intake,
+    static UUID reportDuplicate(Storage storage, String intake,
             LandedItem landed) throws Exception
     {
         List<UUID> others = storage.ledger().itemsWithDigest(landed.digest())
                 .stream().filter(other -> !other.equals(landed.itemId()))
                 .toList();
+        UUID sameAs = LandingLedger.earliest(others, landed.itemId(),
+                landed.replaces()).orElse(null);
         if (!others.isEmpty())
         {
             Telemetry.get().auditWarn("item.duplicate_content",
@@ -723,8 +738,28 @@ public final class IntakeService implements LandingIntake
                             .with(Attr.INTAKE, intake)
                             .with(Attr.COUNT, others.size())
                             .with(Attr.REASON, "same content as item "
-                                    + others.get(0)));
+                                    + (sameAs != null ? sameAs
+                                            : others.get(0))));
         }
+        return sameAs;
+    }
+
+    /**
+     * The earlier item a landed item is an exact copy of, from the ledger,
+     * for an item whose landing isn't at hand: one found at startup, or
+     * recorded before.
+     *
+     * @param storage the landing storage
+     * @param landed  the item; or null
+     * @return the earliest earlier item with the same content, other than
+     *         the one it replaces; null if none, or if there's no item
+     * @throws IOException if the ledger can't be read
+     */
+    static UUID sameAs(Storage storage, LandedItem landed) throws IOException
+    {
+        return landed == null ? null
+                : storage.ledger().earliestCopy(landed.itemId(),
+                        landed.digest(), landed.replaces()).orElse(null);
     }
 
     /**

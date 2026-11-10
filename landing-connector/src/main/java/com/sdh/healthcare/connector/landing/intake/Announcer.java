@@ -21,6 +21,7 @@ import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.Record;
@@ -131,8 +132,27 @@ public final class Announcer
     public void announce(LandedItem item)
             throws PublishFailedException, InterruptedException
     {
+        announce(item, null);
+    }
+
+    /**
+     * Sends an item's {@code item.landed} message, naming the earlier item
+     * it is an exact copy of, and waits for its acknowledgement; then,
+     * with results on, its receipt, naming it too (STAGES.md §15.5a).
+     *
+     * @param item   the landed item
+     * @param sameAs the earliest earlier item of the intake with the same
+     *               content still in the ledger; null if none
+     * @throws PublishFailedException if the broker didn't acknowledge one
+     *                                after every retry, or the summary
+     *                                row couldn't be read
+     * @throws InterruptedException   if the wait is interrupted
+     */
+    public void announce(LandedItem item, UUID sameAs)
+            throws PublishFailedException, InterruptedException
+    {
         ConnectorMessage.ItemLanded message =
-                item.message(catalogName, namespace);
+                item.message(catalogName, namespace, sameAs);
         OutboundMessage outbound = OutboundMessage.of(message,
                 sealer.seal(message));
         try
@@ -151,7 +171,7 @@ public final class Announcer
         }
         if (receipts != null)
         {
-            receipts.channel().send(receipt(item));
+            receipts.channel().send(receipt(item, sameAs));
         }
         Telemetry.get().itemLanded(item.intake(), item.kind().wireName(),
                 item.size());
@@ -165,11 +185,13 @@ public final class Announcer
      * reference and, for a batch, the messages' broker IDs and the
      * earlier messages they replace.
      *
-     * @param item the landed item
+     * @param item   the landed item
+     * @param sameAs the earlier item it is an exact copy of; null if none
      * @return the receipt
      * @throws PublishFailedException if the summary row can't be read
      */
-    private ConnectorMessage.ItemReceived receipt(LandedItem item)
+    private ConnectorMessage.ItemReceived receipt(LandedItem item,
+            UUID sameAs)
             throws PublishFailedException
     {
         try
@@ -186,7 +208,8 @@ public final class Announcer
                     LandedItems.messageRefs(summary, receipts.keys())
                             .orElse(null),
                     LandedItems.messageReplaces(summary, receipts.keys())
-                            .orElse(null));
+                            .orElse(null),
+                    sameAs);
         }
         catch (IOException | RuntimeException unreadable)
         {

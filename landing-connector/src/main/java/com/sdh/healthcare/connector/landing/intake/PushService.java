@@ -190,6 +190,12 @@ public final class PushService implements LandingIntake
     private LandedItem unannounced;
 
     /**
+     * The earlier item {@link #unannounced} is an exact copy of (STAGES.md
+     * §15.5a); null if none.
+     */
+    private UUID unannouncedSameAs;
+
+    /**
      * Creates the service.
      *
      * @param intake       the intake's name
@@ -270,6 +276,8 @@ public final class PushService implements LandingIntake
             if (landed.recorded())
             {
                 unannounced = landed.item();
+                unannouncedSameAs =
+                        IntakeService.sameAs(storage, unannounced);
             }
             else
             {
@@ -433,9 +441,10 @@ public final class PushService implements LandingIntake
         }
 
         unrecorded = landed;
+        UUID sameAs = null;
         try
         {
-            finishLast();
+            sameAs = finishLast();
         }
         catch (Throwable failure)
         {
@@ -448,7 +457,7 @@ public final class PushService implements LandingIntake
             LOG.warn("push.finish_deferred error={}",
                     failure.getClass().getSimpleName());
         }
-        return new Result(Status.LANDED, Receipt.of(landed));
+        return new Result(Status.LANDED, Receipt.of(landed, sameAs));
     }
 
     /**
@@ -468,6 +477,7 @@ public final class PushService implements LandingIntake
             }
             unfinished = true;
             unannounced = storage.lander().lastLanded().orElse(null);
+            unannouncedSameAs = IntakeService.sameAs(storage, unannounced);
             recovered = true;
             LOG.info("intake.recovered ledger_entries={}",
                     storage.index().size());
@@ -483,10 +493,13 @@ public final class PushService implements LandingIntake
      * Writes the ledger entry and sends the message of the last landed
      * item, whichever are still to do.
      *
+     * @return the earlier item the item whose entry it wrote is an exact
+     *         copy of; null if none, or if it wrote no entry
      * @throws Exception if storage or the broker fails
      */
-    private void finishLast() throws Exception
+    private UUID finishLast() throws Exception
     {
+        UUID recordedSameAs = null;
         if (unrecorded != null)
         {
             LandedItem landed = unrecorded;
@@ -496,16 +509,21 @@ public final class PushService implements LandingIntake
             storage.index().add(landed.source().key(), landed.digest());
             unrecorded = null;
             unannounced = landed;
+            unannouncedSameAs = null;
             if (seenContent)
             {
-                IntakeService.reportDuplicate(storage, intake, landed);
+                unannouncedSameAs =
+                        IntakeService.reportDuplicate(storage, intake, landed);
             }
+            recordedSameAs = unannouncedSameAs;
         }
         if (unannounced != null)
         {
-            announcer.announce(unannounced);
+            announcer.announce(unannounced, unannouncedSameAs);
             unannounced = null;
+            unannouncedSameAs = null;
         }
+        return recordedSameAs;
     }
 
     /**
@@ -521,7 +539,18 @@ public final class PushService implements LandingIntake
         {
             return Optional.empty();
         }
-        return storage.ledger().find(intake, ref).map(Receipt::of);
+        Optional<LandingLedger.Entry> entry =
+                storage.ledger().find(intake, ref);
+        if (entry.isEmpty())
+        {
+            return Optional.empty();
+        }
+        UUID itemId = entry.get().itemId();
+        UUID sameAs = storage.ledger().earliestCopy(itemId,
+                entry.get().digest(),
+                storage.lander().replacesOf(itemId).orElse(null))
+                .orElse(null);
+        return Optional.of(Receipt.of(entry.get(), sameAs));
     }
 
     /**

@@ -142,6 +142,12 @@ public enum Attr
     RUN_ID("sdh.run_id"),
 
     /**
+     * The ID of an item that is an exact copy of an earlier one (STAGES.md
+     * §15.5a), a UUID.
+     */
+    COPY_ID("sdh.copy_id"),
+
+    /**
      * Why an object was made again (STAGES.md §15.8.7): {@code reprocess}
      * or {@code correction}.
      */

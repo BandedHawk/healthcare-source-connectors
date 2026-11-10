@@ -31,17 +31,49 @@ import org.apache.iceberg.data.Record;
  *                        kept
  * @param messageReplaces the earlier message each message replaces, or
  *                        null; null if none does
+ * @param sameAs          the earlier item it is an exact copy of, as its
+ *                        {@code item.landed} named it (STAGES.md §15.5a);
+ *                        null if none
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record LandedRefs(String producerRef, UUID replaces,
         MessageIndex messageIndex, List<String> messageRefs,
-        List<String> messageReplaces)
+        List<String> messageReplaces, UUID sameAs)
 {
 
     /** An item with nothing kept: not landed, or its summary is gone. */
     public static final LandedRefs NONE =
             new LandedRefs(null, null, null, null, null);
+
+    /**
+     * What landing kept about an item that is no copy.
+     *
+     * @param producerRef     as in the record, above
+     * @param replaces        as in the record, above
+     * @param messageIndex    as in the record, above
+     * @param messageRefs     as in the record, above
+     * @param messageReplaces as in the record, above
+     */
+    public LandedRefs(String producerRef, UUID replaces,
+            MessageIndex messageIndex, List<String> messageRefs,
+            List<String> messageReplaces)
+    {
+        this(producerRef, replaces, messageIndex, messageRefs,
+                messageReplaces, null);
+    }
+
+    /**
+     * The same, naming the earlier item the item is an exact copy of.
+     *
+     * @param earlier the earlier item; null if none
+     * @return what is kept, with it
+     */
+    public LandedRefs withSameAs(UUID earlier)
+    {
+        return new LandedRefs(producerRef, replaces, messageIndex,
+                messageRefs, messageReplaces, earlier);
+    }
 
     /**
      * Reads what an item's summary row keeps, decrypting what is

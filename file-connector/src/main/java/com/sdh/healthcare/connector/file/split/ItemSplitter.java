@@ -115,6 +115,28 @@ public final class ItemSplitter
     public ItemProcessor.Outcome split(UUID itemId, String digest)
             throws Exception
     {
+        return split(itemId, digest, null);
+    }
+
+    /**
+     * Splits an item as {@link #split(UUID, String)} does; for an exact
+     * copy of an earlier item (STAGES.md §15.5a), first takes note of it,
+     * which flags the earlier item's open failures resent.
+     *
+     * @param itemId the item's ID
+     * @param digest the item's digest, from its {@code item.landed}
+     * @param sameAs the earlier item it is an exact copy of, from its
+     *               {@code item.landed}; null if none
+     * @return how it ended
+     * @throws LeaseHeldException   if another pod holds the item's lease;
+     *                              try again later
+     * @throws InterruptedException if interrupted while waiting
+     * @throws Exception            if storage or the broker fails, or the
+     *                              item's lease was lost; try again later
+     */
+    public ItemProcessor.Outcome split(UUID itemId, String digest,
+            UUID sameAs) throws Exception
+    {
         lock.lockInterruptibly();
         try (LeaseKeeper lease = LeaseKeeper.tryAcquire(leases,
                 leasePrefix + itemId, owner, leaseSettings,
@@ -124,11 +146,16 @@ public final class ItemSplitter
             // What the producer's result names, passed on so later stages
             // need no landing key (STAGES.md §9). Refreshed first: the item
             // landed after the table was last read.
+            if (sameAs != null)
+            {
+                processor.noteCopy(itemId, sameAs);
+            }
             Table landed = landedItems.get();
             landed.refresh();
             LandedRefs refs = LandedItems.summary(landed, itemId)
                     .map(summary -> LandedRefs.of(summary, keys))
-                    .orElse(LandedRefs.NONE);
+                    .orElse(LandedRefs.NONE)
+                    .withSameAs(processor.sameAs(itemId).orElse(null));
             ItemProcessor.Outcome outcome = processor.process(itemId, digest,
                     () -> LandedItemSource.open(landedItems.get(), itemId,
                             keys), lease, refs);
@@ -346,7 +373,8 @@ public final class ItemSplitter
     }
 
     /**
-     * Reads what landing kept about an item.
+     * Reads what landing kept about an item, and the earlier item it is an
+     * exact copy of, if noted (STAGES.md §15.5a).
      *
      * @param itemId the item
      * @return its digest and references
@@ -361,6 +389,7 @@ public final class ItemSplitter
                 .orElseThrow(() -> new IllegalStateException(
                         "The item is no longer in landing"));
         return new Landed((String) summary.getField(
-                LandingTables.ITEM_DIGEST), LandedRefs.of(summary, keys));
+                LandingTables.ITEM_DIGEST), LandedRefs.of(summary, keys)
+                        .withSameAs(processor.sameAs(itemId).orElse(null)));
     }
 }

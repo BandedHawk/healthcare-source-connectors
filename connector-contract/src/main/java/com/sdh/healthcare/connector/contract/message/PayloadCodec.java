@@ -145,6 +145,7 @@ public final class PayloadCodec
                 payload.put("landedAt", landed.landedAt().toString());
                 payload.put("storage", storageFields(landed.storage()));
                 putIfSet(payload, "replaces", landed.replaces());
+                putIfSet(payload, "sameAs", landed.sameAs());
             }
             case ItemReceived received ->
             {
@@ -155,6 +156,7 @@ public final class PayloadCodec
                 payload.put("landedAt", received.landedAt().toString());
                 putIfSet(payload, "producerRef", received.producerRef());
                 putIfSet(payload, "replaces", received.replaces());
+                putIfSet(payload, "sameAs", received.sameAs());
                 putIfSet(payload, "messageIds", received.messageIds());
                 putIfSet(payload, "messageReplaces",
                         received.messageReplaces());
@@ -181,6 +183,7 @@ public final class PayloadCodec
                 payload.put("problems", problems);
                 putIfSet(payload, "producerRef", result.producerRef());
                 putIfSet(payload, "replaces", result.replaces());
+                putIfSet(payload, "sameAs", result.sameAs());
                 payload.put("finishedAt", result.finishedAt().toString());
                 if (result.completion() > (ItemResult.COMPLETED.equals(
                         result.status()) ? 1 : 0))
@@ -197,6 +200,7 @@ public final class PayloadCodec
                 payload.put("itemDigest", split.itemDigest());
                 putIfSet(payload, "producerRef", split.producerRef());
                 putIfSet(payload, "replaces", split.replaces());
+                putIfSet(payload, "sameAs", split.sameAs());
                 if (split.failure() != null)
                 {
                     payload.put("failure", problemFields(split.failure()));
@@ -240,6 +244,7 @@ public final class PayloadCodec
                 {
                     payload.put("completion", converted.completion());
                 }
+                putIfSet(payload, "sameAs", converted.sameAs());
             }
             case ItemProgressed progressed ->
             {
@@ -256,6 +261,7 @@ public final class PayloadCodec
                 }
                 putIfSet(payload, "producerRef", progressed.producerRef());
                 putIfSet(payload, "replaces", progressed.replaces());
+                putIfSet(payload, "sameAs", progressed.sameAs());
                 payload.put("reportedAt", progressed.reportedAt().toString());
                 if (!progressed.versions().isEmpty())
                 {
@@ -361,7 +367,8 @@ public final class PayloadCodec
                             text(payload, "itemDigest"),
                             Instant.parse(text(payload, "landedAt")),
                             storage(payload),
-                            uuid(payload, "replaces"));
+                            uuid(payload, "replaces"),
+                            uuid(payload, "sameAs"));
                     case ITEM_RECEIVED -> new ItemReceived(
                             itemId,
                             text(payload, "intake"),
@@ -372,7 +379,8 @@ public final class PayloadCodec
                             (String) payload.get("producerRef"),
                             uuid(payload, "replaces"),
                             texts(payload, "messageIds"),
-                            texts(payload, "messageReplaces"));
+                            texts(payload, "messageReplaces"),
+                            uuid(payload, "sameAs"));
                     case ITEM_RESULT -> new ItemResult(
                             itemId,
                             text(payload, "intake"),
@@ -389,7 +397,8 @@ public final class PayloadCodec
                             (String) payload.get("producerRef"),
                             uuid(payload, "replaces"),
                             Instant.parse(text(payload, "finishedAt")),
-                            completion(payload, 0));
+                            completion(payload, 0),
+                            uuid(payload, "sameAs"));
                     case RECORD_SPLIT -> new RecordSplit(
                             text(payload, "recordId"),
                             itemId,
@@ -431,7 +440,8 @@ public final class PayloadCodec
                             texts(payload, "versions"),
                             completion(payload, 1),
                             generation(payload),
-                            Boolean.TRUE.equals(payload.get("interrupted")));
+                            Boolean.TRUE.equals(payload.get("interrupted")),
+                            uuid(payload, "sameAs"));
                     case ITEM_CONVERTED -> new ItemConverted(
                             itemId,
                             text(payload, "intake"),
@@ -440,7 +450,8 @@ public final class PayloadCodec
                             Instant.parse(text(payload, "completedAt")),
                             texts(payload, "versions"),
                             completion(payload, 1),
-                            generation(payload));
+                            generation(payload),
+                            uuid(payload, "sameAs"));
                     case ITEM_PROGRESS -> new ItemProgressed(
                             itemId,
                             text(payload, "intake"),
@@ -457,7 +468,8 @@ public final class PayloadCodec
                             Instant.parse(text(payload, "reportedAt")),
                             texts(payload, "versions"),
                             completion(payload, 0),
-                            generation(payload));
+                            generation(payload),
+                            uuid(payload, "sameAs"));
                     case RECORD_REPROCESS -> new RecordReprocess(
                             reprocessed(payload),
                             UUID.fromString(text(payload, "runId")));

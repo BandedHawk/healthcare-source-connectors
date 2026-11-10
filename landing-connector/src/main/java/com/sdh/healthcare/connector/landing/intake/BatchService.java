@@ -185,6 +185,12 @@ public final class BatchService implements LandingIntake, BatchHandler
     private LandedItem unannounced;
 
     /**
+     * The earlier item {@link #unannounced} is an exact copy of (STAGES.md
+     * §15.5a); null if none.
+     */
+    private UUID unannouncedSameAs;
+
+    /**
      * Creates the service.
      *
      * @param intake      the intake's name
@@ -257,6 +263,8 @@ public final class BatchService implements LandingIntake, BatchHandler
             if (landed.recorded())
             {
                 unannounced = landed.item();
+                unannouncedSameAs =
+                        IntakeService.sameAs(storage, unannounced);
             }
             else
             {
@@ -555,6 +563,7 @@ public final class BatchService implements LandingIntake, BatchHandler
             unfinished = true;
             Optional<LandedItem> last = storage.lander().lastLanded();
             unannounced = last.orElse(null);
+            unannouncedSameAs = IntakeService.sameAs(storage, unannounced);
             if (last.isPresent())
             {
                 loadRecent(last.get().landedAt());
@@ -600,15 +609,18 @@ public final class BatchService implements LandingIntake, BatchHandler
             storage.index().add(landed.source().key(), landed.digest());
             unrecorded = null;
             unannounced = landed;
+            unannouncedSameAs = null;
             if (seenContent)
             {
-                IntakeService.reportDuplicate(storage, intake, landed);
+                unannouncedSameAs =
+                        IntakeService.reportDuplicate(storage, intake, landed);
             }
         }
         if (unannounced != null)
         {
-            announcer.announce(unannounced);
+            announcer.announce(unannounced, unannouncedSameAs);
             unannounced = null;
+            unannouncedSameAs = null;
         }
     }
 

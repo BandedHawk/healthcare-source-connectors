@@ -406,6 +406,51 @@ class ContractRoundTripTest
     }
 
     /**
+     * An exact copy's {@code sameAs} (STAGES.md §15.5a) round-trips on every
+     * item message that carries it, and inside an {@code item.reprocess};
+     * it is left out when unset.
+     */
+    @Test
+    void sameAsRoundTripsOnEveryItemMessage()
+    {
+        UUID itemId = UUID.randomUUID();
+        UUID earlier = UUID.randomUUID();
+        java.time.Instant at = java.time.Instant.EPOCH;
+        StorageRef landing = new StorageRef("cat", "sdh_landing",
+                "landed_items", LocalDate.of(2026, 11, 10), 43L, "kek-2");
+        ConnectorMessage.ItemLanded landed = new ConnectorMessage.ItemLanded(
+                itemId, "claims", "file", 999, "digest", at, landing, null,
+                earlier);
+        java.util.List<ConnectorMessage> messages = java.util.List.of(landed,
+                new ConnectorMessage.ItemReprocess(landed, 2,
+                        UUID.randomUUID()),
+                new ConnectorMessage.ItemReceived(itemId, "claims", "file",
+                        999, "sha", at, null, null, null, null, earlier),
+                new ConnectorMessage.ItemSplit(itemId, "claims", 4, 0, 999,
+                        "digest", null, null, null, at, at,
+                        java.util.List.of(), 1, 1, false, earlier),
+                new ConnectorMessage.ItemProgressed(itemId, "claims", "split",
+                        4, 3, 1, 0, null, null, null, at,
+                        java.util.List.of(), 0, 1, earlier),
+                new ConnectorMessage.ItemConverted(itemId, "claims", 4, 0, at,
+                        java.util.List.of(), 1, 1, earlier),
+                new ConnectorMessage.ItemResult(itemId, "claims",
+                        ConnectorMessage.ItemResult.COMPLETED, 4, 0, null, 0,
+                        1, 1, java.util.List.of(), null, null, at, 1,
+                        earlier));
+        for (ConnectorMessage message : messages)
+        {
+            assertThat(PayloadCodec.fromJson(PayloadCodec.toJson(message)))
+                    .isEqualTo(message);
+        }
+        assertThat(PayloadCodec.toJson(landed))
+                .containsEntry("sameAs", earlier.toString());
+        assertThat(PayloadCodec.toJson(new ConnectorMessage.ItemLanded(
+                itemId, "claims", "file", 999, "digest", at, landing)))
+                .doesNotContainKey("sameAs");
+    }
+
+    /**
      * The split stage's reprocess (STAGES.md §15.8.4, §15.8.6) round-trips:
      * an {@code item.reprocess} holding its {@code item.landed}, an
      * interrupted generation's {@code item.split}, and a record cut in a

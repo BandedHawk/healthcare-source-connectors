@@ -366,12 +366,13 @@ public final class ConvertProcessor
             // item.progress is (STAGES.md §15.8.6).
             case ItemSplit item -> new StageInput.ItemTotal(item.itemId(),
                     item.recordCount(), item.interrupted(),
-                    item.completion(), item.generation());
+                    item.completion(), item.generation(), item.sameAs());
             // The split stage has failures open: the records passed so far
             // (STAGES.md §15.6).
             case ItemProgressed progressed -> new StageInput.ItemTotal(
                     progressed.itemId(), progressed.passedCount(), true,
-                    progressed.completion(), progressed.generation());
+                    progressed.completion(), progressed.generation(),
+                    progressed.sameAs());
             default -> new StageInput.Unwanted("wrong_type");
         };
     }
@@ -923,9 +924,12 @@ public final class ConvertProcessor
     {
         String intake = progress.total() instanceof ItemSplit split
                 ? split.intake() : UNKNOWN_INTAKE;
+        ResultReporter.Facts facts = ResultReporter.Facts.of(
+                progress.total());
         return new ItemConverted(progress.itemId(), intake, progress.done(),
                 progress.unresolved(), clock.instant(), progress.versions(),
-                progress.nextCompletion(), progress.generation());
+                progress.nextCompletion(), progress.generation(),
+                facts == null ? null : facts.sameAs());
     }
 
     /**
@@ -945,7 +949,7 @@ public final class ConvertProcessor
                 facts == null ? null : facts.producerRef(),
                 facts == null ? null : facts.replaces(), clock.instant(),
                 progress.versions(), progress.completion(),
-                progress.generation());
+                progress.generation(), facts == null ? null : facts.sameAs());
     }
 
     /**

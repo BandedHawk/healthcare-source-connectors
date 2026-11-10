@@ -118,7 +118,7 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   TLS (`sdh.landing.http.tls`). They authenticate with an OAuth2 bearer token (checked for the issuer, audience and
   scope) or with a client certificate (from `trusted-cas`, with a subject in `subjects`). The body is streamed into
   landing, never held whole or written to disk unencrypted. The answer is `202` with a receipt: the item ID, size,
-  SHA-256 and landing time. A producer that isn't sure a push arrived sends it again with the same
+  SHA-256 and landing time, and `sameAs` for an exact copy (see below). A producer that isn't sure a push arrived sends it again with the same
   `Idempotency-Key` header and gets the same receipt. Pushes are landed one at a time; one that waits longer than
   `max-wait` gets `503` with `Retry-After`, as does any push while storage or the broker is down. A body larger
   than `max-item-bytes` gets `413`, and one cut off gets `400`. The port opens only on the active node, so a
@@ -139,10 +139,16 @@ The source is a local or mounted directory (`type: directory`), an SFTP server (
   holds. A Service Bus queue or subscription must not require sessions. The file connector splits a batch message
   by message, and a message it can't split fails alone.
 
+**Exact copies.** An item with the same content as an earlier item of the intake is landed and processed in full,
+as an item of its own: a stage may have changed since the earlier one went through. Landing logs
+`item.duplicate_content` and names the earliest earlier item it still holds as `sameAs` (not the item a
+resubmission replaces) on the item's messages and receipts, and the stages flag that item's open failures
+`resent`.
+
 **Producer feedback** (`sdh.results`, off by default). The node sends each item's receipt to the producer's own
 queue, sealed to the producer's public key (`sdh.results.recipient`, pinned by SHA-256): the item ID, size, SHA-256,
-landing time, the producer's reference (the file's path, or the push's `X-Correlation-Id`), and for a queue
-batch each message's broker ID. The file connector of the same intake sends the final result there too (see its
+landing time, the producer's reference (the file's path, or the push's `X-Correlation-Id`), for a queue
+batch each message's broker ID, and for an exact copy the earlier item as `sameAs`. The file connector of the same intake sends the final result there too (see its
 README). If the results queue is down, landing waits; nothing is lost. An HTTP push intake with results must admit
 just one sender: set `sdh.landing.http.oauth2.subject`, or list one `mtls.subjects` entry.
 

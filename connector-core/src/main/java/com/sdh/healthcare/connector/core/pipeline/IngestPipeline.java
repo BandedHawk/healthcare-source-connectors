@@ -275,6 +275,30 @@ public final class IngestPipeline implements AutoCloseable
     }
 
     /**
+     * Notes the earlier item an item is an exact copy of, as
+     * {@link ItemCheckpoints#noteSameAs} does.
+     *
+     * @param itemId the item
+     * @param sameAs the earlier item
+     */
+    void noteSameAs(UUID itemId, UUID sameAs)
+    {
+        checkpoints.noteSameAs(itemId, sameAs);
+    }
+
+    /**
+     * The earlier item an item is an exact copy of, as
+     * {@link ItemCheckpoints#sameAs} gives it.
+     *
+     * @param itemId the item
+     * @return the earlier item; empty if none was noted
+     */
+    Optional<UUID> sameAs(UUID itemId)
+    {
+        return checkpoints.sameAs(itemId);
+    }
+
+    /**
      * The database's time now, as {@link ItemCheckpoints#now}.
      *
      * @return the time
