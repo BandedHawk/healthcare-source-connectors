@@ -59,10 +59,10 @@ import org.apache.iceberg.catalog.TableIdentifier;
  * bytes. Thread-safe.
  * <p>
  * Delivery is at least once: a stage sends a message again after a crash,
- * and an operator's replay sends an item's messages again (STAGES.md
- * §13.2), each with the same contract {@code messageId} (for a record,
- * its item and record IDs). {@link #decodeNew} drops a message whose ID
- * this reader has decoded recently, the last
+ * with the same contract {@code messageId} (for a record, its item and
+ * record IDs). A reprocess is never a repeat: its generation or revision
+ * is in its ID (STAGES.md §15.8.2). {@link #decodeNew} drops a message
+ * whose ID this reader has decoded recently, the last
  * {@link Builder#repeatMemory} IDs; {@link #decode} returns every
  * message. The memory is the process's own, so a consumer that must never
  * process a record twice, across its restarts too, keeps the record IDs it
@@ -165,8 +165,8 @@ public final class QueueReader implements AutoCloseable
     /**
      * Decodes a message as {@link #decode} does, but drops it if this
      * reader has decoded one with the same contract {@code messageId}
-     * recently: a message sent again after a stage's crash, or by a replay
-     * (STAGES.md §13.2), under the same ID. A record's message ID is its
+     * recently: a message sent again after a stage's crash, under the same
+     * ID. A record's message ID is its
      * item's and record's IDs, so a record is returned once.
      *
      * @param body the broker message's body
@@ -386,7 +386,7 @@ public final class QueueReader implements AutoCloseable
          * Sets how many message IDs {@link QueueReader#decodeNew} remembers
          * to drop repeats by (default 100,000, about 15 MiB): the oldest is
          * forgotten first. Set it above the most messages a stage may send
-         * again at once, such as an item's records for a replay.
+         * again at once, such as an item's records after a crash.
          *
          * @param size how many; at least 1
          * @return this builder

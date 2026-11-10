@@ -240,6 +240,9 @@ Deploying it is then one more Deployment in `sdh-fhir`.
 
 - **TLS inside the cluster:** Postgres, Kafka, S3 and Vault are reached without TLS, and Kafka without
   authentication; the network policies limit who can connect. Pushes from producers are TLS with mTLS.
+- **Broker rights:** with no Kafka authentication there are no ACLs, so every stage may read and write every
+  topic. In production each stage has its own identity, allowed to read its input and send onward and to its own
+  input (for reprocess), and the admin CLIs none (DEPLOYMENT.md, "Broker rights").
 - **Vault:** one unseal key, kept in `state/`, rather than shares or auto-unseal; periodic tokens rather than
   Kubernetes auth through Vault Agent; the root token isn't revoked. `up` unseals Vault after a restart, and
   renews the tokens (a token unused for 32 days expires).
@@ -489,3 +492,12 @@ Checked again since: see the end of this section.
   (`stage.reprocess_done count=1`). `--status --run` shows `DONE, as g2 r1: stored`. The convert stage superseded
   generation 1 (`stage.generation_superseded`), started generation 2 and completed it. No pod restarted. Interruption
   by a newer generation was not tried here (the items split in one batch); it is covered by the tests.
+- **Replay's removal (2026-11-09, STAGES.md §15.8.10 step 5).** With the new images, `check` passes (5 items split
+  and converted), and at the upgrade no item's end was sent again (`split_item.announced_at` took the time it was
+  added). `replay` is an unknown command on the landing, split and convert admins. A synthetic C-CDA of 153 bytes
+  broken off part way failed at the split stage as a whole (`PARSE_UNBALANCED_ELEMENT`, `item.progress` with 1
+  open). Declined from the split admin, which sent nothing, a split pod sent the item's end 16 seconds later
+  (`stage.item_completed result=FAILED`, the decline counted), and the convert stage completed the item. Reopened,
+  a pod sent `item.progress` with the failure open, and the convert stage reopened the item (`stage.item_reopened
+  reason=upstream`). Each end went once. No pod restarted. Not tried here: a landed item never split chosen by
+  `reprocess` (a lost `item.landed` can't be made without changing the broker), which the tests cover.

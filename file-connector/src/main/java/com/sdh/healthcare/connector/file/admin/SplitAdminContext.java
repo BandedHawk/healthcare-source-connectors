@@ -6,9 +6,6 @@
  */
 package com.sdh.healthcare.connector.file.admin;
 
-import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
-import com.sdh.healthcare.connector.broker.send.Publishers;
-import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
@@ -33,7 +30,6 @@ import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
-import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
@@ -42,7 +38,6 @@ import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import com.sdh.healthcare.connector.stage.admin.ReprocessAdmin;
 import java.io.PrintStream;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -50,8 +45,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.Map;
 import java.util.UUID;
-import org.apache.camel.CamelContext;
-import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
@@ -97,12 +90,6 @@ final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
     /** Landing's ID keys, once loaded. */
     private RecordIds landingIds;
 
-    /** The Camel context the publisher sends through, once started. */
-    private CamelContext camel;
-
-    /** The publisher to the stage's output, once created. */
-    private ClosablePublisher publisher;
-
     /**
      * Creates the context; nothing is opened yet.
      *
@@ -113,49 +100,6 @@ final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
         this.properties = properties;
         this.database = new AdminDatabase(properties.lease());
         this.writing = new AdminDatabase(properties.lease(), true);
-    }
-
-    /**
-     * Creates the context with a publisher of the caller's, for tests.
-     *
-     * @param properties the stage's settings
-     * @param publisher  sends the commands' messages
-     */
-    SplitAdminContext(ConnectorProperties properties,
-            ClosablePublisher publisher)
-    {
-        this(properties);
-        this.publisher = publisher;
-    }
-
-    /**
-     * The publisher to the stage's output ({@code sdh.stage.output}),
-     * created on first use, as the stage creates its own: for
-     * {@code replay}.
-     *
-     * @return the publisher
-     * @throws Exception if the Camel context can't start
-     */
-    ClosablePublisher publisher() throws Exception
-    {
-        if (publisher == null)
-        {
-            CommonSettings.Queue output = properties.queue();
-            if (output == null || output.uri() == null)
-            {
-                throw new IllegalArgumentException(
-                        "sdh.stage.output is required");
-            }
-            QueueType type = QueueType.of(output.type());
-            camel = new DefaultCamelContext();
-            Publishers.configureBroker(camel, type,
-                    output.artemis().brokerUrl(), output.artemis().username(),
-                    output.artemis().password());
-            camel.start();
-            publisher = Publishers.create(camel, type,
-                    type.effectiveUri(output.uri()));
-        }
-        return publisher;
     }
 
     /**
@@ -436,15 +380,16 @@ final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
     }
 
     /**
-     * Sends the item's end again, as the fail store counts it now:
-     * {@code item.split} once none of its failures is open.
+     * Leaves the item to the stage's pods, which send its end again once
+     * one of its failures changed since it was sent (STAGES.md §15.8.10
+     * step 5): the admin sends nothing.
      */
     @Override
     public void changed(UUID itemId, AuditRecord audit, PrintStream out)
-            throws Exception
     {
-        ReplayCommand.send(this, itemId, true, Clock.systemUTC(), audit,
-                out);
+        out.println("The stage's pods send the item's end within a renewal"
+                + " interval: item.split once none of its failures is"
+                + " open, else item.progress");
     }
 
     @Override
@@ -466,19 +411,31 @@ final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
     /**
      * The stage's input, as the split stage reprocesses it (STAGES.md
      * §15.8.4): each item once, at its whole-item place, under its current
-     * generation; an item never split has none.
+     * generation. An item landed for the stage's intake but never split
+     * (its message lost) is chosen at generation 1, to be split as its
+     * next (§15.8.10 step 5); an item not landed there is chosen as
+     * nothing.
      */
     @Override
     public ReprocessInputs reprocessInputs() throws Exception
     {
         ItemCheckpoints checkpoints = checkpoints();
+        String intake = properties.landing().intake();
         return itemId ->
         {
             Integer generation = checkpoints.generations(List.of(itemId))
                     .get(itemId);
             if (generation == null)
             {
-                return List.of();
+                boolean landed = LandedItems.summary(landedItems(), itemId)
+                        .filter(summary -> intake.equals(summary.getField(
+                                LandingTables.INTAKE)))
+                        .isPresent();
+                if (!landed)
+                {
+                    return List.of();
+                }
+                generation = 1;
             }
             return List.of(new ReprocessInputs.Input(
                     new ReprocessStore.Chosen(itemId,
@@ -587,18 +544,6 @@ final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
     @Override
     public void close()
     {
-        if (publisher != null)
-        {
-            try
-            {
-                publisher.close();
-            }
-            catch (Exception ignored)
-            {
-                // exiting
-            }
-        }
-        closeQuietly(camel);
         if (keys != null)
         {
             keys.close();
@@ -613,9 +558,9 @@ final class SplitAdminContext implements ReprocessAdmin, AutoCloseable
     }
 
     /**
-     * Closes a catalog or Camel context, if it holds anything to close.
+     * Closes a catalog, if it holds anything to close.
      *
-     * @param catalog the catalog or context, or null
+     * @param catalog the catalog, or null
      */
     private static void closeQuietly(Object catalog)
     {

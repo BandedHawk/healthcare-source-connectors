@@ -585,7 +585,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     // it waits on the queue until this stage is upgraded.
                     // An earlier one, which no upgrade reads, is rejected
                     // below; a record is found by the reconciler, an item
-                    // total replayed (STAGES.md §13.2).
+                    // reprocessed at the split stage (STAGES.md §15.8).
                     Telemetry.get().auditError("stage.unreadable_version",
                             stageFields(ErrorCode.MESSAGE_REJECTED));
                     return Outcome.RETRY;

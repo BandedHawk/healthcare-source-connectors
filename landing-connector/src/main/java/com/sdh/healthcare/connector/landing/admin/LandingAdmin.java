@@ -12,8 +12,10 @@ import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 /**
- * The landing node's operator commands (design §11.4): {@code replay}, on
- * the stages' shared {@link AdminCli}.
+ * The landing node's operator commands (design §11.4): {@code resubmit},
+ * on the stages' shared {@link AdminCli}. Its {@code replay} went with
+ * STAGES.md §15.8.10 step 5: an item is split again by a reprocess at the
+ * split stage.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -38,7 +40,7 @@ public final class LandingAdmin
                         "landing-connector", Configuration.class,
                         LandingProperties.class, LandingProperties::telemetry,
                         LandingAdminContext::new),
-                List.of(new ReplayCommand(), new ResubmitCommand()));
+                List.of(new ResubmitCommand()));
     }
 
     /**

@@ -36,7 +36,6 @@ import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.RecordInput;
 import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.reader.QueueReader;
-import com.sdh.healthcare.connector.stage.RegistryReport;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageRegistry;
 import com.sdh.healthcare.connector.stage.StageWorker;
@@ -440,8 +439,7 @@ class ConvertStageTest
      * as a new row of records, marked correction_of the failed one, which
      * stays, and of the record's next revision here (§15.8.5); sent on as
      * record.stored with that revision; the failure superseded; and the
-     * item completed with both records passed. A replay sends the corrected
-     * record too, and counts nothing failed.
+     * item completed with both records passed, counting nothing failed.
      *
      * @throws Exception if the test fails to run
      */
@@ -505,11 +503,6 @@ class ConvertStageTest
             }
         }
 
-        List<ConnectorMessage> again = ConvertProcessor.replayMessages(item,
-                records, "prod", NS, "claims", 2, 1, SPLIT_AT);
-        assertThat(again).hasSize(3);
-        assertThat(((ItemConverted) again.get(2)).failedRecordCount())
-                .isZero();
     }
 
     /**
@@ -608,54 +601,6 @@ class ConvertStageTest
             assertThat(object.outcome()).isEqualTo("stored");
             assertThat(object.sameOutput()).isTrue();
         });
-    }
-
-    /**
-     * A replay's messages are the ones the stage first sent, rebuilt from
-     * {@code records} and the registry: each record's {@code record.stored}
-     * or {@code record.failed}, the same but for the snapshot named, then
-     * {@code item.converted} with the same counts and intake, at the time
-     * the registry says the item completed (STAGES.md §13.2).
-     *
-     * @throws Exception if the test fails to run
-     */
-    @Test
-    void aReplayRebuildsTheMessagesFirstSent() throws Exception
-    {
-        List<RecordSplit> messages = split("1,2", "3,4");
-        ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
-                null, null, null, SPLIT_AT, SPLIT_AT);
-        assertThat(worker.handle(List.of(received(messages.get(0)),
-                received(total), received(messages.get(1)))))
-                .isEqualTo(BatchHandler.Outcome.DONE);
-        MessageOpener opener = new MessageOpener(
-                Map.of("transform", downstream.getPrivate()),
-                Map.of("convert", (ECPublicKey) signer.getPublic()));
-        List<ConnectorMessage> first = new ArrayList<>();
-        for (OutboundMessage message : sent)
-        {
-            first.add(opener.open(message.body()));
-        }
-
-        RegistryReport.Item done = new RegistryReport(
-                postgres.getPostgresDatabase(), schema, ConvertProcessor.STAGE)
-                .item(item).orElseThrow();
-        records.refresh();
-        List<ConnectorMessage> again = ConvertProcessor.replayMessages(item,
-                records, "prod", NS, total.intake(), done.done(),
-                done.failed(), done.completedAt());
-
-        assertThat(again).hasSize(first.size());
-        assertThat(again.subList(0, again.size() - 1))
-                .usingRecursiveFieldByFieldElementComparatorIgnoringFields(
-                        "storage.snapshotId")
-                .containsExactlyInAnyOrderElementsOf(
-                        first.subList(0, first.size() - 1));
-        assertThat(again.get(again.size() - 1)).usingRecursiveComparison()
-                .ignoringFields("completedAt")
-                .isEqualTo(first.get(first.size() - 1));
-        assertThat(((ItemConverted) again.get(again.size() - 1))
-                .completedAt()).isEqualTo(done.completedAt());
     }
 
     /**

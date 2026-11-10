@@ -1400,7 +1400,7 @@ Each step builds, passes its tests, and is tried on the sandbox before the next:
 4. **Exact copies** (§15.5) at landing and at the stages.
 5. **The drain check** (§14.4).
 
-### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 to 4 built)
+### 15.8 Reprocess, generations and revisions (decided 2026-11-09; steps 1 to 5 built)
 
 Worked out with the user on 2026-11-09, in place of the proposal first written here. It replaces `replay`
 (§13.2), the outcomes of §15.4 and the matching of §15.4a, and changes how corrections and retries are recorded
@@ -1952,6 +1952,59 @@ Worked out in planning, as consequences of what was decided:
   superseded; at a later stage, an interrupted generation's end; the command's whole-item and landing-time choices;
   and, in the app test, a run queued, sent to the stage's own input, taken and noted, and an `item.landed` signed by
   the stage itself refused. Not tested on its own: a pod interrupting an item another pod left `SPLITTING`.
+
+**Step 5 as planned (2026-11-09, with the user).** Replay's removal, and the brokers' send rights. Settled with
+the user:
+- **A landed item never split** (its `item.landed` lost, the reconciler not yet past its grace) is chosen by a
+  reprocess at the split stage, by `--item-id` or by landing time, and split as any reprocess: under the next
+  number of the generation counter, which is 2 for an item with no checkpoint. Its `item.landed`, if it arrives
+  late, is then generation 1, a repeat of an item already past it. Until now such items were left out of a run
+  without a word. An item ID not in `landed_items` for the stage's intake is still chosen as nothing.
+- **All three replays go** (landing, split and convert), with `Replayer`, `ConvertProcessor.replayMessages`,
+  `ResultsChannel`'s sending again and their tests. What each did is now:
+  - landing's `replay --item-id`: a reprocess at the split stage, or the split stage's reconciler, which already
+    splits every landed item whose message was lost;
+  - the split stage's `replay --item-id`: a reprocess at the convert stage of the item's current records, which
+    reads them from `split_records` whether or not they ever reached it, or the convert stage's reconciler;
+  - the convert stage's `replay --item-id [--with-result]`: the transform stage's reprocess, once that stage is
+    built. The producer's result is never sent again (§15.8.7).
+- **The admin CLIs no longer send.** Without replay, no admin command of landing or the stages publishes, so their
+  broker publisher, Camel context and signing go; the admin opens the database, the catalog and the keys it
+  unwraps with (landing's none: `resubmit` reads only `landed_items` and the lease database). Broker settings in
+  an admin's configuration are ignored, as other settings it doesn't use are.
+- **The split stage's pods send an item's end after a decline or reopen** (settled with the user once it was found
+  that the split stage's admin sent it, through the replay code). As at the convert stage, the admin only changes
+  the fail store. `split_item` gains `announced_at`: the database's time just before an end's failures were
+  counted, written once the end is sent (rows from before take the time the column is added). Each renewal
+  interval, the loop that applies corrections and releases also looks for items whose splitting has ended
+  (`COMPLETED` or `FAILED`) with a failure of their generation changed since, and sends each one's end again under
+  its lease, as it does for a correction whose end a pod didn't send. An end that couldn't be sent leaves the time
+  as it was, so it is tried again.
+- **Send rights are documented, not added to the sandbox.** DEPLOYMENT.md gains, for each of the seven brokers,
+  what each stage's identity must be allowed: to read its input, to send to its own input (for reprocess), and to
+  send onward. The sandbox's Kafka has no TLS, SASL or ACLs (SANDBOX.md, "Not yet as in production"), so there is
+  nothing to grant there; that section says so.
+
+Kept: `PushService`'s replays (a repeated push answered with its first receipt) are another thing and stay, as does
+`QueueReader` dropping repeats, which a stage still sends after a crash. Earlier write-ups that name `replay` keep
+their history, with a note where they describe what an operator does now.
+
+**Step 5 as built (2026-11-09; tried on the sandbox, SANDBOX.md).** As planned, with these choices made in building:
+- **Choosing an item never split.** The split admin's inputs look in `landed_items` for an item with no checkpoint,
+  and choose it at generation 1 only if it was landed for the stage's own intake. Queueing gives it the counter's
+  next number, 2, and taking its `item.reprocess` finds no checkpoint and cuts it from the start. Its `item.landed`,
+  arriving after, finds the item past it and cuts nothing.
+- **Sending an end again.** `ItemCheckpoints` gains `now` (the database's clock, which the fail store's
+  `changed_at` uses), `markAnnounced` (never moves the time back) and `changedEnds`. The time is read after the
+  item's failures are recorded and before they are counted, so recording them doesn't by itself call for another
+  end. `SplitCorrections.sweep` sends the ends of both kinds of item, those whose correction's end wasn't sent and
+  those whose failures changed, each once.
+- **Removed:** the three `ReplayCommand`s and `ReplayCommandTest`, `Replayer` and its test,
+  `ConvertProcessor.replayMessages`, `RegistryReport.totalMessage` (the column is still written), the results
+  channel's resend under a broker suffix, and the admins' publishers, Camel contexts and, at landing, keys.
+- **Tests:** the split admin's decline and reopen have a pod send the end, once each, and the admin nothing;
+  `reprocess --dry-run` chooses a landed item never split and nothing for an unknown one; the app test splits such
+  an item as generation 2 and its late `item.landed` cuts nothing.
 
 ## 16. Items with no records (decided and built 2026-11-09)
 

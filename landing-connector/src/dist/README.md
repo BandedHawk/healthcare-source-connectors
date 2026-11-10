@@ -188,7 +188,7 @@ Leave room to grow: a ledger near the top of its row needs the next row's heap t
 ```sh
 bin/landing-connector                      # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx1g bin/landing-connector     # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin replay --item-id <id>   # operator commands: replay, resubmit
+SDH_OPERATOR=alice bin/sdh-admin resubmit --item-id <id>   # operator commands: resubmit
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The node exits with status 70
@@ -298,22 +298,18 @@ The image has no shell, so run the JVM directly:
 
 ```sh
 kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin.args \
-  replay --item-id <id> --operator alice
+  resubmit --item-id <id> --operator alice
 ```
 
 `--operator` names who is running the command, for the audit log; on a host, `$SDH_OPERATOR` does the same.
-`replay --item-id <id>` sends a fully landed item's `item.landed` again and waits for the broker to acknowledge
-it. It is how an operator recovers an item lost between landing and the split stage, or whose `item.split` was
-lost after: the split stage splits an item it hasn't, and announces again one it has. The broker is given an ID
-of its own for the message (`il-<id>~replay-<millis>`), so a broker that drops repeated IDs doesn't drop it; the
-message itself is the one first sent. No receipt goes to the producer, and nothing is written to the tables, so
-it is safe to run beside the node. Every run is audited (`admin.replay`).
+The admin sends nothing to a broker, so it needs no broker settings or keys. An item lost between landing and the
+split stage is split by the split stage's reconciler once its grace has passed, or at once by a reprocess there
+(`reprocess --item-id` on the split stage, STAGES.md §15.8.9); landing's `replay` went with §15.8.10 step 5.
 
 `resubmit --item-id <id> [--again]` lands a fully landed item again, from what landing kept, as a new item that
 replaces it (`replaces_item_id`), as if its producer had sent it again; both items are kept. It is for an item the
 pipeline failed for a reason that wasn't the item's, such as an outage before the split stage recognised one
-(STAGES.md §13.5): a replay doesn't help there, since the split stage only announces a failed item's failure
-again. The command takes no lease and writes no landing storage: it leaves a request in the lease database
+(STAGES.md §13.5). A reprocess at the split stage splits the same item again; this lands it as a new item. The command takes no lease and writes no landing storage: it leaves a request in the lease database
 (`sdh_landing_resubmit`, beside the lease table, created by the node at startup), which the node holding the
 intake's lease carries out within about 10 seconds, and waits up to 2 minutes for it, printing the new item's ID.
 The node audits `item.resubmitted`, or `resubmit.refused` for an item it can't land again. Run again for an

@@ -43,6 +43,7 @@ import com.sdh.healthcare.connector.core.storage.RecordBatchWriter.WrittenRecord
 import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import java.io.IOException;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -271,6 +272,40 @@ public final class IngestPipeline implements AutoCloseable
     int announced(UUID itemId, boolean complete)
     {
         return checkpoints.announced(itemId, complete);
+    }
+
+    /**
+     * The database's time now, as {@link ItemCheckpoints#now}.
+     *
+     * @return the time
+     */
+    Instant databaseNow()
+    {
+        return checkpoints.now();
+    }
+
+    /**
+     * Notes an item's end sent, as {@link ItemCheckpoints#markAnnounced}.
+     *
+     * @param itemId the item
+     * @param readAt when its failures were read
+     */
+    void markAnnounced(UUID itemId, Instant readAt)
+    {
+        checkpoints.markAnnounced(itemId, readAt);
+    }
+
+    /**
+     * The ended items with a failure changed since their end was sent, as
+     * {@link ItemCheckpoints#changedEnds}.
+     *
+     * @param stage the stage, as the fail store names it
+     * @param limit the most returned
+     * @return their ids
+     */
+    List<UUID> changedEnds(String stage, int limit)
+    {
+        return checkpoints.changedEnds(stage, limit);
     }
 
     /**

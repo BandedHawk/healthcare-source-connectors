@@ -28,8 +28,9 @@ import java.util.UUID;
  * record's {@code record.split} from its row of {@code split_records}, and
  * an item's {@code item.split} from its checkpoint. The stage sends a
  * record again with these after a crash, and announces a finished item
- * again with them; its replay (STAGES.md §13.2) sends them all again. Each
- * message is the one first sent, but for the snapshot it names.
+ * again with them, as when an operator declines or reopens one of its
+ * failures. Each message is the one first sent, but for the snapshot it
+ * names.
  *
  * @author Jonas Barnett
  * @since 0.1.0

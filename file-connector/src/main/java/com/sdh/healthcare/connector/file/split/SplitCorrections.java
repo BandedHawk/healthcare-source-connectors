@@ -10,6 +10,8 @@ import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import java.time.Duration;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -21,7 +23,8 @@ import org.slf4j.LoggerFactory;
  * Applies operators' corrections of the split stage's failures (STAGES.md
  * §15.6d), on every pod, each interval: each pending correction under its
  * item's lease, then sends again the end of any item whose correction was
- * applied by a pod that stopped before sending it. It also applies
+ * applied by a pod that stopped before sending it, or whose failures an
+ * operator declined or reopened since its end was sent. It also applies
  * operators' requests to end the hold on an item held across versions
  * (§15.6e), which are applied as corrections are, by a pod under the
  * item's lease. Where the stage reprocesses, it queues and sends the
@@ -222,7 +225,9 @@ public final class SplitCorrections implements AutoCloseable
 
     /**
      * Sends again the end of each item whose correction was applied but
-     * whose end wasn't sent since.
+     * whose end wasn't sent since, and of each whose failures an operator
+     * declined or reopened since its end was sent (STAGES.md §15.8.10
+     * step 5).
      *
      * @return how many were sent
      * @throws Exception if storage or the broker fails
@@ -230,7 +235,9 @@ public final class SplitCorrections implements AutoCloseable
     public int sweep() throws Exception
     {
         int sent = 0;
-        for (UUID itemId : store.unnotified(unsentAfter))
+        Set<UUID> due = new LinkedHashSet<>(store.unnotified(unsentAfter));
+        due.addAll(splitter.changedEnds(LIMIT));
+        for (UUID itemId : due)
         {
             try
             {

@@ -12,15 +12,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.broker.receive.BatchHandler.Outcome;
 import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
-import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemProgressed;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.ItemSplit;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSplit;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
-import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.file.FileConnectorApplication;
 import com.sdh.healthcare.connector.file.TestKeys;
 import com.sdh.healthcare.connector.file.TestLanding;
@@ -43,18 +40,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.interfaces.ECPublicKey;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Stream;
+import org.apache.camel.CamelContext;
+import org.apache.camel.ConsumerTemplate;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -91,6 +85,9 @@ class AdminCommandsTest
 
     /** The landing intake's name. */
     static final String INTAKE = "claims";
+
+    /** Where the stage sends its output. */
+    static final String OUT_QUEUE = "seda:sdh-admin-out?size=100000";
 
     /** The JDBC catalog's properties, for the landing stand-in. */
     static final Map<String, String> CATALOG = new LinkedHashMap<>();
@@ -147,7 +144,7 @@ class AdminCommandsTest
                 "kafka:sdh.landed?brokers=localhost:1&groupId=split");
         CONFIG.put("sdh.stage.registry-schema", "sdh_split");
         CONFIG.put("sdh.stage.output.type", "camel");
-        CONFIG.put("sdh.stage.output.uri", "seda:sdh-admin-out?size=100000");
+        CONFIG.put("sdh.stage.output.uri", OUT_QUEUE);
         CONFIG.put("sdh.split.format", "csv");
         CONFIG.put("sdh.storage.catalog-name", TestLanding.CATALOG);
         CATALOG.forEach((key, value) ->
@@ -220,6 +217,10 @@ class AdminCommandsTest
     /** The stage's runtime. */
     @Autowired
     ConnectorRuntime runtime;
+
+    /** The stage's Camel context, to read what it sent. */
+    @Autowired
+    CamelContext camel;
 
     /** The stage's settings, as the admin commands read them. */
     @Autowired
@@ -325,106 +326,6 @@ class AdminCommandsTest
         }
     }
 
-    /**
-     * Records what it is given to send, acknowledging each at once.
-     *
-     * @param sent where the messages go
-     */
-    record Recording(List<OutboundMessage> sent) implements ClosablePublisher
-    {
-
-        @Override
-        public CompletableFuture<Void> publish(OutboundMessage message)
-        {
-            sent.add(message);
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public void close()
-        {
-        }
-    }
-
-    /**
-     * Replays an item through the command, as operator {@code alice}.
-     *
-     * @param itemId the item
-     * @param now    the time the broker IDs are made from
-     * @return what was sent
-     * @throws Exception if the command fails
-     */
-    List<OutboundMessage> replay(UUID itemId, Instant now) throws Exception
-    {
-        List<OutboundMessage> sent = new CopyOnWriteArrayList<>();
-        try (SplitAdminContext context =
-                new SplitAdminContext(properties, new Recording(sent)))
-        {
-            new ReplayCommand(Clock.fixed(now, ZoneOffset.UTC)).run(
-                    AdminArgs.parse(List.of("replay", "--item-id",
-                            itemId.toString()), Set.of()),
-                    context, new AuditRecord("alice"),
-                    new PrintStream(new ByteArrayOutputStream(), true,
-                            UTF_8));
-        }
-        return sent;
-    }
-
-    /**
-     * A finished item's output is sent again: every record.split, in
-     * order, then its item.split, sealed to the convert stage and signed
-     * by the split stage, each under its own message ID with a broker ID
-     * of its own. The failed item's item.split names its failure and
-     * counts the records it committed; it is item.progress, since its
-     * failure is open (STAGES.md §15.6). An item the stage never had is
-     * refused, and nothing is sent.
-     *
-     * @throws Exception if the test fails to run
-     */
-    @Test
-    void replaysAFinishedItemsRecordsThenItsItemSplit() throws Exception
-    {
-        MessageOpener opener = new MessageOpener(
-                Map.of("downstream-2026", KEYS.recipient.getPrivate()),
-                Map.of("connector-2026",
-                        (ECPublicKey) KEYS.signing.getPublic()));
-        Instant now = Instant.parse("2026-11-07T06:00:00Z");
-        List<OutboundMessage> good = replay(goodId, now);
-        assertThat(good).hasSize(4);
-        List<ConnectorMessage> opened = new ArrayList<>();
-        for (OutboundMessage message : good)
-        {
-            ConnectorMessage inside = opener.open(message.body());
-            opened.add(inside);
-            assertThat(message.messageId()).isEqualTo(inside.messageId()
-                    + "~replay-" + now.toEpochMilli());
-            assertThat(message.itemId()).isEqualTo(goodId);
-        }
-        assertThat(opened.subList(0, 3)).allSatisfy(message ->
-                assertThat(message).isInstanceOf(RecordSplit.class));
-        assertThat(opened.subList(0, 3)).extracting(
-                message -> ((RecordSplit) message).seq())
-                .isSorted().doesNotHaveDuplicates();
-        ItemSplit total = (ItemSplit) opened.get(3);
-        assertThat(total.recordCount()).isEqualTo(3);
-        assertThat(total.failure()).isNull();
-        assertThat(total.intake()).isEqualTo(INTAKE);
-
-        // The failed item ends in item.progress: its failure is open, and
-        // in the fail store, not sent on (STAGES.md §15.6).
-        List<OutboundMessage> bad = replay(badId, now);
-        ItemProgressed failed = (ItemProgressed) opener.open(
-                bad.get(bad.size() - 1).body());
-        assertThat(failed.failure()).isNotNull();
-        assertThat(failed.openCount()).isEqualTo(1);
-        assertThat(bad).hasSize((int) failed.passedCount() + 1);
-
-        assertThatThrownBy(() -> replay(UUID.randomUUID(), now))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("no row");
-        assertThat(FATAL).isEmpty();
-    }
-
     /** The last fail store command's audit record. */
     AuditRecord lastAudit;
 
@@ -434,14 +335,11 @@ class AdminCommandsTest
      *
      * @param reason what standard input holds
      * @param args   the command and its options
-     * @return what was sent
      * @throws Exception if the command fails
      */
-
-    List<OutboundMessage> failureCommand(String reason, String... args)
-            throws Exception
+    void failureCommand(String reason, String... args) throws Exception
     {
-        return failureCommand(reason, new ByteArrayOutputStream(), args);
+        failureCommand(reason, new ByteArrayOutputStream(), args);
     }
 
     /**
@@ -450,17 +348,14 @@ class AdminCommandsTest
      * @param input what it reads from standard input
      * @param out   what it prints
      * @param args  the command and its options
-     * @return what it sent
      * @throws Exception if the command fails
      */
-    List<OutboundMessage> failureCommand(String input,
-            ByteArrayOutputStream out, String... args) throws Exception
+    void failureCommand(String input, ByteArrayOutputStream out,
+            String... args) throws Exception
     {
-        List<OutboundMessage> sent = new CopyOnWriteArrayList<>();
         InputStream stdin = System.in;
         System.setIn(new ByteArrayInputStream(input.getBytes(UTF_8)));
-        try (SplitAdminContext context =
-                new SplitAdminContext(properties, new Recording(sent)))
+        try (SplitAdminContext context = new SplitAdminContext(properties))
         {
             AdminCommand<SplitAdminContext> command = SplitAdmin.commands()
                     .stream().filter(each -> each.name().equals(args[0]))
@@ -474,18 +369,37 @@ class AdminCommandsTest
         {
             System.setIn(stdin);
         }
-        return sent;
     }
 
     /**
-     * Declining the failed item's failure sends its end again, alone, now
-     * as item.split: none of its failures is open (STAGES.md §15.3).
-     * Reopening it sends item.progress again, with the failure open.
+     * The messages the stage has sent to its output since last asked.
+     *
+     * @return their sealed bodies, oldest first
+     */
+    List<String> sentByTheStage()
+    {
+        List<String> bodies = new ArrayList<>();
+        ConsumerTemplate consumer = camel.createConsumerTemplate();
+        String body;
+        while ((body = consumer.receiveBodyNoWait(OUT_QUEUE,
+                String.class)) != null)
+        {
+            bodies.add(body);
+        }
+        return bodies;
+    }
+
+    /**
+     * Declining the failed item's failure sends nothing from the admin: a
+     * pod of the stage sends the item's end again, alone, now as
+     * item.split, since none of its failures is open (STAGES.md §15.3,
+     * §15.8.10 step 5), and only once. Reopening it has a pod send
+     * item.progress again, with the failure open.
      *
      * @throws Exception if the test fails to run
      */
     @Test
-    void declineSendsTheItemsEndAgainAsItemSplit() throws Exception
+    void declineHasAPodSendTheItemsEndAgainAsItemSplit() throws Exception
     {
         MessageOpener opener = new MessageOpener(
                 Map.of("downstream-2026", KEYS.recipient.getPrivate()),
@@ -496,25 +410,56 @@ class AdminCommandsTest
         {
             seq = context.failures().failures(badId).get(0).failure().seq();
         }
-        List<OutboundMessage> declined = failureCommand(
-                "Synthetic: the source sent it twice", "decline",
+        assertThat(runtime.corrections().sweep()).isZero();
+        sentByTheStage();
+        failureCommand("Synthetic: the source sent it twice", "decline",
                 "--item-id", badId.toString(), "--seq", Long.toString(seq));
-        assertThat(declined).singleElement().satisfies(message ->
-                assertThat(opener.open(message.body()))
-                        .isInstanceOf(ItemSplit.class));
         // Audited with the failure's new state, not the item checkpoint's.
         assertThat(lastAudit.fields().toAttributes().get(
                 AttributeKey.stringKey("sdh.state"))).isEqualTo("DECLINED");
+        assertThat(sentByTheStage()).isEmpty();
+        assertThat(runtime.corrections().sweep()).isEqualTo(1);
+        assertThat(sentByTheStage()).singleElement().satisfies(body ->
+                assertThat(opener.open(body.getBytes(UTF_8)))
+                        .isInstanceOf(ItemSplit.class));
+        assertThat(runtime.corrections().sweep()).isZero();
 
-        List<OutboundMessage> reopened = failureCommand(
-                "Synthetic: a correction is possible", "reopen",
+        failureCommand("Synthetic: a correction is possible", "reopen",
                 "--item-id", badId.toString(), "--seq", Long.toString(seq));
-        assertThat(reopened).singleElement().satisfies(message ->
+        assertThat(runtime.corrections().sweep()).isEqualTo(1);
+        assertThat(sentByTheStage()).singleElement().satisfies(body ->
         {
-            ItemProgressed progress =
-                    (ItemProgressed) opener.open(message.body());
+            ItemProgressed progress = (ItemProgressed) opener.open(
+                    body.getBytes(UTF_8));
             assertThat(progress.openCount()).isEqualTo(1);
         });
+        assertThat(runtime.corrections().sweep()).isZero();
+    }
+
+    /**
+     * A landed item the stage never split (its {@code item.landed} lost)
+     * is chosen by {@code reprocess}, at generation 1, to be split as its
+     * next; an item not landed for the stage's intake is chosen as nothing
+     * (STAGES.md §15.8.10 step 5). A dry run records nothing.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void reprocessChoosesALandedItemNeverSplit() throws Exception
+    {
+        TestLanding landing = new TestLanding(CATALOG, runtime.keys().wrap(),
+                KEYS, INTAKE);
+        LandedItem lost = landing.land(GOOD, "lost-adams.csv");
+        String id = lost.itemId().toString();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        failureCommand("", out, "reprocess", "--item-id", id, "--dry-run");
+        assertThat(out.toString(UTF_8)).contains("Would reprocess 1")
+                .contains(id + " seq -1 g1");
+
+        ByteArrayOutputStream none = new ByteArrayOutputStream();
+        failureCommand("", none, "reprocess", "--item-id",
+                UUID.randomUUID().toString(), "--dry-run");
+        assertThat(none.toString(UTF_8)).contains("Nothing chosen");
     }
 
     /**

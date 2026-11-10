@@ -48,11 +48,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -886,104 +884,9 @@ public final class ConvertProcessor
     }
 
     /**
-     * A completed item's output, rebuilt as the stage first sent it, for a
-     * replay (STAGES.md §13.2): a {@code record.stored} for each record in
-     * {@code records} that passed, in order, then its
-     * {@code item.converted}; failed records are in the fail store, and
-     * aren't sent on (§15.1). Each record names the table's
-     * current snapshot rather than the one it was stored in, which reads
-     * the same.
-     *
-     * @param itemId      the item
-     * @param records     the {@code records} table, refreshed
-     * @param catalog     the catalog's name, as messages give it
-     * @param namespace   the table's namespace
-     * @param intake      the item's intake, from its {@code item.split}
-     * @param done        its records stored, from the registry
-     * @param failed      those stored in their original form
-     * @param completedAt when the stage completed it, from the registry
-     * @return the messages
-     */
-    public static List<ConnectorMessage> replayMessages(UUID itemId,
-            Table records, String catalog, String namespace, String intake,
-            long done, long failed, Instant completedAt)
-    {
-        return replayMessages(itemId, records, catalog, namespace, intake,
-                done, failed, completedAt, 1);
-    }
-
-    /**
-     * A completed item's output, as {@link #replayMessages(UUID, Table,
-     * String, String, String, long, long, Instant)} rebuilds it, its
-     * {@code item.converted} numbered as the stage's last completion of it
-     * (STAGES.md §15.6e).
-     *
-     * @param itemId      the item
-     * @param records     the {@code records} table, refreshed
-     * @param catalog     the catalog's name, as messages give it
-     * @param namespace   the table's namespace
-     * @param intake      the item's intake, from its {@code item.split}
-     * @param done        its records stored, from the registry
-     * @param failed      those stored in their original form
-     * @param completedAt when the stage completed it, from the registry
-     * @param completion  its last completion's number, from the registry
-     * @return the messages
-     */
-    public static List<ConnectorMessage> replayMessages(UUID itemId,
-            Table records, String catalog, String namespace, String intake,
-            long done, long failed, Instant completedAt, int completion)
-    {
-        long snapshotId = records.currentSnapshot() == null ? -1
-                : records.currentSnapshot().snapshotId();
-        List<ConnectorMessage> messages = new ArrayList<>();
-        Set<String> versions = new LinkedHashSet<>();
-        // The newest generation only (STAGES.md §15.8): the ones before
-        // are superseded downstream.
-        int generation = 0;
-        for (CommittedRecords.Row row : CommittedRecords.all(records, itemId))
-        {
-            generation = Math.max(generation, row.lineage().generation());
-        }
-        for (CommittedRecords.Row row : CommittedRecords.all(records, itemId,
-                generation))
-        {
-            if (row.errorCode() != null)
-            {
-                // In the fail store, and not sent on (STAGES.md §15.1).
-                continue;
-            }
-            messages.add(recordMessage(itemId, row, new StorageRef(catalog,
-                    namespace, RecordsTable.DEFAULT_NAME, row.ingestedDate(),
-                    snapshotId, row.kekRef())));
-            if (row.stageVersion() != null)
-            {
-                versions.add(row.stageVersion());
-            }
-        }
-        // Records made from operators' corrections that passed, after the
-        // originals; each resolves a failure (STAGES.md §15.6c).
-        Set<Long> corrected = new java.util.TreeSet<>();
-        for (CommittedRecords.Row row : CommittedRecords.corrections(records,
-                itemId, generation))
-        {
-            if (row.errorCode() == null)
-            {
-                corrected.add(row.seq());
-                messages.add(recordMessage(itemId, row, new StorageRef(
-                        catalog, namespace, RecordsTable.DEFAULT_NAME,
-                        row.ingestedDate(), snapshotId, row.kekRef())));
-            }
-        }
-        messages.add(new ItemConverted(itemId, intake, done,
-                failed - corrected.size(), completedAt,
-                List.copyOf(versions), completion));
-        return messages;
-    }
-
-    /**
      * A stored record's {@code record.stored} or {@code record.failed},
      * rebuilt from its row of {@code records} as the stage first sent it,
-     * but for the snapshot it names: for a replay (STAGES.md §13.2).
+     * but for the snapshot it names.
      *
      * @param itemId its item
      * @param row    its row

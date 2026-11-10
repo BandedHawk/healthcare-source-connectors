@@ -229,9 +229,9 @@ class QueueReaderTest
 
     /**
      * {@code decodeNew} returns a record's message once: the same body
-     * again, or the message sealed again as a replay sends it, is dropped,
-     * while {@code decode} returns every one. With room for one ID, the
-     * first is forgotten once another is decoded.
+     * again, or the message sealed again as a stage sends it after a crash,
+     * is dropped, while {@code decode} returns every one. With room for one
+     * ID, the first is forgotten once another is decoded.
      *
      * @throws Exception if the test fails to run
      */

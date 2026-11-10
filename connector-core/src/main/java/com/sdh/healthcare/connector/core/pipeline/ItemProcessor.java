@@ -294,6 +294,21 @@ public final class ItemProcessor
     }
 
     /**
+     * The items whose splitting has ended one of whose failures changed
+     * since their end was sent (an operator's decline or reopen), for a
+     * pod to send their ends again with {@link #reannounce} (STAGES.md
+     * §15.8.10 step 5).
+     *
+     * @param limit the most returned
+     * @return their ids; none if the processor has no fail store
+     */
+    public List<UUID> changedEnds(int limit)
+    {
+        return failures == null ? List.of()
+                : pipeline.changedEnds(STAGE, limit);
+    }
+
+    /**
      * An item's checkpoint, its splitting ended.
      *
      * @param itemId the item
@@ -887,7 +902,9 @@ public final class ItemProcessor
      * Records an item's failures in the fail store, then sends the message
      * that ends it (STAGES.md §15.6): {@code item.split} when none is open,
      * otherwise {@code item.progress}. Failures aren't sent on (§15.1). Both
-     * steps are safe to repeat, so after a crash it is done again.
+     * steps are safe to repeat, so after a crash it is done again. Once
+     * sent, the end is noted with when its failures were read, so a pod
+     * sends it again if one changes after (STAGES.md §15.8.10 step 5).
      *
      * @param checkpoint its checkpoint
      * @param landing    what came with it from landing
@@ -902,6 +919,7 @@ public final class ItemProcessor
         List<CommittedRecords.Row> failed = pipeline.failedRows(itemId,
                 checkpoint.generation());
         FailureStore.Counts counts;
+        Instant readAt = null;
         if (failures == null)
         {
             counts = SplitMessages.unstored(checkpoint, failed.size());
@@ -909,6 +927,8 @@ public final class ItemProcessor
         else
         {
             failures.record(SplitMessages.failures(checkpoint, failed));
+            // Before the counts are read, so a change after is sent again.
+            readAt = pipeline.databaseNow();
             counts = failures.counts(itemId);
         }
         SplitMessages.Corrected corrected = corrections == null
@@ -925,6 +945,10 @@ public final class ItemProcessor
                 failed.size(), counts, landing.digest(), landing.refs(),
                 endedAt, pipeline.clock().instant(), corrected, completion);
         pipeline.publishNow(List.of(message));
+        if (readAt != null)
+        {
+            pipeline.markAnnounced(itemId, readAt);
+        }
         if (message instanceof ItemProgressed progressed)
         {
             Telemetry.get().audit("item.progress",

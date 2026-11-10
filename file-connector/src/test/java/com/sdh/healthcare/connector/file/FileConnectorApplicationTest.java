@@ -411,6 +411,52 @@ class FileConnectorApplicationTest
     }
 
     /**
+     * A reprocess of a landed item the stage never split (its
+     * {@code item.landed} lost) splits it as generation 2, the next number
+     * from the counter (STAGES.md §15.8.10 step 5); its message, should it
+     * turn up later, is of generation 1 and cuts nothing.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void reprocessesALandedItemNeverSplit() throws Exception
+    {
+        TestLanding landing = new TestLanding(catalogProperties(),
+                runtime.keys().wrap(), KEYS, INTAKE);
+        LandedItem item = landing.land(csv(3, "n"), "n-brown.csv");
+        SplitHandler handler = handler();
+        drain();
+        ReprocessStore runs = new ReprocessStore(PG.getPostgresDatabase(),
+                "sdh_split", "split", Duration.ofSeconds(10));
+        UUID runId = runs.record("--item-id " + item.itemId(), "alice", "v",
+                id -> FailureReason.seal(runtime.keys().wrap(),
+                        TestKeys.RECORDS, id, -2, 1,
+                        "Synthetic reprocess reason 9b2f"),
+                List.of(new ReprocessStore.Chosen(item.itemId(), -1,
+                        Lineage.FIRST, item.itemId().toString())));
+
+        assertThat(runtime.corrections().queueReprocess()).isEqualTo(1);
+        String sent = camel.createConsumerTemplate().receiveBody(
+                REPROCESS_QUEUE, 2000, String.class);
+        assertThat(sent).isNotNull();
+        assertThat(handle(handler, sent.getBytes(UTF_8)))
+                .isEqualTo(Outcome.DONE);
+        List<ConnectorMessage> messages = drain();
+        assertThat(of(messages, RecordSplit.class)).hasSize(3)
+                .allSatisfy(record -> assertThat(record.lineage())
+                        .isEqualTo(Lineage.of(2, List.of())));
+        assertThat(of(messages, ItemSplit.class)).singleElement()
+                .satisfies(end -> assertThat(end.generation()).isEqualTo(2));
+        assertThat(runs.objects(runId)).singleElement().satisfies(object ->
+                assertThat(object.outcome()).isEqualTo("stored"));
+
+        assertThat(handle(handler, landing.announcement(item)))
+                .isEqualTo(Outcome.DONE);
+        assertThat(of(drain(), RecordSplit.class)).isEmpty();
+        assertThat(FATAL).isEmpty();
+    }
+
+    /**
      * A landed item whose {@code item.landed} message the broker lost is
      * found and split all the same, once its grace has passed: not
      * before, not twice, and not an item of another intake. Its message,

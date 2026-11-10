@@ -18,8 +18,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 
 /**
  * The convert stage's operator commands (design §11.4): {@code status},
- * {@code replay}, {@code reprocess} and those for its fail store, on the
- * shared {@link AdminCli}.
+ * {@code reprocess} and those for its fail store, on the shared
+ * {@link AdminCli}. None sends to a broker (STAGES.md §15.8.10 step 5).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -56,7 +56,7 @@ public final class ConvertAdmin
     {
         List<AdminCommand<ConvertAdminContext>> commands =
                 new ArrayList<>(List.of(new StageStatusCommand<>(),
-                        new ReplayCommand(), new ReprocessCommand<>()));
+                        new ReprocessCommand<>()));
         commands.addAll(FailureCommands.<ConvertAdminContext>all());
         return List.copyOf(commands);
     }

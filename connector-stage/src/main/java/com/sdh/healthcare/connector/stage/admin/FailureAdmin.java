@@ -149,8 +149,8 @@ public interface FailureAdmin
      * @param itemId the item
      * @param audit  the command's audit record
      * @param out    where to say what was done
-     * @throws Exception if it fails; the change stays made, and can be
-     *                   acted on again by replaying the item
+     * @throws Exception if it fails; the change stays made, and the
+     *                   stage's pods act on it
      */
     void changed(UUID itemId, AuditRecord audit, PrintStream out)
             throws Exception;

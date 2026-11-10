@@ -22,6 +22,7 @@ import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
@@ -306,6 +307,18 @@ public final class ItemSplitter
         {
             lock.unlock();
         }
+    }
+
+    /**
+     * The items whose ends are to be sent again, their failures changed
+     * since: see {@link ItemProcessor#changedEnds}.
+     *
+     * @param limit the most returned
+     * @return their ids
+     */
+    public List<UUID> changedEnds(int limit)
+    {
+        return processor.changedEnds(limit);
     }
 
     /**

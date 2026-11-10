@@ -28,8 +28,9 @@ import org.apache.iceberg.data.Record;
  * Asks the running landing node to land a landed item again, as a new item
  * that replaces it (STAGES.md §13.5): for an item the pipeline failed for a
  * reason that wasn't the item's, such as an outage before the split stage
- * recognised one. A replay can't help there, since the split stage only
- * announces a failed item's failure again.
+ * recognised one. A reprocess at the split stage splits the same item
+ * again; this lands the producer's data as a new item, linked to the one
+ * it replaces (STAGES.md §15.8.9).
  * <p>
  * The command takes no lease and writes no landing storage: it leaves a
  * request in the lease database, which the node holding the intake's lease

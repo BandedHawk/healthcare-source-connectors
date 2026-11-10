@@ -154,6 +154,16 @@ public final class ItemCheckpoints
                     + " NOT NULL DEFAULT 1");
             statement.execute("ALTER TABLE " + table
                     + " ADD COLUMN IF NOT EXISTS version text");
+            // Added 2026-11-09 (STAGES.md §15.8.10 step 5): when the
+            // failures last counted in an end sent were read, so a pod
+            // sends the end again once one changes (an operator's decline
+            // or reopen). Rows from before take the time it was added, as
+            // their ends were sent by the operator's command.
+            statement.execute("ALTER TABLE " + table
+                    + " ADD COLUMN IF NOT EXISTS announced_at timestamptz"
+                    + " DEFAULT clock_timestamp()");
+            statement.execute("ALTER TABLE " + table
+                    + " ALTER COLUMN announced_at DROP DEFAULT");
         }
         catch (SQLException failure)
         {
@@ -510,6 +520,114 @@ public final class ItemCheckpoints
                 }
                 return rows.getInt(1);
             }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The database's time now, to note with an end when its failures are
+     * read ({@link #markAnnounced}): the fail store notes its changes by
+     * the database's clock too.
+     *
+     * @return the time
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Instant now()
+    {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(
+                        "SELECT clock_timestamp()"))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            try (ResultSet rows = select.executeQuery())
+            {
+                rows.next();
+                return rows.getTimestamp(1).toInstant();
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Notes that an item's end was sent, counting its failures as they
+     * were when read: a failure changed after then has the end sent again
+     * ({@link #changedEnds}). Never moves the time back.
+     *
+     * @param itemId the item
+     * @param readAt when its failures were read, by {@link #now}
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void markAnnounced(UUID itemId, Instant readAt)
+    {
+        String sql = """
+                UPDATE %s
+                   SET announced_at = GREATEST(announced_at, ?)
+                 WHERE item_id = ?""".formatted(table);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setTimestamp(1, Timestamp.from(readAt));
+            update.setObject(2, itemId);
+            update.executeUpdate();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The items whose splitting has ended ({@code COMPLETED} or
+     * {@code FAILED}) one of whose failures of the item's generation
+     * changed since its end was last sent: an operator declined or
+     * reopened it, or the end never went (STAGES.md §15.8.10 step 5). A
+     * pod sends their ends again, as the convert stage's workers do.
+     *
+     * @param stage the stage, as the fail store names it
+     * @param limit the most returned
+     * @return their ids, longest waiting first
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<UUID> changedEnds(String stage, int limit)
+    {
+        String failures = FailureStore.table(
+                table.substring(0, table.indexOf('.')));
+        String sql = """
+                SELECT s.item_id FROM %1$s s
+                 WHERE s.state IN ('COMPLETED', 'FAILED')
+                   AND EXISTS (SELECT 1 FROM %2$s f
+                                WHERE f.stage = ? AND f.item_id = s.item_id
+                                  AND f.generation = s.generation
+                                  AND f.changed_at > COALESCE(
+                                      s.announced_at, s.ended_at,
+                                      '-infinity'::timestamptz))
+                 ORDER BY COALESCE(s.announced_at, s.ended_at)
+                 LIMIT ?""".formatted(table, failures);
+        List<UUID> found = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            select.setInt(2, limit);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(rows.getObject(1, UUID.class));
+                }
+            }
+            return found;
         }
         catch (SQLException failure)
         {

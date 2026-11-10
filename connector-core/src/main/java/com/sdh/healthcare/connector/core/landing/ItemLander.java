@@ -664,7 +664,8 @@ public final class ItemLander
         /**
          * When the batch was started; every row's partition time. To the
          * microsecond, as the table keeps it, so that a message rebuilt from
-         * the summary row (a replay, STAGES.md §13.2) is the one first sent.
+         * the summary row (a reprocess, STAGES.md §15.8) is the one first
+         * sent.
          */
         private final OffsetDateTime landedAt = OffsetDateTime.ofInstant(
                 clock.instant().truncatedTo(ChronoUnit.MICROS),

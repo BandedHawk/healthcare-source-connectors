@@ -90,7 +90,7 @@ Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` b
 ```sh
 bin/convert-stage                          # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/convert-stage         # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, replay, failures, decline, reopen, export, correct, retry
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, failures, decline, reopen, export, correct, retry, reprocess
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The stage exits with status
@@ -223,13 +223,9 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 has checked (`reconciler`); `status --item <id>` shows one item and its records by state. It reads only the lease
 database.
 
-`replay --item-id <id>` sends every `record.stored` of an item the stage has completed again, rebuilt from
-`records` (failed records are in the fail store, and aren't sent on), then its `item.converted`, and waits for the broker: for an item lost after this stage
-(STAGES.md §13.2). `--with-result` also sends the producer's `item.result` again, for a result that was lost;
-without it, the producer hears nothing, since a second result could set off its own handling. With results off
-(`sdh.results.enabled`), `--with-result` is refused before anything is sent. Each message goes
-under a broker ID of its own (`<messageId>~replay-<millis>`). An item not yet complete is refused. It needs the
-stage's keys and catalog, and writes nothing (`admin.replay`).
+No admin command sends to a broker, so the admin needs no broker settings. An item lost after this stage is
+reprocessed at the transform stage once that stage is built (STAGES.md §15.8.9); the producer's result is never sent
+again (§15.8.7). `replay` went with §15.8.10 step 5.
 
 #### Failures
 
@@ -348,7 +344,8 @@ What to watch:
 - **`convert.records_recovered`:** a message was lost, unless it follows `reconcile_deferral_capped` (then it is
   mostly queued records).
 - **`convert.item_total_missing`:** an item whose records are all converted but whose `item.split` hasn't come. Act
-  only if it is still incomplete once the queue has drained: replay it from the landing node (`replay --item-id`).
+  only if it is still incomplete once the queue has drained: reprocess it at the split stage
+  (`reprocess --item-id`), which cuts it again as its next generation.
 - **Outage length against queue retention** (Kafka and Pub/Sub 7 days by default, SQS 4): longer, and queued
   messages are lost. Check the retention before a planned outage, and drain the queues first if you can: then the
   reconciler waits only its 15 minutes at startup.

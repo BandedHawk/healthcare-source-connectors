@@ -94,7 +94,7 @@ Records are stored as split, in their original form. Conversion to JSON and the 
 ```sh
 bin/file-connector                         # Java 25 on the PATH, or JAVA=/path/to/java
 JAVA_OPTS=-Xmx2g bin/file-connector        # extra JVM options
-SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, replay, failures, decline, reopen, export, correct, retry, release, reprocess
+SDH_OPERATOR=alice bin/sdh-admin status    # operator commands: status, restore, failures, decline, reopen, export, correct, retry, release, reprocess
 ```
 
 Run it under a service manager (for example systemd) that restarts it when it exits. The connector exits with
@@ -234,12 +234,10 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 `restore --item-id <id> --to /tmp` decrypts a landed item into the pod's `/tmp`. `kubectl cp` can't copy out of this
 image, because it needs `tar`; read it through a debug container instead (below), from `/proc/1/root/tmp/<id>`,
 and delete it when you're done.
-`replay --item-id <id>` sends every `record.split` of an item the stage has finished again, rebuilt from
-`split_records`, then its `item.split` (or `item.progress`, while one of its failures is open), and waits for the
-broker. Pieces the splitter couldn't parse are in the fail store, and aren't sent: for an item lost between this stage and the
-convert stage, which converts what it lacks and completes the item (STAGES.md §13.2). Each message goes under a
-broker ID of its own (`<messageId>~replay-<millis>`), so a broker that drops repeated IDs doesn't drop it. An item
-still being split is refused. Nothing is written, so it is safe beside the running stage (`admin.replay`).
+No admin command sends to a broker, so the admin needs no broker settings: what the stage sends after an operator's
+command, its pods send. An item lost between this stage and the convert stage is found by the convert stage's
+reconciler, or reprocessed there (`reprocess --item-id` on the convert stage), which reads its records from
+`split_records` whether or not they ever reached it (STAGES.md §15.8.9). `replay` went with §15.8.10 step 5.
 
 #### Failures
 
@@ -256,9 +254,11 @@ kubectl exec -i <pod> -- java @/app/jvm.options @/app/container.options @/app/ad
 ```
 
 The reason (at most 4 KiB) is kept encrypted with the stage's records KEK, one entry per change, and is never
-printed or logged (`failure.declined`, `failure.reopened`). They write only to the fail store. Afterwards the stage sends the item's end again, alone: `item.split` once none of its failures is open, so the
-convert stage can complete it, or `item.progress` with the new counts. An item still being split counts the change
-when it ends.
+printed or logged (`failure.declined`, `failure.reopened`). They write only to the fail store. Within a renewal
+interval a pod of the stage sends the item's end again, alone, under the item's lease: `item.split` once none of its
+failures is open, so the convert stage can complete it, or `item.progress` with the new counts. An item still being
+split counts the change when it ends. The stage notes when it last read an item's failures for its end
+(`split_item.announced_at`), and sends the end again whenever one changed since.
 
 To correct a failure, export what failed encrypted to your own key, edit it on your machine, and submit the edit.
 Keep the private key on your machine; only the public key goes to the pod:
@@ -339,7 +339,9 @@ other. `reprocess --status --run <id>` lists the run item by item (queued, refus
 interrupted); `reprocess --cancel --run <id>` cancels what isn't yet queued. Audited as `admin.reprocess`, then
 `stage.reprocess_queued`, `stage.reprocess_refused`, `stage.generation_started`, `stage.reprocessed` and
 `stage.reprocess_done`, and counted by `sdh.stage.reprocessed`. Without `sdh.stage.reprocess` and the stage's own
-public keys the pods queue nothing, and the runs wait.
+public keys the pods queue nothing, and the runs wait. An item landed but never split (its `item.landed` lost, and
+the reconciler not yet past its grace) is chosen too, by `--item-id` or by landing time, and split as generation 2;
+should its `item.landed` come after, it cuts nothing.
 
 #### Held items
 
