@@ -2313,4 +2313,195 @@ audits (`stage.item_completed stage=split count=0`) and can reprocess them once 
   (`failsEmptyAndBlankMessagesAlone`, resuming after every record, `failsABatchWithoutMessages`);
   `IngestPipelineTest.emptyFileFails`; `ItemProcessorTest.failsAnEmptyItemForAnOperatorToDecide` (failed whole,
   an empty correction failing, declined and complete with 0 records, naming its failure).
-- **Tried on the sandbox** 2026-11-09 (SANDBOX.md "Checked"); the `-Pit` suite not run.
+- **Tried on the sandbox** 2026-11-09 (SANDBOX.md "Checked"); the `-Pit` suite passed 2026-11-10, once the
+  integration tests were brought up to the fail store (§15).
+
+## 17. A shared record stage (decided 2026-11-10, with the user)
+
+Before the transformer is built (§11, step 6), what the convert stage does around its conversion moves into a
+library, so the convert and transform stages share one copy of it, and a stage is chosen at run time: its queues,
+the table it reads records from and the table it stores them in. Asked for by the user 2026-11-10; the four choices
+below were made with the user the same day.
+
+### 17.1 Decided (2026-11-10, with the user)
+
+- **Common concerns go in a library,** used at least by the convert and transform stages: receiving queue
+  messages, reading records from an Iceberg table, storing what a stage makes in the next layer's table, and
+  announcing it downstream by queue.
+- **Chosen at run time:** the input, output and dead-letter queues (any of the seven brokers, as now), the source
+  table and the sink table.
+- **One of each queue (decided):** one input, one output, one dead-letter queue per stage. Fan-in and fan-out are
+  done by running more deployments, not by one stage listening or sending on several.
+- **Every source and sink is a records table (decided):** gold has the schema of `split_records` and `records`
+  (`RecordsTable.SCHEMA`): a row per record, the content encrypted under the table's KEK, with its metadata. The
+  transform stage stores one FHIR bundle per record. Tables per resource type, if wanted, are made from gold
+  downstream, outside the pipeline.
+- **The producer's result from any stage, by setting (decided):** results become the library's, turned on per
+  stage at run time. A pipeline turns them on at its last stage (the transform stage, once built), and the result
+  covers failures at every stage before it too.
+- **A new module, `connector-record-stage` (decided),** published, on `connector-stage`. `connector-stage` stays
+  the per-message worker the split stage runs on too; the new module is what a stage that reads records from one
+  table and stores records in another adds to it.
+
+### 17.2 What a record stage is
+
+A stage that, for each record message it receives, reads the record from its source table, makes one output from
+it, stores the output (or the record as it came, with the error that stopped it) in its sink table, and announces
+it on its output queue; and, once an item's records are all handled, sends the item's progress or completion.
+Split is not one: it reads a landed item as a stream and makes many records from it.
+
+```
+ input queue ──record message──► [ record stage ] ──record message──► output queue
+                                   │  read       ▲ store
+                                   ▼             │
+                             source table     sink table        (both RecordsTable.SCHEMA, any catalog)
+```
+
+The only stage-specific code is a **`RecordTransform`**, the step from one record's bytes to its output:
+
+| | Convert stage | Transform stage |
+|---|---|---|
+| Stage name (its place in a line, `Lineage`) | `convert` | `transform` |
+| Takes | `record.split`, `item.split` | `record.stored`, `item.converted` |
+| Makes | `record.stored`, `item.converted` | `record.transformed`, `item.transformed` |
+| `RecordTransform` | the converter registry by format, with `sdh.convert.options` | the Whistle runtime, fail-fast, with the WSTL set of its settings |
+| Its version (§14.2) | the converter's mapping (or `none`) | the WSTL set's name and digest |
+| Output | JSON, `Representation.json(mapping)` | a FHIR bundle, `application/fhir+json`, mapping the WSTL set |
+| Its own rules | `CONVERT_TOO_LARGE`, `CONVERT_SKIPPED`, a splitter's error passed on, a format with no converter | the first error's issue (§17.6), from `Checks.failure` |
+
+A `RecordTransform` is given the record's bytes and its metadata (format, content type, mapping, origin, item,
+place) and the attempt number, and returns the output's bytes and representation, or an error code with where
+in the record it was found. It never sees a table, a key or a queue. It says how much memory a record of a size
+takes, so the transforms running at once share a budget (`ConversionBudget`, moved to the library), and gives the
+versions it can stamp, for the drain check (§14.4a).
+
+### 17.3 What moves into `connector-record-stage`
+
+Everything in `convert-stage` today but the conversion itself, made general where it names `split_records` or a
+message type:
+
+| Now (`convert-stage`) | Becomes | Made general by |
+|---|---|---|
+| `ConvertProcessor` (all but converting) | `RecordStageProcessor`, the `StageProcessor` of every record stage | the source, the sink and the stage's messages (§17.4), given at start |
+| `ConvertProcessor.prepare`/`convert` | the convert stage's `RecordTransform` | stays in `convert-stage` |
+| `BacklogWatch` | `BacklogWatch` | the source table, whatever it is |
+| `ConvertReconciler` | `RecordReconciler` | the source table and the stage's input messages, rebuilt from a row |
+| `ConvertInputs` (reprocess, §15.8.4) | `SourceInputs` | the source table |
+| `ResultReporter` | `ResultReporter` | the tables to gather failures from (§17.5) |
+| `ConvertRuntime`, `ConvertConfiguration` | `RecordStageRuntime`, an auto-configuration | settings (§17.7); a stage's application gives only its `RecordTransform` |
+| `ConvertAdminContext`, `ConvertAdmin` | `RecordStageAdmin` | the source and sink from settings |
+| audit events `convert.reconcile_*`, `convert.item_total_missing`, `convert.placement_unknown`, `convert.result_not_sent` | `stage.reconcile_*` and the rest, with `sdh.stage` | nothing released, so renamed without a shim, as in §2 |
+
+`convert-stage` keeps its application class, its `RecordTransform` and its settings `sdh.convert.*`. The
+transformer's repository has the same three for the transform stage, and nothing else of its own about queues,
+tables, claims, failures, reprocessing, the drain check, results or reconciling.
+
+Two spots in `StageWorker` name the convert stage's messages and become general: a reprocess's `cause` is set
+on any record message (`RecordInStorage.withCause`), not only `record.stored`; the check for an interrupted
+generation stays on `item.split`, which is right, since only the split stage fans out (§15.8.1).
+
+### 17.4 Messages
+
+Each stage keeps its own message types (`record.stored`, `record.transformed`), so a reader still tells at a
+glance what layer a record is in. What the library needs from them is in the contract as interfaces:
+- **`RecordInStorage`** (exists) gains `record.transformed`, and `withCause`.
+- **An item's end, `ItemEnd`,** for `item.split`, `item.converted` and `item.transformed`: the item, its intake,
+  counts, versions, completion and generation, `sameAs`, and the producer's facts (below).
+- **`StageMessages`,** per stage name: how to make its record message from a stored row and its item's end from
+  an item's progress, and which messages it takes as input (its upstream stage's). The library is given the one
+  for its stage; `convert` and `transform` are in the contract, so a reader decodes both.
+- **The producer's facts travel with the item's end.** A result names the producer's reference for the item, the
+  item it replaces and a whole-item failure; today the convert stage reads them from `item.split`. So that the
+  last stage can send results without reading landing, `item.converted` (and `item.transformed`) carry them on
+  from the end before it. A record's queue message is carried on its failed row (`message_index`,
+  `message_refs_enc`), as now, by every stage.
+- **`record.transformed` and `item.transformed`** are added (contract still 3.0: nothing released). Their mapping
+  is the WSTL set and its digest (§1).
+- **`record.failed` and `record.untransformed` are dropped.** No stage sends a failed record on since the fail
+  store (§15.1): the convert stage still builds `record.failed` and the worker discards it.
+
+### 17.5 Results from any stage
+
+`sdh.results.enabled` (as now) turns results on at a stage. The result is sent after the stage's item end, as
+now, from what is in the stage's sink and in the tables named by `sdh.results.upstream` (the source by default,
+and any table before it: for the transform stage, `split_records` and `records`): the failed rows of every one,
+less those a correction resolved. A failure is put down to the stage whose table it is in, not to its code's
+prefix. Results on at two stages of a pipeline would tell the producer twice; the stage's start warns if its
+upstream item end says results were already sent (`results_sent`, carried on the item's end).
+
+### 17.6 The transform stage, as this design leaves it
+
+Its `RecordTransform` runs the Whistle runtime in fail-fast mode with the WSTL set at `sdh.transform.wstl`, loaded
+at start; the set's digest is part of its version, so a record mapped again under a changed set is processed
+under a new version (§14.3), never mistaken for a duplicate. A record the mapping rejects is stored in gold as it
+came (the silver JSON) with the first error's code and place, in the fail store, open for an operator (§15.1). The
+report mode (re-mapping a failed record to list every issue) is an operator command of that stage. This section
+decides only what the library needs from it; the stage itself is designed with step 6.
+
+### 17.7 Settings, at run time
+
+As now: `sdh.stage.input`, `sdh.stage.output`, `sdh.stage.dlq`, `sdh.stage.concurrency`, `sdh.lease`,
+`sdh.results`, `sdh.reconcile`, `sdh.maintenance`. New, replacing `sdh.storage` in a record stage:
+
+```yaml
+sdh:
+  stage:
+    source:                    # where records are read: the upstream stage's sink
+      catalog: { ... }         # Iceberg catalog properties, as sdh.storage.catalog
+      catalog-name: sdh
+      namespace: sdh_ingest
+      table: split_records     # the convert stage's default; records for the transform stage
+    sink:                      # where this stage stores what it makes
+      catalog: { ... }         # may be another catalog (another bucket, another layer)
+      catalog-name: sdh
+      namespace: sdh_ingest
+      table: records
+      kek: records-kek         # the sink's KEK; the source's comes from its rows
+```
+
+- **A message naming another table is refused.** A record message's storage reference must name the source's
+  catalog, namespace and table; any other is audited `stage.message_rejected` (reason `WRONG_SOURCE`) and dropped,
+  as an untrusted message is. So a stage only ever reads where it was told to, whatever a message says.
+- **The sink is created if missing,** shared by every pod, as `records` is now (§9); table maintenance and
+  retention of the sink are the stage's duties. The source is read only: its maintenance is its own stage's.
+- **Keys:** the stage unwraps the source's KEK to read, and holds the sink's to write, by `KeyMaterial.forStage`.
+- **The convert stage's old names go in the same change (decided 2026-11-10, §17.9):** `sdh.storage.*` and
+  `sdh.storage.split-namespace` are replaced by `sdh.stage.sink` and `sdh.stage.source`, with no aliases. The kit's
+  `application.yml.example`, the sandbox's `convert-application.yml`, the integration tests and the demo move with
+  it. The split stage and landing keep `sdh.storage`: they are not record stages.
+
+### 17.8 Order of building
+
+Each step builds, passes its tests and, where it says, is tried on the sandbox:
+1. **The contract:** `ItemEnd`, `StageMessages`, `withCause` on records, the producer's facts on `item.converted`,
+   `record.transformed` and `item.transformed`; `RecordLocation` and `readRecord` on it; `record.failed` dropped.
+2. **`connector-record-stage`:** `RecordTransform`, `RecordStageProcessor`, source and sink with the source check,
+   `BacklogWatch`, `RecordReconciler`, `SourceInputs`, `ResultReporter`, the runtime and admin; tested with a test
+   transform against an in-memory catalog and embedded Postgres, as `connector-stage` is.
+3. **`convert-stage` on it:** only its application, `RecordTransform` and `sdh.convert.*` left. Its tests, the
+   `-Pit` suite and the sandbox run unchanged in what they check (the audit names of §17.3 aside): the proof
+   that nothing was lost in the move.
+4. **The transformer** (§11, step 6), on the published module.
+
+### 17.9 Decided after review (2026-11-10, with the user)
+
+1. **Audit names. Decided 2026-11-10 with the user: renamed `stage.*`,** with `sdh.stage`, as the library's own
+   events already are (`stage.item_completed`, `stage.batch_failed`): `stage.reconcile_catching_up`,
+   `stage.reconcile_caught_up`, `stage.reconcile_deferred`, `stage.reconcile_deferral_capped`,
+   `stage.records_recovered`, `stage.item_completion_recovered`, `stage.item_total_missing`,
+   `stage.placement_unknown`, `stage.result_not_sent`, `stage.started`, `stage.not_started`, `stage.stopping`. No
+   shim (nothing released); `scripts/sandbox.sh` and SANDBOX.md move in the same change. `convert.record_skipped`
+   stays: it is the convert stage's own rule, in its `RecordTransform`.
+2. **The producer's facts. Decided 2026-11-10 with the user: carried on each item's end** (§17.4).
+   `item.converted` and `item.transformed` gain `producerRef` and `replaces`, copied from the item end the stage
+   received, so any stage can send results from what reached it, and none holds landing's KEK or catalog (§9).
+   Nothing new is exposed: messages are sealed for the recipient, and `item.progress` carries both already. Two
+   fields per item, never per record.
+3. **`record.failed`. Decided 2026-11-10 with the user: dropped in step 1,** with `record.untransformed` (never
+   built). Its last use is as a carrier: the admin's `failures export` wraps a failed row in a `RecordFailed` to
+   read it with `QueueReader.readRecord`. So the contract gains a `RecordLocation` (record ID, storage reference,
+   chunk count), which every record message gives; `readRecord` takes one; the export and the demo move to it.
+   `RecordInStorage` then permits only what a stage sends: `record.split`, `record.stored`, `record.transformed`.
+4. **The convert stage's old `sdh.storage` names. Decided 2026-11-10 with the user: moved in the same change,**
+   with no aliases (§17.7). Every place that sets them is in this repository and nothing is released, as for the
+   rename of §2; step 3 then proves the stage on the settings the transformer will use.
