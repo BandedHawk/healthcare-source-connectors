@@ -2641,8 +2641,9 @@ needed the user are decided in §17.10.10; the rest is proposed.
   bytes. A changed file in the set is a new digest, so a new version (§14.2), and the drain check (§14.4a) holds it
   until the stage is drained, as for a converter's change.
 - **What it says about itself:** a set must say its name and version, which input mappings it reads, and what it
-  makes. The US Core package has none of this today (`main.wstl`, `README.md` and `LICENSE`). Decided (§17.10.10,
-  point 2): a small `wstl-set.json` at the set's root, written by mapping's packaging:
+  makes. The US Core package had only its Maven coordinates and name (`mapping.properties`, read by ccda-quickrun),
+  not what it reads or makes. Decided (§17.10.10, point 2): a small `wstl-set.json` at the set's root, written by
+  mapping's packaging:
 
   ```json
   { "name": "ccda-us-core-6.1", "version": "1.0.0",
@@ -2789,8 +2790,51 @@ Small, and each tested here before the transformer uses it:
 Each part builds and passes its tests before the next:
 - **4a, here:** §17.10.6, with the library's tests.
 - **4b, mapping:** `wstl-set.json` in the US Core package (point 2).
+
+  **4b as built (2026-11-10):** a shared template, mapping's `src/assembly/wstl-set.json`, filled in by the parent
+  pom to `target/wstl-set/` at `generate-resources` and packed at the tarball's root beside `mapping.properties`.
+  The name is `mapping.set.name` (the artifactId), the version the project's; each implementation sets
+  `mapping.set.reads` and `mapping.set.makes` (the enforcer fails a build without them), and
+  `mapping.set.content-type` defaults to `application/fhir+json`. US Core's reads `ccda/1` and `ccda/2` and makes
+  `fhir-r4/us-core-6.1`. `SetManifestTest` (mapping-test-support) checks the filled-in file before packing: strict
+  JSON, exactly the four fields, each mapping `<name>/<version>`, none read twice, the name and version the
+  build's. The tarball is still byte-identical between builds. The set's README says it is deterministic.
+  The manifest is the set's own description, not the transformer's alone: ccda-quickrun's built-in copy of the set
+  carries it too (filled in from the same template), with a test that it reads `ccda/2`, what quickrun gives it.
 - **4c, transformer:** the repository (made by the user), its build (point 1), `transform-stage` with its
   `RecordTransform`, settings, application and tests (§17.10.8, without the end-to-end).
+
+  **4c as built (2026-11-10):** `healthcare-data-transformer` (not yet a git repository) has a root pom whose parent
+  is this repository's, unpacking `connector-build-kit` to `target/build-kit` at `initialize` and naming the
+  connectors' modules at `connectors.version` (the parent manages them at `${project.version}`, the child's own).
+  Whistle's runtime asks for gRPC 1.84.0 and Gson 2.11; the stage takes the connectors' 1.84.1 and 2.13.2. Its own
+  `LICENSE` and `NOTICE` name Whistle as derived from Google's Apache-2.0 code: the attribution step leaves out every
+  `com.sdh.*` artifact, Whistle's jars included. One line added here to `src/license/copyrights.properties` for
+  `org.antlr:antlr4-runtime` (Whistle's transpiler), as harmonization's own policy has it.
+  `transform-stage`:
+  - `WstlSet`: a folder or a `.tar.gz`, unpacked to its own folder under `java.io.tmpdir` (regular files and folders
+    only, inside the root, at most 10,000 files and 64 MiB; commons-compress's `isFile()` is true for a link too, so
+    links are refused by type), removed on close. The manifest is read strictly (exactly the four fields, mappings
+    `<name>/<version>`, none read twice). The digest is as §17.10.2, with each length as 8 bytes, high first.
+  - `MappingTransform`: as §17.10.3. A record that claims to be JSON and isn't fails `TRANSFORM_UNSUPPORTED`. A
+    failure that isn't a data check is logged `transform.mapping_failed` with its class only; Whistle reports deep
+    recursion as its own `WhistleStackOverflowError`, failed `TRANSFORM_FAILED` like any other.
+  - `TransformProperties` (`sdh.transform.wstl`, required; `max-bytes` 64MB; `memory`; `memory-factor` 30),
+    `TransformConfiguration` (logs `transform.set_loaded` with name, version, digest, reads and makes, or
+    `transform.set_not_loaded` and fails the start), `TransformAdmin` (the record stage's commands; `report` is 4d),
+    `TransformStageApplication`.
+  - Tests, 19: every one of mapping's 13 test documents (from its new `test-documents` zip) maps as report mode does
+    up to its first error: the 3 with none to their baseline bundle, the 10 others `TRANSFORM_CHECK_FAILED` at the
+    first error's line and column; the same bytes from 8 threads at once; unsupported, skipped, too large, not JSON,
+    a set that recurses; the version; the stage end to end on embedded Postgres (bundles in gold, a check failure at
+    its place in the item, results); a set that won't load stopping the start; the manifest's and archive's checks.
+  - **Memory factor measured:** the smallest heap that maps each document, less that for a 6 KB one (45 MiB): 4 MiB
+    for 158 KB and 310 KB, 8 MiB for 487 KB, so 14 to 27 bytes of heap per byte (in steps of the heap's sizing, about
+    4 MiB). Default 30, for headroom. The 45 MiB is the bare engine and set, not the application: the pod's sums
+    come in 4e.
+  - **Most documents fail in fail-fast:** of mapping's 4 samples only one has no US Core error; of all 13 documents,
+    3. So most real documents will land in the fail store, for `report` and correction. That is the decided policy
+    (US Core violations are errors), but it is what the sandbox will show.
 - **4d, transformer:** `report`, the kit and the images.
 - **4e, sandbox:** memory sums first, then the deployment and `check` (§17.10.7).
 
