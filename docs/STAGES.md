@@ -2961,7 +2961,9 @@ Each part builds and passes its tests before the next:
   `GOMEMLIMIT=600MiB`. With it fixed, the orphan sweep (`TableMaintenance.reachable`) ran the landing node and the
   split stage out of heap: Iceberg caches each snapshot's manifest list on the snapshot, so a sweep holds all of
   them (docs/SANDBOX.md "Checked"); fixed by reading each through a copy of the snapshot (DESIGN revision
-  (cw)), and checked. Not tried: more than one record at a time now the reads are bounded.
+  (cw)), and checked. More than one record at a time, measured on one pod (docs/SANDBOX.md "Checked"): 4.6 records
+  a second at one, 7.2 at two, 8.9 at four, with 8%, 14% and 22% of the time in GC and at most 143 MiB live; no
+  out-of-memory. The sandbox's setting is two, decided with the user the same day (7.2 a second, 14% in GC).
 
 #### 17.10.10 Decided (2026-11-10, with the user)
 

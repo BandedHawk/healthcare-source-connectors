@@ -7,7 +7,7 @@
 #   scripts/sandbox.sh images      build the landing node's and the three stages' customer images (in the sdh-it
 #                                  VM, with the cluster stopped meanwhile) and push them to the cluster's registry
 #   scripts/sandbox.sh deploy      deploy each pipeline's landing node, split, convert and transform stages
-#                                  (after up and images)
+#                                  (after up and images); restarts a stage whose image or settings changed
 #   scripts/sandbox.sh push <pipeline> <file>...
 #                                  push files to a pipeline's landing node, as its producer
 #   scripts/sandbox.sh check       push the sample C-CDA documents and check they are landed, split, converted,
@@ -759,11 +759,17 @@ deploy_pipeline() {
   cp "$DEPLOY/pipeline/splitter-patch.yaml" "$work/splitter/"
   cp "$DEPLOY/pipeline/convert-patch.yaml" "$work/convert/"
   envsubst '$PIPELINE' < "$DEPLOY/fhir/transform-patch.yaml" > "$work/transform/transform-patch.yaml"
-  stage_kustomization landing "landing.yaml, landing-service.yaml" landing-patch.yaml \
+  # Each with a digest of its settings on its pods, so a deploy that changes only the settings restarts them:
+  # a pod reads its settings once, at startup.
+  CONFIG_SHA="$(settings_digest "$work/landing-application.yml")" \
+    stage_kustomization landing "landing.yaml, landing-service.yaml" landing-patch.yaml \
     > "$work/landing/kustomization.yaml"
-  stage_kustomization splitter "splitter.yaml" splitter-patch.yaml scaled > "$work/splitter/kustomization.yaml"
-  stage_kustomization convert "convert.yaml" convert-patch.yaml scaled > "$work/convert/kustomization.yaml"
-  K8S_NS=sdh-fhir stage_kustomization "transform-$p" "transform.yaml" transform-patch.yaml scaled \
+  CONFIG_SHA="$(settings_digest "$work/splitter-application.yml")" \
+    stage_kustomization splitter "splitter.yaml" splitter-patch.yaml scaled > "$work/splitter/kustomization.yaml"
+  CONFIG_SHA="$(settings_digest "$work/convert-application.yml")" \
+    stage_kustomization convert "convert.yaml" convert-patch.yaml scaled > "$work/convert/kustomization.yaml"
+  CONFIG_SHA="$(settings_digest "$work/transform-application.yml" "$STATE/wstl-us-core.tar.gz")" \
+    K8S_NS=sdh-fhir stage_kustomization "transform-$p" "transform.yaml" transform-patch.yaml scaled \
     > "$work/transform/kustomization.yaml"
 
   # The landing node first: it makes the landing tables, which the split stage may only read. The split stage
@@ -832,10 +838,17 @@ readme_yaml() {
   awk '/^```yaml$/ {on=1; next} /^```$/ {on=0} on' "$1"
 }
 
+# settings_digest <file>...: a short digest of a stage's settings files, for its pods' annotation.
+settings_digest() {
+  cat "$@" | sha256sum | cut -c1-16
+}
+
 # stage_kustomization <stage> <resources> <patch> [scaled]: with "scaled", the Deployment's replicas are left to
-# KEDA, so a deploy doesn't reset what it has scaled to.
+# KEDA, so a deploy doesn't reset what it has scaled to. With $CONFIG_SHA, it is put on the pods (and the
+# Deployment) as sdh.sandbox/settings, so a change to it restarts them.
 stage_kustomization() {
-  local patches="{ path: $3 }"
+  local patches="{ path: $3 }" annotations=""
+  [[ -z "${CONFIG_SHA:-}" ]] || annotations="commonAnnotations: { sdh.sandbox/settings: \"$CONFIG_SHA\" }"
   if [[ "${4:-}" == "scaled" ]]; then
     local remove='[{"op": "remove", "path": "/spec/replicas"}]'
     patches+=", { target: { kind: Deployment, name: $1 }, patch: '$remove' }"
@@ -846,6 +859,7 @@ kind: Kustomization
 namespace: $K8S_NS
 resources: [$2]
 patches: [$patches]
+$annotations
 EOF
 }
 

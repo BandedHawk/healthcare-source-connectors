@@ -161,7 +161,10 @@ scripts/sandbox.sh delete --yes   # delete the cluster and its volumes (state/ i
 ```
 
 The cluster stays running after `up` and `deploy`; stop it when the demo is over. `images` stops `sdh-it`
-afterwards unless `SDH_IT_STOP=0`.
+afterwards unless `SDH_IT_STOP=0`. `deploy` restarts a stage's pods when its settings change, not only its
+image: each Deployment carries a digest of the stage's settings file (and the transform stage's set) as the
+annotation `sdh.sandbox/settings`, since a pod reads its settings once, at startup. Before 2026-11-11 a change
+to settings alone needed `kubectl rollout restart`.
 
 ## Layout
 
@@ -257,8 +260,9 @@ a US Core check, so expect most records there. Per pipeline, in the namespace `s
 - in the secret `transform-<pipeline>-keys`: the private key the convert stage seals records to, the convert
   stage's signing public key, and the public half of gold's consumer key pair (`<pipeline>-consumer`), which its
   messages are sealed to. No reader of gold is deployed; the private half is kept in the state directory for one.
-- one record at a time (`sdh.stage.concurrency: 1`) and `max-bytes` 2 MB here: at four at once the pod ran out
-  of heap (STAGES.md §17.10.9, 4e, as found). A larger record is kept as it came, `TRANSFORM_TOO_LARGE`.
+- two records at a time (`sdh.stage.concurrency: 2`, decided with the user on 2026-11-11 from the measures under
+  Checked) and `max-bytes` 2 MB here. A larger record is kept as it came, `TRANSFORM_TOO_LARGE`. Before the fix to
+  reading compacted tables (DESIGN.md revision (cv)) four at once ran out of heap, so it was one at a time.
 
 Producer results are off here, at every stage: no results topic or producer key is set up yet.
 
@@ -586,3 +590,16 @@ Checked again since: see the end of this section.
     stage's `records` (about 1,800 commits) passed. Fixed the same day (DESIGN.md revision (cw)): the sweep reads
     each snapshot's manifests through a copy of it. Checked with maintenance every five minutes on all three
     stages and `scale-demo` (300 items in 328 s): every run finished, twice on each table, with no restart.
+  - **More than one record at a time (2026-11-11), measured; set to 2 with the user.** One transform pod drained 300
+    queued records (the stage held at no pods while they were pushed and converted, then let to one), at each
+    concurrency for the run (`SDH_STAGE_CONCURRENCY`), with GC logging on (`-Xlog:gc`; pause times only). 180 of
+    the 300 failed a check on synthetic data, which in fail-fast mode stops a mapping early. The heap is 520 MiB:
+
+    | At once | Records a second | Share of time in GC | Most live after a full GC |
+    |---|---|---|---|
+    | 1 | 4.6 | 8% | 110 MiB |
+    | 2 | 7.2 | 14% | 128 MiB |
+    | 4 | 8.9 | 22% | 143 MiB |
+
+    No out-of-memory and no restart at any. Before the fix, one at a time thrashed at 350 MiB live and under 2 a
+    second: the reads were the whole difference. More at once adds little live heap; the cost is collection.
