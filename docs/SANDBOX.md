@@ -572,4 +572,17 @@ Checked again since: see the end of this section.
     the same moment. While it restarts, the stages' reads and writes time out (`SdkClientException`, a failed
     multipart upload in the landing node's maintenance, retried at its next interval), and `scale-demo` slowed to
     a few items a minute for its first 15 minutes. Nothing was lost: each failed write was retried or failed
-    whole. Not yet fixed (below the memory table, the control-plane node has 147 MiB to spare).
+    whole. Fixed the same day without more memory (the control-plane node has 147 MiB to spare): SeaweedFS runs
+    with `GOMEMLIMIT=600MiB` (`deploy/sandbox/infra/seaweedfs.yaml`), so Go collects before the limit rather
+    than growing past it. Checked with maintenance every five minutes on all three stages at once and
+    `scale-demo` (300 items in 468 s, with no slow phase): no SeaweedFS restart or kill, at up to 767 MiB.
+  - **Found with SeaweedFS fixed: the orphan sweep runs the landing node and the split stage out of heap.** With
+    storage no longer failing part way, maintenance reached `deleteOrphans` on `landed_items` and `split_records`
+    (about 4,300 commits each, most within the seven days' snapshots kept), and both pods ended with
+    `OutOfMemoryError` (heaps of 512 and 768 MiB), each at its run. A thread dump at the moment (SIGQUIT from a
+    debug container; frames only) had the sweep in `TableMaintenance.reachable`, in `Snapshot.allManifests`: Iceberg
+    keeps each snapshot's manifest list on the snapshot once read, so one sweep holds every snapshot's list at
+    once. Not the compaction change; older than it, and hidden while SeaweedFS failed the runs. The convert
+    stage's `records` (about 1,800 commits) passed. Fixed the same day (DESIGN.md revision (cw)): the sweep reads
+    each snapshot's manifests through a copy of it. Checked with maintenance every five minutes on all three
+    stages and `scale-demo` (300 items in 328 s): every run finished, twice on each table, with no restart.

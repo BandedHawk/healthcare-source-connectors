@@ -46,6 +46,7 @@ import org.apache.iceberg.PartitionStatisticsFile;
 import org.apache.iceberg.ReachableFileUtil;
 import org.apache.iceberg.RewriteFiles;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotParser;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.SortOrderComparators;
 import org.apache.iceberg.StructLike;
@@ -1004,6 +1005,14 @@ public final class TableMaintenance
      * Every file the table's metadata references: metadata files, manifest
      * lists, statistics, manifests, and the data and delete files of every
      * snapshot.
+     * <p>
+     * Each snapshot's manifests are read through a copy of it
+     * ({@link #detached}): Iceberg keeps a manifest list on the snapshot it
+     * was read from, and the table's snapshots last as long as the table, so
+     * reading them there would hold every snapshot's list at once. With a
+     * week of commits that ran the landing node out of heap (docs/SANDBOX.md
+     * "Checked", 2026-11-11). Only one list is held at a time, besides the
+     * paths found.
      *
      * @param table the table
      * @return their locations
@@ -1023,7 +1032,8 @@ public final class TableMaintenance
         Set<String> manifests = new HashSet<>();
         for (Snapshot snapshot : table.snapshots())
         {
-            for (ManifestFile manifest : snapshot.allManifests(table.io()))
+            for (ManifestFile manifest
+                    : detached(snapshot).allManifests(table.io()))
             {
                 if (manifests.add(manifest.path()))
                 {
@@ -1058,5 +1068,17 @@ public final class TableMaintenance
             }
         }
         return paths;
+    }
+
+    /**
+     * A copy of a snapshot that shares nothing with the table's own, so the
+     * manifest list it reads, and keeps, is dropped with it.
+     *
+     * @param snapshot the table's snapshot
+     * @return the copy
+     */
+    static Snapshot detached(Snapshot snapshot)
+    {
+        return SnapshotParser.fromJson(SnapshotParser.toJson(snapshot));
     }
 }

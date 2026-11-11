@@ -30,6 +30,10 @@ spec:
           image: chrislusf/seaweedfs:4.48
           args: [server, -s3, -s3.config=/etc/seaweedfs/s3.json, -dir=/data, -ip.bind=0.0.0.0, -volume.max=50,
                  -master.volumeSizeLimitMB=1024]
+          # Go doesn't see the container's limit: without a soft limit of its own it let the heap grow past the
+          # 768 MiB and was killed under maintenance (docs/SANDBOX.md "Checked", 2026-11-11). 600 MiB leaves room
+          # for what Go doesn't count (stacks, buffers outside the heap).
+          env: [{ name: GOMEMLIMIT, value: 600MiB }]
           ports: [{ name: s3, containerPort: 8333 }]
           readinessProbe: { tcpSocket: { port: 8333 }, periodSeconds: 5 }
           securityContext:

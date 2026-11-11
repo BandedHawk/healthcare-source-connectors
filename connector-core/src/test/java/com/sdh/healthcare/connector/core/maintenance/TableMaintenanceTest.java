@@ -732,6 +732,34 @@ class TableMaintenanceTest
                 .isEqualTo(before);
     }
 
+    /**
+     * Finding what is reachable leaves nothing cached on the table's
+     * snapshots: with its manifest list gone, an older snapshot can't list
+     * its manifests, as it could if the sweep had kept the list on it.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void findingReachableFilesKeepsNoManifestListOnTheSnapshots()
+            throws Exception
+    {
+        Table table = records();
+        batch(table, RECENT_DAY, 2);
+        batch(table, RECENT_DAY, 2);
+        batch(table, RECENT_DAY, 2);
+        List<Snapshot> snapshots = new ArrayList<>();
+        table.snapshots().forEach(snapshots::add);
+        assertThat(snapshots).hasSizeGreaterThanOrEqualTo(3);
+        Snapshot first = snapshots.get(0);
+
+        Set<String> referenced = TableMaintenance.reachable(table);
+
+        assertThat(referenced).contains(first.manifestListLocation());
+        Files.delete(Path.of(first.manifestListLocation()));
+        assertThatThrownBy(() -> first.allManifests(table.io()))
+                .isInstanceOf(RuntimeException.class);
+    }
+
     /** Listed paths are qualified to match the table's own paths. */
     @Test
     void listedPathsAreQualifiedLikeTablePaths()

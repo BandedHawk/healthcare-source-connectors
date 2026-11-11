@@ -2957,9 +2957,11 @@ Each part builds and passes its tests before the next:
   backlog (about 3,600 records) at up to 909 of its 1,088 MiB, with no restart; `check` and `scale-demo` passed
   (two pods, 190 and 110 of 300 records); docs/SANDBOX.md "Checked". The KEDA pause is off. `check` and
   `scale-demo` wait for every record of an item to end, not for its completion, since an item with a failure stays
-  open (§15.6). Found on the way: the sandbox's SeaweedFS runs out of its 768 MiB under maintenance's rewrites and
-  two stages' maintenance at once; open, a sandbox sizing question. Not tried: more than one record at a time now
-  the reads are bounded.
+  open (§15.6). Found on the way: the sandbox's SeaweedFS ran out of its 768 MiB under maintenance; fixed with
+  `GOMEMLIMIT=600MiB`. With it fixed, the orphan sweep (`TableMaintenance.reachable`) ran the landing node and the
+  split stage out of heap: Iceberg caches each snapshot's manifest list on the snapshot, so a sweep holds all of
+  them (docs/SANDBOX.md "Checked"); fixed by reading each through a copy of the snapshot (DESIGN revision
+  (cw)), and checked. Not tried: more than one record at a time now the reads are bounded.
 
 #### 17.10.10 Decided (2026-11-10, with the user)
 
