@@ -261,9 +261,12 @@ public final class CommonSettings
      *
      * @param otlp           the collector
      * @param metricInterval how often metrics are exported
+     * @param jvmMetrics     whether the JVM's metrics are exported too,
+     *                       with an endpoint (design §12.2)
      */
     public record Telemetry(@DefaultValue Otlp otlp,
-            @DefaultValue("60s") Duration metricInterval)
+            @DefaultValue("60s") Duration metricInterval,
+            @DefaultValue("true") boolean jvmMetrics)
     {
     }
 

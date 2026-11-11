@@ -24,7 +24,7 @@ camel:
     run-controller: true
 
 # Telemetry (design §12): exported through sdh.telemetry.otlp with the PHI
-# allow-list filter, so Boot's own OTLP exporters are off.
+# allow-list filter, so Boot's own OTLP trace and log exporters are off.
 management:
   tracing:
     sampling:
@@ -36,10 +36,13 @@ management:
     export:
       otlp:
         enabled: false
+  # The JVM's metrics only, with only the JVM's tags (design §12.2): the
+  # collector, headers and interval are sdh.telemetry's, and
+  # sdh.telemetry.jvm-metrics: false turns them off.
   otlp:
     metrics:
       export:
-        enabled: false
+        enabled: true
 
 # Azure's JDK HTTP client warns on every request about a header it sets
 # itself (design §8.1).

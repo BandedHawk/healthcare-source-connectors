@@ -18,7 +18,7 @@ camel:
     run-controller: true
 
 # Telemetry (design §12): spans are exported through sdh.telemetry.otlp (with the PHI allow-list filter), so Boot's
-# own OTLP exporters and the Micrometer OTLP metrics registry are off. Sample every trace: one per file is cheap.
+# own OTLP trace and log exporters are off. Sample every trace: one per file is cheap.
 management:
   tracing:
     sampling:
@@ -30,10 +30,12 @@ management:
     export:
       otlp:
         enabled: false
+  # The JVM's metrics only, with only the JVM's tags (design §12.2): the collector, headers and interval are
+  # sdh.telemetry's, and sdh.telemetry.jvm-metrics: false turns them off.
   otlp:
     metrics:
       export:
-        enabled: false
+        enabled: true
 
 # Azure uses the JDK HTTP client (design §8.1). It warns on every storage request that it ignores the SDK's
 # Content-Length header; the JDK sets that header itself from the request body, so the warning is noise (about one

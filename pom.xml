@@ -388,7 +388,8 @@
         <artifactId>bcprov-jdk18on</artifactId>
         <version>${bouncycastle.version}</version>
       </dependency>
-      <!-- Test only: the OTLP wire format, for the demo's telemetry receiver. -->
+      <!-- The OTLP wire format: at run time for the Micrometer OTLP registry (design §12.2); in tests for the
+           demo's telemetry receiver. -->
       <dependency>
         <groupId>io.opentelemetry.proto</groupId>
         <artifactId>opentelemetry-proto</artifactId>

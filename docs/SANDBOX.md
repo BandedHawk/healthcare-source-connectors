@@ -613,3 +613,9 @@ Checked again since: see the end of this section.
   Iceberg 1.12's classes, expiry reads each manifest list from its file, streamed, not from the snapshot, and
   keeps manifests once each, by path, so it holds what the table has, not what every snapshot listed. Nothing to
   fix. The settings were removed after; the sandbox's history before the run is gone, its data unchanged.
+- **JVM metrics (2026-11-11, DESIGN.md revision (cx)).** With the new images, every stage sends the JVM's metrics
+  to Prometheus in Grafana (67 to 71 series a pod: `jvm_memory_used_bytes` by pool, `jvm_gc_pause_seconds`,
+  `jvm_gc_live_data_size_bytes`, `jvm_threads_states_threads`, `process_cpu_usage`), with only the JVM's tags;
+  no other name is new. The share of time in GC is `rate(jvm_gc_pause_seconds_sum[5m])`, and what the heap
+  needs is `jvm_gc_live_data_size_bytes`. The first deploy found the splitter's image without
+  `opentelemetry-proto` (fixed). `check` passed.

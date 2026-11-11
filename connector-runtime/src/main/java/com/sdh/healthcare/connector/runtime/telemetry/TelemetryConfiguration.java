@@ -9,6 +9,8 @@ package com.sdh.healthcare.connector.runtime.telemetry;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.ConnectorSettings;
+import io.micrometer.registry.otlp.OtlpConfig;
+import io.micrometer.registry.otlp.OtlpMeterRegistry;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter;
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporterBuilder;
@@ -26,14 +28,16 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.micrometer.metrics.autoconfigure.MeterRegistryCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
  * OpenTelemetry export (design §12). Spring Boot builds the SDK from these
- * beans; its own OTLP exporters and the Micrometer OTLP registry are
- * switched off in {@code application.yml}, so everything leaves through the
- * filters here.
+ * beans; its own OTLP trace and log exporters are switched off in
+ * {@code application.yml}, so everything leaves through the filters here.
+ * The Micrometer OTLP registry exports the JVM's metrics only, through its
+ * own allow-list (§12.2).
  * <p>
  * With {@code sdh.telemetry.otlp.endpoint} unset, no exporters exist:
  * telemetry stays in the process, and audit events still go to the console
@@ -143,6 +147,34 @@ public class TelemetryConfiguration
                                         settings.telemetry().metricInterval())
                                 .build())
                 .build();
+    }
+
+    /**
+     * The Micrometer OTLP registry's settings, from {@code sdh.telemetry}
+     * (design §12.2); Boot's own, from
+     * {@code management.otlp.metrics.export}, back off.
+     *
+     * @param settings the application's settings
+     * @param resource describes the service
+     * @return the registry's settings
+     */
+    @Bean
+    OtlpConfig sdhOtlpConfig(ConnectorSettings settings, Resource resource)
+    {
+        return JvmMetricsExport.config(settings.telemetry(), resource);
+    }
+
+    /**
+     * Lets only the JVM's meters, with only the JVM's tags, into the OTLP
+     * registry (design §12.2).
+     *
+     * @return the customizer
+     */
+    @Bean
+    MeterRegistryCustomizer<OtlpMeterRegistry> sdhJvmMetricsOnly()
+    {
+        return registry -> registry.config()
+                .meterFilter(JvmMetricsExport.filter());
     }
 
     /** The longest a flush waits for the collector. */
