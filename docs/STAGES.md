@@ -2964,6 +2964,8 @@ Each part builds and passes its tests before the next:
   (cw)), and checked. More than one record at a time, measured on one pod (docs/SANDBOX.md "Checked"): 4.6 records
   a second at one, 7.2 at two, 8.9 at four, with 8%, 14% and 22% of the time in GC and at most 143 MiB live; no
   out-of-memory. The sandbox's setting is two, decided with the user the same day (7.2 a second, 14% in GC).
+  Snapshot expiry, forced on a week's worth of commits (5,543 snapshots of `landed_items` at once), ran within
+  the heaps too: Iceberg's expiry reads manifest lists from their files, not the snapshots (docs/SANDBOX.md "Checked").
 
 #### 17.10.10 Decided (2026-11-10, with the user)
 

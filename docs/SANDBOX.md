@@ -603,3 +603,13 @@ Checked again since: see the end of this section.
 
     No out-of-memory and no restart at any. Before the fix, one at a time thrashed at 350 MiB live and under 2 a
     second: the reads were the whole difference. More at once adds little live heap; the cost is collection.
+- **Snapshot expiry on a week's commits (2026-11-11).** Maintenance keeps seven days of snapshots, so on tables
+  four days old it had expired none. Expiry was forced on every stage, with a retention of one hour
+  (`SDH_MAINTENANCE_SNAPSHOTRETENTION=1h`) and maintenance every five minutes: the first run expired 5,543
+  snapshots of `landed_items`, 5,517 of `landing_ledger`, 5,249 of `split_records`, 2,112 of `records` and 357 of
+  gold's `fhir`, with their compaction, and the second the few made since. No out-of-memory and no restart; on the
+  landing node (512 MiB of heap) the old generation reached at most 265 MiB during expiry, by thread dumps every
+  four seconds (frames and heap sizes only), an upper bound since it holds garbage until it fills. As read from
+  Iceberg 1.12's classes, expiry reads each manifest list from its file, streamed, not from the snapshot, and
+  keeps manifests once each, by path, so it holds what the table has, not what every snapshot listed. Nothing to
+  fix. The settings were removed after; the sandbox's history before the run is gone, its data unchanged.
