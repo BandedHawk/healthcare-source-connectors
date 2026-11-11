@@ -2613,7 +2613,7 @@ needed the user are decided in §17.10.10; the rest is proposed.
   yet a git repository; the user makes it one. It depends on all three of the others, and nothing depends on it, so
   the repositories' order holds: harmonization, then connectors, then mapping, then the transformer.
 - **One module to start, `transform-stage`:** its application, its `RecordTransform` and `sdh.transform.*`, as
-  `convert-stage` has (§17.3), and its operator command `report` (§17.10.4). The rest comes from
+  `convert-stage` has (§17.3); no operator command of its own (§17.10.4). The rest comes from
   `connector-record-stage`.
 - **From this repository:** `connector-record-stage` and what it brings (`connector-stage`, `connector-broker`,
   `connector-core`, `connector-contract`, `connector-runtime`), at a version. **From harmonization:**
@@ -2688,22 +2688,33 @@ needed the user are decided in §17.10.10; the rest is proposed.
 Five new codes in `ErrorCode` (`connector-core`): `TRANSFORM_UNSUPPORTED`, `TRANSFORM_SKIPPED`,
 `TRANSFORM_TOO_LARGE`, `TRANSFORM_CHECK_FAILED` and `TRANSFORM_FAILED`.
 
-#### 17.10.4 A failure's issue, and the report command
+#### 17.10.4 A failure's issue, and diagnosing it (revised 2026-11-10, with the user)
 
 - **Where:** an issue's line and column are where its element starts in the record (the converter's `#line` and
   `#col`, record-relative). `RecordTransform.Result.Failed` gives a byte offset today, which the library turns into
   the record's line and column and then the item's (`origin.toFile`). It gains a second form that gives the record's
   line and column directly; the library maps it to the item's the same way, so a transform failure's
   `error_line` and `error_column` are a place in the landed file, as a convert failure's are.
-- **What, not stored:** an issue's text and its `where` quote the document (a code, a date, an entry's ID: seven of
-  the US Core set's fifteen error checks put a value in their message), so they are never logged, audited or put in
-  a metric, and are not kept in gold. The failed row keeps the code and the place; the text is made again on demand,
-  which a deterministic set (§17.10.2) gives exactly.
-- **`transform-stage.jar admin report --record <id> [--item <id>]`:** reads the failed row from gold (as
-  `failures export` does), maps it again in **report** mode (`Checks.Mode.REPORT`), and prints every issue (severity,
-  where, message, the item's line and column) to the operator's terminal, in one pass rather than one error at a
-  time: the remediation the report mode was made for. Run as `SDH_OPERATOR`, audited `transform.report_run` with
-  the record ID and the issue count, never the text. It needs the gold KEK, as `failures export` does.
+- **What the stage stores:** that the record failed to map (`TRANSFORM_CHECK_FAILED`, at its place), and the record
+  as it came, as the convert stage does. Nothing else: the stage runs fail-fast only, never in report mode, and
+  doesn't keep, log, audit or measure an issue's text.
+- **No values in an issue, in either mode (decided 2026-11-10 with the user):** a set's issue text (its `where` and
+  message) names fields, rules and places only, never a value from the document, so what quickrun or any runner
+  prints is never PHI. The US Core set doesn't meet this yet: some messages quote a date (`effectiveTime`,
+  `birthTime`) or a code as written, every `where` names its entry by `[id root|extension]`, and a practitioner or
+  organisation with no ID by `[name …]` (`common/checks.wstl`). That is a change in mapping, not here.
+- **No `report` command (decided 2026-11-10 with the user; it replaces the one proposed here):** an operator who
+  needs to diagnose a failure, with access to the document, runs the harmonisation engine in report mode on the
+  failed JSON (as ccda-quickrun does on XML), which gives every error, its explanation and its place.
+- **Corrections (decided 2026-11-10 with the user):** the right place for an edit is the pre-convert document. An
+  operator can still edit the failed post-convert JSON and submit it to the transform stage (`correct`, as at any
+  record stage; `retry` for the record unchanged, say after a fixed set), but the engine's report won't help with
+  that edit: its lines and columns are places in the original pre-convert document (the converter's `#line` and
+  `#col`), not in the JSON.
+- **Not now, to investigate:** tracing a transform failure back to its originating document (the split record and
+  the landed file, before conversion), opening it beside the parse of its JSON, and correcting it there so the
+  correction flows through convert and transform again. The same is needed for every other format, and how each
+  format is tracked for editing and debugging.
 
 #### 17.10.5 Settings
 
@@ -2774,7 +2785,7 @@ Small, and each tested here before the transformer uses it:
 - **In the transformer:** the `RecordTransform` on the four samples' JSON with the US Core set (a bundle each,
   matching mapping's baselines); a data check failing (`fixtures/epic-gender-u.json`) at its line and column; an
   unsupported input; too large; a set that won't load; the version changing with one byte of the set. The stage on
-  embedded Postgres and an in-memory catalog, as `ConvertStageTest`. The report command on a failed row. The kit's
+  embedded Postgres and an in-memory catalog, as `ConvertStageTest`. The kit's
   and image's settings start, as the other stages' tests do.
 - **Engines at once:** a test mapping the samples on many threads from one initialised builder, comparing each
   output with the serial one. Quickrun only ever builds engines one after another; `Checks` keeps issues per engine
@@ -2821,7 +2832,7 @@ Each part builds and passes its tests before the next:
     recursion as its own `WhistleStackOverflowError`, failed `TRANSFORM_FAILED` like any other.
   - `TransformProperties` (`sdh.transform.wstl`, required; `max-bytes` 64MB; `memory`; `memory-factor` 30),
     `TransformConfiguration` (logs `transform.set_loaded` with name, version, digest, reads and makes, or
-    `transform.set_not_loaded` and fails the start), `TransformAdmin` (the record stage's commands; `report` is 4d),
+    `transform.set_not_loaded` and fails the start), `TransformAdmin` (the record stage's commands),
     `TransformStageApplication`.
   - Tests, 19: every one of mapping's 13 test documents (from its new `test-documents` zip) maps as report mode does
     up to its first error: the 3 with none to their baseline bundle, the 10 others `TRANSFORM_CHECK_FAILED` at the
@@ -2833,9 +2844,21 @@ Each part builds and passes its tests before the next:
     4 MiB). Default 30, for headroom. The 45 MiB is the bare engine and set, not the application: the pod's sums
     come in 4e.
   - **Most documents fail in fail-fast:** of mapping's 4 samples only one has no US Core error; of all 13 documents,
-    3. So most real documents will land in the fail store, for `report` and correction. That is the decided policy
+    3. So most real documents will land in the fail store, for diagnosis and correction. That is the decided policy
     (US Core violations are errors), but it is what the sandbox will show.
-- **4d, transformer:** `report`, the kit and the images.
+- **4d, transformer:** the kit and the images (no `report`: §17.10.4).
+
+  **4d as built (2026-11-10):** `transform-stage` packs the kit as convert-stage does (`src/assembly/`, `src/dist/`:
+  `bin/transform-stage` and `bin/sdh-admin`, `config/jvm.options` and `application.yml.example`, `container/`, the
+  zstd and snappy libraries, `legal/` with the SBOM), as a folder on every package and a tarball with `-Pdist`
+  (176 MB); its service `Dockerfile` and `docker/sdh-admin` are convert's. `-Pimages` builds both images through the
+  build kit's `build-image.sh` from the transformer's folder: `sdh/transform-stage` (420 MB) and
+  `sdh/transform-stage-service` (504 MB), uid 10001, the sdh-it VM stopped after. Neither holds a set. The kit's
+  README covers the set (a `.tar.gz` in a ConfigMap as `binaryData`: a ConfigMap holds no folders), gold, the
+  results moved here with `split_records` upstream, the five error codes, and diagnosing a check failure with the
+  engine in report mode on the exported record, its places being in the pre-convert document. No `report` command
+  (§17.10.4). `DistributionSettingsTest` binds the example settings as the stage does and checks the kit's files;
+  21 tests in all. Not yet: an image test like file-connector's `CustomerImageIT` (the sandbox in 4e starts both).
 - **4e, sandbox:** memory sums first, then the deployment and `check` (§17.10.7).
 
 #### 17.10.10 Decided (2026-11-10, with the user)

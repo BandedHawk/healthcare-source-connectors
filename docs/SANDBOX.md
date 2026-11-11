@@ -224,9 +224,9 @@ stage to the convert stage's, and the convert stage to the FHIR stage's.
 
 ## The FHIR stage
 
-Not built yet: it is the planned `healthcare-data-transformer` project, which runs the Whistle mapping (the
-`mapping` repository, US Core 6.1) on each record, fail-fast, writes the resources to the gold layer, and sends
-what fails to a dead-letter topic for its report mode. The sandbox has its place ready:
+Built (`healthcare-data-transformer`, STAGES.md §17.10) but not yet deployed here (step 4e): it runs the Whistle
+mapping (the `mapping` repository, US Core 6.1) on each record, fail-fast, writes the bundles to the gold layer, and
+keeps what fails as it came in its fail store, as the other stages do. The sandbox has its place ready:
 - the namespace `sdh-fhir`, with a quota (3 CPUs, 4 GB) the pipelines can't take, and the same network policies;
 - per pipeline: the topics `<pipeline>.records` (its input) and `<pipeline>.fhir.dlq`; the gold bucket and an S3
   key that reads silver and writes gold; a database role; a Vault token that unwraps the records KEK and uses
