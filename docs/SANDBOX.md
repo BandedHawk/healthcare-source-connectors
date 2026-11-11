@@ -111,34 +111,49 @@ moves anything else off it, so that a restarting service always finds its memory
 | KEDA's three pods (held to 128 MiB each; they ask 100 and may grow to 1,000; they use under 50) | 3 × 128 |
 | Total, of 4,869 | 4,722 |
 
-| On the other two nodes | MiB |
+| On the other two nodes (since 2026-11-10, with the transform stage) | MiB |
 |---|---|
 | Kafka (two brokers) | 2 × 768 |
 | Landing node (one pod, no standby) | 1,024 |
-| Split stage, one to two pods (768 MiB heap; its README says 2 GiB, the samples are small) | 2 × 1,536 |
-| Convert stage, one to two pods (its README says 2 GiB) | 2 × 1,024 |
+| Split stage, one pod (768 MiB heap; its README says 2 GiB, the samples are small) | 1,536 |
+| Convert stage, one pod (its README says 2 GiB) | 1,024 |
+| Transform stage, one to two pods (its README says 2 GiB) | 2 × 1,088 |
 | OpenTelemetry collector | 256 |
 | Producer | 64 |
-| Total at most, of 2 × 4,753 = 9,506 | 8,000 |
+| Total at most, of 2 × 4,753 = 9,506 | 7,616 |
 
-A total isn't enough: a pod needs its memory on one node. In the second test run, with both convert pods already
-up, one on each node, neither node had the 1,536 MiB a second split pod needs, and it waited for minutes. So each
-stage's two pods must run on different nodes (a required anti-affinity in `splitter-patch.yaml` and
-`convert-patch.yaml`), and each node is sized for one pod of each beside the rest, however they arrive. The busier
-node holds a Kafka broker (768), a split pod (1,536), a convert pod (1,024), and at worst the landing pod, the
-collector and the producer too (1,344): 4,672 of its 4,753. A third pod of either stage doesn't fit, so KEDA's
-maximum is two. The pods do use their memory: under load the convert pods used about 940 MiB of their 1,024, the
-landing pod 896 of its 1,024, and the split pods 1,170 of their 1,536.
+A total isn't enough: a pod needs its memory on one node. Before the transform stage, the split and convert stages
+had two pods each, one per node, and the busier node held a Kafka broker, a split pod, a convert pod, and at worst
+the landing pod, the collector and the producer too: 4,672 of its 4,753, with no room for anything more. In a
+test run, with both convert pods already up, neither node had the 1,536 MiB a second split pod needs, and it
+waited for minutes.
+
+So the transform stage's room was found by holding the split and convert stages to one pod each (decided with the
+user, 2026-11-10; STAGES.md §17.10.9, 4e), which frees 2,560 MiB:
+- **The split pod and the convert pod run on different nodes** (a required anti-affinity between the two, in
+  `splitter-patch.yaml` and `convert-patch.yaml`), and the transform stage's two pods on different nodes too
+  (`fhir/transform-patch.yaml`). Each node then has room for a transform pod however the pods arrive. The busier
+  node holds a Kafka broker (768), the split pod (1,536), at worst the landing pod, the collector and the producer
+  (1,344), and a transform pod (1,088): 4,736 of its 4,753. The other holds a broker, the convert pod and a
+  transform pod: 2,880, or 4,224 with the landing pod, collector and producer.
+- **1,088 MiB is the most the busier node can give** a transform pod. It was set from the convert pod (about
+  940 MiB of its 1,024 used under load) plus the Whistle engine and its set, and measured once deployed (Checked,
+  below).
+- **The split and convert stages are updated by stopping the old pod first** (`maxSurge: 0`), since a new pod
+  can't be placed beside the old one: the stage pauses for the restart, and its messages wait in Kafka.
+
+The pods do use their memory: under load the convert pods used about 940 MiB of their 1,024, the landing pod 896
+of its 1,024, and the split pods 1,170 of their 1,536.
 
 ## Using it
 
 ```sh
 scripts/sandbox.sh up        # make or start the cluster and the shared services (about 10 minutes the first time)
-scripts/sandbox.sh images    # build the three customer images in sdh-it (the cluster stopped), push them to its registry
-scripts/sandbox.sh deploy    # deploy each pipeline's landing node, split stage and convert stage
+scripts/sandbox.sh images    # build the four customer images in sdh-it (the cluster stopped), push them to its registry
+scripts/sandbox.sh deploy    # deploy each pipeline's landing node, split, convert and transform stages
 scripts/sandbox.sh check     # push the sample C-CDA documents through, and check the result
 scripts/sandbox.sh push ccda-push some.xml   # push your own files (synthetic or de-identified only)
-scripts/sandbox.sh scale-demo [count]   # push count copies of the samples (300), and watch KEDA scale out
+scripts/sandbox.sh scale-demo [count]   # push count copies of the samples (300), and watch KEDA scale the transform stage out
 scripts/sandbox.sh status    # nodes, pods, topic counts, scaling
 scripts/sandbox.sh grafana   # http://localhost:3000, user admin, password in state/secrets/grafana
 scripts/sandbox.sh stop      # stop the VMs; `up` starts them again with everything kept
@@ -151,10 +166,10 @@ afterwards unless `SDH_IT_STOP=0`.
 ## Layout
 
 ```
- sdh-producers         sdh-ccda-push (one namespace per pipeline)                         sdh-fhir (reserved)
+ sdh-producers         sdh-ccda-push (one namespace per pipeline)                         sdh-fhir
  ┌──────────┐ mTLS  ┌───────────────────┐ item.landed ┌──────────┐ split ┌─────────┐ records ┌──────────────┐
- │ producer ├──────►│ landing (one pod) ├────────────►│ splitter ├──────►│ convert ├────────►│ FHIR stage,  │
- └──────────┘ push  │                   │  Kafka      │ 1–2 pods │ Kafka │1–2 pods │  Kafka  │ not yet built│
+ │ producer ├──────►│ landing (one pod) ├────────────►│ splitter ├──────►│ convert ├────────►│ transform    │
+ └──────────┘ push  │                   │  Kafka      │  1 pod   │ Kafka │  1 pod  │  Kafka  │ 1–2 pods     │
                     └─────────┬─────────┘                  │ silver           │ silver       └──────┬───────┘
                               │ bronze                     │                  │                     │ gold
  sdh-infra   ┌────────────────▼────────────────────────────▼──────────────────▼─────────────────────▼───────┐
@@ -174,10 +189,10 @@ when their claim is deleted (`Retain`).
   act as `sdh_catalog`, because a JDBC catalog keeps every namespace in the same tables.
 - **Kafka:** three nodes (KRaft), one per cluster node; every topic has three replicas and needs two for a write.
   Topics are made by the script, as a customer's broker team would; brokers don't create them. The stages' inputs
-  (`<pipeline>.landed`, `<pipeline>.split`) have six partitions, the most pods KEDA could give a stage; the rest
-  have one. A topic made with fewer is given more by `up` (partitions are only ever added; do it drained).
+  (`<pipeline>.landed`, `<pipeline>.split`, `<pipeline>.records`) have six partitions, the most pods KEDA could
+  give a stage; the rest have one. A topic made with fewer is given more by `up` (partitions are only ever added; do it drained).
 - **KEDA** (namespace `keda`, version pinned in the script, its manifest checked against a pinned SHA-256 and kept
-  in `$SDH_SANDBOX/sdh-demo/downloads/`): scales the split and convert stages on their Kafka consumer lag (below).
+  in `$SDH_SANDBOX/sdh-demo/downloads/`): scales the stages on their Kafka consumer lag (below).
 - **SeaweedFS:** S3 object storage, a bucket per medallion layer (below).
 - **Vault:** the Transit engine holds every KEK and signing key (`vault-transit`, design §7.4); none leaves it.
   Each stage has a token whose policy allows only its own keys.
@@ -189,15 +204,16 @@ README, as customers get it, with the image by digest from the cluster's registr
 cluster adds around it (kustomize patches): requests equal to limits, the push port and its Service, and a TCP
 readiness probe. The landing node runs as one pod, with no standby (decided 2026-11-07, for memory): if it dies,
 Kubernetes starts another, on another node if its node is gone, and it lands once the old pod's lease has
-expired. The split stage (Deployment `splitter`) and the convert stage (`convert`) are scaled by KEDA
-(`deploy/sandbox/pipeline/scaling.yaml`), from one pod to two each (what the memory is sized for, above), on
-their consumer groups' lag: another pod for
-each 5 items waiting to be split, and for each 5 records waiting to be converted. Never fewer than one: the pod
+expired. The split stage (Deployment `splitter`), the convert stage (`convert`) and the transform stage
+(`transform-<pipeline>` in `sdh-fhir`) are scaled by KEDA (`deploy/sandbox/pipeline/scaling.yaml`,
+`deploy/sandbox/fhir/scaling.yaml`) on their consumer groups' lag: another pod for each 5 items waiting to be
+split, 5 records waiting to be converted, or 5 to be mapped. The memory has room for one split and one convert pod
+and up to two transform pods (above), so only the transform stage goes beyond one. Never fewer than one: the pod
 holding a stage's duties runs its reconciler, and a lost message adds no lag, so a stage scaled to nothing would
 never be woken to recover it. Back to one pod two minutes after the backlog is gone. The script leaves their
 replica count to KEDA, so a `deploy` doesn't reset it. The landing node is never scaled: it lands serially, and
-never more than one pod is in service, since landing in parallel could land a file twice. The split and convert
-stages have less memory than their READMEs say (above). The default pipeline is `ccda-push`: C-CDA documents
+never more than one pod is in service, since landing in parallel could land a file twice. The stages have less
+memory than their READMEs say (above). The default pipeline is `ccda-push`: C-CDA documents
 pushed over HTTPS with mTLS.
 
 **Producers** (`sdh-producers`): a pod with its own client certificate from the sandbox CA, which pushes files.
@@ -224,17 +240,27 @@ stage to the convert stage's, and the convert stage to the FHIR stage's.
 
 ## The FHIR stage
 
-Built (`healthcare-data-transformer`, STAGES.md §17.10) but not yet deployed here (step 4e): it runs the Whistle
-mapping (the `mapping` repository, US Core 6.1) on each record, fail-fast, writes the bundles to the gold layer, and
-keeps what fails as it came in its fail store, as the other stages do. The sandbox has its place ready:
-- the namespace `sdh-fhir`, with a quota (3 CPUs, 4 GB) the pipelines can't take, and the same network policies;
-- per pipeline: the topics `<pipeline>.records` (its input) and `<pipeline>.fhir.dlq`; the gold bucket and an S3
-  key that reads silver and writes gold; a database role; a Vault token that unwraps the records KEK and uses
-  its own gold KEK (`<pipeline>-fhir`); the private key the convert stage seals records to, and the convert
-  stage's signing public key (`convert-signer.pem`), which its messages are checked against;
-- the secret and ConfigMap `fhir-<pipeline>` in `sdh-fhir`, naming all of these.
+The transform stage (`healthcare-data-transformer`, STAGES.md §17.10), deployed here since step 4e: it maps each
+record with the Whistle mapping (the `mapping` repository's US Core 6.1 set), fail-fast, stores the bundles in the
+gold layer, and keeps what fails as it came in its fail store, as the other stages do. Most C-CDA documents fail
+a US Core check, so expect most records there. Per pipeline, in the namespace `sdh-fhir` (a quota of 3 CPUs and
+4 GiB the pipelines can't take, and the same network policies):
+- the Deployment `transform-<pipeline>`, from its kit README's, one to two pods of 1,088 MiB (Memory, above),
+  scaled by KEDA on the lag of `transform-<pipeline>` on `<pipeline>.records`;
+- its settings `deploy/sandbox/fhir/transform-application.yml` in the ConfigMap `transform-<pipeline>-config`; the
+  set, as mapping packs it (a `.tar.gz`), in `transform-<pipeline>-wstl`, made by `images` from the transformer's
+  build (`SDH_TRANSFORMER`, by default `../healthcare-data-transformer`; mapping installed first);
+- the topics `<pipeline>.records` (its input, 6 partitions), `<pipeline>.fhir` (its output) and
+  `<pipeline>.fhir.dlq`; the gold bucket and an S3 key that reads silver and writes gold; a database role; a
+  Vault token that unwraps the records KEK, uses its own gold KEK (`<pipeline>-fhir`) and signs with
+  `<pipeline>-transform-signing`;
+- in the secret `transform-<pipeline>-keys`: the private key the convert stage seals records to, the convert
+  stage's signing public key, and the public half of gold's consumer key pair (`<pipeline>-consumer`), which its
+  messages are sealed to. No reader of gold is deployed; the private half is kept in the state directory for one.
+- one record at a time (`sdh.stage.concurrency: 1`) and `max-bytes` 2 MB here: at four at once the pod ran out
+  of heap (STAGES.md §17.10.9, 4e, as found). A larger record is kept as it came, `TRANSFORM_TOO_LARGE`.
 
-Deploying it is then one more Deployment in `sdh-fhir`.
+Producer results are off here, at every stage: no results topic or producer key is set up yet.
 
 ## Not yet as in production
 
@@ -530,3 +556,20 @@ Checked again since: see the end of this section.
   rows removed, another change (66MB) was let in `drained`; removing the setting brought the first release back
   (`previous`), and `check` passed again. No pod restarted. Not tried here: a held split pod (tested), and a rollout
   with a stage at two pods (above).
+- **The transform stage (2026-11-11, STAGES.md §17.10.9 step 4e).** Deployed in `sdh-fhir` with the stages
+  above, at one record at a time and `max-bytes` 2 MB (FHIR stage, above). On the first images it ran out of heap
+  reading silver's `records`: a compacted file of one 119 MiB row group (STAGES.md, "Found with a heap dump"). On
+  images with the fix (DESIGN.md revision (cv): row groups of 8 MiB, compaction sorted, oversized files
+  rewritten), one pod cleared the backlog of about 3,600 records (1,410 mapped to a bundle, 2,164 kept in the fail
+  store, nearly all `TRANSFORM_CHECK_FAILED` on synthetic data) at up to 909 MiB of its 1,088, with no restart.
+  `check` passed: 5 records, 2 bundles, 3 failures. It now waits for every record of the pushed items to end, not
+  for their completion: an item with a failure stays open until an operator settles it (STAGES.md §15.6).
+  `scale-demo` passed: 300 items, KEDA took the transform stage to two pods, which stored 190 and 110 records; the
+  two together mapped about two a second once the items arrived. No stage pod restarted.
+  - **Found on the way: SeaweedFS runs out of its 768 MiB.** Killed by its memory limit four times in the hour and
+    a half after the cluster started: three while maintenance ran every five minutes (set for the test) and
+    rewrote the oversized files, and once when the landing node's and the split stage's hourly maintenance ran at
+    the same moment. While it restarts, the stages' reads and writes time out (`SdkClientException`, a failed
+    multipart upload in the landing node's maintenance, retried at its next interval), and `scale-demo` slowed to
+    a few items a minute for its first 15 minutes. Nothing was lost: each failed write was retried or failed
+    whole. Not yet fixed (below the memory table, the control-plane node has 147 MiB to spare).

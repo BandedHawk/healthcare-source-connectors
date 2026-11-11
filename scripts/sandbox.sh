@@ -4,17 +4,17 @@
 # minikube-home.sh).
 #
 #   scripts/sandbox.sh up          create or start the cluster, and the services every pipeline uses
-#   scripts/sandbox.sh images      build the landing node's and both stages' customer images (in the sdh-it VM,
-#                                  with the cluster stopped meanwhile) and push them to the cluster's registry
-#   scripts/sandbox.sh deploy      deploy each pipeline's landing node, split stage and convert stage (after up
-#                                  and images)
+#   scripts/sandbox.sh images      build the landing node's and the three stages' customer images (in the sdh-it
+#                                  VM, with the cluster stopped meanwhile) and push them to the cluster's registry
+#   scripts/sandbox.sh deploy      deploy each pipeline's landing node, split, convert and transform stages
+#                                  (after up and images)
 #   scripts/sandbox.sh push <pipeline> <file>...
 #                                  push files to a pipeline's landing node, as its producer
-#   scripts/sandbox.sh check       push the sample C-CDA documents and check they are landed, split, converted and
-#                                  sent on
+#   scripts/sandbox.sh check       push the sample C-CDA documents and check they are landed, split, converted,
+#                                  mapped to FHIR or kept as failures, and sent on
 #   scripts/sandbox.sh scale-demo [count]
 #                                  push count copies of the samples (300 by default), and follow KEDA scaling the
-#                                  split and convert stages out to share them, and back
+#                                  transform stage out to share them, and back
 #   scripts/sandbox.sh status      pods, nodes, topics, scaling
 #   scripts/sandbox.sh grafana     port-forward Grafana to http://localhost:3000 (until interrupted)
 #   scripts/sandbox.sh stop        stop the cluster's VMs; `up` starts them again, with everything kept
@@ -24,11 +24,12 @@
 # Environment (defaults): SDH_DEMO_PROFILE=sdh-demo SDH_DEMO_NODES=3 SDH_DEMO_CPUS=6 SDH_DEMO_CP_MEMORY=7680
 #   SDH_DEMO_MEMORY=6912 (MiB, the control-plane node and each other node; docs/SANDBOX.md "Memory")
 #   SDH_DEMO_DISK=120g SDH_PIPELINES=ccda-push (each pushed C-CDA; one namespace sdh-<pipeline> each)
+#   SDH_TRANSFORMER=../healthcare-data-transformer (the transform stage's project, beside this one)
 #
 # Kept in $SDH_SANDBOX/sdh-demo/state (mode 700), made once and reused, since data encrypted or stored under them
 # can't be read without them: the database and S3 credentials, Vault's unseal key and root token, the stages'
-# Vault tokens, the stages' inbox key pairs and the FHIR stage's, and the sandbox CA. Never delete it while the
-# cluster's volumes hold data.
+# Vault tokens, the stages' inbox key pairs and the FHIR stage's, gold's consumer key pair, the sandbox CA, and
+# the WSTL set last built. Never delete it while the cluster's volumes hold data.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,12 +43,13 @@ done
 PROFILE="${SDH_DEMO_PROFILE:-sdh-demo}"
 PIPELINES="${SDH_PIPELINES:-ccda-push}"
 DEPLOY="$ROOT/deploy/sandbox"
+TRANSFORMER="${SDH_TRANSFORMER:-$ROOT/../healthcare-data-transformer}"
 STATE="$SDH_SANDBOX/sdh-demo/state"
 export KUBECONFIG="$SDH_KUBE_DIR/$PROFILE"
 KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9092,kafka-1.kafka.sdh-infra.svc:9092,kafka-2.kafka.sdh-infra.svc:9092"
 PRODUCER_SUBJECT="CN=producer-1,O=SDH Sandbox"
 REGISTRY="localhost:5000"
-# KEDA, which scales the split and convert stages (docs/STAGES.md §10). Its release publishes no checksum, so the
+# KEDA, which scales the stages (docs/STAGES.md §10). Its release publishes no checksum, so the
 # manifest's was taken when it was pinned, and every download is checked against it.
 KEDA_VERSION="2.21.0"
 KEDA_SHA256="b43c89ffeef81722d7e2dd2c079d74789767a0f89cae1336cff784994814f6d7"
@@ -408,7 +410,7 @@ setup_vault() {
       for k in $p-landed-items $p-records $p-fhir; do
         vault read transit/keys/\$k >/dev/null 2>&1 || vault write -f transit/keys/\$k type=aes256-gcm96
       done
-      for k in $p-landing-signing $p-splitter-signing $p-convert-signing; do
+      for k in $p-landing-signing $p-splitter-signing $p-convert-signing $p-transform-signing; do
         vault read transit/keys/\$k >/dev/null 2>&1 || vault write -f transit/keys/\$k type=ecdsa-p256
       done" >/dev/null
     vault_policy "landing-$p" "
@@ -428,11 +430,15 @@ setup_vault() {
       path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
       path \"transit/sign/$p-convert-signing/*\" { capabilities = [\"update\"] }
       path \"transit/keys/$p-convert-signing\" { capabilities = [\"read\"] }"
+    # Encrypt as well as decrypt with the records KEK: a stage checks each KEK at startup with a round trip.
     vault_policy "fhir-$p" "
+      path \"transit/encrypt/$p-records\" { capabilities = [\"update\"] }
       path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
       path \"transit/encrypt/$p-fhir\" { capabilities = [\"update\"] }
       path \"transit/decrypt/$p-fhir\" { capabilities = [\"update\"] }
-      path \"transit/keys/$p-convert-signing\" { capabilities = [\"read\"] }"
+      path \"transit/keys/$p-convert-signing\" { capabilities = [\"read\"] }
+      path \"transit/sign/$p-transform-signing/*\" { capabilities = [\"update\"] }
+      path \"transit/keys/$p-transform-signing\" { capabilities = [\"read\"] }"
     local role
     for role in landing splitter convert fhir; do
       vault_token "$role-$p"
@@ -492,11 +498,12 @@ setup_topics() {
   local p topic
   for p in $PIPELINES; do
     # The stages' inputs have a partition for each pod KEDA may run: messages are keyed by item or record, so
-    # each item's and each record's messages stay in order on their partition, and nothing needs more. The rest
-    # have one, until the FHIR stage scales too.
-    for topic in "$p.landed" "$p.split" "$p.records" "$p.convert.dlq" "$p.fhir.dlq"; do
+    # each item's and each record's messages stay in order on their partition, and nothing needs more. The rest,
+    # gold's output and the dead-letter topics, have one.
+    for topic in "$p.landed" "$p.split" "$p.records" "$p.fhir" "$p.convert.dlq" "$p.fhir.dlq"; do
       local partitions=1
-      [[ "$topic" == "$p.landed" || "$topic" == "$p.split" ]] && partitions="$STAGE_PARTITIONS"
+      [[ "$topic" == "$p.landed" || "$topic" == "$p.split" || "$topic" == "$p.records" ]] \
+        && partitions="$STAGE_PARTITIONS"
       infra exec kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create \
         --if-not-exists --topic "$topic" --partitions "$partitions" --replication-factor 3 \
         --config min.insync.replicas=2 >/dev/null
@@ -592,17 +599,31 @@ build_images() {
     say "Stopping the cluster while sdh-it builds (everything on it is kept)"
     minikube stop -p "$PROFILE" >/dev/null
   fi
-  say "Building the customer images ($version) in the sdh-it VM"
-  (cd "$ROOT" && ./mvnw -q -pl landing-connector,file-connector,convert-stage -am package -DskipTests)
-  # module=image: the split stage kept its module's name, file-connector.
+  [[ -f "$TRANSFORMER/transform-stage/pom.xml" ]] || { echo "No transform stage at $TRANSFORMER: set" \
+    "SDH_TRANSFORMER to the healthcare-data-transformer folder" >&2; exit 1; }
+  local transform_version
+  transform_version="$(cd "$TRANSFORMER" && ./mvnw -q -N help:evaluate -Dexpression=project.version \
+    -DforceStdout)"
+  say "Building the customer images ($version, the transform stage $transform_version) in the sdh-it VM"
+  # Installed, not only packaged: the transformer is built on this repository's libraries and build kit from the
+  # local Maven repository, so it is built on them as they are here. Its set is mapping's, from the same
+  # repository (mapping installed); its build copies it to target/test-sets.
+  (cd "$ROOT" && ./mvnw -q install -DskipTests)
+  (cd "$TRANSFORMER" && ./mvnw -q package -DskipTests)
+  cp "$TRANSFORMER/transform-stage/target/test-sets/us-core.tar.gz" "$STATE/wstl-us-core.tar.gz.tmp"
+  mv "$STATE/wstl-us-core.tar.gz.tmp" "$STATE/wstl-us-core.tar.gz"
+  # module=image: the split stage kept its module's name, file-connector. The transform stage is a folder of
+  # another project, which build-image.sh takes as it is.
   local apps=(landing-connector=landing-connector file-connector=split-stage convert-stage=convert-stage) app
   for app in "${apps[@]}"; do
     SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 SDH_IMAGE="sdh/${app#*=}:$version" "$ROOT/scripts/build-image.sh" \
       "${app%%=*}" customer
   done
+  SDH_IT_STOP=0 SDH_SKIP_MAVEN=1 SDH_IMAGE="sdh/transform-stage:$transform_version" \
+    "$ROOT/scripts/build-image.sh" "$TRANSFORMER/transform-stage" customer
   (source "$ROOT/scripts/minikube-env.sh" >/dev/null
-   docker save "sdh/landing-connector:$version" "sdh/split-stage:$version" "sdh/convert-stage:$version") \
-    > "$archive.part"
+   docker save "sdh/landing-connector:$version" "sdh/split-stage:$version" "sdh/convert-stage:$version" \
+     "sdh/transform-stage:$transform_version") > "$archive.part"
   mv "$archive.part" "$archive"
   say "Stopping the sdh-it VM"
   MINIKUBE_HOME="$MINIKUBE_HOME" minikube stop -p "${SDH_IT_PROFILE:-sdh-it}" >/dev/null
@@ -613,14 +634,16 @@ build_images() {
   minikube -p "$PROFILE" ssh --native-ssh=false -- docker load < "$archive" >/dev/null
   rm -f "$archive"
   : > "$STATE/images.env.tmp"
-  for app in "${apps[@]}"; do
+  for app in "${apps[@]}" transform-stage="transform-stage:$transform_version"; do
     app="${app#*=}"
-    minikube -p "$PROFILE" ssh -- "docker tag sdh/$app:$version $REGISTRY/sdh/$app:$version \
-      && docker push -q $REGISTRY/sdh/$app:$version >/dev/null"
+    [[ "$app" == *:* ]] || app="$app:$version"
+    minikube -p "$PROFILE" ssh -- "docker tag sdh/$app $REGISTRY/sdh/$app \
+      && docker push -q $REGISTRY/sdh/$app >/dev/null"
     # Deployed by digest, so a rebuild under the same SNAPSHOT version is a new image to Kubernetes.
     local digest
     digest="$(minikube -p "$PROFILE" ssh -- docker inspect --format "'{{index .RepoDigests 0}}'" \
-      "$REGISTRY/sdh/$app:$version" | tr -d '\r')"
+      "$REGISTRY/sdh/$app" | tr -d '\r')"
+    app="${app%%:*}"
     echo "${app//-/_}=$digest" >> "$STATE/images.env.tmp"
     say "  $digest"
   done
@@ -633,8 +656,9 @@ deploy_pipelines() {
   [[ -s "$STATE/images.env" ]] || { echo "No images yet: run scripts/sandbox.sh images" >&2; exit 1; }
   # shellcheck source=/dev/null
   source "$STATE/images.env"
-  [[ -n "${split_stage:-}" && -n "${convert_stage:-}" ]] || { echo "No split and convert stage images (made" \
-    "before the stages): run scripts/sandbox.sh images" >&2; exit 1; }
+  [[ -n "${split_stage:-}" && -n "${convert_stage:-}" && -n "${transform_stage:-}" ]] || { echo "No split," \
+    "convert and transform stage images (made before the stages): run scripts/sandbox.sh images" >&2; exit 1; }
+  [[ -s "$STATE/wstl-us-core.tar.gz" ]] || { echo "No WSTL set: run scripts/sandbox.sh images" >&2; exit 1; }
   pki
   kc apply -f "$DEPLOY/producers/producer.yaml" >/dev/null
   kc -n sdh-producers create secret generic producer --from-file=ca.crt="$STATE/pki/ca.crt" \
@@ -665,16 +689,21 @@ deploy_pipeline() {
   ec_key "$STATE/keys/$p-inbox" "$(secret "inbox-passphrase-$p")"
   ec_key "$STATE/keys/$p-convert-inbox" "$(secret "convert-inbox-passphrase-$p")"
   ec_key "$STATE/keys/$p-fhir-recipient" "$(secret "fhir-recipient-passphrase-$p")"
-  export INBOX_SHA256 CONVERT_INBOX_SHA256 RECIPIENT_SHA256
+  # Gold's readers' key pair (STAGES.md §17.10.10, point 4): the transform stage seals to its public half. No
+  # reader is deployed; one added later is given the private half, which stays here.
+  ec_key "$STATE/keys/$p-consumer" "$(secret "consumer-passphrase-$p")"
+  export INBOX_SHA256 CONVERT_INBOX_SHA256 RECIPIENT_SHA256 CONSUMER_SHA256
   INBOX_SHA256="$(fingerprint "$STATE/keys/$p-inbox-public.pem")"
   CONVERT_INBOX_SHA256="$(fingerprint "$STATE/keys/$p-convert-inbox-public.pem")"
   RECIPIENT_SHA256="$(fingerprint "$STATE/keys/$p-fhir-recipient-public.pem")"
+  CONSUMER_SHA256="$(fingerprint "$STATE/keys/$p-consumer-public.pem")"
   local vars='$PIPELINE $ICEBERG_PREFIX $PRODUCER_SUBJECT $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256'
-  vars+=' $KAFKA_BROKERS $SPLIT_FORMAT'
+  vars+=' $CONSUMER_SHA256 $KAFKA_BROKERS $SPLIT_FORMAT'
   local stage
   for stage in landing splitter convert; do
     envsubst "$vars" < "$DEPLOY/pipeline/$stage-application.yml" > "$work/$stage-application.yml"
   done
+  envsubst "$vars" < "$DEPLOY/fhir/transform-application.yml" > "$work/transform-application.yml"
 
   apply_secret "$n" landing-keys --from-file=tls.crt="$STATE/pki/landing-$p.crt" \
     --from-file=tls.key="$STATE/pki/landing-$p.key" --from-file=producers-ca.pem="$STATE/pki/ca.crt" \
@@ -704,10 +733,10 @@ deploy_pipeline() {
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "convert-inbox-passphrase-$p")"
   kc -n "$n" create configmap convert-config --from-file=application.yml="$work/convert-application.yml" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
-  fhir_handover "$p"
+  transform_settings "$p" "$work/transform-application.yml"
 
   # Each stage from the Deployment in its README, renamed for the pipeline's namespace, by digest.
-  mkdir -p "$work/landing" "$work/splitter" "$work/convert"
+  mkdir -p "$work/landing" "$work/splitter" "$work/convert" "$work/transform"
   readme_yaml "$ROOT/landing-connector/src/dist/README.md" \
     | sed -e "s#<registry>/landing-connector:<version>#$landing_connector#" -e 's/landing-claims/landing/g' \
     > "$work/landing/landing.yaml"
@@ -721,16 +750,25 @@ deploy_pipeline() {
           -e 's/convert-stage-\(env\|keys\|config\)/convert-\1/g' \
           -e 's/name: convert-stage }/name: convert }/' -e 's/app: convert-stage }/app: convert }/g' \
     > "$work/convert/convert.yaml"
+  readme_yaml "$TRANSFORMER/transform-stage/src/dist/README.md" \
+    | sed -e "s#<registry>/transform-stage:<version>#$transform_stage#" \
+          -e "s/transform-stage-\(env\|keys\|config\|wstl\)/transform-$p-\1/g" \
+          -e "s/name: transform-stage }/name: transform-$p }/" -e "s/app: transform-stage }/app: transform-$p }/g" \
+    > "$work/transform/transform.yaml"
   cp "$DEPLOY/pipeline/landing-patch.yaml" "$DEPLOY/pipeline/landing-service.yaml" "$work/landing/"
   cp "$DEPLOY/pipeline/splitter-patch.yaml" "$work/splitter/"
   cp "$DEPLOY/pipeline/convert-patch.yaml" "$work/convert/"
+  envsubst '$PIPELINE' < "$DEPLOY/fhir/transform-patch.yaml" > "$work/transform/transform-patch.yaml"
   stage_kustomization landing "landing.yaml, landing-service.yaml" landing-patch.yaml \
     > "$work/landing/kustomization.yaml"
   stage_kustomization splitter "splitter.yaml" splitter-patch.yaml scaled > "$work/splitter/kustomization.yaml"
   stage_kustomization convert "convert.yaml" convert-patch.yaml scaled > "$work/convert/kustomization.yaml"
+  K8S_NS=sdh-fhir stage_kustomization "transform-$p" "transform.yaml" transform-patch.yaml scaled \
+    > "$work/transform/kustomization.yaml"
 
   # The landing node first: it makes the landing tables, which the split stage may only read. The split stage
-  # before the convert stage: it makes split_records.
+  # before the convert stage: it makes split_records; the convert stage before the transform stage: it makes
+  # records.
   kc apply -k "$work/landing" >/dev/null
   if ! wait_for 300 landing_active "$n"; then
     kc -n "$n" get pods -o wide; kc -n "$n" logs deploy/landing --tail=40; exit 1
@@ -745,14 +783,21 @@ deploy_pipeline() {
       || ! wait_for 300 logged "$n" deploy/convert "Started ConvertStageApplication"; then
     kc -n "$n" get pods -o wide; kc -n "$n" logs deploy/convert --tail=60; exit 1
   fi
+  kc apply -k "$work/transform" >/dev/null
+  if ! kc -n sdh-fhir rollout status "deploy/transform-$p" --timeout=300s >/dev/null \
+      || ! wait_for 300 logged sdh-fhir "deploy/transform-$p" "Started TransformStageApplication"; then
+    kc -n sdh-fhir get pods -o wide; kc -n sdh-fhir logs "deploy/transform-$p" --tail=60; exit 1
+  fi
   envsubst '$PIPELINE $K8S_NS $KAFKA_BROKERS' < "$DEPLOY/pipeline/scaling.yaml" | kc apply -f - >/dev/null
+  envsubst '$PIPELINE $KAFKA_BROKERS' < "$DEPLOY/fhir/scaling.yaml" | kc apply -f - >/dev/null
   local scaled
-  for scaled in splitter convert; do
-    if ! kc -n "$n" wait --for=condition=Ready "scaledobject/$scaled" --timeout=120s >/dev/null; then
-      kc -n "$n" describe "scaledobject/$scaled" | tail -20; exit 1
+  for scaled in "$n splitter" "$n convert" "sdh-fhir transform-$p"; do
+    if ! kc -n "${scaled% *}" wait --for=condition=Ready "scaledobject/${scaled#* }" --timeout=120s >/dev/null; then
+      kc -n "${scaled% *}" describe "scaledobject/${scaled#* }" | tail -20; exit 1
     fi
   done
-  say "  landing (one pod), split stage and convert stage running; KEDA scales each stage to 2 pods"
+  say "  landing (one pod), split and convert stages (one pod each) and transform stage running; KEDA scales the" \
+    "transform stage to 2 pods"
 }
 
 # apply_secret <namespace> <name> <kubectl create secret args>...
@@ -761,33 +806,25 @@ apply_secret() {
   kc -n "$n" create secret generic "$name" "$@" --dry-run=client -o yaml | kc apply -f - >/dev/null
 }
 
-# fhir_handover <pipeline>: what the FHIR stage will need, ready in its namespace.
-fhir_handover() {
-  local p="$1"
-  apply_secret sdh-fhir "fhir-$p" --from-file=recipient.pem="$STATE/keys/$p-fhir-recipient.pem" \
-    --from-literal=RECIPIENT_PASSPHRASE="$(secret "fhir-recipient-passphrase-$p")" \
-    --from-literal=S3_SECRET_ACCESS_KEY="$(secret "s3-fhir-$p")" \
-    --from-literal=JDBC_PASSWORD="$(secret "db-fhir-$p")" \
-    --from-file=vault-token="$STATE/secrets/vault-token-fhir-$p" \
-    --from-file=convert-signer.pem="$STATE/keys/$p-convert-signing-public.pem"
-  kc -n sdh-fhir create configmap "fhir-$p" \
-    --from-literal=pipeline="$p" \
-    --from-literal=records-topic="$p.records" \
-    --from-literal=dlq-topic="$p.fhir.dlq" \
-    --from-literal=kafka-brokers="$KAFKA_BROKERS" \
-    --from-literal=catalog-uri="jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh" \
-    --from-literal=jdbc-user="fhir_$(prefix "$p")" \
-    --from-literal=records-namespace="$(prefix "$p")" \
-    --from-literal=fhir-namespace="$(prefix "$p")_fhir" \
-    --from-literal=warehouse="s3://sdh-gold/warehouse" \
-    --from-literal=s3-endpoint="http://seaweedfs.sdh-infra.svc:8333" \
-    --from-literal=s3-access-key-id="fhir-$p" \
-    --from-literal=vault-address="http://vault.sdh-infra.svc:8200" \
-    --from-literal=records-kek="$p-records" \
-    --from-literal=fhir-kek="$p-fhir" \
-    --from-literal=recipient-kid="fhir-$p" \
-    --from-literal=convert-signer-kid="convert-$p" \
+# transform_settings <pipeline> <application.yml>: the transform stage's secrets and ConfigMaps in sdh-fhir, as
+# its README names them, transform-<pipeline>-*. They replace the handover the namespace was given before the
+# stage was built (fhir-<pipeline>), which nothing reads.
+transform_settings() {
+  local p="$1" t="transform-$1"
+  apply_secret sdh-fhir "$t-keys" --from-file=inbox.pem="$STATE/keys/$p-fhir-recipient.pem" \
+    --from-file=inbox-public.pem="$STATE/keys/$p-fhir-recipient-public.pem" \
+    --from-file=recipient.pem="$STATE/keys/$p-consumer-public.pem" \
+    --from-file=convert-signer.pem="$STATE/keys/$p-convert-signing-public.pem" \
+    --from-file=vault-token="$STATE/secrets/vault-token-fhir-$p"
+  apply_secret sdh-fhir "$t-env" --from-literal=S3_SECRET_ACCESS_KEY="$(secret "s3-fhir-$p")" \
+    --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-fhir-$p")" \
+    --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "fhir-recipient-passphrase-$p")"
+  kc -n sdh-fhir create configmap "$t-config" --from-file=application.yml="$2" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
+  # The set as binary data: a ConfigMap holds no folders, so the .tar.gz as mapping packs it.
+  kc -n sdh-fhir create configmap "$t-wstl" --from-file=set.tar.gz="$STATE/wstl-us-core.tar.gz" \
+    --dry-run=client -o yaml | kc apply -f - >/dev/null
+  kc -n sdh-fhir delete secret,configmap "fhir-$p" --ignore-not-found >/dev/null
 }
 
 # readme_yaml <readme>: its YAML block, the Deployment customers are given.
@@ -869,14 +906,27 @@ check() {
   for file in "$ROOT"/connector-core/src/test/resources/ccda/*.xml; do
     samples+=("$file")
   done
-  local landed_before split_before records_before split_done converted
+  local landed_before split_before records_before fhir_before split_done converted prefix
+  prefix="$(prefix "$p")"
+  db() { infra exec postgres-0 -- psql -U postgres -d sdh -At -c "$1"; }
   landed_before="$(topic_count "$p.landed")"
   split_before="$(topic_count "$p.split")"
   records_before="$(topic_count "$p.records")"
+  fhir_before="$(topic_count "$p.fhir")"
   split_done="$(audited "$n" splitter "item\.completed")"
   converted="$(audited "$n" convert "stage\.item_completed")"
   say "Pushing ${#samples[@]} synthetic and de-identified C-CDA documents to $p"
-  push "$p" "${samples[@]}" | sed 's/^/   /'
+  local pushed ids
+  pushed="$(push "$p" "${samples[@]}")"
+  sed 's/^/   /' <<<"$pushed"
+  ids="$(grep -o '"itemId":"[0-9a-f-]*"' <<<"$pushed" | cut -d'"' -f4 | sed "s/.*/'&'/" | paste -sd,)"
+  # The pushed items whose every record has ended at the transform stage, from its registry: mapped to a bundle
+  # or kept in the fail store. An item with a failure stays open until an operator settles it (STAGES.md §15.6),
+  # so completion isn't waited for. The pods' logs would miss a pod scaled away.
+  local ended_sql="FROM transform_$prefix.stage_item WHERE item_id IN (${ids:-NULL}) AND expected IS NOT NULL
+    AND NOT upstream_open AND done >= expected"
+  transformed() { db "SELECT count(*) $ended_sql"; }
+  transformed_all() { [[ "$(transformed)" -ge ${#samples[@]} ]]; }
   done_by() { [[ "$(audited "$n" "$1" "$2")" -ge $(($3 + ${#samples[@]})) ]]; }
   local failures=0
   if wait_for 300 done_by splitter "item\.completed" "$split_done"; then
@@ -889,14 +939,33 @@ check() {
   else
     say "  FAIL: not all converted"; failures=1
   fi
+  if wait_for 300 transformed_all; then
+    local counts expected done failed
+    counts="$(db "SELECT coalesce(sum(expected), 0), coalesce(sum(done), 0), coalesce(sum(failed), 0)
+      $ended_sql")"
+    IFS='|' read -r expected done failed <<<"$counts"
+    if ((expected > 0 && done == expected)); then
+      say "  all ${#samples[@]} transformed (every record ended): $expected records, $((done - failed)) mapped to" \
+        "a FHIR bundle in gold, $failed kept as they came in the fail store"
+    else
+      say "  FAIL: $done of $expected records ended at the transform stage"; failures=1
+    fi
+  else
+    say "  FAIL: not all transformed ($(transformed) of ${#samples[@]} with every record ended)"; failures=1
+  fi
   say "  item.landed messages: $(($(topic_count "$p.landed") - landed_before)) more on $p.landed"
   say "  split stage messages: $(($(topic_count "$p.split") - split_before)) more on $p.split"
   say "  convert stage messages: $(($(topic_count "$p.records") - records_before)) more on $p.records"
-  local pod
-  for pod in $(kc -n "$n" get pods -o name); do
-    if kc -n "$n" logs "$pod" --all-containers 2>/dev/null | grep -qE "ClinicalDocument|Newman|\.xml"; then
-      say "  FAIL: $pod's log holds document content or a filename"; failures=1
-    fi
+  say "  transform stage messages: $(($(topic_count "$p.fhir") - fhir_before)) more on $p.fhir"
+  local pod where
+  for where in "$n" "sdh-fhir -l app=transform-$p"; do
+    # shellcheck disable=SC2086
+    for pod in $(kc -n $where get pods -o name); do
+      if kc -n "${where%% *}" logs "$pod" --all-containers 2>/dev/null \
+          | grep -qE "ClinicalDocument|Newman|\.xml"; then
+        say "  FAIL: $pod's log holds document content or a filename"; failures=1
+      fi
+    done
   done
   return "$failures"
 }
@@ -904,10 +973,9 @@ check() {
 # scale_demo [count]: pushes count copies of the sample documents, each made an item and a record of its own by a
 # numbered comment before its root element's end tag (the content is otherwise the same: a comment before the
 # root is outside the record, so its copies would share a record ID, the key its messages are partitioned by),
-# and follows KEDA scaling both stages
-# out. What is done is counted in the stages' registries, so a pod scaled away still counts; how the work was
-# shared is from the convert stage's records (who stored each) and the split stage's pods' logs (pods still
-# running when looked at, so a lower bound).
+# and follows KEDA scaling the transform stage out to share them, and back. The split and convert stages are held
+# to one pod each here (docs/SANDBOX.md "Memory"). What is done is counted in the stages' registries, so a pod
+# scaled away still counts; how the work was shared is from the transform stage's records (who stored each).
 scale_demo() {
   local p="${PIPELINES%% *}" count="${1:-300}" n run prefix samples=()
   [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]] || { echo "usage: $0 scale-demo [count]" >&2; exit 2; }
@@ -923,19 +991,13 @@ scale_demo() {
   since="$(db "SELECT now()")"
   split_done() { db "SELECT count(*) FROM split_$prefix.split_item WHERE ended_at >= '$since'"; }
   converted() { db "SELECT count(*) FROM convert_$prefix.stage_item WHERE completed_at >= '$since'"; }
+  # Items whose every record has ended at the transform stage, mapped or failed: one with a failure stays open
+  # until an operator settles it (STAGES.md §15.6), so completion isn't waited for.
+  transformed() { db "SELECT count(*) FROM transform_$prefix.stage_item i WHERE i.expected IS NOT NULL
+      AND NOT i.upstream_open AND i.done >= i.expected AND i.item_id IN (SELECT item_id
+      FROM transform_$prefix.stage_record WHERE stored_at >= '$since')"; }
   # Pods ready, not only asked for: one with no room to run doesn't count.
-  replicas() { kc -n "$n" get deploy "$1" -o jsonpath='{.status.readyReplicas}'; }
-  # Each split pod's items finished, the highest seen in its log.
-  declare -A split_by=() split_before=()
-  tally() {
-    local pod seen
-    for pod in $(kc -n "$n" get pods -l app=splitter -o name); do
-      seen="$(kc -n "$n" logs "$pod" --tail=-1 2>/dev/null | grep -cE '(^|[] ])item\.completed( |$)' || true)"
-      [[ -n "${split_before[$pod]+set}" ]] || split_before[$pod]="$seen"
-      [[ "${split_by[$pod]:-0}" -ge "$seen" ]] || split_by[$pod]="$seen"
-    done
-  }
-  tally
+  replicas() { kc -n sdh-fhir get deploy "transform-$p" -o jsonpath='{.status.readyReplicas}'; }
 
   say "Pushing $count copies of ${#samples[@]} sample C-CDA documents to $p (run $run), one at a time"
   local url="https://landing.$n.svc:8443/intakes/$p/items"
@@ -955,47 +1017,36 @@ scale_demo() {
         rm -rf "$d"' &
   local pusher=$!
 
-  local started=$SECONDS most_split=0 most_convert=0 split_now=0 convert_now=0 r c
+  local started=$SECONDS most=0 split_now=0 convert_now=0 transform_now=0 t
   while ((SECONDS - started < 1800)); do
     sleep 15
-    tally
     split_now="$(split_done)"
     convert_now="$(converted)"
-    r="$(replicas splitter)"; r="${r:-0}"; ((r > most_split)) && most_split=$r
-    c="$(replicas convert)"; c="${c:-0}"; ((c > most_convert)) && most_convert=$c
-    say "  $((SECONDS - started))s: split $split_now/$count on $r pod(s), converted $convert_now/$count on" \
-      "$c pod(s)"
-    ((split_now >= count && convert_now >= count)) && break
+    transform_now="$(transformed)"
+    t="$(replicas)"; t="${t:-0}"; ((t > most)) && most=$t
+    say "  $((SECONDS - started))s: split $split_now/$count, converted $convert_now/$count, transformed" \
+      "$transform_now/$count on $t pod(s)"
+    ((transform_now >= count)) && break
   done
   wait "$pusher" || true
 
-  local failures=0 pod split_worked=0 convert_worked
-  say "  split stage: up to $most_split pods; items each finished (from logs, at least):"
-  for pod in "${!split_by[@]}"; do
-    local did=$((split_by[$pod] - split_before[$pod]))
-    ((did > 0)) || continue
-    split_worked=$((split_worked + 1))
-    say "    ${pod#pod/}: $did"
-  done
-  say "  convert stage: up to $most_convert pods; records each stored (from its registry):"
-  db "SELECT split_part(owner, '/', 1), count(*) FROM convert_$prefix.stage_record WHERE stored_at >= '$since'
+  local failures=0 worked again
+  say "  transform stage: up to $most pods; records each stored (from its registry):"
+  db "SELECT split_part(owner, '/', 1), count(*) FROM transform_$prefix.stage_record WHERE stored_at >= '$since'
       GROUP BY 1 ORDER BY 1" | while IFS='|' read -r pod did; do say "    $pod: $did"; done
-  convert_worked="$(db "SELECT count(DISTINCT split_part(owner, '/', 1)) FROM convert_$prefix.stage_record
+  worked="$(db "SELECT count(DISTINCT split_part(owner, '/', 1)) FROM transform_$prefix.stage_record
       WHERE stored_at >= '$since'")"
-  local again
-  again="$(db "SELECT count(*) FROM convert_$prefix.stage_record WHERE stored_at >= '$since' AND attempts > 1")"
-  ((again == 0)) || say "  $again record(s) converted on a second claim: their first pod stopped holding them"
-  if ((split_now < count || convert_now < count)); then
-    say "  FAIL: $split_now split and $convert_now converted of $count in 30 minutes"; failures=1
+  again="$(db "SELECT count(*) FROM transform_$prefix.stage_record WHERE stored_at >= '$since' AND attempts > 1")"
+  ((again == 0)) || say "  $again record(s) mapped on a second claim: their first pod stopped holding them"
+  if ((transform_now < count)); then
+    say "  FAIL: $split_now split, $convert_now converted and $transform_now transformed of $count in 30 minutes"
+    failures=1
   fi
-  if ((most_split < 2 || split_worked < 2)); then
-    say "  FAIL: the split stage didn't scale out (its backlog may not have passed 5 items)"; failures=1
+  if ((most < 2 || worked < 2)); then
+    say "  FAIL: the transform stage didn't scale out (its backlog may not have passed 5 records)"; failures=1
   fi
-  if ((most_convert < 2 || convert_worked < 2)); then
-    say "  FAIL: the convert stage didn't scale out (its backlog may not have passed 5 records)"; failures=1
-  fi
-  ((failures)) || say "  Both stages scaled out and shared the work. KEDA scales them back to one pod about" \
-    "two minutes after their backlogs are gone (scripts/sandbox.sh status)."
+  ((failures)) || say "  The transform stage scaled out and shared the work. KEDA scales it back to one pod" \
+    "about two minutes after its backlog is gone (scripts/sandbox.sh status)."
   return "$failures"
 }
 
@@ -1010,9 +1061,10 @@ status() {
   for p in $PIPELINES; do
     echo
     echo "$p: $(topic_count "$p.landed") on $p.landed, $(topic_count "$p.split") on $p.split," \
-      "$(topic_count "$p.records") on $p.records, $(topic_count "$p.convert.dlq") on $p.convert.dlq," \
-      "$(topic_count "$p.fhir.dlq") on $p.fhir.dlq"
+      "$(topic_count "$p.records") on $p.records, $(topic_count "$p.fhir") on $p.fhir," \
+      "$(topic_count "$p.convert.dlq") on $p.convert.dlq, $(topic_count "$p.fhir.dlq") on $p.fhir.dlq"
     kc -n "$(ns "$p")" get scaledobject,hpa 2>/dev/null || true
+    kc -n sdh-fhir get "scaledobject/transform-$p" "hpa/keda-hpa-transform-$p" 2>/dev/null || true
   done
 }
 

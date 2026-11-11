@@ -1,0 +1,86 @@
+# A pipeline's transform stage (the FHIR stage; docs/STAGES.md §17.10): reads the convert stage's records from
+# records in the silver bucket, maps each with the US Core 6.1 set, fail-fast, and stores the bundle, or the record
+# as it came if it fails, in fhir in the gold bucket, sealed to gold's consumer key and announced on
+# <pipeline>.fhir. Mounted from the ConfigMap transform-<pipeline>-config, as the transform stage's README
+# describes; the set from the ConfigMap transform-<pipeline>-wstl. ${...} in capitals with a prefix are filled in
+# by scripts/sandbox.sh; ${S3_SECRET_ACCESS_KEY} and ${SDH_LEASE_JDBC_PASSWORD} are left for Spring, from the
+# secret transform-<pipeline>-env. Keys are in the secret transform-<pipeline>-keys, at /run/secrets. Producer
+# results are off, as at the other stages here (docs/SANDBOX.md).
+sdh:
+  connector-id: transform-${PIPELINE}
+  transform:
+    wstl: /etc/sdh/wstl/set.tar.gz
+    # Not the default 64 MB: the pod's heap is small (docs/STAGES.md §17.10.9, 4e). A larger record is kept as it
+    # came, TRANSFORM_TOO_LARGE.
+    max-bytes: 2MB
+  stage:
+    # One record at a time: at four, the 1,088 MiB pod ran out of heap (docs/STAGES.md §17.10.9, 4e, as found).
+    concurrency: 1
+    input:
+      # groupProtocol=consumer (KIP-848, Kafka 4): a rebalance doesn't wait for every pod's next poll.
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&groupId=transform-${PIPELINE}&groupProtocol=consumer"
+    output:
+      type: kafka
+      uri: "kafka:${PIPELINE}.fhir?brokers=${KAFKA_BROKERS}"
+    dlq:
+      type: kafka
+      uri: "kafka:${PIPELINE}.fhir.dlq?brokers=${KAFKA_BROKERS}"
+    # The stage's own input, which a reprocess sends its objects to, sealed to the stage itself (STAGES.md
+    # §15.8.4). Kafka has no authentication here yet, so the pods may write it as they are.
+    reprocess:
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}"
+    registry-schema: transform_${ICEBERG_PREFIX}
+    # Reads records (the convert stage's sink) in silver; stores fhir in gold, a catalog and bucket of its own.
+    source:
+      catalog-name: sdh
+      namespace: ${ICEBERG_PREFIX}
+      table: records
+      catalog:
+        type: jdbc
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        jdbc.user: fhir_${ICEBERG_PREFIX}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://sdh-silver/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        # The FHIR stage's key reads silver and writes gold, and nothing else.
+        s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
+              access-key-id: fhir-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+        client: { region: us-east-1 }
+    sink:
+      catalog-name: sdh-gold
+      namespace: ${ICEBERG_PREFIX}_fhir
+      table: fhir
+      kek: ${PIPELINE}-fhir
+      catalog:
+        type: jdbc
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        jdbc.user: fhir_${ICEBERG_PREFIX}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://sdh-gold/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        s3: { endpoint: "http://seaweedfs.sdh-infra.svc:8333", path-style-access: true,
+              access-key-id: fhir-${PIPELINE}, secret-access-key: "${S3_SECRET_ACCESS_KEY}" }
+        client: { region: us-east-1 }
+  lease:
+    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: fhir_${ICEBERG_PREFIX} }
+  crypto:
+    wrap-provider: vault-transit
+    sign-provider: vault-transit
+    vault: { address: "http://vault.sdh-infra.svc:8200", token-file: /run/secrets/vault-token }
+    keys:
+      records-kek: ${PIPELINE}-records
+      signing: { kid: transform-${PIPELINE}, key-ref: ${PIPELINE}-transform-signing }
+      # Gold's readers: the consumer key pair, of which the stage has only the public half (STAGES.md §17.10.10,
+      # point 4).
+      recipient: { kid: consumer-${PIPELINE}, pem: /run/secrets/recipient.pem, sha256: "${CONSUMER_SHA256}" }
+      # The key the convert stage seals records to; its public half too, pinned, so the stage can seal a
+      # reprocess to itself.
+      inbox: { kid: fhir-${PIPELINE}, pem: /run/secrets/inbox.pem, public-pem: /run/secrets/inbox-public.pem,
+               sha256: "${RECIPIENT_SHA256}" }
+      landing-signer: { kid: convert-${PIPELINE}, pem: /run/secrets/convert-signer.pem }
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }

@@ -1,0 +1,25 @@
+# How KEDA scales a pipeline's transform stage (docs/STAGES.md §10, §17.10.9 4e): on its Kafka consumer group's
+# lag on <pipeline>.records, from one pod to two, one per worker (docs/SANDBOX.md "Memory"). Never fewer than one,
+# as the other stages (deploy/sandbox/pipeline/scaling.yaml). ${...} are filled in by scripts/sandbox.sh.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: transform-${PIPELINE}, namespace: sdh-fhir }
+spec:
+  scaleTargetRef: { name: transform-${PIPELINE} }
+  minReplicaCount: 1
+  maxReplicaCount: 2
+  pollingInterval: 15
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown: { stabilizationWindowSeconds: 120 }
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: ${KAFKA_BROKERS}
+        consumerGroup: transform-${PIPELINE}
+        topic: ${PIPELINE}.records
+        # A record.stored is one record to map.
+        lagThreshold: "5"
+        offsetResetPolicy: earliest

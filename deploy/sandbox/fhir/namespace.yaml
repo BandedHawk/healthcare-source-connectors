@@ -1,9 +1,8 @@
-# Reserved for the FHIR stage, not yet built (the healthcare-data-transformer project): it will read each
-# pipeline's records from Kafka (<pipeline>.records) and the silver bucket, map C-CDA JSON to FHIR (US Core
-# 6.1, fail-fast), write the resources as Iceberg tables (<pipeline>_fhir) in the gold bucket, and send what fails
-# to <pipeline>.fhir.dlq for the report mode. Everything it needs is made ready by scripts/sandbox.sh: its topics,
-# its bucket and access key (reads silver, writes gold), its Vault token (unwraps the records KEK), the
-# private key the splitter seals records to, and the ConfigMap fhir-<pipeline> naming them all.
+# The FHIR stage's namespace: each pipeline's transform stage (the healthcare-data-transformer project,
+# docs/STAGES.md §17.10), transform-<pipeline>. It reads the pipeline's records from Kafka (<pipeline>.records)
+# and the silver bucket, maps them to FHIR (US Core 6.1, fail-fast), and stores the bundles, and what fails as it
+# came, in fhir (<pipeline>_fhir) in the gold bucket, announced on <pipeline>.fhir. scripts/sandbox.sh deploys it
+# with its topics, its bucket and access key (reads silver, writes gold), its Vault token, its keys and the set.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -13,7 +12,8 @@ metadata:
     pod-security.kubernetes.io/enforce-version: latest
     sdh.smiledigitalhealth.com/infra-client: "true"
 ---
-# Room kept for it on the cluster: what it may reserve, so the pipelines can't take it.
+# Room kept for it on the cluster: what it may reserve, so the pipelines can't take it (two pods of 1,088 MiB
+# per pipeline, and one more in a rollout).
 apiVersion: v1
 kind: ResourceQuota
 metadata: { name: fhir-stage, namespace: sdh-fhir }

@@ -4,14 +4,20 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: convert }
 spec:
+  # The old pod stops before the new one starts: with one pod, and the other stage's node forbidden, a new pod
+  # can't be placed beside the old. The stage pauses for the restart; its messages wait in Kafka.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }
   template:
     spec:
-      # A stage's two pods on different nodes: each node then has room for one pod of each stage beside the rest,
-      # however the pods arrive (docs/SANDBOX.md "Memory").
+      # The split pod and the convert pod on different workers, each stage held to one pod: whichever worker also
+      # holds the landing pod, the collector and the producer then has room for a transform pod (docs/SANDBOX.md
+      # "Memory").
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector: { matchLabels: { app: convert } }
+            - labelSelector: { matchLabels: { app: splitter } }
               topologyKey: kubernetes.io/hostname
       containers:
         - name: convert-stage

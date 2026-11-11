@@ -1,0 +1,21 @@
+# The transform stage README's Deployment, with requests: its memory is reserved on the node, as its limit.
+# 1,088 MiB, not the README's 2 GiB: the most the busier worker has room for beside a split pod, the landing pod,
+# the collector and the producer (docs/SANDBOX.md "Memory"); the sample documents are small. ${...} are filled in
+# by scripts/sandbox.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: transform-${PIPELINE} }
+spec:
+  template:
+    spec:
+      # The stage's two pods on different workers: each worker has room for one beside the rest.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: transform-${PIPELINE} } }
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: transform-stage
+          resources:
+            requests: { cpu: 500m, memory: 1088Mi }
+            limits: { memory: 1088Mi }

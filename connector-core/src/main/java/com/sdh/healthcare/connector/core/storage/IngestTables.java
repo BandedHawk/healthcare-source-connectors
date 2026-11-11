@@ -37,6 +37,21 @@ public final class IngestTables
 {
 
     /**
+     * The largest Parquet row group written, in bytes (design §8.2): 8 MiB.
+     * A reader of one record holds the columns of each row group it reads,
+     * whole, so this bounds a record read's memory (STAGES.md §17.10.9,
+     * 4e). It was 128 MiB until 2026-11-11.
+     */
+    public static final long ROW_GROUP_BYTES = 8L << 20;
+
+    /**
+     * The largest data file written, in bytes (design §8.2): 64 MiB, which
+     * is also the most compaction writes (design §8.4). It was 512 MiB until
+     * 2026-11-11.
+     */
+    public static final long TARGET_FILE_BYTES = 64L << 20;
+
+    /**
      * Table properties for every ingest table (design §8.2, §16.5).
      * <p>
      * Iceberg sets the Parquet codec per table, not per column, so ciphertext
@@ -48,9 +63,9 @@ public final class IngestTables
             TableProperties.PARQUET_COMPRESSION, "zstd",
             TableProperties.PARQUET_COMPRESSION_LEVEL, "1",
             TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES,
-            Long.toString(128L * 1024 * 1024),
+            Long.toString(ROW_GROUP_BYTES),
             TableProperties.WRITE_TARGET_FILE_SIZE_BYTES,
-            Long.toString(512L * 1024 * 1024),
+            Long.toString(TARGET_FILE_BYTES),
             TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED, "true",
             TableProperties.METADATA_PREVIOUS_VERSIONS_MAX, "100");
 
@@ -65,9 +80,14 @@ public final class IngestTables
      * row-group limit is even checked; the archive ran out of heap at
      * 768 MiB. After the first check, Iceberg estimates when the next one is
      * due from the average row size, so small rows are still checked rarely.
+     * <p>
+     * The row-group size too ({@link #ROW_GROUP_BYTES}), since tables made
+     * before 2026-11-11 have 128 MiB in their properties.
      */
     public static final Map<String, String> WRITE_OVERRIDES = Map.of(
-            TableProperties.PARQUET_ROW_GROUP_CHECK_MIN_RECORD_COUNT, "1");
+            TableProperties.PARQUET_ROW_GROUP_CHECK_MIN_RECORD_COUNT, "1",
+            TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES,
+            Long.toString(ROW_GROUP_BYTES));
 
     /** The split stage's table of records as cut (STAGES.md §3). */
     public static final String SPLIT_RECORDS = "split_records";

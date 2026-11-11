@@ -40,24 +40,35 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
 import javax.crypto.KeyGenerator;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SortOrder;
+import org.apache.iceberg.SortOrderComparators;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.data.parquet.GenericParquetReaders;
+import org.apache.iceberg.data.parquet.GenericParquetWriter;
 import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.io.DataWriter;
 import org.apache.iceberg.io.FileInfo;
+import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.jdbc.JdbcCatalog;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -324,6 +335,195 @@ class TableMaintenanceTest
                 .count();
         assertThat(gone).isEqualTo(4);
         assertThat(rows(table)).containsAll(before);
+    }
+
+    /**
+     * The rows of one data file, in the order the file holds them.
+     *
+     * @param table the table
+     * @param file  the file
+     * @return its rows
+     * @throws IOException if it can't be read
+     */
+    static List<Record> fileRows(Table table, DataFile file) throws IOException
+    {
+        List<Record> out = new ArrayList<>();
+        try (CloseableIterable<Record> rows = Parquet.read(
+                table.io().newInputFile(file.location()))
+                .project(table.schema())
+                .createReaderFunc(fileSchema -> GenericParquetReaders
+                        .buildReader(table.schema(), fileSchema))
+                .build())
+        {
+            rows.forEach(out::add);
+        }
+        return out;
+    }
+
+    /**
+     * The sizes of a file's row groups, from its split offsets, the last
+     * to the end of the file.
+     *
+     * @param file the file
+     * @return the sizes, in bytes
+     */
+    static List<Long> rowGroups(DataFile file)
+    {
+        List<Long> offsets = file.splitOffsets();
+        List<Long> sizes = new ArrayList<>();
+        for (int index = 0; index < offsets.size(); index++)
+        {
+            long end = index + 1 < offsets.size() ? offsets.get(index + 1)
+                    : file.fileSizeInBytes();
+            sizes.add(end - offsets.get(index));
+        }
+        return sizes;
+    }
+
+    /**
+     * Compaction writes the rows sorted by the table's sort order (item,
+     * seq, chunk), so a reader can skip the files and row groups an item
+     * isn't in (STAGES.md §17.10.9, 4e).
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void compactionWritesTheRowsSorted() throws Exception
+    {
+        Table table = records();
+        for (int index = 0; index < 5; index++)
+        {
+            batch(table, OLD_DAY, 4);
+        }
+        Set<String> before = rows(table);
+
+        TableMaintenance.Report report = maintenance(settings(
+                Duration.ofDays(7), 10, 3, 8L << 30, Duration.ofDays(3)))
+                .run(table, INGESTED_AT, Optional.empty(), false);
+
+        assertThat(report.compactedFiles()).isEqualTo(5);
+        assertThat(report.compactedInto()).isEqualTo(1);
+        DataFile merged = files(table).getFirst();
+        Comparator<StructLike> order = SortOrderComparators
+                .forSchema(table.schema(), table.sortOrder());
+        assertThat(fileRows(table, merged)).hasSize(20)
+                .isSortedAccordingTo(order);
+        assertThat(rows(table)).isEqualTo(before);
+    }
+
+    /**
+     * A file written before row groups were small, with one row group of
+     * over 16 MiB, is rewritten into sorted files whose row groups are
+     * within the limit, every row unchanged, even alone in its partition.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aFileWithAnOversizedRowGroupIsRewrittenSorted() throws Exception
+    {
+        Table table = records();
+        RecordBatchWriter writer = new RecordBatchWriter(table, keys, "k",
+                new RecordIds(new byte[32]), RECENT_DAY);
+        Random random = new Random(7);
+        for (int index = 0; index < 20; index++)
+        {
+            byte[] payload = new byte[1 << 20];
+            random.nextBytes(payload);
+            writer.add(new RecordBatchWriter.RecordInput(UUID.randomUUID(),
+                    index, 0, "csv", payload));
+        }
+        DataFile small = writer.finish();
+        committer.commit(table, transaction -> transaction.newFastAppend()
+                .appendFile(small).commit());
+        assertThat(rowGroups(small)).allMatch(
+                size -> size <= 2 * IngestTables.ROW_GROUP_BYTES);
+
+        // As written before 2026-11-11: one row group of 128 MiB at most,
+        // checked only every 100 rows.
+        String location = table.locationProvider().newDataLocation(
+                table.spec(), small.partition(),
+                FileFormat.PARQUET.addExtension("legacy-" + UUID.randomUUID()));
+        DataWriter<Record> legacy = Parquet.writeData(
+                table.io().newOutputFile(location))
+                .schema(table.schema())
+                .withSpec(table.spec())
+                .withPartition(small.partition())
+                .withSortOrder(SortOrder.unsorted())
+                .setAll(table.properties())
+                .set(TableProperties.PARQUET_ROW_GROUP_SIZE_BYTES,
+                        Long.toString(128L << 20))
+                .createWriterFunc(GenericParquetWriter::create)
+                .build();
+        try (legacy)
+        {
+            for (Record row : fileRows(table, small))
+            {
+                legacy.write(row);
+            }
+        }
+        DataFile big = legacy.toDataFile();
+        committer.commit(table, transaction -> transaction.newRewrite()
+                .deleteFile(small).addFile(big).commit());
+        assertThat(rowGroups(big)).hasSize(1);
+        assertThat(TableMaintenance.hasOversizedRowGroup(big)).isTrue();
+        Set<String> before = rows(table);
+
+        TableMaintenance.Report report = maintenance(settings(
+                Duration.ofDays(7), 10, 5, 8L << 30, Duration.ofDays(3)))
+                .run(table, INGESTED_AT, Optional.empty(), false);
+
+        assertThat(report.compactedFiles()).isEqualTo(1);
+        List<DataFile> rewritten = files(table);
+        assertThat(rewritten).hasSize(report.compactedInto()).isNotEmpty();
+        Comparator<StructLike> order = SortOrderComparators
+                .forSchema(table.schema(), table.sortOrder());
+        for (DataFile file : rewritten)
+        {
+            assertThat(TableMaintenance.hasOversizedRowGroup(file)).isFalse();
+            assertThat(rowGroups(file)).hasSizeGreaterThan(1);
+            assertThat(fileRows(table, file)).isSortedAccordingTo(order);
+        }
+        assertThat(rows(table)).isEqualTo(before);
+
+        // Rewritten once: the next run leaves the new files alone.
+        TableMaintenance.Report again = maintenance(settings(
+                Duration.ofDays(7), 10, 5, 8L << 30, Duration.ofDays(3)))
+                .run(table, INGESTED_AT, Optional.empty(), false);
+        assertThat(again.compactedFiles()).isZero();
+    }
+
+    /**
+     * Rows are split into sorted files of at most the run's size, and each
+     * is counted by its binary values.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aLargeBinIsWrittenAsSeveralSortedFiles() throws Exception
+    {
+        Table table = records();
+        for (int index = 0; index < 4; index++)
+        {
+            batch(table, OLD_DAY, 5);
+        }
+        List<DataFile> input = files(table);
+        long oneRow = TableMaintenance.rowBytes(
+                fileRows(table, input.getFirst()).getFirst());
+
+        TableMaintenance.Sorted sorted = TableMaintenance.copySorted(table,
+                input, 7 * oneRow, "test");
+
+        assertThat(sorted.read()).isEqualTo(20);
+        assertThat(sorted.files()).hasSizeGreaterThanOrEqualTo(3);
+        assertThat(sorted.files().stream().mapToLong(DataFile::recordCount)
+                .sum()).isEqualTo(20);
+        Comparator<StructLike> order = SortOrderComparators
+                .forSchema(table.schema(), table.sortOrder());
+        for (DataFile file : sorted.files())
+        {
+            assertThat(file.recordCount()).isLessThanOrEqualTo(7);
+            assertThat(fileRows(table, file)).isSortedAccordingTo(order);
+        }
     }
 
     /**

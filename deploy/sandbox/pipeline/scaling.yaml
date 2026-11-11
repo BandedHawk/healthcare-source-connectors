@@ -1,20 +1,20 @@
 # How KEDA scales a pipeline's split and convert stages (docs/STAGES.md §10, docs/SANDBOX.md): on their Kafka
-# consumer groups' lag, from one pod to two. Never fewer than one: the pod holding a
-# stage's duties runs its reconciler, and a lost message adds no lag, so a stage scaled to nothing would never be
-# woken to find it. The landing node is never scaled: it lands serially, one active node at a time, with a standby
-# (its README). ${...} are filled in by scripts/sandbox.sh.
+# consumer groups' lag; held to one pod each since the transform stage was added (2026-11-10). Never fewer than
+# one: the pod holding a stage's duties runs its reconciler, and a lost message adds no lag, so a stage scaled to
+# nothing would never be woken to find it. The landing node is never scaled: it lands serially, one active node
+# at a time, with a standby (its README). ${...} are filled in by scripts/sandbox.sh.
 #
 # A lag threshold is the backlog one pod is given before another is added: an item.landed is a whole document to
-# split, a record.split one record to convert. KEDA adds no more pods than the topic has partitions (6). Two pods
-# of each (1.5 GiB a split pod, 1 GiB a convert pod) are what the sandbox's memory is sized for (docs/SANDBOX.md
-# "Memory"); a pod beyond what fits would wait unscheduled rather than starve the node.
+# split, a record.split one record to convert. KEDA adds no more pods than the topic has partitions (6). The
+# sandbox's memory has room for one pod of each (1.5 GiB a split pod, 1 GiB a convert pod) beside one or two
+# transform pods (docs/SANDBOX.md "Memory"); a production cluster sized for more raises maxReplicaCount.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata: { name: splitter, namespace: ${K8S_NS} }
 spec:
   scaleTargetRef: { name: splitter }
   minReplicaCount: 1
-  maxReplicaCount: 2
+  maxReplicaCount: 1
   pollingInterval: 15
   cooldownPeriod: 120
   advanced:
@@ -37,7 +37,7 @@ metadata: { name: convert, namespace: ${K8S_NS} }
 spec:
   scaleTargetRef: { name: convert }
   minReplicaCount: 1
-  maxReplicaCount: 2
+  maxReplicaCount: 1
   pollingInterval: 15
   cooldownPeriod: 120
   advanced:

@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.core.maintenance;
 
 import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
+import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -17,7 +18,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,6 +47,8 @@ import org.apache.iceberg.ReachableFileUtil;
 import org.apache.iceberg.RewriteFiles;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SortOrder;
+import org.apache.iceberg.SortOrderComparators;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.data.Record;
@@ -373,10 +378,7 @@ public final class TableMaintenance
      */
     private long[] compact(Table table)
     {
-        long target = Long.parseLong(table.properties().getOrDefault(
-                TableProperties.WRITE_TARGET_FILE_SIZE_BYTES,
-                Long.toString(
-                        TableProperties.WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT)));
+        long target = compactionTarget(table);
         long small = (long) (target * settings.smallFileFraction());
         Snapshot start = table.currentSnapshot();
         if (start == null)
@@ -384,14 +386,24 @@ public final class TableMaintenance
             return new long[3];
         }
         Map<String, List<DataFile>> byPartition = new LinkedHashMap<>();
+        List<List<DataFile>> oversized = new ArrayList<>();
         try (CloseableIterable<FileScanTask> tasks =
                 table.newScan().planFiles())
         {
             for (FileScanTask task : tasks)
             {
                 DataFile file = task.file();
-                if (file.fileSizeInBytes() < small
-                        && task.deletes().isEmpty())
+                if (!task.deletes().isEmpty())
+                {
+                    continue;
+                }
+                if (hasOversizedRowGroup(file))
+                {
+                    // Written before row groups were small (design §8.4):
+                    // rewritten on its own, however few there are.
+                    oversized.add(List.of(file));
+                }
+                else if (file.fileSizeInBytes() < small)
                 {
                     byPartition.computeIfAbsent(
                             table.spec().partitionToPath(file.partition()),
@@ -405,9 +417,7 @@ public final class TableMaintenance
             throw new UncheckedIOException(failure);
         }
 
-        long inputFiles = 0;
-        long outputFiles = 0;
-        long bytes = 0;
+        List<List<DataFile>> bins = new ArrayList<>(oversized);
         for (List<DataFile> files : byPartition.values())
         {
             if (files.size() < settings.minInputFiles())
@@ -416,27 +426,32 @@ public final class TableMaintenance
             }
             for (List<DataFile> bin : binPack(files, target))
             {
-                if (bin.size() < 2)
+                if (bin.size() >= 2)
                 {
-                    continue;
+                    bins.add(bin);
                 }
-                long binBytes = bin.stream()
-                        .mapToLong(DataFile::fileSizeInBytes).sum();
-                if (bytes > 0 && bytes + binBytes
-                        > settings.maxRewriteBytesPerRun())
-                {
-                    LOG.info("maintenance.compaction_budget_reached"
-                            + " table={} bytes={}", table.name(), bytes);
-                    return new long[]
-                    {
-                        inputFiles, outputFiles, bytes
-                    };
-                }
-                rewrite(table, start.snapshotId(), bin);
-                inputFiles += bin.size();
-                outputFiles++;
-                bytes += binBytes;
             }
+        }
+        long inputFiles = 0;
+        long outputFiles = 0;
+        long bytes = 0;
+        for (List<DataFile> bin : bins)
+        {
+            long binBytes = bin.stream()
+                    .mapToLong(DataFile::fileSizeInBytes).sum();
+            if (bytes > 0 && bytes + binBytes
+                    > settings.maxRewriteBytesPerRun())
+            {
+                LOG.info("maintenance.compaction_budget_reached"
+                        + " table={} bytes={}", table.name(), bytes);
+                return new long[]
+                {
+                    inputFiles, outputFiles, bytes
+                };
+            }
+            outputFiles += rewrite(table, start.snapshotId(), bin, target);
+            inputFiles += bin.size();
+            bytes += binBytes;
         }
         return new long[]
         {
@@ -483,32 +498,82 @@ public final class TableMaintenance
     }
 
     /**
+     * The size compaction aims for: the table's target file size, but at
+     * most {@link IngestTables#TARGET_FILE_BYTES} (64 MiB), since a bin is
+     * sorted in memory (design §8.4).
+     *
+     * @param table the table
+     * @return the bytes
+     */
+    static long compactionTarget(Table table)
+    {
+        long property = Long.parseLong(table.properties().getOrDefault(
+                TableProperties.WRITE_TARGET_FILE_SIZE_BYTES,
+                Long.toString(
+                        TableProperties.WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT)));
+        return Math.min(property, IngestTables.TARGET_FILE_BYTES);
+    }
+
+    /**
+     * Whether a file has a row group over twice
+     * {@link IngestTables#ROW_GROUP_BYTES}, from its split offsets: written
+     * before row groups were small, so a read of one record from it holds
+     * the whole group (STAGES.md §17.10.9, 4e). The last group is measured
+     * to the end of the file, footer included. A file without split offsets
+     * is taken as it is.
+     *
+     * @param file the data file
+     * @return true if it should be rewritten
+     */
+    static boolean hasOversizedRowGroup(DataFile file)
+    {
+        List<Long> offsets = file.splitOffsets();
+        if (offsets == null || offsets.isEmpty())
+        {
+            return false;
+        }
+        long limit = 2 * IngestTables.ROW_GROUP_BYTES;
+        for (int index = 0; index < offsets.size(); index++)
+        {
+            long end = index + 1 < offsets.size() ? offsets.get(index + 1)
+                    : file.fileSizeInBytes();
+            if (end - offsets.get(index) > limit)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Copies the rows of {@code bin} unchanged (ciphertext included) into
-     * one new file and swaps it in with {@code RewriteFiles}, validated from
-     * {@code startSnapshot}. The new file is written unsorted: concatenating
-     * sorted files doesn't keep the table's sort order.
+     * new files sorted by the table's sort order (design §8.4), each at most
+     * {@code target} bytes of rows, and swaps them in with
+     * {@code RewriteFiles}, validated from {@code startSnapshot}.
      *
      * @param table         the table
      * @param startSnapshot the snapshot the files were chosen from
      * @param bin           the files to merge, all in one partition
-     * @throws IllegalStateException if the merged file's row count is wrong
+     * @param target        the most rows' bytes a new file holds
+     * @return how many files were written
+     * @throws IllegalStateException if the new files' row count is wrong
      */
-    private void rewrite(Table table, long startSnapshot, List<DataFile> bin)
+    private int rewrite(Table table, long startSnapshot, List<DataFile> bin,
+            long target)
     {
         long expectedRows = 0;
         for (DataFile file : bin)
         {
             expectedRows += file.recordCount();
         }
-        Copied copied = copyRows(table, bin, row -> true, "compact");
-        DataFile merged = copied.file();
-        if (merged == null || merged.recordCount() != expectedRows
-                || copied.read() != expectedRows)
+        Sorted sorted = copySorted(table, bin, target, "compact");
+        long written = sorted.files().stream()
+                .mapToLong(DataFile::recordCount).sum();
+        if (sorted.files().isEmpty() || written != expectedRows
+                || sorted.read() != expectedRows)
         {
-            if (merged != null)
-            {
-                table.io().deleteFile(merged.location());
-            }
+            sorted.files().forEach(
+                    file -> deleteQuietly(table, file.location()));
             throw new IllegalStateException(
                     "Compaction row count mismatch in " + table.name());
         }
@@ -517,9 +582,175 @@ public final class TableMaintenance
             RewriteFiles rewriteFiles = transaction.newRewrite()
                     .validateFromSnapshot(startSnapshot);
             bin.forEach(rewriteFiles::deleteFile);
-            rewriteFiles.addFile(merged);
+            sorted.files().forEach(rewriteFiles::addFile);
             rewriteFiles.commit();
         });
+        return sorted.files().size();
+    }
+
+    /**
+     * What {@link #copySorted} wrote.
+     *
+     * @param files the new files, in the order written
+     * @param read  how many rows were read
+     */
+    record Sorted(List<DataFile> files, long read)
+    {
+    }
+
+    /**
+     * Copies the rows of data files, unchanged (ciphertext included), into
+     * new files in the first one's partition, each sorted by the table's
+     * sort order and holding at most {@code runBytes} of rows (as
+     * {@link #rowBytes} counts them), with the writers' overrides
+     * ({@link IngestTables#WRITE_OVERRIDES}). The rows of a file are held in
+     * memory to sort them. A table without a sort order keeps the rows in
+     * the order read. Nothing is committed: the caller swaps the files in,
+     * or deletes them.
+     *
+     * @param table    the table
+     * @param files    the files, all in one partition
+     * @param runBytes the most rows' bytes one new file holds
+     * @param prefix   the start of the new files' names
+     * @return the new files and how many rows were read
+     * @throws UncheckedIOException if a file can't be read or written
+     */
+    static Sorted copySorted(Table table, List<DataFile> files, long runBytes,
+            String prefix)
+    {
+        SortOrder order = table.sortOrder();
+        Comparator<StructLike> comparator = order.isUnsorted() ? null
+                : SortOrderComparators.forSchema(table.schema(), order);
+        List<DataFile> written = new ArrayList<>();
+        List<Record> run = new ArrayList<>();
+        long runSize = 0;
+        long read = 0;
+        try
+        {
+            for (DataFile file : files)
+            {
+                try (CloseableIterable<Record> rows = Parquet.read(
+                        table.io().newInputFile(file.location()))
+                        .project(table.schema())
+                        .createReaderFunc(fileSchema -> GenericParquetReaders
+                                .buildReader(table.schema(), fileSchema))
+                        .build())
+                {
+                    for (Record row : rows)
+                    {
+                        read++;
+                        long size = rowBytes(row);
+                        if (!run.isEmpty() && runSize + size > runBytes)
+                        {
+                            written.add(writeRun(table, files.getFirst(), run,
+                                    comparator, order, prefix));
+                            run.clear();
+                            runSize = 0;
+                        }
+                        run.add(row);
+                        runSize += size;
+                    }
+                }
+            }
+            if (!run.isEmpty())
+            {
+                written.add(writeRun(table, files.getFirst(), run, comparator,
+                        order, prefix));
+            }
+        }
+        catch (IOException | RuntimeException failure)
+        {
+            written.forEach(file -> deleteQuietly(table, file.location()));
+            if (failure instanceof IOException io)
+            {
+                throw new UncheckedIOException(io);
+            }
+            throw (RuntimeException) failure;
+        }
+        return new Sorted(List.copyOf(written), read);
+    }
+
+    /**
+     * Sorts rows and writes them to one new file.
+     *
+     * @param table      the table
+     * @param first      a file of the partition the rows are in
+     * @param run        the rows; sorted in place
+     * @param comparator the table's sort order; null to keep their order
+     * @param order      the table's sort order, recorded in the file
+     * @param prefix     the start of the new file's name
+     * @return the new file
+     * @throws IOException if it can't be written
+     */
+    private static DataFile writeRun(Table table, DataFile first,
+            List<Record> run, Comparator<StructLike> comparator,
+            SortOrder order, String prefix) throws IOException
+    {
+        if (comparator != null)
+        {
+            run.sort(comparator);
+        }
+        String location = table.locationProvider().newDataLocation(
+                table.spec(), first.partition(),
+                FileFormat.PARQUET.addExtension(
+                        prefix + "-" + UUID.randomUUID()));
+        DataWriter<Record> writer = Parquet.writeData(
+                table.io().newOutputFile(location))
+                .schema(table.schema())
+                .withSpec(table.spec())
+                .withPartition(first.partition())
+                .withSortOrder(order)
+                .setAll(table.properties())
+                .setAll(IngestTables.WRITE_OVERRIDES)
+                .createWriterFunc(GenericParquetWriter::create)
+                .overwrite()
+                .build();
+        try (writer)
+        {
+            for (Record row : run)
+            {
+                writer.write(row);
+            }
+        }
+        catch (IOException | RuntimeException failure)
+        {
+            deleteQuietly(table, location);
+            throw failure;
+        }
+        return writer.toDataFile();
+    }
+
+    /**
+     * About how much memory a row's values take: the bytes of its binary
+     * and text values, and 16 for each other value. Ciphertext dominates.
+     *
+     * @param row the row
+     * @return the estimate, in bytes
+     */
+    static long rowBytes(Record row)
+    {
+        long bytes = 0;
+        for (int index = 0; index < row.size(); index++)
+        {
+            Object value = row.get(index, Object.class);
+            if (value instanceof ByteBuffer buffer)
+            {
+                bytes += buffer.remaining();
+            }
+            else if (value instanceof byte[] array)
+            {
+                bytes += array.length;
+            }
+            else if (value instanceof CharSequence text)
+            {
+                bytes += text.length();
+            }
+            else
+            {
+                bytes += 16;
+            }
+        }
+        return bytes;
     }
 
     /**
@@ -552,6 +783,7 @@ public final class TableMaintenance
                     .withPartition(first.partition())
                     .withSortOrder(SortOrder.unsorted())
                     .setAll(table.properties())
+                    .setAll(IngestTables.WRITE_OVERRIDES)
                     .createWriterFunc(GenericParquetWriter::create)
                     .overwrite()
                     .build();

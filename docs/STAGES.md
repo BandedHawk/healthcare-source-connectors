@@ -2861,6 +2861,106 @@ Each part builds and passes its tests before the next:
   21 tests in all. Not yet: an image test like file-connector's `CustomerImageIT` (the sandbox in 4e starts both).
 - **4e, sandbox:** memory sums first, then the deployment and `check` (§17.10.7).
 
+  **4e as designed (2026-11-10, with the user):**
+  - **Memory:** the split and convert stages held to one pod each (KEDA's maximum 1), and the transform stage
+    given one or two pods of 1,088 MiB, one per worker. A split pod and the convert pod are kept on different
+    workers (a required anti-affinity between the two), so whichever worker holds the landing pod, the collector
+    and the producer too has room for a transform pod: 768 (Kafka) + 1,536 (split) + 1,344 + 1,088 = 4,736 of
+    4,753. 1,088 MiB is an estimate from the convert pod (940 of 1,024 used under load) plus Whistle: one pod is
+    measured under load before KEDA is let to add the second. Two pods take 2,176 MiB of `sdh-fhir`'s 4 GiB
+    quota. SANDBOX.md "Memory" has the tables.
+  - **Rollouts of split and convert stop the old pod first** (`maxSurge: 0`, `maxUnavailable: 1`), in the
+    sandbox's patches only: at one pod each, with each on the other's node forbidden, a new pod can't be placed
+    beside the old one. The stage pauses for the restart; its messages wait in Kafka.
+  - **Records too large for the sandbox's heap:** `max-bytes` 2 MB (first 6 MB, from the factor of 30; changed
+    as found, below). A larger record is kept as it came, `TRANSFORM_TOO_LARGE`, rather than run alone, run the
+    heap out and be skipped after its retries.
+  - **Per pipeline, in `sdh-fhir`:** a Deployment `transform-<pipeline>` from the kit README's, by digest, with
+    the secrets `transform-<pipeline>-env` and `-keys` and the ConfigMaps `-config` and `-wstl` (the set's
+    `.tar.gz`, 73 KB, as binary data). These replace the handover's `fhir-<pipeline>` secret and ConfigMap. Its
+    input `<pipeline>.records` (6 partitions, as the other stages' inputs), its output `<pipeline>.fhir` (new, 1
+    partition), its dead-letter topic `<pipeline>.fhir.dlq`. Source `records` in silver; sink `fhir` in gold
+    (`sdh-gold` catalog, the gold KEK `<pipeline>-fhir`); registry schema `transform_<prefix>`.
+  - **Keys:** its inbox is the key the convert stage already seals records to (`<pipeline>-fhir-recipient`), its
+    public half pinned for reprocess; a Vault signing key `<pipeline>-transform-signing`, added to its policy; and
+    the consumer key pair `<pipeline>-consumer` (§17.10.10, point 4), made once in the sandbox's state, of which
+    only the public half is given to the stage.
+  - **KEDA:** a ScaledObject in `sdh-fhir` on the group `transform-<pipeline>`'s lag on `<pipeline>.records`, 1
+    to 2 pods, threshold 5, as the others.
+  - **Producer results stay off,** as they are in the sandbox now: nothing is moved off the convert stage, and
+    the transform stage's results are not run here. Turning them on (a results topic, a producer key pair, the
+    landing node and the transform stage both sending) is a later sandbox step.
+  - **`check`** waits for the transform stage to complete every pushed item too, and passes when each of their
+    records has ended, as a bundle in gold or a failure in the fail store: none lost. It prints how many of each
+    (most C-CDA documents fail a US Core check), the messages on `<pipeline>.fhir`, and fails if any pod's log,
+    the transform stage's included, holds document content or a filename. The counts are printed, not pinned.
+  - **`scale-demo`** follows the transform stage scaling out and back, in place of the split and convert stages.
+  - **Images:** `images` builds the transformer from its folder (`SDH_TRANSFORMER`, by default
+    `../healthcare-data-transformer`) after installing this repository's libraries and build kit, so it is built
+    on them as they are. The set is the one its build takes from the local Maven repository (mapping installed).
+
+  **4e as found so far (2026-11-11):** deployed. The FHIR stage's Vault policy also needed `encrypt` on the records
+  KEK (a stage checks each KEK at startup with a round trip). Then:
+  - **The 1,088 MiB pod runs out of heap mapping four records at once** (the default concurrency), within seconds
+    of starting on the backlog (about 7,200 records already on `<pipeline>.records`). Each crash is an attempt on
+    the records it held: 16 reached a third attempt, none was skipped. Batches of 10, not 100, didn't help.
+  - **At one at a time it holds, barely:** no out-of-memory in 4 minutes, but a full GC about every 0.4 s (a third
+    of its time), up to 350 of its 525 MiB heap live after one, 197 records in 150 s. At 2 GiB (a 1 GiB heap) one
+    at a time runs with no full GC and 255 records in 150 s; four at a time there thrashes (a full GC every few
+    seconds, up to 583 MiB live), and maps fewer.
+  - **The mapping isn't what fills the heap.** `MemoryProbe` (the transformer's test sources) maps documents with
+    the set, so many at once, at a given heap, and prints the rate and the share of time in GC. Mapping's 13 test
+    documents: four at once in 96 MiB (33% in GC), 15% at 256 MiB, about 60 a second; the convert stage's form of
+    a sample (`google-synthea-sample1.json`, 616 KB): 100 a second four at once in 512 MiB, 9% in GC. The stage
+    maps under 2 a second. A class histogram of the pod at one at a time: 227 MiB live, 158 MiB of it byte arrays
+    (447,000 of them, 354 bytes on average, so strings and small buffers rather than whole records), the engine's
+    own objects about 2 MiB. So the heap goes to the stage around the mapping, not to Whistle; the factor of 30 is
+    not what is wrong. The convert stage, on the same library with the same batch and concurrency, holds in 1 GiB.
+  - **Not yet known:** what the transform stage's pods hold that the convert stage's don't. Candidates: the sink in
+    a catalog of its own (gold), the source `records` read per record, the outputs sealed to the consumer key.
+    Finding it needs a heap dump of the pod (synthetic data only here) or a reading of the record stage's reading
+    and storing path.
+  - **Meanwhile:** the stage is paused at zero pods (`autoscaling.keda.sh/paused-replicas: "0"` on its
+    ScaledObject); its settings here are one at a time and `max-bytes` 2 MB.
+  - **Found with a heap dump (2026-11-11, with the user's agreement; synthetic data, the dump deleted after):** at
+    four at once, 358 of the 435 MiB live were three byte arrays of 119.3 MiB, each in a `HeapByteBuffer` on a
+    mapping thread's stack. Maintenance had compacted silver's `records` for 2026-11-07 into a 125.2 MB Parquet
+    file of one row group (row groups of 128 MiB, files of 512 MiB: `IngestTables.PROPERTIES`). Reading a record
+    (`RecordInputStream`: a scan filtered on item, seq and day) reads each matching row group's columns whole, and
+    compaction copies rows unsorted, so no row group or file can be skipped: one record read held 119 MiB, and
+    read 125 MB. `split_records`' largest compacted file is 27.8 MB, which is why the convert stage held. Any
+    stage reading a compacted table had this coming; the transform stage met it first.
+
+  **The fix (decided 2026-11-11 with the user): small row groups, and compaction sorts.** In `connector-core`,
+  for every table: (DESIGN §8.2, §8.4)
+  - **Row groups of 8 MiB,** set at write time (`IngestTables.WRITE_OVERRIDES`, so tables made before get it
+    too) and for new tables. A row is at most an 8 MiB ciphertext chunk, and the size is checked after every
+    row, so a row group is at most about 16 MiB. Reading a record then holds one row group's columns.
+  - **Compaction targets 64 MiB files** (`TableMaintenance`: the table's target, but at most 64 MiB), and
+    **writes each sorted** by the table's sort order (`item_id, seq, chunk_index` for record tables), with the
+    8 MiB row groups. With the files and row groups sorted, their min/max statistics let a read skip the files and
+    row groups its item isn't in. A bin is read into memory and sorted: at most 64 MiB of rows, in the pod
+    holding the duties lease, between items. A bin larger than that (only an oversized file, below) is written as
+    several sorted files, each at most 64 MiB of rows.
+  - **Oversized files are rewritten once:** a data file with a row group over twice the 8 MiB (from its split
+    offsets), whatever its size, is rewritten by compaction into sorted files of 8 MiB groups, within the run's
+    budget. That covers files written or compacted before the fix (the sandbox's 125 MB file). Reading such a
+    file to rewrite it still holds its largest row group once.
+  - **Not changed:** the reader (Iceberg already skips by statistics), the stages' own writes (a batch's file,
+    unsorted, small), and the stages' memory budget (it counts the mapping, not the read, which is now bounded).
+  - **Tests (`TableMaintenanceTest`, 3 new, 12 in all):** a compacted file's rows are in sort order, every row
+    unchanged; a file with one row group of 20 MiB, written as before, is rewritten alone into sorted files of
+    several row groups each within the limit, and left alone by the next run; a bin larger than the run's size
+    is written as several sorted files.
+
+  **4e as checked (2026-11-11), with the fix deployed:** the transform pod, one record at a time, cleared the
+  backlog (about 3,600 records) at up to 909 of its 1,088 MiB, with no restart; `check` and `scale-demo` passed
+  (two pods, 190 and 110 of 300 records); docs/SANDBOX.md "Checked". The KEDA pause is off. `check` and
+  `scale-demo` wait for every record of an item to end, not for its completion, since an item with a failure stays
+  open (§15.6). Found on the way: the sandbox's SeaweedFS runs out of its 768 MiB under maintenance's rewrites and
+  two stages' maintenance at once; open, a sandbox sizing question. Not tried: more than one record at a time now
+  the reads are bounded.
+
 #### 17.10.10 Decided (2026-11-10, with the user)
 
 1. **How the transformer gets this repository's build. Decided 2026-11-10 with the user: the root `pom.xml` as its
