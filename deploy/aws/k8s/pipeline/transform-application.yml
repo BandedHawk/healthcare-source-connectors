@@ -1,0 +1,72 @@
+# A pipeline's transform stage on AWS (docs/AWS-POC.md §5; STAGES.md §17.10): reads records in the silver bucket,
+# maps each with the US Core 6.1 set, fail-fast, and stores the bundle, or the record as it came if it fails, in
+# fhir in the gold bucket, sealed to gold's consumer key and announced on <pipeline>.fhir. As
+# deploy/sandbox/fhir/transform-application.yml, with S3 through the pod's role (EKS Pod Identity; reads silver,
+# writes gold), AWS KMS for the keys, and no telemetry collector. Producer results are off: no producer listens
+# for them with a bucket intake. ${...} in capitals are filled in by deploy/aws/k8s/pipeline/apply.sh;
+# ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret transform-<pipeline>-env.
+sdh:
+  connector-id: transform-${PIPELINE}
+  results: { enabled: false }
+  transform:
+    wstl: /etc/sdh/wstl/set.tar.gz
+    # Not the default 64 MB: the pod's heap is small (STAGES.md §17.10.9, 4e). A larger record is kept as it came,
+    # TRANSFORM_TOO_LARGE.
+    max-bytes: 2MB
+  stage:
+    # Two records at a time, as in the sandbox (decided 2026-11-11); the input has 8 partitions for 4 pods.
+    concurrency: 2
+    input:
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&groupId=transform-${PIPELINE}&groupProtocol=consumer"
+    output:
+      type: kafka
+      uri: "kafka:${PIPELINE}.fhir?brokers=${KAFKA_BROKERS}"
+    dlq:
+      type: kafka
+      uri: "kafka:${PIPELINE}.fhir.dlq?brokers=${KAFKA_BROKERS}"
+    reprocess:
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}"
+    registry-schema: transform_${ICEBERG_PREFIX}
+    source:
+      catalog-name: sdh
+      namespace: ${ICEBERG_PREFIX}
+      table: records
+      catalog:
+        type: jdbc
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        jdbc.user: fhir_${ICEBERG_PREFIX}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://${SILVER_BUCKET}/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        client: { region: ${AWS_REGION} }
+    sink:
+      catalog-name: sdh-gold
+      namespace: ${ICEBERG_PREFIX}_fhir
+      table: fhir
+      kek: alias/sdh-poc-${PIPELINE}-fhir
+      catalog:
+        type: jdbc
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        jdbc.user: fhir_${ICEBERG_PREFIX}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://${GOLD_BUCKET}/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        client: { region: ${AWS_REGION} }
+  lease:
+    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: fhir_${ICEBERG_PREFIX} }
+  crypto:
+    wrap-provider: aws-kms
+    sign-provider: aws-kms
+    aws: { region: ${AWS_REGION} }
+    keys:
+      records-kek: alias/sdh-poc-${PIPELINE}-records
+      signing: { kid: transform-${PIPELINE}, key-ref: alias/sdh-poc-${PIPELINE}-transform-signing }
+      # Gold's readers' key pair: the stage has only the public half (STAGES.md §17.10.10, point 4).
+      recipient: { kid: consumer-${PIPELINE}, pem: /run/secrets/recipient.pem, sha256: "${CONSUMER_SHA256}" }
+      inbox: { kid: fhir-${PIPELINE}, pem: /run/secrets/inbox.pem, public-pem: /run/secrets/inbox-public.pem,
+               sha256: "${RECIPIENT_SHA256}" }
+      landing-signer: { kid: convert-${PIPELINE}, pem: /run/secrets/convert-signer.pem }

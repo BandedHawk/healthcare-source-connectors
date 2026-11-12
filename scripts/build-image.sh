@@ -12,6 +12,7 @@
 #   SDH_JAVA_IMAGE=eclipse-temurin:25-jre scripts/build-image.sh customer   # another Java 25 base
 #   SDH_SKIP_MAVEN=1 scripts/build-image.sh        # reuse what <module>/target already holds
 #   SDH_IT_STOP=1 scripts/build-image.sh           # stop the VM afterwards
+#   SDH_PLATFORM=linux/arm64 scripts/build-image.sh customer   # for another architecture (customer images)
 #   scripts/build-image.sh ../healthcare-data-transformer/transform-stage customer   # a module of another project
 #
 # The application is file-connector (also: split, splitter; the default; its images are named split-stage, as
@@ -87,16 +88,20 @@ else
     echo "No distribution kit at $KIT; package $APP first" >&2
     exit 1
   fi
+  # SDH_PLATFORM builds for another architecture. Neither build runs anything on it (the kit's Dockerfile only
+  # copies, and the inventory stage runs on the build machine's platform), so no emulation is needed.
+  platform=()
+  [[ -z "${SDH_PLATFORM:-}" ]] || platform=(--platform "$SDH_PLATFORM" --build-arg "TARGETARCH=${SDH_PLATFORM#*/}")
   docker build -f "$KIT/container/Dockerfile" --build-arg JAVA_IMAGE="${SDH_JAVA_IMAGE:-$DISTROLESS_IMAGE}" \
-    -t "$IMAGE-kit" "$@" "$KIT" || status=$?
+    "${platform[@]}" -t "$IMAGE-kit" "$@" "$KIT" || status=$?
   if [[ $status -eq 0 ]]; then
     docker build -f "$ROOT/docker/customer-inventory.Dockerfile" --build-arg KIT_IMAGE="$IMAGE-kit" \
-      -t "$IMAGE" "$ROOT/docker" || status=$?
+      "${platform[@]}" -t "$IMAGE" "$ROOT/docker" || status=$?
     docker image rm "$IMAGE-kit" >/dev/null 2>&1 || true
   fi
 fi
 if [[ $status -eq 0 ]]; then
-  docker image inspect "$IMAGE" --format '>> Built {{index .RepoTags 0}} ({{.Size}} bytes, user {{.Config.User}})'
+  docker image inspect "$IMAGE" --format '>> Built {{index .RepoTags 0}} ({{.Architecture}}, {{.Size}} bytes, user {{.Config.User}})'
 fi
 stop_vm_if_asked
 exit "$status"

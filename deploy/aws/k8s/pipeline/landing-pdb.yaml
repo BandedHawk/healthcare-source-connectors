@@ -1,0 +1,7 @@
+# A node drain takes the active landing node or the standby, not both.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: landing }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { app: landing } }

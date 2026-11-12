@@ -1,0 +1,55 @@
+# A pipeline's convert stage on AWS (docs/AWS-POC.md §5): reads split_records in the silver bucket, converts each
+# record to JSON, stores it in records in the same bucket, sealed to the transform stage, and announces it on
+# <pipeline>.records. As deploy/sandbox/pipeline/convert-application.yml, with S3 through the pod's role (EKS Pod
+# Identity; silver only), AWS KMS for the keys, and no telemetry collector. ${...} in capitals are filled in by
+# deploy/aws/k8s/pipeline/apply.sh; ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret convert-env.
+# Keys are in the secret convert-keys, at /run/secrets.
+sdh:
+  connector-id: convert-${PIPELINE}
+  # The transform stage, the last, sends the producer's results; here they are off (its README). No producer
+  # listens on AWS, so they are off there too (docs/AWS-POC.md §5).
+  results: { enabled: false }
+  stage:
+    input:
+      type: kafka
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}&groupId=convert-${PIPELINE}&groupProtocol=consumer"
+    output:
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}"
+    dlq:
+      type: kafka
+      uri: "kafka:${PIPELINE}.convert.dlq?brokers=${KAFKA_BROKERS}"
+    reprocess:
+      type: kafka
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}"
+    registry-schema: convert_${ICEBERG_PREFIX}
+    # Reads split_records and stores in records, both in silver: the sink shares the source's catalog
+    # (STAGES.md §17.7).
+    source:
+      catalog-name: sdh
+      namespace: ${ICEBERG_PREFIX}
+      catalog:
+        type: jdbc
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        jdbc.user: convert_${ICEBERG_PREFIX}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://${SILVER_BUCKET}/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        client: { region: ${AWS_REGION} }
+    sink:
+      catalog-name: sdh
+      namespace: ${ICEBERG_PREFIX}
+  lease:
+    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: convert_${ICEBERG_PREFIX} }
+  crypto:
+    wrap-provider: aws-kms
+    sign-provider: aws-kms
+    aws: { region: ${AWS_REGION} }
+    keys:
+      records-kek: alias/sdh-poc-${PIPELINE}-records
+      signing: { kid: convert-${PIPELINE}, key-ref: alias/sdh-poc-${PIPELINE}-convert-signing }
+      recipient: { kid: fhir-${PIPELINE}, pem: /run/secrets/recipient.pem, sha256: "${RECIPIENT_SHA256}" }
+      inbox: { kid: convert-${PIPELINE}-inbox, pem: /run/secrets/inbox.pem, public-pem: /run/secrets/inbox-public.pem,
+               sha256: "${CONVERT_INBOX_SHA256}" }
+      landing-signer: { kid: splitter-${PIPELINE}, pem: /run/secrets/split-signer.pem }

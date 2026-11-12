@@ -1,0 +1,31 @@
+# The landing README's Deployment on AWS (docs/AWS-POC.md §5): the active node and a hot standby, on different base
+# nodes. Both start with SDH_LANDING_STANDBY (the README's Deployment): the first to get the lease lands, and the
+# other waits, taking over once the lease's TTL passes without a renewal. Never two landing at once: the lease
+# (with its fencing epoch) and the intake bucket's claim (.sdh-owner, a conditional write) each refuse a second.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: landing }
+spec:
+  replicas: 2
+  # The old pods stop before the new ones start, so a rollout never has an old and a new node contending.
+  strategy: { type: Recreate, rollingUpdate: null }
+  template:
+    spec:
+      serviceAccountName: landing
+      automountServiceAccountToken: false
+      # On-demand base nodes, never Spot: a reclaimed node would cost the active node and its lease at once.
+      nodeSelector: { sdh-poc/pool: base }
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: { matchLabels: { app: landing } }
+              topologyKey: kubernetes.io/hostname
+      volumes:
+        - { name: intake, $patch: delete }     # a bucket, not a directory
+      containers:
+        - name: landing-connector
+          resources:
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { mountPath: /data/intake, $patch: delete }

@@ -1,0 +1,333 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadEverywhereInRegion",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:Get*",
+        "eks:Describe*",
+        "eks:List*",
+        "kms:ListKeys",
+        "kms:ListAliases",
+        "ecr:GetAuthorizationToken",
+        "ecr:DescribeRepositories",
+        "logs:DescribeLogGroups",
+        "s3:ListAllMyBuckets",
+        "autoscaling:Describe*",
+        "elasticloadbalancing:Describe*",
+        "access-analyzer:ValidatePolicy",
+        "states:ListStateMachines",
+        "scheduler:ListSchedules",
+        "states:ValidateStateMachineDefinition"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EksPocCluster",
+      "Effect": "Allow",
+      "Action": "eks:*",
+      "Resource": [
+        "arn:aws:eks:us-east-2:493469777520:cluster/sdh-poc*",
+        "arn:aws:eks:us-east-2:493469777520:nodegroup/sdh-poc*/*/*",
+        "arn:aws:eks:us-east-2:493469777520:addon/sdh-poc*/*/*",
+        "arn:aws:eks:us-east-2:493469777520:podidentityassociation/sdh-poc*/*",
+        "arn:aws:eks:us-east-2:493469777520:access-entry/sdh-poc*/*",
+        "arn:aws:eks::aws:cluster-access-policy/*"
+      ]
+    },
+    {
+      "Sid": "Ec2CreateTagged",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateVpcEndpoint"
+      ],
+      "Resource": [
+        "arn:aws:ec2:us-east-2:493469777520:security-group/*",
+        "arn:aws:ec2:us-east-2:493469777520:vpc-endpoint/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2CreateInDefaultVpc",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateVpcEndpoint"
+      ],
+      "Resource": [
+        "arn:aws:ec2:us-east-2:493469777520:vpc/vpc-7a4e0012",
+        "arn:aws:ec2:us-east-2:493469777520:route-table/*"
+      ]
+    },
+    {
+      "Sid": "Ec2TagOnCreate",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": [
+        "arn:aws:ec2:us-east-2:493469777520:*/*",
+        "arn:aws:ec2:us-east-2::snapshot/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "CreateSecurityGroup",
+            "CreateVpcEndpoint",
+            "CreateVolume",
+            "CreateSnapshot"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "Ec2ChangeOwnResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:ModifySecurityGroupRules",
+        "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
+        "ec2:DeleteSecurityGroup",
+        "ec2:ModifyVpcEndpoint",
+        "ec2:DeleteVpcEndpoints",
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2ChangeEksClusterSecurityGroup",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:CreateTags"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2:493469777520:security-group/*",
+      "Condition": {
+        "StringLike": {
+          "aws:ResourceTag/aws:eks:cluster-name": "sdh-poc*"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2RouteTablesForS3Endpoint",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:ModifyVpcEndpoint",
+        "ec2:DeleteVpcEndpoints"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2:493469777520:route-table/*"
+    },
+    {
+      "Sid": "S3PocBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": "arn:aws:s3:::sdh-poc-*"
+    },
+    {
+      "Sid": "EcrPocRepos",
+      "Effect": "Allow",
+      "Action": "ecr:*",
+      "Resource": "arn:aws:ecr:us-east-2:493469777520:repository/sdh-poc/*"
+    },
+    {
+      "Sid": "KmsCreateTagged",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateKey",
+        "kms:TagResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "KmsManageTaggedKeysNoDecrypt",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:PutKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:ListResourceTags",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:EnableKey",
+        "kms:DisableKey",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion",
+        "kms:GetPublicKey",
+        "kms:ListGrants",
+        "kms:RevokeGrant",
+        "kms:CreateAlias",
+        "kms:DeleteAlias",
+        "kms:UpdateAlias"
+      ],
+      "Resource": "arn:aws:kms:us-east-2:493469777520:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "KmsGrantsOnlyForAwsServices",
+      "Effect": "Allow",
+      "Action": "kms:CreateGrant",
+      "Resource": "arn:aws:kms:us-east-2:493469777520:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "sdh-poc"
+        },
+        "Bool": {
+          "kms:GrantIsForAWSResource": "true"
+        }
+      }
+    },
+    {
+      "Sid": "KmsPocAliases",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:DeleteAlias",
+        "kms:UpdateAlias"
+      ],
+      "Resource": "arn:aws:kms:us-east-2:493469777520:alias/sdh-poc-*"
+    },
+    {
+      "Sid": "LogsPoc",
+      "Effect": "Allow",
+      "Action": "logs:*",
+      "Resource": [
+        "arn:aws:logs:us-east-2:493469777520:log-group:/aws/eks/sdh-poc*",
+        "arn:aws:logs:us-east-2:493469777520:log-group:/sdh-poc/*"
+      ]
+    },
+    {
+      "Sid": "CostVisibility",
+      "Effect": "Allow",
+      "Action": [
+        "budgets:ViewBudget",
+        "budgets:ModifyBudget",
+        "pricing:GetProducts",
+        "pricing:DescribeServices",
+        "pricing:GetAttributeValues",
+        "ce:GetCostAndUsage",
+        "ce:GetCostForecast"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Ec2StateVolumesCreate",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVolume"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2:493469777520:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2StateVolumesChange",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DeleteVolume",
+        "ec2:ModifyVolume",
+        "ec2:CreateSnapshot"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2:493469777520:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2SnapshotsCreate",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSnapshot"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2::snapshot/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2SnapshotsDelete",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DeleteSnapshot"
+      ],
+      "Resource": "arn:aws:ec2:us-east-2::snapshot/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "AutoDownGuardStateMachine",
+      "Effect": "Allow",
+      "Action": [
+        "states:*"
+      ],
+      "Resource": [
+        "arn:aws:states:us-east-2:493469777520:stateMachine:sdh-poc*",
+        "arn:aws:states:us-east-2:493469777520:execution:sdh-poc*:*"
+      ]
+    },
+    {
+      "Sid": "AutoDownSchedule",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:CreateSchedule",
+        "scheduler:UpdateSchedule",
+        "scheduler:GetSchedule",
+        "scheduler:DeleteSchedule"
+      ],
+      "Resource": "arn:aws:scheduler:us-east-2:493469777520:schedule/default/sdh-poc*"
+    },
+    {
+      "Sid": "KmsForEncryptedVolumesViaEbs",
+      "Effect": "Allow",
+      "Action": [
+        "kms:GenerateDataKeyWithoutPlaintext",
+        "kms:Decrypt",
+        "kms:ReEncrypt*"
+      ],
+      "Resource": "arn:aws:kms:us-east-2:493469777520:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "sdh-poc",
+          "kms:ViaService": "ec2.us-east-2.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+# How KEDA scales a pipeline's split, convert and transform stages on AWS (docs/AWS-POC.md §5): on their Kafka
+# consumer groups' lag, as in the sandbox (deploy/sandbox/pipeline/scaling.yaml, deploy/sandbox/fhir/scaling.yaml),
+# with the PoC's maxima: 2, 3 and 4 pods. Never fewer than one: the pod holding a stage's duties runs its
+# reconciler, and a lost message adds no lag, so a stage scaled to nothing would never be woken to find it. The
+# landing node is never scaled. poc.sh down pauses these at 0 (autoscaling.keda.sh/paused-replicas), and up
+# resumes them. ${...} are filled in by deploy/aws/k8s/pipeline/apply.sh.
+#
+# Each input has a partition for each pod times its concurrency (poc.sh setup_topics): 4, 6 and 8.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: splitter, namespace: ${K8S_NS} }
+spec:
+  scaleTargetRef: { name: splitter }
+  minReplicaCount: 1
+  maxReplicaCount: 2
+  pollingInterval: 15
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown: { stabilizationWindowSeconds: 120 }
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: ${KAFKA_BROKERS}
+        consumerGroup: splitter-${PIPELINE}
+        topic: ${PIPELINE}.landed
+        lagThreshold: "5"
+        offsetResetPolicy: earliest
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: convert, namespace: ${K8S_NS} }
+spec:
+  scaleTargetRef: { name: convert }
+  minReplicaCount: 1
+  maxReplicaCount: 3
+  pollingInterval: 15
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown: { stabilizationWindowSeconds: 120 }
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: ${KAFKA_BROKERS}
+        consumerGroup: convert-${PIPELINE}
+        topic: ${PIPELINE}.split
+        lagThreshold: "5"
+        offsetResetPolicy: earliest
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: transform-${PIPELINE}, namespace: sdh-fhir }
+spec:
+  scaleTargetRef: { name: transform-${PIPELINE} }
+  minReplicaCount: 1
+  maxReplicaCount: 4
+  pollingInterval: 15
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown: { stabilizationWindowSeconds: 120 }
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: ${KAFKA_BROKERS}
+        consumerGroup: transform-${PIPELINE}
+        topic: ${PIPELINE}.records
+        lagThreshold: "5"
+        offsetResetPolicy: earliest

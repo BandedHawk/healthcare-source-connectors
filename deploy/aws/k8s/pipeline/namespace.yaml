@@ -1,0 +1,98 @@
+# A pipeline's namespaces on AWS: sdh-<pipeline> (landing, split, convert) and sdh-fhir (transform), as in the
+# sandbox (deploy/sandbox/pipeline/namespace.yaml, deploy/sandbox/fhir/namespace.yaml), with:
+#   - the stages' service accounts, which EKS Pod Identity gives their roles (terraform/compute: the associations
+#     name sdh-<pipeline>/landing, splitter, convert and sdh-fhir/transform). No Kubernetes API token is mounted:
+#     the Pod Identity webhook mounts its own;
+#   - egress to AWS (S3 through the VPC's gateway endpoint, KMS through its public endpoint) and to the node's Pod
+#     Identity agent, and nothing else outside the cluster;
+#   - the label poc.sh's drain and stop look for (sdh.smiledigitalhealth.com/infra-client), which also lets them
+#     reach Postgres and Kafka.
+# Filled in by deploy/aws/k8s/pipeline/apply.sh (${K8S_NS}, ${PIPELINE}).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${K8S_NS}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    sdh.smiledigitalhealth.com/infra-client: "true"
+    sdh.smiledigitalhealth.com/pipeline: ${PIPELINE}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdh-fhir
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    sdh.smiledigitalhealth.com/infra-client: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: landing, namespace: ${K8S_NS} }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: splitter, namespace: ${K8S_NS} }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: convert, namespace: ${K8S_NS} }
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: transform, namespace: sdh-fhir }
+automountServiceAccountToken: false
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: ${K8S_NS} }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: sdh-fhir }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# DNS, Postgres and Kafka; AWS's HTTPS endpoints outside the VPC; the Pod Identity agent on the node. Nothing
+# reaches the stages: the bucket intake is polled, not pushed to.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: to-services, namespace: ${K8S_NS} }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: sdh-infra } } }]
+      ports: [{ port: 5432 }, { port: 9092 }]
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16] } }]
+      ports: [{ port: 443 }]
+    - to: [{ ipBlock: { cidr: 169.254.170.23/32 } }]
+      ports: [{ port: 80 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: to-services, namespace: sdh-fhir }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+             podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: sdh-infra } } }]
+      ports: [{ port: 5432 }, { port: 9092 }]
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16] } }]
+      ports: [{ port: 443 }]
+    - to: [{ ipBlock: { cidr: 169.254.170.23/32 } }]
+      ports: [{ port: 80 }]

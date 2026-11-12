@@ -1,0 +1,206 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateAndChangeRolesOnlyWithBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::493469777520:role/sdh-poc/*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::493469777520:policy/sdh-poc-admin/sdh-poc-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "AttachOnlyKnownPolicies",
+      "Effect": "Deny",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnNotLike": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::493469777520:policy/sdh-poc/*",
+            "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
+            "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+            "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
+            "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+            "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ManagePocRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:DeleteRole"
+      ],
+      "Resource": "arn:aws:iam::493469777520:role/sdh-poc/*"
+    },
+    {
+      "Sid": "ManagePocPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "arn:aws:iam::493469777520:policy/sdh-poc/*"
+    },
+    {
+      "Sid": "ReadAwsManagedAndBoundaryPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions"
+      ],
+      "Resource": [
+        "arn:aws:iam::aws:policy/*",
+        "arn:aws:iam::493469777520:policy/sdh-poc-admin/sdh-poc-boundary"
+      ]
+    },
+    {
+      "Sid": "PassPocRolesToKnownServices",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::493469777520:role/sdh-poc/*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "eks.amazonaws.com",
+            "ec2.amazonaws.com",
+            "pods.eks.amazonaws.com",
+            "states.amazonaws.com",
+            "scheduler.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "eks.amazonaws.com",
+            "eks-nodegroup.amazonaws.com",
+            "autoscaling.amazonaws.com",
+            "spot.amazonaws.com",
+            "elasticloadbalancing.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:GetRole",
+      "Resource": "arn:aws:iam::493469777520:role/aws-service-role/*"
+    },
+    {
+      "Sid": "DenyOutsideRegion",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "sts:*",
+        "budgets:*",
+        "pricing:*",
+        "ce:*",
+        "s3:ListAllMyBuckets"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "us-east-2"
+        }
+      }
+    },
+    {
+      "Sid": "DenyAssumingPocRoles",
+      "Effect": "Deny",
+      "Action": [
+        "sts:AssumeRole",
+        "sts:AssumeRoleWithWebIdentity",
+        "sts:TagSession"
+      ],
+      "Resource": "arn:aws:iam::493469777520:role/sdh-poc/*"
+    },
+    {
+      "Sid": "DenyBoundaryTampering",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:SetDefaultPolicyVersion"
+      ],
+      "Resource": [
+        "arn:aws:iam::493469777520:policy/sdh-poc-admin/*",
+        "arn:aws:iam::493469777520:role/*"
+      ]
+    },
+    {
+      "Sid": "DenyDecryptingPocData",
+      "Effect": "Deny",
+      "Action": [
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:Sign"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": {
+          "kms:ViaService": [
+            "ec2.us-east-2.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyKmsLockoutBypass",
+      "Effect": "Deny",
+      "Action": [
+        "kms:CreateKey",
+        "kms:PutKeyPolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "kms:BypassPolicyLockoutSafetyCheck": "true"
+        }
+      }
+    }
+  ]
+}

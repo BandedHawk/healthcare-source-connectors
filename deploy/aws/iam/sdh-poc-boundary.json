@@ -1,0 +1,120 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ClusterNodesAndAutoscaling",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:*",
+        "elasticloadbalancing:*",
+        "autoscaling:*",
+        "eks:Describe*",
+        "eks:List*",
+        "eks-auth:AssumeRoleForPodIdentity"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-2"
+        }
+      }
+    },
+    {
+      "Sid": "PullImages",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:DescribeImages",
+        "ecr:DescribeRepositories",
+        "ecr:ListImages"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PocBucketsOnly",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": "arn:aws:s3:::sdh-poc-*"
+    },
+    {
+      "Sid": "PocKeysOnly",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:DescribeKey",
+        "kms:Sign",
+        "kms:Verify",
+        "kms:GetPublicKey",
+        "kms:CreateGrant",
+        "kms:ListGrants",
+        "kms:RevokeGrant"
+      ],
+      "Resource": "arn:aws:kms:us-east-2:493469777520:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "sdh-poc"
+        }
+      }
+    },
+    {
+      "Sid": "LogsAndMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:PutRetentionPolicy",
+        "cloudwatch:PutMetricData"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ServiceLinkedRolesOnly",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "eks.amazonaws.com",
+            "eks-nodegroup.amazonaws.com",
+            "autoscaling.amazonaws.com",
+            "elasticloadbalancing.amazonaws.com",
+            "spot.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadOwnRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::493469777520:role/sdh-poc/*"
+    },
+    {
+      "Sid": "AutoDownGuard",
+      "Effect": "Allow",
+      "Action": [
+        "eks:DeleteNodegroup",
+        "eks:DeleteCluster",
+        "states:StartExecution"
+      ],
+      "Resource": [
+        "arn:aws:eks:us-east-2:493469777520:cluster/sdh-poc*",
+        "arn:aws:eks:us-east-2:493469777520:nodegroup/sdh-poc*",
+        "arn:aws:states:us-east-2:493469777520:stateMachine:sdh-poc*"
+      ]
+    }
+  ]
+}

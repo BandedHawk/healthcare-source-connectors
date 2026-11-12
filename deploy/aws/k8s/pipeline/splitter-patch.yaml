@@ -1,0 +1,24 @@
+# The split stage README's Deployment on AWS (docs/AWS-POC.md §5): 2 GiB, the README's size; KEDA 1-2 pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: splitter }
+spec:
+  template:
+    spec:
+      serviceAccountName: splitter
+      automountServiceAccountToken: false
+      # Base nodes first; KEDA's extra pods may go to the Spot burst nodes, which the cluster autoscaler adds
+      # for them (docs/AWS-POC.md §4). A Spot reclaim costs only the work in flight: its messages are delivered
+      # again.
+      tolerations:
+        - { key: sdh-poc/burst, operator: Equal, value: "true", effect: NoSchedule }
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference: { matchExpressions: [{ key: sdh-poc/pool, operator: In, values: [base] }] }
+      containers:
+        - name: file-connector
+          resources:
+            requests: { cpu: 500m, memory: 2Gi }
+            limits: { memory: 2Gi }

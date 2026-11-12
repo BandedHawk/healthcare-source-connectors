@@ -1,0 +1,25 @@
+# The transform stage README's Deployment on AWS (docs/AWS-POC.md §5): 1.5 GiB; KEDA 1-4 pods. ${PIPELINE} is
+# filled in by apply.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: transform-${PIPELINE} }
+spec:
+  template:
+    spec:
+      serviceAccountName: transform
+      automountServiceAccountToken: false
+      # Base nodes first; KEDA's extra pods may go to the Spot burst nodes, which the cluster autoscaler adds
+      # for them (docs/AWS-POC.md §4). A Spot reclaim costs only the work in flight: its messages are delivered
+      # again.
+      tolerations:
+        - { key: sdh-poc/burst, operator: Equal, value: "true", effect: NoSchedule }
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference: { matchExpressions: [{ key: sdh-poc/pool, operator: In, values: [base] }] }
+      containers:
+        - name: transform-stage
+          resources:
+            requests: { cpu: 500m, memory: 1536Mi }
+            limits: { memory: 1536Mi }

@@ -8,7 +8,8 @@
 ARG KIT_IMAGE=sdh/file-connector:kit
 FROM ${KIT_IMAGE} AS kit
 
-FROM busybox:1.37.0 AS inventory
+# The build machine's own platform: it only reads files, so an image for another architecture needs no emulation.
+FROM --platform=$BUILDPLATFORM busybox:1.37.0 AS inventory
 COPY --from=kit /var/lib/dpkg/ /dpkg/
 COPY --from=kit /usr/share/doc/ /doc/
 RUN set -eu; \

@@ -1,0 +1,180 @@
+# Postgres and Kafka on the EBS volumes that the persistent Terraform layer keeps, so their data outlives each
+# cluster. poc.sh fills in ${POSTGRES_VOLUME_ID}, ${KAFKA_VOLUME_ID} and ${STATE_ZONE} (with envsubst).
+#
+# Each PersistentVolume is static, with Retain, and is bound to the claim that its StatefulSet's template would
+# create (data-postgres-0, data-kafka-0). So the StatefulSet picks up the old data instead of an empty disk.
+apiVersion: v1
+kind: PersistentVolume
+metadata: { name: sdh-poc-postgres }
+spec:
+  capacity: { storage: 10Gi }
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef: { namespace: sdh-infra, name: data-postgres-0 }
+  csi: { driver: ebs.csi.aws.com, volumeHandle: "${POSTGRES_VOLUME_ID}", fsType: ext4 }
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions: [{ key: topology.kubernetes.io/zone, operator: In, values: ["${STATE_ZONE}"] }]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: data-postgres-0, namespace: sdh-infra }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: sdh-poc-postgres
+  resources: { requests: { storage: 10Gi } }
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata: { name: sdh-poc-kafka }
+spec:
+  capacity: { storage: 10Gi }
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef: { namespace: sdh-infra, name: data-kafka-0 }
+  csi: { driver: ebs.csi.aws.com, volumeHandle: "${KAFKA_VOLUME_ID}", fsType: ext4 }
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions: [{ key: topology.kubernetes.io/zone, operator: In, values: ["${STATE_ZONE}"] }]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: data-kafka-0, namespace: sdh-infra }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: sdh-poc-kafka
+  resources: { requests: { storage: 10Gi } }
+---
+# The catalog and lease database, as in the sandbox (deploy/sandbox/infra/postgres.yaml). The superuser
+# password is in the secret postgres, which poc.sh makes from its state directory.
+apiVersion: v1
+kind: Service
+metadata: { name: postgres, namespace: sdh-infra }
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres, namespace: sdh-infra }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      terminationGracePeriodSeconds: 60   # a clean shutdown checkpoints, so the next start skips recovery
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:18.4
+          env:
+            - { name: POSTGRES_DB, value: sdh }
+            - { name: POSTGRES_USER, value: postgres }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres, key: password } }
+          args: [-c, max_connections=200, -c, shared_buffers=128MB]
+          ports: [{ containerPort: 5432 }]
+          readinessProbe: { exec: { command: [pg_isready, -U, postgres, -d, sdh] }, periodSeconds: 5 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }
+            - { name: run, mountPath: /var/run/postgresql }
+      volumes:
+        - { name: run, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: ""
+        resources: { requests: { storage: 10Gi } }
+---
+# One Kafka node in KRaft mode, a broker and a controller (docs/AWS-POC.md §3: one broker accepted for the PoC,
+# so replication factor 1). Otherwise as in the sandbox (deploy/sandbox/infra/kafka.yaml). Topics are made by
+# poc.sh; brokers don't create them.
+apiVersion: v1
+kind: Service
+metadata: { name: kafka, namespace: sdh-infra }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: kafka }
+  ports:
+    - { name: broker, port: 9092 }
+    - { name: controller, port: 9093 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: kafka, namespace: sdh-infra }
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector: { matchLabels: { app: kafka } }
+  template:
+    metadata: { labels: { app: kafka } }
+    spec:
+      nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      terminationGracePeriodSeconds: 60   # a controlled shutdown, so the logs needn't be recovered on start
+      enableServiceLinks: false           # the image turns every KAFKA_* variable into configuration
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: kafka
+          image: apache/kafka:4.2.2
+          env:
+            - { name: CLUSTER_ID, value: c2RoLXBvYy1rYWZrYS0wMQ }
+            - { name: KAFKA_NODE_ID, value: "0" }
+            - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
+            - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka-0.kafka.sdh-infra.svc:9092" }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-0.kafka.sdh-infra.svc:9093" }
+            - { name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data/logs }
+            - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false" }
+            - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_MIN_INSYNC_REPLICAS, value: "1" }
+            - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+            - { name: KAFKA_HEAP_OPTS, value: "-Xms384m -Xmx384m" }
+          ports:
+            - { name: broker, containerPort: 9092 }
+            - { name: controller, containerPort: 9093 }
+          readinessProbe: { tcpSocket: { port: 9092 }, periodSeconds: 5 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 200m, memory: 768Mi }
+            limits: { memory: 768Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/kafka/data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: ""
+        resources: { requests: { storage: 10Gi } }

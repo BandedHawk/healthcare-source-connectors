@@ -1,0 +1,66 @@
+# A pipeline's split stage on AWS (docs/AWS-POC.md §5): reads items from the bronze bucket, stores their records in
+# split_records in the silver bucket, sealed to the convert stage, and announces them on <pipeline>.split. As
+# deploy/sandbox/pipeline/splitter-application.yml, with S3 through the pod's role (EKS Pod Identity; it may only
+# read bronze), AWS KMS for the keys, and no telemetry collector. ${...} in capitals are filled in by
+# deploy/aws/k8s/pipeline/apply.sh; ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret splitter-env.
+# Keys are in the secret splitter-keys, at /run/secrets.
+sdh:
+  connector-id: split-${PIPELINE}
+  landing:
+    intake: ${PIPELINE}
+    storage:
+      catalog-name: sdh
+      namespace: ${ICEBERG_PREFIX}_landing
+      catalog:
+        type: jdbc
+        uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+        jdbc.user: splitter_${ICEBERG_PREFIX}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://${BRONZE_BUCKET}/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        client: { region: ${AWS_REGION} }
+  stage:
+    # groupProtocol=consumer (KIP-848, Kafka 4): the group rebalances without waiting for a pod busy splitting.
+    input:
+      type: kafka
+      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&groupId=splitter-${PIPELINE}&groupProtocol=consumer"
+    output:
+      type: kafka
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}"
+    # The stage's own input, which a reprocess sends its items to (STAGES.md §15.8.4).
+    reprocess:
+      type: kafka
+      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}"
+    registry-schema: split_${ICEBERG_PREFIX}
+  split:
+    format: ccda
+  storage:
+    catalog-name: sdh
+    namespace: ${ICEBERG_PREFIX}
+    catalog:
+      type: jdbc
+      uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+      jdbc.user: splitter_${ICEBERG_PREFIX}
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://${SILVER_BUCKET}/warehouse
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      client: { region: ${AWS_REGION} }
+  lease:
+    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: splitter_${ICEBERG_PREFIX} }
+  crypto:
+    wrap-provider: aws-kms
+    sign-provider: aws-kms
+    aws: { region: ${AWS_REGION} }
+    keys:
+      records-kek: alias/sdh-poc-${PIPELINE}-records
+      landed-items-kek: alias/sdh-poc-${PIPELINE}-landed-items
+      signing: { kid: splitter-${PIPELINE}, key-ref: alias/sdh-poc-${PIPELINE}-splitter-signing }
+      # The convert stage's inbox: record.split and item.split are sealed to it.
+      recipient: { kid: convert-${PIPELINE}-inbox, pem: /run/secrets/recipient.pem, sha256: "${CONVERT_INBOX_SHA256}" }
+      # Its own inbox, with the public half pinned, so it can seal a reprocess to itself.
+      inbox: { kid: splitter-${PIPELINE}-inbox, pem: /run/secrets/inbox.pem, public-pem: /run/secrets/inbox-public.pem,
+               sha256: "${INBOX_SHA256}" }
+      # The landing node's KMS signing key's public half, exported by apply.sh.
+      landing-signer: { kid: landing-${PIPELINE}, pem: /run/secrets/landing-signer.pem }
