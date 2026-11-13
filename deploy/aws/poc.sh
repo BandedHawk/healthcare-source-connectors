@@ -5,10 +5,13 @@
 #   poc.sh up [--hours N]             create the cluster and start the services (default: what's left of today's 8 h)
 #   poc.sh up --long-test "reason" --hours N
 #                                     beyond the 8-hour day, for a resilience or performance test only
+#   poc.sh up ... --on-demand-burst   burst nodes on demand, not Spot, so no interruption spoils a measurement
 #   poc.sh extend N [--long-test "reason"]
 #                                     move the automatic shutdown to N hours from now
 #   poc.sh down [--no-drain]          drain the pipeline, stop the services, snapshot the state volumes, destroy the cluster
 #   poc.sh status                     what's running, when it stops, today's hours, this month's cost
+#   poc.sh reset [--yes]              with a session up: delete every pipeline's data (tables, topics, offsets,
+#                                     registries, leases, intake), then start the pipeline again on nothing
 #
 # Every `up` first schedules an automatic shutdown on AWS (EventBridge Scheduler, then the sdh-poc-auto-down
 # state machine). So a session ends on time even if this machine is off or asleep, or the script fails half way.
@@ -186,11 +189,12 @@ cmd_bootstrap() {
 # --- up ------------------------------------------------------------------------------------------------------
 
 cmd_up() {
-  local hours="" reason=""
+  local hours="" reason="" burst=SPOT
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --hours) hours="${2:?}"; shift 2 ;;
       --long-test) reason="${2:?--long-test needs a reason}"; shift 2 ;;
+      --on-demand-burst) burst=ON_DEMAND; shift ;;
       *) die "up: unknown option $1" ;;
     esac
   done
@@ -213,7 +217,8 @@ cmd_up() {
   local ip; ip="$(curl -s -m 10 https://checkip.amazonaws.com | tr -d '[:space:]')"
   [[ "$ip" =~ ^[0-9.]+$ ]] || die "couldn't find this machine's public address"
   say "Cluster $CLUSTER (API open to $ip/32 only; about 15 minutes the first time)"
-  tf compute apply -input=false -auto-approve -var "api_cidrs=[\"$ip/32\"]"
+  [[ "$burst" == SPOT ]] || say "burst nodes on demand"
+  tf compute apply -input=false -auto-approve -var "api_cidrs=[\"$ip/32\"]" -var "burst_capacity_type=$burst"
   aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
 
   start_services
@@ -470,6 +475,82 @@ leftovers() {
   [[ -z "$enis" ]] || say "note: unattached network interfaces left by the CNI (free; AWS removes them): $enis"
 }
 
+# --- reset ---------------------------------------------------------------------------------------------------
+# Puts the pipeline back as it was before anything was landed, for a clean test. With a session up, it:
+#   1. deletes every stage's workloads (deployments, KEDA scaling, any gold check) and waits for the pods to go;
+#   2. deletes each pipeline's topics and every consumer group, then makes the topics again;
+#   3. drops and recreates the database sdh: the Iceberg catalog, leases, registries, checkpoints, fail store;
+#   4. empties the bronze, silver and gold buckets, and each pipeline's prefix of the intake bucket (and its claim);
+#   5. deploys the pipeline again (apply.sh), which makes its tables afresh as it starts.
+# Kept: the KMS keys, the state directory (passwords, key pairs, images, load reports), the tools bucket, the
+# images, the roles. Synthetic data only (docs/AWS-POC.md): what this deletes can't be got back.
+cmd_reset() {
+  local yes=0
+  [[ "${1:-}" == "--yes" ]] && yes=1
+  need_tools; state_dir
+  cluster_exists || die "reset needs a session: poc.sh up"
+  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
+  local buckets=("sdh-poc-bronze-$ACCOUNT" "sdh-poc-silver-$ACCOUNT" "sdh-poc-gold-$ACCOUNT") p b n answer
+  if (( ! yes )); then
+    printf 'This deletes all PoC pipeline data for good: the database sdh, the topics of %s, every consumer\n' "$PIPELINES"
+    printf 'group, the buckets %s, and the intake prefixes. Type reset to go on: ' "${buckets[*]}"
+    read -r answer
+    [[ "$answer" == reset ]] || die "not reset"
+  fi
+
+  say "Stopping the stages"
+  # The workloads go, not just their pods: the stages leave replicas to KEDA, so a deployment scaled to 0 would
+  # stay at 0 when apply.sh applies it again. apply.sh then creates them as on a new cluster.
+  for n in $(pipeline_namespaces); do
+    kubectl -n "$n" delete scaledobject --all --ignore-not-found >/dev/null 2>&1 || true
+    kubectl -n "$n" delete job,deploy --all --ignore-not-found >/dev/null 2>&1 || true
+  done
+  for n in $(pipeline_namespaces); do
+    kubectl -n "$n" wait --for=delete pod --all --timeout=300s >/dev/null 2>&1 \
+      || die "the pods in $n didn't stop; nothing has been deleted yet"
+  done
+
+  say "Kafka: deleting the topics and consumer groups"
+  local kt=/opt/kafka/bin/kafka-topics.sh kg=/opt/kafka/bin/kafka-consumer-groups.sh bs="--bootstrap-server localhost:9092"
+  for p in $PIPELINES; do
+    # shellcheck disable=SC2086
+    if kafka $kt $bs --list | grep -q "^$p\."; then
+      kafka $kt $bs --delete --topic "${p//./\\.}\\..*" >/dev/null
+    fi
+  done
+  local i left
+  for i in $(seq 1 60); do
+    # shellcheck disable=SC2086
+    left="$(kafka $kt $bs --list | grep -cE "^($(echo "$PIPELINES" | tr ' ' '|'))\." || true)"
+    [[ "$left" == 0 ]] && break
+    sleep 2
+  done
+  [[ "$left" == 0 ]] || die "Kafka still lists $left of the pipeline's topics"
+  # shellcheck disable=SC2086
+  if [[ -n "$(kafka $kg $bs --list 2>/dev/null)" ]]; then kafka $kg $bs --delete --all-groups >/dev/null; fi
+  setup_topics
+
+  say "Postgres: dropping and recreating the database sdh"
+  infra exec -i postgres-0 -- psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres >/dev/null <<'SQL'
+DROP DATABASE IF EXISTS sdh WITH (FORCE);
+CREATE DATABASE sdh;
+SQL
+  setup_database
+  # The marker that shows the database survives a new cluster (docs/AWS-POC.md, Status), made again.
+  infra exec -i postgres-0 -- psql -q -v ON_ERROR_STOP=1 -U postgres -d sdh >/dev/null <<'SQL'
+CREATE TABLE sdh_poc_marker (made_at timestamptz NOT NULL DEFAULT now(), note text NOT NULL);
+INSERT INTO sdh_poc_marker (note) VALUES ('made by poc.sh reset');
+SQL
+
+  say "S3: emptying bronze, silver and gold, and the intake prefixes"
+  for b in "${buckets[@]}"; do aws s3 rm "s3://$b" --recursive --only-show-errors; done
+  for p in $PIPELINES; do aws s3 rm "s3://sdh-poc-intake-$ACCOUNT/$p/" --recursive --only-show-errors; done
+
+  say "Deploying the pipeline again"
+  "$K8S/pipeline/apply.sh"
+  say "reset: the pipeline runs on empty tables"
+}
+
 # --- status --------------------------------------------------------------------------------------------------
 
 cmd_status() {
@@ -503,5 +584,6 @@ case "${1:-}" in
   extend)    shift; cmd_extend "$@" ;;
   down)      shift; cmd_down "$@" ;;
   status)    shift; cmd_status "$@" ;;
-  *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  reset)     shift; cmd_reset "$@" ;;
+  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

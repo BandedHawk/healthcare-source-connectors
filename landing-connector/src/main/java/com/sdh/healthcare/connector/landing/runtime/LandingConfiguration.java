@@ -41,6 +41,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
@@ -256,6 +258,29 @@ public class LandingConfiguration
                     runtime.service(), System::nanoTime);
         }
         return new IntakeRoute(runtime.source(), runtime.service());
+    }
+
+    /**
+     * Stops a remote listing at the next item as soon as the node starts to
+     * stop, before Camel stops its routes. A listing is one exchange, so
+     * otherwise Camel waits for all of it, the pod is killed first, and the
+     * intake's lease runs out instead of being released: a standby then
+     * waits a whole TTL to take over.
+     *
+     * @param intakeRoute the route that lists the source
+     * @return the listener
+     */
+    @Bean
+    ApplicationListener<ContextClosedEvent> stopListing(
+            RouteBuilder intakeRoute)
+    {
+        return event ->
+        {
+            if (intakeRoute instanceof RemoteIntakeRoute remote)
+            {
+                remote.stopListing();
+            }
+        };
     }
 
     /**

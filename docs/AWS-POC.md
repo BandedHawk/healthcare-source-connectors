@@ -27,8 +27,9 @@
 - A load test ran on 2026-11-12 (`deploy/aws/k8s/pipeline/load-test.sh`, 2,450 objects, 312 MB: 80 copies of
   each of mapping's 30 test documents and 10 of each of the file connector's 5 error inputs). It was stopped
   part-way, as below. What it showed:
-  - **The split stage can't keep up, and slows as bronze grows.** It reads each landed item with a full scan of
-    `ccda_push_landing.landed_items`, which is unpartitioned and gets one manifest per commit: about 800 manifests
+  - **The split stage can't keep up, and slows as bronze grows.** It reads each landed item with a scan of
+    `ccda_push_landing.landed_items`, which is partitioned by day, so a lookup by item ID reads every manifest of
+    the day, and every commit adds one (corrected 2026-11-12: it isn't unpartitioned): about 800 manifests
     and 10 s a lookup by the time 800 items had landed, rising with each item. Split (and so convert and
     transform) went from about 6 items a minute to about 1. `split_records` has the same shape (85, then 324
     manifests; 1–4 s a lookup), and so does any reader of it: the gold check read only about 6 bundles a minute.
@@ -56,6 +57,46 @@
   - **A mistake:** `poc.sh extend --hours 2` (it takes `extend 2`) scheduled the shutdown for that moment.
     Rescheduling 20 s later didn't stop the run the scheduler had already taken, and the guard deleted the
     cluster mid-check. `extend` now refuses anything but a positive number of hours.
+- **Fixed after the load test, 2026-11-12, and run on AWS, 2026-11-13** (results below):
+  - **Landing failover:** the 84 s wasn't the standby's fault. A listing is one Camel exchange, so the deleted
+    holder couldn't stop its route within Kubernetes' default 30 s, was killed, and left its lease to run out
+    (60 s TTL). The node now stops listing at the next item when it starts to stop, and the landing pods have
+    `terminationGracePeriodSeconds: 90` to finish that item and release the lease (DESIGN.md revision cy). The
+    standby should then take over within its 2 s poll, before the replacement pod is even scheduled (the
+    anti-affinity keeps it off the node until the old pod is gone). After a crash, with no release, either pod
+    may still win once the TTL passes; both are equally ready, since neither loads anything before its lease.
+  - **Spot:** the burst group now has six arm64 types of 2 vCPUs and 8 GiB (`t4g`, `m6g`, `m6gd`, `m7g`, `m7gd`,
+    `m8g` `.large`, all offered in us-east-2a, 2b and 2c) in all three zones. `poc.sh up --on-demand-burst` puts
+    the burst nodes on demand for a performance test (about $0.07/hour each; the on-demand vCPU quota must cover
+    8, iam/spot-quota.sh).
+  - **The gold check** tolerates the burst taint, so with burst nodes it gets the room it lacked. Its reading is
+    as slow as split's (the same lookups), so until the performance work it is run after a small load.
+  - **`poc.sh reset`** puts the pipeline back to nothing: the database `sdh`, each pipeline's topics and every
+    consumer group, the bronze, silver and gold buckets and the intake prefixes are deleted, then the pipeline is
+    deployed again. The keys, the state directory and the tools bucket are kept.
+- **Run on AWS, 2026-11-13** (`poc.sh reset`, then `load-test.sh 5 2`: 160 objects, 26 MB; report
+  `load/load-20261113T030404Z`):
+  - **Landing failover:** the holder was deleted at 30% landed; the standby took the lease **2 s** later (was 84 s).
+  - **Spot:** one burst node launched on Spot and stayed; KEDA ran transform at 4 pods and split at 2.
+  - **Errors as expected:** split `PARSE_UNBALANCED_ELEMENT` 2 and `PARSE_XML_UNSUPPORTED_ENCODING` 2, convert
+    `CONVERT_XML_MALFORMED` 2, transform `TRANSFORM_CHECK_FAILED` 84 (the US Core set's); junk rejected 3 each at
+    convert and transform; both DLQs empty.
+  - **Gold is readable and right:** the gold check read 238 messages and 78 bundles, 76 of them matched to
+    mapping's test documents; every per-document check passed, and the HL7 validator found nothing beyond
+    mapping's baselines in the 32 bundles validated.
+  - **Throughput** (small, not a performance figure): 868 s end to end, landing 20.6 items/min, split
+    11.4 items/min. Split is still the bottleneck (the lookups above).
+  - **One duplicate:** 161 items landed for 160 objects, and one document has 6 bundles for 5 copies. Probably
+    the item the holder was landing when it was deleted, landed again by the standby; not yet confirmed. Nothing
+    was lost. To look at in the landing node's stop path.
+  - **Fixed on the way:** `poc.sh reset` left the stages at 0 replicas (they leave replicas to KEDA, and their
+    scaling is made last), so it now deletes the stages' workloads and `apply.sh` makes them as on a new cluster.
+    The gold check named no bundle, so its per-document checks ran on nothing: it hashed whole files, but a split
+    record is only the root element with the XML declaration before it. It now hashes the root element on both
+    sides (GoldCheck in the transformer, and gold-check.sh).
+  - The session started on images built from the committed connectors plus these fixes. An `up` on a kept
+    database whose last load left items part way stays held at split's drain gate (`stage.version_blocked`) until
+    those items drain, or `reset`.
 - The prices are approximate us-east-2 on-demand list prices, not checked against the Pricing API.
 
 **Decided with the user, 2026-11-12:**
@@ -172,7 +213,7 @@ month, so the forecast alert catches it within days. Lowered from $250 on 2026-1
 | Concern | Choice | Rejected, and why |
 |---|---|---|
 | Kubernetes | EKS 1.37, standard support only (`upgrade_policy`: a version in extended support costs $0.60/hour) | k3s on EC2: no control-plane fee, but no second node for landing's standby |
-| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst`, 0–2 Spot (`t4g.large`/`m7g.large`/`m6g.large`), with Cluster Autoscaler | Karpenter or Auto Mode: more to set up, or a fee on every instance |
+| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst`, 0–2 Spot (six arm64 `.large` types, three zones; on demand with `--on-demand-burst`), with Cluster Autoscaler | Karpenter or Auto Mode: more to set up, or a fee on every instance |
 | Postgres | `postgres:18.4` StatefulSet on a kept 10 GiB gp3 volume, snapshotted at each `down` | RDS: restarts itself after 7 days stopped, and is a second start/stop. Aurora Serverless v2: dearer while running. |
 | Kafka | 1 KRaft broker (`apache/kafka:4.2.2`) on a kept 10 GiB volume, RF 1 | MSK: ≥ $100/month, or about $540/month serverless |
 | Iceberg catalog | JDBC on that Postgres (tested) | Glue: not supported by the code. S3 Tables, Polaris: untested, or one more pod |

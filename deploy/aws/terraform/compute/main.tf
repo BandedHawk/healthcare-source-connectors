@@ -47,6 +47,13 @@ data "aws_subnet" "zone" {
   default_for_az    = true
 }
 
+data "aws_subnet" "burst_zone" {
+  for_each          = toset(var.burst_zones)
+  vpc_id            = data.aws_vpc.default.id
+  availability_zone = each.key
+  default_for_az    = true
+}
+
 data "aws_caller_identity" "me" {}
 
 resource "aws_eks_cluster" "poc" {
@@ -84,7 +91,8 @@ resource "aws_eks_cluster" "poc" {
 # base: one on-demand node per zone. They hold the active and standby landing pods (one per node), Postgres and
 # Kafka (on the node in the state volumes' zone), and one pod of each scaled stage.
 #
-# burst: Spot nodes, 0 to 2, tainted so only the KEDA-scaled stages run there. Cluster Autoscaler adds one when
+# burst: Spot nodes (on-demand for a performance test), 0 to 2, in any of three zones and six instance types,
+# tainted so only the KEDA-scaled stages and the gold check run there. Cluster Autoscaler adds one when
 # pods can't be placed, and removes it 10 minutes after it empties.
 
 resource "aws_eks_node_group" "base" {
@@ -114,9 +122,9 @@ resource "aws_eks_node_group" "burst" {
   cluster_name    = aws_eks_cluster.poc.name
   node_group_name = "burst"
   node_role_arn   = local.p.node_role_arn
-  subnet_ids      = [for s in data.aws_subnet.zone : s.id]
+  subnet_ids      = [for s in data.aws_subnet.burst_zone : s.id]
   ami_type        = "AL2023_ARM_64_STANDARD"
-  capacity_type   = "SPOT"
+  capacity_type   = var.burst_capacity_type
   instance_types  = var.burst_instance_types
   disk_size       = 20
   labels          = { "sdh-poc/pool" = "burst" }

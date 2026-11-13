@@ -64,8 +64,12 @@ say "Building the check (GoldCheck, offline)"
   com/sdh/healthcare/transform/TestDocuments*.class)
 python3 -I - "$DOCUMENTS/documents" "$work/xml-sha256.json" <<'EOF'
 import hashlib, json, os, sys
+# The root element only, as GoldCheck digests a split record: the split stage drops what's outside it.
+def root(b):
+    s, e = b.find(b"<ClinicalDocument"), b.rfind(b"</ClinicalDocument>")
+    return b if s < 0 or e < s else b[s:e + len(b"</ClinicalDocument>")]
 d = sys.argv[1]
-json.dump({n[:-4]: hashlib.sha256(open(os.path.join(d, n), "rb").read()).hexdigest()
+json.dump({n[:-4]: hashlib.sha256(root(open(os.path.join(d, n), "rb").read())).hexdigest()
            for n in sorted(os.listdir(d)) if n.endswith(".xml")}, open(sys.argv[2], "w"), indent=1)
 EOF
 

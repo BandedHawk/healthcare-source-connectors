@@ -15,6 +15,10 @@ spec:
       automountServiceAccountToken: false
       # On-demand base nodes, never Spot: a reclaimed node would cost the active node and its lease at once.
       nodeSelector: { sdh-poc/pool: base }
+      # Time to finish the item being landed and release the lease (a listing stops at the next item), so the
+      # standby takes over at once instead of waiting out the lease's TTL. Killed at the default 30 s, a node
+      # landing a long listing left its lease to expire: 84 s to fail over on 2026-11-12.
+      terminationGracePeriodSeconds: 90
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

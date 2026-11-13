@@ -33,6 +33,8 @@ sudo apt-get update && sudo apt-get install -y terraform kubectl
 | `deploy/aws/poc.sh down` | Drains the pipeline, snapshots the data and destroys the cluster. **Run it when you're done.** |
 | `deploy/aws/poc.sh down --no-drain` | Same, but without waiting for the pipeline to catch up. |
 | `deploy/aws/poc.sh status` | Shows the cluster, its node groups, the shutdown time, today's hours and the month's cost. |
+| `deploy/aws/poc.sh reset` | With a session up: deletes all pipeline data (database, topics, offsets, buckets, intake) and deploys the pipeline again on nothing. Asks first; `--yes` doesn't. |
+| `deploy/aws/poc.sh up --on-demand-burst` | Burst nodes on demand instead of Spot, for a performance test. |
 | `deploy/aws/poc.sh up --long-test "landing failover" --hours 12` | Goes beyond the 8-hour day, for resilience or performance tests only (at most 24 h per session). |
 
 If you forget `down`, the guard on AWS deletes the cluster at the session's deadline, even with this machine off.
@@ -121,7 +123,7 @@ keys lost there are gone for good.
 
 - The split stage's lookups in bronze (and readers' in silver) slow with every item: a fix in the connectors
   comes before a larger load (docs/AWS-POC.md, Status).
-- The Spot burst nodes don't get capacity in us-east-2a (`t4g`/`m7g`/`m6g.large`): more types or zones, or
-  on-demand. `iam/spot-quota.sh` still shows the quota, which isn't the cause.
-- The gold check hasn't completed on AWS.
-- The landing standby didn't take the lease when the holder was deleted; its replacement did.
+- Until the lookups are fixed, run the gold check after a small load on a reset pipeline: `poc.sh reset`, then
+  `load-test.sh 5 2`. That ran on 2026-11-13: failover in 2 s, Spot burst, gold read and checked (docs/AWS-POC.md,
+  Status).
+- At that failover one item landed twice (161 for 160 objects); not yet explained.

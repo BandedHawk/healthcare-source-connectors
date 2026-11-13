@@ -57,6 +57,9 @@ public final class RemoteIntakeRoute extends RouteBuilder
     /** Whether a listing has been tried since a quiet spell began. */
     private boolean quiet;
 
+    /** Set once the node starts to stop: no more items are offered. */
+    private volatile boolean stopping;
+
     /**
      * Creates the route.
      *
@@ -118,6 +121,10 @@ public final class RemoteIntakeRoute extends RouteBuilder
         service.listingTook(nanoTime.getAsLong() - listingFrom, items.size());
         for (ListedItem item : items)
         {
+            if (stopping)
+            {
+                return;
+            }
             service.onListed(item);
             if (!source.reachable())
             {
@@ -125,5 +132,17 @@ public final class RemoteIntakeRoute extends RouteBuilder
             }
         }
         service.onListingDone();
+    }
+
+    /**
+     * Stops offering items, from the next one: the item being landed is
+     * finished, and the rest of the listing is left for the next node, as
+     * for a broken connection. A listing is a single exchange, so without
+     * this a long one keeps the route from stopping until the pod is
+     * killed, and its lease is left to run out instead of being released.
+     */
+    public void stopListing()
+    {
+        stopping = true;
     }
 }

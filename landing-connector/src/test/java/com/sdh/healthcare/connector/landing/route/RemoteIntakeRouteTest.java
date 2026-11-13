@@ -159,6 +159,25 @@ class RemoteIntakeRouteTest
     }
 
     /**
+     * Once the node starts to stop, the item being landed is finished and
+     * the rest of the listing is left, without reporting its end.
+     */
+    @Test
+    void stopsAListingWhenTheNodeStops()
+    {
+        listings.add(ITEMS);
+        doAnswer(call ->
+        {
+            route.stopListing();
+            return null;
+        }).when(service).onListed(ITEMS.get(0));
+        route.poll();
+        verify(service).onListed(ITEMS.get(0));
+        verify(service, never()).onListed(ITEMS.get(1));
+        verify(service, never()).onListingDone();
+    }
+
+    /**
      * After refused credentials, the next listing waits for the auth retry
      * interval, however often the timer fires.
      */
