@@ -555,6 +555,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     public Outcome handle(List<BrokerMessage> batch)
             throws InterruptedException
     {
+        long started = System.nanoTime();
         List<Opened> opened = new ArrayList<>(batch.size());
         for (BrokerMessage received : batch)
         {
@@ -595,6 +596,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                                 .with(Attr.REASON, rejected.reason().name()));
             }
         }
+        timed("open", started);
         return run(opened);
     }
 
@@ -690,6 +692,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      */
     private Outcome run(List<Opened> batch) throws InterruptedException
     {
+        long started = System.nanoTime();
         try
         {
             Map<StageRegistry.Key, Pending> records =
@@ -749,7 +752,10 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     Thread.sleep(settings.busyPoll().toMillis());
                 }
             }
+            long completing = System.nanoTime();
             completeItems(items);
+            timed("complete", completing);
+            timed("batch", started);
             return Outcome.DONE;
         }
         catch (RuntimeException | ExecutionException | TimeoutException failure)
@@ -819,7 +825,9 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         if (!owned.isEmpty())
         {
             List<StageRegistry.Entry> entries = commit(owned);
+            long storing = System.nanoTime();
             Set<StageRegistry.Key> marked = registry.store(entries);
+            timed("register", storing);
             for (StageRegistry.Entry entry : entries)
             {
                 if (marked.contains(entry.key()))
@@ -856,20 +864,24 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     private Result<O> claimAndProcess(Pending record)
             throws InterruptedException
     {
+        long claiming = System.nanoTime();
         StageRegistry.Claim claim = registry.claim(
                 record.input().key().recordId(), record.input().itemId(),
                 settings.claimTtl());
+        timed("claim", claiming);
         return switch (claim)
         {
             case StageRegistry.Owned owned ->
             {
                 String version = processor.version(record.message());
+                long processing = System.nanoTime();
                 StageOutput<O> output = record.runId() == null
                         ? processor.process(record.message(), owned.attempts())
                         : processor.process(record.message(), owned.attempts(),
                                 new ConnectorMessage.Cause(
                                         ConnectorMessage.Cause.REPROCESS,
                                         record.runId(), null));
+                timed("process", processing);
                 yield new Result<>(record, Found.OWNED, output, null,
                         version);
             }
@@ -927,7 +939,9 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         List<ConnectorMessage> messages;
         synchronized (commits)
         {
+            long started = System.nanoTime();
             messages = processor.commit(outputs);
+            timed("commit", started);
         }
         if (messages.size() != outputs.size())
         {
@@ -1240,7 +1254,24 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      */
     private OutboundMessage outbound(ConnectorMessage message)
     {
-        return OutboundMessage.of(message, sealer.seal(message));
+        long started = System.nanoTime();
+        OutboundMessage sealed = OutboundMessage.of(message,
+                sealer.seal(message));
+        timed("seal", started);
+        return sealed;
+    }
+
+    /**
+     * Records how long a step of the stage's work took, from when it
+     * started to now (docs/PERFORMANCE.md §10).
+     *
+     * @param phase   the step, such as {@code commit}
+     * @param started when it started, by {@link System#nanoTime}
+     */
+    private void timed(String phase, long started)
+    {
+        Telemetry.get().phaseDuration(processor.stage(), phase,
+                System.nanoTime() - started);
     }
 
     /**
@@ -1261,6 +1292,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         {
             return;
         }
+        long started = System.nanoTime();
         List<CompletableFuture<Void>> sends = new ArrayList<>();
         for (OutboundMessage message : messages)
         {
@@ -1269,6 +1301,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         CompletableFuture.allOf(sends.toArray(CompletableFuture[]::new))
                 .get(settings.sendTimeout().toMillis(),
                         TimeUnit.MILLISECONDS);
+        timed("send", started);
     }
 
     /**

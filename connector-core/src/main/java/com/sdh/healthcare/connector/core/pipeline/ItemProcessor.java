@@ -373,6 +373,19 @@ public final class ItemProcessor
     }
 
     /**
+     * Notes when an item landed, from its summary row in the landing
+     * table, so its time through the stages can be measured from the
+     * registries (docs/PERFORMANCE.md §10). The first noted stays.
+     *
+     * @param itemId   the item
+     * @param landedAt when it landed
+     */
+    public void noteLanded(UUID itemId, Instant landedAt)
+    {
+        pipeline.noteLanded(itemId, landedAt);
+    }
+
+    /**
      * The earlier item an item is an exact copy of, as noted by
      * {@link #noteCopy}.
      *
@@ -633,11 +646,14 @@ public final class ItemProcessor
         }
         IngestPipeline.SplitResult split;
         long size = 0;
+        long opening = System.nanoTime();
         try (SeekableByteSource bytes = source.open())
         {
+            long splitting = timed("open", opening);
             size = bytes.size();
             split = pipeline.split(bytes, itemId, lease, landing.refs(),
                     fresh ? cut : null);
+            timed("split", splitting);
         }
         catch (ItemHeldException held)
         {
@@ -887,8 +903,10 @@ public final class ItemProcessor
     {
         UUID itemId = checkpoint.itemId();
         Ended announced = announce(checkpoint, landing, endedAt(itemId));
+        long completing = System.nanoTime();
         pipeline.commitCheckpoint(
                 checkpoint.withState(Checkpoint.State.COMPLETED), lease);
+        timed("checkpoint", completing);
         auditEnded(announced, Result.COMPLETED);
         Telemetry.get().audit("item.completed",
                 Fields.of(Attr.ITEM_ID, itemId)
@@ -947,8 +965,10 @@ public final class ItemProcessor
             Instant endedAt) throws Exception
     {
         UUID itemId = checkpoint.itemId();
+        long started = System.nanoTime();
         List<CommittedRecords.Row> failed = pipeline.failedRows(itemId,
                 checkpoint.generation());
+        started = timed("failed_rows", started);
         FailureStore.Counts counts;
         Instant readAt = null;
         if (failures == null)
@@ -962,12 +982,17 @@ public final class ItemProcessor
             readAt = pipeline.databaseNow();
             counts = failures.counts(itemId);
         }
+        started = timed("fail_store", started);
         SplitMessages.Corrected corrected = corrections == null
                 ? SplitMessages.Corrected.NONE
                 : SplitMessages.Corrected.of(checkpoint,
-                        pipeline.correctionRows(itemId,
-                                checkpoint.generation()),
+                        // Until an operator submits one, there are none.
+                        corrections.any(itemId)
+                                ? pipeline.correctionRows(itemId,
+                                        checkpoint.generation())
+                                : List.of(),
                         wholeItemCorrected(itemId));
+        started = timed("correction_rows", started);
         // Numbered before it is sent (STAGES.md §15.6e).
         // An interrupted generation's end is a completion of its own.
         int completion = pipeline.announced(itemId, counts.open() == 0
@@ -980,6 +1005,7 @@ public final class ItemProcessor
         {
             pipeline.markAnnounced(itemId, readAt);
         }
+        timed("announce", started);
         if (message instanceof ItemProgressed progressed)
         {
             Telemetry.get().audit("item.progress",
@@ -994,6 +1020,22 @@ public final class ItemProcessor
         return new Ended(itemId, message,
                 checkpoint.recordCount() + corrected.added(),
                 failed.size() - corrected.pieces());
+    }
+
+    /**
+     * Records how long a step of splitting an item took, from when it
+     * started to now (docs/PERFORMANCE.md §10), as a phase of the split
+     * stage.
+     *
+     * @param phase   the step, such as {@code failed_rows}
+     * @param started when it started, by {@link System#nanoTime}
+     * @return now, by {@link System#nanoTime}: when the next step starts
+     */
+    private static long timed(String phase, long started)
+    {
+        long now = System.nanoTime();
+        Telemetry.get().phaseDuration(STAGE, phase, now - started);
+        return now;
     }
 
     /**

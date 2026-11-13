@@ -24,8 +24,17 @@ import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.stage.StageFailures;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,12 +52,14 @@ import org.slf4j.LoggerFactory;
  * can't read is held instead, and tried again, so that no item is
  * stranded by a landing node upgraded first.
  * <p>
- * A batch is acknowledged once each of its items is split. If one can't
- * be split now (storage or the broker down, another pod on the item, its
- * lease lost), the batch is held and tried again in place; items already
- * split in it are only announced again. So a batch of one message
- * ({@code sdh.stage.input.batch.max-messages: 1}) suits the stage best. A
- * tampered checkpoint, a commit whose outcome isn't known, or an
+ * A batch's items are split at once, each on a thread of its own, up to
+ * the splitter's limit ({@code sdh.split.concurrency}); the batch is
+ * acknowledged once each is split. If one can't be split now (storage or
+ * the broker down, another pod on the item, its lease lost), the batch is
+ * held and tried again; items already split in it are skipped, known by
+ * their broker IDs. So a batch as large
+ * as the splitter's limit suits the stage best: a larger one holds
+ * finished items' messages behind a slow one. A tampered checkpoint, a commit whose outcome isn't known, or an
  * {@link Error} stops the process.
  *
  * @author Jonas Barnett
@@ -81,6 +92,14 @@ public final class SplitHandler implements BatchHandler
 
     /** The stage's reprocess; null if it doesn't reprocess. */
     private final SplitReprocess reprocess;
+
+    /**
+     * The messages of the batch being retried whose items are split, by
+     * {@link #key}: the route hands one batch at a time, the same one again
+     * until it is done (as new objects, for a Kafka batch left for the next
+     * poll).
+     */
+    private final Map<Object, Boolean> done = new HashMap<>();
 
     /**
      * Creates a handler.
@@ -126,27 +145,147 @@ public final class SplitHandler implements BatchHandler
     }
 
     /**
-     * Splits each message's item, in order.
+     * Splits each message's item, all at once: the splitter limits how
+     * many run together, and each item's lease keeps two messages for the
+     * same item apart.
      *
      * @param messages the messages
      * @return {@code DONE} once every item is split or its message
-     *         refused; {@code RETRY} if one must be tried again;
-     *         {@code FATAL} if the process is stopping
-     * @throws InterruptedException if interrupted while waiting
+     *         refused; {@code FATAL} if one stops the process; otherwise
+     *         {@code RETRY} if one must be tried again
+     * @throws InterruptedException if interrupted while waiting; the
+     *                              items still being split are
+     *                              interrupted too
      */
     @Override
     public Outcome handle(List<BrokerMessage> messages)
             throws InterruptedException
     {
+        if (messages.size() == 1)
+        {
+            return handle(messages.get(0).body());
+        }
+        // A batch retried comes again as the same messages: those whose
+        // items were split last time are skipped, not split (announced)
+        // again while another waits for its lease.
+        done.keySet().retainAll(keys(messages));
+        List<BrokerMessage> left = new ArrayList<>(messages.size());
         for (BrokerMessage message : messages)
         {
-            Outcome outcome = handle(message.body());
-            if (outcome != Outcome.DONE)
+            if (!done.containsKey(key(message)))
             {
-                return outcome;
+                left.add(message);
             }
         }
-        return Outcome.DONE;
+        ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor();
+        try
+        {
+            List<Future<Outcome>> splits = new ArrayList<>(left.size());
+            for (BrokerMessage message : left)
+            {
+                splits.add(threads.submit(() -> handle(message.body())));
+            }
+            Outcome outcome = Outcome.DONE;
+            for (int index = 0; index < splits.size(); index++)
+            {
+                Outcome one = outcome(splits.get(index));
+                if (one == Outcome.DONE)
+                {
+                    done.put(key(left.get(index)), Boolean.TRUE);
+                }
+                outcome = worse(outcome, one);
+            }
+            if (outcome == Outcome.DONE)
+            {
+                done.clear();
+            }
+            return outcome;
+        }
+        finally
+        {
+            // Interrupts any still running if this thread was interrupted;
+            // otherwise each has ended.
+            threads.shutdownNow();
+        }
+    }
+
+    /**
+     * What a message is known by across a batch's retries: the broker's ID
+     * (for Kafka, its topic, partition and offset), or else the message
+     * itself, by identity (a record's equality compares its body by
+     * reference).
+     *
+     * @param message the message
+     * @return its key
+     */
+    private static Object key(BrokerMessage message)
+    {
+        return message.messageId() != null
+                ? "id:" + message.messageId() : message;
+    }
+
+    /**
+     * A batch's messages' keys.
+     *
+     * @param messages the messages
+     * @return their keys
+     */
+    private static Set<Object> keys(List<BrokerMessage> messages)
+    {
+        Set<Object> set = new HashSet<>();
+        for (BrokerMessage message : messages)
+        {
+            set.add(key(message));
+        }
+        return set;
+    }
+
+    /**
+     * What became of one message's item.
+     *
+     * @param split its split
+     * @return its outcome
+     * @throws InterruptedException if interrupted while waiting
+     * @throws RuntimeException     what its split threw, if unchecked
+     */
+    private static Outcome outcome(Future<Outcome> split)
+            throws InterruptedException
+    {
+        try
+        {
+            return split.get();
+        }
+        catch (ExecutionException failed)
+        {
+            // Thrown on as it would be from this thread. An interruption
+            // of the item's own thread is tried again.
+            switch (failed.getCause())
+            {
+                case RuntimeException unchecked -> throw unchecked;
+                case Error error -> throw error;
+                default ->
+                {
+                    return Outcome.RETRY;
+                }
+            }
+        }
+    }
+
+    /**
+     * The worse of two outcomes: {@code FATAL}, then {@code RETRY}, then
+     * {@code DONE}.
+     *
+     * @param one   one outcome
+     * @param other the other
+     * @return the worse
+     */
+    private static Outcome worse(Outcome one, Outcome other)
+    {
+        return one == Outcome.FATAL || other == Outcome.FATAL
+                ? Outcome.FATAL
+                : one == Outcome.RETRY || other == Outcome.RETRY
+                        ? Outcome.RETRY
+                        : Outcome.DONE;
     }
 
     /**
@@ -217,7 +356,7 @@ public final class SplitHandler implements BatchHandler
             return reject("OTHER_STORAGE");
         }
         return split(() -> splitter.split(landed.itemId(),
-                landed.itemDigest(), landed.sameAs()));
+                landed.itemDigest(), landed.sameAs(), landed.storage()));
     }
 
     /**

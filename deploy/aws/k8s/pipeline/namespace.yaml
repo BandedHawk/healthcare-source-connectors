@@ -74,7 +74,7 @@ spec:
              podSelector: { matchLabels: { k8s-app: kube-dns } } }]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: sdh-infra } } }]
-      ports: [{ port: 5432 }, { port: 9092 }]
+      ports: [{ port: 5432 }, { port: 9092 }, { port: 4318 }]   # 4318: metrics to the collector (infra/telemetry.yaml)
     - to: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16] } }]
       ports: [{ port: 443 }]
     - to: [{ ipBlock: { cidr: 169.254.170.23/32 } }]
@@ -91,7 +91,7 @@ spec:
              podSelector: { matchLabels: { k8s-app: kube-dns } } }]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: sdh-infra } } }]
-      ports: [{ port: 5432 }, { port: 9092 }]
+      ports: [{ port: 5432 }, { port: 9092 }, { port: 4318 }]   # 4318: metrics to the collector (infra/telemetry.yaml)
     - to: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16] } }]
       ports: [{ port: 443 }]
     - to: [{ ipBlock: { cidr: 169.254.170.23/32 } }]

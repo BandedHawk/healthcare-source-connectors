@@ -47,6 +47,12 @@ public enum Attr
      */
     STAGE("sdh.stage"),
 
+    /**
+     * A step of a stage's work that is timed, such as {@code process},
+     * {@code commit} or {@code send}.
+     */
+    PHASE("sdh.phase"),
+
     /** An {@link ErrorCode}. */
     ERROR_CODE("sdh.error_code"),
 

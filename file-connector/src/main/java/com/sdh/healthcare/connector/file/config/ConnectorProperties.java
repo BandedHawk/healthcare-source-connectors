@@ -127,14 +127,18 @@ public record ConnectorProperties(
     /**
      * How items are split. Records are converted by the convert stage.
      *
-     * @param format   the format, such as {@code csv}
-     * @param boundary a boundary override, where the format has one
-     * @param options  format options as in design §6.2, such as
-     *                 {@code csv.header} or {@code namespace}
-     * @param limits   size limits; null values keep the format's
+     * @param format      the format, such as {@code csv}
+     * @param boundary    a boundary override, where the format has one
+     * @param options     format options as in design §6.2, such as
+     *                    {@code csv.header} or {@code namespace}
+     * @param limits      size limits; null values keep the format's
+     * @param concurrency the most items a pod splits at once
+     *                    (docs/PERFORMANCE.md §3.4); its input batch
+     *                    should be as large
      */
     public record Split(String format, String boundary,
-            Map<String, String> options, @DefaultValue Limits limits)
+            Map<String, String> options, @DefaultValue Limits limits,
+            @DefaultValue("4") int concurrency)
     {
     }
 
@@ -189,15 +193,19 @@ public record ConnectorProperties(
      * @param enabled           whether it runs
      * @param interval          how often it runs
      * @param snapshotRetention how long old snapshots are kept
-     * @param minSnapshots      the fewest snapshots kept
+     * @param minSnapshots      the fewest snapshots kept; retention and
+     *                          this keep whichever is more
+     * @param manifests         how often small manifests are rewritten
+     *                          between runs (docs/PERFORMANCE.md §3.3)
      * @param compaction        compaction of small files
      * @param orphans           removal of unreferenced files
      * @param retention         how long rows are kept
      */
     public record Maintenance(@DefaultValue("true") boolean enabled,
             @DefaultValue("1h") Duration interval,
-            @DefaultValue("7d") Duration snapshotRetention,
-            @DefaultValue("10") int minSnapshots,
+            @DefaultValue("24h") Duration snapshotRetention,
+            @DefaultValue("2000") int minSnapshots,
+            @DefaultValue("5m") Duration manifests,
             @DefaultValue Compaction compaction,
             @DefaultValue Orphans orphans,
             @DefaultValue Retention retention)
@@ -222,7 +230,7 @@ public record ConnectorProperties(
         public MaintenanceScheduler.Schedule toSchedule()
         {
             return new MaintenanceScheduler.Schedule(enabled, interval,
-                    orphans.enabled(), orphans.interval());
+                    orphans.enabled(), orphans.interval(), manifests);
         }
     }
 

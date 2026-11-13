@@ -28,13 +28,45 @@ import java.util.UUID;
  *                   if it was resumed part-way
  * @param replaces   the earlier item its producer said it replaces, a link
  *                   only; null if none
+ * @param file       the data file of its final commit, which holds its
+ *                   summary row and, before it, its last chunks
+ *                   (PERFORMANCE.md §3.2); null if not known, when the
+ *                   splitter finds the item by scan
+ * @param fileSize   that file's size in bytes; -1 without a file
+ * @param summaryRow the summary row's position in that file, from 0; -1
+ *                   without a file
  * @author Jonas Barnett
  * @since 0.1.0
  */
 public record LandedItem(UUID itemId, String intake, ItemKind kind,
         SourceRef source, long size, String digest, Instant landedAt,
-        long snapshotId, String kekRef, String sha256, UUID replaces)
+        long snapshotId, String kekRef, String sha256, UUID replaces,
+        String file, long fileSize, long summaryRow)
 {
+
+    /**
+     * An item whose final data file isn't known: one rebuilt from its
+     * summary row.
+     *
+     * @param itemId     the item's ID
+     * @param intake     the intake it came in through
+     * @param kind       what kind of item it is
+     * @param source     where it came from; null if none
+     * @param size       its size, in bytes
+     * @param digest     its keyed, chained digest, in base32
+     * @param landedAt   when its final commit was made
+     * @param snapshotId a snapshot that holds the whole item
+     * @param kekRef     the KEK that wrapped its summary row's data key
+     * @param sha256     its plain SHA-256, in hex; null if resumed
+     * @param replaces   the earlier item it replaces; null if none
+     */
+    public LandedItem(UUID itemId, String intake, ItemKind kind,
+            SourceRef source, long size, String digest, Instant landedAt,
+            long snapshotId, String kekRef, String sha256, UUID replaces)
+    {
+        this(itemId, intake, kind, source, size, digest, landedAt,
+                snapshotId, kekRef, sha256, replaces, null, -1, -1);
+    }
 
     /**
      * The {@code item.landed} message for this item.
@@ -62,12 +94,15 @@ public record LandedItem(UUID itemId, String intake, ItemKind kind,
     public ConnectorMessage.ItemLanded message(String catalog,
             String namespace, UUID sameAs)
     {
+        ConnectorMessage.StorageRef ref = new ConnectorMessage.StorageRef(
+                catalog, namespace, LandingTables.LANDED_ITEMS,
+                landedAt.atOffset(ZoneOffset.UTC).toLocalDate(), snapshotId,
+                kekRef);
+        // The summary row's place, so the splitter reads it and the chunks
+        // before it without a scan (PERFORMANCE.md §3.2).
         return new ConnectorMessage.ItemLanded(itemId, intake,
                 kind.wireName(), size, digest, landedAt,
-                new ConnectorMessage.StorageRef(catalog, namespace,
-                        LandingTables.LANDED_ITEMS,
-                        landedAt.atOffset(ZoneOffset.UTC).toLocalDate(),
-                        snapshotId, kekRef),
+                file == null ? ref : ref.at(file, fileSize, summaryRow),
                 replaces, sameAs);
     }
 }

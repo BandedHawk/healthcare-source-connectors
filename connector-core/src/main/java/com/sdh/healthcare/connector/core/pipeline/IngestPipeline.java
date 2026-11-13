@@ -54,6 +54,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -139,6 +140,14 @@ public final class IngestPipeline implements AutoCloseable
 
     /** The checkpoint of each item. */
     private final ItemCheckpoints checkpoints;
+
+    /**
+     * Items split from their start in this process, by the generation, for
+     * as long as no record of theirs has failed: their failed rows needn't
+     * be looked for (PERFORMANCE.md §3.2). An item resumed, or with a
+     * failed record, isn't here, and is looked up.
+     */
+    private final Map<UUID, Integer> failureFree = new ConcurrentHashMap<>();
 
     /** Wraps each batch's data key. */
     private final KeyProvider keys;
@@ -284,6 +293,18 @@ public final class IngestPipeline implements AutoCloseable
     void noteSameAs(UUID itemId, UUID sameAs)
     {
         checkpoints.noteSameAs(itemId, sameAs);
+    }
+
+    /**
+     * Notes when an item landed, as {@link ItemCheckpoints#noteLanded}
+     * does.
+     *
+     * @param itemId   the item
+     * @param landedAt when it landed
+     */
+    void noteLanded(UUID itemId, Instant landedAt)
+    {
+        checkpoints.noteLanded(itemId, landedAt);
     }
 
     /**
@@ -451,6 +472,8 @@ public final class IngestPipeline implements AutoCloseable
             {
                 hold(current, lease);
             }
+            // Its earlier batches weren't seen here.
+            failureFree.remove(itemId);
             // Counted before any work, as a crash in this attempt (an
             // out-of-memory exit, say) can't record anything.
             current = current.resumed();
@@ -478,6 +501,7 @@ public final class IngestPipeline implements AutoCloseable
                     settings.version(), cut == null ? Checkpoint.Cut.FIRST
                             : cut);
             commitCheckpoint(current, lease);
+            failureFree.put(itemId, current.generation());
             Telemetry.get().audit("item.started",
                     Fields.of(Attr.ITEM_ID, current.itemId())
                             .with(Attr.FORMAT, current.format())
@@ -491,6 +515,7 @@ public final class IngestPipeline implements AutoCloseable
         }
         catch (Exception failure)
         {
+            failureFree.remove(itemId);
             // An error is a clean end, not a crash: if a service was down,
             // it says nothing about the item, so the restart is taken back.
             if (attempt.restarts() > 0 && Outage.caused(failure))
@@ -1157,13 +1182,16 @@ public final class IngestPipeline implements AutoCloseable
                 {
                     // A generation cut from a correction of the item as a
                     // whole resolves the item (STAGES.md §15.8.5).
-                    messages.add(stamped(message(record, ref, batch.refs,
+                    messages.add(stamped(message(record,
+                            batch.writer.locate(ref, dataFile, record),
+                            batch.refs,
                             settings.version(), batch.cut.correction() > 0
                                     ? record.itemId().toString() : null),
                             batch.cut));
                 }
                 else
                 {
+                    failureFree.remove(record.itemId());
                     // Kept in split_records, in the fail store at the
                     // item's end, and not sent on (STAGES.md §15.1).
                     // Audited once committed, so a restart doesn't report it
@@ -1634,7 +1662,9 @@ public final class IngestPipeline implements AutoCloseable
 
     /**
      * Reads the rows of an item's committed records that the splitter
-     * couldn't parse, for its fail store (STAGES.md §15.3).
+     * couldn't parse, for its fail store (STAGES.md §15.3). For an item
+     * this process split from its start with none failed, there are none,
+     * and the table isn't read (PERFORMANCE.md §3.2).
      *
      * @param itemId     the item
      * @param generation its generation
@@ -1643,6 +1673,12 @@ public final class IngestPipeline implements AutoCloseable
     public List<CommittedRecords.Row> failedRows(UUID itemId,
             int generation)
     {
+        Integer clean = failureFree.remove(itemId);
+        if (clean != null && clean == generation)
+        {
+            // Split whole here with none failed: nothing to look for.
+            return List.of();
+        }
         table.refresh();
         List<CommittedRecords.Row> failed = new ArrayList<>();
         for (CommittedRecords.Row row : CommittedRecords.all(table, itemId,

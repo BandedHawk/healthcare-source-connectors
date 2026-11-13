@@ -880,4 +880,46 @@ class TableMaintenanceTest
                 .isGreaterThan(snapshotCount);
         assertThat(files(table)).hasSize(3);
     }
+
+    /**
+     * Small manifests, one per commit, are rewritten into one per
+     * partition once there are enough of them, keeping every row; a table
+     * with few is left alone, so the same manifests aren't written again
+     * and again.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void rewritesSmallManifestsByPartitionOnceThereAreEnough()
+            throws Exception
+    {
+        Table table = records();
+        int half = TableMaintenance.MIN_SMALL_MANIFESTS / 2;
+        for (int index = 0; index < half - 1; index++)
+        {
+            batch(table, OLD_DAY, 1);
+            batch(table, RECENT_DAY, 1);
+        }
+        TableMaintenance maintenance = maintenance(MaintenanceSettings.DEFAULT);
+        assertThat(maintenance.rewriteManifests(table)).isZero();
+        batch(table, OLD_DAY, 1);
+        batch(table, RECENT_DAY, 1);
+        Set<String> before = rows(table);
+        int snapshotsBefore = snapshots(table);
+
+        assertThat(maintenance.rewriteManifests(table))
+                .isEqualTo(TableMaintenance.MIN_SMALL_MANIFESTS);
+
+        table.refresh();
+        assertThat(table.currentSnapshot().dataManifests(table.io()))
+                .hasSize(2)
+                .allSatisfy(manifest -> assertThat(
+                        manifest.existingFilesCount()
+                                + manifest.addedFilesCount())
+                        .isEqualTo(half));
+        assertThat(rows(table)).isEqualTo(before);
+        assertThat(snapshots(table)).isEqualTo(snapshotsBefore + 1);
+        assertThat(maintenance.rewriteManifests(table)).isZero();
+        assertThat(snapshots(table)).isEqualTo(snapshotsBefore + 1);
+    }
 }

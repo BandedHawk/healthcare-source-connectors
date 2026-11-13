@@ -88,6 +88,13 @@ public final class ItemCheckpoints
      */
     private final String copies;
 
+    /**
+     * The table of when each item landed, from its summary row in the
+     * landing table, with its schema: for measuring an item's time
+     * through the stages from the registries (docs/PERFORMANCE.md §10).
+     */
+    private final String landed;
+
     /** Writes and verifies checkpoints. */
     private final CheckpointCodec codec;
 
@@ -115,6 +122,7 @@ public final class ItemCheckpoints
         this.dataSource = dataSource;
         this.table = schema + ".split_item";
         this.copies = schema + ".split_copy";
+        this.landed = schema + ".split_landed";
         this.codec = codec;
         this.queryTimeoutSeconds =
                 (int) Math.max(1, queryTimeout.toSeconds());
@@ -180,6 +188,13 @@ public final class ItemCheckpoints
                       same_as  uuid        NOT NULL,
                       noted_at timestamptz NOT NULL
                     )""".formatted(copies));
+            // Added 2026-11-13 (docs/PERFORMANCE.md §10): when each item
+            // landed, so its time to gold is a query on the registries.
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS %s (
+                      item_id   uuid        PRIMARY KEY,
+                      landed_at timestamptz NOT NULL
+                    )""".formatted(landed));
         }
         catch (SQLException failure)
         {
@@ -678,6 +693,35 @@ public final class ItemCheckpoints
             insert.setQueryTimeout(queryTimeoutSeconds);
             insert.setObject(1, itemId);
             insert.setObject(2, sameAs);
+            insert.executeUpdate();
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Notes when an item landed, from its summary row in the landing table
+     * (docs/PERFORMANCE.md §10). The first noted stays: an item split
+     * again, or reprocessed, landed when it first did.
+     *
+     * @param itemId   the item
+     * @param landedAt when it landed
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void noteLanded(UUID itemId, Instant landedAt)
+    {
+        String sql = """
+                INSERT INTO %s (item_id, landed_at) VALUES (?, ?)
+                ON CONFLICT (item_id) DO NOTHING""".formatted(landed);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement insert = connection.prepareStatement(sql))
+        {
+            insert.setQueryTimeout(queryTimeoutSeconds);
+            insert.setObject(1, itemId);
+            insert.setTimestamp(2, Timestamp.from(landedAt));
             insert.executeUpdate();
         }
         catch (SQLException failure)

@@ -1,0 +1,122 @@
+# Metrics for measuring the pipeline (docs/PERFORMANCE.md §10): the stages export OTLP/HTTP to a collector, as they
+# would to a customer's, which passes the metrics to Prometheus (its OTLP receiver) and drops traces and logs. Only
+# allow-listed attributes leave the stages, so nothing here holds PHI. Smaller than the sandbox's all-in-one
+# backend (deploy/sandbox/infra/telemetry.yaml), to fit the base nodes beside the pipeline: about 0.8 GiB.
+# Prometheus keeps its data on an emptyDir, so it is lost at `poc.sh down`: run measure.sh before.
+# Prometheus: kubectl -n sdh-infra port-forward svc/prometheus 9090 (http://localhost:9090).
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: otel-collector, namespace: sdh-infra }
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http: { endpoint: "0.0.0.0:4318" }
+    processors:
+      memory_limiter: { check_interval: 1s, limit_percentage: 80, spike_limit_percentage: 20 }
+      batch: {}
+    exporters:
+      otlphttp/prometheus:
+        metrics_endpoint: http://prometheus.sdh-infra.svc:9090/api/v1/otlp/v1/metrics
+      nop: {}
+    extensions:
+      health_check: { endpoint: "0.0.0.0:13133" }
+    service:
+      extensions: [health_check]
+      pipelines:
+        metrics: { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp/prometheus] }
+        traces: { receivers: [otlp], exporters: [nop] }
+        logs: { receivers: [otlp], exporters: [nop] }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: otel-collector, namespace: sdh-infra }
+spec:
+  selector: { app: otel-collector }
+  ports: [{ name: otlp-http, port: 4318 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: otel-collector, namespace: sdh-infra }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: otel-collector } }
+  template:
+    metadata: { labels: { app: otel-collector } }
+    spec:
+      nodeSelector: { "sdh-poc/pool": base }
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.162.0
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports: [{ name: otlp-http, containerPort: 4318 }]
+          readinessProbe:
+            httpGet: { path: /, port: 13133 }
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/otelcol, readOnly: true }
+      volumes:
+        - { name: config, configMap: { name: otel-collector } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: prometheus, namespace: sdh-infra }
+data:
+  # Nothing to scrape: the collector pushes. The resource's service.name becomes the job label.
+  prometheus.yml: |
+    global: { scrape_interval: 1m }
+    otlp:
+      promote_resource_attributes: [service.instance.id, k8s.pod.name]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: prometheus, namespace: sdh-infra }
+spec:
+  selector: { app: prometheus }
+  ports: [{ name: http, port: 9090 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: prometheus, namespace: sdh-infra }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: prometheus } }
+  template:
+    metadata: { labels: { app: prometheus } }
+    spec:
+      nodeSelector: { "sdh-poc/pool": base }
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.15.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=2d
+            - --web.enable-otlp-receiver
+          ports: [{ name: http, containerPort: 9090 }]
+          readinessProbe:
+            httpGet: { path: /-/ready, port: 9090 }
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus, readOnly: true }
+            - { name: data, mountPath: /prometheus }
+      volumes:
+        - { name: config, configMap: { name: prometheus } }
+        - { name: data, emptyDir: { sizeLimit: 2Gi } }
+---
+# The pipeline namespaces send their metrics in, as they reach Postgres and Kafka (namespace.yaml); the collector
+# reaches Prometheus inside sdh-infra (each-other-only).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: clients-to-collector, namespace: sdh-infra }
+spec:
+  podSelector: { matchLabels: { app: otel-collector } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { sdh.smiledigitalhealth.com/infra-client: "true" } } }]
+      ports: [{ port: 4318 }]

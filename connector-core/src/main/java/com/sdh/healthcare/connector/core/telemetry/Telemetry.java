@@ -137,6 +137,12 @@ public final class Telemetry
     private final DoubleHistogram publishDuration;
 
     /**
+     * How long each step of a stage's work takes, in seconds, by stage and
+     * phase (docs/PERFORMANCE.md §10).
+     */
+    private final DoubleHistogram phaseDuration;
+
+    /**
      * Records received again under a different version than they were
      * stored with, by stage (STAGES.md §6).
      */
@@ -243,9 +249,16 @@ public final class Telemetry
                         + " failing conversion, by error code")
                 .build();
         commitDuration = meter.histogramBuilder("sdh.commit.duration")
-                .setUnit("s").build();
+                .setUnit("s")
+                .setExplicitBucketBoundariesAdvice(SECONDS_BUCKETS).build();
         publishDuration = meter.histogramBuilder("sdh.publish.duration")
-                .setUnit("s").build();
+                .setUnit("s")
+                .setExplicitBucketBoundariesAdvice(SECONDS_BUCKETS).build();
+        phaseDuration = meter.histogramBuilder("sdh.stage.phase_duration")
+                .setUnit("s")
+                .setDescription("How long each step of a stage's work takes,"
+                        + " by stage and phase")
+                .setExplicitBucketBoundariesAdvice(SECONDS_BUCKETS).build();
         versionDiffers = meter.counterBuilder("sdh.stage.version_differs")
                 .setUnit("{record}")
                 .setDescription("Records received again under a different"
@@ -675,6 +688,22 @@ public final class Telemetry
     public void publishDuration(long nanos)
     {
         publishDuration.record(nanos / NANOS_PER_SECOND);
+    }
+
+    /**
+     * Records how long a step of a stage's work took (docs/PERFORMANCE.md
+     * §10): a batch's for a step done once per batch, a record's for one
+     * done per record.
+     *
+     * @param stage the stage, such as {@code convert}
+     * @param phase the step, such as {@code process} or {@code commit}
+     * @param nanos how long, in nanoseconds
+     */
+    public void phaseDuration(String stage, String phase, long nanos)
+    {
+        phaseDuration.record(nanos / NANOS_PER_SECOND,
+                Fields.of(Attr.STAGE, stage).with(Attr.PHASE, phase)
+                        .toAttributes());
     }
 
     /** Counts a file as being processed, until it is finished. */

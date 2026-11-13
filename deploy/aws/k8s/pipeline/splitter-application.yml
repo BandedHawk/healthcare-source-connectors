@@ -1,11 +1,15 @@
 # A pipeline's split stage on AWS (docs/AWS-POC.md §5): reads items from the bronze bucket, stores their records in
 # split_records in the silver bucket, sealed to the convert stage, and announces them on <pipeline>.split. As
 # deploy/sandbox/pipeline/splitter-application.yml, with S3 through the pod's role (EKS Pod Identity; it may only
-# read bronze), AWS KMS for the keys, and no telemetry collector. ${...} in capitals are filled in by
+# read bronze), AWS KMS for the keys, and metrics to the collector. ${...} in capitals are filled in by
 # deploy/aws/k8s/pipeline/apply.sh; ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret splitter-env.
 # Keys are in the secret splitter-keys, at /run/secrets.
 sdh:
   connector-id: split-${PIPELINE}
+  # Metrics for measuring the pipeline (docs/PERFORMANCE.md §10); the collector drops traces and logs.
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+    metric-interval: 15s
   landing:
     intake: ${PIPELINE}
     storage:

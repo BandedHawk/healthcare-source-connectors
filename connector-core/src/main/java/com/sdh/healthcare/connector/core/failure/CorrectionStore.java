@@ -1079,6 +1079,41 @@ public final class CorrectionStore
         }).stream().findFirst();
     }
 
+    /**
+     * Whether an operator has ever submitted a correction or retry of the
+     * item at this stage. Until one is, the stage's table holds no records
+     * made from corrections, so the stage needn't look for them
+     * (PERFORMANCE.md §3.2): this reads the primary key's first columns.
+     *
+     * @param itemId the item
+     * @return true if one has been
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public boolean any(UUID itemId)
+    {
+        String sql = """
+                SELECT seq
+                  FROM %s
+                 WHERE stage = ? AND item_id = ?""".formatted(table);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(timeout);
+            select.setMaxRows(1);
+            select.setString(1, stage);
+            select.setObject(2, itemId);
+            try (ResultSet rows = select.executeQuery())
+            {
+                return rows.next();
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Correction store unavailable",
+                    failure);
+        }
+    }
+
     /** Sets a query's parameters. */
     @FunctionalInterface
     private interface Parameters

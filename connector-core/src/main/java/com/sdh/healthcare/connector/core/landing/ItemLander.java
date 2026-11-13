@@ -506,7 +506,9 @@ public final class ItemLander
                             startedAt, (chunkIndex / chunksPerBlock) + 1,
                             Base64.getEncoder().encodeToString(chain), true,
                             bytesRead, digest, landedAt);
-                    Snapshot snapshot = commit(batch.finish(), done);
+                    long summaryRow = batch.summaryRow;
+                    DataFile file = batch.finish();
+                    Snapshot snapshot = commit(file, done);
                     batch = null;
                     afterCommit.accept(done.nextBlock());
                     Telemetry.get().audit("item.landed",
@@ -517,7 +519,9 @@ public final class ItemLander
                     return new LandedItem(item.itemId(), settings.intake(),
                             item.kind(), item.source(), bytesRead, digest,
                             landedAt, snapshotId(snapshot),
-                            settings.kekRef(), plainHash, item.replaces());
+                            settings.kekRef(), plainHash, item.replaces(),
+                            file.location(), file.fileSizeInBytes(),
+                            summaryRow);
                 }
                 if (blockEnds && batch.bytes >= settings.commitBytes())
                 {
@@ -691,6 +695,12 @@ public final class ItemLander
         /** How many plaintext bytes the batch holds. */
         private long bytes;
 
+        /** How many rows have been written to the batch's file. */
+        private long rows;
+
+        /** The summary row's position in the file; -1 until written. */
+        private long summaryRow = -1;
+
         /** Starts a batch: makes its key and opens its data file. */
         Batch()
         {
@@ -759,6 +769,7 @@ public final class ItemLander
                     RecordCrypto.recordKey(dataKey, itemId, 0), itemId, 0,
                     chunkIndex, 0, plaintext);
             writer.write(row(itemId, chunkIndex, ciphertext));
+            rows++;
             bytes += plaintext.length;
         }
 
@@ -832,7 +843,9 @@ public final class ItemLander
                                         item.messageReplaces()).getBytes(
                                                 StandardCharsets.UTF_8))));
             }
+            summaryRow = rows;
             writer.write(row);
+            rows++;
         }
 
         /**

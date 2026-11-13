@@ -138,6 +138,21 @@ class QueueReaderTest
      */
     List<byte[]> ingest(UUID itemId, byte[]... records)
     {
+        return ingest(true, itemId, records);
+    }
+
+    /**
+     * What the connector does for one batch, with or without saying in each
+     * message which data file and rows hold the record (PERFORMANCE.md
+     * §3.2).
+     *
+     * @param located whether the messages give the data file and rows
+     * @param itemId  the file the records come from
+     * @param records the records' plaintext
+     * @return the sealed messages, one per record
+     */
+    List<byte[]> ingest(boolean located, UUID itemId, byte[]... records)
+    {
         FencedCommitter committer = new FencedCommitter(new LeaseToken()
         {
             public long epoch()
@@ -164,7 +179,7 @@ class QueueReaderTest
                 transaction.newFastAppend().appendFile(dataFile).commit());
         return writer.written().stream()
                 .map(record -> sealer.seal(message(record, writer,
-                        snapshot)))
+                        snapshot, located ? dataFile : null)))
                 .toList();
     }
 
@@ -174,19 +189,22 @@ class QueueReaderTest
      * @param record   the record
      * @param writer   the writer that wrote it
      * @param snapshot the commit that made it visible
+     * @param file     the batch's data file, to say where the record's rows
+     *                 are; null to leave the reader to scan
      * @return the message
      */
     static RecordStored message(WrittenRecord record,
-            RecordBatchWriter writer, Snapshot snapshot)
+            RecordBatchWriter writer, Snapshot snapshot, DataFile file)
     {
+        StorageRef ref = new StorageRef("prod", NS, RecordsTable.DEFAULT_NAME,
+                writer.ingestedDate(), snapshot.snapshotId(),
+                writer.kekRef());
         return new RecordStored(record.recordId(), record.itemId(),
                 record.seq(), record.sourceOffset(), record.sourceLength(),
                 record.format(), record.representation().contentType(),
                 record.representation().mapping(), record.plaintextLength(),
                 record.chunkCount(),
-                new StorageRef("prod", NS, RecordsTable.DEFAULT_NAME,
-                        writer.ingestedDate(), snapshot.snapshotId(),
-                        writer.kekRef()));
+                file == null ? ref : writer.locate(ref, file, record));
     }
 
     /**
@@ -329,6 +347,76 @@ class QueueReaderTest
             assertThatThrownBy(() -> recordsOnly.decode(first.get(0)))
                     .isInstanceOf(IllegalStateException.class);
         }
+    }
+
+    /**
+     * A message that doesn't say where the record's rows are, as before
+     * PERFORMANCE.md §3.2, reads by scan.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void readsARecordWhoseMessageGivesNoFile() throws Exception
+    {
+        byte[] small = "abc".getBytes(StandardCharsets.UTF_8);
+        byte[] large = new byte[RecordCrypto.CHUNK_SIZE + 99];
+        new Random(5).nextBytes(large);
+        List<byte[]> bodies = ingest(false, UUID.randomUUID(), small, large);
+        try (QueueReader reader = reader())
+        {
+            RecordStored largeMessage =
+                    (RecordStored) reader.decode(bodies.get(1));
+            assertThat(largeMessage.storage().hasFile()).isFalse();
+            assertThat(reader.readRecord(
+                    (RecordStored) reader.decode(bodies.get(0)), 10))
+                    .isEqualTo(small);
+            assertThat(reader.readRecord(largeMessage, 1 << 24))
+                    .isEqualTo(large);
+        }
+    }
+
+    /**
+     * A record whose data file is gone, compacted away (PERFORMANCE.md
+     * §3.3), is found by scan; so is one whose message points at another
+     * record's rows, which are never taken for it.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void fallsBackToAScanWhenTheRowsAreNotThere() throws Exception
+    {
+        byte[] first = "first".getBytes(StandardCharsets.UTF_8);
+        byte[] second = "second".getBytes(StandardCharsets.UTF_8);
+        List<byte[]> bodies = ingest(UUID.randomUUID(), first, second);
+        try (QueueReader reader = reader())
+        {
+            RecordStored message = (RecordStored) reader.decode(bodies.get(0));
+            StorageRef ref = message.storage();
+            assertThat(ref.hasFile()).isTrue();
+            RecordStored gone = withStorage(message, ref.at(
+                    ref.file().replace(".parquet", "-gone.parquet"),
+                    ref.fileSize(), ref.firstRow()));
+            assertThat(reader.readRecord(gone, 10)).isEqualTo(first);
+            RecordStored elsewhere = withStorage(message,
+                    ref.at(ref.file(), ref.fileSize(), ref.firstRow() + 1));
+            assertThat(reader.readRecord(elsewhere, 10)).isEqualTo(first);
+        }
+    }
+
+    /**
+     * The same message, stored elsewhere.
+     *
+     * @param message the message
+     * @param storage where it now says the record is
+     * @return the message
+     */
+    private static RecordStored withStorage(RecordStored message,
+            StorageRef storage)
+    {
+        return new RecordStored(message.recordId(), message.itemId(),
+                message.seq(), message.sourceOffset(), message.sourceLength(),
+                message.format(), message.contentType(), message.mapping(),
+                message.plaintextLength(), message.chunkCount(), storage);
     }
 
     /**

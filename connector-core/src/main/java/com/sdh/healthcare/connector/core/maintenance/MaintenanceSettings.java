@@ -13,9 +13,11 @@ import java.util.Objects;
  * Table maintenance settings (design §8.4).
  *
  * @param snapshotRetention     snapshots older than this are expired
- *                              (default 7 days)
+ *                              (default 24 hours)
  * @param minSnapshots          never keep fewer snapshots than this
- *                              (default 10)
+ *                              (default 2,000): with the retention,
+ *                              whichever keeps more (docs/PERFORMANCE.md
+ *                              §3.3)
  * @param compaction            bin-pack small files
  * @param smallFileFraction     a data file is "small" below this fraction
  *                              of the table's target file size
@@ -39,12 +41,12 @@ public record MaintenanceSettings(
 {
 
     /**
-     * Seven days' snapshots, at least ten; compaction of files under 75% of
+     * A day's snapshots, at least 2,000; compaction of files under 75% of
      * the target size, five or more at a time, up to 8 GiB a run; orphans
      * older than three days.
      */
     public static final MaintenanceSettings DEFAULT = new MaintenanceSettings(
-            Duration.ofDays(7), 10, true, 0.75, 5,
+            Duration.ofHours(24), 2000, true, 0.75, 5,
             8L << 30, Duration.ofDays(3));
 
     /**

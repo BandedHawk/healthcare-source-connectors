@@ -1,11 +1,15 @@
 # A pipeline's convert stage on AWS (docs/AWS-POC.md §5): reads split_records in the silver bucket, converts each
 # record to JSON, stores it in records in the same bucket, sealed to the transform stage, and announces it on
 # <pipeline>.records. As deploy/sandbox/pipeline/convert-application.yml, with S3 through the pod's role (EKS Pod
-# Identity; silver only), AWS KMS for the keys, and no telemetry collector. ${...} in capitals are filled in by
+# Identity; silver only), AWS KMS for the keys, and metrics to the collector. ${...} in capitals are filled in by
 # deploy/aws/k8s/pipeline/apply.sh; ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret convert-env.
 # Keys are in the secret convert-keys, at /run/secrets.
 sdh:
   connector-id: convert-${PIPELINE}
+  # Metrics for measuring the pipeline (docs/PERFORMANCE.md §10); the collector drops traces and logs.
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+    metric-interval: 15s
   # The transform stage, the last, sends the producer's results; here they are off (its README). No producer
   # listens on AWS, so they are off there too (docs/AWS-POC.md §5).
   results: { enabled: false }

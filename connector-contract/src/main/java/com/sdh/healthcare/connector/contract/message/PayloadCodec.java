@@ -799,7 +799,8 @@ public final class PayloadCodec
      * The JSON fields of where a record or item is stored.
      *
      * @param ref where it is stored
-     * @return its catalog, namespace, table, day, snapshot and KEK
+     * @return its catalog, namespace, table, day, snapshot and KEK, and its
+     *         data file, the file's size and its first row if known
      */
     private static Map<String, Object> storageFields(StorageRef ref)
     {
@@ -810,6 +811,12 @@ public final class PayloadCodec
         storage.put("ingestedDate", ref.ingestedDate().toString());
         storage.put("snapshotId", ref.snapshotId());
         storage.put("kekRef", ref.kekRef());
+        if (ref.hasFile())
+        {
+            storage.put("file", ref.file());
+            storage.put("fileSize", ref.fileSize());
+            storage.put("firstRow", ref.firstRow());
+        }
         return storage;
     }
 
@@ -842,10 +849,16 @@ public final class PayloadCodec
     {
         Map<String, Object> storage =
                 (Map<String, Object>) required(payload, "storage");
-        return new StorageRef(text(storage, "catalog"),
+        StorageRef ref = new StorageRef(text(storage, "catalog"),
                 text(storage, "namespace"), text(storage, "table"),
                 LocalDate.parse(text(storage, "ingestedDate")),
                 number(storage, "snapshotId"), text(storage, "kekRef"));
+        // Optional: a message from before PERFORMANCE.md §3.2, or one
+        // rebuilt from a scan, has no file; its reader scans.
+        return storage.get("file") instanceof String file
+                ? ref.at(file, number(storage, "fileSize"),
+                        number(storage, "firstRow"))
+                : ref;
     }
 
     /**

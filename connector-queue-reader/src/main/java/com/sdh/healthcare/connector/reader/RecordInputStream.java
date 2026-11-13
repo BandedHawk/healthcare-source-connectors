@@ -22,13 +22,17 @@ import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordLocation;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
+import com.sdh.healthcare.connector.contract.table.DataFileRows;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -36,19 +40,25 @@ import javax.crypto.SecretKey;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 
 /**
- * Streams one record: scans its chunk rows, puts them in order and
- * decrypts them one at a time.
+ * Streams one record: reads its chunk rows, by position in its data file
+ * or by scan, puts them in order and decrypts them one at a time.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
 final class RecordInputStream extends InputStream
 {
+
+    /** The columns a record is read with. */
+    private static final List<String> COLUMNS = List.of(RECORD_ID, ITEM_ID,
+            SEQ, CHUNK_INDEX, CHUNK_COUNT, PLAINTEXT_LENGTH, CIPHERTEXT,
+            BDK_WRAPPED, KEK_REF, BATCH_ID);
 
     /** What {@link #check} returns for a row of another copy. */
     private static final int OTHER_COPY = -1;
@@ -59,7 +69,7 @@ final class RecordInputStream extends InputStream
     /** The batch data keys unwrapped so far. */
     private final BatchKeyCache keys;
 
-    /** The scan of the record's chunk rows. */
+    /** The record's chunk rows, read by position or by scan. */
     private final CloseableIterable<Record> rows;
 
     /** Where the scan has got to. */
@@ -90,7 +100,8 @@ final class RecordInputStream extends InputStream
     private boolean sawRows;
 
     /**
-     * Starts the scan of a record's rows.
+     * Starts reading a record's rows: by position in its data file when its
+     * location says which (PERFORMANCE.md §3.2), otherwise by scan.
      *
      * @param table   the records table
      * @param location where the record is
@@ -101,6 +112,70 @@ final class RecordInputStream extends InputStream
     {
         this.location = location;
         this.keys = keys;
+        List<Record> positioned = byPosition(table, location);
+        this.rows = positioned != null
+                ? CloseableIterable.withNoopClose(positioned)
+                : scan(table, location);
+        this.rowIterator = rows.iterator();
+    }
+
+    /**
+     * Reads a record's rows by their position in its data file.
+     *
+     * @param table    the records table
+     * @param location where the record is
+     * @return its rows; null if the location gives no file, or the file is
+     *         gone (compacted and expired, PERFORMANCE.md §3.3) or its rows
+     *         there are another record's, when the record is found by scan
+     * @throws UncheckedIOException if the file can't be read
+     */
+    private static List<Record> byPosition(Table table,
+            RecordLocation location)
+    {
+        StorageRef storage = location.storage();
+        if (!storage.hasFile())
+        {
+            return null;
+        }
+        try
+        {
+            List<Record> found = DataFileRows.read(table.io(),
+                    table.schema(), storage.file(), storage.fileSize(),
+                    storage.firstRow(), location.chunkCount(), COLUMNS);
+            if (found.size() != location.chunkCount())
+            {
+                return null;
+            }
+            for (Record row : found)
+            {
+                if (!location.itemId().equals(row.getField(ITEM_ID))
+                        || location.seq() != (Long) row.getField(SEQ))
+                {
+                    return null;
+                }
+            }
+            return found;
+        }
+        catch (NotFoundException gone)
+        {
+            return null;
+        }
+        catch (IOException failure)
+        {
+            throw new UncheckedIOException(failure);
+        }
+    }
+
+    /**
+     * Scans for a record's rows, pruned to its day.
+     *
+     * @param table    the records table
+     * @param location where the record is
+     * @return the scan
+     */
+    private static CloseableIterable<Record> scan(Table table,
+            RecordLocation location)
+    {
         long dayStart = TimeUnit.SECONDS.toMicros(location.storage()
                 .ingestedDate().atStartOfDay(ZoneOffset.UTC).toEpochSecond());
         Expression filter = Expressions.and(
@@ -109,12 +184,10 @@ final class RecordInputStream extends InputStream
                 Expressions.greaterThanOrEqual(INGESTED_AT, dayStart),
                 Expressions.lessThan(INGESTED_AT,
                         dayStart + TimeUnit.DAYS.toMicros(1)));
-        this.rows = IcebergGenerics.read(table)
+        return IcebergGenerics.read(table)
                 .where(filter)
-                .select(RECORD_ID, CHUNK_INDEX, CHUNK_COUNT, PLAINTEXT_LENGTH,
-                        CIPHERTEXT, BDK_WRAPPED, KEK_REF, BATCH_ID)
+                .select(COLUMNS)
                 .build();
-        this.rowIterator = rows.iterator();
     }
 
     /**

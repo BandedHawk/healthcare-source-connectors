@@ -2,11 +2,15 @@
 # maps each with the US Core 6.1 set, fail-fast, and stores the bundle, or the record as it came if it fails, in
 # fhir in the gold bucket, sealed to gold's consumer key and announced on <pipeline>.fhir. As
 # deploy/sandbox/fhir/transform-application.yml, with S3 through the pod's role (EKS Pod Identity; reads silver,
-# writes gold), AWS KMS for the keys, and no telemetry collector. Producer results are off: no producer listens
+# writes gold), AWS KMS for the keys, and metrics to the collector. Producer results are off: no producer listens
 # for them with a bucket intake. ${...} in capitals are filled in by deploy/aws/k8s/pipeline/apply.sh;
 # ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret transform-<pipeline>-env.
 sdh:
   connector-id: transform-${PIPELINE}
+  # Metrics for measuring the pipeline (docs/PERFORMANCE.md §10); the collector drops traces and logs.
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+    metric-interval: 15s
   results: { enabled: false }
   transform:
     wstl: /etc/sdh/wstl/set.tar.gz
@@ -14,7 +18,7 @@ sdh:
     # TRANSFORM_TOO_LARGE.
     max-bytes: 2MB
   stage:
-    # Two records at a time, as in the sandbox (decided 2026-11-11); the input has 8 partitions for 4 pods.
+    # Two records at a time, as in the sandbox (decided 2026-11-11); the input has 24 partitions (poc.sh).
     concurrency: 2
     input:
       type: kafka

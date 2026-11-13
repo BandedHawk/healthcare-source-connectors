@@ -2383,6 +2383,15 @@ public sealed interface ConnectorMessage permits
      * @param snapshotId   the Iceberg snapshot the record was committed in
      * @param kekRef       which key encryption key wrapped the record's
      *                     data key
+     * @param file         the data file the record's rows are in, as
+     *                     Iceberg's {@code DataFile.location()}; null if not
+     *                     known, when a reader finds the rows by scan
+     *                     (PERFORMANCE.md §3.2)
+     * @param fileSize     the data file's size in bytes, so a reader needn't
+     *                     ask the store for it; -1 without a file
+     * @param firstRow     the position in the file of the record's first
+     *                     row, from 0; its rows follow it, one per chunk; -1
+     *                     without a file
      */
     record StorageRef(
             String catalog,
@@ -2390,8 +2399,70 @@ public sealed interface ConnectorMessage permits
             String table,
             java.time.LocalDate ingestedDate,
             long snapshotId,
-            String kekRef)
+            String kekRef,
+            String file,
+            long fileSize,
+            long firstRow)
     {
+
+        /**
+         * A reference without the data file: a reader finds the rows by
+         * scan.
+         *
+         * @param catalog      the Iceberg catalog's name
+         * @param namespace    the table's namespace
+         * @param table        the table's name
+         * @param ingestedDate the day the record was written
+         * @param snapshotId   the snapshot the record was committed in
+         * @param kekRef       which key encryption key wrapped the data key
+         */
+        public StorageRef(String catalog, String namespace, String table,
+                java.time.LocalDate ingestedDate, long snapshotId,
+                String kekRef)
+        {
+            this(catalog, namespace, table, ingestedDate, snapshotId, kekRef,
+                    null, -1, -1);
+        }
+
+        /**
+         * Checks that a file comes with its size and a first row.
+         *
+         * @throws IllegalArgumentException if a file is given without a
+         *         size or first row
+         */
+        public StorageRef
+        {
+            if (file != null && (fileSize <= 0 || firstRow < 0))
+            {
+                throw new IllegalArgumentException(
+                        "A data file needs its size and first row");
+            }
+        }
+
+        /**
+         * The same reference, at a record's rows in a data file.
+         *
+         * @param dataFile the data file, as {@code DataFile.location()}
+         * @param size     its size in bytes
+         * @param first    the position of the record's first row in it
+         * @return the reference
+         */
+        public StorageRef at(String dataFile, long size, long first)
+        {
+            return new StorageRef(catalog, namespace, table, ingestedDate,
+                    snapshotId, kekRef, dataFile, size, first);
+        }
+
+        /**
+         * Whether the reference says which data file and rows hold the
+         * record.
+         *
+         * @return true if it does
+         */
+        public boolean hasFile()
+        {
+            return file != null;
+        }
     }
 
     /**

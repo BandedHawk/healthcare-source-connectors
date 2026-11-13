@@ -134,10 +134,13 @@ analytic readers. These keep it bounded:
 - **Snapshot retention** by count and age in the hot tables: keep **24 hours or 2,000 snapshots**, whichever
   keeps more. With group commit that's about a day of history. A message's snapshot is then only a hint; the
   `file` is what's read.
-- **Manifest rewrite** every few minutes (`RewriteManifests`), clustered by day and by an `item_id` bucket,
-  so a lookup by item opens about one manifest per day, not one per commit.
-- **Partition by day and `bucket(16, item_id)`** for new tables, so the fallback prunes by item too. Existing
-  tables keep their spec; Iceberg plans each spec separately, so old and new data both read.
+- **Manifest rewrite** every few minutes (`RewriteManifests`), clustered by partition (the day), so a lookup
+  by item opens a few manifests per day, not one per commit. Built: once a table has 48 small manifests.
+- ~~**Partition by day and `bucket(16, item_id)`** for new tables, so the fallback prunes by item too.~~
+  **Dropped 2026-11-13 (DESIGN.md revision (dc)):** the batch writers put each commit's rows in one file
+  under one partition key, so an item bucket would mean a file per bucket (up to 16 per commit: 16 times the
+  PUTs and small files) or rows filed under the wrong bucket. With reads by location the hot path doesn't
+  plan, so it would only speed the fallback and the reconcilers. Manifests are clustered by day.
 - `write.object-storage.enabled=true` for new tables, so data files' paths are spread by hash. That spreads
   requests across S3 and GCS partitions, and keeps ADLS directories small.
 
@@ -154,6 +157,8 @@ analytic readers. These keep it bounded:
 - **Split pods split several items at once** (default 4): the pod-wide lock goes, and the per-item leases
   stay.
 - **Partitions:** 24 per topic by default (so 24 pods per stage at most), set per pipeline.
+  Built 2026-11-13, with split concurrency (DESIGN.md revision (dc)): on AWS, `STAGE_PARTITIONS` in `poc.sh`
+  for every pipeline's stage inputs.
 
 ### 3.5 Signing without a KMS call per message
 
@@ -365,15 +370,164 @@ A measurement harness before any change, so every change is measured against the
 - **Pass:** ≥ 100 documents/s sustained over the 1M load, p99 landed → gold under 20 s, and documents/s that
   stays flat as the tables grow (the regression we have now).
 
+**Built, 2026-11-13 (step 0; DESIGN.md revision (cz)).** Decided with the user: the time per document comes from
+the registries rather than from a time carried in every message, so no contract change and no figure lost to a
+restart; and the baseline on today's code is 1,000 documents (1.5–5 hours at today's 3–11 a minute), with 100,000
+and 1M once step 1 makes split fast.
+
+- **Per item:** the split stage notes when each item landed (`split_landed`). With `split_item.ended_at` and each
+  stage's `stage_record.stored_at`, `measure.sh` gives landed → gold, and each stage's part, as p50/p95/p99/max.
+  The gap from one stage's end of an item to the next stage's first record of it is the queue's wait plus one
+  record's work, so queue wait needs no broker timestamps.
+- **Inside the stages:** `sdh.stage.phase_duration` by stage and phase (split: the landed-table lookup and the
+  whole item; the record stages: open, claim, read, transform, commit, seal, register, send, complete, batch),
+  beside `sdh.commit.duration` by table. On AWS a collector passes them to a Prometheus with its OTLP receiver
+  (`deploy/aws/k8s/infra/telemetry.yaml`, about 0.8 GiB on the base nodes); its data goes at `poc.sh down`.
+- **The report** (`deploy/aws/k8s/pipeline/measure.sh`, run by `load-test.sh`): the above, the rate in tenths of
+  the run by when items reached gold (flat, or falling as the tables grow), snapshots kept and made per table
+  and their metadata size, KMS calls by API from CloudWatch, and the cost per million documents at the run's rate
+  (on-demand node price, EKS and KMS; storage and S3 requests not counted).
+- **Not yet:** the sandbox (SeaweedFS) run of the same report; it has its own telemetry stack, and `measure.sh`
+  reads the AWS PoC's.
+- **Changed after the first run:** commits per table come from the metadata version in the catalog, and KMS
+  signatures from the messages written to the topics (each is signed once): the deployer may read neither the
+  warehouse's metadata nor CloudWatch, by design. Each stage pod reports as its own instance
+  (`OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<pod>`): without it two pods' counters interleaved in one
+  Prometheus series, read as resets, and counts came out tens of times too high. The pipeline's network policies
+  let the stages reach the collector (port 4318).
+
+**Baseline, AWS, 2026-11-13** (`poc.sh reset`, then `load-test.sh 34 0`: 1,020 C-CDA documents, 115 MB, no
+failover; on-demand burst nodes; stopped by agreement after 103 minutes with 748 items split, 744 in gold; report
+`load/load-20261113T141643Z/measured.txt`). The figures to beat:
+
+| | Baseline |
+|---|---|
+| Throughput, first landed to last in gold | **0.12 documents/s** (target 100) |
+| Landed → gold, p50 / p95 / p99 | **3,592 / 5,320 / 5,526 s** (target p99 20 s); all but ~20 s of it is waiting for split |
+| Landing | all 1,020 landed in about 20 minutes (~50/min) |
+| Split, per pod | 6.0 s an item fresh, 12.9 s 40 minutes later; 2 pods, so 3–16 items/min |
+| Convert per record (1 pod) | read 1.49 s, transform 0.02 s; batch 1.68 s, commit 0.42 s |
+| Transform per record (1 pod) | read 0.59 s, transform 0.65 s; batch 1.90 s, commit 0.40 s |
+| Seal and sign, per message | 0.016 s |
+| Commits | one per item to `split_records` (754 for 748 items), and one per item to each landing table |
+| KMS Sign calls | 7.2 per document, so the ~300/s quota caps the pipeline at **~41 documents/s** (§2.3) |
+| Cost at this rate | ~$950 per million documents (compute $850, KMS $110), on-demand prices |
+
+What it showed, beyond §2's predictions:
+
+- **Split slows inside a pod as it runs, and a restart restores it** (later found to be the landed table's growth, not the pod: see the next run below). The rate fell from 25 to 3 items/min over
+  the first hour, with both split pods on the base nodes beside every other pod. Restarted at 15:18 (for the
+  instance fix), both landed on a fresh burst node and ran at 16/min, then fell again to 6/min within 40 minutes.
+  Over those 40 minutes the landed-table lookup (0.3 s), the `split_records` commit (0.3 s) and publishing
+  (0.03 s) stayed flat; the rest of the item doubled. So it is neither the lookup §2.1 named, nor commit time.
+  Candidates, for step 1 to time apart before changing anything: the point lookups on `split_records` within
+  an item (a pending batch's resolution, the fail store's), which plan a table growing a manifest per commit;
+  something held in the pod that grows with the items split (a cached table's metadata, the heap); and CPU
+  shared with the other pods on the base nodes (the restart also moved split to a node of its own).
+- **Reading dominates the record stages**: nearly all of convert's work on a record (1.49 of 1.51 s) is
+  reading it by point lookup (§2.1), and transform's read is as long as its transform.
+- **Not reliable from this run:** split's phase times before 15:18, and convert's and transform's after KEDA
+  scaled them to 3 and 4 pods (the instance fix wasn't in their pods); the per-record figures above are from
+  the first hour, at one pod each.
+- **Split's steps timed apart, AWS, 2026-11-13 (DESIGN.md revision (da)).** Same load as the baseline, on a
+  reset pipeline, stopped after 50 minutes once the answer was clear (199 items to gold, 0.07 documents/s;
+  report `load-20261113T174625Z/measured.txt`). Split's mean seconds per item, by quarter of the run:
+
+  | Step | Q1 | Q2 | Q3 | Q4 |
+  |---|---|---|---|---|
+  | `lookup` (landed table: refresh, summary) | 3.52 | 12.56 | 12.80 | 12.54 |
+  | `open` (landed table: refresh, item's chunks) | 3.54 | 12.23 | 12.81 | 12.54 |
+  | `split` (reads the chunks, writes `split_records`) | 3.83 | 12.70 | 13.29 | 13.11 |
+  | `failed_rows` (`split_records` lookup) | 0.74 | 1.49 | 1.97 | 2.29 |
+  | `correction_rows` (`split_records` lookup) | 0.69 | 1.44 | 1.92 | 2.24 |
+  | everything else | 0.03 | 0.03 | 0.03 | 0.02 |
+  | item | 12.24 | 40.25 | 41.39 | 38.59 |
+
+  Landing committed all 1,020 items to `landed_items` in the first 18 minutes, one commit each. In 3-minute
+  windows, `lookup`, `open` and `split` rose with those commits (0.8 s at 92 commits, 12.4 s at ~1,000) and
+  went flat at ~12.5 s the moment landing stopped. Split was then restarted, and both pods came up on a burst
+  node of their own: no change (12.5 s each). CPU on the split pods was 6%, garbage collection 0.2%, Postgres
+  idle. So it is **§2.1 on the landed table, three times an item**: each read of it plans every manifest,
+  about 12 ms per commit, and nothing held in the pod or shared CPU plays a part. The `split_records`
+  lookups are the same effect, smaller so far because that table has had fewer commits (198); they grow
+  with it. Together the five steps are 99% of the item. The baseline's reading that `lookup` stayed at
+  0.3 s after its restart, and that a restart restores the rate, is not borne out; its split figures were
+  taken while two pods' counters were mixed (the instance fix), so this run's figures stand. Convert's
+  read (1.76 s per record) and transform's (0.78 s) are point lookups of the same kind (§2.1).
+  Step 1's direct reads by location (§3.2) remove all of these; housekeeping (§3.3) alone would only cap them.
+- **Reads by location, AWS, 2026-11-13 (step 1, first part; DESIGN.md revision (db)).** Same load, reset
+  pipeline, same nodes (report `load-20261113T192923Z/measured.txt`):
+
+  | | Baseline | Split timed | Reads by location |
+  |---|---|---|---|
+  | items to gold | 744 of 748 in 103 min | 196 (stopped at 50 min) | 1,020 of 1,020 in 18 min |
+  | documents/s, first landed to last in gold | 0.12 | 0.07 | **1.23** |
+  | landed → gold p50 / p95 / p99 (s) | 3,592 / 5,320 / 5,526 | 551 / 2,434 / 2,667 | **22.5 / 47.5 / 58.5** |
+  | split per item (s), first → last quarter | 6 → 13 | 12.2 → 38.6 | **0.93 → 0.77** |
+  | convert's read per record (s) | 1.49 | 1.76 | **0.23** |
+  | transform's read per record (s) | 0.59 | 0.78 | **0.20** |
+  | cost per million documents | ~$950 | $1,436 | **$226** |
+
+  Split's steps by quarter are flat: lookup 0.20 → 0.15 s (the summary row by position), open 0.00, the
+  split itself 0.66 → 0.58 s, the end-of-item lookups 0.00. The rate held at 67–101 items/min from the first
+  tenth of the run to the last. What now sets the pace: split's own work on an item (0.6 s, one pod at a time
+  per item and one item per pod, §3.4), each record stage's commit per batch (0.5 s) and transform's
+  transform (0.36 s); and in latency, the gaps between stages (p95 14 s and 22 s: queue waits behind those
+  commits). Landing still made one commit per item (1,020 to `landed_items`, and split 1,020 to
+  `split_records`), which step 2's group commit takes on. KMS: 6.5 signatures per document, a ceiling of
+  ~46 documents/s, which step 3 removes. The p99 is 58.5 s against the 20 s goal, at 1.2 documents/s
+  against 100: steps 1 (rest) to 3 are still needed.
+  Not checked in this run: the gold check. Its first run was killed by a Spot reclaim of its node after
+  13 minutes (`backoffLimit: 0`); the second was stopped at 27 minutes for the session's end. It reads each
+  bundle's source C-CDA from `split_records` by `CommittedRecords` lookup, a planned scan of ~13 s at 1,022
+  commits, since a gold message doesn't say where its source split record is: so do readers following
+  `GoldReaderExample`. Housekeeping's manifest rewrite (§3.3) makes that scan cheap; carrying the source's
+  location in the lineage would remove it. Every record convert and transform read was read by position and
+  decrypted, and the AAD binds item, seq and chunk, so the reads themselves are checked. Also seen: table
+  maintenance runs on AWS, and its orphan sweep logs an ERROR per old metadata file Iceberg has already
+  deleted (`ReachableFileUtil`, 100 in 10 minutes); harmless, to be quietened.
+- **Step 1 complete, AWS, 2026-11-13 (DESIGN.md revisions (dc), (dd)).** Housekeeping, split 4 items at once
+  per pod, 24 partitions per stage topic. Two runs of the same 1,020-document load, each on a reset pipeline
+  (reports `load-20261113T214645Z` and `load-20261113T221700Z`; gold check skipped).
+
+  **Run A, as deployed.** 0.98 documents/s first landed to last in gold, landed → gold p50 / p95 / p99
+  25.1 / 51.0 / 58.2 s: no better than reads by location alone (1.23, 22.5 / 47.5 / 58.5). **Landing is
+  now the limit:** it lands one item at a time, ~1.3 items/s, and split keeps within a few items of it.
+  The rate is lower overall because of two stalls of ~2 minutes, at the start and after the failover:
+  the AWS landing configuration wrote `ready` and `after` as nested keys (`ready: { mode: stable, settle:
+  0s }`), which the flat settings ignore, so landing waited the default `settle`, 2 minutes, after each
+  start (in every AWS run so far). Fixed in `landing-application.yml`. Split's item took 1.69 s, against
+  0.83 s one at a time: four items share the pod's 0.5 CPU, and `split_records` commits took 1.04 s
+  against 0.36 s, more of them at once.
+
+  **Run B, split held back.** With the landing fix, and split paused (KEDA `paused-replicas: 0`) until
+  every item had landed, so the stages after landing work through a backlog:
+  - **Landing alone:** 1,021 items in 875 s with a 36 s failover, 70 items/min (1.2/s), starting at once.
+  - **Split, convert and transform on the backlog:** 234.8 items/min to gold in the run's best tenth
+    (3.9 documents/s, two split pods), 165 and 109 in the next: about three times landing's rate. Split's
+    item fell from 6.6 s (4 at once, cold) to 1.0 s within the run.
+  - **A livelock, found and fixed (revision (dd)).** Paused past the reconcile grace (10 minutes), every
+    landed item looked lost, and the reconciler announced each again (`split.recovered`, 536 messages more
+    on `<p>.split`). A batch could then hold two messages for one item: split at once, one took the lease
+    and the other was refused it, so the batch was retried, and both ran again, for ever. One partition
+    stopped at 994 of 1,020 items for 20 minutes. Now a retried batch skips the messages it has already
+    split (known by broker ID: a Kafka batch comes again as new objects), so the duplicate finds the item
+    done. Deployed during the run: the stuck partition cleared and every item reached gold, exactly once.
+    Run B's latency (p50 843 s) is the pause, not the pipeline.
+
+  What sets the pace now: **landing, at ~1.2 items/s**, one commit per item to `landed_items` and the
+  ledger: step 2's group commit. After it, split's CPU (0.5 a pod) and the record stages' commits per
+  batch. KMS: ~6.5–7 signatures per document, ~42–46 documents/s (step 3).
+
 ## 11. Order of work
 
 Each step is measured before the next, and each is useful alone.
 
 | Step | What | Expected effect |
 |---|---|---|
-| 0 | Measurement harness and a baseline at 1,000 and 100,000 documents (§10) | the numbers to beat |
+| 0 | Measurement harness and a baseline at 1,000 documents (§10; 100,000 after step 1) | the numbers to beat. Harness built and baseline run 2026-11-13 (§10): 0.12 documents/s, p99 5,526 s; split slows as the landed table grows: three planned reads of it per item, 99% of split's time with the `split_records` lookups (§10, 2026-11-13); not the pod, not CPU |
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
-| 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate |
+| 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots |
 | 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |

@@ -75,6 +75,9 @@ import org.apache.iceberg.catalog.TableIdentifier;
 public final class QueueReader implements AutoCloseable
 {
 
+    /** How many expired snapshots are remembered. */
+    private static final int EXPIRED_KEPT = 4096;
+
     /**
      * Decrypts messages and checks their signatures; null for a reader
      * built without message keys, which only reads records.
@@ -99,6 +102,25 @@ public final class QueueReader implements AutoCloseable
     /** The tables loaded so far, by identifier. */
     private final Map<TableIdentifier, Table> tables =
             new ConcurrentHashMap<>();
+
+    /**
+     * Snapshots messages named that were still missing after a refresh:
+     * expired, so not refreshed for again. A backlog older than the
+     * tables' snapshot retention then costs a refresh per commit, not per
+     * message. The most recent {@value #EXPIRED_KEPT}; guarded by itself.
+     */
+    private final Map<Long, Boolean> expired =
+            new LinkedHashMap<>(16, 0.75f, true)
+            {
+                private static final long serialVersionUID = 1L;
+
+                @Override
+                protected boolean removeEldestEntry(
+                        Map.Entry<Long, Boolean> eldest)
+                {
+                    return size() > EXPIRED_KEPT;
+                }
+            };
 
     /**
      * Creates a reader from a builder's settings.
@@ -286,13 +308,36 @@ public final class QueueReader implements AutoCloseable
         }
         TableIdentifier id = TableIdentifier.of(ref.namespace(), ref.table());
         Table table = tables.computeIfAbsent(id, catalog::loadTable);
-        if (table.snapshot(ref.snapshotId()) == null)
+        long snapshotId = ref.snapshotId();
+        if (table.snapshot(snapshotId) == null && !expired(snapshotId))
         {
             // The message can arrive before our cached metadata has seen the
-            // commit.
+            // commit. If even the refreshed metadata hasn't it, it was
+            // committed before the message was sent, so it has expired.
             table.refresh();
+            if (table.snapshot(snapshotId) == null)
+            {
+                synchronized (expired)
+                {
+                    expired.put(snapshotId, Boolean.TRUE);
+                }
+            }
         }
         return table;
+    }
+
+    /**
+     * Whether a snapshot was found expired before.
+     *
+     * @param snapshotId the snapshot
+     * @return whether it was
+     */
+    private boolean expired(long snapshotId)
+    {
+        synchronized (expired)
+        {
+            return expired.get(snapshotId) != null;
+        }
     }
 
     /** Forgets the unwrapped keys and the loaded tables. */

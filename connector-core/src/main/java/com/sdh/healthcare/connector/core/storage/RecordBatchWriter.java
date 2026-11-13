@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.core.telemetry.ErrorCode;
 import static com.sdh.healthcare.connector.contract.table.RecordsTable.*;
 
 import com.nimbusds.jose.util.JSONArrayUtils;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
@@ -35,6 +36,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -167,6 +169,15 @@ public final class RecordBatchWriter implements AutoCloseable
 
     /** The records written so far, in order. */
     private final List<WrittenRecord> written = new ArrayList<>();
+
+    /**
+     * Where each record's rows start in the data file, by the record as
+     * written: two records of one place may be in a batch, so by identity.
+     */
+    private final Map<WrittenRecord, Long> firstRows = new IdentityHashMap<>();
+
+    /** How many rows have been written to the data file. */
+    private long rows;
 
     /**
      * The queue messages failed records start in, by item and seq, noted
@@ -780,7 +791,48 @@ public final class RecordBatchWriter implements AutoCloseable
                 record.seq()));
         row.setField(CAUSE, cause == null ? null : cause[0]);
         row.setField(RUN_ID, cause == null ? null : cause[1]);
+        if (chunkIndex == 0)
+        {
+            firstRows.put(record, rows);
+        }
         writer.write(row);
+        rows++;
+    }
+
+    /**
+     * Where a record's rows start in the batch's data file: they follow
+     * one another, one per chunk.
+     *
+     * @param record a record this batch wrote, as it was returned
+     * @return the position of its first row, from 0
+     * @throws IllegalArgumentException if this batch didn't write it
+     */
+    public long firstRow(WrittenRecord record)
+    {
+        Long first = firstRows.get(record);
+        if (first == null)
+        {
+            throw new IllegalArgumentException(
+                    "The record wasn't written in this batch");
+        }
+        return first;
+    }
+
+    /**
+     * A record's storage reference, with the data file and rows it is in,
+     * so a reader reads it without planning a scan (PERFORMANCE.md §3.2).
+     *
+     * @param ref    the batch's reference: table, day, snapshot and KEK
+     * @param file   the batch's data file, from {@link #finish()}
+     * @param record a record this batch wrote, as it was returned
+     * @return the record's reference
+     * @throws IllegalArgumentException if this batch didn't write it
+     */
+    public StorageRef locate(StorageRef ref, DataFile file,
+            WrittenRecord record)
+    {
+        return ref.at(file.location(), file.fileSizeInBytes(),
+                firstRow(record));
     }
 
     /**

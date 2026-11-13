@@ -57,6 +57,13 @@ public final class IngestTables
      * Iceberg sets the Parquet codec per table, not per column, so ciphertext
      * is zstd-compressed like everything else. On incompressible pages that
      * costs a little CPU and almost no space.
+     * <p>
+     * Data files' paths start with a hash ({@code write.object-storage}),
+     * so a busy table's requests are spread across S3's and GCS's key
+     * partitions and its ADLS directories stay small (docs/PERFORMANCE.md
+     * §3.3). They stay under the table's {@code data/}, where orphan
+     * cleanup lists. Set for new tables only: an existing one keeps its
+     * layout, and Iceberg reads files wherever they are.
      */
     public static final Map<String, String> PROPERTIES = Map.of(
             TableProperties.FORMAT_VERSION, "2",
@@ -67,7 +74,8 @@ public final class IngestTables
             TableProperties.WRITE_TARGET_FILE_SIZE_BYTES,
             Long.toString(TARGET_FILE_BYTES),
             TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED, "true",
-            TableProperties.METADATA_PREVIOUS_VERSIONS_MAX, "100");
+            TableProperties.METADATA_PREVIOUS_VERSIONS_MAX, "100",
+            TableProperties.OBJECT_STORE_ENABLED, "true");
 
     /**
      * Writer settings applied on top of the table's properties by every

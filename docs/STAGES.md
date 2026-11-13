@@ -66,7 +66,7 @@ rows are encrypted under its own KEK; the split stage gets the split-records KEK
 | Type | From → to | Payload |
 |---|---|---|
 | `item.landed` | landing → split | as now, `fileId` renamed `itemId` |
-| `record.split` | split → convert | recordId, itemId, seq, sourceOffset, sourceLength, format, storage ref, origin |
+| `record.split` | split → convert | recordId, itemId, seq, sourceOffset, sourceLength, format, storage ref (with the data file and first row, PERFORMANCE.md §3.2), origin |
 | `item.split` | split → convert | itemId, recordCount, failedRecordCount (pieces the splitter couldn't parse, stored raw), itemDigest |
 | `record.stored`, `record.failed` | convert → transform and other readers | as `section.stored` and `section.failed` now |
 | `item.converted` | convert → transform and readers | itemId, recordCount, failedRecordCount |
@@ -233,6 +233,9 @@ pod of the stage at a time.
   and sealing run on worker pools); items run in parallel across pods, which KEDA adds. The handler takes the
   messages of a received batch one after the other, so `sdh.stage.input.batch.max-messages` should be 1: a
   long item would otherwise hold the others past their visibility timeout.
+  **Changed 2026-11-13 (DESIGN.md revision (dc)):** a pod splits up to `sdh.split.concurrency` items at once
+  (default 4), a batch's items each on a thread of its own, and takes batches as large
+  (`max-messages: ${sdh.split.concurrency:4}`). Each item's lease still keeps it to one split at a time.
 - **The item's lease** is a row in the existing lease table, `split/<connector-id>/<itemId>`, taken without
   waiting. If another worker holds it, the batch is answered retry and tried again after the pause, so a
   redelivered `item.landed` waits for the worker splitting it. The lease is renewed in the background while
@@ -267,7 +270,7 @@ pod of the stage at a time.
 - **Settings:** `sdh.stage.input` and `sdh.stage.output` replace `sdh.landing.queue-uri` and `sdh.queue`;
   `sdh.stage.registry-schema` holds `split_item`. The item lease uses the `sdh.lease` timings and database.
   `sdh.landing.idle-wait`, `sdh.split.convert*` and `sdh.results` are gone. The application's defaults set
-  `sdh.stage.input.batch.max-messages` to 1. `sdh.split.autostart: false` leaves the input and duties stopped,
+  `sdh.stage.input.batch.max-messages` to 1 (to `sdh.split.concurrency` since revision (dc)). `sdh.split.autostart: false` leaves the input and duties stopped,
   for tests that hand messages to the handler themselves.
 - **Duties for one pod:** reconciling and table maintenance run under a lease of their own,
   `split/<connector-id>/duties`, taken as a standby by every pod, so one pod has it at a time; losing it sends
@@ -1296,6 +1299,11 @@ and `resent_at`, shown by `failures`); the docs: DESIGN.md §10.1, §5.3.3 and t
   has it, the receipt replayed for a repeated `Idempotency-Key` too (looked up, with the replaced item from the
   summary row, `ItemLander.replacesOf`). A receipt given while the ledger entry was deferred by a storage error
   leaves it out; the item's messages, sent once the entry is written, still name it.
+- **When an item landed (2026-11-13, for measuring; docs/PERFORMANCE.md §10).** The split stage notes each item's
+  `landed_at`, from its summary row in `landed_items`, in `split_landed` (item, when landed; the first noted stays)
+  as it starts splitting it, whether from `item.landed` or the reconciler. With `split_item.ended_at` and each
+  stage's `stage_record.stored_at`, an item's time from landing to gold, and through each stage, is a query on
+  the registries.
 - **Split stage.** The `sameAs` of an `item.landed` is kept in a table of its own beside the checkpoints,
   `split_copy` (item, earlier item, when noted; the first noted stays), before the item is split; noting it flags the
   earlier item's open failures. Every end sent for the copy reads it from there, so ends sent again after a decline,

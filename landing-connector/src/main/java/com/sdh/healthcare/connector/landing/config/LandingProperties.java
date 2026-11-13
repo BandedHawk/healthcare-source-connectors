@@ -441,15 +441,19 @@ public record LandingProperties(
      * @param interval          how often to try; a run is skipped while an
      *                          item is being landed
      * @param snapshotRetention how long old snapshots are kept
-     * @param minSnapshots      the fewest snapshots kept
+     * @param minSnapshots      the fewest snapshots kept; retention and
+     *                          this keep whichever is more
+     * @param manifests         how often small manifests are rewritten
+     *                          between runs (docs/PERFORMANCE.md §3.3)
      * @param compaction        compaction of small files
      * @param orphans           removal of unreferenced files
      * @param retention         how long landed items are kept
      */
     public record Maintenance(@DefaultValue("true") boolean enabled,
             @DefaultValue("1h") Duration interval,
-            @DefaultValue("7d") Duration snapshotRetention,
-            @DefaultValue("10") int minSnapshots,
+            @DefaultValue("24h") Duration snapshotRetention,
+            @DefaultValue("2000") int minSnapshots,
+            @DefaultValue("5m") Duration manifests,
             @DefaultValue Compaction compaction,
             @DefaultValue Orphans orphans,
             @DefaultValue Retention retention)
@@ -483,7 +487,7 @@ public record LandingProperties(
         public MaintenanceScheduler.Schedule toSchedule()
         {
             return new MaintenanceScheduler.Schedule(enabled, interval,
-                    orphans.enabled(), orphans.interval());
+                    orphans.enabled(), orphans.interval(), manifests);
         }
     }
 

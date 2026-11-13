@@ -47,10 +47,11 @@ logging:
 sdh:
   stage:
     input:
-      # One item.landed message per batch: a batch is held until each of its items is split (STAGES.md §8), so a
-      # larger one would hold finished items' messages behind a slow one.
+      # As many item.landed messages per batch as the pod splits at once (sdh.split.concurrency): a batch is held
+      # until each of its items is split (STAGES.md §8), so a larger one would hold finished items' messages behind
+      # a slow one.
       batch:
-        max-messages: 1
+        max-messages: ${sdh.split.concurrency:4}
   landing:
     # Landed items whose item.landed message was lost (docs/DEPLOYMENT.md).
     reconcile:

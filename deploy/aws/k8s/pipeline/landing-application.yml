@@ -4,11 +4,15 @@
 #     the same bucket stops at its next listing;
 #   - S3 itself, with the pod's role through EKS Pod Identity, in place of SeaweedFS and an access key;
 #   - AWS KMS in place of Vault Transit;
-#   - no telemetry collector: audit events go to the console.
+#   - metrics only to the collector (k8s/infra/telemetry.yaml); audit events go to the console.
 # ${...} in capitals are filled in by deploy/aws/k8s/pipeline/apply.sh; ${SDH_LEASE_JDBC_PASSWORD} is left for
 # Spring, from the secret landing-env. Keys are in the secret landing-keys, at /run/secrets.
 sdh:
   connector-id: landing-${PIPELINE}
+  # Metrics for measuring the pipeline (docs/PERFORMANCE.md §10); the collector drops traces and logs.
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+    metric-interval: 15s
   landing:
     intake: ${PIPELINE}
     source:
@@ -17,9 +21,11 @@ sdh:
       bucket: { name: ${INTAKE_BUCKET}, region: ${AWS_REGION} }
       # Read-write, so the bucket is claimed, and each object is deleted once landed: landing keeps it.
       access: read-write
-      after: { mode: delete }
-      # Objects appear whole.
-      ready: { mode: stable, settle: 0s }
+      after: delete
+      # Objects appear whole, so they are landed as soon as listed. (Until 2026-11-13 this was written as nested
+      # keys, which these flat settings ignore, so landing waited the default settle, 2 minutes, after each start.)
+      ready: settled
+      settle: 0s
       recursive: false
       max-item-bytes: 104857600
   storage:

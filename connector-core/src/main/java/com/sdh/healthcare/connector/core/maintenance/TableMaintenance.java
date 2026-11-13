@@ -42,6 +42,7 @@ import org.apache.iceberg.ManifestContent;
 import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.ManifestFiles;
 import org.apache.iceberg.ManifestReader;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.PartitionStatisticsFile;
 import org.apache.iceberg.ReachableFileUtil;
 import org.apache.iceberg.RewriteFiles;
@@ -62,6 +63,7 @@ import org.apache.iceberg.io.DataWriter;
 import org.apache.iceberg.io.FileInfo;
 import org.apache.iceberg.io.SupportsPrefixOperations;
 import org.apache.iceberg.parquet.Parquet;
+import org.apache.iceberg.util.PropertyUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -101,6 +103,14 @@ public final class TableMaintenance
             TableMaintenance.class);
 
     /**
+     * The fewest small manifests worth rewriting. A rewrite leaves one or a
+     * few per partition written to lately, small until it fills: a day's
+     * sixteen item buckets, or two days' just after midnight. Fewer than
+     * this, and a rewrite would only write them again.
+     */
+    static final int MIN_SMALL_MANIFESTS = 48;
+
+    /**
      * What one run did, for logs and tests.
      *
      * @param table                 the table's name
@@ -113,10 +123,13 @@ public final class TableMaintenance
      * @param compactedBytes        bytes rewritten by compaction
      * @param expiredSnapshots      snapshots expired
      * @param orphansDeleted        unreferenced files deleted
+     * @param rewrittenManifests    small manifests rewritten, clustered
+     *                              by partition
      */
     public record Report(String table, int retentionDeletedFiles,
             int purgedFiles, int compactedFiles, int compactedInto,
-            long compactedBytes, int expiredSnapshots, int orphansDeleted)
+            long compactedBytes, int expiredSnapshots, int orphansDeleted,
+            int rewrittenManifests)
     {
     }
 
@@ -300,20 +313,102 @@ public final class TableMaintenance
 
         long[] compaction = settings.compaction()
                 ? compact(table) : new long[3];
+        int manifests = rewriteSmallManifests(table);
         int expired = expire(table, now, purgeBefore);
         int orphansDeleted = orphans ? deleteOrphans(table, now) : 0;
 
         Report report = new Report(table.name(), retentionDeleted, purged,
                 (int) compaction[0], (int) compaction[1], compaction[2],
-                expired, orphansDeleted);
+                expired, orphansDeleted, manifests);
         LOG.info("maintenance.done table={} retentionDeletedFiles={}"
                 + " purgedFiles={} compactedFiles={} into={}"
-                + " expiredSnapshots={} orphansDeleted={}", table.name(),
+                + " expiredSnapshots={} orphansDeleted={}"
+                + " rewrittenManifests={}", table.name(),
                 report.retentionDeletedFiles(), report.purgedFiles(),
                 report.compactedFiles(),
                 report.compactedInto(), report.expiredSnapshots(),
-                report.orphansDeleted());
+                report.orphansDeleted(), report.rewrittenManifests());
         return report;
+    }
+
+    // ---- manifests ----
+
+    /**
+     * Rewrites a table's small data manifests, if there are enough of them,
+     * into manifests clustered by partition (docs/PERFORMANCE.md §3.3). A
+     * stage's every commit adds a small manifest, and a scan plans every
+     * manifest its filter can't rule out: clustered, a lookup by day (and,
+     * on a table partitioned by an item bucket too, by item) opens about one
+     * manifest per partition, not one per commit. Cheap: it reads and writes
+     * only manifests, never data, so it runs every few minutes, apart from
+     * the full run. A manifest of at least half the target size
+     * ({@code commit.manifest.target-size-bytes}) is left as it is, so the
+     * same manifests aren't rewritten again and again.
+     *
+     * @param table the table
+     * @return how many manifests were rewritten; 0 if too few were small
+     * @throws com.sdh.healthcare.connector.core.checkpoint.LeaseLostException
+     *         if the lease was lost
+     */
+    public int rewriteManifests(Table table)
+    {
+        Span span = Telemetry.get().span("maintenance.manifests",
+                Fields.of(Attr.TABLE, table.name()));
+        try (Scope ignored = span.makeCurrent())
+        {
+            int rewritten = rewriteSmallManifests(table);
+            if (rewritten > 0)
+            {
+                LOG.info("maintenance.manifests_rewritten table={}"
+                        + " manifests={}", table.name(), rewritten);
+            }
+            return rewritten;
+        }
+        catch (RuntimeException | Error failure)
+        {
+            Telemetry.fail(span, failure);
+            throw failure;
+        }
+        finally
+        {
+            span.end();
+        }
+    }
+
+    /**
+     * Rewrites the small data manifests of the table's current snapshot,
+     * clustered by partition, if there are at least
+     * {@value #MIN_SMALL_MANIFESTS}.
+     *
+     * @param table the table
+     * @return how many were rewritten
+     */
+    private int rewriteSmallManifests(Table table)
+    {
+        committer.verifyCurrent(table);
+        table.refresh();
+        Snapshot current = table.currentSnapshot();
+        if (current == null)
+        {
+            return 0;
+        }
+        long small = PropertyUtil.propertyAsLong(table.properties(),
+                TableProperties.MANIFEST_TARGET_SIZE_BYTES,
+                TableProperties.MANIFEST_TARGET_SIZE_BYTES_DEFAULT) / 2;
+        int count = (int) current.dataManifests(table.io()).stream()
+                .filter(manifest -> manifest.length() < small).count();
+        if (count < MIN_SMALL_MANIFESTS)
+        {
+            return 0;
+        }
+        Map<Integer, PartitionSpec> specs = table.specs();
+        committer.commit(table, transaction -> transaction.rewriteManifests()
+                .rewriteIf(manifest -> manifest.length() < small)
+                .clusterBy(file -> file.specId() + "/"
+                        + specs.get(file.specId())
+                                .partitionToPath(file.partition()))
+                .commit());
+        return count;
     }
 
     // ---- retention ----

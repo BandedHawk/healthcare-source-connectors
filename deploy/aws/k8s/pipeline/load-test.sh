@@ -16,6 +16,10 @@
 # SDH_LOAD_OUTAGE_AT, _MIN and _LOSE add an outage part way (below, and docs/PERFORMANCE.md §3.6); the report then
 # checks every item ended at every stage, and counts what the reconcilers rebuilt.
 #
+# At the end it measures the run (measure.sh: time per item to gold, where it went, the rate as the tables grew,
+# commits, KMS calls, cost), then runs the gold check; SDH_LOAD_GOLD_CHECK=0 skips the check, whose reading is as
+# slow as split's on a large load (docs/PERFORMANCE.md §2.1).
+#
 # How: the inputs go to a staging prefix in the intake bucket first, then are copied server-side under <p>/ at t0,
 # so the push isn't limited by this machine's upload. Progress every 15 s; done when the intake prefix is empty, no
 # consumer group lags and the registries have stopped changing. The report (counts, codes and timings only) is
@@ -44,6 +48,7 @@ OUTAGE_AT="${SDH_LOAD_OUTAGE_AT:-0}"
 OUTAGE_MIN="${SDH_LOAD_OUTAGE_MIN:-10}"
 OUTAGE_LOSE="${SDH_LOAD_OUTAGE_LOSE:-}"
 SETTLE_MIN="${SDH_LOAD_SETTLE_MIN:-$([[ -n "$OUTAGE_LOSE" ]] && echo 45 || echo 0)}"
+GOLD_CHECK="${SDH_LOAD_GOLD_CHECK:-1}"
 
 say() { printf '>> %s\n' "$*" | tee -a "${report:-/dev/null}"; }
 die() { printf 'load-test.sh: %s\n' "$*" >&2; exit 1; }
@@ -107,6 +112,10 @@ s_items0="$(split_ended)"
 t0_db="$(db "SELECT now()")"
 t0_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 t0=$SECONDS
+echo "$t0_db" > "$out/t0"   # for measure.sh
+for t in "${topics[@]}"; do echo "$t ${before[$t]}"; done > "$out/offsets0"   # for measure.sh
+db "SELECT catalog_name || ':' || table_namespace || '.' || table_name, metadata_location FROM public.iceberg_tables" \
+  | sed -E 's#\|.*/0*([0-9]+)-[^/]*\.metadata\.json$# \1#' > "$out/versions0" || true   # for measure.sh
 
 # --- Push --------------------------------------------------------------------------------------------------------
 
@@ -237,6 +246,7 @@ while :; do
   ((now < (TIMEOUT_MIN + OUTAGE_MIN * (OUTAGE_AT != 0) + SETTLE_MIN) * 60)) || { say "  TIMEOUT after $TIMEOUT_MIN minutes: reporting what's done"; break; }
 done
 end=$(( ${last_change[transformed]:-$((SECONDS - t0))} ))
+db "SELECT now()" > "$out/t1"; echo "$max_nodes" > "$out/nodes"   # for measure.sh
 
 # --- Report ------------------------------------------------------------------------------------------------------
 
@@ -318,5 +328,10 @@ fi
 say "Report kept in $report"
 
 say ""
+say "=== Measured ==="
+"$HERE/measure.sh" "$run" 2>&1 | tee -a "$report" || say "measure.sh failed (above); run it again by hand"
+say ""
 say "=== Gold check ==="
-"$HERE/gold-check.sh" 2>&1 | tee -a "$report"
+if [[ "$GOLD_CHECK" == 0 ]]; then say "skipped (SDH_LOAD_GOLD_CHECK=0)"; else
+  "$HERE/gold-check.sh" 2>&1 | tee -a "$report"
+fi

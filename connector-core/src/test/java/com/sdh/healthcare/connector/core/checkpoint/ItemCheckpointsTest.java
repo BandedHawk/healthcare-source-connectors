@@ -15,6 +15,7 @@ import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -304,6 +305,35 @@ class ItemCheckpointsTest
         }
         assertThatThrownBy(() -> checkpoints.load(other))
                 .isInstanceOf(CheckpointTamperedException.class);
+    }
+
+    /**
+     * When an item landed is kept for measuring (docs/PERFORMANCE.md §10),
+     * and the first noted stays: splitting it again, or a reprocess, notes
+     * it again without moving it.
+     *
+     * @throws Exception if the database can't be read
+     */
+    @Test
+    void keepsWhenAnItemFirstLanded() throws Exception
+    {
+        Instant landed = Instant.parse("2026-11-13T10:00:00.123456Z");
+        checkpoints.noteLanded(item, landed);
+        checkpoints.noteLanded(item, landed.plusSeconds(60));
+        try (Connection connection = database.getConnection();
+                PreparedStatement select = connection.prepareStatement(
+                        "SELECT landed_at FROM " + schema
+                                + ".split_landed WHERE item_id = ?"))
+        {
+            select.setObject(1, item);
+            try (ResultSet rows = select.executeQuery())
+            {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getTimestamp(1).toInstant())
+                        .isEqualTo(landed);
+                assertThat(rows.next()).isFalse();
+            }
+        }
     }
 
     /** A schema name that isn't a plain identifier is refused. */

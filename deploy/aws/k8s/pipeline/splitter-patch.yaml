@@ -19,6 +19,12 @@ spec:
               preference: { matchExpressions: [{ key: sdh-poc/pool, operator: In, values: [base] }] }
       containers:
         - name: file-connector
+          # Each pod's own metrics series (k8s/infra/telemetry.yaml): without an instance, two pods' counters
+          # interleave in one series and Prometheus reads each drop as a reset.
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.instance.id=$(POD_NAME)" }
           resources:
             requests: { cpu: 500m, memory: 2Gi }
             limits: { memory: 2Gi }

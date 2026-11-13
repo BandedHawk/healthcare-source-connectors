@@ -13,7 +13,8 @@
   <name>connector-contract</name>
   <description>
     The wire contract shared by connectors (writers) and connector-queue-reader (consumers):
-    message types, JOSE sealing, record chunk encryption and the records table schema.
+    message types, JOSE sealing, record chunk encryption, the records table schema, and reading a
+    record's rows where its message says they are.
     Internal module: consumers use connector-queue-reader, never this directly.
   </description>
 
@@ -21,6 +22,28 @@
     <dependency>
       <groupId>org.apache.iceberg</groupId>
       <artifactId>iceberg-api</artifactId>
+    </dependency>
+    <!-- DataFileRows: a record's rows read by their position in a data file (PERFORMANCE.md §3.2). -->
+    <dependency>
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.parquet</groupId>
+      <artifactId>parquet-column</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.parquet</groupId>
+      <artifactId>parquet-common</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.parquet</groupId>
+      <artifactId>parquet-hadoop</artifactId>
+    </dependency>
+    <!-- Parquet's file reader names Hadoop's Configuration; the same trimmed set as connector-core. -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-common</artifactId>
     </dependency>
     <dependency>
       <groupId>com.nimbusds</groupId>

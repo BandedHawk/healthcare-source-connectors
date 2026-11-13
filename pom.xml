@@ -328,6 +328,11 @@
         <artifactId>parquet-hadoop</artifactId>
         <version>${parquet.version}</version>
       </dependency>
+      <dependency>
+        <groupId>org.apache.parquet</groupId>
+        <artifactId>parquet-common</artifactId>
+        <version>${parquet.version}</version>
+      </dependency>
 
       <!-- Iceberg's Parquet writer still needs Hadoop's Configuration class. Trimmed to the minimum. -->
       <dependency>

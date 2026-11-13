@@ -42,6 +42,8 @@ LONG_TEST_MAX_HOURS=24
 SNAPSHOTS_KEPT=3
 PIPELINES="${SDH_PIPELINES:-ccda-push}"
 KEDA_VERSION="2.21.0"
+# Partitions of each stage's input topic (setup_topics).
+STAGE_PARTITIONS=24
 KEDA_SHA256="b43c89ffeef81722d7e2dd2c079d74789767a0f89cae1336cff784994814f6d7"
 
 say() { printf '>> %s\n' "$*"; }
@@ -248,6 +250,8 @@ start_services() {
   envsubst '$POSTGRES_VOLUME_ID $KAFKA_VOLUME_ID $STATE_ZONE' < "$K8S/infra/state.yaml" | kubectl apply -f - >/dev/null
   infra scale statefulset/postgres statefulset/kafka --replicas=1 >/dev/null
   kubectl apply -f "$K8S/infra/cluster-autoscaler.yaml" >/dev/null
+  # The stages' metrics, for measure.sh (docs/PERFORMANCE.md §10); kept only while the session is up.
+  kubectl apply -f "$K8S/infra/telemetry.yaml" >/dev/null
   infra rollout status statefulset/postgres --timeout=600s >/dev/null
   infra rollout status statefulset/kafka --timeout=600s >/dev/null
 }
@@ -284,19 +288,28 @@ EOF
   done
 }
 
-# The stages' inputs get a partition for each pod KEDA may run times its concurrency (STAGES.md §10):
-#   - split: up to 2 pods, so 4 partitions;
-#   - convert: up to 3, so 6;
-#   - transform: up to 4 pods at concurrency 2, so 8.
-# Partitions can only be added later, with the topic drained. Everything else gets 1.
+# The stages' inputs get STAGE_PARTITIONS each (docs/PERFORMANCE.md §3.4): enough for the most pods any stage could
+# be given, so a stage scales without the topic being changed. Messages are keyed by item or record, so each one's
+# messages stay in order on their partition; a pod takes a batch of as many as it works on at once. Gold's output and
+# the dead-letter topics get 1.
 setup_topics() {
   say "Kafka topics"
-  local p topic parts
+  local p topic parts have
   for p in $PIPELINES; do
-    for topic in "$p.landed:4" "$p.split:6" "$p.records:8" "$p.fhir:1" "$p.convert.dlq:1" "$p.fhir.dlq:1"; do
+    for topic in "$p.landed:$STAGE_PARTITIONS" "$p.split:$STAGE_PARTITIONS" "$p.records:$STAGE_PARTITIONS" \
+        "$p.fhir:1" "$p.convert.dlq:1" "$p.fhir.dlq:1"; do
       parts="${topic##*:}"; topic="${topic%:*}"
       kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists \
         --topic "$topic" --partitions "$parts" --replication-factor 1 >/dev/null
+      # A topic made with fewer, before this. Partitions are only ever added; a key's messages already queued stay
+      # on their old partition, so this is done at "up", before any stage starts.
+      have="$(kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic "$topic" \
+        | sed -n 's/.*PartitionCount: *\([0-9]*\).*/\1/p' | head -n 1)"
+      if [[ -n "$have" && "$have" -lt "$parts" ]]; then
+        say "  $topic: $have partitions to $parts"
+        kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --alter --topic "$topic" \
+          --partitions "$parts" >/dev/null
+      fi
     done
   done
 }

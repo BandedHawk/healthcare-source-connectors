@@ -68,6 +68,24 @@ throughput and each stage's failures, then runs the gold check. Its report is ke
 deploy/aws/k8s/pipeline/load-test.sh [copies] [error-copies]
 ```
 
+At the end it measures the run (`measure.sh`; docs/PERFORMANCE.md §10): seconds per item from landing to gold and
+through each stage, where the time went inside the stages, the rate as the tables grew, snapshots per table, KMS
+calls and the cost per million documents. Run it again by hand before `poc.sh down`, which loses the stages'
+metrics. For the baseline (1,020 documents; up to 5.5 hours on today's code, so `up --hours 6`), without the gold
+check, whose reading takes hours on a load this size:
+
+```bash
+deploy/aws/poc.sh reset
+```
+
+```bash
+SDH_LOAD_FAILOVER_AT=0 SDH_LOAD_GOLD_CHECK=0 SDH_LOAD_TIMEOUT_MIN=330 deploy/aws/k8s/pipeline/load-test.sh 34 0
+```
+
+```bash
+deploy/aws/k8s/pipeline/measure.sh
+```
+
 The outage test (docs/PERFORMANCE.md §3.6): the same load, with every stage, Postgres and Kafka killed at once at
 40% landed and kept down 10 minutes; then every item must arrive once, with none left behind at any stage:
 

@@ -129,7 +129,7 @@ public final class ConnectorRuntime implements AutoCloseable
     /** Takes items through the pipeline. */
     private final ItemProcessor processor;
 
-    /** Splits one item at a time, under its lease. */
+    /** Splits items, each under its lease. */
     private final ItemSplitter splitter;
 
     /** Applies operators' corrections. */
@@ -183,7 +183,7 @@ public final class ConnectorRuntime implements AutoCloseable
      *                       null if it doesn't reprocess
      * @param pipeline       splits, stores and publishes
      * @param processor      takes items through the pipeline
-     * @param splitter       splits one item at a time
+     * @param splitter       splits items, each under its lease
      * @param corrections    applies operators' corrections
      * @param reprocess      the stage's reprocess; null if it doesn't
      * @param receiver       takes messages off the broker
@@ -386,7 +386,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     failures, corrections);
             ItemSplitter splitter = new ItemSplitter(processor, landedItems,
                     keys.wrap(), leases, properties.connectorId(),
-                    leaseSettings);
+                    leaseSettings, properties.split().concurrency());
             SplitCorrections correcting = new SplitCorrections(corrections,
                     releases, splitter, reprocess,
                     leaseSettings.renewInterval(), leaseSettings.ttl());
@@ -618,7 +618,7 @@ public final class ConnectorRuntime implements AutoCloseable
     }
 
     /**
-     * Splits one item at a time, under its lease.
+     * Splits items, each under its lease.
      *
      * @return the splitter
      */

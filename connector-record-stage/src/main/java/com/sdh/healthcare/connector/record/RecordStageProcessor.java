@@ -511,9 +511,19 @@ public final class RecordStageProcessor
         int taken = budget.acquire(apply.memoryBytes());
         try
         {
+            // Timed apart, as reading is what slows as the tables grow
+            // (docs/PERFORMANCE.md §2.1, §10).
+            long reading = System.nanoTime();
             byte[] raw = reader.readRecord(input,
                     (int) Math.min(Integer.MAX_VALUE, transform.maxBytes()));
-            return applyTo(input, raw);
+            Telemetry telemetry = Telemetry.get();
+            telemetry.phaseDuration(stage(), "read",
+                    System.nanoTime() - reading);
+            long applying = System.nanoTime();
+            StageOutput<Prepared> output = applyTo(input, raw);
+            telemetry.phaseDuration(stage(), "transform",
+                    System.nanoTime() - applying);
+            return output;
         }
         finally
         {
@@ -646,7 +656,8 @@ public final class RecordStageProcessor
             if (record.error() == null)
             {
                 Prepared prepared = outputs.get(index).value();
-                sent.add(message(record, ref, prepared.input(),
+                sent.add(message(record, writer.locate(ref, file, record),
+                        prepared.input(),
                         version(prepared.input()), prepared.correctionOf()));
             }
             else

@@ -22,11 +22,13 @@ import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.Semaphore;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.data.Record;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,8 +75,12 @@ public final class ItemSplitter
     /** The lease timings. */
     private final LeaseKeeper.Settings leaseSettings;
 
-    /** Held while an item is split: one at a time per pod. */
-    private final ReentrantLock lock = new ReentrantLock();
+    /**
+     * A permit is held while an item is split, so a pod splits at most so
+     * many at once. Each item's own lease keeps it to one split at a time,
+     * in this pod or another: a live lease is refused to its own owner too.
+     */
+    private final Semaphore permits;
 
     /**
      * Creates a splitter.
@@ -90,6 +96,32 @@ public final class ItemSplitter
             LandedItemsTable landedItems, KeyProvider keys, LeaseStore leases,
             String connectorId, LeaseKeeper.Settings leaseSettings)
     {
+        this(processor, landedItems, keys, leases, connectorId,
+                leaseSettings, 1);
+    }
+
+    /**
+     * Creates a splitter that splits up to so many items at once.
+     *
+     * @param processor     splits, stores and announces items
+     * @param landedItems   the {@code landed_items} table
+     * @param keys          unwraps the landed items' data keys
+     * @param leases        where the item leases are kept
+     * @param connectorId   the split stage's ID, naming its item leases
+     * @param leaseSettings the lease timings
+     * @param concurrency   the most items split at once; at least 1
+     */
+    public ItemSplitter(ItemProcessor processor,
+            LandedItemsTable landedItems, KeyProvider keys, LeaseStore leases,
+            String connectorId, LeaseKeeper.Settings leaseSettings,
+            int concurrency)
+    {
+        if (concurrency < 1)
+        {
+            throw new IllegalArgumentException(
+                    "concurrency must be at least 1");
+        }
+        this.permits = new Semaphore(concurrency);
         this.processor = processor;
         this.landedItems = landedItems;
         this.keys = keys;
@@ -101,7 +133,7 @@ public final class ItemSplitter
 
     /**
      * Splits an item, or finishes or announces again one already started.
-     * Waits while this pod splits another.
+     * Waits while this pod splits as many as it may.
      *
      * @param itemId the item's ID
      * @param digest the item's digest, from its {@code item.landed}
@@ -137,7 +169,31 @@ public final class ItemSplitter
     public ItemProcessor.Outcome split(UUID itemId, String digest,
             UUID sameAs) throws Exception
     {
-        lock.lockInterruptibly();
+        return split(itemId, digest, sameAs, null);
+    }
+
+    /**
+     * Splits an item as {@link #split(UUID, String, UUID)} does, reading
+     * its summary row and chunks where its {@code item.landed} says they
+     * are, not by scan (PERFORMANCE.md §3.2).
+     *
+     * @param itemId  the item's ID
+     * @param digest  the item's digest, from its {@code item.landed}
+     * @param sameAs  the earlier item it is an exact copy of; null if none
+     * @param storage where its {@code item.landed} says it is; null to find
+     *                it by scan
+     * @return how it ended
+     * @throws LeaseHeldException   if another pod holds the item's lease;
+     *                              try again later
+     * @throws InterruptedException if interrupted while waiting
+     * @throws Exception            if storage or the broker fails, or the
+     *                              item's lease was lost; try again later
+     */
+    public ItemProcessor.Outcome split(UUID itemId, String digest,
+            UUID sameAs, ConnectorMessage.StorageRef storage)
+            throws Exception
+    {
+        permits.acquire();
         try (LeaseKeeper lease = LeaseKeeper.tryAcquire(leases,
                 leasePrefix + itemId, owner, leaseSettings,
                 lost -> LOG.warn("split.item_lease_lost reason={}",
@@ -146,26 +202,44 @@ public final class ItemSplitter
             // What the producer's result names, passed on so later stages
             // need no landing key (STAGES.md §9). Refreshed first: the item
             // landed after the table was last read.
+            long started = System.nanoTime();
             if (sameAs != null)
             {
                 processor.noteCopy(itemId, sameAs);
             }
             Table landed = landedItems.get();
-            landed.refresh();
-            LandedRefs refs = LandedItems.summary(landed, itemId)
-                    .map(summary -> LandedRefs.of(summary, keys))
+            Optional<LandedItemSource.Summary> located =
+                    LandedItemSource.summary(landed, itemId, storage);
+            Optional<Record> summary =
+                    located.map(LandedItemSource.Summary::row);
+            Telemetry telemetry = Telemetry.get();
+            telemetry.phaseDuration(ItemProcessor.STAGE, "lookup",
+                    System.nanoTime() - started);
+            // When it landed, so its time to gold can be measured from the
+            // registries (docs/PERFORMANCE.md §10).
+            summary.ifPresent(row -> processor.noteLanded(itemId,
+                    ((OffsetDateTime) row.getField(LandingTables.LANDED_AT))
+                            .toInstant()));
+            LandedRefs refs = summary
+                    .map(row -> LandedRefs.of(row, keys))
                     .orElse(LandedRefs.NONE)
                     .withSameAs(processor.sameAs(itemId).orElse(null));
+            // Read once: the source reads the item from where it says.
             ItemProcessor.Outcome outcome = processor.process(itemId, digest,
-                    () -> LandedItemSource.open(landedItems.get(), itemId,
-                            keys), lease, refs);
+                    () -> located.isPresent()
+                            ? LandedItemSource.open(landed, itemId, keys,
+                                    located.get())
+                            : LandedItemSource.open(landedItems.get(),
+                                    itemId, keys), lease, refs);
+            telemetry.phaseDuration(ItemProcessor.STAGE, "item",
+                    System.nanoTime() - started);
             LOG.info("split.item_done result={} records={}",
                     outcome.result(), outcome.recordCount());
             return outcome;
         }
         finally
         {
-            lock.unlock();
+            permits.release();
         }
     }
 
@@ -174,7 +248,7 @@ public final class ItemSplitter
      * (STAGES.md §15.8.4), under the item's lease: interrupting the
      * generation before if it is part way (§15.8.6), or finishing it if its
      * cut is over; then notes what came of the run's object. Waits while
-     * this pod splits another.
+     * this pod splits as many as it may.
      *
      * @param reprocess the message taken
      * @param runs      notes what came of it; null to note nothing
@@ -191,7 +265,7 @@ public final class ItemSplitter
             throws Exception
     {
         UUID itemId = reprocess.itemId();
-        lock.lockInterruptibly();
+        permits.acquire();
         try (LeaseKeeper lease = lease(itemId))
         {
             Landed landed = landed(itemId);
@@ -210,7 +284,7 @@ public final class ItemSplitter
         }
         finally
         {
-            lock.unlock();
+            permits.release();
         }
     }
 
@@ -232,7 +306,7 @@ public final class ItemSplitter
             throws Exception
     {
         UUID itemId = pending.itemId();
-        lock.lockInterruptibly();
+        permits.acquire();
         try (LeaseKeeper lease = lease(itemId))
         {
             if (!store.stillPending(pending))
@@ -247,7 +321,7 @@ public final class ItemSplitter
         }
         finally
         {
-            lock.unlock();
+            permits.release();
         }
     }
 
@@ -273,7 +347,7 @@ public final class ItemSplitter
     {
         UUID itemId = request.itemId();
         Optional<Checkpoint> held;
-        lock.lockInterruptibly();
+        permits.acquire();
         try (LeaseKeeper lease = lease(itemId))
         {
             if (!releases.stillPending(request))
@@ -302,7 +376,7 @@ public final class ItemSplitter
         }
         finally
         {
-            lock.unlock();
+            permits.release();
         }
         if (request.action() == HoldReleases.Action.RESUME)
         {
@@ -324,7 +398,7 @@ public final class ItemSplitter
      */
     public void reannounce(UUID itemId) throws Exception
     {
-        lock.lockInterruptibly();
+        permits.acquire();
         try (LeaseKeeper lease = lease(itemId))
         {
             Landed landed = landed(itemId);
@@ -332,7 +406,7 @@ public final class ItemSplitter
         }
         finally
         {
-            lock.unlock();
+            permits.release();
         }
     }
 

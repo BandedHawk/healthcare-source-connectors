@@ -28,6 +28,12 @@ spec:
         - { name: intake, $patch: delete }     # a bucket, not a directory
       containers:
         - name: landing-connector
+          # Each pod's own metrics series (k8s/infra/telemetry.yaml): without an instance, two pods' counters
+          # interleave in one series and Prometheus reads each drop as a reset.
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.instance.id=$(POD_NAME)" }
           resources:
             requests: { cpu: 250m, memory: 1Gi }
             limits: { memory: 1Gi }

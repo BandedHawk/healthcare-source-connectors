@@ -51,32 +51,73 @@ public final class MaintenanceScheduler implements AutoCloseable
     /**
      * When maintenance runs.
      *
-     * @param enabled        whether it runs at all
-     * @param interval       how often
-     * @param orphans        whether orphan-file cleanup runs
-     * @param orphanInterval how often orphan-file cleanup runs, at most
+     * @param enabled          whether it runs at all
+     * @param interval         how often the full run (retention, compaction,
+     *                         manifests, expiry, orphans)
+     * @param orphans          whether orphan-file cleanup runs
+     * @param orphanInterval   how often orphan-file cleanup runs, at most
+     * @param manifestInterval how often small manifests are rewritten
+     *                         between full runs (docs/PERFORMANCE.md §3.3);
+     *                         no more often than the full run if not
+     *                         shorter
      */
     public record Schedule(boolean enabled, Duration interval,
-            boolean orphans, Duration orphanInterval)
+            boolean orphans, Duration orphanInterval,
+            Duration manifestInterval)
     {
+
+        /** How often manifests are rewritten unless set: five minutes. */
+        public static final Duration MANIFEST_INTERVAL =
+                Duration.ofMinutes(5);
 
         /**
          * Checks the schedule.
          *
-         * @param enabled        whether it runs at all
-         * @param interval       how often
-         * @param orphans        whether orphan-file cleanup runs
-         * @param orphanInterval how often orphan-file cleanup runs, at most
+         * @param enabled          whether it runs at all
+         * @param interval         how often the full run
+         * @param orphans          whether orphan-file cleanup runs
+         * @param orphanInterval   how often orphan-file cleanup runs, at most
+         * @param manifestInterval how often manifests are rewritten
          */
         public Schedule
         {
             Objects.requireNonNull(interval, "interval");
             Objects.requireNonNull(orphanInterval, "orphanInterval");
-            if (interval.isNegative() || interval.isZero())
+            Objects.requireNonNull(manifestInterval, "manifestInterval");
+            if (interval.isNegative() || interval.isZero()
+                    || manifestInterval.isNegative()
+                    || manifestInterval.isZero())
             {
                 throw new IllegalArgumentException(
-                        "The maintenance interval must be positive");
+                        "The maintenance intervals must be positive");
             }
+        }
+
+        /**
+         * A schedule that rewrites manifests every
+         * {@link #MANIFEST_INTERVAL}.
+         *
+         * @param enabled        whether it runs at all
+         * @param interval       how often the full run
+         * @param orphans        whether orphan-file cleanup runs
+         * @param orphanInterval how often orphan-file cleanup runs, at most
+         */
+        public Schedule(boolean enabled, Duration interval, boolean orphans,
+                Duration orphanInterval)
+        {
+            this(enabled, interval, orphans, orphanInterval,
+                    MANIFEST_INTERVAL);
+        }
+
+        /**
+         * How often the scheduler ticks: the shorter interval.
+         *
+         * @return the tick
+         */
+        Duration tick()
+        {
+            return manifestInterval.compareTo(interval) < 0
+                    ? manifestInterval : interval;
         }
     }
 
@@ -152,6 +193,9 @@ public final class MaintenanceScheduler implements AutoCloseable
 
     /** When orphan cleanup last ran. */
     private Instant lastOrphanRun = Instant.EPOCH;
+
+    /** When the full run last ran; null before the first. */
+    private Instant lastFullRun;
 
     /**
      * Creates a scheduler; {@link #start} starts it.
@@ -234,12 +278,16 @@ public final class MaintenanceScheduler implements AutoCloseable
         executor = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().name("sdh-maintenance").daemon(true)
                         .factory());
-        long every = schedule.interval().toMillis();
+        long every = schedule.tick().toMillis();
+        lastFullRun = clock.instant();
         executor.scheduleWithFixedDelay(this::tick, every, every,
                 TimeUnit.MILLISECONDS);
     }
 
-    /** One tick: a run, if the writer lock is free. */
+    /**
+     * One tick, if the writer lock is free: the full run if its interval
+     * has passed, otherwise only the manifests' rewrite.
+     */
     private void tick()
     {
         if (!writer.tryLock())
@@ -249,7 +297,19 @@ public final class MaintenanceScheduler implements AutoCloseable
         }
         try
         {
-            runOnce();
+            Instant now = clock.instant();
+            // A tick a little early still counts: ticks are a fixed delay
+            // apart, after runs of their own length.
+            if (!now.plus(schedule.tick().dividedBy(2))
+                    .isBefore(lastFullRun.plus(schedule.interval())))
+            {
+                runOnce();
+                lastFullRun = now;
+            }
+            else
+            {
+                rewriteManifests();
+            }
         }
         catch (LeaseLostException | CommitStateUnknownException
                 | CheckpointTamperedException failure)
@@ -294,6 +354,22 @@ public final class MaintenanceScheduler implements AutoCloseable
             lastOrphanRun = now;
         }
         return reports;
+    }
+
+    /**
+     * Rewrites every table's small manifests (docs/PERFORMANCE.md §3.3).
+     * The caller must hold the writer lock, or know nothing is writing.
+     *
+     * @return how many manifests were rewritten in each table, in order
+     */
+    public List<Integer> rewriteManifests()
+    {
+        List<Integer> rewritten = new ArrayList<>();
+        for (Target target : targets.get())
+        {
+            rewritten.add(maintenance.rewriteManifests(target.table()));
+        }
+        return rewritten;
     }
 
     /** Stops the ticks, waiting up to a minute for a run to finish. */

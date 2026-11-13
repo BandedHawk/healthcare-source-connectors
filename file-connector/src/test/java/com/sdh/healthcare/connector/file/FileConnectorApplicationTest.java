@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.file;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 import com.fasterxml.jackson.databind.cfg.PackageVersion;
 import com.nimbusds.jose.crypto.ECDSASigner;
@@ -24,6 +25,8 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordSpli
 import com.sdh.healthcare.connector.contract.message.PayloadCodec;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
+import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
+import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
 import com.sdh.healthcare.connector.core.landing.LandedItem;
@@ -58,6 +61,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.camel.CamelContext;
 import org.apache.camel.ConsumerTemplate;
+import org.assertj.core.groups.Tuple;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -612,6 +616,87 @@ class FileConnectorApplicationTest
         public void checkHeld()
         {
         }
+    }
+
+    /**
+     * A batch's items are split at once (sdh.split.concurrency, 4 by
+     * default), each in full: every item is announced once, with all its
+     * records.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void splitsABatchsItemsAtOnce() throws Exception
+    {
+        TestLanding landing = new TestLanding(catalogProperties(),
+                runtime.keys().wrap(), KEYS, INTAKE);
+        List<LandedItem> items = new ArrayList<>();
+        List<BrokerMessage> batch = new ArrayList<>();
+        for (int index = 0; index < 4; index++)
+        {
+            LandedItem item = landing.land(csv(5 + index, "c" + index),
+                    null);
+            items.add(item);
+            batch.add(new BrokerMessage(landing.announcement(item),
+                    UUID.randomUUID().toString(), Map.of()));
+        }
+
+        assertThat(handler().handle(batch)).isEqualTo(Outcome.DONE);
+
+        List<ConnectorMessage> messages = drain();
+        assertThat(FATAL).isEmpty();
+        assertThat(of(messages, ItemSplit.class))
+                .extracting(ItemSplit::itemId, ItemSplit::recordCount)
+                .containsExactlyInAnyOrder(items.stream()
+                        .map(item -> tuple(item.itemId(),
+                                5L + items.indexOf(item)))
+                        .toArray(Tuple[]::new));
+        assertThat(of(messages, RecordSplit.class)).hasSize(5 + 6 + 7 + 8);
+    }
+
+    /**
+     * A batch retried because another pod holds one item's lease splits
+     * only that item the next time: the others, split the first time, are
+     * not announced again.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aRetriedBatchSplitsOnlyTheItemsLeft() throws Exception
+    {
+        TestLanding landing = new TestLanding(catalogProperties(),
+                runtime.keys().wrap(), KEYS, INTAKE);
+        List<LandedItem> items = new ArrayList<>();
+        List<BrokerMessage> batch = new ArrayList<>();
+        for (int index = 0; index < 3; index++)
+        {
+            LandedItem item = landing.land(csv(2, "r" + index), null);
+            items.add(item);
+            batch.add(new BrokerMessage(landing.announcement(item),
+                    UUID.randomUUID().toString(), Map.of()));
+        }
+        SplitHandler handler = handler();
+        JdbcLeaseStore leases = new JdbcLeaseStore(PG.getPostgresDatabase(),
+                "sdh_lease", Duration.ofSeconds(10));
+        UUID held = items.get(1).itemId();
+        try (LeaseKeeper other = LeaseKeeper.tryAcquire(leases,
+                "split/file-connector/" + held, "pod-b",
+                new LeaseKeeper.Settings(Duration.ofSeconds(30),
+                        Duration.ofSeconds(5), Duration.ofSeconds(5)),
+                lost -> { }))
+        {
+            assertThat(handler.handle(batch)).isEqualTo(Outcome.RETRY);
+        }
+        assertThat(of(drain(), ItemSplit.class))
+                .extracting(ItemSplit::itemId)
+                .containsExactlyInAnyOrder(items.get(0).itemId(),
+                        items.get(2).itemId());
+
+        assertThat(handler.handle(batch)).isEqualTo(Outcome.DONE);
+
+        assertThat(of(drain(), ItemSplit.class))
+                .extracting(ItemSplit::itemId).containsExactly(held);
+        assertThat(FATAL).isEmpty();
     }
 
     /**
