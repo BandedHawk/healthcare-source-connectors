@@ -68,6 +68,20 @@ throughput and each stage's failures, then runs the gold check. Its report is ke
 deploy/aws/k8s/pipeline/load-test.sh [copies] [error-copies]
 ```
 
+The outage test (docs/PERFORMANCE.md §3.6): the same load, with every stage, Postgres and Kafka killed at once at
+40% landed and kept down 10 minutes; then every item must arrive once, with none left behind at any stage:
+
+```bash
+SDH_LOAD_FAILOVER_AT=0 SDH_LOAD_OUTAGE_AT=40 SDH_LOAD_OUTAGE_MIN=10 deploy/aws/k8s/pipeline/load-test.sh 5 2
+```
+
+Add `SDH_LOAD_OUTAGE_LOSE=landed,split,records` to also delete the messages queued during the outage, as if it had
+outlasted the brokers' retention: the reconcilers must rebuild them (it waits 45 minutes more for them). For an
+outage across sessions, run `poc.sh down --no-drain` part way through a load and `up` later; the stages resume.
+After an outage the "junk rejected" counts may read low: they come from pod logs, and the outage kills the pods.
+Run it on a freshly `reset` pipeline: on tables holding earlier runs, split and the gold check slow down
+(docs/PERFORMANCE.md §2).
+
 The gold check alone (needs about 1 CPU and 2.5 GiB free, a burst node or the stages paused):
 
 ```bash
@@ -126,4 +140,3 @@ keys lost there are gone for good.
 - Until the lookups are fixed, run the gold check after a small load on a reset pipeline: `poc.sh reset`, then
   `load-test.sh 5 2`. That ran on 2026-11-13: failover in 2 s, Spot burst, gold read and checked (docs/AWS-POC.md,
   Status).
-- At that failover one item landed twice (161 for 160 objects); not yet explained.

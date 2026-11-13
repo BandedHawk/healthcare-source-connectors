@@ -13,6 +13,9 @@
 # On top, 3 messages no stage can open go on each of <p>.split and <p>.records (rejected and dropped by the convert
 # and transform stages: stage.message_rejected reason=MALFORMED; a dead-letter queue is for messages that open), and the landing pod holding the lease is deleted part-way (its standby takes over).
 #
+# SDH_LOAD_OUTAGE_AT, _MIN and _LOSE add an outage part way (below, and docs/PERFORMANCE.md §3.6); the report then
+# checks every item ended at every stage, and counts what the reconcilers rebuilt.
+#
 # How: the inputs go to a staging prefix in the intake bucket first, then are copied server-side under <p>/ at t0,
 # so the push isn't limited by this machine's upload. Progress every 15 s; done when the intake prefix is empty, no
 # consumer group lags and the registries have stopped changing. The report (counts, codes and timings only) is
@@ -33,6 +36,14 @@ BUCKET="s3://sdh-poc-intake-$ACCOUNT"
 INTAKE="$BUCKET/$P/"
 TIMEOUT_MIN="${SDH_LOAD_TIMEOUT_MIN:-120}"
 FAILOVER_AT="${SDH_LOAD_FAILOVER_AT:-30}"   # % of objects landed when the lease holder is deleted; 0: never
+# The outage (docs/PERFORMANCE.md §3.6): at OUTAGE_AT % landed, every stage, Postgres and Kafka are killed at once,
+# with no graceful stop; they stay down OUTAGE_MIN minutes. OUTAGE_LOSE names topics whose queued messages are
+# deleted meanwhile (landed,split,records), as if the outage had outlasted the brokers' retention: the reconcilers
+# must then rebuild them, after their backlog wait, so the test waits SETTLE_MIN more before it can end.
+OUTAGE_AT="${SDH_LOAD_OUTAGE_AT:-0}"
+OUTAGE_MIN="${SDH_LOAD_OUTAGE_MIN:-10}"
+OUTAGE_LOSE="${SDH_LOAD_OUTAGE_LOSE:-}"
+SETTLE_MIN="${SDH_LOAD_SETTLE_MIN:-$([[ -n "$OUTAGE_LOSE" ]] && echo 45 || echo 0)}"
 
 say() { printf '>> %s\n' "$*" | tee -a "${report:-/dev/null}"; }
 die() { printf 'load-test.sh: %s\n' "$*" >&2; exit 1; }
@@ -69,6 +80,7 @@ mkdir -p "$STATE/load"; chmod 700 "$STATE/load"
 report="$out/report.txt"
 staging="$BUCKET/staging/$run/"
 cleanup() {
+  [[ "${outage_state:-}" == down ]] && { outage_restore || true; }
   aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
   rm -rf "$out/inputs"
 }
@@ -120,6 +132,38 @@ holder() {  # the running landing pod that has logged lease.acquired (with two, 
   return 0
 }
 killed="" killed_at="" takeover=""
+
+# The outage: KEDA paused at 0 and every pod killed, then Postgres and Kafka killed (their StatefulSets start them
+# again at once, as after a crash; the stages stay down until the outage ends).
+outage_state="" outage_end=0 outage_landed="" restored_at="" settle_until=0
+outage_start() {
+  local ns
+  for ns in "$N" sdh-fhir; do
+    kubectl -n "$ns" annotate scaledobject --all autoscaling.keda.sh/paused-replicas=0 --overwrite >/dev/null
+    kubectl -n "$ns" scale deploy --all --replicas=0 >/dev/null
+    kubectl -n "$ns" delete pods --all --grace-period=0 --force >/dev/null 2>&1 || true
+  done
+  infra delete pod postgres-0 kafka-0 --grace-period=0 --force >/dev/null 2>&1 || true
+  infra wait --for=condition=Ready pod/postgres-0 pod/kafka-0 --timeout=600s >/dev/null \
+    || die "Postgres or Kafka didn't come back after the outage's kill"
+}
+# Deletes every queued message of a topic (up to its end): what retention would do to a backlog it outlasted.
+lose_messages() {
+  local topic="$P.$1" parts json
+  parts="$(kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic "$topic" \
+    | awk '/PartitionCount/ {for (i = 1; i <= NF; i++) if ($i == "PartitionCount:") print $(i + 1)}')"
+  json="$(python3 -I -c 'import json, sys; print(json.dumps({"version": 1, "partitions": [
+    {"topic": sys.argv[1], "partition": i, "offset": -1} for i in range(int(sys.argv[2]))]}))' "$topic" "$parts")"
+  printf '%s' "$json" | kafka sh -c 'cat > /tmp/sdh-lose.json && /opt/kafka/bin/kafka-delete-records.sh \
+    --bootstrap-server localhost:9092 --offset-json-file /tmp/sdh-lose.json >/dev/null && rm /tmp/sdh-lose.json'
+}
+outage_restore() {
+  local ns
+  kubectl -n "$N" scale deploy landing --replicas=2 >/dev/null
+  for ns in "$N" sdh-fhir; do
+    kubectl -n "$ns" annotate scaledobject --all autoscaling.keda.sh/paused-replicas- >/dev/null
+  done
+}
 declare -A max_pods=([landing]=0 [splitter]=0 [convert]=0 ["transform-$P"]=0)
 max_nodes=0 max_burst=0 pushed_at="" stable=0 last=""
 declare -A last_change seen
@@ -167,12 +211,30 @@ while :; do
     takeover=$((SECONDS - killed_at)); say "  failover: $(holder) took the lease ${takeover}s later"
   fi
 
+  # The outage: down for OUTAGE_MIN minutes, losing OUTAGE_LOSE's queued messages, then started again.
+  if [[ -z "$outage_state" && "$OUTAGE_AT" != 0 ]] && ((landed * 100 >= files * OUTAGE_AT)); then
+    outage_landed=$landed
+    say "  outage: killing every stage, Postgres and Kafka at $landed landed, for $OUTAGE_MIN minutes"
+    outage_start
+    for t in ${OUTAGE_LOSE//,/ }; do
+      lose_messages "$t" && say "  outage: deleted the queued messages of $P.$t" \
+        || say "  outage: couldn't delete the queued messages of $P.$t"
+    done
+    outage_state=down outage_end=$((SECONDS + OUTAGE_MIN * 60))
+  fi
+  if [[ "$outage_state" == down ]] && ((SECONDS >= outage_end)); then
+    outage_restore; outage_state=restored restored_at=$SECONDS settle_until=$((SECONDS + SETTLE_MIN * 60))
+    say "  outage: started again after $OUTAGE_MIN minutes${SETTLE_MIN:+; waiting at least $SETTLE_MIN more for the reconcilers}"
+  fi
+
   state="$in|$landed|$split|$c_done|$t_done|$t_failed|$l"
   if [[ -n "$pushed_at" && "$in" == 0 && "$l" == 0 && "$state" == "$last" ]]; then stable=$((stable + 1))
   else stable=0; fi
+  # Nothing moving is the end only when no outage is under way or settling.
+  if [[ "$outage_state" == down ]] || ((SECONDS < settle_until)); then stable=0; fi
   last="$state"
   ((stable >= 3)) && break   # 45 s with nothing moving
-  ((now < TIMEOUT_MIN * 60)) || { say "  TIMEOUT after $TIMEOUT_MIN minutes: reporting what's done"; break; }
+  ((now < (TIMEOUT_MIN + OUTAGE_MIN * (OUTAGE_AT != 0) + SETTLE_MIN) * 60)) || { say "  TIMEOUT after $TIMEOUT_MIN minutes: reporting what's done"; break; }
 done
 end=$(( ${last_change[transformed]:-$((SECONDS - t0))} ))
 
@@ -182,7 +244,40 @@ per_min() { python3 -I -c 'import sys; n, s = float(sys.argv[1]), float(sys.argv
 say ""
 say "=== Report: run $run (pipeline $P) ==="
 say "Pushed: $files objects, $bytes bytes; all in the intake after ${pushed_at:-?}s (server-side copy)"
-say "Landed: $landed items for $files objects (exactly once: $([[ "$landed" == "$files" ]] && echo yes || echo NO))"
+# Items, not messages: a landing node that takes the lease announces the last item landed again (STAGES.md §13.2),
+# and the split stage drops the repeat, so a failover adds a .landed message but no item.
+items="$(db "SELECT count(DISTINCT item_id) FROM split_$PREFIX.split_item WHERE updated_at >= '$t0_db'" 2>/dev/null || echo '?')"
+say "Landed: $items items for $files objects (exactly once: $([[ "$items" == "$files" ]] && echo yes || echo NO));" \
+  "$landed $P.landed messages (one more per failover: the last item announced again)"
+# Every item split must have ended at convert, and every item convert ended must have ended at transform: what
+# an outage could leave behind (docs/PERFORMANCE.md §3.6). 0 and 0 when nothing was. Ended, as in ended(): every
+# record ended, failed or not; completed_at is set only when none failed, so it can't be the test. An item with a
+# failure open upstream stays open downstream until the failure is retried (STAGES.md, the fail store), so its
+# total counts as final there once every record it got has ended.
+not_ended() { echo "NOT EXISTS (SELECT 1 FROM $1.stage_item b WHERE b.item_id = a.item_id
+  AND b.expected IS NOT NULL AND (NOT b.upstream_open OR $2) AND b.done >= b.expected)"; }
+run_items="SELECT item_id FROM split_$PREFIX.split_item WHERE updated_at >= '$t0_db'"
+split_behind="$(db "SELECT count(*) FROM split_$PREFIX.split_item a WHERE a.updated_at >= '$t0_db'
+  AND a.state = 'COMPLETED' AND $(not_ended "convert_$PREFIX" false)" 2>/dev/null || echo '?')"
+convert_behind="$(db "SELECT count(*) FROM convert_$PREFIX.stage_item a WHERE a.item_id IN ($run_items)
+  AND a.failed < a.done AND $(not_ended "transform_$PREFIX" "a.failed > 0")" 2>/dev/null || echo '?')"
+say "Items left behind: split but not ended at convert $split_behind; converted (with a record sent on)" \
+  "but not ended at transform $convert_behind (expected 0 and 0)"
+if [[ -n "$outage_state" ]]; then
+  say "Outage: at $outage_landed landed, down $OUTAGE_MIN minutes, messages lost: ${OUTAGE_LOSE:-none};" \
+    "$((${last_change[transformed]:-0} - (restored_at - t0)))s from the restart to the last item transformed"
+  say "  what the reconcilers did (audit events, all pods since the restart):"
+  for e in stage.records_recovered stage.item_completion_recovered stage.item_total_missing \
+      stage.placement_unknown stage.reconcile_deferral_capped split.recovered; do
+    c=0
+    for ns in "$N" sdh-fhir; do
+      for pod in $(kubectl -n "$ns" get pods -o name 2>/dev/null); do
+        c=$((c + $(kubectl -n "$ns" logs "$pod" 2>/dev/null | grep -c "$e" || true)))
+      done
+    done
+    say "    $e: $c"
+  done
+fi
 copies="$(db "SELECT count(*) FROM split_$PREFIX.split_copy WHERE noted_at >= '$t0_db'" 2>/dev/null || echo '?')"
 say "  resends noted as copies by the split stage: $copies (expected $ERROR_COPIES)"
 say "Items ended: split $split, convert $converted, transform $transformed"
@@ -202,7 +297,8 @@ db "SELECT state, count(*) FROM split_$PREFIX.split_item WHERE updated_at >= '$t
 say "Messages written since t0:"
 for t in "${topics[@]}"; do say "    $P.$t: $(($(offsets "$P.$t") - before[$t]))"; done
 say "  expected: $P.convert.dlq and $P.fhir.dlq 0 (the junk is rejected, not dead-lettered)"
-say "Junk rejected (stage.message_rejected reason=MALFORMED, since t0; expected 3 each):"
+say "Junk rejected (stage.message_rejected reason=MALFORMED, since t0; expected 3 each$([[ -n "$outage_state" ]] \
+  && echo ', or fewer: counted from the pods'"'"' logs, and the outage killed the pods that read them')):"
 for d in "$N convert" "sdh-fhir transform-$P"; do
   read -r ns app <<<"$d"
   logs="$(kubectl -n "$ns" logs -l "app=$app" --tail=-1 --max-log-requests=10 --since-time="$t0_iso" 2>/dev/null || true)"

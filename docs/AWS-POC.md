@@ -86,9 +86,11 @@
     mapping's baselines in the 32 bundles validated.
   - **Throughput** (small, not a performance figure): 868 s end to end, landing 20.6 items/min, split
     11.4 items/min. Split is still the bottleneck (the lookups above).
-  - **One duplicate:** 161 items landed for 160 objects, and one document has 6 bundles for 5 copies. Probably
-    the item the holder was landing when it was deleted, landed again by the standby; not yet confirmed. Nothing
-    was lost. To look at in the landing node's stop path.
+  - **No duplicate, though the report said so:** it counted 161 `.landed` messages for 160 objects, but 160
+    distinct items were split. The standby, on taking the lease, announces the last item landed again (by
+    design, STAGES.md §13.2), and the split stage drops the repeat. The one document with 6 bundles is the load
+    test's exact resend of the first AliceNewman copy. The load test now checks exactly once by the split
+    stage's distinct items, and reports the messages beside them.
   - **Fixed on the way:** `poc.sh reset` left the stages at 0 replicas (they leave replicas to KEDA, and their
     scaling is made last), so it now deletes the stages' workloads and `apply.sh` makes them as on a new cluster.
     The gold check named no bundle, so its per-document checks ran on nothing: it hashed whole files, but a split
@@ -97,6 +99,12 @@
   - The session started on images built from the committed connectors plus these fixes. An `up` on a kept
     database whose last load left items part way stays held at split's drain gate (`stage.version_blocked`) until
     those items drain, or `reset`.
+- **Outage test, AWS, 2026-11-13** (`load-test.sh 5 2`, outage at 40% for 10 minutes; report
+  `load/load-20261113T044533Z`; docs/PERFORMANCE.md §3.6). Every stage, Postgres and Kafka were killed at once
+  at 78 of 160 landed. Afterwards every item arrived exactly once, none was left part way, and the gold check
+  passed (32 bundles, nothing beyond mapping's baselines). Recovery was slow: split ran at 3 items/min on
+  tables holding two runs, and the gold check's read took 23 minutes, longer than `gold-check.sh` waits. The
+  message-losing variant (`SDH_LOAD_OUTAGE_LOSE`) is not yet run.
 - The prices are approximate us-east-2 on-demand list prices, not checked against the Pricing API.
 
 **Decided with the user, 2026-11-12:**
