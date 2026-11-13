@@ -200,3 +200,32 @@ resource "aws_eks_pod_identity_association" "stage" {
   service_account = split("/", each.value)[1]
   role_arn        = local.p.stage_role_arns[each.key]
 }
+
+# The gold check's reader (deploy/aws/k8s/pipeline/gold-check.sh): read-only, in sdh-fhir. Only once the persistent
+# layer has the role (it was added after the first apply).
+resource "aws_eks_pod_identity_association" "gold_reader" {
+  count           = lookup(local.p, "gold_reader_role_arn", null) == null ? 0 : 1
+  cluster_name    = aws_eks_cluster.poc.name
+  namespace       = "sdh-fhir"
+  service_account = "gold-reader"
+  role_arn        = local.p.gold_reader_role_arn
+}
+
+# --- Console access ---------------------------------------------------------------------------------------------
+#
+# The cluster's creator (the deployer) is its only admin. These IAM principals may also see its workloads in the
+# EKS console (Resources tab), read-only and without Secrets: AmazonEKSViewPolicy.
+resource "aws_eks_access_entry" "viewer" {
+  for_each      = toset(var.console_viewers)
+  cluster_name  = aws_eks_cluster.poc.name
+  principal_arn = each.value
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "viewer" {
+  for_each      = aws_eks_access_entry.viewer
+  cluster_name  = aws_eks_cluster.poc.name
+  principal_arn = each.value.principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy"
+  access_scope { type = "cluster" }
+}

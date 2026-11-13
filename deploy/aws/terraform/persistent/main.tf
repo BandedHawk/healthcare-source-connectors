@@ -93,10 +93,11 @@ resource "aws_kms_alias" "infra" {
 # --- S3 ----------------------------------------------------------------------------------------------------------
 # intake: synthetic test C-CDA that the landing stage reads. It uses SSE-S3, so the deployer can upload to it.
 # bronze, silver, gold: the medallion layers, with SSE-KMS under the infra key and a bucket key (fewer KMS calls).
-# The pipeline also encrypts every record itself (DESIGN.md §8).
+# The pipeline also encrypts every record itself (DESIGN.md §8). tools: test tools, such as the HL7 FHIR validator
+# the gold check runs (deploy/aws/k8s/pipeline/gold-check.sh); no data, so SSE-S3.
 
 locals {
-  layers = { intake = false, bronze = true, silver = true, gold = true } # name => SSE-KMS?
+  layers = { intake = false, bronze = true, silver = true, gold = true, tools = false } # name => SSE-KMS?
 }
 
 resource "aws_s3_bucket" "layer" {

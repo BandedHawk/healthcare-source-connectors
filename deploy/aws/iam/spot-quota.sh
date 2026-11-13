@@ -7,6 +7,9 @@
 # Why: on 2026-11-12 the PoC's Spot burst node group (0 to 2 nodes, each 2 vCPUs: t4g, m7g or m6g .large) failed
 # every launch with UnfulfillableCapacity, though Spot was priced in us-east-2a. A new account's Spot vCPU quota
 # is often too small for even one node. The deployer can't read Service Quotas, so an admin runs this.
+# Later the same day a burst node did launch (then got a Spot interruption, and every launch after it was
+# UnfulfillableCapacity again), so the quota isn't the cause there: Spot capacity for these types in us-east-2a is.
+# This still shows the quota, which a larger burst group would need.
 #
 # It changes nothing unless you answer y: then it files one quota increase request, which AWS reviews (often
 # approved within minutes for small amounts, sometimes a support case). Raising a quota costs nothing by itself;

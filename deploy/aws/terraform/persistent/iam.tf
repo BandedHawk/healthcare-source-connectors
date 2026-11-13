@@ -244,3 +244,62 @@ resource "aws_iam_role_policy_attachment" "stage" {
   role       = aws_iam_role.stage[each.key].name
   policy_arn = aws_iam_policy.stage[each.key].arn
 }
+
+# --- The gold check: a reader after the transform stage (deploy/aws/k8s/pipeline/gold-check.sh) ----------------
+#
+# What a downstream reader of gold needs, and nothing to write: it reads each bundle from gold (the fhir KEK) and its
+# source document from silver's split_records (the records KEK), and checks the transform stage's signatures. The
+# messages themselves are sealed to the consumer key, which the check is given as a secret.
+
+resource "aws_iam_role" "gold_reader" {
+  name                 = "${var.cluster_name}-gold-reader"
+  path                 = local.path
+  permissions_boundary = local.boundary
+  assume_role_policy   = local.pods_trust
+}
+
+resource "aws_iam_policy" "gold_reader" {
+  name = "${var.cluster_name}-gold-reader"
+  path = local.path
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ListBuckets"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Resource = [local.bucket_arn["gold"], local.bucket_arn["silver"]]
+      },
+      {
+        Sid      = "ReadObjects"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${local.bucket_arn["gold"]}/*", "${local.bucket_arn["silver"]}/*"]
+      },
+      {
+        Sid      = "UnwrapOnly"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:DescribeKey"]
+        Resource = flatten([for p in var.pipelines : [local.kek_arn["${p}-fhir"], local.kek_arn["${p}-records"]]])
+      },
+      {
+        Sid      = "VerifySignatures"
+        Effect   = "Allow"
+        Action   = ["kms:GetPublicKey", "kms:Verify"]
+        Resource = values(local.sign_arn)
+      },
+      {
+        Sid       = "BucketEncryption"
+        Effect    = "Allow"
+        Action    = ["kms:Decrypt"]
+        Resource  = aws_kms_key.infra.arn
+        Condition = { StringEquals = { "kms:ViaService" = "s3.${var.region}.amazonaws.com" } }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "gold_reader" {
+  role       = aws_iam_role.gold_reader.name
+  policy_arn = aws_iam_policy.gold_reader.arn
+}

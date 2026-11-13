@@ -8,7 +8,9 @@
   - 2 base nodes; Postgres and Kafka on the kept volumes; KEDA; the autoscaler, with Pod Identity credentials;
     the topics (4/6/8/1/1/1 partitions) and database roles;
   - then a drain, a clean stop, snapshots, the cluster destroyed, the schedule removed, and nothing left over.
-  - The guard ran once with no cluster and succeeded. Deleting a live cluster with it is still untested.
+  - The guard ran once with no cluster and succeeded. On 2026-11-12 it also deleted a live cluster (fired by
+    mistake, see the load test below): node groups and cluster gone in 11 minutes; `poc.sh down` afterwards found
+    no cluster, snapshotted both volumes and left nothing running.
   - Postgres holds a table `sdh_poc_marker` with one row: the next `up` should find it, which proves the data
     survives a new cluster.
 - The pipeline ran on AWS on 2026-11-12 (`poc.sh up --hours 2`, then `down`):
@@ -20,11 +22,40 @@
     bundle, 5 kept as they came), and no log held document content or an object key;
   - KEDA scaled split to 2, convert to 2 and transform to 4 on the backlog, and back;
   - the marker table `sdh_poc_marker` was found on the new cluster, so the data survives one.
-  - **Open:** the Spot burst nodes couldn't be launched (`UnfulfillableCapacity`, though Spot was priced in
-    us-east-2a), so 3 transform pods stayed Pending until the backlog cleared. The likeliest cause is the new
-    account's Spot vCPU quota ("All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests"), which the
-    deployer can't read. The admin runs `deploy/aws/iam/spot-quota.sh`, which shows it and, if they agree, asks
-    for 8 vCPUs (2 burst nodes need 4).
+  - The Spot burst nodes couldn't be launched (`UnfulfillableCapacity`), so 3 transform pods stayed Pending
+    until the backlog cleared. Not the quota, as first thought: see the load test.
+- A load test ran on 2026-11-12 (`deploy/aws/k8s/pipeline/load-test.sh`, 2,450 objects, 312 MB: 80 copies of
+  each of mapping's 30 test documents and 10 of each of the file connector's 5 error inputs). It was stopped
+  part-way, as below. What it showed:
+  - **The split stage can't keep up, and slows as bronze grows.** It reads each landed item with a full scan of
+    `ccda_push_landing.landed_items`, which is unpartitioned and gets one manifest per commit: about 800 manifests
+    and 10 s a lookup by the time 800 items had landed, rising with each item. Split (and so convert and
+    transform) went from about 6 items a minute to about 1. `split_records` has the same shape (85, then 324
+    manifests; 1–4 s a lookup), and so does any reader of it: the gold check read only about 6 bundles a minute.
+    From 22:45 UTC throughput rose about tenfold (75–90 items per 5 minutes) for reasons not found: the deployer
+    can't read bronze's metadata, by design. **Needs a fix in the connectors** before a larger load: lookups by
+    key that prune manifests (partitioning or sorting the tables by item ID) and regular manifest rewriting.
+  - Landing kept up: all 2,450 objects were in the intake 22 s after the server-side copy began, and landed at
+    about 80 a minute. When the stages were paused, about 475 items had been split, 470 converted and 225
+    transformed (245 records `TRANSFORM_CHECK_FAILED`, the set's expected failures), about 715 bundles were in
+    gold, and about 2,000 landed items were still queued for the split stage (kept; they resume next session).
+    The split and convert error inputs were all still queued, so their handling wasn't seen at volume.
+  - **Landing failover:** the lease holder was deleted with 1,576 objects still in the intake. The lease moved in
+    84 s, never two landing at once, but to the pod that replaced it, not to the standby that had waited 19
+    minutes. The new holder's reconcile then scanned `landed_items` (12–18 s a scan) before landing resumed.
+  - **Unopenable messages** (junk put on `.split` and `.records`) are rejected and dropped by the convert and
+    transform stages (`stage.message_rejected reason=MALFORMED`), not dead-lettered: a dead-letter queue is for
+    messages that open. Both DLQs stayed empty.
+  - **Spot:** one burst node launched and got a Spot interruption notice 80 s later; every launch after that was
+    `UnfulfillableCapacity`. So the quota is not the cause (the node launched): it is Spot capacity for
+    `t4g`/`m7g`/`m6g.large` in us-east-2a. Burst capacity here needs more instance types or zones, or on-demand.
+  - **The gold check didn't complete.** It needs about 1 CPU and 2.5 GiB, more than the base nodes had free
+    while the stages ran, and it read too slowly (above) to finish before the guard fired. Locally, against
+    mapping's baseline, it gave the expected results (30 of 30 documents' resource counts; validator errors
+    matched for the three bundles tried).
+  - **A mistake:** `poc.sh extend --hours 2` (it takes `extend 2`) scheduled the shutdown for that moment.
+    Rescheduling 20 s later didn't stop the run the scheduler had already taken, and the guard deleted the
+    cluster mid-check. `extend` now refuses anything but a positive number of hours.
 - The prices are approximate us-east-2 on-demand list prices, not checked against the Pricing API.
 
 **Decided with the user, 2026-11-12:**
@@ -259,6 +290,10 @@ This configuration is for synthetic data only. Real PHI would need:
      beside the KMS signing keys' public halves. Run it again on its own to apply a change.
 5. **Tests:**
    - a smoke set (`deploy/aws/k8s/pipeline/check.sh`; passed 2026-11-12), then 2 GB;
+   - a load with each stage's error inputs (`deploy/aws/k8s/pipeline/load-test.sh`; tried 2026-11-12, stopped
+     part-way: the split stage's lookups, Status), followed by the gold check (`gold-check.sh`): every bundle in
+     gold read as a downstream reader would, checked against mapping's baselines, and a few of each document
+     run through the HL7 FHIR validator (US Core 6.1.0), in the cluster, as the read-only role gold-reader;
    - failover (§6) and scaling (each stage to its maximum and back), as long tests;
    - the failure and correction commands (STAGES §15);
    - a drain-and-deploy;

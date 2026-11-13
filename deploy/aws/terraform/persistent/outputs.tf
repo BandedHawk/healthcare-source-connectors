@@ -14,3 +14,4 @@ output "state_zone" { value = var.state_zone }
 output "guard_state_machine_arn" { value = aws_sfn_state_machine.guard.arn }
 output "scheduler_role_arn" { value = aws_iam_role.scheduler.arn }
 output "cluster_name" { value = var.cluster_name }
+output "gold_reader_role_arn" { value = aws_iam_role.gold_reader.arn }

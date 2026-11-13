@@ -1,0 +1,99 @@
+# The gold check (deploy/aws/k8s/pipeline/gold-check.sh): a reader after the transform stage, as a Job in sdh-fhir.
+# It runs on the transform stage's own image, with the check's classes (GoldCheck, beside GoldReaderExample in the
+# transformer's tests) mounted from a ConfigMap and started with Spring Boot's PropertiesLauncher. Its service account
+# has the read-only role gold-reader (terraform/persistent/iam.tf) through EKS Pod Identity.
+#   read      every bundle on <pipeline>.fhir, from gold, with its source document from silver; checks each against
+#             mapping's baselines; keeps a few per document in the work directory. Small heap.
+#   validate  the HL7 FHIR validator (fetched from the tools bucket by a pre-signed URL, checked against its SHA-256)
+#             on the bundles kept, compared with mapping's expected errors. The validator needs the internet
+#             (packages.fhir.org, tx.fhir.org), which the namespace's egress policy allows on 443.
+# Nothing is printed but counts, document names, error codes and fact names. The work directory, which holds the
+# bundles kept, goes with the pod. ${...} are filled in by gold-check.sh.
+apiVersion: batch/v1
+kind: Job
+metadata: { name: gold-check, namespace: sdh-fhir }
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200
+  activeDeadlineSeconds: 5400
+  template:
+    metadata: { labels: { app: gold-check } }
+    spec:
+      serviceAccountName: gold-reader
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      tolerations:
+        - { key: sdh-poc/burst, operator: Equal, value: "true", effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: read
+          image: ${TRANSFORM_IMAGE}
+          command: ["java", "@/app/jvm.options", "@/app/container.options", "-Xmx768m",
+                    "-Dloader.path=/check/gold-check.jar", "-Dloader.main=com.sdh.healthcare.transform.GoldCheck",
+                    "-cp", "/app/app.jar", "org.springframework.boot.loader.launch.PropertiesLauncher", "read"]
+          env: &env
+            - { name: DOCS, value: /docs }
+            - { name: WORK, value: /work }
+            - { name: KEEP_PER_DOCUMENT, value: "${KEEP_PER_DOCUMENT}" }
+            - { name: AWS_REGION, value: "${AWS_REGION}" }
+            - { name: NAMESPACE, value: "${ICEBERG_PREFIX}" }
+            - { name: GOLD_CATALOG, value: sdh-gold }
+            - { name: GOLD_WAREHOUSE, value: "s3://${GOLD_BUCKET}/warehouse" }
+            - { name: SILVER_CATALOG, value: sdh }
+            - { name: SILVER_WAREHOUSE, value: "s3://${SILVER_BUCKET}/warehouse" }
+            - { name: CATALOG_URI, value: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh" }
+            - { name: CATALOG_USER, value: "gold_reader_${ICEBERG_PREFIX}" }
+            - { name: KAFKA_BROKERS, value: "${KAFKA_BROKERS}" }
+            - { name: TOPIC, value: "${PIPELINE}.fhir" }
+            - { name: CONSUMER_KID, value: "consumer-${PIPELINE}" }
+            - { name: CONSUMER_KEY, value: /run/secrets/consumer.pem }
+            - { name: SIGNER_KID, value: "transform-${PIPELINE}" }
+            - { name: SIGNER_PEM, value: /run/secrets/transform-signer.pem }
+            - { name: VALIDATOR_SHA256, value: "${VALIDATOR_SHA256}" }
+            - { name: VALIDATOR_HEAP, value: 1800m }
+            - { name: VALIDATOR_ARGS, value: "-version 4.0.1 -sct us -ig hl7.fhir.us.core#6.1.0" }
+          envFrom: [{ secretRef: { name: gold-check-env } }]
+          securityContext: &container
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 500m, memory: 1536Mi }
+            limits: { memory: 1536Mi }
+          volumeMounts: &mounts
+            - { name: work, mountPath: /work }
+            - { name: tmp, mountPath: /tmp }
+            - { name: check, mountPath: /check, readOnly: true }
+            - { name: docs, mountPath: /docs, readOnly: true }
+            - { name: keys, mountPath: /run/secrets, readOnly: true }
+      containers:
+        - name: validate
+          image: ${TRANSFORM_IMAGE}
+          command: ["java", "@/app/jvm.options", "@/app/container.options", "-Xmx256m",
+                    "-Dloader.path=/check/gold-check.jar", "-Dloader.main=com.sdh.healthcare.transform.GoldCheck",
+                    "-cp", "/app/app.jar", "org.springframework.boot.loader.launch.PropertiesLauncher", "validate"]
+          env: *env
+          envFrom: [{ secretRef: { name: gold-check-env } }]
+          securityContext: *container
+          resources:
+            requests: { cpu: 1000m, memory: 2560Mi }
+            limits: { memory: 2560Mi }
+          volumeMounts: *mounts
+      volumes:
+        - { name: work, emptyDir: { sizeLimit: 3Gi } }
+        - { name: tmp, emptyDir: { sizeLimit: 1Gi } }
+        - { name: check, configMap: { name: gold-check } }
+        - name: docs
+          configMap:
+            name: gold-check-docs
+            items:
+              - { key: expected-issues.json, path: baseline/expected-issues.json }
+              - { key: expected-errors.json, path: baseline/expected-errors.json }
+              - { key: resource-counts.json, path: resource-counts.json }
+              - { key: xml-sha256.json, path: xml-sha256.json }
+        - { name: keys, secret: { secretName: gold-check-keys, defaultMode: 0440 } }

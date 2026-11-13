@@ -58,6 +58,26 @@ The smoke test puts the 12 sample documents in the intake and follows them to go
 deploy/aws/k8s/pipeline/check.sh
 ```
 
+The load test pushes 2,450 objects (mapping's test documents and the file connector's error inputs), measures
+throughput and each stage's failures, then runs the gold check. Its report is kept in the state directory's
+`load/<run>/report.txt`. The split stage is too slow for it yet (docs/AWS-POC.md, Status):
+
+```bash
+deploy/aws/k8s/pipeline/load-test.sh [copies] [error-copies]
+```
+
+The gold check alone (needs about 1 CPU and 2.5 GiB free, a burst node or the stages paused):
+
+```bash
+deploy/aws/k8s/pipeline/gold-check.sh [bundles-validated-per-document]
+```
+
+To move the automatic shutdown, a number of hours from now (not `--hours`):
+
+```bash
+deploy/aws/poc.sh extend 2
+```
+
 To apply a change to the stages while a session is up, without a new `up`:
 
 ```bash
@@ -99,6 +119,9 @@ keys lost there are gone for good.
 
 ## Not yet done
 
-- The Spot burst nodes don't launch yet (docs/AWS-POC.md, Status): an admin runs `iam/spot-quota.sh` to check the
-  account's Spot vCPU quota and request more.
-- The guard deleting a live cluster is untested.
+- The split stage's lookups in bronze (and readers' in silver) slow with every item: a fix in the connectors
+  comes before a larger load (docs/AWS-POC.md, Status).
+- The Spot burst nodes don't get capacity in us-east-2a (`t4g`/`m7g`/`m6g.large`): more types or zones, or
+  on-demand. `iam/spot-quota.sh` still shows the quota, which isn't the cause.
+- The gold check hasn't completed on AWS.
+- The landing standby didn't take the lease when the holder was deleted; its replacement did.

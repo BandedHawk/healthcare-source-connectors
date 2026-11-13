@@ -333,6 +333,9 @@ resume_stages() {
 
 cmd_extend() {
   local hours="${1:?extend <hours>}" reason=""; shift
+  # A number, or the deadline would be now: `extend --hours 2` once scheduled the shutdown for that moment.
+  [[ "$hours" =~ ^[0-9]+(\.[0-9]+)?$ ]] && python3 -I -c 'import sys; sys.exit(float(sys.argv[1]) <= 0)' "$hours" \
+    || die "extend takes a number of hours: poc.sh extend N [--long-test \"reason\"]"
   [[ "${1:-}" == "--long-test" ]] && reason="${2:?--long-test needs a reason}"
   need_tools; state_dir; tf_init persistent
   [[ -n "$(open_session)" ]] || die "no open session"

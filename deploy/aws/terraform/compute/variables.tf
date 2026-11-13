@@ -39,3 +39,9 @@ variable "burst_max" {
 variable "api_cidrs" {
   type = list(string)
 }
+
+variable "console_viewers" {
+  description = "IAM principals that may view the cluster's workloads in the EKS console, read-only"
+  type        = list(string)
+  default     = ["arn:aws:iam::493469777520:user/jonas-admin"]
+}
