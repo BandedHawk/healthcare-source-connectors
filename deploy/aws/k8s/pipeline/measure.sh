@@ -15,7 +15,7 @@
 #   - Inside each stage, from Prometheus (k8s/infra/telemetry.yaml): sdh.stage.phase_duration by stage and phase,
 #     and the commit durations by table.
 #   - Commits per table, from the metadata version in the catalog.
-#   - KMS Sign calls, from the messages written to the topics (each is signed once).
+#   - KMS Sign calls: the pod statements logged (docs/PERFORMANCE.md §3.5), and the messages written.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -187,26 +187,38 @@ for row in "${tables[@]}"; do
   printf '    %-44s %7d  (version %d)\n' "$name" "$((now_v - ${then_v:-0}))" "$now_v"
 done
 
-# --- KMS signatures, from the topics ------------------------------------------------------------------------------
+# --- KMS signatures ---------------------------------------------------------------------------------------------
 
-# Every message on the pipeline's topics is signed once, with the sending stage's KMS key (an asymmetric Sign, the
-# call with the 300/s quota, docs/PERFORMANCE.md §2.3). So the messages written in the run are its Sign calls.
+# Every message on the pipeline's topics is signed once. Since step 3 (docs/PERFORMANCE.md §3.5) a pod signs them
+# with a key of its own, and KMS signs (an asymmetric Sign, the call with the 300/s quota, §2.3) only the statement
+# vouching for each pod key: one per pod per half hour, each logged as crypto.pod_statement. So the Sign calls are
+# those log lines since t0, in the pods still running (a pod scaled away took its log with it: a few more). A stage
+# with pod keys off signs each message in KMS, so the messages written are shown too, as the old ceiling.
 # Unwrapping data keys (Decrypt) is cached per batch and not counted; CloudWatch's KMS usage is closed to the
 # deployer.
 offsets() {
   kubectl -n sdh-infra exec -i kafka-0 -- /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 \
     --topic "$1" 2>/dev/null | awk -F: '{sum += $3} END {print sum + 0}'
 }
-say "KMS Sign calls in the run (messages written, each signed once)"
-kms_sign=0 kms_other=0
+say "Messages written in the run (each signed once, with a pod key)"
+messages=0 kms_other=0
 for t in landed split records fhir; do
   then_o="$(awk -v t="$t" '$1 == t {print $2}' "$out/offsets0" 2>/dev/null || true)"
   n=$(($(offsets "$P.$t") - ${then_o:-0}))
   printf '    %-16s %8d\n' "$P.$t" "$n"
-  kms_sign=$((kms_sign + n))
+  messages=$((messages + n))
 done
 [[ -s "$out/offsets0" ]] || say "  (no offsets saved at t0: counted from the topics' start)"
-say "  $kms_sign in all; at the ~300/s quota that caps the pipeline at $((300 * ${n_gold:-0} / (kms_sign > 0 ? kms_sign : 1))) documents/s"
+since="$(date -u -d "$t0" +%Y-%m-%dT%H:%M:%SZ)"
+kms_sign=0
+for ns in "sdh-$P" sdh-fhir; do
+  for pod in $(kubectl -n "$ns" get pods -o name 2>/dev/null); do
+    n="$(kubectl -n "$ns" logs "$pod" --since-time="$since" 2>/dev/null | grep -c 'crypto.pod_statement' || true)"
+    kms_sign=$((kms_sign + ${n:-0}))
+  done
+done
+say "KMS Sign calls in the run: $kms_sign pod statements (in the pods still running), for $messages messages"
+say "  signing every message in KMS instead would cap the pipeline at $((300 * ${n_gold:-0} / (messages > 0 ? messages : 1))) documents/s (the ~300/s quota)"
 
 # --- Cost ---------------------------------------------------------------------------------------------------------
 

@@ -236,6 +236,11 @@ pod of the stage at a time.
   **Changed 2026-11-13 (DESIGN.md revision (dc)):** a pod splits up to `sdh.split.concurrency` items at once
   (default 4), a batch's items each on a thread of its own, and takes batches as large
   (`max-messages: ${sdh.split.concurrency:4}`). Each item's lease still keeps it to one split at a time.
+  **Changed 2026-11-14 (DESIGN.md revision (dh)):** on Kafka, a pod can take `sdh.split.consumers` batches at
+  once (default 1), each on a consumer of its own (Camel `consumersCount`), so it splits up to
+  `concurrency × consumers` items; a batch is still acknowledged once each of its items is split, but a slow
+  item holds back only its own batch. The topic needs a partition for each consumer of every pod. More than one
+  on another broker, or a `consumersCount` in the URI, is refused at startup.
 - **The item's lease** is a row in the existing lease table, `split/<connector-id>/<itemId>`, taken without
   waiting. If another worker holds it, the batch is answered retry and tried again after the pause, so a
   redelivered `item.landed` waits for the worker splitting it. The lease is renewed in the background while

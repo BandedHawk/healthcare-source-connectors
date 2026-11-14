@@ -363,6 +363,39 @@ class IngestPipelineTest
     }
 
     /**
+     * An item split whole with none failed is noted clean in its
+     * checkpoint, so its end sent again, by any pod, reads no rows for
+     * failed pieces (docs/PERFORMANCE.md §3.4): with the table gone, a
+     * clean checkpoint still answers none, and one not known to be clean
+     * has to read it.
+     *
+     * @throws Exception if the file can't be processed
+     */
+    @Test
+    void aCleanItemsEndSentAgainReadsNoRows() throws Exception
+    {
+        IngestPipeline pipeline = process(settings(),
+                new RecordingPublisher(), PipelineHooks.NONE);
+        split(pipeline, csv(csvRows()));
+        Checkpoint clean = pipeline.checkpoint(item).orElseThrow();
+        assertThat(clean.clean()).isTrue();
+
+        IngestPipeline another = process(settings(),
+                new RecordingPublisher(), PipelineHooks.NONE);
+        Checkpoint unknown = new Checkpoint(clean.itemId(),
+                clean.fingerprint(), clean.format(), clean.itemSize(),
+                clean.state(), clean.resumeAt(), clean.nextSeq(),
+                clean.committedSeq(), clean.publishedSeq(),
+                clean.startedAt(), clean.failure(), clean.restarts(),
+                clean.version(), clean.cut());
+        // Its files deleted too, so reading it fails.
+        catalog.dropTable(tableId, true);
+        assertThat(another.failedRows(clean)).isEmpty();
+        assertThatThrownBy(() -> another.failedRows(unknown))
+                .isInstanceOf(RuntimeException.class);
+    }
+
+    /**
      * An empty or blank item can't be split: nothing was sent, so it fails
      * for an operator to decide, with nothing stored or announced
      * (STAGES.md §16).

@@ -39,6 +39,10 @@ sdh:
     registry-schema: split_${ICEBERG_PREFIX}
   split:
     format: ccda
+    # 8 Kafka consumers, each with batches of 2: 16 items at once, and a slow item holds back only its own batch
+    # (docs/PERFORMANCE.md §3.4). 2 pods × 8 consumers fit the topic's 24 partitions (poc.sh STAGE_PARTITIONS).
+    concurrency: 2
+    consumers: 8
   storage:
     catalog-name: sdh
     namespace: ${ICEBERG_PREFIX}

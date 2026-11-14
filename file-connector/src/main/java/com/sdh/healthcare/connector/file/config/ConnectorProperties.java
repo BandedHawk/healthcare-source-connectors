@@ -132,14 +132,52 @@ public record ConnectorProperties(
      * @param options     format options as in design §6.2, such as
      *                    {@code csv.header} or {@code namespace}
      * @param limits      size limits; null values keep the format's
-     * @param concurrency the most items a pod splits at once
-     *                    (docs/PERFORMANCE.md §3.4); its input batch
-     *                    should be as large
+     * @param concurrency the most items of one input batch split at once
+     *                    (docs/PERFORMANCE.md §3.4); the batch should be
+     *                    as large
+     * @param consumers   how many input batches a pod handles at once, each
+     *                    on a Kafka consumer of its own, so that one slow
+     *                    item holds back only its own batch; so a pod splits
+     *                    up to {@code concurrency × consumers} items at
+     *                    once. Above 1 on Kafka only, whose topic needs a
+     *                    partition per consumer of every pod
+     * @throws IllegalArgumentException if either is under 1
      */
     public record Split(String format, String boundary,
             Map<String, String> options, @DefaultValue Limits limits,
-            @DefaultValue("4") int concurrency)
+            @DefaultValue("4") int concurrency,
+            @DefaultValue("1") int consumers)
     {
+
+        /**
+         * Checks the counts.
+         *
+         * @param format      the format
+         * @param boundary    a boundary override
+         * @param options     format options
+         * @param limits      size limits
+         * @param concurrency items of one batch split at once
+         * @param consumers   batches handled at once
+         * @throws IllegalArgumentException if a count is under 1
+         */
+        public Split
+        {
+            if (concurrency < 1 || consumers < 1)
+            {
+                throw new IllegalArgumentException("sdh.split.concurrency"
+                        + " and sdh.split.consumers must be at least 1");
+            }
+        }
+
+        /**
+         * The most items a pod splits at once.
+         *
+         * @return {@code concurrency × consumers}
+         */
+        public int itemsAtOnce()
+        {
+            return Math.multiplyExact(concurrency, consumers);
+        }
     }
 
     /**

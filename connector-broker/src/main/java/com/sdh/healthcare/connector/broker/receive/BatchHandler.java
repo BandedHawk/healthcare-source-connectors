@@ -10,9 +10,11 @@ import java.util.List;
 
 /**
  * Handles a batch of received messages: lands them, for the landing node,
- * or does a stage's work on them. Called from one thread at a time, and
- * never with an empty batch. The batch's messages are acknowledged only
- * after it returns {@link Outcome#DONE}.
+ * or does a stage's work on them. Called from one thread at a time,
+ * unless the handler says it may be called from several (on Kafka, one
+ * per consumer: {@code consumersCount}), and never with an empty batch.
+ * The batch's messages are acknowledged only after it returns
+ * {@link Outcome#DONE}.
  *
  * @author Jonas Barnett
  * @since 0.1.0

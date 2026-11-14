@@ -110,6 +110,11 @@ public final class CheckpointCodec
             // Left out when not known, as restarts.
             fields.put("version", checkpoint.version());
         }
+        if (checkpoint.clean())
+        {
+            // Left out when not known, as restarts.
+            fields.put("clean", true);
+        }
         Checkpoint.Cut cut = checkpoint.cut();
         if (cut.generation() > 1)
         {
@@ -191,7 +196,9 @@ public final class CheckpointCodec
                     fields.containsKey("restarts")
                             ? JSONObjectUtils.getInt(fields, "restarts") : 0,
                     JSONObjectUtils.getString(fields, "version"),
-                    cut(fields));
+                    cut(fields),
+                    fields.containsKey("clean")
+                            && JSONObjectUtils.getBoolean(fields, "clean"));
         }
         catch (ParseException malformed)
         {

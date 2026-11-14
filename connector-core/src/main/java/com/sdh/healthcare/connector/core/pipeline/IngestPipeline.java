@@ -762,6 +762,13 @@ public final class IngestPipeline implements AutoCloseable
             inFlightPublish = null;
             hooks.beforeEndOfFile();
             current = current.withState(Checkpoint.State.ARCHIVING);
+            Integer whole = failureFree.get(current.itemId());
+            if (whole != null && whole == current.generation())
+            {
+                // Noted, so its end sent again needn't look for failed
+                // pieces (docs/PERFORMANCE.md §3.4).
+                current = current.withClean();
+            }
             commitCheckpoint(current, lease);
             Telemetry.get().audit("item.split",
                     Fields.of(Attr.ITEM_ID, current.itemId())
@@ -1668,20 +1675,21 @@ public final class IngestPipeline implements AutoCloseable
     /**
      * Reads the rows of an item's committed records that the splitter
      * couldn't parse, for its fail store (STAGES.md §15.3). For an item
-     * this process split from its start with none failed, there are none,
-     * and the table isn't read (PERFORMANCE.md §3.2).
+     * split whole with none failed, as its checkpoint notes or this process
+     * saw, there are none, and the table isn't read (PERFORMANCE.md §3.2,
+     * §3.4).
      *
-     * @param itemId     the item
-     * @param generation its generation
+     * @param checkpoint the item's checkpoint, past {@code SPLITTING}
      * @return the rows, in sequence order
      */
-    public List<CommittedRecords.Row> failedRows(UUID itemId,
-            int generation)
+    public List<CommittedRecords.Row> failedRows(Checkpoint checkpoint)
     {
+        UUID itemId = checkpoint.itemId();
+        int generation = checkpoint.generation();
         Integer clean = failureFree.remove(itemId);
-        if (clean != null && clean == generation)
+        if (checkpoint.clean() || clean != null && clean == generation)
         {
-            // Split whole here with none failed: nothing to look for.
+            // Split whole with none failed: nothing to look for.
             return List.of();
         }
         table.refresh();

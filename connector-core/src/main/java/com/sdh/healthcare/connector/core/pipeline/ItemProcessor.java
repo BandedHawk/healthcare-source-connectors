@@ -966,8 +966,7 @@ public final class ItemProcessor
     {
         UUID itemId = checkpoint.itemId();
         long started = System.nanoTime();
-        List<CommittedRecords.Row> failed = pipeline.failedRows(itemId,
-                checkpoint.generation());
+        List<CommittedRecords.Row> failed = pipeline.failedRows(checkpoint);
         started = timed("failed_rows", started);
         FailureStore.Counts counts;
         Instant readAt = null;

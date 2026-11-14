@@ -52,15 +52,17 @@ import org.slf4j.LoggerFactory;
  * can't read is held instead, and tried again, so that no item is
  * stranded by a landing node upgraded first.
  * <p>
- * A batch's items are split at once, each on a thread of its own, up to
- * the splitter's limit ({@code sdh.split.concurrency}); the batch is
- * acknowledged once each is split. If one can't be split now (storage or
- * the broker down, another pod on the item, its lease lost), the batch is
- * held and tried again; items already split in it are skipped, known by
- * their broker IDs. So a batch as large
- * as the splitter's limit suits the stage best: a larger one holds
- * finished items' messages behind a slow one. A tampered checkpoint, a commit whose outcome isn't known, or an
- * {@link Error} stops the process.
+ * A batch's items are split at once, each on a thread of its own; the
+ * batch is acknowledged once each is split. If one can't be split now
+ * (storage or the broker down, another pod on the item, its lease lost),
+ * the batch is held and tried again; items already split in it are
+ * skipped, known by their broker IDs. So a batch as large as
+ * {@code sdh.split.concurrency} suits the stage best: a larger one holds
+ * finished items' messages behind a slow one. A pod may handle several
+ * batches at once, one per Kafka consumer ({@code sdh.split.consumers}),
+ * so a slow item holds back only its own batch; the splitter's limit
+ * covers them all. A tampered checkpoint, a commit whose outcome isn't
+ * known, or an {@link Error} stops the process.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -95,11 +97,13 @@ public final class SplitHandler implements BatchHandler
 
     /**
      * The messages of the batch being retried whose items are split, by
-     * {@link #key}: the route hands one batch at a time, the same one again
-     * until it is done (as new objects, for a Kafka batch left for the next
-     * poll).
+     * {@link #key}, for each consumer thread: each hands one batch at a
+     * time, the same one again until it is done (as new objects, for a
+     * Kafka batch left for the next poll), and a pod may have several
+     * ({@code sdh.split.consumers}).
      */
-    private final Map<Object, Boolean> done = new HashMap<>();
+    private final ThreadLocal<Map<Object, Boolean>> retried =
+            ThreadLocal.withInitial(HashMap::new);
 
     /**
      * Creates a handler.
@@ -168,6 +172,7 @@ public final class SplitHandler implements BatchHandler
         // A batch retried comes again as the same messages: those whose
         // items were split last time are skipped, not split (announced)
         // again while another waits for its lease.
+        Map<Object, Boolean> done = retried.get();
         done.keySet().retainAll(keys(messages));
         List<BrokerMessage> left = new ArrayList<>(messages.size());
         for (BrokerMessage message : messages)

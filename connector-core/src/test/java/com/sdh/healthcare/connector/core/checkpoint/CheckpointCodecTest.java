@@ -75,6 +75,29 @@ class CheckpointCodecTest
                 .restarts()).isZero();
     }
 
+    /**
+     * Whether an item was split whole with none failed is stored only when
+     * it was, so a checkpoint from before still verifies, and is MAC'd like
+     * any other field.
+     */
+    @Test
+    void cleanIsStoredOnlyWhenSetAndIsProtected()
+    {
+        Checkpoint checkpoint = sample();
+        String unknown = codec.encode(checkpoint);
+        assertThat(unknown).doesNotContain("clean");
+        assertThat(codec.decode(unknown).clean()).isFalse();
+        Checkpoint clean = checkpoint
+                .withState(Checkpoint.State.ARCHIVING).withClean();
+        String json = codec.encode(clean);
+        assertThat(codec.decode(json)).isEqualTo(clean);
+        assertThat(codec.decode(json).withState(Checkpoint.State.COMPLETED)
+                .clean()).isTrue();
+        assertThatThrownBy(() -> codec.decode(
+                json.replace(",\"clean\":true", "")))
+                .isInstanceOf(CheckpointTamperedException.class);
+    }
+
     /** Changing any field, or the JSON itself, fails verification. */
     @Test
     void anyChangedFieldFailsVerification()

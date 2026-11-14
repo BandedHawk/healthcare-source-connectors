@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.file.runtime;
 
+import com.sdh.healthcare.connector.broker.receive.BrokerKind;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
 import com.sdh.healthcare.connector.broker.send.Publishers;
@@ -258,9 +259,10 @@ public final class ConnectorRuntime implements AutoCloseable
                         || landing.storage().catalog().isEmpty()
                         ? null : landing.storage().catalog();
         StageProperties stage = properties.stage();
-        ReceiveSettings input = stage.receive(Set.of()).withKafkaDefault(
-                "maxPollIntervalMs",
-                Long.toString(MAX_POLL_INTERVAL.toMillis()));
+        ReceiveSettings input = consumers(stage.receive(Set.of())
+                .withKafkaDefault("maxPollIntervalMs",
+                        Long.toString(MAX_POLL_INTERVAL.toMillis())),
+                properties.split().consumers());
         CommonSettings.Queue output = requireQueue(stage.output());
         QueueType queueType = QueueType.of(output.type());
         String queueUri = queueType.effectiveUri(output.uri());
@@ -386,7 +388,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     failures, corrections);
             ItemSplitter splitter = new ItemSplitter(processor, landedItems,
                     keys.wrap(), leases, properties.connectorId(),
-                    leaseSettings, properties.split().concurrency());
+                    leaseSettings, properties.split().itemsAtOnce());
             SplitCorrections correcting = new SplitCorrections(corrections,
                     releases, splitter, reprocess,
                     leaseSettings.renewInterval(), leaseSettings.ttl());
@@ -444,6 +446,40 @@ public final class ConnectorRuntime implements AutoCloseable
             keys.close();
             throw failure;
         }
+    }
+
+    /**
+     * The split stage's input with as many Kafka consumers as
+     * {@code sdh.split.consumers} asks (docs/PERFORMANCE.md §3.4), each
+     * handling its own batches, so that one slow item holds back only its
+     * own batch.
+     *
+     * @param input     the input as configured
+     * @param consumers how many consumers
+     * @return the input to receive from
+     * @throws IllegalArgumentException if more than one is asked of a broker
+     *                                  other than Kafka, or the URI sets
+     *                                  {@code consumersCount} itself
+     */
+    static ReceiveSettings consumers(ReceiveSettings input, int consumers)
+    {
+        if (input.kind() == BrokerKind.KAFKA
+                && input.uri().matches(".*[?&]consumersCount=.*"))
+        {
+            throw new IllegalArgumentException("sdh.stage.input.uri sets"
+                    + " consumersCount; set sdh.split.consumers instead");
+        }
+        if (consumers == 1)
+        {
+            return input;
+        }
+        if (input.kind() != BrokerKind.KAFKA)
+        {
+            throw new IllegalArgumentException("sdh.split.consumers above 1"
+                    + " needs a Kafka input, not " + input.kind());
+        }
+        return input.withKafkaDefault("consumersCount",
+                Integer.toString(consumers));
     }
 
     /**

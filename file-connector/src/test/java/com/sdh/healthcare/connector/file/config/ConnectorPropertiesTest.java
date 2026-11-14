@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.file.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.util.Map;
@@ -69,5 +70,34 @@ class ConnectorPropertiesTest
                 .isEqualTo(Duration.ofMinutes(10));
         assertThat(properties.landing().reconcile().interval())
                 .isEqualTo(Duration.ofMinutes(15));
+    }
+
+    /**
+     * A pod splits one batch of four items at a time unless told
+     * otherwise; with more consumers, as many batches at once, and its
+     * limit covers them all.
+     */
+    @Test
+    void splitsConcurrencyTimesConsumersItemsAtOnce()
+    {
+        ConnectorProperties defaults = new Binder(
+                new MapConfigurationPropertySource(
+                        Map.of("sdh.split.format", "ccda")))
+                .bindOrCreate("sdh", ConnectorProperties.class);
+        assertThat(defaults.split().concurrency()).isEqualTo(4);
+        assertThat(defaults.split().consumers()).isEqualTo(1);
+        assertThat(defaults.split().itemsAtOnce()).isEqualTo(4);
+
+        ConnectorProperties more = new Binder(
+                new MapConfigurationPropertySource(Map.of(
+                        "sdh.split.format", "ccda",
+                        "sdh.split.concurrency", "2",
+                        "sdh.split.consumers", "8")))
+                .bindOrCreate("sdh", ConnectorProperties.class);
+        assertThat(more.split().itemsAtOnce()).isEqualTo(16);
+
+        assertThatThrownBy(() -> new ConnectorProperties.Split("ccda", null,
+                Map.of(), null, 4, 0))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

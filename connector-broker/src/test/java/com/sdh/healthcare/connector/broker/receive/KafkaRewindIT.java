@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import org.apache.camel.impl.DefaultCamelContext;
@@ -39,8 +41,10 @@ import org.testcontainers.kafka.KafkaContainer;
  * Tests the Kafka route on a real broker (STAGES.md §10, "found
  * 2026-11-07"): a poll that isn't handled comes again, rather than being
  * passed by the next poll's commit, a handled poll commits every one of
- * its partitions, not only its last record's, and a batch tried again for
- * longer than the poll interval doesn't take the consumer out of its group.
+ * its partitions, not only its last record's, a batch tried again for
+ * longer than the poll interval doesn't take the consumer out of its group,
+ * and two consumers of one route handle their batches at once
+ * (docs/PERFORMANCE.md §3.4).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -202,6 +206,70 @@ class KafkaRewindIT
     }
 
     /**
+     * With {@code consumersCount=2}, each consumer takes a partition and
+     * handles its batches while the other's is still being handled: a
+     * slow batch holds back only its own consumer. Every record is handled
+     * once, and both partitions are committed.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void twoConsumersHandleTheirBatchesAtOnce() throws Exception
+    {
+        try (KafkaContainer kafka = new KafkaContainer("apache/kafka:4.2.2"))
+        {
+            kafka.start();
+            Properties config = new Properties();
+            config.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+                    kafka.getBootstrapServers());
+            try (Admin admin = Admin.create(config))
+            {
+                admin.createTopics(List.of(new NewTopic(TOPIC, 2, (short) 1)))
+                        .all().get();
+                CountDownLatch both = new CountDownLatch(2);
+                Set<String> threads = Collections.synchronizedSet(
+                        new java.util.HashSet<>());
+                ReceiveSettings settings = settings(kafka,
+                        "&consumersCount=2");
+                try (DefaultCamelContext camel = new DefaultCamelContext())
+                {
+                    camel.addRoutes(new CamelReceiveRoute(ROUTE, settings,
+                            messages ->
+                            {
+                                threads.add(Thread.currentThread().getName());
+                                // The first batch of each consumer waits
+                                // for the other's: with one consumer at a
+                                // time, neither would come.
+                                both.countDown();
+                                if (!both.await(60, TimeUnit.SECONDS))
+                                {
+                                    return BatchHandler.Outcome.FATAL;
+                                }
+                                for (BrokerMessage message : messages)
+                                {
+                                    handled.add(new String(message.body(),
+                                            UTF_8));
+                                }
+                                return BatchHandler.Outcome.DONE;
+                            }, Duration.ofMillis(50), Duration.ofMillis(200)));
+                    camel.start();
+                    camel.getRouteController().startRoute(ROUTE);
+                    // Sent once each consumer has its partition, so neither
+                    // takes both in its first poll.
+                    await(() -> assigned(admin) == 2,
+                            "each consumer has a partition");
+                    send(config);
+                    await(() -> committed(admin).equals(Map.of(0, (long) EACH,
+                            1, (long) EACH)), "both partitions committed");
+                    assertThat(threads).hasSize(2);
+                    assertThat(handled).doesNotHaveDuplicates()
+                            .hasSize(2 * EACH);
+                }
+            }
+        }
+    }
+
+    /**
      * The route's settings on a test broker.
      *
      * @param kafka the broker
@@ -281,6 +349,28 @@ class KafkaRewindIT
         catch (Exception notYet)
         {
             return Map.of();
+        }
+    }
+
+    /**
+     * How many of the group's members have a partition.
+     *
+     * @param admin the broker's admin client
+     * @return the count; 0 if the group can't be read yet
+     */
+    static int assigned(Admin admin)
+    {
+        try
+        {
+            return (int) admin.describeConsumerGroups(List.of(GROUP)).all()
+                    .get().get(GROUP).members().stream()
+                    .filter(member -> !member.assignment().topicPartitions()
+                            .isEmpty())
+                    .count();
+        }
+        catch (Exception notYet)
+        {
+            return 0;
         }
     }
 
