@@ -6,6 +6,8 @@
 # Works for Debian-based images: package records in /var/lib/dpkg/status.d/ (distroless) or /var/lib/dpkg/status.
 # The busybox stage only reads the records; nothing from it ends up in the image.
 ARG KIT_IMAGE=sdh/file-connector:kit
+# Set by BuildKit. The classic builder (the integration tests' Testcontainers builds) sets nothing, so they pass it.
+ARG BUILDPLATFORM
 FROM ${KIT_IMAGE} AS kit
 
 # The build machine's own platform: it only reads files, so an image for another architecture needs no emulation.

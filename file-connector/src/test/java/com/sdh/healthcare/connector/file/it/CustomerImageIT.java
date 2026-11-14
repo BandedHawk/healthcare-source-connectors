@@ -71,7 +71,10 @@ class CustomerImageIT extends ContainerImageItBase
         return new ImageFromDockerfile("sdh/" + module + ":it", false)
                 .withFileFromPath("Dockerfile", Path.of("..", "docker",
                         "customer-inventory.Dockerfile"))
-                .withBuildArg("KIT_IMAGE", kitImage);
+                .withBuildArg("KIT_IMAGE", kitImage)
+                // BuildKit's own; the classic builder Testcontainers uses
+                // leaves it empty. The test VM is linux/amd64.
+                .withBuildArg("BUILDPLATFORM", "linux/amd64");
     }
 
     /**
