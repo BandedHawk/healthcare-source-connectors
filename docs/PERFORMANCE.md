@@ -172,14 +172,28 @@ analytic readers. These keep it bounded:
 
 Each pod makes an ES256 key pair in memory at startup, and **KMS signs a short statement about it**: the
 public key, the stage, the pipeline, the pod and an expiry (default 1 hour; renewed at half-life). Messages
-are signed with the pod's key locally (about 0.1 ms) and carry the statement's ID. A reader verifies a
-statement once, against the stage's KMS public key it already trusts, and caches it until it expires.
+are signed with the pod's key locally (about 0.1 ms) and carry the statement and their signing time. A reader
+verifies a statement once, against the stage's KMS public key it already trusts, and caches it.
 
 - KMS calls fall from one per message to **one per pod per 30 minutes**.
 - The private key never leaves the pod's memory, and it dies with the pod, so a leaked key lasts an hour at
   most. The KMS key is still the root of trust, and a stage can still only sign as itself.
-- The statement goes in the message's protected header the first time and is fetched by ID after that, from
-  a small table in the database, so messages don't grow.
+- The statement goes in every message's protected header (`sdh_stmt`, about 500 bytes), with the signing time
+  (`sdh_iat`). Decided with the user, 2026-11-13: no table, so a reader needs only the message and the key it
+  already trusts, even for a message replayed days later. A reader checks the signing time against the
+  statement, not the time now, so a message that waited in a queue still opens.
+- **Revocation:** each new statement is logged (`crypto.pod_statement`, its ID, the pod and its expiry; no
+  PHI). Listing an ID in `sdh.crypto.pod-keys.revoked` refuses every message signed under it
+  (`REVOKED_SIGNER`), including those signed before; the pod's next statement is unaffected. Messages under a
+  revoked statement are then redone from the tables by the reconcilers, not lost.
+- **Outage:** if KMS can't sign the next statement, the pod keeps its key until it expires, so a KMS outage of
+  under half an hour goes unnoticed; after that, sealing fails as it did on every message before.
+- **PHI and HIPAA:** nothing changes at rest or in the seal; the statement holds no PHI. The pod's private key
+  is in the JVM's heap, so a heap or core dump would hold it: dumps stay off in the images, as now. The JVM's
+  ES256 is not a FIPS 140 validated module (KMS is); a deployment that needs one sets
+  `sdh.crypto.pod-keys.enabled: false` and signs every message in KMS, at the old ceiling. CloudTrail records
+  one `Sign` per statement instead of per message; the log line ties each statement to its pod.
+- Results sent to producers stay signed with the stage's KMS key, since producers trust that key alone.
 - Seal (ECDH-ES to the next stage's inbox key) is unchanged: it's local already.
 
 ### 3.6 Recovery: with batches, and after a long outage
@@ -563,7 +577,7 @@ Each step is measured before the next, and each is useful alone.
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
-| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling |
+| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID; not yet measured |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |
 | 6 | Large documents (§9) | 100 MB documents through, with bounded memory |

@@ -20,10 +20,12 @@ import java.io.UncheckedIOException;
 import java.security.PrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
@@ -132,7 +134,8 @@ public final class QueueReader implements AutoCloseable
     {
         this.opener = builder.recipients.isEmpty()
                 && builder.signers.isEmpty() ? null
-                : new MessageOpener(builder.recipients, builder.signers);
+                : new MessageOpener(builder.recipients, builder.signers,
+                        Set.copyOf(builder.revoked));
         this.catalog = Objects.requireNonNull(builder.catalog, "catalog");
         this.expectedCatalogName = builder.expectedCatalogName;
         this.keys = new BatchKeyCache(
@@ -358,6 +361,9 @@ public final class QueueReader implements AutoCloseable
         /** The connector signing keys to trust, by key id. */
         private final Map<String, ECPublicKey> signers = new HashMap<>();
 
+        /** The IDs of pod statements no longer trusted. */
+        private final Set<String> revoked = new HashSet<>();
+
         /** The catalog the records' tables are in. */
         private Catalog catalog;
 
@@ -406,6 +412,21 @@ public final class QueueReader implements AutoCloseable
         public Builder trustedSigner(String kid, ECPublicKey key)
         {
             signers.put(kid, key);
+            return this;
+        }
+
+        /**
+         * Stops trusting a pod's signing key, by the ID of the statement
+         * that vouched for it (docs/PERFORMANCE.md §3.5): messages it signed
+         * are refused. The ID is logged as {@code crypto.pod_statement} when
+         * the pod makes the key.
+         *
+         * @param statementId the statement's ID
+         * @return this builder
+         */
+        public Builder revokedStatement(String statementId)
+        {
+            revoked.add(statementId);
             return this;
         }
 

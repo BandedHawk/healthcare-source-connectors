@@ -336,7 +336,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     pipelineSettings(properties, format, split, retry)
                             .withVersion(version(splitters, format, split)),
                     splitRecords, checkpoints, keys.wrap(), ids, splitters,
-                    new MessageSealer(keys.signer(), keys.signerKid(),
+                    new MessageSealer(keys.messages(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
                     publisher, clock);
             // The fail store's states, beside the checkpoints (STAGES.md
@@ -372,7 +372,7 @@ public final class ConnectorRuntime implements AutoCloseable
                 reprocessPublisher = publisher(camel, reprocessQueue);
                 KeyMaterial.Self self = keys.self();
                 reprocess = new SplitReprocess(new SplitReprocess.Parts(
-                        reprocessRuns, new MessageSealer(keys.signer(),
+                        reprocessRuns, new MessageSealer(keys.messages(),
                                 keys.signerKid(), self.inbox(),
                                 self.inboxKid()), reprocessPublisher,
                         self.signerKid()),

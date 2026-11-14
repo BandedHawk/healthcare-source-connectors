@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.runtime.config;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.util.unit.DataSize;
@@ -76,13 +77,36 @@ public final class CommonSettings
      * @param aws          AWS KMS settings
      * @param gcp          Google Cloud KMS settings
      * @param vault        Vault Transit settings
+     * @param podKeys      signing with pod keys; null for the defaults
      */
     public record Crypto(@DefaultValue("local") String wrapProvider,
             @DefaultValue("local") String signProvider,
             @DefaultValue Keystore keystore, @DefaultValue Keys keys,
             @DefaultValue Aws aws, @DefaultValue Gcp gcp,
-            @DefaultValue Vault vault)
+            @DefaultValue Vault vault, @DefaultValue PodKeys podKeys)
     {
+    }
+
+    /**
+     * Signing messages with a key of each pod's own, which the stage's key
+     * vouches for in a statement (docs/PERFORMANCE.md §3.5), so the KMS
+     * signs once per pod every half {@code lifetime}, not every message.
+     * Results sent to producers are still signed with the stage's key.
+     *
+     * @param enabled  whether messages are signed with pod keys
+     * @param lifetime how long a statement vouches for a pod's key
+     * @param revoked  the IDs of statements whose messages are refused, as
+     *                 the {@code crypto.pod_statement} log line gives them,
+     *                 for a pod key thought exposed
+     */
+    public record PodKeys(@DefaultValue("true") boolean enabled,
+            @DefaultValue("1h") Duration lifetime,
+            @DefaultValue List<String> revoked)
+    {
+
+        /** The defaults: on, an hour, nothing revoked. */
+        public static final PodKeys DEFAULT =
+                new PodKeys(true, Duration.ofHours(1), List.of());
     }
 
     /**

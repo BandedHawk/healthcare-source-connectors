@@ -24,6 +24,7 @@ import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
+import com.sdh.healthcare.connector.contract.jose.PodSigner;
 import com.sdh.healthcare.connector.core.pipeline.Outage;
 import com.sdh.healthcare.connector.kms.AwsKmsKeyProvider;
 import com.sdh.healthcare.connector.kms.AzureKeyVaultKeyProvider;
@@ -47,6 +48,7 @@ import java.security.SecureRandom;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECParameterSpec;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -88,7 +90,11 @@ import org.slf4j.LoggerFactory;
  * refuses startup at once.
  *
  * @param wrap         wraps and unwraps data keys with the KEKs
- * @param signer       signs messages
+ * @param signer       signs with the stage's key: results for producers,
+ *                     who verify them with it
+ * @param messages     signs the pipeline's messages: with a pod key that
+ *                     the stage's key vouches for (docs/PERFORMANCE.md
+ *                     §3.5), or the stage's key if pod keys are off
  * @param signerKid    the signing key's ID
  * @param recipient    the public key messages are sealed to
  * @param recipientKid the recipient key's ID
@@ -102,8 +108,9 @@ import org.slf4j.LoggerFactory;
  * @since 0.1.0
  */
 public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
-        String signerKid, PublicKey recipient, String recipientKid,
-        MessageOpener inbox, Self self, List<AutoCloseable> resources)
+        JWSSigner messages, String signerKid, PublicKey recipient,
+        String recipientKid, MessageOpener inbox, Self self,
+        List<AutoCloseable> resources)
         implements AutoCloseable
 {
 
@@ -496,8 +503,12 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
             PublicKey recipient =
                     pinnedKey(keys.recipient(), "sdh.crypto.keys.recipient");
             Self self = inbox ? self(keys, ownSigning) : null;
-            MessageOpener opener = inbox ? inboxOpener(keys, self) : null;
-            return new KeyMaterial(wrap, signer, keys.signing().kid(),
+            MessageOpener opener = inbox
+                    ? inboxOpener(keys, self, podKeys(crypto).revoked())
+                    : null;
+            return new KeyMaterial(wrap, signer,
+                    messageSigner(crypto, signer, keys.signing().kid()),
+                    keys.signing().kid(),
                     recipient, require(keys.recipient().kid(),
                             "sdh.crypto.keys.recipient.kid"),
                     opener, self, List.copyOf(resources));
@@ -627,15 +638,17 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
      * (for the splitter, the landing node's), with the stage's own when it
      * sends to itself.
      *
-     * @param keys the key settings
-     * @param self the stage's own public keys; null if not configured
+     * @param keys    the key settings
+     * @param self    the stage's own public keys; null if not configured
+     * @param revoked the IDs of pod statements no longer trusted
      * @return the opener
      * @throws IOException              if a key file can't be read
      * @throws GeneralSecurityException if a key isn't EC P-256, or the
      *                                  inbox key's public half isn't its
      */
     private static MessageOpener inboxOpener(CommonSettings.Keys keys,
-            Self self) throws IOException, GeneralSecurityException
+            Self self, List<String> revoked)
+            throws IOException, GeneralSecurityException
     {
         Path pem = require(keys.inbox().pem(), "sdh.crypto.keys.inbox.pem");
         checkPrivate(pem);
@@ -671,7 +684,47 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
         return new MessageOpener(
                 Map.of(require(keys.inbox().kid(),
                         "sdh.crypto.keys.inbox.kid"), key),
-                signers);
+                signers, Set.copyOf(revoked));
+    }
+
+    /**
+     * The pod-key settings, or their defaults if none are given.
+     *
+     * @param crypto the key settings
+     * @return the pod-key settings
+     */
+    private static CommonSettings.PodKeys podKeys(
+            CommonSettings.Crypto crypto)
+    {
+        return crypto.podKeys() == null ? CommonSettings.PodKeys.DEFAULT
+                : crypto.podKeys();
+    }
+
+    /**
+     * Builds what signs the pipeline's messages: a {@link PodSigner} whose
+     * statements the stage's key signs, or the stage's key itself if pod
+     * keys are off (docs/PERFORMANCE.md §3.5).
+     *
+     * @param crypto    the key settings
+     * @param stage     signs with the stage's key
+     * @param signerKid the stage key's ID
+     * @return the message signer
+     */
+    private static JWSSigner messageSigner(CommonSettings.Crypto crypto,
+            JWSSigner stage, String signerKid)
+    {
+        CommonSettings.PodKeys settings = podKeys(crypto);
+        if (!settings.enabled())
+        {
+            return stage;
+        }
+        String pod = Optional.ofNullable(System.getenv("HOSTNAME"))
+                .filter(name -> !name.isBlank()).orElse("unknown");
+        return new PodSigner(stage, signerKid, signerKid, pod,
+                settings.lifetime(), Clock.systemUTC(),
+                statement -> LOG.info("crypto.pod_statement id={} pod={}"
+                        + " not_after={}", statement.id(), statement.pod(),
+                        statement.notAfter()));
     }
 
     /**

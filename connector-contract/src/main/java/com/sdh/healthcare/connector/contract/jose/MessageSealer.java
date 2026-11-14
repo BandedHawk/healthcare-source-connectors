@@ -47,6 +47,18 @@ public final class MessageSealer
     /** The JWE {@code cty} header: the content is a signed message. */
     public static final String JWE_CONTENT_TYPE = "sdh-msg+jws";
 
+    /**
+     * The protected header parameter that carries the pod statement of a
+     * message signed with a pod's key (docs/PERFORMANCE.md §3.5).
+     */
+    public static final String STATEMENT_PARAM = "sdh_stmt";
+
+    /**
+     * The protected header parameter that says when a message signed with
+     * a pod's key was signed, in seconds since the epoch.
+     */
+    public static final String SIGNED_AT_PARAM = "sdh_iat";
+
     /** Signs messages. */
     private final JWSSigner signer;
 
@@ -65,7 +77,9 @@ public final class MessageSealer
     /**
      * Creates a sealer for one signing key and one recipient.
      *
-     * @param signer       signs messages
+     * @param signer       signs messages: the stage's key, or a
+     *                     {@link PodSigner}, whose messages carry its
+     *                     statement
      * @param signerKid    the signing key's ID
      * @param recipient    the recipient's public key, EC or RSA
      * @param recipientKid the recipient key's ID
@@ -129,13 +143,23 @@ public final class MessageSealer
     {
         try
         {
-            JWSObject jws = new JWSObject(
-                    new JWSHeader.Builder(JWSAlgorithm.ES256)
-                            .keyID(signerKid)
-                            .type(JWS_TYPE)
-                            .build(),
+            JWSHeader.Builder header = new JWSHeader.Builder(JWSAlgorithm.ES256)
+                    .keyID(signerKid)
+                    .type(JWS_TYPE);
+            JWSSigner signing = signer;
+            if (signer instanceof PodSigner pod)
+            {
+                // Signed with the pod's own key, under the statement that
+                // vouches for it, and when.
+                PodSigner.Signing current = pod.current();
+                header.customParam(STATEMENT_PARAM, current.statement())
+                        .customParam(SIGNED_AT_PARAM,
+                                pod.now().getEpochSecond());
+                signing = current.signer();
+            }
+            JWSObject jws = new JWSObject(header.build(),
                     new Payload(JSONObjectUtils.toJSONString(payload)));
-            jws.sign(signer);
+            jws.sign(signing);
             JWEObject jwe = new JWEObject(
                     new JWEHeader.Builder(jweAlgorithm,
                             EncryptionMethod.A256GCM)

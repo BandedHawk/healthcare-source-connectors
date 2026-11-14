@@ -26,8 +26,10 @@ import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPrivateKey;
 import java.text.ParseException;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Decrypts and verifies a sealed message. Only the algorithms the
@@ -50,6 +52,19 @@ public final class MessageOpener
     /** The trusted signing public keys, by key ID. */
     private final Map<String, ECPublicKey> trustedSigners;
 
+    /** The IDs of pod statements whose messages are refused. */
+    private final Set<String> revoked;
+
+    /** The most verified pod statements kept. */
+    private static final int STATEMENTS_KEPT = 4096;
+
+    /**
+     * Pod statements already verified, by their compact form, so each is
+     * verified once (docs/PERFORMANCE.md §3.5).
+     */
+    private final Map<String, PodStatement> verified =
+            new ConcurrentHashMap<>();
+
     /**
      * Creates an opener.
      *
@@ -61,6 +76,22 @@ public final class MessageOpener
     public MessageOpener(Map<String, PrivateKey> recipientKeys,
             Map<String, ECPublicKey> trustedSigners)
     {
+        this(recipientKeys, trustedSigners, Set.of());
+    }
+
+    /**
+     * Creates an opener that also refuses messages signed under revoked
+     * pod statements.
+     *
+     * @param recipientKeys  this reader's private keys by key ID
+     * @param trustedSigners the trusted signing public keys by key ID
+     * @param revoked        the IDs of revoked pod statements
+     * @throws IllegalArgumentException if either map is empty
+     */
+    public MessageOpener(Map<String, PrivateKey> recipientKeys,
+            Map<String, ECPublicKey> trustedSigners, Set<String> revoked)
+    {
+        this.revoked = Set.copyOf(revoked);
         if (recipientKeys.isEmpty() || trustedSigners.isEmpty())
         {
             throw new IllegalArgumentException("At least one recipient key"
@@ -151,6 +182,14 @@ public final class MessageOpener
         {
             throw new MessageRejectedException(Reason.UNKNOWN_SIGNER);
         }
+        Object statement =
+                jws.getHeader().getCustomParam(MessageSealer.STATEMENT_PARAM);
+        if (statement != null)
+        {
+            signerKey = podKey(statement, signerKid, signerKey,
+                    jws.getHeader().getCustomParam(
+                            MessageSealer.SIGNED_AT_PARAM));
+        }
         try
         {
             JWSVerifier verifier = new ECDSAVerifier(signerKey);
@@ -173,6 +212,49 @@ public final class MessageOpener
         {
             throw new MessageRejectedException(Reason.BAD_PAYLOAD, failure);
         }
+    }
+
+    /**
+     * The pod key a message is signed with, once its statement is shown
+     * to be the stage's, not revoked, and to cover the time the message
+     * says it was signed (docs/PERFORMANCE.md §3.5). The time is the
+     * signing time, not now, so a message queued for days still opens.
+     *
+     * @param statement the statement header parameter
+     * @param stageKid  the stage key's ID, as the message names it
+     * @param stageKey  that stage key
+     * @param signedAt  the signing time header parameter
+     * @return the pod's public key
+     * @throws MessageRejectedException if any check fails
+     */
+    private ECPublicKey podKey(Object statement, String stageKid,
+            ECPublicKey stageKey, Object signedAt)
+            throws MessageRejectedException
+    {
+        if (!(statement instanceof String compact)
+                || !(signedAt instanceof Number seconds))
+        {
+            throw new MessageRejectedException(Reason.STATEMENT_INVALID);
+        }
+        PodStatement known = verified.get(compact);
+        if (known == null)
+        {
+            known = PodStatement.verify(compact, stageKid, stageKey);
+            if (verified.size() >= STATEMENTS_KEPT)
+            {
+                verified.clear();
+            }
+            verified.put(compact, known);
+        }
+        if (revoked.contains(known.id()))
+        {
+            throw new MessageRejectedException(Reason.REVOKED_SIGNER);
+        }
+        if (!known.covers(Instant.ofEpochSecond(seconds.longValue())))
+        {
+            throw new MessageRejectedException(Reason.STATEMENT_INVALID);
+        }
+        return known.key();
     }
 
     /**

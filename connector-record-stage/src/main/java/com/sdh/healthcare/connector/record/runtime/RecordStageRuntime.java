@@ -271,7 +271,7 @@ public final class RecordStageRuntime implements AutoCloseable
                     new SourceInputs(source, transform.messages()), opened);
             StageWorker<RecordStageProcessor.Prepared> worker =
                     new StageWorker<>(processor, registry, keys.inbox(),
-                            new MessageSealer(keys.signer(), keys.signerKid(),
+                            new MessageSealer(keys.messages(), keys.signerKid(),
                                     keys.recipient(), keys.recipientKid()),
                             publisher, workerSettings, reprocessing);
             opened.add(worker);
@@ -373,7 +373,7 @@ public final class RecordStageRuntime implements AutoCloseable
         ClosablePublisher publisher = publisher(camel, queue);
         opened.add(publisher);
         return new StageWorker.Reprocessing(store, inputs,
-                new MessageSealer(keys.signer(), keys.signerKid(),
+                new MessageSealer(keys.messages(), keys.signerKid(),
                         self.inbox(), self.inboxKid()),
                 publisher, self.signerKid());
     }

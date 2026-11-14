@@ -61,7 +61,7 @@ class StageTablesTest
                 Duration.ofMinutes(1), source, sink, true);
         CommonSettings.Crypto crypto = new CommonSettings.Crypto("local",
                 "local", null, new CommonSettings.Keys(recordsKek, null, null,
-                        null, null, null), null, null, null);
+                        null, null, null), null, null, null, null);
         return new RecordStageSettings()
         {
             @Override

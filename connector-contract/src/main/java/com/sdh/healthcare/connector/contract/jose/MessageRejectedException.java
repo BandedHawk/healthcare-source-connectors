@@ -52,7 +52,17 @@ public class MessageRejectedException extends Exception
         EARLIER_VERSION,
 
         /** Its payload couldn't be read as a message. */
-        BAD_PAYLOAD
+        BAD_PAYLOAD,
+
+        /**
+         * The pod statement it carries isn't well formed, or doesn't cover
+         * the time the message says it was signed (docs/PERFORMANCE.md
+         * §3.5).
+         */
+        STATEMENT_INVALID,
+
+        /** It is signed under a pod statement that was revoked. */
+        REVOKED_SIGNER
     }
 
     /** Why the message was rejected. */

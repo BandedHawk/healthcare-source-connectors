@@ -374,7 +374,7 @@ public final class LandingRuntime implements AutoCloseable
                         keys.wrap());
             }
             Announcer announcer = new Announcer(
-                    new MessageSealer(keys.signer(), keys.signerKid(),
+                    new MessageSealer(keys.messages(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
                     publisher, storageSettings.catalogName(),
                     storageSettings.namespace(), retry, ACK_TIMEOUT,

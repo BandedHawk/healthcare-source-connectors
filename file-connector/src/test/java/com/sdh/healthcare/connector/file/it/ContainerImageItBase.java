@@ -361,7 +361,7 @@ abstract class ContainerImageItBase
                         keys.signingPem, null),
                 new CommonSettings.Aws(null, null),
                 new CommonSettings.Gcp(null),
-                new CommonSettings.Vault(null, null, null, "transit", null));
+                new CommonSettings.Vault(null, null, null, "transit", null), null);
         downstreamKeys = KeyMaterial.load(hostCrypto);
         reader = ItSupport.convertReader(keys,
                 CatalogUtil.buildIcebergCatalog("sdh",
