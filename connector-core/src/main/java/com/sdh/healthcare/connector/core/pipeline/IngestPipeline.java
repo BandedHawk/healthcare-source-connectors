@@ -22,7 +22,6 @@ import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
-import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
@@ -187,6 +186,12 @@ public final class IngestPipeline implements AutoCloseable
     /** Publishes each committed batch's messages, one batch at a time. */
     private final ExecutorService publishing;
 
+    /**
+     * Appends the batches of the items split at once on this pod to the
+     * records table together, in one commit.
+     */
+    private final GroupAppender appender;
+
     /** Test hooks between the steps of a batch; none by default. */
     private PipelineHooks hooks = PipelineHooks.NONE;
 
@@ -234,6 +239,7 @@ public final class IngestPipeline implements AutoCloseable
         this.publishing = Executors.newSingleThreadExecutor(
                 Thread.ofPlatform().name("sdh-publish").daemon(true)
                         .factory());
+        this.appender = new GroupAppender(recordsTable);
     }
 
     /**
@@ -1127,7 +1133,6 @@ public final class IngestPipeline implements AutoCloseable
             // a checkpoint that resume can settle (STAGES.md §8).
             checkpoints.prepare(next, lease);
             hooks.batchPrepared(batch.lastSeq);
-            TableCommitter committer = new LeasedCommitter(lease);
             Span commit = telemetry.span("storage.commit",
                     Fields.of(Attr.TABLE, table.name())
                             .with(Attr.COUNT, batch.count));
@@ -1142,9 +1147,9 @@ public final class IngestPipeline implements AutoCloseable
                             {
                                 return table.currentSnapshot();
                             }
-                            return committer.commit(table, transaction ->
-                                    transaction.newFastAppend()
-                                            .appendFile(dataFile).commit());
+                            // With the other items' batches waiting, in one
+                            // commit (docs/PERFORMANCE.md §3.1).
+                            return appender.append(dataFile, lease);
                         });
                 hooks.batchAppended(batch.lastSeq);
                 checkpoints.save(next, lease);
@@ -1924,6 +1929,7 @@ public final class IngestPipeline implements AutoCloseable
     @Override
     public void close()
     {
+        appender.close();
         publishing.shutdownNow();
         sealers.shutdownNow();
         workers.shutdownNow();

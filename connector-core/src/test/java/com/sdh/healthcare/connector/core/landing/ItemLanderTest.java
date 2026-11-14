@@ -16,6 +16,7 @@ import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
+import com.sdh.healthcare.connector.core.pipeline.UuidV7;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
@@ -162,7 +163,8 @@ class ItemLanderTest
     }
 
     /**
-     * A file item with a source reference for its bytes.
+     * A file item with a source reference for its bytes, and a
+     * time-ordered ID, as an intake gives it.
      *
      * @param bytes the item
      * @param name  its path
@@ -170,7 +172,8 @@ class ItemLanderTest
      */
     NewItem fileItem(byte[] bytes, String name)
     {
-        return new NewItem(UUID.randomUUID(), ItemKind.FILE,
+        return new NewItem(UuidV7.next(System.currentTimeMillis()),
+                ItemKind.FILE,
                 SourceRef.of(ids, INTAKE, name, bytes.length, "1700000000000"),
                 name, null);
     }
@@ -631,6 +634,235 @@ class ItemLanderTest
         assertThat(message.storage().snapshotId())
                 .isEqualTo(landed.snapshotId());
         assertThat(message.storage().kekRef()).isEqualTo(KEK);
+    }
+
+    /**
+     * Small items landed together share one data file and one commit; each
+     * reads back whole, with the digest and hash it would have alone, and
+     * recovery finds them all, by position in the file.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void landsSmallItemsTogetherInOneCommit() throws Exception
+    {
+        byte[] empty = data(0);
+        byte[] small = data(10);
+        byte[] blocks = data(2 * BLOCK + 7);
+        List<NewItem> items = List.of(fileItem(empty, "g/empty"),
+                fileItem(small, "g/small"), fileItem(blocks, "g/blocks"));
+        List<byte[]> contents = List.of(empty, small, blocks);
+        ItemLander lander = lander();
+        long snapshots = snapshotCount();
+
+        ItemLander.GroupLanded result = lander.landAll(List.of(
+                new ItemLander.Grouped(items.get(0), opener(empty)),
+                new ItemLander.Grouped(items.get(1), opener(small)),
+                new ItemLander.Grouped(items.get(2), opener(blocks))),
+                3 * BLOCK);
+
+        assertThat(snapshotCount()).isEqualTo(snapshots + 1);
+        assertThat(result.changed()).isEmpty();
+        assertThat(result.landed()).extracting(LandedItem::itemId)
+                .containsExactlyElementsOf(
+                        items.stream().map(NewItem::itemId).toList());
+        assertThat(result.landed()).extracting(LandedItem::file)
+                .containsOnly(result.landed().get(0).file());
+        for (int index = 0; index < items.size(); index++)
+        {
+            byte[] bytes = contents.get(index);
+            LandedItem landed = result.landed().get(index);
+            assertThat(readBack(landed.itemId())).isEqualTo(bytes);
+            assertThat(landed.size()).isEqualTo(bytes.length);
+            assertThat(landed.sha256()).isEqualTo(HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(bytes)));
+            assertThat(landed.digest()).isEqualTo(lander().land(
+                    fileItem(bytes, "alone/" + index), opener(bytes))
+                    .digest());
+        }
+        assertThat(chunkRows(items.get(2).itemId())).isEqualTo(9);
+        assertThat(lander().checkpoint()).hasValueSatisfying(
+                checkpoint -> assertThat(checkpoint.done()).isTrue());
+    }
+
+    /**
+     * Recovery finds every item of the last group commit, as it was
+     * landed, from where its summary row is.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void recoveryFindsEveryItemOfTheLastGroup() throws Exception
+    {
+        byte[] first = data(20);
+        byte[] second = data(BLOCK + 3);
+        NewItem one = fileItem(first, "r/one");
+        NewItem two = fileItem(second, "r/two");
+        List<LandedItem> landed = lander().landAll(List.of(
+                new ItemLander.Grouped(one, opener(first)),
+                new ItemLander.Grouped(two, opener(second))), BLOCK * 2)
+                .landed();
+
+        List<LandedItem> found = lander().lastLandedAll();
+        assertThat(found).hasSize(2);
+        for (int index = 0; index < 2; index++)
+        {
+            LandedItem expected = landed.get(index);
+            LandedItem actual = found.get(index);
+            assertThat(actual.itemId()).isEqualTo(expected.itemId());
+            assertThat(actual.source()).isEqualTo(expected.source());
+            assertThat(actual.digest()).isEqualTo(expected.digest());
+            assertThat(actual.size()).isEqualTo(expected.size());
+            assertThat(actual.sha256()).isEqualTo(expected.sha256());
+            assertThat(actual.landedAt()).isEqualTo(expected.landedAt());
+            assertThat(actual.kekRef()).isEqualTo(KEK);
+            assertThat(actual.file()).isEqualTo(expected.file());
+            assertThat(actual.fileSize()).isEqualTo(expected.fileSize());
+            assertThat(actual.summaryRow())
+                    .isEqualTo(expected.summaryRow());
+        }
+        assertThat(lander().lastLanded()).hasValueSatisfying(
+                last -> assertThat(last.itemId()).isEqualTo(two.itemId()));
+    }
+
+    /**
+     * An item whose source changed is left out of its group, and nothing
+     * of it is committed; the rest are landed.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void leavesOutAnItemWhoseSourceChanged() throws Exception
+    {
+        byte[] bytes = data(30);
+        NewItem kept = fileItem(bytes, "c/kept");
+        NewItem shrunk = fileItem(bytes, "c/shrunk");
+        ItemLander.GroupLanded result = lander().landAll(List.of(
+                new ItemLander.Grouped(shrunk,
+                        opener(Arrays.copyOf(bytes, 20))),
+                new ItemLander.Grouped(kept, opener(bytes))), BLOCK);
+
+        assertThat(result.changed()).containsExactly(shrunk);
+        assertThat(result.landed()).extracting(LandedItem::itemId)
+                .containsExactly(kept.itemId());
+        assertThat(chunkRows(shrunk.itemId())).isZero();
+        assertThat(readBack(kept.itemId())).isEqualTo(bytes);
+    }
+
+    /**
+     * A group tried again after its commit went through, as after an error
+     * that followed it, isn't landed twice: its items are returned again
+     * without being read, and an item that joined it since is landed.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aCommittedGroupTriedAgainLandsOnlyTheRest() throws Exception
+    {
+        byte[] bytes = data(40);
+        NewItem one = fileItem(bytes, "t/one");
+        NewItem two = fileItem(bytes, "t/two");
+        NewItem three = fileItem(bytes, "t/three");
+        ItemLander crashing = lander();
+        crashing.afterCommit(nextBlock ->
+        {
+            throw new Crash();
+        });
+        assertThatThrownBy(() -> crashing.landAll(List.of(
+                new ItemLander.Grouped(one, opener(bytes)),
+                new ItemLander.Grouped(two, opener(bytes))), BLOCK))
+                .isInstanceOf(Crash.class);
+
+        ItemLander.ItemOpener unread = offset ->
+        {
+            throw new AssertionError("must not read the source");
+        };
+        ItemLander.GroupLanded again = lander().landAll(List.of(
+                new ItemLander.Grouped(one, unread),
+                new ItemLander.Grouped(two, unread),
+                new ItemLander.Grouped(three, opener(bytes))), BLOCK);
+
+        assertThat(again.landed()).extracting(LandedItem::itemId)
+                .containsExactly(one.itemId(), two.itemId(),
+                        three.itemId());
+        assertThat(chunkRows(one.itemId())).isEqualTo(1);
+        assertThat(readBack(three.itemId())).isEqualTo(bytes);
+        assertThat(lander().lastLandedAll()).extracting(LandedItem::itemId)
+                .containsExactly(three.itemId());
+    }
+
+    /**
+     * An item landed alone after a group replaces it as the last commit.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void anItemLandedAloneEndsTheLastGroup() throws Exception
+    {
+        byte[] bytes = data(15);
+        lander().landAll(List.of(
+                new ItemLander.Grouped(fileItem(bytes, "a/1"), opener(bytes)),
+                new ItemLander.Grouped(fileItem(bytes, "a/2"),
+                        opener(bytes))), BLOCK);
+        NewItem alone = fileItem(bytes, "a/alone");
+        lander().land(alone, opener(bytes));
+
+        assertThat(lander().lastLandedAll()).extracting(LandedItem::itemId)
+                .containsExactly(alone.itemId());
+        table.refresh();
+        assertThat(table.properties())
+                .doesNotContainKey(LandingBatch.propertyKey(INTAKE));
+    }
+
+    /**
+     * An item larger than a group allows, a group with an item twice, or
+     * an item whose ID isn't time-ordered, is refused before anything is
+     * written.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void refusesAGroupItCannotLand() throws Exception
+    {
+        byte[] bytes = data(BLOCK + 1);
+        NewItem large = fileItem(bytes, "l/large");
+        assertThatThrownBy(() -> lander().landAll(List.of(
+                new ItemLander.Grouped(large, opener(bytes))), BLOCK))
+                .isInstanceOf(IllegalArgumentException.class);
+        NewItem twice = fileItem(data(5), "l/twice");
+        assertThatThrownBy(() -> lander().landAll(List.of(
+                new ItemLander.Grouped(twice, opener(data(5))),
+                new ItemLander.Grouped(twice, opener(data(5)))), BLOCK))
+                .isInstanceOf(IllegalArgumentException.class);
+        NewItem unordered = new NewItem(new UUID(-1L, -1L), ItemKind.FILE,
+                SourceRef.of(ids, INTAKE, "l/unordered", 5, "1"), null, null);
+        assertThatThrownBy(() -> lander().landAll(List.of(
+                new ItemLander.Grouped(unordered, opener(data(5)))), BLOCK))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(chunkRows(large.itemId())).isZero();
+        assertThat(chunkRows(twice.itemId())).isZero();
+    }
+
+    /**
+     * A tampered record of the last group commit is refused.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aTamperedGroupIsRefused() throws Exception
+    {
+        byte[] bytes = data(10);
+        lander().landAll(List.of(
+                new ItemLander.Grouped(fileItem(bytes, "x/1"), opener(bytes)),
+                new ItemLander.Grouped(fileItem(bytes, "x/2"),
+                        opener(bytes))), BLOCK);
+        String key = LandingBatch.propertyKey(INTAKE);
+        String stored = table.properties().get(key);
+        table.updateProperties()
+                .set(key, stored.replace("\"rows\":4", "\"rows\":5"))
+                .commit();
+        assertThatThrownBy(() -> lander().lastLandedAll())
+                .isInstanceOf(CheckpointTamperedException.class);
     }
 
     /** Thrown by a test hook to simulate a crash. */

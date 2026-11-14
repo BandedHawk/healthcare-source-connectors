@@ -82,15 +82,23 @@ At 100 items/s that is about one commit per second per writer instead of 100, so
 snapshots. What that changes:
 
 - **Landing:** items are read, encrypted and written concurrently (§3.4), then committed together with their
-  ledger rows and the batch's checkpoint, and announced. The intake objects are deleted after the commit, in
+  ledger rows and the batch's checkpoint, and announced. **Built (revision (de)) without the concurrent reads,
+  which are step 4:** small items listed from a source (up to `sdh.storage.group.max-item-bytes`, 8 MB) are
+  read one after another into one data file and committed together; larger ones, pushes and message batches
+  are landed alone. The intake objects are deleted after the commit, in
   bulk (S3 and GCS batch deletes; ADLS one per object, concurrently). A crash before the commit lands the batch
   again from the same intake objects, as today for one item; the ledger still stops a file being landed twice.
   The batch's one data key wraps once per batch, as now.
 - **The ledger, once per batch.** The JDBC catalog commits one table at a time, so the ledger can't share
-  the items' commit. It is committed first, then the items with the checkpoint naming the ledger's commit;
-  recovery finds a ledger batch with no items and lands those items again, as it does now for one item.
+  the items' commit. **As built (DESIGN.md revision (de)) it is committed after the items, as it was for one
+  item:** the items' commit records the whole batch beside the checkpoint, and recovery writes the ledger rows
+  of any of its items without one, and announces them all again. Committing the ledger first, as first
+  proposed here, would make recovery land items again from the source; this way it needs only the checkpoint.
 - **Split, convert, transform:** the stage already writes one data file per poll; the change is to let a
-  poll's worth of input fill the batch, and to commit across items. Item completion (the registry in the
+  poll's worth of input fill the batch, and to commit across items. **Built for split (revision (de)):** the
+  items split at once on a pod append their files in one commit (`GroupAppender`), taking whatever is waiting
+  when the previous commit ends, so it adds no wait when idle; convert and transform already commit a poll's
+  records together. Item completion (the registry in the
   database) is updated for the whole batch in one statement (§8).
 - **Exactly once** is kept the way it is now: nothing is published before its commit, the checkpoint or
   registry rows commit with it, and a retry first checks whether an earlier attempt committed.
@@ -528,7 +536,7 @@ Each step is measured before the next, and each is useful alone.
 | 0 | Measurement harness and a baseline at 1,000 documents (§10; 100,000 after step 1) | the numbers to beat. Harness built and baseline run 2026-11-13 (§10): 0.12 documents/s, p99 5,526 s; split slows as the landed table grows: three planned reads of it per item, 99% of split's time with the `split_records` lookups (§10, 2026-11-13); not the pod, not CPU |
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
-| 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots |
+| 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before; not yet measured |
 | 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |

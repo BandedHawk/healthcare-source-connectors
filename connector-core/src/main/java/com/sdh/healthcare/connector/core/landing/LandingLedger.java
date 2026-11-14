@@ -18,8 +18,10 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileFormat;
@@ -42,8 +44,9 @@ import org.apache.iceberg.parquet.Parquet;
  * <p>
  * An entry is written straight after its item's final commit. Iceberg has
  * no commit across tables, so a crash in between leaves the last landed item
- * without an entry; {@link #repair} adds it at startup. Because items are
- * landed one at a time, only the last one can be missing.
+ * without an entry; {@link #repair} adds it at startup. Because each
+ * commit is recorded before the next, only the last commit's items can be
+ * missing.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -204,27 +207,52 @@ public final class LandingLedger
     }
 
     /**
-     * Adds the entry of the last landed item if a crash kept it from being
-     * written, so it is in the ledger before the intake looks for new
-     * items.
+     * Adds the entries of the items the last commit landed if a crash kept
+     * them from being written, so they are in the ledger before the intake
+     * looks for new items: the one item landed alone, or every item of a
+     * group commit.
      *
      * @param lander the intake's lander
-     * @param index  the loaded index, which the entry is added to as well
+     * @param index  the loaded index, which the entries are added to as
+     *               well
      * @return true if an entry was missing and has been added
      * @throws Exception if storage fails
      */
     public boolean repair(ItemLander lander, LedgerIndex index)
             throws Exception
     {
-        LandedItem last = lander.lastLanded().orElse(null);
-        if (last == null || contains(last.itemId()))
+        List<LandedItem> missing = missing(lander.lastLandedAll());
+        if (missing.isEmpty())
         {
             return false;
         }
-        record(List.of(Entry.of(last)));
-        index.add(last.source() == null ? null : last.source().key(),
-                last.digest());
+        record(missing.stream().map(Entry::of).toList());
+        for (LandedItem item : missing)
+        {
+            index.add(item.source() == null ? null : item.source().key(),
+                    item.digest());
+        }
         return true;
+    }
+
+    /**
+     * The items that have no entry in the ledger, found in one scan.
+     *
+     * @param items the items
+     * @return those without an entry, in the same order
+     * @throws IOException if the table can't be read
+     */
+    public List<LandedItem> missing(List<LandedItem> items)
+            throws IOException
+    {
+        if (items.isEmpty())
+        {
+            return List.of();
+        }
+        Set<UUID> recorded = new HashSet<>(itemIds(Expressions.in(ITEM_ID,
+                items.stream().map(LandedItem::itemId).toList())));
+        return items.stream()
+                .filter(item -> !recorded.contains(item.itemId())).toList();
     }
 
     /**

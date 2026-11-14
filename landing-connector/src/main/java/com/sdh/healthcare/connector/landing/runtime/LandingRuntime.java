@@ -426,7 +426,8 @@ public final class LandingRuntime implements AutoCloseable
                         new Readiness(source.settle(), System::nanoTime),
                         storage, announcer, claim, fatal, clock,
                         properties.retry().initialBackoff(),
-                        new IntakeHealth(intake, System::nanoTime));
+                        new IntakeHealth(intake, System::nanoTime),
+                        grouping(storageSettings.group()));
             }
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.INTAKE, intake)
@@ -692,6 +693,27 @@ public final class LandingRuntime implements AutoCloseable
         closeQuietly(catalog);
         closeQuietly(dataSource);
         LOG.info("connector.stopped");
+    }
+
+    /**
+     * How small items are landed together, from the settings.
+     *
+     * @param group the {@code sdh.storage.group} settings
+     * @return the grouping
+     * @throws IllegalArgumentException if an item may be larger than can
+     *                                  be held in memory at once
+     */
+    static IntakeService.Grouping grouping(LandingProperties.Group group)
+    {
+        long maxItemBytes = group.maxItemBytes().toBytes();
+        if (maxItemBytes >= Integer.MAX_VALUE)
+        {
+            throw new IllegalArgumentException(
+                    "sdh.storage.group.max-item-bytes must be under 2GB");
+        }
+        return new IntakeService.Grouping(group.maxItems(),
+                group.maxBytes().toBytes(), group.maxWait(),
+                (int) maxItemBytes);
     }
 
     /**

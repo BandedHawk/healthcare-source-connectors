@@ -21,7 +21,10 @@ import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.Record;
@@ -169,6 +172,116 @@ public final class Announcer
         {
             throw new PublishFailedException(failure);
         }
+        announced(item, sameAs);
+    }
+
+    /**
+     * An item to announce, and the earlier item it is an exact copy of.
+     *
+     * @param item   the landed item
+     * @param sameAs the earliest earlier item of the intake with the same
+     *               content still in the ledger; null if none
+     */
+    public record Announcement(LandedItem item, UUID sameAs)
+    {
+    }
+
+    /**
+     * Sends the {@code item.landed} messages of several items at once,
+     * then waits for their acknowledgements: a group commit's items
+     * (docs/PERFORMANCE.md §3.1). One the broker didn't acknowledge is
+     * sent again on its own, with the retries {@link #announce} has. Each
+     * message is keyed by its item, so one sent twice is the same message.
+     *
+     * @param announcements the items, in order
+     * @throws PublishFailedException if the broker didn't acknowledge one
+     *                                after every retry, or a summary row
+     *                                couldn't be read
+     * @throws InterruptedException   if the wait is interrupted
+     */
+    public void announceAll(List<Announcement> announcements)
+            throws PublishFailedException, InterruptedException
+    {
+        if (announcements.size() == 1)
+        {
+            announce(announcements.get(0).item(),
+                    announcements.get(0).sameAs());
+            return;
+        }
+        List<CompletableFuture<?>> sent = new ArrayList<>();
+        for (Announcement announcement : announcements)
+        {
+            ConnectorMessage.ItemLanded message = announcement.item()
+                    .message(catalogName, namespace, announcement.sameAs());
+            CompletableFuture<?> acknowledged;
+            try
+            {
+                acknowledged = publisher.publish(
+                        OutboundMessage.of(message, sealer.seal(message)));
+            }
+            catch (RuntimeException failure)
+            {
+                acknowledged = CompletableFuture.failedFuture(failure);
+            }
+            sent.add(acknowledged);
+        }
+        long deadline = System.nanoTime() + timeout.toNanos();
+        for (int index = 0; index < announcements.size(); index++)
+        {
+            Announcement announcement = announcements.get(index);
+            if (acknowledged(sent.get(index), deadline))
+            {
+                announced(announcement.item(), announcement.sameAs());
+            }
+            else
+            {
+                announce(announcement.item(), announcement.sameAs());
+            }
+        }
+    }
+
+    /**
+     * Waits for a message's acknowledgement, until a deadline.
+     *
+     * @param sent     completes once the broker has acknowledged it
+     * @param deadline the latest time to wait to, by
+     *                 {@link System#nanoTime}
+     * @return true if it was acknowledged; false if it failed or the
+     *         deadline passed
+     * @throws InterruptedException if the wait is interrupted
+     */
+    private static boolean acknowledged(CompletableFuture<?> sent,
+            long deadline) throws InterruptedException
+    {
+        try
+        {
+            sent.get(Math.max(0, deadline - System.nanoTime()),
+                    TimeUnit.NANOSECONDS);
+            return true;
+        }
+        catch (InterruptedException interrupted)
+        {
+            throw interrupted;
+        }
+        catch (Exception failure)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * After an item's message is acknowledged: sends its receipt, with
+     * results on, and records it.
+     *
+     * @param item   the landed item
+     * @param sameAs the earlier item it is an exact copy of; null if none
+     * @throws PublishFailedException if the summary row couldn't be read,
+     *                                or the receipt wasn't acknowledged
+     * @throws InterruptedException   if the wait is interrupted
+     */
+    private void announced(LandedItem item, UUID sameAs)
+            throws PublishFailedException, InterruptedException
+    {
         if (receipts != null)
         {
             receipts.channel().send(receipt(item, sameAs));

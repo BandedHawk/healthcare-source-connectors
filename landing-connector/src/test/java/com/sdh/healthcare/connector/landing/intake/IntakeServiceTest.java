@@ -31,6 +31,7 @@ import com.sdh.healthcare.connector.landing.config.SourceSettings;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -223,6 +224,26 @@ class IntakeServiceTest
     IntakeService service(IntakeSource source, ItemLander lander,
             FencedCommitter committer, Duration settle) throws Exception
     {
+        return service(source, lander, committer, settle,
+                IntakeService.Grouping.NONE);
+    }
+
+    /**
+     * A service as a fresh start would make it, landing small items
+     * together.
+     *
+     * @param source    where items come from
+     * @param lander    the lander, under its committer
+     * @param committer the lander's committer
+     * @param settle    how long items must settle
+     * @param grouping  how small items are landed together
+     * @return the service
+     * @throws Exception if the ledger can't be loaded
+     */
+    IntakeService service(IntakeSource source, ItemLander lander,
+            FencedCommitter committer, Duration settle,
+            IntakeService.Grouping grouping) throws Exception
+    {
         LandingLedger ledger = new LandingLedger(ledgerTable, committer,
                 RETRY);
         Announcer announcer = new Announcer(new MessageSealer(
@@ -244,7 +265,38 @@ class IntakeServiceTest
                 new IntakeService.Storage(lander, ledger,
                         ledger.load(INTAKE), ids),
                 announcer, null, fatal::add, Clock.systemUTC(),
-                Duration.ofMillis(1), new IntakeHealth(INTAKE, now::get));
+                Duration.ofMillis(1), new IntakeHealth(INTAKE, now::get),
+                grouping);
+    }
+
+    /**
+     * A service on a fresh committer and lander, landing small items
+     * together.
+     *
+     * @param source   where items come from
+     * @param grouping how small items are landed together
+     * @return the service
+     * @throws Exception if the ledger can't be loaded
+     */
+    IntakeService grouped(IntakeSource source,
+            IntakeService.Grouping grouping) throws Exception
+    {
+        FencedCommitter committer = committer();
+        return service(source, lander(committer), committer, Duration.ZERO,
+                grouping);
+    }
+
+    /**
+     * Grouping that waits for the listing to end, for items of up to 64
+     * bytes.
+     *
+     * @param maxItems land once this many are waiting
+     * @return the grouping
+     */
+    static IntakeService.Grouping grouping(int maxItems)
+    {
+        return new IntakeService.Grouping(maxItems, 1 << 20,
+                Duration.ofHours(1), 64);
     }
 
     /**
@@ -518,6 +570,182 @@ class IntakeServiceTest
         service.onListed(item);
         assertThat(sent).hasSize(1);
         assertThat(root.resolve("in/a.csv")).doesNotExist();
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * Small items wait for the end of the listing, then are landed in one
+     * data file and commit, recorded, announced in order, and deleted.
+     */
+    @Test
+    void landsSmallItemsTogetherAtTheEndOfAListing() throws Exception
+    {
+        IntakeService service = grouped(
+                new LocalDirectorySource(settings("read-write")),
+                grouping(500));
+        service.recoverAtStartup();
+        service.onListed(write("a.csv", "first"));
+        service.onListed(write("b.csv", "second, longer than a chunk"));
+        service.onListed(write("c.csv", ""));
+        assertThat(sent).as("waiting for the listing to end").isEmpty();
+        assertThat(root.resolve("in/a.csv")).exists();
+
+        service.onListingDone();
+        List<ConnectorMessage.ItemLanded> messages = landed();
+        assertThat(messages).extracting(ConnectorMessage.ItemLanded::size)
+                .containsExactly(5L, 27L, 0L);
+        assertThat(messages).extracting(message -> message.storage().file())
+                .doesNotContainNull()
+                .containsOnly(messages.get(0).storage().file());
+        assertThat(messages)
+                .extracting(message -> message.storage().firstRow())
+                .doesNotHaveDuplicates();
+        LandingLedger ledger = new LandingLedger(ledgerTable, committer(),
+                RETRY);
+        for (ConnectorMessage.ItemLanded message : messages)
+        {
+            assertThat(ledger.contains(message.itemId())).isTrue();
+        }
+        assertThat(root.resolve("in/a.csv")).doesNotExist();
+        assertThat(root.resolve("in/b.csv")).doesNotExist();
+        assertThat(root.resolve("in/c.csv")).doesNotExist();
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * A group is landed once it is full, or once its first item has
+     * waited long enough; an item listed again while it waits isn't added
+     * twice.
+     */
+    @Test
+    void landsAGroupOnceItIsFullOrHasWaited() throws Exception
+    {
+        IntakeService service = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                grouping(2));
+        ListedItem first = write("a.csv", "1");
+        service.onListed(first);
+        service.onListed(first);
+        assertThat(sent).isEmpty();
+        service.onListed(write("b.csv", "2"));
+        assertThat(sent).as("two make a group").hasSize(2);
+        service.onListed(write("c.csv", "3"));
+        assertThat(sent).hasSize(2);
+
+        IntakeService waited = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                new IntakeService.Grouping(500, 1 << 20, Duration.ZERO, 64));
+        waited.recoverAtStartup();
+        int recovered = sent.size();
+        waited.onListed(write("d.csv", "4"));
+        assertThat(sent).as("no wait at all").hasSize(recovered + 1);
+    }
+
+    /**
+     * An item too large for a group is landed alone, after the items
+     * waiting before it, so they keep their order.
+     */
+    @Test
+    void landsALargeItemAloneAfterTheGroup() throws Exception
+    {
+        IntakeService service = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                grouping(500));
+        service.onListed(write("small.csv", "small"));
+        service.onListed(write("large.csv", "x".repeat(100)));
+        assertThat(landed()).extracting(ConnectorMessage.ItemLanded::size)
+                .containsExactly(5L, 100L);
+        assertThat(landed().get(0).storage().file())
+                .isNotEqualTo(landed().get(1).storage().file());
+    }
+
+    /**
+     * After a crash between a group's commit and its messages, a restart
+     * announces every item of the group, and records them all.
+     */
+    @Test
+    void announcesTheWholeLastGroupAgainAfterACrash() throws Exception
+    {
+        IntakeService service = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                grouping(500));
+        failSends.set(Integer.MAX_VALUE);
+        service.onListed(write("a.csv", "first"));
+        service.onListed(write("b.csv", "second"));
+        service.onListingDone();
+        assertThat(sent).as("the messages never went").isEmpty();
+        failSends.set(0);
+
+        IntakeService restarted = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                grouping(500));
+        restarted.recoverAtStartup();
+        List<ConnectorMessage.ItemLanded> messages = landed();
+        assertThat(messages).extracting(ConnectorMessage.ItemLanded::size)
+                .containsExactly(5L, 6L);
+        restarted.onListed(listed("a.csv"));
+        restarted.onListed(listed("b.csv"));
+        restarted.onListingDone();
+        assertThat(sent).as("the ledger knows them").hasSize(2);
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * A group whose commit went through, but whose landing then failed,
+     * is tried again and landed once, under the same IDs.
+     */
+    @Test
+    void aGroupTriedAgainAfterItsCommitIsLandedOnce() throws Exception
+    {
+        FencedCommitter committer = committer();
+        ItemLander lander = lander(committer);
+        AtomicInteger failures = new AtomicInteger(1);
+        lander.afterCommit(nextBlock ->
+        {
+            if (failures.getAndDecrement() > 0)
+            {
+                throw new UncheckedIOException(new IOException("cut off"));
+            }
+        });
+        IntakeService service = service(
+                new LocalDirectorySource(settings("read-write")), lander,
+                committer, Duration.ZERO, grouping(500));
+        service.onListed(write("a.csv", "first"));
+        service.onListed(write("b.csv", "second"));
+        service.onListingDone();
+        assertThat(sent).isEmpty();
+        assertThat(root.resolve("in/a.csv")).exists();
+
+        service.onListingDone();
+        List<ConnectorMessage.ItemLanded> messages = landed();
+        assertThat(messages).hasSize(2);
+        assertThat(new LandingLedger(ledgerTable, committer(), RETRY)
+                .load(INTAKE).size()).isEqualTo(2);
+        assertThat(root.resolve("in/a.csv")).doesNotExist();
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * An item whose source changed before its group was landed is left
+     * out, and landed afresh once listed again; the rest of its group
+     * isn't held up.
+     */
+    @Test
+    void leavesAChangedItemOutOfItsGroup() throws Exception
+    {
+        IntakeService service = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                grouping(500));
+        service.onListed(write("a.csv", "short"));
+        service.onListed(write("b.csv", "kept"));
+        write("a.csv", "longer content");
+        service.onListingDone();
+        assertThat(landed()).extracting(ConnectorMessage.ItemLanded::size)
+                .containsExactly(4L);
+        service.onListed(listed("a.csv"));
+        service.onListingDone();
+        assertThat(landed()).extracting(ConnectorMessage.ItemLanded::size)
+                .containsExactly(4L, 14L);
         assertThat(fatal).isEmpty();
     }
 

@@ -424,11 +424,35 @@ public record LandingProperties(
      * @param namespace   the landing namespace
      * @param commitBytes commit a large item's chunks after at least this
      *                    many bytes, so a restart resumes from there
+     * @param group       how small items are landed together
      */
     public record Storage(Map<String, String> catalog,
             @DefaultValue("sdh") String catalogName,
             @DefaultValue(LandingTables.DEFAULT_NAMESPACE) String namespace,
-            @DefaultValue("512MB") DataSize commitBytes)
+            @DefaultValue("512MB") DataSize commitBytes,
+            @DefaultValue Group group)
+    {
+    }
+
+    /**
+     * How small items listed from a source are landed together, in one
+     * commit (docs/PERFORMANCE.md §3.1). The items waiting are landed once
+     * any limit is reached, or the listing ends. Pushed items and message
+     * batches are landed alone.
+     *
+     * @param maxItems     land once this many are waiting; 1 lands each
+     *                     item alone
+     * @param maxBytes     or once they hold this many bytes
+     * @param maxWait      or once the first has waited this long
+     * @param maxItemBytes the largest item landed with others; larger
+     *                     ones, and those whose size isn't known, are
+     *                     landed alone. Each is held in memory while it is
+     *                     landed.
+     */
+    public record Group(@DefaultValue("500") int maxItems,
+            @DefaultValue("64MB") DataSize maxBytes,
+            @DefaultValue("1s") Duration maxWait,
+            @DefaultValue("8MB") DataSize maxItemBytes)
     {
     }
 

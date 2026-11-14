@@ -29,7 +29,11 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -39,8 +43,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Lands an intake's items, one at a time, as its route lists them (design
- * §5.3). For each item listed:
+ * Lands an intake's items as its route lists them (design §5.3). For each
+ * item listed:
  * <ol>
  *   <li>its source reference is hashed with the ID key, and looked up in
  *       the ledger: an item already landed is only removed from a
@@ -52,8 +56,17 @@ import org.slf4j.LoggerFactory;
  *   <li>its {@code item.landed} message is sent and acknowledged;</li>
  *   <li>a read-write source deletes, moves or renames it.</li>
  * </ol>
+ * Small items can be landed together instead (docs/PERFORMANCE.md §3.1):
+ * with {@linkplain Grouping grouping} on, a ready item no larger than
+ * {@link Grouping#maxItemBytes} waits in memory, and the items waiting are
+ * landed in one commit once there are enough of them, they are large
+ * enough, the first has waited long enough, or the listing ends. Steps 3
+ * to 5 then run for them all: one ledger commit, their messages sent at
+ * once. Larger items, and items whose size isn't known, are landed alone.
+ * <p>
  * A crash between any two steps is recovered at startup: the ledger is
- * repaired, the last item's message is sent again, and an unfinished item
+ * repaired, the last commit's messages are sent again, and an unfinished
+ * item
  * is resumed if the first full listing finds it unchanged, or given up
  * otherwise. Step 1 then finishes the source side.
  * <p>
@@ -92,8 +105,105 @@ public final class IntakeService implements LandingIntake
     {
     }
 
+    /**
+     * How small items are landed together (docs/PERFORMANCE.md §3.1).
+     *
+     * @param maxItems     land the items waiting once there are this many;
+     *                     1 lands each alone
+     * @param maxBytes     or once they hold this many bytes
+     * @param maxWait      or once the first has waited this long
+     * @param maxItemBytes the largest item landed with others; larger ones
+     *                     are landed alone
+     */
+    public record Grouping(int maxItems, long maxBytes, Duration maxWait,
+            int maxItemBytes)
+    {
+
+        /** Each item landed alone. */
+        public static final Grouping NONE =
+                new Grouping(1, 0, Duration.ZERO, 0);
+
+        /**
+         * Creates the settings, checking them.
+         *
+         * @param maxItems     land once there are this many
+         * @param maxBytes     or once they hold this many bytes
+         * @param maxWait      or once the first has waited this long
+         * @param maxItemBytes the largest item landed with others
+         * @throws IllegalArgumentException if a value is negative, or
+         *                                  there must be fewer than one
+         */
+        public Grouping
+        {
+            if (maxItems < 1 || maxBytes < 0 || maxWait.isNegative()
+                    || maxItemBytes < 0)
+            {
+                throw new IllegalArgumentException(
+                        "Grouping limits can't be negative");
+            }
+        }
+
+        /**
+         * Tells whether an item of a size is landed with others.
+         *
+         * @param size its size; negative if not known
+         * @return true if it is
+         */
+        boolean groups(long size)
+        {
+            return maxItems > 1 && size >= 0 && size <= maxItemBytes;
+        }
+    }
+
+    /**
+     * A ready item waiting to be landed with others.
+     *
+     * @param item   the item, with its new ID
+     * @param listed the item as listed
+     */
+    private record Waiting(NewItem item, ListedItem listed)
+    {
+    }
+
+    /**
+     * A landed item not yet in the ledger, and the item as listed, to
+     * finish it at the source.
+     *
+     * @param item   the landed item
+     * @param listed the item as listed; null if it isn't at hand, as at
+     *               startup
+     */
+    private record Finishing(LandedItem item, ListedItem listed)
+    {
+    }
+
     /** The intake's name. */
     private final String intake;
+
+    /** How small items are landed together. */
+    private final Grouping grouping;
+
+    /** The ready items waiting to be landed together, by source key. */
+    private final Map<LedgerIndex.Key, Waiting> waiting =
+            new LinkedHashMap<>();
+
+    /** How many bytes the waiting items hold. */
+    private long waitingBytes;
+
+    /** When the first waiting item began to wait, by {@link #clock}. */
+    private long waitingSince;
+
+    /** Landed items whose ledger entries aren't written yet. */
+    private final List<Finishing> unrecorded = new ArrayList<>();
+
+    /**
+     * Whether writing {@link #unrecorded}'s entries failed once, so some
+     * may be written already.
+     */
+    private boolean recordFailed;
+
+    /** Announced items not yet finished at the source. */
+    private final List<ListedItem> atSource = new ArrayList<>();
 
     /** Where items come from. */
     private final IntakeSource source;
@@ -140,14 +250,12 @@ public final class IntakeService implements LandingIntake
     /** Whether the current listing has found the unfinished item. */
     private boolean unfinishedListed;
 
-    /** A landed item whose message isn't acknowledged yet; or null. */
-    private LandedItem unannounced;
-
     /**
-     * The earlier item {@link #unannounced} is an exact copy of (STAGES.md
-     * §15.5a); null if none.
+     * Landed items whose messages aren't acknowledged yet, each with the
+     * earlier item it is an exact copy of (STAGES.md §15.5a).
      */
-    private UUID unannouncedSameAs;
+    private final List<Announcer.Announcement> unannounced =
+            new ArrayList<>();
 
     /** Whether the source is answering, for events and gauges. */
     private final IntakeHealth health;
@@ -189,7 +297,34 @@ public final class IntakeService implements LandingIntake
             InboundDirectoryClaim claim, FatalExit fatal, Clock clock,
             Duration initialBackoff, IntakeHealth health)
     {
+        this(intake, source, readiness, storage, announcer, claim, fatal,
+                clock, initialBackoff, health, Grouping.NONE);
+    }
+
+    /**
+     * Creates the service, landing small items together.
+     *
+     * @param intake         the intake's name
+     * @param source         where items come from
+     * @param readiness      decides when an item is ready
+     * @param storage        the landing storage
+     * @param announcer      sends {@code item.landed} messages
+     * @param claim          the read-write source's claim; null when
+     *                       read-only
+     * @param fatal          stops the process
+     * @param clock          gives the times item IDs are made from, and
+     *                       how long items have waited
+     * @param initialBackoff the wait after the first error in a row
+     * @param health         whether the source is answering
+     * @param grouping       how small items are landed together
+     */
+    public IntakeService(String intake, IntakeSource source,
+            Readiness readiness, Storage storage, Announcer announcer,
+            InboundDirectoryClaim claim, FatalExit fatal, Clock clock,
+            Duration initialBackoff, IntakeHealth health, Grouping grouping)
+    {
         this.intake = intake;
+        this.grouping = grouping;
         this.source = source;
         this.readiness = readiness;
         this.storage = storage;
@@ -262,7 +397,7 @@ public final class IntakeService implements LandingIntake
             claim.verify();
             claimChecked = true;
         }
-        announcePending();
+        finishLanded();
         health.answered();
         SourceRef ref = SourceRef.of(storage.ids(), intake, item.ref(),
                 item.size(), item.versionText());
@@ -271,21 +406,148 @@ public final class IntakeService implements LandingIntake
             if (unfinished.source().hash().equals(ref.hash()))
             {
                 unfinishedListed = true;
+                landWaiting();
                 land(new NewItem(unfinished.itemId(), unfinished.kind(),
                         ref, item.ref(), replaces(item)), item);
             }
+            return;
+        }
+        if (waiting.containsKey(ref.key()))
+        {
+            landWaitingIfDue();
             return;
         }
         if (storage.index().contains(ref.key()))
         {
             source.afterLanding(item);
             readiness.forget(item.ref());
+            landWaitingIfDue();
             return;
         }
         if (readiness.ready(item))
         {
-            land(new NewItem(UuidV7.next(clock.millis()), source.kind(),
-                    ref, item.ref(), replaces(item)), item);
+            NewItem ready = new NewItem(UuidV7.next(clock.millis()),
+                    source.kind(), ref, item.ref(), replaces(item));
+            if (grouping.groups(item.size()))
+            {
+                if (waiting.isEmpty())
+                {
+                    waitingSince = clock.millis();
+                }
+                waiting.put(ref.key(), new Waiting(ready, item));
+                waitingBytes += item.size();
+            }
+            else
+            {
+                landWaiting();
+                land(ready, item);
+                return;
+            }
+        }
+        landWaitingIfDue();
+    }
+
+    /**
+     * Lands the waiting items if there are enough of them, they are large
+     * enough, or the first has waited long enough.
+     *
+     * @throws Exception if storage, the broker or the source fails
+     */
+    private void landWaitingIfDue() throws Exception
+    {
+        if (!waiting.isEmpty() && (waiting.size() >= grouping.maxItems()
+                || waitingBytes >= grouping.maxBytes()
+                || clock.millis() - waitingSince
+                        >= grouping.maxWait().toMillis()))
+        {
+            landWaiting();
+        }
+    }
+
+    /**
+     * Lands the waiting items together, records them, announces them and
+     * finishes them at the source. If landing them fails, nothing is
+     * committed and they keep waiting, under the same IDs, to be tried
+     * again; an item whose source changed is forgotten, to be landed
+     * afresh once it settles again.
+     *
+     * @throws Exception if storage, the broker or the source fails
+     */
+    private void landWaiting() throws Exception
+    {
+        if (waiting.isEmpty())
+        {
+            return;
+        }
+        List<Waiting> items = List.copyOf(waiting.values());
+        ItemLander.GroupLanded result = storage.lander().landAll(
+                items.stream().map(each -> new ItemLander.Grouped(
+                        each.item(), offset -> source.open(each.listed(),
+                                offset))).toList(),
+                grouping.maxItemBytes());
+        waiting.clear();
+        waitingBytes = 0;
+        Map<UUID, ListedItem> listed = new LinkedHashMap<>();
+        items.forEach(each -> listed.put(each.item().itemId(),
+                each.listed()));
+        for (NewItem changed : result.changed())
+        {
+            readiness.forget(listed.get(changed.itemId()).ref());
+            Telemetry.get().auditWarn("item.changed",
+                    Fields.of(Attr.ITEM_ID, changed.itemId())
+                            .with(Attr.INTAKE, intake));
+        }
+        for (LandedItem landed : result.landed())
+        {
+            unrecorded.add(new Finishing(landed,
+                    listed.get(landed.itemId())));
+        }
+        finishLanded();
+    }
+
+    /**
+     * Finishes landed items, each step only once: writes their ledger
+     * entries, in one commit, and warns of those with the same content as
+     * items landed before; sends their messages; then finishes them at the
+     * source. A step that fails is tried again next time, from where it
+     * stopped.
+     *
+     * @throws Exception if storage, the broker or the source fails
+     */
+    private void finishLanded() throws Exception
+    {
+        if (!unrecorded.isEmpty())
+        {
+            List<LandedItem> items =
+                    unrecorded.stream().map(Finishing::item).toList();
+            List<LandedItem> missing = recordFailed
+                    ? storage.ledger().missing(items) : items;
+            recordFailed = true;
+            storage.ledger().record(
+                    missing.stream().map(LandingLedger.Entry::of).toList());
+            List<Announcer.Announcement> found = new ArrayList<>();
+            for (LandedItem item : items)
+            {
+                boolean seenContent =
+                        storage.index().mayHaveContent(item.digest());
+                storage.index().add(item.source() == null ? null
+                        : item.source().key(), item.digest());
+                found.add(new Announcer.Announcement(item,
+                        seenContent ? reportDuplicate(item) : null));
+            }
+            unrecorded.stream().map(Finishing::listed)
+                    .filter(each -> each != null).forEach(atSource::add);
+            unrecorded.clear();
+            recordFailed = false;
+            unannounced.addAll(found);
+        }
+        announcePending();
+        for (Iterator<ListedItem> next = atSource.iterator(); next.hasNext();)
+        {
+            ListedItem item = next.next();
+            source.afterLanding(item);
+            readiness.forget(item.ref());
+            next.remove();
         }
     }
 
@@ -406,6 +668,8 @@ public final class IntakeService implements LandingIntake
                         Fields.of(Attr.ITEM_ID, itemId)
                                 .with(Attr.INTAKE, intake));
             }
+            landWaiting();
+            finishLanded();
         }
         catch (Throwable failure)
         {
@@ -462,7 +726,7 @@ public final class IntakeService implements LandingIntake
         try
         {
             ensureRecovered();
-            announcePending();
+            finishLanded();
             Resubmitter.Landed landed;
             try
             {
@@ -490,8 +754,7 @@ public final class IntakeService implements LandingIntake
             {
                 sameAs = sameAs(storage, item);
             }
-            unannounced = item;
-            unannouncedSameAs = sameAs;
+            unannounced.add(new Announcer.Announcement(item, sameAs));
             announcePending();
             return landed;
         }
@@ -578,7 +841,7 @@ public final class IntakeService implements LandingIntake
 
     /**
      * Runs startup recovery, once: repairs the ledger, notes an unfinished
-     * item to resume, and sends the last item's message again.
+     * item to resume, and sends the last commit's messages again.
      *
      * @throws Exception if storage or the broker fails
      */
@@ -606,8 +869,11 @@ public final class IntakeService implements LandingIntake
                 unfinished = stored.get();
             }
         }
-        unannounced = lander.lastLanded().orElse(null);
-        unannouncedSameAs = sameAs(storage, unannounced);
+        for (LandedItem last : lander.lastLandedAll())
+        {
+            unannounced.add(new Announcer.Announcement(last,
+                    sameAs(storage, last)));
+        }
         announcePending();
         recovered = true;
         LOG.info("intake.recovered resume={} ledger_entries={}",
@@ -651,16 +917,8 @@ public final class IntakeService implements LandingIntake
             throw failure;
         }
         unfinished = null;
-        boolean seenContent =
-                storage.index().mayHaveContent(landed.digest());
-        storage.ledger().record(List.of(LandingLedger.Entry.of(landed)));
-        storage.index().add(landed.source().key(), landed.digest());
-        UUID sameAs = seenContent ? reportDuplicate(landed) : null;
-        unannounced = landed;
-        unannouncedSameAs = sameAs;
-        announcePending();
-        source.afterLanding(listed);
-        readiness.forget(listed.ref());
+        unrecorded.add(new Finishing(landed, listed));
+        finishLanded();
     }
 
     /**
@@ -683,17 +941,17 @@ public final class IntakeService implements LandingIntake
     }
 
     /**
-     * Sends the message of a landed item not yet acknowledged.
+     * Sends the messages of landed items not yet acknowledged. If one
+     * isn't, they are all sent again next time; each is keyed by its item.
      *
-     * @throws Exception if the broker doesn't acknowledge it
+     * @throws Exception if the broker doesn't acknowledge one
      */
     private void announcePending() throws Exception
     {
-        if (unannounced != null)
+        if (!unannounced.isEmpty())
         {
-            announcer.announce(unannounced, unannouncedSameAs);
-            unannounced = null;
-            unannouncedSameAs = null;
+            announcer.announceAll(List.copyOf(unannounced));
+            unannounced.clear();
         }
     }
 

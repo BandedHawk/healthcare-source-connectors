@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
+import com.sdh.healthcare.connector.core.pipeline.UuidV7;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import io.opentelemetry.api.OpenTelemetry;
@@ -216,6 +217,51 @@ class LandingLedgerTest
         assertThat(index.contains(item.source().key())).isTrue();
         assertThat(ledger.load(INTAKE).contains(item.source().key())).isTrue();
         assertThat(ledger.repair(lander, index)).isFalse();
+    }
+
+    /**
+     * A crash between a group commit and its ledger entries is repaired at
+     * startup for every item of the group; one entry already written isn't
+     * written again.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void repairsTheEntriesOfTheLastGroup() throws Exception
+    {
+        ItemLander lander = new ItemLander(items, committer(), keys, ids,
+                ItemLander.Settings.defaults(INTAKE, KEK).withRetry(RETRY),
+                Clock.systemUTC());
+        List<ItemLander.Grouped> group = new ArrayList<>();
+        for (String path : List.of("g/a.xml", "g/b.xml", "g/c.xml"))
+        {
+            byte[] bytes = path.getBytes();
+            group.add(new ItemLander.Grouped(new NewItem(
+                    UuidV7.next(System.currentTimeMillis()), ItemKind.FILE,
+                    SourceRef.of(ids, INTAKE, path, bytes.length, "1"), path,
+                    null), offset -> new ByteArrayInputStream(bytes)));
+        }
+        List<LandedItem> landed = lander.landAll(group, 1024).landed();
+
+        FencedCommitter restarted = committer();
+        LandingLedger ledger =
+                new LandingLedger(ledgerTable, restarted, RETRY);
+        ledger.record(List.of(LandingLedger.Entry.of(landed.get(1))));
+        assertThat(ledger.missing(landed)).containsExactly(landed.get(0),
+                landed.get(2));
+        LedgerIndex index = ledger.load(INTAKE);
+        ItemLander again = new ItemLander(items, restarted, keys, ids,
+                ItemLander.Settings.defaults(INTAKE, KEK).withRetry(RETRY),
+                Clock.systemUTC());
+
+        assertThat(ledger.repair(again, index)).isTrue();
+        assertThat(ledger.missing(landed)).isEmpty();
+        assertThat(ledger.load(INTAKE).size()).isEqualTo(3);
+        for (LandedItem item : landed)
+        {
+            assertThat(index.contains(item.source().key())).isTrue();
+        }
+        assertThat(ledger.repair(again, index)).isFalse();
     }
 
     /**
