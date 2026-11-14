@@ -207,14 +207,20 @@ public final class ItemSplitter
             {
                 processor.noteCopy(itemId, sameAs);
             }
+            Telemetry telemetry = Telemetry.get();
             Table landed = landedItems.get();
+            long table = System.nanoTime();
+            telemetry.phaseDuration(ItemProcessor.STAGE, "lookup_table",
+                    table - started);
             Optional<LandedItemSource.Summary> located =
                     LandedItemSource.summary(landed, itemId, storage);
             Optional<Record> summary =
                     located.map(LandedItemSource.Summary::row);
-            Telemetry telemetry = Telemetry.get();
+            long read = System.nanoTime();
+            telemetry.phaseDuration(ItemProcessor.STAGE, "lookup_row",
+                    read - table);
             telemetry.phaseDuration(ItemProcessor.STAGE, "lookup",
-                    System.nanoTime() - started);
+                    read - started);
             // When it landed, so its time to gold can be measured from the
             // registries (docs/PERFORMANCE.md §10).
             summary.ifPresent(row -> processor.noteLanded(itemId,
@@ -224,6 +230,8 @@ public final class ItemSplitter
                     .map(row -> LandedRefs.of(row, keys))
                     .orElse(LandedRefs.NONE)
                     .withSameAs(processor.sameAs(itemId).orElse(null));
+            telemetry.phaseDuration(ItemProcessor.STAGE, "refs",
+                    System.nanoTime() - read);
             // Read once: the source reads the item from where it says.
             ItemProcessor.Outcome outcome = processor.process(itemId, digest,
                     () -> located.isPresent()

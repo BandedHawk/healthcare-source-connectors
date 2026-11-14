@@ -92,10 +92,28 @@ public final class LandedItemSource implements SeekableByteSource
      *                   not known, when its chunks are found by scan
      * @param fileSize   that file's size in bytes; -1 without a file
      * @param summaryRow the summary row's position in it; -1 without a file
+     * @param lastChunk  the item's last chunk, read with the summary row
+     *                   from the row before it; null if not read
      */
     public record Summary(Record row, String file, long fileSize,
-            long summaryRow)
+            long summaryRow, Record lastChunk)
     {
+
+        /**
+         * A summary without its last chunk.
+         *
+         * @param row        the summary row
+         * @param file       the data file of the item's final commit; null
+         *                   if not known
+         * @param fileSize   that file's size in bytes; -1 without a file
+         * @param summaryRow the summary row's position in it; -1 without a
+         *                   file
+         */
+        public Summary(Record row, String file, long fileSize,
+                long summaryRow)
+        {
+            this(row, file, fileSize, summaryRow, null);
+        }
 
         /**
          * The first chunk in the final data file: that file holds the
@@ -126,6 +144,12 @@ public final class LandedItemSource implements SeekableByteSource
 
     /** Whether the table has been refreshed for a scan. */
     private boolean refreshed;
+
+    /**
+     * The item's last chunk, read with its summary row; null if not read,
+     * or once used.
+     */
+    private Record lastChunk;
 
     /** The item. */
     private final UUID itemId;
@@ -185,6 +209,7 @@ public final class LandedItemSource implements SeekableByteSource
         this.fileSize = located.fileSize();
         this.firstInFile = located.firstChunkInFile();
         this.refreshed = refreshed;
+        this.lastChunk = located.lastChunk();
         this.keys = keys;
         this.size = (Long) summary.getField(ITEM_SIZE);
         this.chunkCount = (Integer) summary.getField(CHUNK_COUNT);
@@ -233,7 +258,9 @@ public final class LandedItemSource implements SeekableByteSource
     /**
      * Reads a landed item's summary row: by position, where its
      * {@code item.landed} says (PERFORMANCE.md §3.2), otherwise by scan of
-     * the refreshed table.
+     * the refreshed table. By position, the row before it is read in the
+     * same open of the file: it is the item's last chunk, so an item of one
+     * chunk, as most are, needs no other read (§10).
      *
      * @param table   the {@value LandingTables#LANDED_ITEMS} table
      * @param itemId  the item
@@ -249,19 +276,26 @@ public final class LandedItemSource implements SeekableByteSource
         {
             try
             {
+                long before = Math.min(1, storage.firstRow());
                 List<Record> found = DataFileRows.read(table.io(),
                         table.schema(), storage.file(), storage.fileSize(),
-                        storage.firstRow(), 1, table.schema().columns()
-                                .stream().map(Types.NestedField::name)
-                                .toList());
-                if (found.size() == 1
-                        && itemId.equals(found.get(0).getField(ITEM_ID))
-                        && (Integer) found.get(0).getField(CHUNK_INDEX)
+                        storage.firstRow() - before, (int) before + 1,
+                        table.schema().columns().stream()
+                                .map(Types.NestedField::name).toList());
+                Record row = found.size() == before + 1
+                        ? found.get((int) before) : null;
+                if (row != null && itemId.equals(row.getField(ITEM_ID))
+                        && (Integer) row.getField(CHUNK_INDEX)
                                 == LandingTables.SUMMARY_ROW)
                 {
-                    return Optional.of(new Summary(found.get(0),
-                            storage.file(), storage.fileSize(),
-                            storage.firstRow()));
+                    Record previous = before == 1 ? found.get(0) : null;
+                    boolean last = previous != null
+                            && itemId.equals(previous.getField(ITEM_ID))
+                            && previous.getField(CHUNK_INDEX).equals(
+                                    (Integer) row.getField(CHUNK_COUNT) - 1);
+                    return Optional.of(new Summary(row, storage.file(),
+                            storage.fileSize(), storage.firstRow(),
+                            last ? previous : null));
                 }
             }
             catch (NotFoundException gone)
@@ -326,6 +360,7 @@ public final class LandedItemSource implements SeekableByteSource
         {
             windows.clear();
             dataKeys.clear();
+            lastChunk = null;
         }
     }
 
@@ -396,7 +431,17 @@ public final class LandedItemSource implements SeekableByteSource
     {
         int first = window * WINDOW;
         int count = Math.min(WINDOW, chunkCount - first);
-        List<Record> rows = positioned(first, count);
+        List<Record> rows = null;
+        if (lastChunk != null && count == 1 && first == chunkCount - 1)
+        {
+            // Read with the summary row.
+            rows = new ArrayList<>(List.of(lastChunk));
+            lastChunk = null;
+        }
+        if (rows == null)
+        {
+            rows = positioned(first, count);
+        }
         if (rows == null)
         {
             if (!refreshed)

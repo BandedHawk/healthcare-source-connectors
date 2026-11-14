@@ -48,7 +48,10 @@ import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.logs.SdkLoggerProvider;
 import io.opentelemetry.sdk.logs.data.LogRecordData;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.data.MetricData;
 import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
 import java.io.ByteArrayInputStream;
 import java.security.KeyPair;
 import java.security.interfaces.ECPrivateKey;
@@ -57,8 +60,10 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import javax.crypto.KeyGenerator;
 import org.apache.iceberg.CatalogProperties;
@@ -421,6 +426,54 @@ class ItemProcessorTest
         assertThat(publisher.sent).hasSize(sent + 1);
         assertThat(messages().getLast().messageId())
                 .isEqualTo(messages.getLast().messageId());
+    }
+
+    /**
+     * Splitting an item times each of its steps as a phase of the split
+     * stage (docs/PERFORMANCE.md §10): the checkpoints, the records, the
+     * file, the commit and its wait, and the sends.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void timesEachStepOfSplittingAnItem() throws Exception
+    {
+        InMemoryMetricReader metrics = InMemoryMetricReader.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setMeterProvider(SdkMeterProvider.builder()
+                        .registerMetricReader(metrics).build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            process(processor(), land(csv(10)));
+
+            Set<String> phases = new HashSet<>();
+            for (MetricData metric : metrics.collectAllMetrics())
+            {
+                if (!"sdh.stage.phase_duration".equals(metric.getName()))
+                {
+                    continue;
+                }
+                metric.getHistogramData().getPoints().forEach(point ->
+                {
+                    if ("split".equals(point.getAttributes().get(
+                            AttributeKey.stringKey("sdh.stage"))))
+                    {
+                        phases.add(point.getAttributes().get(
+                                AttributeKey.stringKey("sdh.phase")));
+                    }
+                });
+            }
+            assertThat(phases).contains("resume", "start", "first_record",
+                    "records", "write",
+                    "publish_wait", "prepare", "append", "commit_queue",
+                    "commit_group", "save", "send_wait", "archive", "open",
+                    "split", "failed_rows", "announce");
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
     }
 
     /**

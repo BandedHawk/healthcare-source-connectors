@@ -193,6 +193,46 @@ class LandedItemSourceTest
     }
 
     /**
+     * An item of one chunk is read whole with its summary row: once that is
+     * read, its file isn't read again, so reading still works with the
+     * file gone. An item of more chunks reads its others as before.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void readsAOneChunkItemWithItsSummary() throws Exception
+    {
+        byte[] bytes = new byte[10];
+        new Random(5).nextBytes(bytes);
+        LandedItem item = land(bytes, 1 << 20);
+        StorageRef storage = item.message("prod",
+                LandingTables.DEFAULT_NAMESPACE).storage();
+        LandedItemSource.Summary summary = LandedItemSource.summary(table,
+                item.itemId(), storage).orElseThrow();
+        assertThat(summary.lastChunk()).isNotNull();
+        table.io().deleteFile(storage.file());
+        try (LandedItemSource source = LandedItemSource.open(table,
+                item.itemId(), keys, summary))
+        {
+            assertThat(source.readFully(0, 10)).isEqualTo(bytes);
+        }
+
+        byte[] longer = new byte[40];
+        new Random(6).nextBytes(longer);
+        LandedItem three = land(longer, 1 << 20);
+        LandedItemSource.Summary several = LandedItemSource.summary(table,
+                three.itemId(), three.message("prod",
+                        LandingTables.DEFAULT_NAMESPACE).storage())
+                .orElseThrow();
+        assertThat(several.lastChunk()).isNotNull();
+        try (LandedItemSource source = LandedItemSource.open(table,
+                three.itemId(), keys, several))
+        {
+            assertThat(source.readFully(0, 40)).isEqualTo(longer);
+        }
+    }
+
+    /**
      * Where the message's file is gone, or names another item's rows, the
      * summary is found by scan.
      *

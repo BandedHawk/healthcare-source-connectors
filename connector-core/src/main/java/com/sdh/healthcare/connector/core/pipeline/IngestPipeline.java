@@ -441,7 +441,9 @@ public final class IngestPipeline implements AutoCloseable
             LeaseToken lease, LandedRefs refs, Checkpoint.Cut cut)
             throws Exception
     {
+        long resuming = System.nanoTime();
         Checkpoint current = resume(itemId, lease).orElse(null);
+        timed("resume", resuming);
         boolean fresh = cut != null && (current == null
                 || current.generation() < cut.generation());
         if (fresh && current != null && !current.state().ended())
@@ -506,7 +508,9 @@ public final class IngestPipeline implements AutoCloseable
                     settings.format(), source.size(), clock.instant(),
                     settings.version(), cut == null ? Checkpoint.Cut.FIRST
                             : cut);
+            long starting = System.nanoTime();
             commitCheckpoint(current, lease);
+            timed("start", starting);
             failureFree.put(itemId, current.generation());
             Telemetry.get().audit("item.started",
                     Fields.of(Attr.ITEM_ID, current.itemId())
@@ -715,6 +719,10 @@ public final class IngestPipeline implements AutoCloseable
 
         Batch batch = null;
         Future<Long> inFlightPublish = null;
+        // When the batch being filled was begun, for its "records" time.
+        long filling = 0;
+        // Until the first record: reading and parsing the item's start.
+        long reading = System.nanoTime();
         // Lines and columns, so failures and mapping issues can be found in
         // the file (RecordOrigin).
         try (SplitSession session = open(current, source);
@@ -724,14 +732,21 @@ public final class IngestPipeline implements AutoCloseable
             Optional<SplitRecord> next;
             while ((next = session.next()).isPresent())
             {
+                if (reading != 0)
+                {
+                    timed("first_record", reading);
+                    reading = 0;
+                }
                 if (batch == null)
                 {
                     batch = new Batch(current.itemId(), current.format(),
                             refs, current.cut());
+                    filling = System.nanoTime();
                 }
                 batch.add(seq++, origins.withOrigin(next.get()), source);
                 if (batch.full())
                 {
+                    timed("records", filling);
                     BatchOutcome outcome = commitBatch(batch, current,
                             inFlightPublish, lease);
                     current = outcome.checkpoint();
@@ -751,15 +766,18 @@ public final class IngestPipeline implements AutoCloseable
             }
             if (batch != null)
             {
+                timed("records", filling);
                 BatchOutcome outcome = commitBatch(batch, current,
                         inFlightPublish, lease);
                 current = outcome.checkpoint();
                 inFlightPublish = outcome.publish();
                 batch = null;
             }
+            long sending = System.nanoTime();
             current = current.published(
                     await(inFlightPublish, current.publishedSeq()));
             inFlightPublish = null;
+            long archiving = timed("send_wait", sending);
             hooks.beforeEndOfFile();
             current = current.withState(Checkpoint.State.ARCHIVING);
             Integer whole = failureFree.get(current.itemId());
@@ -770,6 +788,7 @@ public final class IngestPipeline implements AutoCloseable
                 current = current.withClean();
             }
             commitCheckpoint(current, lease);
+            timed("archive", archiving);
             Telemetry.get().audit("item.split",
                     Fields.of(Attr.ITEM_ID, current.itemId())
                             .with(Attr.COUNT, current.recordCount()));
@@ -1131,14 +1150,18 @@ public final class IngestPipeline implements AutoCloseable
         Telemetry telemetry = Telemetry.get();
         try (Scope ignored = batch.span.makeCurrent())
         {
+            long step = System.nanoTime();
             DataFile dataFile = batch.finish();
+            step = timed("write", step);
             hooks.batchWritten(batch.lastSeq);
             long published = await(previousPublish, current.publishedSeq());
+            step = timed("publish_wait", step);
             Checkpoint next = current.committed(batch.last.resume(),
                     batch.lastSeq, published);
             // Kept as pending first, so a stop before the next step leaves
             // a checkpoint that resume can settle (STAGES.md §8).
             checkpoints.prepare(next, lease);
+            timed("prepare", step);
             hooks.batchPrepared(batch.lastSeq);
             Span commit = telemetry.span("storage.commit",
                     Fields.of(Attr.TABLE, table.name())
@@ -1158,8 +1181,10 @@ public final class IngestPipeline implements AutoCloseable
                             // commit (docs/PERFORMANCE.md §3.1).
                             return appender.append(dataFile, lease);
                         });
+                long saving = timed("append", started);
                 hooks.batchAppended(batch.lastSeq);
                 checkpoints.save(next, lease);
+                timed("save", saving);
             }
             catch (Exception | Error failure)
             {
@@ -1300,6 +1325,26 @@ public final class IngestPipeline implements AutoCloseable
     void publishNow(List<ConnectorMessage> messages) throws Exception
     {
         publish(messages);
+    }
+
+    /**
+     * Notes how long a step of splitting an item took, from when it was
+     * started to now (docs/PERFORMANCE.md §10), as a phase of the split
+     * stage: {@code resume}, {@code start}, {@code first_record},
+     * {@code records}, {@code write},
+     * {@code publish_wait}, {@code prepare}, {@code append}, {@code save},
+     * {@code send_wait} and {@code archive}.
+     *
+     * @param phase   the step
+     * @param started when it started, from {@link System#nanoTime()}
+     * @return now, to start the next step from
+     */
+    private static long timed(String phase, long started)
+    {
+        long now = System.nanoTime();
+        Telemetry.get().phaseDuration(ItemProcessor.STAGE, phase,
+                now - started);
+        return now;
     }
 
     /**

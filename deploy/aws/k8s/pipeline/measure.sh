@@ -120,7 +120,10 @@ def vec(s, keys):
 k = ("sdh_stage", "sdh_phase")
 count, total, p95 = (vec(s, k) for s in sys.argv[1:4])
 order = ["split", "convert", "transform"]
-phases = ["lookup", "open", "split", "failed_rows", "fail_store", "correction_rows", "announce", "checkpoint", "item",
+phases = ["lookup", "lookup_table", "lookup_row", "refs", "open", "split", "resume", "start",
+          "first_record", "records", "write", "publish_wait", "prepare", "append",
+          "commit_queue", "commit_group", "save", "send_wait", "archive", "failed_rows", "fail_store",
+          "correction_rows", "announce", "checkpoint", "item",
           "claim", "read", "transform", "process", "commit", "seal", "register", "send", "complete", "batch"]
 if not count:
     print("    none recorded (were the stages built with the timings, and was the collector up?)")
@@ -157,7 +160,10 @@ EOF
   done
   python3 -I - "${cols[@]}" <<'EOF2'
 import json, sys
-order = ["lookup", "open", "split", "failed_rows", "fail_store", "correction_rows", "announce", "checkpoint", "item"]
+order = ["lookup", "lookup_table", "lookup_row", "refs", "open", "split", "resume", "start",
+         "first_record", "records", "write", "publish_wait", "prepare", "append",
+         "commit_queue", "commit_group", "save", "send_wait", "archive", "failed_rows", "fail_store",
+         "correction_rows", "announce", "checkpoint", "item"]
 qs = []
 for a in sys.argv[1:]:
     try:
@@ -169,6 +175,37 @@ for k in order:
     if any(k in q for q in qs):
         print(f"    {k:<16}" + "".join(f"{q[k]:9.2f}" if k in q and q[k] == q[k] else f"{'-':>9}" for q in qs))
 EOF2
+  # What the pods got of the machine, by quarter: the CPU a service's pods used, in cores (summed over them); the
+  # share of the time some thread of a pod was ready to run but waited for a CPU (cpu.pressure, the mean over the
+  # pods); and the share a pod's JVM spent in GC (likewise). Steps that slow as waiting grows are short of CPU;
+  # steps that slow with neither growing wait on storage or the catalog (docs/PERFORMANCE.md §10).
+  say "CPU by service and quarter of the run: cores used / share waiting for a CPU / share in GC"
+  cpu=()
+  for q in 3 2 1 0; do
+    at=$((end_s - q * quarter))
+    for m in "sum cpu_time" "avg cpu_wait" "avg gc_time"; do
+      cpu+=("$(prom_at "$at" "${m% *} by (job) (increase(sdh_process_${m#* }_seconds_total[${quarter}s])) / $quarter")")
+    done
+  done
+  python3 -I - "${cpu[@]}" <<'EOF3'
+import json, sys
+def vec(s):
+    try:
+        return {r["metric"].get("job", ""): float(r["value"][1]) for r in json.loads(s)["data"]["result"]}
+    except Exception:
+        return {}
+a = [vec(s) for s in sys.argv[1:]]
+qs = [a[i:i + 3] for i in range(0, len(a), 3)]
+jobs = sorted({j for q in qs for m in q for j in m})
+if not jobs:
+    print("    none recorded (were the pods built with the process metrics?)")
+print(f"    {'':<28}" + "".join(f"{'Q' + str(i + 1):>17}" for i in range(4)))
+for j in jobs:
+    cells = []
+    for used, wait, gc in qs:
+        cells.append(f"{used.get(j, 0):5.2f}/{wait.get(j, 0):5.2f}/{gc.get(j, 0):4.2f}".rjust(17))
+    print(f"    {j:<28}" + "".join(cells))
+EOF3
 fi
 
 

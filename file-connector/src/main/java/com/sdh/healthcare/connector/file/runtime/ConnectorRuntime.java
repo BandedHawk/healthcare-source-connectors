@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
 import com.sdh.healthcare.connector.broker.send.Publishers;
 import com.sdh.healthcare.connector.broker.send.QueueType;
+import com.sdh.healthcare.connector.contract.crypto.UnwrapCache;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
@@ -104,6 +105,12 @@ public final class ConnectorRuntime implements AutoCloseable
 
     /** The shortest age orphan cleanup may delete files at. */
     static final Duration MIN_ORPHAN_AGE = Duration.ofHours(1);
+
+    /**
+     * How many landing data keys the split stage keeps unwrapped: one per
+     * landing group, so a few groups' worth.
+     */
+    static final int LANDING_KEYS_KEPT = 64;
 
     /** Logs start and stop. */
     private static final Logger LOG =
@@ -386,8 +393,11 @@ public final class ConnectorRuntime implements AutoCloseable
             }
             ItemProcessor processor = new ItemProcessor(pipeline, intake,
                     failures, corrections);
+            // A landing group's items share a data key: one KMS call for
+            // them all (docs/PERFORMANCE.md §10).
             ItemSplitter splitter = new ItemSplitter(processor, landedItems,
-                    keys.wrap(), leases, properties.connectorId(),
+                    new UnwrapCache(keys.wrap(), LANDING_KEYS_KEPT), leases,
+                    properties.connectorId(),
                     leaseSettings, properties.split().itemsAtOnce());
             SplitCorrections correcting = new SplitCorrections(corrections,
                     releases, splitter, reprocess,

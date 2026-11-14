@@ -298,6 +298,7 @@ public final class Telemetry
                 .setDescription("Bytes split / file size of the current file")
                 .buildWithCallback(measurement -> measurement.record(
                         progressPerMillion.get() / (double) WHOLE_FILE));
+        ProcessMetrics.register(meter);
     }
 
     /**

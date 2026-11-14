@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -51,12 +52,13 @@ public final class GroupAppender implements AutoCloseable
     /**
      * A file to append.
      *
-     * @param file  the data file
-     * @param lease its item's lease, which must be held at the commit
-     * @param done  completes with the snapshot that holds the file
+     * @param file     the data file
+     * @param lease    its item's lease, which must be held at the commit
+     * @param done     completes with the snapshot that holds the file
+     * @param queuedAt when it was sent, from {@link System#nanoTime()}
      */
     private record Request(DataFile file, LeaseToken lease,
-            CompletableFuture<Snapshot> done)
+            CompletableFuture<Snapshot> done, long queuedAt)
     {
     }
 
@@ -103,7 +105,8 @@ public final class GroupAppender implements AutoCloseable
             throw new IllegalStateException("The appender is closed");
         }
         Request request =
-                new Request(file, lease, new CompletableFuture<>());
+                new Request(file, lease, new CompletableFuture<>(),
+                        System.nanoTime());
         waiting.add(request);
         try
         {
@@ -152,11 +155,38 @@ public final class GroupAppender implements AutoCloseable
 
     /**
      * Commits a group of files whose leases are held, and tells each
-     * sender how it went.
+     * sender how it went, timing the wait and the commit.
      *
      * @param group the files
      */
     private void commit(List<Request> group)
+    {
+        // How long each waited for the commit before, and how long this
+        // one takes (docs/PERFORMANCE.md §10).
+        Telemetry telemetry = Telemetry.get();
+        long started = System.nanoTime();
+        for (Request request : group)
+        {
+            telemetry.phaseDuration(ItemProcessor.STAGE, "commit_queue",
+                    started - request.queuedAt());
+        }
+        try
+        {
+            commitHeld(group);
+        }
+        finally
+        {
+            telemetry.phaseDuration(ItemProcessor.STAGE, "commit_group",
+                    System.nanoTime() - started);
+        }
+    }
+
+    /**
+     * Commits the files of a group whose leases are still held.
+     *
+     * @param group the requests
+     */
+    private void commitHeld(List<Request> group)
     {
         List<Request> held = new ArrayList<>();
         for (Request request : group)
