@@ -259,6 +259,12 @@ public final class ItemLander
     /** The table property the last group commit's items are kept in. */
     private final String batchKey;
 
+    /** The table property naming the last group announced. */
+    private final String announcedKey;
+
+    /** Writes and reads that property with its MAC. */
+    private final MacedJson<UUID> announcedCodec;
+
     /** Runs after each commit; see {@link #afterCommit}. */
     private LongConsumer afterCommit = nextBlock ->
     {
@@ -287,6 +293,8 @@ public final class ItemLander
         this.checkpointKey = LandingCheckpoint.propertyKey(settings.intake());
         this.batchCodec = LandingBatch.codec(ids);
         this.batchKey = LandingBatch.propertyKey(settings.intake());
+        this.announcedKey = LandingBatch.announcedKey(settings.intake());
+        this.announcedCodec = LandingBatch.announcedCodec(ids);
     }
 
     /**
@@ -398,6 +406,53 @@ public final class ItemLander
                     "The last group commit isn't the checkpoint's");
         }
         return batchItems(batch);
+    }
+
+    /**
+     * Records that every message of a group commit was acknowledged, so
+     * recovery needn't send them again: a group can be hundreds of items,
+     * and each repeat costs the next stage a lookup. Without it, recovery
+     * sends them all again, which is safe, since each message is keyed by
+     * its item. The value is MAC'd and checked against the checkpoint, so
+     * it says nothing once a later commit is made, and one that was
+     * tampered with only has the messages sent again.
+     *
+     * @param lastItemId the group's last item, which the checkpoint names
+     * @throws Exception if storage fails
+     */
+    public void markAnnounced(UUID lastItemId) throws Exception
+    {
+        settings.retry().call("landing.announced",
+                RetryPolicy.TRANSIENT_STORAGE, attempt -> committer.commit(
+                        table, transaction -> transaction.updateProperties()
+                                .set(announcedKey,
+                                        announcedCodec.encode(lastItemId))
+                                .commit()));
+    }
+
+    /**
+     * Tells whether the last commit's messages were all acknowledged, as
+     * {@link #markAnnounced} recorded.
+     *
+     * @return true if they were; false if not known
+     */
+    public boolean lastAnnounced()
+    {
+        Optional<LandingCheckpoint> stored = checkpoint();
+        String encoded = table.properties().get(announcedKey);
+        if (stored.isEmpty() || !stored.get().done() || encoded == null)
+        {
+            return false;
+        }
+        try
+        {
+            return stored.get().itemId()
+                    .equals(announcedCodec.decode(encoded));
+        }
+        catch (MacedJson.Tampered | IllegalArgumentException tampered)
+        {
+            return false;
+        }
     }
 
     /**

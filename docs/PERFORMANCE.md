@@ -527,6 +527,32 @@ What it showed, beyond §2's predictions:
   ledger: step 2's group commit. After it, split's CPU (0.5 a pod) and the record stages' commits per
   batch. KMS: ~6.5–7 signatures per document, ~42–46 documents/s (step 3).
 
+- **Step 2, group commit, AWS, 2026-11-14 (DESIGN.md revision (de)).** The same 1,020-document load on a
+  reset pipeline, with the landing failover part-way (report `load-20261114T021156Z`; gold check skipped).
+  Every item landed exactly once and reached gold.
+  - **Landing is no longer the limit.** 1,013 of 1,020 items landed by 130 s, through a failover whose
+    standby took the lease 58 s after the holder was deleted: about 10 items/s while a pod held the lease,
+    against 1.2 before. All of it in **2 commits** to `landed_items` and 2 to the ledger (5 metadata
+    versions each, with the fencing), against one of each per item. What paces it now is reading the items
+    one after another (step 4).
+  - **Overall: 1.84 documents/s** first landed to last in gold (0.98 in step 1's run A), 106 items/min end
+    to end. Landed → gold p50 / p95 / p99 216 / 328 / 364 s: the items now wait in split's queue instead
+    of at the intake, since landing is ~5 times faster than split.
+  - **Split is the limit**, at 112.5 items/min (1.9/s) with its 2 pods: an item took 2.4 s (split 1.8 s
+    of it, 4 at once on 0.5 CPU). Its batches went to `split_records` in 530 commits for 1,036 batches,
+    about 2 a commit (at most 4 a pod at once), at 0.59 s each against 1.04 s in step 1. Convert (3 pods)
+    and transform (4) kept up.
+  - **A failover now announces a whole group again.** The standby, recovering, sent the last commit's
+    `item.landed` again for each of its items: 507 at once (1,520 messages for 1,020 items), where one item
+    was sent before. Split found each already split and only announced it again (1,553 lookups for 1,020
+    items), but at ~0.5 s a lookup that is about 4 minutes of split pods' time. Worth fixing: a takeover
+    could announce only the items the ledger lacks, and leave a message the broker lost to split's
+    reconciler, as it already does for earlier items. **Fixed (DESIGN.md revision (df)) another way:** the
+    intake records a group as announced once its messages are acknowledged, and recovery sends a group again
+    only if that record is missing, so a lost message is still sent at once. Not yet measured.
+  - **A slow tail:** the last 7 items took from 407 s to 544 s to split; not yet explained.
+  - KMS: 7,676 signatures, 7.5 a document (more with the repeats), a ceiling of 39 documents/s (step 3).
+
 ## 11. Order of work
 
 Each step is measured before the next, and each is useful alone.
@@ -536,7 +562,7 @@ Each step is measured before the next, and each is useful alone.
 | 0 | Measurement harness and a baseline at 1,000 documents (§10; 100,000 after step 1) | the numbers to beat. Harness built and baseline run 2026-11-13 (§10): 0.12 documents/s, p99 5,526 s; split slows as the landed table grows: three planned reads of it per item, 99% of split's time with the `split_records` lookups (§10, 2026-11-13); not the pod, not CPU |
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
-| 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before; not yet measured |
+| 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
 | 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |

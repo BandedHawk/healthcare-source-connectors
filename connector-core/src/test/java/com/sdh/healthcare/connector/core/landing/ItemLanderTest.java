@@ -865,6 +865,37 @@ class ItemLanderTest
                 .isInstanceOf(CheckpointTamperedException.class);
     }
 
+    /**
+     * A group recorded as announced is known to be so until a later commit;
+     * a tampered record only means not known.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void knowsWhenTheLastGroupWasAnnounced() throws Exception
+    {
+        byte[] bytes = data(12);
+        List<LandedItem> group = lander().landAll(List.of(
+                new ItemLander.Grouped(fileItem(bytes, "m/1"), opener(bytes)),
+                new ItemLander.Grouped(fileItem(bytes, "m/2"),
+                        opener(bytes))), BLOCK).landed();
+        assertThat(lander().lastAnnounced()).isFalse();
+        lander().markAnnounced(group.getLast().itemId());
+        assertThat(lander().lastAnnounced()).isTrue();
+
+        String key = LandingBatch.announcedKey(INTAKE);
+        String stored = table.properties().get(key);
+        table.updateProperties().set(key, stored.replace(
+                group.getLast().itemId().toString(),
+                group.getFirst().itemId().toString())).commit();
+        assertThat(lander().lastAnnounced()).isFalse();
+        table.updateProperties().set(key, stored).commit();
+        assertThat(lander().lastAnnounced()).isTrue();
+
+        lander().land(fileItem(bytes, "m/alone"), opener(bytes));
+        assertThat(lander().lastAnnounced()).isFalse();
+    }
+
     /** Thrown by a test hook to simulate a crash. */
     static final class Crash extends RuntimeException
     {

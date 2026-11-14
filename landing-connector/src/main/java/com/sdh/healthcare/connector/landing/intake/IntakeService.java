@@ -65,10 +65,9 @@ import org.slf4j.LoggerFactory;
  * once. Larger items, and items whose size isn't known, are landed alone.
  * <p>
  * A crash between any two steps is recovered at startup: the ledger is
- * repaired, the last commit's messages are sent again, and an unfinished
- * item
- * is resumed if the first full listing finds it unchanged, or given up
- * otherwise. Step 1 then finishes the source side.
+ * repaired, the last commit's messages are sent again (a group's only if
+ * they weren't all acknowledged), and an unfinished item is resumed if the
+ * first full listing finds it unchanged, or given up otherwise. Step 1 then finishes the source side.
  * <p>
  * Errors that mean the node can't safely go on (lease loss, an unknown
  * commit outcome, a tampered checkpoint, a broken invariant, a lost
@@ -201,6 +200,12 @@ public final class IntakeService implements LandingIntake
      * may be written already.
      */
     private boolean recordFailed;
+
+    /**
+     * The last item of a group commit whose messages are to be recorded as
+     * acknowledged once they are; null if none.
+     */
+    private UUID groupToMark;
 
     /** Announced items not yet finished at the source. */
     private final List<ListedItem> atSource = new ArrayList<>();
@@ -502,14 +507,18 @@ public final class IntakeService implements LandingIntake
             unrecorded.add(new Finishing(landed,
                     listed.get(landed.itemId())));
         }
+        if (result.landed().size() > 1)
+        {
+            groupToMark = result.landed().getLast().itemId();
+        }
         finishLanded();
     }
 
     /**
      * Finishes landed items, each step only once: writes their ledger
      * entries, in one commit, and warns of those with the same content as
-     * items landed before; sends their messages; then finishes them at the
-     * source. A step that fails is tried again next time, from where it
+     * items landed before; sends their messages, and records a group's as
+     * sent; then finishes them at the source. A step that fails is tried again next time, from where it
      * stopped.
      *
      * @throws Exception if storage, the broker or the source fails
@@ -542,6 +551,7 @@ public final class IntakeService implements LandingIntake
             unannounced.addAll(found);
         }
         announcePending();
+        markGroup();
         for (Iterator<ListedItem> next = atSource.iterator(); next.hasNext();)
         {
             ListedItem item = next.next();
@@ -841,7 +851,8 @@ public final class IntakeService implements LandingIntake
 
     /**
      * Runs startup recovery, once: repairs the ledger, notes an unfinished
-     * item to resume, and sends the last commit's messages again.
+     * item to resume, and sends the last commit's messages again, unless
+     * they were all acknowledged.
      *
      * @throws Exception if storage or the broker fails
      */
@@ -869,12 +880,23 @@ public final class IntakeService implements LandingIntake
                 unfinished = stored.get();
             }
         }
-        for (LandedItem last : lander.lastLandedAll())
+        // A group whose messages were all acknowledged isn't announced
+        // again: hundreds of repeats would each cost split a lookup.
+        if (!lander.lastAnnounced())
         {
-            unannounced.add(new Announcer.Announcement(last,
-                    sameAs(storage, last)));
+            List<LandedItem> last = lander.lastLandedAll();
+            for (LandedItem item : last)
+            {
+                unannounced.add(new Announcer.Announcement(item,
+                        sameAs(storage, item)));
+            }
+            if (last.size() > 1)
+            {
+                groupToMark = last.getLast().itemId();
+            }
         }
         announcePending();
+        markGroup();
         recovered = true;
         LOG.info("intake.recovered resume={} ledger_entries={}",
                 unfinished != null, storage.index().size());
@@ -938,6 +960,21 @@ public final class IntakeService implements LandingIntake
         unfinished = stored.isPresent() && !stored.get().done()
                 && stored.get().source() != null ? stored.get() : null;
         checkpointStale = false;
+    }
+
+    /**
+     * Records that a group's messages were all acknowledged, once they
+     * have been, so a restart doesn't send them again.
+     *
+     * @throws Exception if storage fails; tried again next time
+     */
+    private void markGroup() throws Exception
+    {
+        if (groupToMark != null && unannounced.isEmpty())
+        {
+            storage.lander().markAnnounced(groupToMark);
+            groupToMark = null;
+        }
     }
 
     /**

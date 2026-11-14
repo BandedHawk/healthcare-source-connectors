@@ -42,6 +42,12 @@ public record LandingBatch(List<UUID> itemIds, String file, long fileSize,
     /** The start of the table property's name; the intake follows. */
     public static final String PROPERTY_PREFIX = "sdh.landing-batch.";
 
+    /**
+     * The start of the name of the table property that says which group
+     * commit's messages were all acknowledged; the intake follows.
+     */
+    public static final String ANNOUNCED_PREFIX = "sdh.landing-announced.";
+
     /** The label of the property's MAC. */
     private static final String LABEL = "sdh-landing-batch";
 
@@ -74,6 +80,43 @@ public record LandingBatch(List<UUID> itemIds, String file, long fileSize,
     public static String propertyKey(String intake)
     {
         return PROPERTY_PREFIX + intake;
+    }
+
+    /**
+     * The table property naming the last item of the last group commit
+     * whose messages were all acknowledged, so recovery needn't send them
+     * again.
+     *
+     * @param intake the intake's name
+     * @return the property's name
+     */
+    public static String announcedKey(String intake)
+    {
+        return ANNOUNCED_PREFIX + intake;
+    }
+
+    /**
+     * Writes and reads the announced group's last item with its MAC.
+     *
+     * @param ids makes the MACs, with the ID key
+     * @return the codec
+     */
+    public static MacedJson<UUID> announcedCodec(RecordIds ids)
+    {
+        return new MacedJson<>(ids, "sdh-landing-announced",
+                itemId -> Map.of("itemId", itemId.toString()),
+                fields ->
+                {
+                    try
+                    {
+                        return UUID.fromString(
+                                JSONObjectUtils.getString(fields, "itemId"));
+                    }
+                    catch (ParseException | NullPointerException malformed)
+                    {
+                        throw new IllegalArgumentException(malformed);
+                    }
+                });
     }
 
     /**

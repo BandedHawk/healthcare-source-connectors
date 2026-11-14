@@ -660,6 +660,29 @@ class IntakeServiceTest
     }
 
     /**
+     * A group whose messages were all acknowledged isn't announced again
+     * at a restart, as a takeover would otherwise do for every item of it.
+     */
+    @Test
+    void anAnnouncedGroupIsntAnnouncedAgainAtARestart() throws Exception
+    {
+        IntakeService service = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                grouping(500));
+        service.onListed(write("a.csv", "first"));
+        service.onListed(write("b.csv", "second"));
+        service.onListingDone();
+        assertThat(sent).hasSize(2);
+
+        IntakeService restarted = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                grouping(500));
+        restarted.recoverAtStartup();
+        assertThat(sent).hasSize(2);
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
      * After a crash between a group's commit and its messages, a restart
      * announces every item of the group, and records them all.
      */
@@ -687,6 +710,9 @@ class IntakeServiceTest
         restarted.onListed(listed("b.csv"));
         restarted.onListingDone();
         assertThat(sent).as("the ledger knows them").hasSize(2);
+        grouped(new LocalDirectorySource(settings("read-only")),
+                grouping(500)).recoverAtStartup();
+        assertThat(sent).as("announced once recovered").hasSize(2);
         assertThat(fatal).isEmpty();
     }
 
