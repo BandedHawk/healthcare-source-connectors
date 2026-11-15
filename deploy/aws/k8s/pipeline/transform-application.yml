@@ -18,8 +18,8 @@ sdh:
     # TRANSFORM_TOO_LARGE.
     max-bytes: 2MB
   stage:
-    # Two records at a time, as in the sandbox (decided 2026-11-11); the input has 24 partitions (poc.sh).
-    concurrency: 2
+    # Four records at a time (docs/PERFORMANCE.md §10, 2026-11-15; the sandbox keeps 2); 24 partitions (poc.sh).
+    concurrency: 4
     input:
       type: kafka
       uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&groupId=transform-${PIPELINE}&groupProtocol=consumer"

@@ -51,11 +51,11 @@ variable "burst_capacity_type" {
   }
 }
 
-# Four: with the stages asking for the CPU they use (docs/PERFORMANCE.md §10) and split at 3 pods, all of them
-# at the most need about 9.2 vCPU, near what two base and three burst nodes give.
+# Six: with the stages asking for the CPU they use (docs/PERFORMANCE.md §10), split at 3 pods and transform at 4
+# of 1.6, all of them at the most need about 12.4 vCPU: two base and five burst nodes, one spare.
 variable "burst_max" {
   type    = number
-  default = 4
+  default = 6
 }
 
 # Who may reach the Kubernetes API. poc.sh sets this machine's public address (/32).

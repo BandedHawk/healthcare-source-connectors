@@ -226,7 +226,7 @@ month, so the forecast alert catches it within days. Lowered from $250 on 2026-1
 | Concern | Choice | Rejected, and why |
 |---|---|---|
 | Kubernetes | EKS 1.37, standard support only (`upgrade_policy`: a version in extended support costs $0.60/hour) | k3s on EC2: no control-plane fee, but no second node for landing's standby |
-| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst`, 0–4 Spot (six arm64 `.large` types, three zones; on demand with `--on-demand-burst`), with Cluster Autoscaler | Karpenter or Auto Mode: more to set up, or a fee on every instance |
+| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst`, 0–6 Spot (six arm64 `.large` types, three zones; on demand with `--on-demand-burst`), with Cluster Autoscaler | Karpenter or Auto Mode: more to set up, or a fee on every instance |
 | Postgres | `postgres:18.4` StatefulSet on a kept 10 GiB gp3 volume, snapshotted at each `down` | RDS: restarts itself after 7 days stopped, and is a second start/stop. Aurora Serverless v2: dearer while running. |
 | Kafka | 1 KRaft broker (`apache/kafka:4.2.2`) on a kept 10 GiB volume, RF 1 | MSK: ≥ $100/month, or about $540/month serverless |
 | Iceberg catalog | JDBC on that Postgres (tested) | Glue: not supported by the code. S3 Tables, Polaris: untested, or one more pod |
@@ -244,9 +244,9 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 | Pod | Replicas | CPU req | Mem req = limit | Notes |
 |---|---|---|---|---|
 | landing | 2 (1 active, 1 standby); never KEDA | 250m | 1 Gi | `SDH_LANDING_STANDBY=true`; required anti-affinity on hostname, so one on each base node; PDB `maxUnavailable: 1`; `Recreate` |
-| split | KEDA 1–2 | 500m | 2 Gi | `<p>.landed`, 24 partitions, lag 5, 4 items at once a pod |
-| convert | KEDA 1–3 | 250m | 1.25 Gi | `<p>.split`, 24 partitions, lag 5, results off |
-| transform | KEDA 1–4 | 500m | 1.5 Gi | `<p>.records`, 24 partitions, concurrency 2, lag 5, results off (below) |
+| split | KEDA 1–3 | 900m | 2 Gi | `<p>.landed`, 24 partitions, lag 5, 8 consumers of 2 items a pod |
+| convert | KEDA 1–3 | 400m | 1.25 Gi | `<p>.split`, 24 partitions, lag 5, results off |
+| transform | KEDA 1–4 | 1600m | 2 Gi | `<p>.records`, 24 partitions, concurrency 4, lag 5, results off (below) |
 | kafka | 1 | 200m | 768 Mi | heap 384 MiB, as in the sandbox |
 | postgres | 1 | 100m | 512 Mi | as in the sandbox |
 | KEDA (3 pods), Cluster Autoscaler, CoreDNS, CNI, EBS CSI, Pod Identity agent | — | ~0.5 | ~1.5 Gi | — |
@@ -262,11 +262,12 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 - Postgres and Kafka run on the base node in us-east-2a, where their volumes are.
 
 **Totals:**
-- At rest, about 10.3 GiB and 3.65 vCPU requested, which fits the two base nodes (about 14 GiB and 3.86 vCPU
-  allocatable).
-- At the maximum, about 21.3 GiB and 9.2 vCPU, which needs up to four Spot burst nodes: the stages ask for the
-  CPU they use under load (split 0.9, transform 0.8, convert 0.4 a pod; [PERFORMANCE.md](PERFORMANCE.md) §10),
-  and split runs up to 3 pods.
+- At rest, about 10.8 GiB and 4.45 vCPU requested: more CPU than the two base nodes have (about 14 GiB and 3.86
+  vCPU allocatable), so one Spot burst node stays up while the stack is (about $0.02 an hour): transform's one
+  pod asks for 1.6.
+- At the maximum, about 23.3 GiB and 12.4 vCPU, which needs up to five Spot burst nodes (six allowed): the
+  stages ask for the CPU they use under load (split 0.9, transform 1.6, convert 0.4 a pod;
+  [PERFORMANCE.md](PERFORMANCE.md) §10), split runs up to 3 pods and transform up to 4.
 
 ## 6. Landing exclusivity on AWS
 
