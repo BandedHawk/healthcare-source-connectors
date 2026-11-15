@@ -23,6 +23,12 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param output         where its messages go
  * @param dlq            where conflicts go: the stage's dead-letter queue
  * @param concurrency    how many records a pod processes at once
+ * @param consumers      for a record stage, how many input batches a pod
+ *                       handles at once (Kafka only), their records sharing
+ *                       the {@code concurrency} threads: one batch's
+ *                       records are processed while another commits
+ *                       (docs/PERFORMANCE.md §3.4); the split stage takes
+ *                       {@code sdh.split.consumers} instead
  * @param claim          how records are claimed
  * @param registrySchema the Postgres schema of the stage's registry, in
  *                       the lease database
@@ -47,7 +53,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  */
 public record StageProperties(ReceiveProperties input,
         CommonSettings.Queue output, CommonSettings.Queue dlq,
-        @DefaultValue("4") int concurrency, @DefaultValue Claim claim,
+        @DefaultValue("4") int concurrency,
+        @DefaultValue("1") int consumers, @DefaultValue Claim claim,
         @DefaultValue("sdh_stage") String registrySchema,
         @DefaultValue("30s") Duration sendTimeout,
         CommonSettings.Queue reprocess,
@@ -117,6 +124,21 @@ public record StageProperties(ReceiveProperties input,
             throw new IllegalArgumentException(PREFIX + ".input is required");
         }
         return ReceiveSettings.of(input, PREFIX + ".input", attributes);
+    }
+
+    /**
+     * The checked input settings of a record stage, with its
+     * {@link #consumers} ({@link ReceiveSettings#withConsumers}).
+     *
+     * @param attributes the message attributes or headers to read
+     * @return the settings
+     * @throws IllegalArgumentException as {@link #receive}, or if the
+     *                                  consumers can't be had
+     */
+    public ReceiveSettings receiveRecords(Set<String> attributes)
+    {
+        return receive(attributes).withConsumers(consumers,
+                PREFIX + ".consumers");
     }
 
     /**

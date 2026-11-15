@@ -64,7 +64,25 @@ class StagePropertiesTest
             CommonSettings.Queue output, CommonSettings.Queue dlq,
             StageProperties.Claim claim)
     {
-        return new StageProperties(input, output, dlq, 4, claim, "sdh_stage",
+        return properties(input, output, dlq, claim, 1);
+    }
+
+    /**
+     * Settings with a record stage's consumers.
+     *
+     * @param input     the input
+     * @param output    the output
+     * @param dlq       the dead-letter queue
+     * @param claim     the claims
+     * @param consumers the input batches a pod handles at once
+     * @return the settings
+     */
+    static StageProperties properties(ReceiveProperties input,
+            CommonSettings.Queue output, CommonSettings.Queue dlq,
+            StageProperties.Claim claim, int consumers)
+    {
+        return new StageProperties(input, output, dlq, 4, consumers, claim,
+                "sdh_stage",
                 Duration.ofSeconds(30), null, -1, Duration.ofMinutes(1),
                 new StageProperties.TableSettings(null, null, null, null,
                         null),
@@ -87,6 +105,24 @@ class StagePropertiesTest
         assertThatThrownBy(() -> properties(null, QUEUE, QUEUE, CLAIM)
                 .receive(Set.of()))
                 .hasMessageContaining("sdh.stage.input is required");
+    }
+
+    /**
+     * A record stage's consumers are Kafka consumers, one by default, and
+     * named in errors.
+     */
+    @Test
+    void givesARecordStageItsConsumers()
+    {
+        assertThat(properties(INPUT, QUEUE, QUEUE, CLAIM)
+                .receiveRecords(Set.of()).uri())
+                .doesNotContain("consumersCount");
+        assertThat(properties(INPUT, QUEUE, QUEUE, CLAIM, 2)
+                .receiveRecords(Set.of()).uri())
+                .contains("consumersCount=2");
+        assertThatThrownBy(() -> properties(INPUT, QUEUE, QUEUE, CLAIM, 0)
+                .receiveRecords(Set.of()))
+                .hasMessageContaining("sdh.stage.consumers");
     }
 
     /**

@@ -30,9 +30,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -752,6 +755,96 @@ class StageWorkerTest
         });
         assertThat(StageTestSupport.registry(schema, "pod-a").failureStore()
                 .counts(item)).isEqualTo(new FailureStore.Counts(8, 0, 0));
+    }
+
+    /**
+     * A worker handed two batches at once, as by two of a pod's consumers
+     * (docs/PERFORMANCE.md §3.4), processes the second's records while the
+     * first commits; the commits still go one at a time, and both items
+     * complete, each record stored once.
+     *
+     * @throws Exception if a worker fails
+     */
+    @Test
+    void processesOneBatchWhileAnotherCommits() throws Exception
+    {
+        CountDownLatch committing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger inCommit = new AtomicInteger();
+        AtomicInteger mostInCommit = new AtomicInteger();
+        StageTestSupport.TestProcessor processor =
+                new StageTestSupport.TestProcessor(1, committed)
+                {
+                    @Override
+                    public List<ConnectorMessage> commit(
+                            List<StageOutput<String>> outputs)
+                    {
+                        mostInCommit.accumulateAndGet(
+                                inCommit.incrementAndGet(), Math::max);
+                        try
+                        {
+                            committing.countDown();
+                            if (!release.await(10, TimeUnit.SECONDS))
+                            {
+                                throw new IllegalStateException(
+                                        "Not released");
+                            }
+                            return super.commit(outputs);
+                        }
+                        catch (InterruptedException interrupted)
+                        {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(interrupted);
+                        }
+                        finally
+                        {
+                            inCommit.decrementAndGet();
+                        }
+                    }
+                };
+        StageWorker<String> worker = worker("pod-a", processor);
+        UUID other = UUID.randomUUID();
+        List<BrokerMessage> second = new ArrayList<>();
+        for (int seq = 0; seq < 4; seq++)
+        {
+            second.add(StageTestSupport.record(other, seq));
+        }
+        second.add(StageTestSupport.total(other, 4));
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try
+        {
+            Future<BatchHandler.Outcome> first =
+                    pool.submit(() -> worker.handle(batch(4)));
+            assertThat(committing.await(10, TimeUnit.SECONDS)).isTrue();
+            Future<BatchHandler.Outcome> next =
+                    pool.submit(() -> worker.handle(second));
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (processor.processed.get() < 8
+                    && System.nanoTime() < until)
+            {
+                Thread.sleep(10);
+            }
+            // The second batch's records are processed with the first's
+            // commit still waiting.
+            assertThat(processor.processed).hasValue(8);
+            assertThat(first.isDone()).isFalse();
+            release.countDown();
+            assertThat(first.get(10, TimeUnit.SECONDS))
+                    .isEqualTo(BatchHandler.Outcome.DONE);
+            assertThat(next.get(10, TimeUnit.SECONDS))
+                    .isEqualTo(BatchHandler.Outcome.DONE);
+        }
+        finally
+        {
+            release.countDown();
+            pool.shutdownNow();
+        }
+        assertThat(mostInCommit).hasValue(1);
+        assertThat(committed).hasSize(8).doesNotHaveDuplicates();
+        assertThat(sentRecords()).containsExactlyInAnyOrderElementsOf(
+                committed);
+        assertThat(sentItems()).extracting(ItemConverted::itemId)
+                .containsExactlyInAnyOrder(item, other);
     }
 
     /**

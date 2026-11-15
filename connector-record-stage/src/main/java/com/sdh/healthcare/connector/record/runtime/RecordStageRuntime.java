@@ -277,7 +277,7 @@ public final class RecordStageRuntime implements AutoCloseable
             opened.add(worker);
             StageHealth health = new StageHealth();
             StageReceiver receiver = new StageReceiver(camel,
-                    stage.receive(Set.of()), worker, health,
+                    stage.receiveRecords(Set.of()), worker, health,
                     Fields.of(Attr.STAGE, stageName),
                     settings.retry().initialBackoff(), MAX_BACKOFF);
             opened.add(receiver);

@@ -6,7 +6,6 @@
  */
 package com.sdh.healthcare.connector.file.runtime;
 
-import com.sdh.healthcare.connector.broker.receive.BrokerKind;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
 import com.sdh.healthcare.connector.broker.send.Publishers;
@@ -267,6 +266,13 @@ public final class ConnectorRuntime implements AutoCloseable
                         || landing.storage().catalog().isEmpty()
                         ? null : landing.storage().catalog();
         StageProperties stage = properties.stage();
+        if (stage.consumers() != 1)
+        {
+            // Split's consumers share its item limit (sdh.split.consumers).
+            throw new IllegalArgumentException(StageProperties.PREFIX
+                    + ".consumers is for a record stage; set"
+                    + " sdh.split.consumers instead");
+        }
         ReceiveSettings input = consumers(stage.receive(Set.of())
                 .withKafkaDefault("maxPollIntervalMs",
                         Long.toString(MAX_POLL_INTERVAL.toMillis())),
@@ -492,23 +498,7 @@ public final class ConnectorRuntime implements AutoCloseable
      */
     static ReceiveSettings consumers(ReceiveSettings input, int consumers)
     {
-        if (input.kind() == BrokerKind.KAFKA
-                && input.uri().matches(".*[?&]consumersCount=.*"))
-        {
-            throw new IllegalArgumentException("sdh.stage.input.uri sets"
-                    + " consumersCount; set sdh.split.consumers instead");
-        }
-        if (consumers == 1)
-        {
-            return input;
-        }
-        if (input.kind() != BrokerKind.KAFKA)
-        {
-            throw new IllegalArgumentException("sdh.split.consumers above 1"
-                    + " needs a Kafka input, not " + input.kind());
-        }
-        return input.withKafkaDefault("consumersCount",
-                Integer.toString(consumers));
+        return input.withConsumers(consumers, "sdh.split.consumers");
     }
 
     /**

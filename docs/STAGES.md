@@ -197,6 +197,12 @@ Two new modules, both published, so `healthcare-data-transformer` can use them:
   Postgres, real sealing), and `StageWorkerIT` on all seven brokers: a worker stops part-way with records claimed,
   two more run at once, wait out its claims and take them over, and store every record exactly once. Its output is
   kept in memory, since sending on each broker is tested by `file-connector`.
+  **Changed 2026-11-15 (DESIGN.md revision (dn)):** on Kafka, a record stage's pod can take
+  `sdh.stage.consumers` batches at once (default 1), each on a consumer of its own (Camel `consumersCount`),
+  their records sharing the pod's `concurrency` threads: one batch's records are processed while another's
+  commit, register and send, which otherwise left the CPU idle. Commits still go one at a time. The topic needs a
+  partition for each consumer of every pod. More than one on another broker, or a `consumersCount` in the URI, is
+  refused at startup; the split stage takes `sdh.split.consumers` instead, and refuses this one.
 
 The processor interface knows nothing of formats or mappings: a record's bytes and metadata in, its output (or
 the error that stopped it) out. The transform stage's processor loads its WSTL set at startup, from a location in

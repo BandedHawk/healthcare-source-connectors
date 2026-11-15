@@ -113,6 +113,36 @@ class ReceiveSettingsTest
                 .doesNotContain("maxPollIntervalMs");
     }
 
+    /**
+     * More than one consumer is Kafka's {@code consumersCount}; one changes
+     * nothing; fewer, another broker, or a count in the URI, are refused,
+     * naming the setting.
+     */
+    @Test
+    void addsKafkaConsumers()
+    {
+        ReceiveSettings kafka = of(broker("kafka", "kafka:hl7?groupId=g"));
+        assertThat(kafka.withConsumers(1, "sdh.stage.consumers"))
+                .isSameAs(kafka);
+        assertThat(kafka.withConsumers(2, "sdh.stage.consumers").uri())
+                .contains("&consumersCount=2");
+        ReceiveSettings sqs = of(broker("sqs", "aws2-sqs:q"));
+        assertThat(sqs.withConsumers(1, "sdh.stage.consumers"))
+                .isSameAs(sqs);
+        assertThatThrownBy(() -> sqs.withConsumers(2, "sdh.stage.consumers"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("sdh.stage.consumers")
+                .hasMessageContaining("Kafka");
+        assertThatThrownBy(() -> kafka.withConsumers(0, "sdh.stage.consumers"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("sdh.stage.consumers");
+        assertThatThrownBy(() -> of(broker("kafka",
+                "kafka:hl7?groupId=g&consumersCount=3"))
+                .withConsumers(1, "sdh.stage.consumers"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("consumersCount");
+    }
+
     /** Kafka without a consumer group is refused. */
     @Test
     void refusesKafkaWithoutAGroup()

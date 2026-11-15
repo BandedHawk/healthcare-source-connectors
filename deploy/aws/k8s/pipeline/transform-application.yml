@@ -20,6 +20,9 @@ sdh:
   stage:
     # Four records at a time (docs/PERFORMANCE.md §10, 2026-11-15; the sandbox keeps 2); 24 partitions (poc.sh).
     concurrency: 4
+    # Two batches a pod at once, sharing those four threads: one batch's records are mapped while the other's
+    # commit (docs/PERFORMANCE.md §10, 2026-11-15). 4 pods × 2 consumers fit the 24 partitions.
+    consumers: 2
     input:
       type: kafka
       uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&groupId=transform-${PIPELINE}&groupProtocol=consumer"

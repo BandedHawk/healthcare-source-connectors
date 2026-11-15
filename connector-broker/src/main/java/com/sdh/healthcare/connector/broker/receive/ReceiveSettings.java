@@ -226,6 +226,46 @@ public record ReceiveSettings(BrokerKind kind, String uri, int maxMessages,
     }
 
     /**
+     * These settings with as many Kafka consumers as asked for (Camel's
+     * {@code consumersCount}), each handling its own batches, so one
+     * batch's slow work holds back only that batch (docs/PERFORMANCE.md
+     * §3.4). Each consumer is a member of the group, so the topic's
+     * partitions are shared among every pod's consumers.
+     *
+     * @param consumers how many consumers, at least 1
+     * @param setting   the setting that gives the count, named in errors
+     * @return the settings; these, unchanged, for one consumer
+     * @throws IllegalArgumentException if the count is below 1, more than
+     *                                  one is asked of a broker other than
+     *                                  Kafka, or a Kafka URI sets
+     *                                  {@code consumersCount} itself
+     */
+    public ReceiveSettings withConsumers(int consumers, String setting)
+    {
+        if (consumers < 1)
+        {
+            throw new IllegalArgumentException(setting
+                    + " must be at least 1");
+        }
+        if (kind == BrokerKind.KAFKA
+                && Pattern.compile("[?&]consumersCount=").matcher(uri).find())
+        {
+            throw new IllegalArgumentException("sdh.stage.input.uri sets"
+                    + " consumersCount; set " + setting + " instead");
+        }
+        if (consumers == 1)
+        {
+            return this;
+        }
+        if (kind != BrokerKind.KAFKA)
+        {
+            throw new IllegalArgumentException(setting + " above 1 needs a"
+                    + " Kafka input, not " + kind);
+        }
+        return withKafkaDefault("consumersCount", Integer.toString(consumers));
+    }
+
+    /**
      * The consumer URI with the options receiving needs.
      *
      * @param kind       the broker

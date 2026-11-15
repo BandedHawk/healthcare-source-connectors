@@ -56,7 +56,7 @@ class StageTablesTest
     static RecordStageSettings settings(StageProperties.TableSettings source,
             StageProperties.TableSettings sink, String recordsKek)
     {
-        StageProperties stage = new StageProperties(null, null, null, 4,
+        StageProperties stage = new StageProperties(null, null, null, 4, 1,
                 null, "sdh_stage", Duration.ofSeconds(30), null, -1,
                 Duration.ofMinutes(1), source, sink, true);
         CommonSettings.Crypto crypto = new CommonSettings.Crypto("local",
