@@ -26,8 +26,13 @@ import java.util.concurrent.TimeUnit;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.catalog.Catalog;
+import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.io.CloseableIterable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -39,6 +44,9 @@ import org.junit.jupiter.api.Test;
  */
 class GroupAppenderTest
 {
+
+    /** The catalog the table is in. */
+    Catalog catalog;
 
     /** The {@code split_records} table the files are appended to. */
     Table table;
@@ -81,8 +89,8 @@ class GroupAppenderTest
     @BeforeEach
     void setUp()
     {
-        table = IngestTables.splitRecords(
-                TestCatalogs.create(TestCatalogs.Kind.JDBC).newClient(),
+        catalog = TestCatalogs.create(TestCatalogs.Kind.JDBC).newClient();
+        table = IngestTables.splitRecords(catalog,
                 "ns_" + UUID.randomUUID().toString().replace("-", ""));
     }
 
@@ -189,6 +197,53 @@ class GroupAppenderTest
             assertThat(kept).isNotNull();
             assertThat(files()).isEqualTo(1);
         }
+    }
+
+    /**
+     * Appenders on two copies of the table, as two pods have, appending at
+     * once: their commits conflict, each tries again on top of the other's,
+     * and every file is committed once. The table's metadata is gzipped.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void appendersOnTwoPodsAllCommit() throws Exception
+    {
+        Table other = catalog.loadTable(TableIdentifier.parse(table.name()
+                .substring(table.name().indexOf('.') + 1)));
+        int each = 40;
+        ExecutorService senders = Executors.newVirtualThreadPerTaskExecutor();
+        try (GroupAppender one = new GroupAppender(table);
+                GroupAppender two = new GroupAppender(other))
+        {
+            List<Future<Snapshot>> sent = new ArrayList<>();
+            for (int index = 0; index < each; index++)
+            {
+                String name = "file-" + index;
+                sent.add(senders.submit(
+                        () -> one.append(file("one-" + name), new Lease())));
+                sent.add(senders.submit(
+                        () -> two.append(file("two-" + name), new Lease())));
+            }
+            for (Future<Snapshot> future : sent)
+            {
+                assertThat(future.get(60, TimeUnit.SECONDS)).isNotNull();
+            }
+        }
+        finally
+        {
+            senders.shutdownNow();
+        }
+        assertThat(files()).isEqualTo(2L * each);
+        Set<String> paths = new HashSet<>();
+        try (CloseableIterable<FileScanTask> tasks = table.newScan()
+                .planFiles())
+        {
+            tasks.forEach(task -> paths.add(task.file().location()));
+        }
+        assertThat(paths).hasSize(2 * each);
+        assertThat(((HasTableOperations) table).operations().current()
+                .metadataFileLocation()).endsWith(".gz.metadata.json");
     }
 
     /**

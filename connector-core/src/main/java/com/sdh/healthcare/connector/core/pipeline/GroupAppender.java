@@ -7,7 +7,6 @@
 package com.sdh.healthcare.connector.core.pipeline;
 
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
-import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.util.ArrayList;
 import java.util.List;
@@ -18,6 +17,7 @@ import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.exceptions.CommitFailedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +44,12 @@ public final class GroupAppender implements AutoCloseable
 
     /** The most files one commit appends. */
     public static final int MAX_FILES = 500;
+
+    /**
+     * Commits tried before a group fails, each with Iceberg's own retries
+     * inside it.
+     */
+    static final int ATTEMPTS = 10;
 
     /** Logs how many files each commit took, without PHI. */
     private static final Logger LOG =
@@ -207,14 +213,7 @@ public final class GroupAppender implements AutoCloseable
         }
         try
         {
-            Snapshot snapshot = new LeasedCommitter(allOf(held)).commit(table,
-                    transaction ->
-                    {
-                        AppendFiles append = transaction.newFastAppend();
-                        held.forEach(request ->
-                                append.appendFile(request.file()));
-                        append.commit();
-                    });
+            Snapshot snapshot = appendAll(held);
             LOG.debug("append.committed files={}", held.size());
             held.forEach(request -> request.done().complete(snapshot));
         }
@@ -226,34 +225,50 @@ public final class GroupAppender implements AutoCloseable
     }
 
     /**
-     * A lease that is held only while every one of a group's is.
+     * Appends a group's files in one fast append on the table itself, not
+     * in a transaction (docs/PERFORMANCE.md §10, 2026-11-15). Every split
+     * pod appends to the table, so a commit often finds another's has gone
+     * in first: Iceberg then reads the table again, puts the files on top
+     * and tries again, as the table's {@code commit.retry.num-retries}
+     * says, and this tries again on top of that. A transaction did the
+     * same, and also read, after each commit, the manifest list of every
+     * snapshot added since it began, its own and the other pods', to find
+     * files to clean up; an append has none. It also read the table once
+     * more before and once more after.
+     * <p>
+     * Every lease is checked before each attempt, as it was before the
+     * transaction's commit. Iceberg's own retries, inside the commit,
+     * check none, as before.
      *
-     * @param group the files, with their leases
-     * @return the lease
+     * @param held the files, whose leases were held a moment ago
+     * @return the table's snapshot just after the commit, which holds the
+     *         files (another pod's, made just after, may be the one)
+     * @throws org.apache.iceberg.exceptions.CommitFailedException if every
+     *         attempt conflicts
+     * @throws RuntimeException what the commit or a lease check threw
      */
-    private static LeaseToken allOf(List<Request> group)
+    private Snapshot appendAll(List<Request> held)
     {
-        return new LeaseToken()
+        for (int attempt = 1; ; attempt++)
         {
-            /**
-             * {@inheritDoc}
-             * <p>
-             * A group has no one epoch; nothing that commits a group asks
-             * for one.
-             */
-            @Override
-            public long epoch()
+            held.forEach(request -> request.lease().checkHeld());
+            AppendFiles append = table.newFastAppend();
+            held.forEach(request -> append.appendFile(request.file()));
+            try
             {
-                throw new UnsupportedOperationException(
-                        "A group of leases has no one epoch");
+                append.commit();
+                return table.currentSnapshot();
             }
-
-            @Override
-            public void checkHeld()
+            catch (CommitFailedException conflict)
             {
-                group.forEach(request -> request.lease().checkHeld());
+                LOG.warn("append.conflict attempt={} table={}", attempt,
+                        table.name());
+                if (attempt >= ATTEMPTS)
+                {
+                    throw conflict;
+                }
             }
-        };
+        }
     }
 
     /**

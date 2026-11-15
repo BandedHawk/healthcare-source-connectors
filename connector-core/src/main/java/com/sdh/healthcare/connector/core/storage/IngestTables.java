@@ -64,6 +64,13 @@ public final class IngestTables
      * §3.3). They stay under the table's {@code data/}, where orphan
      * cleanup lists. Set for new tables only: an existing one keeps its
      * layout, and Iceberg reads files wherever they are.
+     * <p>
+     * The table's metadata file is gzipped ({@code .gz.metadata.json}). It
+     * lists every snapshot kept, so it grows with each commit (about 830
+     * bytes a snapshot, 500 KB at 600), and every commit reads it and
+     * writes it again; gzipped it is a ninth of the size
+     * (docs/PERFORMANCE.md §2.2, §10). Every Iceberg reader reads either.
+     * Set for new tables only, as the layout is.
      */
     public static final Map<String, String> PROPERTIES = Map.of(
             TableProperties.FORMAT_VERSION, "2",
@@ -75,6 +82,7 @@ public final class IngestTables
             Long.toString(TARGET_FILE_BYTES),
             TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED, "true",
             TableProperties.METADATA_PREVIOUS_VERSIONS_MAX, "100",
+            TableProperties.METADATA_COMPRESSION, "gzip",
             TableProperties.OBJECT_STORE_ENABLED, "true");
 
     /**
