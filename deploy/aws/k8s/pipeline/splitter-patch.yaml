@@ -25,6 +25,8 @@ spec:
             - name: POD_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.instance.id=$(POD_NAME)" }
+          # CPU near what a pod uses under load (docs/PERFORMANCE.md §10, 2026-11-14): asking for less packed pods onto
+          # too few CPUs, and they waited for them.
           resources:
-            requests: { cpu: 500m, memory: 2Gi }
+            requests: { cpu: 900m, memory: 2Gi }
             limits: { memory: 2Gi }

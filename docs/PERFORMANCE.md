@@ -623,6 +623,18 @@ What it showed, beyond §2's predictions:
     commits for 2,422 items) and summary read (0.85 s), both on CPU-starved pods; then transform. Next:
     CPU requests that match what the stages use, so the scheduler and the cluster autoscaler give them
     the CPUs, then measure again; then a faster commit (§2.2).
+  - **With CPU requests that match** (`load-20261114T232226Z`; split 0.9 a pod, transform 0.8, convert
+    0.4, up to three burst nodes, all three used): **5.51 documents/s** (5.12). Split's share of time
+    waiting for a CPU 0.25–0.32 (0.55–0.80); convert's and transform's under 0.22. Split per item 2.2 s
+    (2.9): the summary read 0.56 s (0.85), now flat across the run, so one open's S3 round trips (footer,
+    offset index, pages), not contention; a group commit 0.49 s (0.65). Landed → split ended p50 57.7 s
+    (107); landed → gold p50 / p95 / p99 166 / 293 / 333 s.
+  - **Split still sets the pace**: ~7.6 items/s while landing ran, ~4.4 after, on its 2 pods (KEDA's
+    most); transform finished ~30 s after it. In the second quarter split's commits queued 1.4 s an item
+    (0.2 s in the others) while transform used 3.5 cores; the catalog's Postgres shares a base node with
+    Kafka, not yet measured. Next: a third split pod (3 × 8 consumers fit the 24 partitions), the summary
+    read in fewer GETs (the footer and offset index in one ranged read), and the catalog's database
+    measured.
 
 ## 11. Order of work
 
@@ -634,7 +646,7 @@ Each step is measured before the next, and each is useful alone.
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
-| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time) |
+| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32 |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |
 | 6 | Large documents (§9) | 100 MB documents through, with bounded memory |

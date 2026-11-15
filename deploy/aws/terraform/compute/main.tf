@@ -91,7 +91,7 @@ resource "aws_eks_cluster" "poc" {
 # base: one on-demand node per zone. They hold the active and standby landing pods (one per node), Postgres and
 # Kafka (on the node in the state volumes' zone), and one pod of each scaled stage.
 #
-# burst: Spot nodes (on-demand for a performance test), 0 to 2, in any of three zones and six instance types,
+# burst: Spot nodes (on-demand for a performance test), 0 to 3, in any of three zones and six instance types,
 # tainted so only the KEDA-scaled stages and the gold check run there. Cluster Autoscaler adds one when
 # pods can't be placed, and removes it 10 minutes after it empties.
 
