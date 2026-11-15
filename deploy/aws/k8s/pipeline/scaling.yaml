@@ -1,6 +1,6 @@
 # How KEDA scales a pipeline's split, convert and transform stages on AWS (docs/AWS-POC.md §5): on their Kafka
 # consumer groups' lag, as in the sandbox (deploy/sandbox/pipeline/scaling.yaml, deploy/sandbox/fhir/scaling.yaml),
-# with the PoC's maxima: 2, 3 and 4 pods. Never fewer than one: the pod holding a stage's duties runs its
+# with the PoC's maxima: 3, 3 and 4 pods. Never fewer than one: the pod holding a stage's duties runs its
 # reconciler, and a lost message adds no lag, so a stage scaled to nothing would never be woken to find it. The
 # landing node is never scaled. poc.sh down pauses these at 0 (autoscaling.keda.sh/paused-replicas), and up
 # resumes them. ${...} are filled in by deploy/aws/k8s/pipeline/apply.sh.
@@ -12,7 +12,8 @@ metadata: { name: splitter, namespace: ${K8S_NS} }
 spec:
   scaleTargetRef: { name: splitter }
   minReplicaCount: 1
-  maxReplicaCount: 2
+  # 3 pods × 8 consumers: the 24 partitions (docs/PERFORMANCE.md §10, 2026-11-14: split, at 2, set the pace).
+  maxReplicaCount: 3
   pollingInterval: 15
   cooldownPeriod: 120
   advanced:

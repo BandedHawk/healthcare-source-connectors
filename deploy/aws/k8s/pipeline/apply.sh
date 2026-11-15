@@ -276,7 +276,7 @@ deploy_pipeline() {
     kc -n "${scaled% *}" wait --for=condition=Ready "scaledobject/${scaled#* }" --timeout=120s >/dev/null \
       || { kc -n "${scaled% *}" describe "scaledobject/${scaled#* }" | tail -20; die "KEDA isn't scaling ${scaled#* }"; }
   done
-  say "  split, convert and transform running, one pod each; KEDA scales them to 2, 3 and 4"
+  say "  split, convert and transform running, one pod each; KEDA scales them to 3, 3 and 4"
   say "  intake: aws s3 cp <file> s3://$INTAKE_BUCKET/$p/"
 }
 

@@ -166,8 +166,10 @@ class DataFileRowsTest
     }
 
     /**
-     * A small record is read without the rest of the file: here, its
-     * footer, indexes and a page or two, not the 15 MiB of ciphertext.
+     * A small record is read without the rest of the file: here, the
+     * file's tail (footer and indexes) and one read ahead (the pages
+     * holding it and their neighbours), not the 15 MiB of ciphertext. More
+     * bytes than the pages alone, for fewer requests.
      *
      * @throws IOException if the file can't be read
      */
@@ -180,7 +182,149 @@ class DataFileRowsTest
                 1, COLUMNS);
         assertThat(read).hasSize(1);
         assertThat(read.get(0).getField(RecordsTable.SEQ)).isEqualTo(5L);
-        assertThat(io.bytes.get()).isLessThan(256 * 1024);
+        assertThat(io.bytes.get()).isLessThanOrEqualTo(512 * 1024);
+    }
+
+    /**
+     * Through a store that reads ranges, as S3's does, a small record is
+     * read in two requests: the file's tail (footer and indexes), and the
+     * pages holding its row, near each other.
+     *
+     * @throws IOException if the file can't be read
+     */
+    @Test
+    void readsASmallRecordInFewRequests() throws IOException
+    {
+        byte[] bytes;
+        try (SeekableInputStream in = table.io()
+                .newInputFile(file.location()).newStream())
+        {
+            bytes = in.readAllBytes();
+        }
+        List<long[]> requests = new ArrayList<>();
+        FileIO ranged = new FileIO()
+        {
+            @Override
+            public InputFile newInputFile(String path)
+            {
+                return file(bytes, requests);
+            }
+
+            @Override
+            public OutputFile newOutputFile(String path)
+            {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public void deleteFile(String path)
+            {
+                throw new UnsupportedOperationException();
+            }
+        };
+        List<Record> read = DataFileRows.read(ranged, table.schema(),
+                file.location(), file.fileSizeInBytes(), firstRows.get(5L),
+                1, COLUMNS);
+        assertThat(read).hasSize(1);
+        assertThat(read.get(0).getField(RecordsTable.SEQ)).isEqualTo(5L);
+        assertThat(requests).hasSize(2);
+    }
+
+    /**
+     * A file in memory read by range only, noting each request.
+     *
+     * @param bytes    the file's bytes
+     * @param requests where each request is noted, as {start, length}
+     * @return the file
+     */
+    private static InputFile file(byte[] bytes, List<long[]> requests)
+    {
+        return new InputFile()
+        {
+            @Override
+            public long getLength()
+            {
+                return bytes.length;
+            }
+
+            @Override
+            public SeekableInputStream newStream()
+            {
+                return new Ranged(bytes, requests);
+            }
+
+            @Override
+            public String location()
+            {
+                return "memory://ranged";
+            }
+
+            @Override
+            public boolean exists()
+            {
+                return true;
+            }
+        };
+    }
+
+    /** A stream that reads by range only, as S3's can. */
+    private static final class Ranged extends SeekableInputStream
+            implements org.apache.iceberg.io.RangeReadable
+    {
+
+        /** The file's bytes. */
+        private final byte[] bytes;
+
+        /** Where each request is noted. */
+        private final List<long[]> requests;
+
+        /**
+         * Reads bytes by range.
+         *
+         * @param bytes    the file's bytes
+         * @param requests where each request is noted
+         */
+        Ranged(byte[] bytes, List<long[]> requests)
+        {
+            this.bytes = bytes;
+            this.requests = requests;
+        }
+
+        @Override
+        public long getPos()
+        {
+            throw new AssertionError("Read by position");
+        }
+
+        @Override
+        public void seek(long position)
+        {
+            throw new AssertionError("Read by position");
+        }
+
+        @Override
+        public int read()
+        {
+            throw new AssertionError("Read by position");
+        }
+
+        @Override
+        public void readFully(long position, byte[] buffer, int offset,
+                int length)
+        {
+            requests.add(new long[] {position, length});
+            System.arraycopy(bytes, (int) position, buffer, offset, length);
+        }
+
+        @Override
+        public int readTail(byte[] buffer, int offset, int length)
+        {
+            requests.add(new long[] {-1, length});
+            int count = Math.min(length, bytes.length);
+            System.arraycopy(bytes, bytes.length - count, buffer, offset,
+                    count);
+            return count;
+        }
     }
 
     /**

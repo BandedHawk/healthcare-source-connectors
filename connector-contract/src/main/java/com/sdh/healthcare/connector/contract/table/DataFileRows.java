@@ -30,10 +30,12 @@ import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.apache.parquet.ParquetReadOptions;
 import org.apache.parquet.column.page.PageReadStore;
+import org.apache.parquet.compression.CompressionCodecFactory;
 import org.apache.parquet.filter2.compat.FilterCompat;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 import org.apache.parquet.internal.column.columnindex.OffsetIndex;
 import org.apache.parquet.internal.filter2.columnindex.RowRanges;
 import org.apache.parquet.io.ColumnIOFactory;
@@ -70,9 +72,81 @@ import org.apache.parquet.schema.MessageType;
 public final class DataFileRows
 {
 
+    static
+    {
+        prepareCodecs();
+    }
+
     /** Not instantiated. */
     private DataFileRows()
     {
+    }
+
+    /**
+     * Loads, once and on a platform thread, the classes Parquet's codecs
+     * load the first time a page is decompressed (docs/PERFORMANCE.md §10,
+     * 2026-11-15). Hadoop's {@code ReflectionUtils} initializes
+     * {@code JobConf} then, which reloads every {@code Configuration},
+     * taking each one's lock. On a virtual thread a class being
+     * initialized holds its carrier, and so does each thread waiting for
+     * it: with a carrier per CPU, two items reading their first rows at
+     * once could hold both of a two-CPU pod's carriers, while the thread
+     * holding a lock that one waits for has none to run on. Nothing then
+     * moves again, and the stage's other threads, its lease renewals
+     * among them, wait behind it. Here the classes are loaded on a thread
+     * of its own, which needs no carrier; a thread that reads after waits
+     * only for this class, whose initializer takes no lock.
+     */
+    private static void prepareCodecs()
+    {
+        Thread prepare = Thread.ofPlatform().name("sdh-parquet-codecs")
+                .daemon().start(new Codecs());
+        boolean interrupted = false;
+        while (true)
+        {
+            try
+            {
+                prepare.join();
+                break;
+            }
+            catch (InterruptedException again)
+            {
+                interrupted = true;
+            }
+        }
+        if (interrupted)
+        {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Gets a decompressor of each codec the tables write. A class of its
+     * own, not a lambda: a lambda here would be a method of this class,
+     * which its thread couldn't run until this class's initializer, which
+     * waits for that thread, had ended.
+     */
+    private static final class Codecs implements Runnable
+    {
+
+        @Override
+        public void run()
+        {
+            CompressionCodecFactory codecs =
+                    ParquetReadOptions.builder().build().getCodecFactory();
+            try
+            {
+                for (CompressionCodecName codec : List.of(
+                        CompressionCodecName.ZSTD, CompressionCodecName.GZIP))
+                {
+                    codecs.getDecompressor(codec);
+                }
+            }
+            finally
+            {
+                codecs.release();
+            }
+        }
     }
 
     /**
@@ -104,7 +178,8 @@ public final class DataFileRows
         List<Record> rows = new ArrayList<>(count);
         ParquetReadOptions options = ParquetReadOptions.builder().build();
         try (ParquetFileReader reader = ParquetFileReader.open(
-                new IcebergInput(io.newInputFile(file, fileSize)), options))
+                new RangedInputFile(io.newInputFile(file, fileSize),
+                        fileSize), options))
         {
             MessageType fileSchema =
                     reader.getFooter().getFileMetaData().getSchema();

@@ -320,7 +320,7 @@ say "    end to end: ${end}s; $(per_min "$transformed" "$end") items/min," \
 for k in landed split converted transformed; do
   say "    $k: ${!k} items by ${last_change[$k]:-?}s, $(per_min "${!k}" "${last_change[$k]:-0}") items/min"
 done
-say "Pods at most: landing ${max_pods[landing]} (1 active), splitter ${max_pods[splitter]}/2," \
+say "Pods at most: landing ${max_pods[landing]} (1 active), splitter ${max_pods[splitter]}/3," \
   "convert ${max_pods[convert]}/3, transform ${max_pods[transform-$P]}/4; nodes $max_nodes, burst $max_burst"
 if [[ -n "$killed" ]]; then
   say "Landing failover: holder deleted at ${FAILOVER_AT}% landed; standby took the lease after ${takeover:-NEVER}s"
