@@ -311,6 +311,99 @@ Gold passed the gold check. Two points for reading such a report:
 Not yet run: the same with the queued messages deleted (`SDH_LOAD_OUTAGE_LOSE`), which leaves the
 reconcilers to rebuild them. At today's split rate it needs about 2 hours.
 
+### 3.7 One committer for a table, across pods (built 2026-11-15)
+
+**Decided with the user, 2026-11-15:** built as below, for `split_records` first (convert's and
+transform's tables later). The commit-rate cap is a setting, off by default until measured.
+
+**As built** (DESIGN.md revision (dm)), it differs from the proposal below in three ways. The tables are
+`append_lock`, `append_queue` and `append_queue_lease` (a group's leases, one row each). There is no claim
+token: the committing pod writes the groups' own IDs into the snapshot's summary (`sdh.appends`), and the
+groups stay `waiting` until it marks them, so a pod that dies part way leaves them waiting, and the next
+commit finds the IDs in the summaries of the snapshots since they were queued. A commit takes at most 64
+groups. Measured in §10: retries from 31% of commits to under 2%, split 1.38 s an item from 1.85.
+
+**The problem.** Each split pod commits its own groups to `split_records`. With three pods, 31% of their
+commits found another's had gone in first (§10, revision (dl)): Iceberg then reads the table again, rebuilds
+the manifest list and tries again, after a 100 ms wait. That took a group commit from 0.38 s to 0.75 s once
+all three pods were committing at once. Items wait as long again behind their own pod's last commit. More
+pods means more conflicts, so this gets worse just as §1's rate needs more split pods.
+
+**The idea: combine commits through the database.** A pod doesn't commit its own files. It puts its group in
+a queue in the stage database, then commits for **every** pod whose group is waiting. Only one pod commits
+at a time, so commits never conflict, and each one takes all the work waiting from every pod. No pod is
+elected, and nothing new runs: the queue and its lock are rows in the database the stages already use.
+
+1. **Before queueing**, a pod's appender writes its group's files into a manifest itself (`ManifestFiles.write`,
+   no snapshot ID: in format 2 the commit's ID and sequence number are inherited). That's the manifest PUT,
+   done off the critical path and on many pods at once. It then inserts one row into `pending_appends`:
+   the table, the manifest (`ManifestFiles.encode`, a few hundred bytes), each file's item lease name and
+   epoch, and `waiting`. This is committed at once.
+2. **Taking a turn.** The pod opens a transaction and locks the table's row in `append_locks`
+   (`SELECT … FOR UPDATE`). It waits there while another pod commits. Once it holds the lock, it reads its
+   own row first. If another pod has already committed it, it takes that snapshot and lets go. Typically
+   that is every pod but one, a millisecond each.
+3. **Committing for everyone.** Otherwise it locks every `waiting` row for the table (up to 500 files' worth)
+   and refuses any whose lease isn't current in the lease table, by epoch and with a margin before expiry.
+   It writes them a claim token (`claimed`), in its own committed statement. It then makes one Iceberg fast
+   append of all their manifests (`appendManifest`), with the token in the snapshot's summary. Finally it
+   marks the rows `committed` with the snapshot ID and releases the lock. One commit is a refresh, the
+   parent's manifest list, the manifest list PUT, the metadata PUT and the catalog's compare-and-swap.
+   Maintenance's own commits to the table (manifest rewrites, expiry) can still conflict, rarely, and
+   Iceberg retries as now.
+4. **Each pod then carries on as now:** saving the checkpoint, announcing the records, completing the item.
+
+**Exactly once, and what can go wrong.**
+
+- *A pod dies after queueing.* Its row is still committed while its lease is current. When its item is next
+  leased (epoch + 1), the new holder first marks any `waiting` rows of the old epoch `refused`. It then
+  runs today's check (`CommittedRecords.has`), which sees anything committed. If a commit holds the row at
+  that moment, the new holder's update waits for that commit's row lock, so the check never runs part way
+  through it. This is stronger than today, where a pod checks its lease only in its own memory.
+- *The committing pod dies part way.* Its transaction rolls back and releases the lock. Its rows are left
+  `claimed`, with a token that's either in a snapshot's summary or nowhere. The next pod to take the lock
+  looks for the token in the table's recent snapshots. Found: it marks the rows `committed` with that
+  snapshot. Not found: it commits them again. Iceberg's own commit-state-unknown case is settled the same
+  way.
+- *A lease lost while queued:* the row is refused, and the pod is told, as `GroupAppender` tells it now. Its
+  manifest is deleted. Refused and committed rows are deleted after a day.
+- **One window stays the same as today.** A lease can run out between the check and the compare-and-swap,
+  about 0.3 s. The margin covers it, as it covers today's.
+
+**What else was weighed.**
+
+| | Conflicts | With more pods | Cost |
+|---|---|---|---|
+| Today: a committer per pod | 31% at 3 pods, rising | worse | none |
+| A database lock, each pod committing its own group in turn | none | each pod waits for every other's commit: latency grows with pods | none |
+| **Combining through the database (this)** | **none** | **one commit takes everyone's: commits per table stay ~1/commit time** | **a few statements a group** |
+| One pod elected to commit, the others sending it files on a topic | none | as above | a topic, a reply path, failover of the committer |
+| A table per pod or partition | none | readers union many tables, maintenance per table | analytics harder |
+
+**Expected effect** (from run (dl)'s numbers). A group commit drops to about 0.35 s, from 0.61 s: no
+conflicts, and no manifest PUT. The wait behind the last commit drops to half a commit, from 0.60 s. Appending
+then takes about 0.5 s an item instead of 1.27 s, and an item about 1.1 s in split instead of 1.85. There
+are no failed attempts' S3 requests, and no new pods or nodes, so no extra cost. On this load split already
+ends about 30 s after landing and transform 60 s after split, so documents/s will rise less than split's
+time per item falls. The real gain is that split's commits stay flat as pods are added, which §1's rate
+needs. The same appender can later serve convert's and transform's shared tables (0.40–0.47 s a commit,
+15% retried).
+
+**A commit-rate cap (separate choice).** §3.1 planned at most one commit a second per writer, for §2.2:
+`metadata.json` lists every snapshot kept, ~830 bytes each (~90 gzipped). Combined, a table commits back to
+back under load, at most ~3 a second: at 24 hours' retention, up to ~250,000 snapshots and ~22 MB of
+gzipped metadata read and written per commit. A minimum interval, say 1 s, bounds that at 86,400 (~8 MB)
+for up to 1 s more latency. It's one setting either way.
+
+**Portability.** Plain `SELECT … FOR UPDATE`, `INSERT` and `UPDATE` on two small tables: as written it
+runs on Postgres, MySQL and Oracle, and on SQL Server it needs the lock hint `WITH (UPDLOCK, ROWLOCK)` (§8's
+dialect). Store-neutral: manifests go through the table's `FileIO`.
+
+**Tests.**
+- Embedded Postgres: two appenders' groups in one commit; a lease lost while queued; a new lease holder's
+  fence; a committing pod that dies before and after its Iceberg commit, settled both ways.
+- AWS: run (dl)'s load, then the same with a failover.
+
 ## 4. Why it holds on every store
 
 The hot path now uses only what all four stores do well and the same way:
@@ -688,7 +781,25 @@ What it showed, beyond §2's predictions:
     split ended at 245 s (297), landing at 214 s; transform at 303 s; landed → gold p50 / p99 94 / 183 s;
     8 nodes at most, ~$18 per million documents by node-seconds. Kept: fewer reads and smaller metadata
     files at no cost, and the metadata file grows with the snapshots kept (§2.2), so gzip matters more
-    with time. Next: the conflicts, by one committer for a table rather than one a pod.
+    with time. Next: the conflicts, by one committer for a table rather than one a pod (§3.7).
+  - **One queue for split's commits** (`load-20261115T071129Z`, without a failover, and
+    `load-20261115T072550Z`, with the landing failover at 30% and a split pod deleted at 800 split, then the
+    gold check; DESIGN.md revision (dm), §3.7). **The conflicts are gone:** 5 of 335 commits retried
+    (1.02 attempts) and 0 of 140 in the second run, against 97 of 309 (1.48). A group commit 0.49 s (0.61),
+    of it 0.28 s the fast append for everyone and 0.06 s the pod's own manifest; queued 0.27 s (0.60), the
+    turn at the lock 0.18–0.23 s; 506 and 497 commits (563). Split 1.38 and 1.36 s an item (1.85), p95
+    2.46 s (4.75): appending 0.80 s (1.27). Less than §3.7 expected (0.35 s a commit), as a commit for
+    everyone still refreshes, and reads the leases and the queue. **No faster end to end**: 6.91 and
+    8.23 documents/s (8.13). Split no longer sets the pace: it ended within 30 s of landing in the first
+    run, with landing in the second; landing landed its last at 234 s and 287 s (214 s), and transform took
+    88 s and 30 s after split (58 s). Landed → split ended p99 72 and 71 s (85). Both runs exactly once,
+    none left behind, the gold check passed; the deleted split pod's items were taken up by the others.
+    8 nodes at most, no new pods; measure.sh's $34 and $31 per million documents (30) follow the runs'
+    length, not the change. (The second run's transform reported 0 junk messages rejected, of 3: the count
+    is read from the pods still running, and transform had scaled to one.) Kept, on by default: split's
+    commits now stay flat as pods are added, which §1's rate needs. Next: landing (step 4), and transform's
+    pace (a record stage taking several batches at once); convert's and transform's tables through the
+    same queue once they conflict.
 
 ## 11. Order of work
 
@@ -700,7 +811,7 @@ Each step is measured before the next, and each is useful alone.
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
-| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods |
+| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |
 | 6 | Large documents (§9) | 100 MB documents through, with bounded memory |

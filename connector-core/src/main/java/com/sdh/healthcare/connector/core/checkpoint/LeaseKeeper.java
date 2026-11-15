@@ -401,6 +401,15 @@ public final class LeaseKeeper implements LeaseToken, AutoCloseable
     }
 
     /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String name()
+    {
+        return grant.leaseName();
+    }
+
+    /**
      * The lease this instance holds.
      *
      * @return the grant

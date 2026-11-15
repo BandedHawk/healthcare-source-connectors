@@ -27,6 +27,7 @@ import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.pipeline.PipelineSettings;
+import com.sdh.healthcare.connector.core.pipeline.QueuedCommits;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.split.SplitConfig;
 import com.sdh.healthcare.connector.core.split.SplitLimits;
@@ -287,6 +288,7 @@ public final class ConnectorRuntime implements AutoCloseable
         KeyMaterial keys = KeyMaterial.load(properties.crypto());
 
         HikariDataSource dataSource = null;
+        HikariDataSource commitPool = null;
         Catalog catalog = null;
         Catalog landingCatalog = null;
         ClosablePublisher publisher = null;
@@ -341,13 +343,29 @@ public final class ConnectorRuntime implements AutoCloseable
                     output.artemis().username(),
                     output.artemis().password());
             publisher = Publishers.create(camel, queueType, queueUri);
+            // Every pod's files committed together, a pod at a time, through
+            // the stage database (docs/PERFORMANCE.md §3.7), on a pool of
+            // its own: a pod waiting for its turn holds a connection.
+            QueuedCommits queued = null;
+            if (properties.split().commit().shared())
+            {
+                commitPool = LeaseDatabase.dataSource(
+                        properties.lease().jdbc(), "sdh-append", 3);
+                queued = new QueuedCommits(commitPool, stage.registrySchema(),
+                        properties.lease().jdbc().table(),
+                        leaseSettings.safetyMargin(),
+                        properties.split().commit().interval(),
+                        Duration.ofSeconds(10));
+                queued.createTablesIfMissing();
+            }
             pipeline = new IngestPipeline(
                     pipelineSettings(properties, format, split, retry)
                             .withVersion(version(splitters, format, split)),
                     splitRecords, checkpoints, keys.wrap(), ids, splitters,
                     new MessageSealer(keys.messages(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
-                    publisher, clock);
+                    publisher, clock, queued);
+            commitPool = null;
             // The fail store's states, beside the checkpoints (STAGES.md
             // §15.3); the failed pieces stay in split_records.
             FailureStore failures = new FailureStore(dataSource,
@@ -452,6 +470,7 @@ public final class ConnectorRuntime implements AutoCloseable
                 closeQuietly(landingCatalog);
             }
             closeQuietly(catalog);
+            closeQuietly(commitPool);
             closeQuietly(dataSource);
             keys.close();
             throw failure;

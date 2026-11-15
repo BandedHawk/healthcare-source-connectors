@@ -141,12 +141,14 @@ public record ConnectorProperties(
      *                    up to {@code concurrency × consumers} items at
      *                    once. Above 1 on Kafka only, whose topic needs a
      *                    partition per consumer of every pod
+     * @param commit      how the records' files are committed
      * @throws IllegalArgumentException if either is under 1
      */
     public record Split(String format, String boundary,
             Map<String, String> options, @DefaultValue Limits limits,
             @DefaultValue("4") int concurrency,
-            @DefaultValue("1") int consumers)
+            @DefaultValue("1") int consumers,
+            @DefaultValue SplitCommit commit)
     {
 
         /**
@@ -158,10 +160,13 @@ public record ConnectorProperties(
          * @param limits      size limits
          * @param concurrency items of one batch split at once
          * @param consumers   batches handled at once
+         * @param commit      how files are committed
          * @throws IllegalArgumentException if a count is under 1
          */
         public Split
         {
+            commit = commit == null ? new SplitCommit(true, Duration.ZERO)
+                    : commit;
             if (concurrency < 1 || consumers < 1)
             {
                 throw new IllegalArgumentException("sdh.split.concurrency"
@@ -177,6 +182,40 @@ public record ConnectorProperties(
         public int itemsAtOnce()
         {
             return Math.multiplyExact(concurrency, consumers);
+        }
+    }
+
+    /**
+     * How split's pods commit the records' files to {@code split_records}
+     * (docs/PERFORMANCE.md §3.7).
+     *
+     * @param shared   whether every pod's files are committed together, a
+     *                 pod at a time taking all that wait, through the stage
+     *                 database; if not, each pod commits its own, and the
+     *                 pods' commits conflict
+     * @param interval the least time between two of the table's commits,
+     *                 so that fewer snapshots are kept; zero for none
+     * @throws IllegalArgumentException if the interval is negative
+     */
+    public record SplitCommit(@DefaultValue("true") boolean shared,
+            @DefaultValue("0s") Duration interval)
+    {
+
+        /**
+         * Checks the interval.
+         *
+         * @param shared   whether the pods commit together
+         * @param interval the least time between commits
+         * @throws IllegalArgumentException if the interval is negative
+         */
+        public SplitCommit
+        {
+            interval = interval == null ? Duration.ZERO : interval;
+            if (interval.isNegative())
+            {
+                throw new IllegalArgumentException(
+                        "sdh.split.commit.interval can't be negative");
+            }
         }
     }
 

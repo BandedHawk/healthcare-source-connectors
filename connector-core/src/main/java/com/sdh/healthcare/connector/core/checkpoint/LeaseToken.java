@@ -24,6 +24,17 @@ public interface LeaseToken
     long epoch();
 
     /**
+     * The lease's name in its store, so that another pod can check it
+     * there (docs/PERFORMANCE.md §3.7).
+     *
+     * @return the name; null if the lease isn't kept in a store
+     */
+    default String name()
+    {
+        return null;
+    }
+
+    /**
      * Checks that this instance can still be sure it holds the lease.
      *
      * @throws LeaseLostException if it can't

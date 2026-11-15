@@ -217,6 +217,35 @@ public final class IngestPipeline implements AutoCloseable
             SplitterRegistry splitters, MessageSealer sealer,
             MessagePublisher publisher, Clock clock)
     {
+        this(settings, recordsTable, checkpoints, keys, ids, splitters,
+                sealer, publisher, clock, null);
+    }
+
+    /**
+     * Creates the pipeline and its thread pools, checking that the split and
+     * conversion settings suit the format, with what commits the records'
+     * files.
+     *
+     * @param settings     the pipeline's settings
+     * @param recordsTable the {@code split_records} table
+     * @param checkpoints  the checkpoint of each item
+     * @param keys         wraps each batch's data key
+     * @param ids          makes record ids and keys
+     * @param splitters    the splitters, by format
+     * @param sealer       signs and encrypts messages
+     * @param publisher    sends messages to the broker
+     * @param clock        the time
+     * @param committer    commits a pod's group of files, such as
+     *                     {@link QueuedCommits} for every pod's together
+     *                     (docs/PERFORMANCE.md §3.7); null for the pod's
+     *                     own commits
+     */
+    public IngestPipeline(PipelineSettings settings, Table recordsTable,
+            ItemCheckpoints checkpoints, KeyProvider keys, RecordIds ids,
+            SplitterRegistry splitters, MessageSealer sealer,
+            MessagePublisher publisher, Clock clock,
+            GroupAppender.Committer committer)
+    {
         this.settings = settings;
         this.table = recordsTable;
         this.checkpoints = checkpoints;
@@ -239,7 +268,8 @@ public final class IngestPipeline implements AutoCloseable
         this.publishing = Executors.newSingleThreadExecutor(
                 Thread.ofPlatform().name("sdh-publish").daemon(true)
                         .factory());
-        this.appender = new GroupAppender(recordsTable);
+        this.appender = committer == null ? new GroupAppender(recordsTable)
+                : new GroupAppender(recordsTable, committer);
     }
 
     /**
@@ -675,6 +705,10 @@ public final class IngestPipeline implements AutoCloseable
         {
             return Optional.of(stored.get().checkpoint());
         }
+        // Files an earlier holder of the lease queued for every pod's
+        // commit are settled first, so none goes in after this looks
+        // (docs/PERFORMANCE.md §3.7).
+        appender.settle(lease);
         table.refresh();
         Checkpoint settled =
                 CommittedRecords.has(table, itemId, pending.generation(),

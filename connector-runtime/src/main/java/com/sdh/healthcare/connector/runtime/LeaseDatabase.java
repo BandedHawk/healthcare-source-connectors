@@ -37,6 +37,22 @@ public final class LeaseDatabase
      */
     public static HikariDataSource dataSource(CommonSettings.Jdbc jdbc)
     {
+        return dataSource(jdbc, "sdh-lease", 2);
+    }
+
+    /**
+     * Opens a pool of its own on the lease database, such as the one a
+     * split pod waits for its turn to commit on (docs/PERFORMANCE.md §3.7).
+     *
+     * @param jdbc     the database's settings
+     * @param poolName the pool's name, for its metrics and logs
+     * @param size     the most connections it holds
+     * @return the pool; the caller closes it
+     * @throws IllegalArgumentException if no JDBC URL is set
+     */
+    public static HikariDataSource dataSource(CommonSettings.Jdbc jdbc,
+            String poolName, int size)
+    {
         if (jdbc.url() == null || jdbc.url().isBlank())
         {
             throw new IllegalArgumentException(
@@ -46,9 +62,9 @@ public final class LeaseDatabase
         config.setJdbcUrl(jdbc.url());
         config.setUsername(jdbc.username());
         config.setPassword(jdbc.password());
-        config.setMaximumPoolSize(2);
+        config.setMaximumPoolSize(size);
         config.setConnectionTimeout(CONNECTION_TIMEOUT_MS);
-        config.setPoolName("sdh-lease");
+        config.setPoolName(poolName);
         return new HikariDataSource(config);
     }
 }

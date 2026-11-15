@@ -87,17 +87,24 @@ class ConnectorPropertiesTest
         assertThat(defaults.split().concurrency()).isEqualTo(4);
         assertThat(defaults.split().consumers()).isEqualTo(1);
         assertThat(defaults.split().itemsAtOnce()).isEqualTo(4);
+        assertThat(defaults.split().commit().shared()).isTrue();
+        assertThat(defaults.split().commit().interval()).isZero();
 
         ConnectorProperties more = new Binder(
                 new MapConfigurationPropertySource(Map.of(
                         "sdh.split.format", "ccda",
                         "sdh.split.concurrency", "2",
-                        "sdh.split.consumers", "8")))
+                        "sdh.split.consumers", "8",
+                        "sdh.split.commit.shared", "false",
+                        "sdh.split.commit.interval", "1s")))
                 .bindOrCreate("sdh", ConnectorProperties.class);
         assertThat(more.split().itemsAtOnce()).isEqualTo(16);
+        assertThat(more.split().commit().shared()).isFalse();
+        assertThat(more.split().commit().interval())
+                .isEqualTo(Duration.ofSeconds(1));
 
         assertThatThrownBy(() -> new ConnectorProperties.Split("ccda", null,
-                Map.of(), null, 4, 0))
+                Map.of(), null, 4, 0, null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

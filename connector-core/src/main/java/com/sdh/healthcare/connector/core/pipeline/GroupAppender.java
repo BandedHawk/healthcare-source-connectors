@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.core.pipeline;
 
+import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.util.ArrayList;
@@ -75,22 +76,95 @@ public final class GroupAppender implements AutoCloseable
     private final LinkedBlockingQueue<Request> waiting =
             new LinkedBlockingQueue<>();
 
+    /** What commits a group. */
+    private final Committer committer;
+
     /** The thread that commits. */
-    private final Thread committer;
+    private final Thread thread;
 
     /** Whether the appender is closed. */
     private volatile boolean closed;
 
     /**
-     * Creates an appender and starts its thread.
+     * Commits a pod's group of files.
+     */
+    public interface Committer extends AutoCloseable
+    {
+
+        /**
+         * Commits a group of files to a table.
+         *
+         * @param table  the table
+         * @param files  the files
+         * @param leases each one's item lease, held a moment ago
+         * @return a snapshot that holds the files
+         * @throws LeaseLostException if a lease is lost before the commit
+         * @throws RuntimeException   if the commit fails; the files may
+         *                            have been committed only if this is
+         *                            Iceberg's
+         *                            {@code CommitStateUnknownException}
+         */
+        Snapshot commit(Table table, List<DataFile> files,
+                List<LeaseToken> leases);
+
+        /**
+         * Settles, for an item leased again, any of its files that an
+         * earlier lease holder sent and that aren't settled yet, so that
+         * none is committed after this returns: called before the new
+         * holder checks what the table holds. Nothing to do for a
+         * committer that doesn't keep files beyond its pod.
+         *
+         * @param table the table
+         * @param lease the item's new lease
+         */
+        default void settle(Table table, LeaseToken lease)
+        {
+        }
+
+        /**
+         * Lets go of what the committer holds, once the appender's thread
+         * has stopped. Nothing by default.
+         */
+        @Override
+        default void close()
+        {
+        }
+    }
+
+    /**
+     * Creates an appender that commits its pod's files itself, and starts
+     * its thread.
      *
      * @param table the table the files are appended to
      */
     public GroupAppender(Table table)
     {
+        this(table, new Alone());
+    }
+
+    /**
+     * Creates an appender and starts its thread.
+     *
+     * @param table     the table the files are appended to
+     * @param committer what commits a group
+     */
+    public GroupAppender(Table table, Committer committer)
+    {
         this.table = table;
-        this.committer = Thread.ofPlatform().name("sdh-append").daemon(true)
+        this.committer = committer;
+        this.thread = Thread.ofPlatform().name("sdh-append").daemon(true)
                 .start(this::run);
+    }
+
+    /**
+     * Settles any files of an item that an earlier holder of its lease
+     * sent ({@link Committer#settle}).
+     *
+     * @param lease the item's new lease
+     */
+    public void settle(LeaseToken lease)
+    {
+        committer.settle(table, lease);
     }
 
     /**
@@ -213,7 +287,9 @@ public final class GroupAppender implements AutoCloseable
         }
         try
         {
-            Snapshot snapshot = appendAll(held);
+            Snapshot snapshot = committer.commit(table,
+                    held.stream().map(Request::file).toList(),
+                    held.stream().map(Request::lease).toList());
             LOG.debug("append.committed files={}", held.size());
             held.forEach(request -> request.done().complete(snapshot));
         }
@@ -225,47 +301,60 @@ public final class GroupAppender implements AutoCloseable
     }
 
     /**
-     * Appends a group's files in one fast append on the table itself, not
-     * in a transaction (docs/PERFORMANCE.md §10, 2026-11-15). Every split
-     * pod appends to the table, so a commit often finds another's has gone
-     * in first: Iceberg then reads the table again, puts the files on top
-     * and tries again, as the table's {@code commit.retry.num-retries}
-     * says, and this tries again on top of that. A transaction did the
-     * same, and also read, after each commit, the manifest list of every
-     * snapshot added since it began, its own and the other pods', to find
-     * files to clean up; an append has none. It also read the table once
-     * more before and once more after.
-     * <p>
-     * Every lease is checked before each attempt, as it was before the
-     * transaction's commit. Iceberg's own retries, inside the commit,
-     * check none, as before.
-     *
-     * @param held the files, whose leases were held a moment ago
-     * @return the table's snapshot just after the commit, which holds the
-     *         files (another pod's, made just after, may be the one)
-     * @throws org.apache.iceberg.exceptions.CommitFailedException if every
-     *         attempt conflicts
-     * @throws RuntimeException what the commit or a lease check threw
+     * Commits a pod's files itself: the pods' commits conflict when they
+     * meet.
      */
-    private Snapshot appendAll(List<Request> held)
+    static final class Alone implements Committer
     {
-        for (int attempt = 1; ; attempt++)
+
+        /** Creates the committer. */
+        Alone()
         {
-            held.forEach(request -> request.lease().checkHeld());
-            AppendFiles append = table.newFastAppend();
-            held.forEach(request -> append.appendFile(request.file()));
-            try
+        }
+
+        /**
+         * {@inheritDoc}
+         * <p>
+         * One fast append on the table itself, not in a transaction
+         * (docs/PERFORMANCE.md §10, revision (dl)). Every split pod appends
+         * to the table, so a commit often finds another's has gone in
+         * first: Iceberg then reads the table again, puts the files on top
+         * and tries again, as the table's {@code commit.retry.num-retries}
+         * says, and this tries again on top of that. A transaction also
+         * read, after each commit, the manifest list of every snapshot
+         * added since it began, to find files to clean up (an append has
+         * none), and read the table once more before and after.
+         * <p>
+         * Every lease is checked before each attempt; Iceberg's own
+         * retries, inside the commit, check none.
+         *
+         * @return the table's snapshot just after the commit, which holds
+         *         the files (another pod's, made just after, may be the one)
+         * @throws org.apache.iceberg.exceptions.CommitFailedException if
+         *         every attempt conflicts
+         */
+        @Override
+        public Snapshot commit(Table table, List<DataFile> files,
+                List<LeaseToken> leases)
+        {
+            for (int attempt = 1; ; attempt++)
             {
-                append.commit();
-                return table.currentSnapshot();
-            }
-            catch (CommitFailedException conflict)
-            {
-                LOG.warn("append.conflict attempt={} table={}", attempt,
-                        table.name());
-                if (attempt >= ATTEMPTS)
+                leases.forEach(LeaseToken::checkHeld);
+                AppendFiles append = table.newFastAppend();
+                files.forEach(append::appendFile);
+                try
                 {
-                    throw conflict;
+                    append.commit();
+                    return table.currentSnapshot();
+                }
+                catch (CommitFailedException conflict)
+                {
+                    LOG.warn("append.conflict attempt={} table={}", attempt,
+                            table.name());
+                    if (attempt >= ATTEMPTS)
+                    {
+                        throw conflict;
+                    }
                 }
             }
         }
@@ -279,10 +368,10 @@ public final class GroupAppender implements AutoCloseable
     public void close()
     {
         closed = true;
-        committer.interrupt();
+        thread.interrupt();
         try
         {
-            committer.join(30_000);
+            thread.join(30_000);
         }
         catch (InterruptedException interrupted)
         {
@@ -294,5 +383,6 @@ public final class GroupAppender implements AutoCloseable
             left.done().completeExceptionally(
                     new IllegalStateException("The appender is closed"));
         }
+        committer.close();
     }
 }
