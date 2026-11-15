@@ -100,6 +100,18 @@ After an outage the "junk rejected" counts may read low: they come from pod logs
 Run it on a freshly `reset` pipeline: on tables holding earlier runs, split and the gold check slow down
 (docs/PERFORMANCE.md §2).
 
+The backlog test (docs/PERFORMANCE.md §10): transform is held at no pods while the load lands, splits and
+converts, then released at the given pod count, and the report gives how fast that many pods cleared it (records a
+second, a pod's share, CPU, batch). One pod count a run, each on a freshly `reset` pipeline, gives the cleanest
+figures; a list such as `1,2,4,6` steps through them in one run:
+
+```bash
+SDH_LOAD_FAILOVER_AT=0 SDH_LOAD_GOLD_CHECK=0 SDH_LOAD_BACKLOG=4 deploy/aws/k8s/pipeline/load-test.sh 240 0
+```
+
+The test's copies of a document are identical, and a record's Kafka key is the hash of its content, so all the
+copies go to one partition: the pods' shares are uneven, and the busiest pod's rate is the one to read.
+
 The gold check alone (needs about 1 CPU and 2.5 GiB free, a burst node or the stages paused):
 
 ```bash

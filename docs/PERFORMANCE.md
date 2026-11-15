@@ -800,6 +800,40 @@ What it showed, beyond §2's predictions:
     commits now stay flat as pods are added, which §1's rate needs. Next: landing (step 4), and transform's
     pace (a record stage taking several batches at once); convert's and transform's tables through the
     same queue once they conflict.
+  - **Transform clearing a backlog, by pod count** (`load-20261115T170919Z`, `T175213Z` and `T182821Z`:
+    `SDH_LOAD_BACKLOG` at 2, 4 and 6 pods, a run each on a freshly reset pipeline, 7,200 documents, one
+    record each, no failover). Transform is held at no pods while the load lands, splits and converts, then
+    released; records mapped come from Prometheus' count of transform's process step per pod, as the
+    registry counts a record only once its item's total has come too. Every run exactly once, none left
+    behind; gold's commits 3 of 131, 6 of 149 and 0 of 42 retried.
+
+    | Pods | Ready (s) | Records/s | A pod's | Least / most a pod mapped | Cores | CPU-s a record | Batch (s) | Clear (s) |
+    |---|---|---|---|---|---|---|---|---|
+    | 2 | 101 | 8.6 | 4.3 | 453 / 3,385 | 2.67 | 0.31 | 8.5 | 1,094 |
+    | 4 | 101 | 14.1 | 3.5 | 802 / 2,220 | 4.56 | 0.32 | 9.3 | 696 |
+    | 6 | 5 after 310 | (9.3, the tail) | — | 0 / 1,173 | 3.02 | 0.32 | 12.4 | 729 |
+
+    **A record costs 0.31–0.32 CPU-seconds at every pod count**, and gold's commits barely conflict, so the
+    pods don't slow each other: a pod with work maps 4.3–5.0 records a second (the busiest pods: 3,385 in
+    780 s, 2,220 in 443 s) on 1.6 CPU, using 1.1–1.3 cores of it; a thread waits for a CPU 0.31–0.39 of the
+    time, and the CPU sits idle while each batch of ~47 records commits, registers and sends. **The clear
+    time stopped falling at 4 pods, because of the test's data, not transform:** a record's id is the keyed
+    hash of its content (`RecordIds`), and is its Kafka key, so the 240 copies of each of the 30 test
+    documents all went to one partition of 24. The pods' shares differed up to 7.5 times, and the last
+    tenth took 94–183 s on the few pods holding the heaviest partitions. At 6 pods the sixth waited over
+    300 s for a burst node, and its window opened in that tail, so its row isn't a rate. Real documents
+    differ, and spread over the partitions evenly. Landed → gold p99 1,337, 1,004 and 1,005 s: the hold, not
+    the stages.
+
+    **For 100 documents/s** (§1), at ~4.5 records a second a pod: ~23 transform pods, 25 with headroom, one
+    a 2-vCPU node (1.6 CPU), so ~25 nodes for transform alone; `.records`' 24 partitions cap transform at
+    24 pods, so it needs more (48). At the on-demand t4g.large's $0.0672 an hour, 25 nodes are $1.68 an hour
+    for 360,000 documents, ~$4.70 per million (Spot less); the 15M load, ~42 hours at that rate, ~$70 of
+    transform nodes. measure.sh's $38, $33 and $44 per million documents count the whole cluster at its
+    peak for these short runs, mostly idle, and aren't comparable. Next: a pod taking its next batch while
+    one commits (as split's revision (dh)), to use the idle CPU (up to 5 records a second a pod, 1.6 CPU at
+    0.32 CPU-s a record: ~21 pods); 48 partitions; and copies made distinct in the load test (a different comment per copy), so its
+    records spread as real ones do.
 
 ## 11. Order of work
 
@@ -811,7 +845,7 @@ Each step is measured before the next, and each is useful alone.
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
-| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace |
+| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace; transform clearing a 7,200-document backlog at 2, 4 and 6 pods (§10): 0.32 CPU-s a record at every count, 4.3–5.0 records a second a pod with work, so ~25 pods (~25 nodes, ~$4.70 per million documents) and 48 partitions for 100 documents/s; the test's identical copies share a Kafka key, so clearing stopped speeding up at 4 pods |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |
 | 6 | Large documents (§9) | 100 MB documents through, with bounded memory |

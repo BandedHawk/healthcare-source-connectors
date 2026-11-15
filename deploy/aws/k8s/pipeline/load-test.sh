@@ -16,6 +16,9 @@
 # SDH_LOAD_OUTAGE_AT, _MIN and _LOSE add an outage part way (below, and docs/PERFORMANCE.md §3.6); the report then
 # checks every item ended at every stage, and counts what the reconcilers rebuilt.
 #
+# SDH_LOAD_BACKLOG (say "1,2,4,6") is the backlog test (docs/PERFORMANCE.md §10): transform is held at no pods
+# while the load lands, splits and converts, then cleared at each of those pod counts in turn (below).
+#
 # At the end it measures the run (measure.sh: time per item to gold, where it went, the rate as the tables grew,
 # commits, KMS calls, cost), then runs the gold check; SDH_LOAD_GOLD_CHECK=0 skips the check, whose reading is as
 # slow as split's on a large load (docs/PERFORMANCE.md §2.1).
@@ -49,6 +52,14 @@ OUTAGE_MIN="${SDH_LOAD_OUTAGE_MIN:-10}"
 OUTAGE_LOSE="${SDH_LOAD_OUTAGE_LOSE:-}"
 SETTLE_MIN="${SDH_LOAD_SETTLE_MIN:-$([[ -n "$OUTAGE_LOSE" ]] && echo 45 || echo 0)}"
 GOLD_CHECK="${SDH_LOAD_GOLD_CHECK:-1}"
+# The backlog test: once split and convert have nothing queued, transform is released at the first pod count of
+# BACKLOG, the others held at one pod. Each count is held until its pods have all been ready for BACKLOG_WARM
+# seconds and then BACKLOG_STEP more, its window; the next count follows, and the last stays until the backlog
+# is clear. Each window's rate is records ended at transform a second, with transform's CPU over the same window.
+BACKLOG="${SDH_LOAD_BACKLOG:-}"
+BACKLOG_STEP="${SDH_LOAD_BACKLOG_STEP:-120}"
+BACKLOG_WARM="${SDH_LOAD_BACKLOG_WARM:-30}"
+[[ -z "$BACKLOG" || "$BACKLOG" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || { echo "SDH_LOAD_BACKLOG: pod counts, as 1,2,4,6" >&2; exit 2; }
 
 say() { printf '>> %s\n' "$*" | tee -a "${report:-/dev/null}"; }
 die() { printf 'load-test.sh: %s\n' "$*" >&2; exit 1; }
@@ -63,6 +74,20 @@ lag() {  # the three stages' consumer groups, summed
   kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe \
     --group "splitter-$P" --group "convert-$P" --group "transform-$P" 2>/dev/null \
     | awk '$6 ~ /^[0-9]+$/ {sum += $6} END {print sum + 0}'
+}
+group_lag() {  # <consumer group>: its lag, summed over partitions
+  kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group "$1" \
+    2>/dev/null | awk '$6 ~ /^[0-9]+$/ {sum += $6} END {print sum + 0}'
+}
+prom_at() {  # <unix time> <PromQL>: one number then, or "-"
+  kubectl -n sdh-infra exec deploy/prometheus -- wget -qO- \
+    "http://localhost:9090/api/v1/query?time=$1&query=$(python3 -I -c \
+      'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$2")" 2>/dev/null \
+    | python3 -I -c 'import json, sys
+try:
+    r = json.load(sys.stdin)["data"]["result"]; v = float(r[0]["value"][1]); print("-" if v != v else "%.2f" % v)
+except Exception:
+    print("-")'
 }
 replicas() { kubectl -n "$1" get deploy "$2" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0; }
 intake_count() { aws s3 ls "$INTAKE" 2>/dev/null | grep -c '\.xml$' || true; }
@@ -86,6 +111,7 @@ report="$out/report.txt"
 staging="$BUCKET/staging/$run/"
 cleanup() {
   [[ "${outage_state:-}" == down ]] && { outage_restore || true; }
+  [[ -n "$BACKLOG" ]] && { backlog_restore || true; }
   aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
   rm -rf "$out/inputs"
 }
@@ -116,6 +142,69 @@ echo "$t0_db" > "$out/t0"   # for measure.sh
 for t in "${topics[@]}"; do echo "$t ${before[$t]}"; done > "$out/offsets0"   # for measure.sh
 db "SELECT catalog_name || ':' || table_namespace || '.' || table_name, metadata_location FROM public.iceberg_tables" \
   | sed -E 's#\|.*/0*([0-9]+)-[^/]*\.metadata\.json$# \1#' > "$out/versions0" || true   # for measure.sh
+
+# The backlog test's holds (KEDA's paused-replicas sets a fixed count, past the ScaledObject's maximum too).
+hold() {  # <namespace> <scaled object> <pods>
+  kubectl -n "$1" annotate scaledobject "$2" autoscaling.keda.sh/paused-replicas="$3" --overwrite >/dev/null
+  kubectl -n "$1" scale deploy "$2" --replicas="$3" >/dev/null
+}
+backlog_restore() {
+  kubectl -n sdh-fhir annotate scaledobject "transform-$P" autoscaling.keda.sh/paused-replicas- >/dev/null 2>&1
+  kubectl -n "$N" annotate scaledobject splitter convert autoscaling.keda.sh/paused-replicas- >/dev/null 2>&1
+  return 0
+}
+IFS=, read -r -a steps <<<"$BACKLOG"
+backlog_state="" step=0 step_at=0 ready_at="" win_at="" win_done=0 win_epoch=0 backlog_at="" backlog_msgs=""
+backlog_quiet=0 backlog_lines=() step_pods=0 win_closed=0
+if [[ -n "$BACKLOG" ]]; then
+  hold sdh-fhir "transform-$P" 0
+  kubectl -n sdh-fhir wait --for=delete pod -l "app=transform-$P" --timeout=180s >/dev/null 2>&1 || true
+  # A group with no offset on a partition shows no lag there, so the backlog would read as nothing queued (the
+  # stages read such a partition from its start: ReceiveSettings sets autoOffsetReset=earliest). So the group's
+  # offsets are set to the topic's end now, before the push, and the lag counts what queues from here.
+  kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group "transform-$P" \
+    --topic "$P.records" --reset-offsets --to-latest --execute >/dev/null \
+    || die "couldn't set transform-$P's offsets on $P.records"
+  backlog_state=held
+  say "Backlog test: transform held at 0 pods until split and convert are clear; then ${BACKLOG} pods in turn"
+fi
+# A step's window: records mapped a second (Prometheus' count of transform's process step, so a record counts when
+# it is mapped, not when its item's total has come too), and how they were spread over the pods (the least and the
+# most a pod mapped, and how many mapped any); records ended at transform (the registry) as well; transform's CPU
+# then (cores, share waiting for one), and its mean seconds a batch and a record, and records a batch.
+prom_vec() {  # <unix time> <PromQL>: the values then, one a line
+  kubectl -n sdh-infra exec deploy/prometheus -- wget -qO- \
+    "http://localhost:9090/api/v1/query?time=$1&query=$(python3 -I -c \
+      'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$2")" 2>/dev/null \
+    | python3 -I -c 'import json, sys
+try:
+    for r in json.load(sys.stdin)["data"]["result"]: print(r["value"][1])
+except Exception:
+    pass'
+}
+step_line() {  # <pods> <seconds to all ready> <window seconds> <records ended>
+  local h=sdh_stage_phase_duration_seconds w="$3" at
+  at="$(date -u +%s)"
+  local cnt='increase('"$h"'_count{sdh_stage="transform",sdh_phase="process"}['"$w"'s])'
+  local m='sum(increase(sdh_process_cpu_time_seconds_total{job="transform-stage"}['"$w"'s])) / '"$w"
+  local q='avg(increase(sdh_process_cpu_wait_seconds_total{job="transform-stage"}['"$w"'s])) / '"$w"
+  local b='sum(increase('"$h"'_sum{sdh_stage="transform",sdh_phase="batch"}['"$w"'s])) / sum(increase('"$h"'_count{sdh_stage="transform",sdh_phase="batch"}['"$w"'s]))'
+  local r='sum(increase('"$h"'_sum{sdh_stage="transform",sdh_phase="process"}['"$w"'s])) / sum('"$cnt"')'
+  local c='sum('"$cnt"') / sum(increase('"$h"'_count{sdh_stage="transform",sdh_phase="batch"}['"$w"'s]))'
+  local per_pod
+  per_pod="$(prom_vec "$at" "sum by (service_instance_id) ($cnt)" | tr '\n' ' ')"
+  backlog_lines+=("$(python3 -I -c 'import sys
+p, ready, w, ended, pods = int(sys.argv[1]), sys.argv[2], float(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+v = [float(x) for x in pods.split()]
+n = sum(v)
+rate = n / w if w else 0
+busy = sum(1 for x in v if x >= 1)
+lo, hi = (min(v), max(v)) if v else (0, 0)
+print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" % (
+    p, ready, w, n, rate, rate / p, busy, lo, hi, ended, *sys.argv[6:]))' \
+    "$1" "$2" "$w" "$4" "$per_pod" "$(prom_at "$at" "$m")" "$(prom_at "$at" "$q")" "$(prom_at "$at" "$b")" \
+    "$(prom_at "$at" "$r")" "$(prom_at "$at" "$c")")")
+}
 
 # --- Push --------------------------------------------------------------------------------------------------------
 
@@ -236,17 +325,69 @@ while :; do
     say "  outage: started again after $OUTAGE_MIN minutes${SETTLE_MIN:+; waiting at least $SETTLE_MIN more for the reconcilers}"
   fi
 
+  # The backlog test: released once split and convert have been clear for 30 s, then a pod count at a time.
+  # Records converted (and sent on) that transform hasn't ended: its backlog, from the registries, not the lag.
+  remaining=$((c_done - c_done0 - c_failed + c_failed0 - t_done + t_done0))
+  if [[ "$backlog_state" == held && -n "$pushed_at" && "$in" == 0 ]]; then
+    if ((landed >= files && split >= landed && converted >= split)) \
+        && [[ "$(group_lag "splitter-$P")" == 0 && "$(group_lag "convert-$P")" == 0 ]]; then
+      backlog_quiet=$((backlog_quiet + 1))
+    else backlog_quiet=0; fi
+    if ((backlog_quiet >= 2)); then
+      backlog_msgs="$(group_lag "transform-$P")" backlog_at=$now backlog_records=$remaining
+      hold "$N" splitter 1; hold "$N" convert 1
+      hold sdh-fhir "transform-$P" "${steps[0]}"
+      backlog_state=running step=0 step_at=$now ready_at="" win_at=""
+      say "  backlog: $backlog_records records ($backlog_msgs messages) queued for transform; released at ${steps[0]} pods"
+    fi
+  elif [[ "$backlog_state" == running ]]; then
+    want="${steps[$step]}" r="$(replicas sdh-fhir "transform-$P")"
+    if [[ -z "$ready_at" && "${r:-0}" -ge "$want" ]]; then
+      ready_at=$now step_pods=$want; say "  backlog: $want pods ready $((now - step_at))s after asking"
+    elif [[ -z "$ready_at" ]] && ((now >= step_at + 300)); then
+      # No room for them all (the burst nodes, or Spot): the window takes those that are ready.
+      ready_at=$now step_pods="${r:-0}"; say "  backlog: only ${r:-0} of $want pods ready after 300s; measuring those"
+    fi
+    if [[ -n "$ready_at" && -z "$win_at" ]] && ((now >= ready_at + BACKLOG_WARM)); then
+      win_at=$now win_done=$t_done
+    fi
+    last_step=$((step + 1 >= ${#steps[@]}))
+    clear_now=$((remaining <= 0))
+    # The last step's window closes once a tenth of the backlog is left, before the tail, when the partitions
+    # still holding records may be fewer than the pods.
+    tail_now=$((last_step && remaining * 10 <= backlog_records))
+    if [[ -n "$win_at" && "$win_closed" != 1 ]] && { ((clear_now || tail_now)) \
+        || { ((! last_step)) && ((now >= win_at + BACKLOG_STEP)); }; }; then
+      step_line "$step_pods" "$((ready_at - step_at))" "$((now - win_at))" "$((t_done - win_done))"
+      say "  backlog: $want pods, $((t_done - win_done)) records in $((now - win_at))s"
+      if ((clear_now)); then
+        backlog_state=cleared; say "  backlog: clear $((now - backlog_at))s after the release"
+      elif ((last_step)); then
+        win_closed=1; say "  backlog: a tenth left $((now - backlog_at))s after the release"
+      else
+        step=$((step + 1)) step_at=$now ready_at="" win_at=""
+        hold sdh-fhir "transform-$P" "${steps[$step]}"
+        say "  backlog: now ${steps[$step]} pods"
+      fi
+    elif ((clear_now)); then
+      backlog_state=cleared
+      say "  backlog: clear $((now - backlog_at))s after the release$([[ "$win_closed" == 1 ]] || echo ", during $want pods' warm-up")"
+    fi
+  fi
+
   state="$in|$landed|$split|$c_done|$t_done|$t_failed|$l"
   if [[ -n "$pushed_at" && "$in" == 0 && "$l" == 0 && "$state" == "$last" ]]; then stable=$((stable + 1))
   else stable=0; fi
   # Nothing moving is the end only when no outage is under way or settling.
   if [[ "$outage_state" == down ]] || ((SECONDS < settle_until)); then stable=0; fi
+  [[ "$backlog_state" == held || "$backlog_state" == running ]] && stable=0
   last="$state"
   ((stable >= 3)) && break   # 45 s with nothing moving
   ((now < (TIMEOUT_MIN + OUTAGE_MIN * (OUTAGE_AT != 0) + SETTLE_MIN) * 60)) || { say "  TIMEOUT after $TIMEOUT_MIN minutes: reporting what's done"; break; }
 done
 end=$(( ${last_change[transformed]:-$((SECONDS - t0))} ))
 db "SELECT now()" > "$out/t1"; echo "$max_nodes" > "$out/nodes"   # for measure.sh
+[[ -n "$BACKLOG" ]] && backlog_restore
 
 # --- Report ------------------------------------------------------------------------------------------------------
 
@@ -324,6 +465,16 @@ say "Pods at most: landing ${max_pods[landing]} (1 active), splitter ${max_pods[
   "convert ${max_pods[convert]}/3, transform ${max_pods[transform-$P]}/4; nodes $max_nodes, burst $max_burst"
 if [[ -n "$killed" ]]; then
   say "Landing failover: holder deleted at ${FAILOVER_AT}% landed; standby took the lease after ${takeover:-NEVER}s"
+fi
+if [[ -n "$BACKLOG" ]]; then
+  say "Backlog: ${backlog_records:-?} records (${backlog_msgs:-?} messages) queued at ${backlog_at:-?}s; ${backlog_state}" \
+    "$([[ "$backlog_state" == cleared ]] && echo "after $((${last_change[transformed]:-0} - backlog_at))s")"
+  say "  by pod count: seconds to all ready; the window (s); records mapped in it, a second, a pod's a second; pods"
+  say "  that mapped any, the least and most a pod mapped; records ended (registry); transform's CPU (cores, share"
+  say "  waiting for one); seconds a batch and a record; records a batch"
+  say "$(printf '  %5s %6s %6s %7s %7s %7s %5s %6s %6s %7s %6s %5s %6s %6s %5s' pods ready window mapped rec/s \
+    per-pod busy least most ended cores wait batch record per)"
+  for line in "${backlog_lines[@]}"; do say "  $line"; done
 fi
 say "Report kept in $report"
 
