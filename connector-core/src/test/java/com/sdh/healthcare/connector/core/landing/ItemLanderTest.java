@@ -19,6 +19,7 @@ import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.pipeline.UuidV7;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -32,6 +33,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import javax.crypto.KeyGenerator;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Table;
@@ -747,6 +750,111 @@ class ItemLanderTest
                 .containsExactly(kept.itemId());
         assertThat(chunkRows(shrunk.itemId())).isZero();
         assertThat(readBack(kept.itemId())).isEqualTo(bytes);
+    }
+
+    /**
+     * Items read several at once are landed in the order given: the first
+     * item's read waits until the third's has started, which only reading
+     * ahead allows; one whose source changed is still left out.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void readsSeveralAtOnceAndLandsThemInOrder() throws Exception
+    {
+        CountDownLatch thirdStarted = new CountDownLatch(1);
+        List<NewItem> items = new ArrayList<>();
+        List<ItemLander.Grouped> group = new ArrayList<>();
+        List<byte[]> contents = new ArrayList<>();
+        for (int index = 0; index < 6; index++)
+        {
+            byte[] bytes = data(10 + index);
+            NewItem item = fileItem(bytes, "a/" + index);
+            items.add(item);
+            contents.add(bytes);
+            ItemLander.ItemOpener opener = opener(bytes);
+            if (index == 0)
+            {
+                opener = offset ->
+                {
+                    try
+                    {
+                        if (!thirdStarted.await(10, TimeUnit.SECONDS))
+                        {
+                            throw new IOException("not read ahead");
+                        }
+                    }
+                    catch (InterruptedException interrupted)
+                    {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("interrupted");
+                    }
+                    return new ByteArrayInputStream(bytes);
+                };
+            }
+            else if (index == 2)
+            {
+                opener = offset ->
+                {
+                    thirdStarted.countDown();
+                    return new ByteArrayInputStream(bytes);
+                };
+            }
+            else if (index == 4)
+            {
+                opener = opener(Arrays.copyOf(bytes, 3));
+            }
+            group.add(new ItemLander.Grouped(item, opener));
+        }
+        ItemLander lander = lander();
+        long snapshots = snapshotCount();
+
+        ItemLander.GroupLanded result = lander.landAll(group, BLOCK, 4);
+
+        assertThat(snapshotCount()).isEqualTo(snapshots + 1);
+        assertThat(result.changed()).containsExactly(items.get(4));
+        assertThat(result.landed()).extracting(LandedItem::itemId)
+                .containsExactly(items.get(0).itemId(),
+                        items.get(1).itemId(), items.get(2).itemId(),
+                        items.get(3).itemId(), items.get(5).itemId());
+        for (int index : List.of(0, 1, 2, 3, 5))
+        {
+            assertThat(readBack(items.get(index).itemId()))
+                    .isEqualTo(contents.get(index));
+        }
+        assertThat(lander().lastLanded()).hasValueSatisfying(last ->
+                assertThat(last.itemId()).isEqualTo(items.get(5).itemId()));
+    }
+
+    /**
+     * A read that fails while others are under way fails the group, and
+     * nothing of it is committed; at least one reader is needed.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aFailedReadAheadCommitsNothing() throws Exception
+    {
+        byte[] bytes = data(25);
+        List<ItemLander.Grouped> group = new ArrayList<>();
+        for (int index = 0; index < 5; index++)
+        {
+            group.add(new ItemLander.Grouped(fileItem(bytes, "f/" + index),
+                    index == 3 ? offset ->
+                    {
+                        throw new IOException("source down");
+                    } : opener(bytes)));
+        }
+        ItemLander lander = lander();
+        long snapshots = snapshotCount();
+
+        assertThatThrownBy(() -> lander.landAll(group, BLOCK, 3))
+                .isInstanceOf(IOException.class)
+                .hasMessage("source down");
+        assertThat(snapshotCount()).isEqualTo(snapshots);
+        assertThat(chunkRows(group.get(0).item().itemId())).isZero();
+        assertThatThrownBy(() -> lander().landAll(group, BLOCK, 0))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     /**

@@ -75,6 +75,17 @@ public final class LocalDirectorySource implements IntakeSource
         }
     }
 
+    /**
+     * {@inheritDoc} Each request stands alone.
+     *
+     * @return true
+     */
+    @Override
+    public boolean concurrent()
+    {
+        return true;
+    }
+
     @Override
     public void afterLanding(ListedItem item) throws IOException
     {

@@ -36,6 +36,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
@@ -87,6 +91,9 @@ public final class IntakeService implements LandingIntake
     /** The longest wait after repeated errors. */
     private static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
 
+    /** The stage the landing steps are timed under (PERFORMANCE.md §10). */
+    private static final String TIMED = "landing";
+
     /** Logs progress and errors, never item references. */
     private static final Logger LOG =
             LoggerFactory.getLogger(IntakeService.class);
@@ -113,14 +120,17 @@ public final class IntakeService implements LandingIntake
      * @param maxWait      or once the first has waited this long
      * @param maxItemBytes the largest item landed with others; larger ones
      *                     are landed alone
+     * @param concurrency  how many of a group's items are read, and then
+     *                     finished at the source, at once, if the source
+     *                     allows it (docs/PERFORMANCE.md §3.4)
      */
     public record Grouping(int maxItems, long maxBytes, Duration maxWait,
-            int maxItemBytes)
+            int maxItemBytes, int concurrency)
     {
 
         /** Each item landed alone. */
         public static final Grouping NONE =
-                new Grouping(1, 0, Duration.ZERO, 0);
+                new Grouping(1, 0, Duration.ZERO, 0, 1);
 
         /**
          * Creates the settings, checking them.
@@ -129,13 +139,15 @@ public final class IntakeService implements LandingIntake
          * @param maxBytes     or once they hold this many bytes
          * @param maxWait      or once the first has waited this long
          * @param maxItemBytes the largest item landed with others
+         * @param concurrency  how many are read and finished at once
          * @throws IllegalArgumentException if a value is negative, or
-         *                                  there must be fewer than one
+         *                                  there must be fewer than one, or
+         *                                  none at once
          */
         public Grouping
         {
             if (maxItems < 1 || maxBytes < 0 || maxWait.isNegative()
-                    || maxItemBytes < 0)
+                    || maxItemBytes < 0 || concurrency < 1)
             {
                 throw new IllegalArgumentException(
                         "Grouping limits can't be negative");
@@ -484,12 +496,13 @@ public final class IntakeService implements LandingIntake
         {
             return;
         }
+        long started = System.nanoTime();
         List<Waiting> items = List.copyOf(waiting.values());
         ItemLander.GroupLanded result = storage.lander().landAll(
                 items.stream().map(each -> new ItemLander.Grouped(
                         each.item(), offset -> source.open(each.listed(),
                                 offset))).toList(),
-                grouping.maxItemBytes());
+                grouping.maxItemBytes(), concurrency());
         waiting.clear();
         waitingBytes = 0;
         Map<UUID, ListedItem> listed = new LinkedHashMap<>();
@@ -512,6 +525,8 @@ public final class IntakeService implements LandingIntake
             groupToMark = result.landed().getLast().itemId();
         }
         finishLanded();
+        Telemetry.get().phaseDuration(TIMED, "group",
+                System.nanoTime() - started);
     }
 
     /**
@@ -532,8 +547,11 @@ public final class IntakeService implements LandingIntake
             List<LandedItem> missing = recordFailed
                     ? storage.ledger().missing(items) : items;
             recordFailed = true;
+            long recording = System.nanoTime();
             storage.ledger().record(
                     missing.stream().map(LandingLedger.Entry::of).toList());
+            Telemetry.get().phaseDuration(TIMED, "ledger",
+                    System.nanoTime() - recording);
             List<Announcer.Announcement> found = new ArrayList<>();
             for (LandedItem item : items)
             {
@@ -550,14 +568,106 @@ public final class IntakeService implements LandingIntake
             recordFailed = false;
             unannounced.addAll(found);
         }
+        boolean toAnnounce = !unannounced.isEmpty();
+        boolean toFinish = !atSource.isEmpty();
+        long announcing = System.nanoTime();
         announcePending();
         markGroup();
-        for (Iterator<ListedItem> next = atSource.iterator(); next.hasNext();)
+        long finishing = System.nanoTime();
+        if (toAnnounce)
         {
-            ListedItem item = next.next();
-            source.afterLanding(item);
-            readiness.forget(item.ref());
-            next.remove();
+            Telemetry.get().phaseDuration(TIMED, "announce",
+                    finishing - announcing);
+        }
+        finishAtSource();
+        if (toFinish)
+        {
+            Telemetry.get().phaseDuration(TIMED, "finish",
+                    System.nanoTime() - finishing);
+        }
+    }
+
+    /**
+     * How many of a group's items are read, and finished at the source, at
+     * once: as the grouping says, if the source allows it; else one.
+     *
+     * @return how many
+     */
+    private int concurrency()
+    {
+        return source.concurrent() ? grouping.concurrency() : 1;
+    }
+
+    /**
+     * Deletes, moves or renames the landed items at the source, as it is
+     * set to, several at once if it allows it. An item that fails stays,
+     * to be tried again next time, and the others are finished all the
+     * same.
+     *
+     * @throws Exception if the source can't be changed; the first failure
+     */
+    private void finishAtSource() throws Exception
+    {
+        int at = concurrency();
+        if (at == 1 || atSource.size() < 2)
+        {
+            for (Iterator<ListedItem> next = atSource.iterator();
+                    next.hasNext();)
+            {
+                ListedItem item = next.next();
+                source.afterLanding(item);
+                readiness.forget(item.ref());
+                next.remove();
+            }
+            return;
+        }
+        List<ListedItem> items = List.copyOf(atSource);
+        List<Future<Void>> finishing = new ArrayList<>();
+        Semaphore permits = new Semaphore(at);
+        try (ExecutorService threads =
+                Executors.newVirtualThreadPerTaskExecutor())
+        {
+            for (ListedItem item : items)
+            {
+                finishing.add(threads.submit(() ->
+                {
+                    permits.acquire();
+                    try
+                    {
+                        source.afterLanding(item);
+                        return null;
+                    }
+                    finally
+                    {
+                        permits.release();
+                    }
+                }));
+            }
+        }
+        atSource.clear();
+        Throwable first = null;
+        for (int index = 0; index < items.size(); index++)
+        {
+            ListedItem item = items.get(index);
+            Future<Void> finished = finishing.get(index);
+            if (finished.state() == Future.State.SUCCESS)
+            {
+                readiness.forget(item.ref());
+                continue;
+            }
+            atSource.add(item);
+            if (first == null)
+            {
+                first = finished.exceptionNow();
+            }
+        }
+        if (first instanceof Exception failure)
+        {
+            throw failure;
+        }
+        if (first instanceof Error failure)
+        {
+            throw failure;
         }
     }
 

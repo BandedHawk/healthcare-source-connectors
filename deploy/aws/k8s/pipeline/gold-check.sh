@@ -119,43 +119,59 @@ envsubst '$TRANSFORM_IMAGE $KEEP_PER_DOCUMENT $AWS_REGION $ICEBERG_PREFIX $GOLD_
 # check's own lines are kept, and the names of any exceptions (never their messages).
 # A stream with no output for minutes can be closed by the API server (2026-11-16: the read, which prints only at
 # its end, was given up on while it ran), so it is followed again, from where it stopped, until the container ends.
-follow() {  # <container>: once it has started, until it ends
-  local pod="" since="" deadline=$((SECONDS + 5400))
+# A pod lost with its node is replaced by the Job (gold-check.yaml), so each new pod is followed in turn.
+deadline=$((SECONDS + 5400))
+follow() {  # <pod> <container>: once it has started, until it ends; false if the pod ends first
+  local since=""
   while ((SECONDS < deadline)); do
-    pod="$(kubectl -n sdh-fhir get pods -l app=gold-check -o name 2>/dev/null | head -1)"
-    if [[ -n "$pod" ]] && kubectl -n sdh-fhir logs "$pod" -c "$1" --tail=1 >/dev/null 2>&1; then
+    if kubectl -n sdh-fhir logs "$1" -c "$2" --tail=1 >/dev/null 2>&1; then
       local from="$since"
       since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      kubectl -n sdh-fhir logs -f "$pod" -c "$1" ${from:+--since-time="$from"} 2>/dev/null \
+      kubectl -n sdh-fhir logs -f "$1" -c "$2" ${from:+--since-time="$from"} 2>/dev/null \
         | grep --line-buffered -oE '^gold-check: .*|[A-Za-z.]+(Exception|Error)\b' || true
-      ended "$pod" "$1" && return 0
+      ended "$1" "$2" && return 0
     fi
-    job_ended && return 0
+    gone "$1" && return 1
     sleep 5
   done
+  return 1
 }
 ended() {  # <pod> <container>: true once the container has terminated
   local c="[?(@.name==\"$2\")].state.terminated.reason"
   [[ -n "$(kubectl -n sdh-fhir get "$1" \
     -o jsonpath="{.status.initContainerStatuses$c}{.status.containerStatuses$c}" 2>/dev/null)" ]]
 }
+gone() {  # <pod>: true once it has ended, or is no more
+  local phase
+  phase="$(kubectl -n sdh-fhir get "$1" -o jsonpath='{.status.phase}' 2>/dev/null)"
+  [[ -z "$phase" || "$phase" == Failed || "$phase" == Succeeded ]]
+}
 job_ended() {
   kubectl -n sdh-fhir get job gold-check -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>/dev/null \
     | grep -qwE 'Complete|Failed'
 }
-# Where it runs, and how each container ended, so a failure that takes the pod with it is still explained.
-where=""
-for _ in $(seq 60); do
-  where="$(kubectl -n sdh-fhir get pods -l app=gold-check -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null)"
-  [[ -n "$where" ]] && break
-  sleep 5
+newest() {
+  kubectl -n sdh-fhir get pods -l app=gold-check --sort-by=.metadata.creationTimestamp -o name 2>/dev/null | tail -1
+}
+# Where each pod runs, and how each container ended, so a failure that takes the pod with it is still explained.
+seen="" where=""
+until job_ended || ((SECONDS >= deadline)); do
+  pod="$(newest)"
+  if [[ -z "$pod" || " $seen " == *" $pod "* ]]; then sleep 5; continue; fi
+  [[ -z "$seen" ]] || say "  the last pod ended with the Job still running (its node was taken): following the next"
+  seen+=" $pod"
+  for _ in $(seq 60); do
+    where="$(kubectl -n sdh-fhir get "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+    [[ -n "$where" ]] && break
+    sleep 5
+  done
+  [[ -z "$where" ]] || say "  on node $where, pool $(kubectl get node "$where" \
+    -o jsonpath='{.metadata.labels.sdh-poc/pool}' 2>/dev/null), $(kubectl get node "$where" \
+    -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/capacityType}' 2>/dev/null)"
+  follow "$pod" read && follow "$pod" validate || true
+  # The Job takes a moment to mark itself ended, or to start the next pod.
+  for _ in $(seq 12); do job_ended || [[ "$(newest)" != "$pod" ]] && break; sleep 5; done
 done
-[[ -z "$where" ]] || say "  on node $where, pool $(kubectl get node "$where" -o jsonpath='{.metadata.labels.sdh-poc/pool}' \
-  2>/dev/null), $(kubectl get node "$where" -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/capacityType}' 2>/dev/null)"
-follow read
-follow validate
-deadline=$((SECONDS + 600))
-until job_ended || ((SECONDS >= deadline)); do sleep 5; done
 status="$(kubectl -n sdh-fhir get job gold-check -o jsonpath='{.status.succeeded}')"
 if [[ "$status" == 1 ]]; then say "gold check passed"; else
   kubectl -n sdh-fhir get pods -l app=gold-check

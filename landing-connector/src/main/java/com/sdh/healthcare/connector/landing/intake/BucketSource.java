@@ -307,6 +307,17 @@ public abstract class BucketSource implements RemoteSource
         return listing.replacesMarker(item.ref());
     }
 
+    /**
+     * {@inheritDoc} Each request stands alone.
+     *
+     * @return true
+     */
+    @Override
+    public boolean concurrent()
+    {
+        return true;
+    }
+
     @Override
     public boolean reachable()
     {

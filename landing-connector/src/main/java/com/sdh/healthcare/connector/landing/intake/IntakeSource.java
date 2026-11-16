@@ -100,6 +100,19 @@ public interface IntakeSource
     void afterLanding(ListedItem item) throws IOException;
 
     /**
+     * Tells whether several items may be opened, read and finished at once
+     * (docs/PERFORMANCE.md §3.4): true for a source whose every request
+     * stands alone, such as an object store; false for one that shares a
+     * session between them.
+     *
+     * @return true if they may
+     */
+    default boolean concurrent()
+    {
+        return false;
+    }
+
+    /**
      * Tells whether the source can be listed now.
      *
      * @return true if it can

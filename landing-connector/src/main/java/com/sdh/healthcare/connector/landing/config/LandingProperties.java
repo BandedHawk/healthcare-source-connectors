@@ -448,11 +448,18 @@ public record LandingProperties(
      *                     ones, and those whose size isn't known, are
      *                     landed alone. Each is held in memory while it is
      *                     landed.
+     * @param concurrency  how many of a group's items are read, and then
+     *                     deleted, moved or renamed at the source, at once
+     *                     (docs/PERFORMANCE.md §3.4), from a source whose
+     *                     requests stand alone, such as an object store; up
+     *                     to this many, each up to {@code maxItemBytes}, are
+     *                     held in memory ahead of the one being written
      */
     public record Group(@DefaultValue("500") int maxItems,
             @DefaultValue("64MB") DataSize maxBytes,
             @DefaultValue("1s") Duration maxWait,
-            @DefaultValue("8MB") DataSize maxItemBytes)
+            @DefaultValue("8MB") DataSize maxItemBytes,
+            @DefaultValue("8") int concurrency)
     {
     }
 

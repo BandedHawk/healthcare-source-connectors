@@ -85,8 +85,9 @@ snapshots. What that changes:
   ledger rows and the batch's checkpoint, and announced. **Built (revision (de)) without the concurrent reads,
   which are step 4:** small items listed from a source (up to `sdh.storage.group.max-item-bytes`, 8 MB) are
   read one after another into one data file and committed together; larger ones, pushes and message batches
-  are landed alone. The intake objects are deleted after the commit, in
-  bulk (S3 and GCS batch deletes; ADLS one per object, concurrently). A crash before the commit lands the batch
+  are landed alone. The intake objects are deleted after the commit, one at a time (each a HEAD, a
+  conditional delete and a HEAD for a `.replaces` marker), not in bulk as first proposed; since step 4, several
+  at once (§3.4). A crash before the commit lands the batch
   again from the same intake objects, as today for one item; the ledger still stops a file being landed twice.
   The batch's one data key wraps once per batch, as now.
 - **The ledger, once per batch.** The JDBC catalog commits one table at a time, so the ledger can't share
@@ -157,7 +158,26 @@ analytic readers. These keep it bounded:
 - **Landing stays single-active per intake.** Within the active node, a bounded pool (default 8) GETs,
   hashes and encrypts the next items while the batch fills. The order in which items are committed, and
   therefore landed, is still the listing's: a producer that relies on order (file-based ones) sees no
-  difference.
+  difference. **Built 2026-11-16 (DESIGN.md revision (dp)), step 4 part 1:** a group's items are read up to
+  `sdh.storage.group.concurrency` (default 8) at once, each whole on its own virtual thread, ahead of the
+  one being written; they are written, committed and announced in the listing's order. After the ledger and
+  the messages, the group's items are deleted, moved or renamed at the source as many at once; one that fails
+  stays to be tried again, and the others are finished all the same. Only a source whose requests stand
+  alone does either (S3, GCS, Azure Blob, a directory: `IntakeSource.concurrent`); SFTP and SMB, which share a
+  session, stay one at a time. Why: landing measured ~74 ms an item (~11 items/s), nearly all four S3 round
+  trips one after another (the GET, then a HEAD, the delete and a HEAD for a `.replaces` marker); the commits
+  are a few ms an item. Landing's steps are now timed (`sdh.stage.phase_duration`, stage `landing`: per
+  group, `read_wait`, `write`, `close`, `commit`, `ledger`, `announce`, `finish`, `group`). **Measured
+  2026-11-16** (`load-20261116T163159Z`, 7,200 documents, no failover): **landing 30.9 items/s** (7,200 by
+  233 s; ~11 before), each landed exactly once, all 7,200 to gold; the gold check passed (0 failed, every
+  bundle's source document matched). A group of ~450 items took 12.8 s (28 ms an
+  item): waiting for reads 3.1 s, writing 1.2, closing and committing 0.5, the ledger 0.4, **announcing 3.6**
+  (still one message at a time) and **finishing at the source 3.9** (8 at once). Landing's pod used 0.63 CPU
+  on its 0.25 request, waiting for a CPU 31% of the time. Overall 15.1 documents/s (6.9–8.2 in revision (dm)'s
+  runs, which landing paced); split now sets the pace (7,200 by 440 s, 16.4 items/s on 3 pods), transform
+  ends 58 s after it; landed → gold p50 / p99 179 / 325 s, as landing now outruns split and the queue waits
+  there; ~$18 per million documents (10 nodes at most). Next in landing: the announcements sent as a batch,
+  and a CPU request that matches (§11, step 4).
 - **Several intakes for a bulk load.** An intake can be configured as `n` shards: prefixes `…/0/` to
   `…/n-1/` (or by the hash of the object name), each with its own lease, so up to `n` landing nodes are
   active, one per shard. The default is 1, as now. The initial load writes its files across the shards; a
@@ -925,7 +945,7 @@ Each step is measured before the next, and each is useful alone.
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
 | 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace; transform clearing a 7,200-document backlog at 2, 4 and 6 pods (§10): 0.32 CPU-s a record at every count, 4.3–5.0 records a second a pod with work, so ~25 pods (~25 nodes, ~$4.70 per million documents) and 48 partitions for 100 documents/s; the test's identical copies share a Kafka key, so clearing stopped speeding up at 4 pods; two batches at once a transform pod (revision (dn)): 18.3 records a second at 4 pods (14.1), 4.6 a pod, all of its 1.6 CPU, so ~24 pods for 100 documents/s; with 48 partitions and distinct test copies, the pods evenly fed: 21.2 records a second at 4 pods, 5.3 a pod, so ~21 pods (~$3.90 per million documents) for 100 documents/s |
-| 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |
+| 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate. Part 1, concurrent reads and source deletes in the one landing node, built 2026-11-16 (DESIGN.md revision (dp)), measured the same day (§3.4): landing 30.9 items/s (~11), gold check passed, 15.1 documents/s overall (6.9–8.2), split the pace again; announcing (one at a time) and finishing at the source now landing's largest steps |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |
 | 6 | Large documents (§9) | 100 MB documents through, with bounded memory |
 | 7 | 1M documents on S3 and SeaweedFS, against §10's pass mark, with an outage part way (§3.6) | every document in gold once, after the restart |

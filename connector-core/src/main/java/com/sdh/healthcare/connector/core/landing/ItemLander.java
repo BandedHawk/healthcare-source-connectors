@@ -49,6 +49,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.function.LongConsumer;
 import javax.crypto.Mac;
 import org.apache.iceberg.DataFile;
@@ -113,6 +117,9 @@ public final class ItemLander
 
     /** Makes batch data keys. */
     private static final SecureRandom RANDOM = new SecureRandom();
+
+    /** The stage the landing steps are timed under (PERFORMANCE.md §10). */
+    private static final String TIMED = "landing";
 
     /**
      * How an intake lands its items.
@@ -524,12 +531,39 @@ public final class ItemLander
     public GroupLanded landAll(List<Grouped> items, int maxItemBytes)
             throws Exception
     {
+        return landAll(items, maxItemBytes, 1);
+    }
+
+    /**
+     * Lands small items together, as {@link #landAll(List, int)} does,
+     * reading up to {@code readers} of them at once ahead of the one being
+     * written (docs/PERFORMANCE.md §3.4). They are still written, and so
+     * landed, in the order given; at most {@code readers} are held in
+     * memory at once, as well as the one being written.
+     *
+     * @param items        the items, with their own IDs; none unfinished
+     * @param maxItemBytes the most bytes an item may have
+     * @param readers      how many to read at once; 1 reads each in turn
+     * @return the items landed, and those left out
+     * @throws IllegalArgumentException as for {@link #landAll(List, int)},
+     *                                  or if {@code readers} is under 1
+     * @throws IllegalStateException    if an item is still unfinished
+     * @throws Exception                if reading a source or storage
+     *                                  fails; then nothing is committed
+     */
+    public GroupLanded landAll(List<Grouped> items, int maxItemBytes,
+            int readers) throws Exception
+    {
+        if (readers < 1)
+        {
+            throw new IllegalArgumentException("readers must be at least 1");
+        }
         Span span = Telemetry.get().span("land.group",
                 Fields.of(Attr.INTAKE, settings.intake())
                         .with(Attr.COUNT, items.size()));
         try (Scope ignored = span.makeCurrent())
         {
-            return landAllTraced(items, maxItemBytes);
+            return landAllTraced(items, maxItemBytes, readers);
         }
         catch (Exception | Error failure)
         {
@@ -547,11 +581,12 @@ public final class ItemLander
      *
      * @param items        the items
      * @param maxItemBytes the most bytes an item may have
+     * @param readers      how many to read at once
      * @return the items landed, and those left out
      * @throws Exception as for {@link #landAll}
      */
-    private GroupLanded landAllTraced(List<Grouped> items, int maxItemBytes)
-            throws Exception
+    private GroupLanded landAllTraced(List<Grouped> items, int maxItemBytes,
+            int readers) throws Exception
     {
         Set<UUID> seen = new HashSet<>();
         for (Grouped grouped : items)
@@ -580,40 +615,54 @@ public final class ItemLander
         }
         if (stored.isPresent() && seen.contains(stored.get().itemId()))
         {
-            return alreadyLanded(items, maxItemBytes);
+            return alreadyLanded(items, maxItemBytes, readers);
         }
         List<NewItem> changed = new ArrayList<>();
         List<Written> written = new ArrayList<>();
         Batch batch = null;
         try
         {
-            for (Grouped grouped : items)
+            long waited = 0;
+            long writing = 0;
+            try (Reads reads = new Reads(items, maxItemBytes, readers))
             {
-                byte[] bytes;
-                try
+                for (Grouped grouped : items)
                 {
-                    bytes = readWhole(grouped, maxItemBytes);
-                }
-                catch (ItemChangedException itemChanged)
-                {
-                    changed.add(grouped.item());
-                    continue;
-                }
-                Instant startedAt = clock.instant();
-                if (batch == null)
-                {
-                    batch = new Batch();
-                }
-                try
-                {
-                    written.add(write(batch, grouped.item(), bytes,
-                            startedAt));
-                }
-                finally
-                {
-                    Arrays.fill(bytes, (byte) 0);
+                    byte[] bytes;
+                    long asked = System.nanoTime();
+                    try
+                    {
+                        bytes = reads.next();
+                    }
+                    catch (ItemChangedException itemChanged)
+                    {
+                        changed.add(grouped.item());
+                        continue;
+                    }
+                    finally
+                    {
+                        waited += System.nanoTime() - asked;
+                    }
+                    Instant startedAt = clock.instant();
+                    if (batch == null)
+                    {
+                        batch = new Batch();
+                    }
+                    long writeStarted = System.nanoTime();
+                    try
+                    {
+                        written.add(write(batch, grouped.item(), bytes,
+                                startedAt));
+                    }
+                    finally
+                    {
+                        Arrays.fill(bytes, (byte) 0);
+                        writing += System.nanoTime() - writeStarted;
+                    }
                 }
             }
+            Telemetry.get().phaseDuration(TIMED, "read_wait", waited);
+            Telemetry.get().phaseDuration(TIMED, "write", writing);
             if (batch == null)
             {
                 return new GroupLanded(List.of(), changed);
@@ -626,12 +675,18 @@ public final class ItemLander
                     last.chain(), true, last.size(), last.digest(),
                     landedAt);
             int rows = (int) batch.rows;
+            long closeStarted = System.nanoTime();
             DataFile file = batch.finish();
             batch = null;
+            Telemetry.get().phaseDuration(TIMED, "close",
+                    System.nanoTime() - closeStarted);
             LandingBatch landedBatch = new LandingBatch(written.stream()
                     .map(each -> each.item().itemId()).toList(),
                     file.location(), file.fileSizeInBytes(), rows);
+            long commitStarted = System.nanoTime();
             Snapshot snapshot = commit(file, done, landedBatch);
+            Telemetry.get().phaseDuration(TIMED, "commit",
+                    System.nanoTime() - commitStarted);
             afterCommit.accept(done.nextBlock());
             List<LandedItem> landed = new ArrayList<>();
             for (Written each : written)
@@ -668,11 +723,12 @@ public final class ItemLander
      *
      * @param items        the group's items
      * @param maxItemBytes the most bytes an item may have
+     * @param readers      how many to read at once
      * @return the items landed, and those left out
      * @throws Exception as for {@link #landAll}
      */
-    private GroupLanded alreadyLanded(List<Grouped> items, int maxItemBytes)
-            throws Exception
+    private GroupLanded alreadyLanded(List<Grouped> items, int maxItemBytes,
+            int readers) throws Exception
     {
         Set<UUID> wanted = new HashSet<>();
         items.forEach(grouped -> wanted.add(grouped.item().itemId()));
@@ -687,9 +743,118 @@ public final class ItemLander
         {
             return new GroupLanded(landed, List.of());
         }
-        GroupLanded more = landAllTraced(rest, maxItemBytes);
+        GroupLanded more = landAllTraced(rest, maxItemBytes, readers);
         landed.addAll(more.landed());
         return new GroupLanded(landed, more.changed());
+    }
+
+    /**
+     * A group's items, read in order, up to a number at once ahead of the
+     * one taken (docs/PERFORMANCE.md §3.4). Each is read whole, on its own
+     * virtual thread; closing waits for the reads still running and zeroes
+     * the bytes read but not taken.
+     */
+    private static final class Reads implements AutoCloseable
+    {
+
+        /** The items, in order. */
+        private final List<Grouped> items;
+
+        /** The most bytes an item may have. */
+        private final int maxItemBytes;
+
+        /** How many are read at once. */
+        private final int ahead;
+
+        /** Runs the reads; null when they are made in turn. */
+        private final ExecutorService threads;
+
+        /** The reads started, by position; null once taken. */
+        private final List<Future<byte[]>> started = new ArrayList<>();
+
+        /** How many have been taken. */
+        private int taken;
+
+        /**
+         * Creates the reads; none starts until the first is taken.
+         *
+         * @param items        the items, in order
+         * @param maxItemBytes the most bytes an item may have
+         * @param readers      how many to read at once
+         */
+        Reads(List<Grouped> items, int maxItemBytes, int readers)
+        {
+            this.items = items;
+            this.maxItemBytes = maxItemBytes;
+            this.ahead = readers;
+            this.threads = readers > 1
+                    ? Executors.newVirtualThreadPerTaskExecutor() : null;
+        }
+
+        /**
+         * The next item's bytes, starting the reads after it up to the
+         * number allowed.
+         *
+         * @return its bytes; the caller zeroes them
+         * @throws ItemChangedException     if its source changed
+         * @throws IllegalArgumentException if it is too large
+         * @throws Exception                if the source can't be read
+         */
+        byte[] next() throws Exception
+        {
+            Grouped grouped = items.get(taken);
+            if (threads == null)
+            {
+                taken++;
+                return readWhole(grouped, maxItemBytes);
+            }
+            int until = Math.min(items.size(), taken + ahead);
+            while (started.size() < until)
+            {
+                Grouped each = items.get(started.size());
+                started.add(threads.submit(
+                        () -> readWhole(each, maxItemBytes)));
+            }
+            Future<byte[]> read = started.set(taken, null);
+            taken++;
+            try
+            {
+                return read.get();
+            }
+            catch (ExecutionException failed)
+            {
+                if (failed.getCause() instanceof Exception cause)
+                {
+                    throw cause;
+                }
+                if (failed.getCause() instanceof Error cause)
+                {
+                    throw cause;
+                }
+                throw failed;
+            }
+        }
+
+        /**
+         * Waits for the reads still running, and zeroes what was read but
+         * not taken.
+         */
+        @Override
+        public void close()
+        {
+            if (threads == null)
+            {
+                return;
+            }
+            threads.close();
+            for (Future<byte[]> read : started)
+            {
+                if (read != null && read.state() == Future.State.SUCCESS)
+                {
+                    Arrays.fill(read.resultNow(), (byte) 0);
+                }
+            }
+        }
     }
 
     /**

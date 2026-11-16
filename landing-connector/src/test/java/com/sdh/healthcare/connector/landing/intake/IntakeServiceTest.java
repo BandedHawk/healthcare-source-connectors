@@ -52,6 +52,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import javax.crypto.KeyGenerator;
@@ -296,7 +298,7 @@ class IntakeServiceTest
     static IntakeService.Grouping grouping(int maxItems)
     {
         return new IntakeService.Grouping(maxItems, 1 << 20,
-                Duration.ofHours(1), 64);
+                Duration.ofHours(1), 64, 4);
     }
 
     /**
@@ -634,11 +636,104 @@ class IntakeServiceTest
 
         IntakeService waited = grouped(
                 new LocalDirectorySource(settings("read-only")),
-                new IntakeService.Grouping(500, 1 << 20, Duration.ZERO, 64));
+                new IntakeService.Grouping(500, 1 << 20, Duration.ZERO, 64,
+                        4));
         waited.recoverAtStartup();
         int recovered = sent.size();
         waited.onListed(write("d.csv", "4"));
         assertThat(sent).as("no wait at all").hasSize(recovered + 1);
+    }
+
+    /**
+     * A source whose requests stand alone, whose items are finished two
+     * at a time at least, and which fails to finish one of them once.
+     *
+     * @param directory the source it works through
+     * @param together  counted down by each finish, which waits for it
+     * @param failing   the name of the item that fails once; cleared then
+     */
+    record ConcurrentSource(IntakeSource directory, CountDownLatch together,
+            List<String> failing) implements IntakeSource
+    {
+
+        @Override
+        public InputStream open(ListedItem item, long offset)
+                throws IOException
+        {
+            return directory.open(item, offset);
+        }
+
+        @Override
+        public void afterLanding(ListedItem item) throws IOException
+        {
+            together.countDown();
+            try
+            {
+                together.await(10, TimeUnit.SECONDS);
+            }
+            catch (InterruptedException interrupted)
+            {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted");
+            }
+            if (failing.remove(item.ref()))
+            {
+                throw new IOException("source busy");
+            }
+            directory.afterLanding(item);
+        }
+
+        @Override
+        public boolean concurrent()
+        {
+            return true;
+        }
+
+        @Override
+        public boolean reachable()
+        {
+            return directory.reachable();
+        }
+
+        @Override
+        public void checkWritable() throws IOException
+        {
+            directory.checkWritable();
+        }
+    }
+
+    /**
+     * A group's items are finished at a source that allows it several at
+     * once: each waits until the others have started, which only finishing
+     * them at once allows. One that fails stays in the source and is
+     * finished next time, and the others are finished all the same.
+     */
+    @Test
+    void finishesAGroupAtTheSourceSeveralAtOnce() throws Exception
+    {
+        CountDownLatch together = new CountDownLatch(3);
+        List<String> failing = new CopyOnWriteArrayList<>(List.of("b.csv"));
+        IntakeService service = grouped(new ConcurrentSource(
+                new LocalDirectorySource(settings("read-write")), together,
+                failing), grouping(500));
+        service.onListed(write("a.csv", "1"));
+        service.onListed(write("b.csv", "2"));
+        service.onListed(write("c.csv", "3"));
+        long started = System.nanoTime();
+        service.onListingDone();
+
+        assertThat(System.nanoTime() - started)
+                .as("finished together, not one after another")
+                .isLessThan(TimeUnit.SECONDS.toNanos(5));
+        assertThat(sent).hasSize(3);
+        assertThat(root.resolve("in/a.csv")).doesNotExist();
+        assertThat(root.resolve("in/b.csv")).exists();
+        assertThat(root.resolve("in/c.csv")).doesNotExist();
+
+        service.onListed(write("d.csv", "4"));
+        assertThat(root.resolve("in/b.csv")).doesNotExist();
+        assertThat(sent).hasSize(3);
+        assertThat(fatal).isEmpty();
     }
 
     /**

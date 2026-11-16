@@ -31,6 +31,8 @@ sdh:
   storage:
     catalog-name: sdh
     namespace: ${ICEBERG_PREFIX}_landing
+    # Small items landed 500 a commit, 8 read, and deleted after, at once (docs/PERFORMANCE.md §3.4; the default).
+    group: { concurrency: 8 }
     catalog:
       type: jdbc
       uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh

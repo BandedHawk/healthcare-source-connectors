@@ -14,6 +14,12 @@ kind: Job
 metadata: { name: gold-check, namespace: sdh-fhir }
 spec:
   backoffLimit: 0
+  # A pod lost with its node (a Spot reclaim or rebalance, a drain, a node removed) is replaced, not counted: the
+  # check reads from the start each time (2026-11-16, a third check ended when its Spot node was taken six minutes
+  # in). Any other failure fails the Job at once.
+  podFailurePolicy:
+    rules:
+      - { action: Ignore, onPodConditions: [{ type: DisruptionTarget }] }
   ttlSecondsAfterFinished: 7200
   activeDeadlineSeconds: 5400
   template:

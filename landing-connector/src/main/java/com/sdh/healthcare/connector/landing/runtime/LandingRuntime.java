@@ -713,7 +713,7 @@ public final class LandingRuntime implements AutoCloseable
         }
         return new IntakeService.Grouping(group.maxItems(),
                 group.maxBytes().toBytes(), group.maxWait(),
-                (int) maxItemBytes);
+                (int) maxItemBytes, group.concurrency());
     }
 
     /**
