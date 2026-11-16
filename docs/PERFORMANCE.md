@@ -858,11 +858,27 @@ What it showed, beyond §2's predictions:
 
     **For 100 documents/s** at 4.6 a pod: ~22 transform pods, 24 with headroom (from 25), ~24 nodes, ~$4.50
     per million documents of transform nodes on-demand (from ~$4.70); with 2 consumers each, 48 partitions.
-    measure.sh's $38 per million counts the whole cluster at its peak, as above. Built 2026-11-15, not yet
-    measured: 48 partitions a stage input on AWS (`STAGE_PARTITIONS`), and copies made distinct by an
-    element of the load test's own namespace, which the convert stage keeps and the mapping doesn't read
-    (each of the 30 documents' bundle or failure unchanged, checked locally), so they spread over the
-    partitions as real documents do.
+    measure.sh's $38 per million counts the whole cluster at its peak, as above.
+  - **Transform with its records spread evenly** (`load-20261116T004622Z`, a long test: as `T222406Z`, with
+    48 partitions a stage input on AWS, `STAGE_PARTITIONS`, and the load test's copies made distinct by an
+    element of its own namespace, which the convert stage keeps and the mapping doesn't read: each of the
+    30 documents' bundle or failure unchanged, checked locally). Exactly once, none left behind; gold's
+    commits 5 of 44 retried.
+
+    | Run | Records/s | A pod's | Least / most a pod mapped | Cores | CPU-s a record | Wait | Batch (s) | Clear (s) |
+    |---|---|---|---|---|---|---|---|---|
+    | 24 partitions, shared keys (`T222406Z`) | 18.3 | 4.6 | 193 / 2,058 | 6.36 | 0.35 | 0.41 | 13.4 | 555 |
+    | 48 partitions, distinct copies | 21.2 | 5.3 | 1,295 / 1,643 | 6.32 | 0.30 | 0.62 | 13.7 | 494 |
+
+    **The pods now share the work evenly** (their counts within 27% of each other, from 10 times), so all
+    four are fed to the end, and the backlog cleared in 494 s. A record costs 0.30 CPU-seconds and mapping
+    one 0.50 s (0.54 before): the earlier runs' busiest pods mapped the same few heavy documents over and
+    over. So a pod maps 5.3 records a second on its 1.6 CPU, all of it used; a thread waits for a CPU 0.62
+    of the time, and that, not consumers, is the limit.
+
+    **For 100 documents/s** at 5.3 a pod: ~19 transform pods, 21 with headroom, ~21 nodes, ~$3.90 per million
+    documents of transform nodes on-demand (from ~$4.50); 15M documents ~42 hours, ~$59 of transform
+    nodes. 21 pods × 2 consumers fit the 48 partitions.
 
 ## 11. Order of work
 
@@ -874,7 +890,7 @@ Each step is measured before the next, and each is useful alone.
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
-| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace; transform clearing a 7,200-document backlog at 2, 4 and 6 pods (§10): 0.32 CPU-s a record at every count, 4.3–5.0 records a second a pod with work, so ~25 pods (~25 nodes, ~$4.70 per million documents) and 48 partitions for 100 documents/s; the test's identical copies share a Kafka key, so clearing stopped speeding up at 4 pods; two batches at once a transform pod (revision (dn)): 18.3 records a second at 4 pods (14.1), 4.6 a pod, all of its 1.6 CPU, so ~24 pods for 100 documents/s |
+| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace; transform clearing a 7,200-document backlog at 2, 4 and 6 pods (§10): 0.32 CPU-s a record at every count, 4.3–5.0 records a second a pod with work, so ~25 pods (~25 nodes, ~$4.70 per million documents) and 48 partitions for 100 documents/s; the test's identical copies share a Kafka key, so clearing stopped speeding up at 4 pods; two batches at once a transform pod (revision (dn)): 18.3 records a second at 4 pods (14.1), 4.6 a pod, all of its 1.6 CPU, so ~24 pods for 100 documents/s; with 48 partitions and distinct test copies, the pods evenly fed: 21.2 records a second at 4 pods, 5.3 a pod, so ~21 pods (~$3.90 per million documents) for 100 documents/s |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |
 | 6 | Large documents (§9) | 100 MB documents through, with bounded memory |
