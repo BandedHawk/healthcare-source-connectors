@@ -5,7 +5,7 @@
 #
 #   deploy/aws/k8s/pipeline/load-test.sh [copies] [error-copies]    # defaults 80 and 10: 2,450 objects, ~300 MB
 #
-# The inputs (load-inputs.py): mapping's 30 test documents, `copies` of each (made unique by a comment), and the
+# The inputs (load-inputs.py): mapping's 30 test documents, `copies` of each (made unique by an element), and the
 # file connector's demo error files, `error-copies` of each: a batch of 3, a batch with an unconvertible document
 # (convert stage: CONVERT_XML_MALFORMED), a truncated batch (split stage: PARSE_UNBALANCED_ELEMENT), a UTF-16
 # document (split stage: PARSE_XML_UNSUPPORTED_ENCODING) and an exact resend (landing: item.duplicate_content; split:

@@ -1,10 +1,13 @@
 """Makes the AWS PoC load test's inputs (deploy/aws/k8s/pipeline/load-test.sh). Only test documents with no PHI:
 
 - Clean documents: mapping's 30 test documents (healthcare-data-transformer transform-stage/target/test-documents,
-  synthetic, de-identified or HL7 examples), each copied COPIES times. A copy is made unique by a comment before its
-  end tag, <!-- sdh-poc-load <run> c<n> -->: record IDs are keyed hashes of content, so identical copies would be one
-  record downstream. The comment changes no line, so mapping's expected issues (lines and columns) still apply, and
-  the gold check (GoldCheck) strips it to name the document. Half of them fail the US Core set's data checks
+  synthetic, de-identified or HL7 examples), each copied COPIES times. A copy is made unique by an element of the
+  load test's own namespace before its end tag, <sdhLoadCopy xmlns="urn:sdh-poc:load" run="<run>" copy="c<n>"/>:
+  record IDs are keyed hashes of content, and are the records' Kafka keys, so identical copies would share a
+  partition at every stage. Not a comment, as until 2026-11-15: the convert stage's JSON keeps elements it doesn't
+  know but no comments, so transform's copies were identical again. The mapping reads no such element, so a copy's
+  bundle or failure is the original's (checked for all 30 on 2026-11-15); it changes no line, so mapping's expected
+  issues (lines and columns) still apply, and the gold check (GoldCheck) strips it to name the document. Half of them fail the US Core set's data checks
   (mapping's baseline), so the transform stage's fail store is exercised at volume.
 - Error inputs: the file connector's demo files (file-connector DemoFiles), built exactly as it builds them from
   connector-core's sample documents, ERROR_COPIES of each, each copy tagged in its titles as DemoFiles tags them:
@@ -84,7 +87,7 @@ def main():
             original = f.read()
         end = original.rindex(b"</ClinicalDocument>")
         for c in range(copies):
-            marker = ("<!-- sdh-poc-load %s c%d -->" % (run, c)).encode("ascii")
+            marker = ('<sdhLoadCopy xmlns="urn:sdh-poc:load" run="%s" copy="c%d"/>' % (run, c)).encode("ascii")
             data = original[:end] + marker + original[end:]
             write("c%04d-%02d.xml" % (c, k), data)
             if c == 0:

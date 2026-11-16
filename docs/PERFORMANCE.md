@@ -822,8 +822,9 @@ What it showed, beyond §2's predictions:
     780 s, 2,220 in 443 s) on 1.6 CPU, using 1.1–1.3 cores of it; a thread waits for a CPU 0.31–0.39 of the
     time, and the CPU sits idle while each batch of ~47 records commits, registers and sends. **The clear
     time stopped falling at 4 pods, because of the test's data, not transform:** a record's id is the keyed
-    hash of its content (`RecordIds`), and is its Kafka key, so the 240 copies of each of the 30 test
-    documents all went to one partition of 24. The pods' shares differed up to 7.5 times, and the last
+    hash of its content (`RecordIds`), and is its Kafka key, and the comment that made each copy unique
+    is dropped by the convert stage's JSON, so the 240 copies of each of the 30 test documents all went
+    to one partition of 24. The pods' shares differed up to 7.5 times, and the last
     tenth took 94–183 s on the few pods holding the heaviest partitions. At 6 pods the sixth waited over
     300 s for a burst node, and its window opened in that tail, so its row isn't a rate. Real documents
     differ, and spread over the partitions evenly. Landed → gold p99 1,337, 1,004 and 1,005 s: the hold, not
@@ -857,8 +858,11 @@ What it showed, beyond §2's predictions:
 
     **For 100 documents/s** at 4.6 a pod: ~22 transform pods, 24 with headroom (from 25), ~24 nodes, ~$4.50
     per million documents of transform nodes on-demand (from ~$4.70); with 2 consumers each, 48 partitions.
-    measure.sh's $38 per million counts the whole cluster at its peak, as above. Next: 48 partitions and
-    distinct copies in the load test.
+    measure.sh's $38 per million counts the whole cluster at its peak, as above. Built 2026-11-15, not yet
+    measured: 48 partitions a stage input on AWS (`STAGE_PARTITIONS`), and copies made distinct by an
+    element of the load test's own namespace, which the convert stage keeps and the mapping doesn't read
+    (each of the 30 documents' bundle or failure unchanged, checked locally), so they spread over the
+    partitions as real documents do.
 
 ## 11. Order of work
 

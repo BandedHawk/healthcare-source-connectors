@@ -42,8 +42,9 @@ LONG_TEST_MAX_HOURS=24
 SNAPSHOTS_KEPT=3
 PIPELINES="${SDH_PIPELINES:-ccda-push}"
 KEDA_VERSION="2.21.0"
-# Partitions of each stage's input topic (setup_topics).
-STAGE_PARTITIONS=24
+# Partitions of each stage's input topic (setup_topics): 48 since 2026-11-15, for ~24 transform pods of 2 consumers
+# each at 100 documents/s (docs/PERFORMANCE.md §10).
+STAGE_PARTITIONS=48
 KEDA_SHA256="b43c89ffeef81722d7e2dd2c079d74789767a0f89cae1336cff784994814f6d7"
 
 say() { printf '>> %s\n' "$*"; }

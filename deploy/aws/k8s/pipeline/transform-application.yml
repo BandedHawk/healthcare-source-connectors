@@ -18,10 +18,10 @@ sdh:
     # TRANSFORM_TOO_LARGE.
     max-bytes: 2MB
   stage:
-    # Four records at a time (docs/PERFORMANCE.md §10, 2026-11-15; the sandbox keeps 2); 24 partitions (poc.sh).
+    # Four records at a time (docs/PERFORMANCE.md §10, 2026-11-15; the sandbox keeps 2); 48 partitions (poc.sh).
     concurrency: 4
     # Two batches a pod at once, sharing those four threads: one batch's records are mapped while the other's
-    # commit (docs/PERFORMANCE.md §10, 2026-11-15). 4 pods × 2 consumers fit the 24 partitions.
+    # commit (docs/PERFORMANCE.md §10, 2026-11-15). 4 pods × 2 consumers within the 48 partitions.
     consumers: 2
     input:
       type: kafka

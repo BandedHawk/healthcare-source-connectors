@@ -6,7 +6,7 @@
   no drift).
 - A trial `up`/`down` of the cluster alone passed on 2026-11-12:
   - 2 base nodes; Postgres and Kafka on the kept volumes; KEDA; the autoscaler, with Pod Identity credentials;
-    the topics (24/24/24/1/1/1 partitions; 4/6/8 until 2026-11-13) and database roles;
+    the topics (48/48/48/1/1/1 partitions; 24 until 2026-11-15, 4/6/8 until 2026-11-13) and database roles;
   - then a drain, a clean stop, snapshots, the cluster destroyed, the schedule removed, and nothing left over.
   - The guard ran once with no cluster and succeeded. On 2026-11-12 it also deleted a live cluster (fired by
     mistake, see the load test below): node groups and cluster gone in 11 minutes; `poc.sh down` afterwards found
@@ -137,13 +137,13 @@
 ```
  S3 intake bucket ──► landing (1 active + 1 warm standby, Postgres lease)
                           │  bronze: landed_items, landing_ledger
-                          ▼  Kafka <p>.landed  (24 partitions)
+                          ▼  Kafka <p>.landed  (48 partitions)
                        split (KEDA 1..2)
                           │  silver: split_records
-                          ▼  Kafka <p>.split   (24 partitions)
+                          ▼  Kafka <p>.split   (48 partitions)
                        convert (KEDA 1..3)
                           │  silver: records
-                          ▼  Kafka <p>.records (24 partitions)
+                          ▼  Kafka <p>.records (48 partitions)
                        transform (KEDA 1..4, concurrency 2)
                           │  gold: sdh_fhir.fhir
                           ▼  Kafka <p>.fhir (1)   + DLQs, results
@@ -244,9 +244,9 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 | Pod | Replicas | CPU req | Mem req = limit | Notes |
 |---|---|---|---|---|
 | landing | 2 (1 active, 1 standby); never KEDA | 250m | 1 Gi | `SDH_LANDING_STANDBY=true`; required anti-affinity on hostname, so one on each base node; PDB `maxUnavailable: 1`; `Recreate` |
-| split | KEDA 1–3 | 900m | 2 Gi | `<p>.landed`, 24 partitions, lag 5, 8 consumers of 2 items a pod |
-| convert | KEDA 1–3 | 400m | 1.25 Gi | `<p>.split`, 24 partitions, lag 5, results off |
-| transform | KEDA 1–4 | 1600m | 2 Gi | `<p>.records`, 24 partitions, concurrency 4, lag 5, results off (below) |
+| split | KEDA 1–3 | 900m | 2 Gi | `<p>.landed`, 48 partitions, lag 5, 8 consumers of 2 items a pod |
+| convert | KEDA 1–3 | 400m | 1.25 Gi | `<p>.split`, 48 partitions, lag 5, results off |
+| transform | KEDA 1–4 | 1600m | 2 Gi | `<p>.records`, 48 partitions, concurrency 4, 2 consumers, lag 5, results off (below) |
 | kafka | 1 | 200m | 768 Mi | heap 384 MiB, as in the sandbox |
 | postgres | 1 | 100m | 512 Mi | as in the sandbox |
 | KEDA (3 pods), Cluster Autoscaler, CoreDNS, CNI, EBS CSI, Pod Identity agent | — | ~0.5 | ~1.5 Gi | — |

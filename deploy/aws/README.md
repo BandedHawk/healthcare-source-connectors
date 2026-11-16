@@ -109,8 +109,10 @@ figures; a list such as `1,2,4,6` steps through them in one run:
 SDH_LOAD_FAILOVER_AT=0 SDH_LOAD_GOLD_CHECK=0 SDH_LOAD_BACKLOG=4 deploy/aws/k8s/pipeline/load-test.sh 240 0
 ```
 
-The test's copies of a document are identical, and a record's Kafka key is the hash of its content, so all the
-copies go to one partition: the pods' shares are uneven, and the busiest pod's rate is the one to read.
+A record's Kafka key is the hash of its content, so the test makes each copy of a document distinct with an element
+the mapping doesn't read (load-inputs.py), and the copies spread over the partitions as real documents do. Runs
+before 2026-11-15 marked copies with a comment, which the convert stage drops: their transform pods' shares were
+uneven, and the busiest pod's rate is the one to read in them.
 
 The gold check alone (needs about 1 CPU and 2.5 GiB free, a burst node or the stages paused):
 
