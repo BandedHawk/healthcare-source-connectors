@@ -378,7 +378,7 @@ public final class LandingRuntime implements AutoCloseable
                             keys.recipient(), keys.recipientKid()),
                     publisher, storageSettings.catalogName(),
                     storageSettings.namespace(), retry, ACK_TIMEOUT,
-                    receipts);
+                    receipts, storageSettings.group().concurrency());
             IntakeService.Storage storage =
                     new IntakeService.Storage(lander, ledger, index, ids);
             ResubmitRequests requests = new ResubmitRequests(dataSource,

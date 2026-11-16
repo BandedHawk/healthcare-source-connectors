@@ -243,7 +243,7 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 
 | Pod | Replicas | CPU req | Mem req = limit | Notes |
 |---|---|---|---|---|
-| landing | 2 (1 active, 1 standby); never KEDA | 250m | 1 Gi | `SDH_LANDING_STANDBY=true`; required anti-affinity on hostname, so one on each base node; PDB `maxUnavailable: 1`; `Recreate` |
+| landing | 2 (1 active, 1 standby); never KEDA | 750m | 1 Gi | `SDH_LANDING_STANDBY=true`; required anti-affinity on hostname, so one on each base node; PDB `maxUnavailable: 1`; `Recreate` |
 | split | KEDA 1–3 | 900m | 2 Gi | `<p>.landed`, 48 partitions, lag 5, 8 consumers of 2 items a pod |
 | convert | KEDA 1–3 | 400m | 1.25 Gi | `<p>.split`, 48 partitions, lag 5, results off |
 | transform | KEDA 1–4 | 1600m | 2 Gi | `<p>.records`, 48 partitions, concurrency 4, 2 consumers, lag 5, results off (below) |
@@ -262,10 +262,12 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 - Postgres and Kafka run on the base node in us-east-2a, where their volumes are.
 
 **Totals:**
-- At rest, about 10.8 GiB and 4.45 vCPU requested: more CPU than the two base nodes have (about 14 GiB and 3.86
+- At rest, about 10.8 GiB and 5.45 vCPU requested: more CPU than the two base nodes have (about 14 GiB and 3.86
   vCPU allocatable), so one Spot burst node stays up while the stack is (about $0.02 an hour): transform's one
-  pod asks for 1.6.
-- At the maximum, about 23.3 GiB and 12.4 vCPU, which needs up to five Spot burst nodes (six allowed): the
+  pod asks for 1.6. What runs only on the base nodes asks for about 2.45 vCPU (landing 2 × 0.75, Kafka, Postgres,
+  the system pods, the collector), so 1.4 is left there for split's and convert's resting pods (0.9 and 0.4);
+  landing asked for 0.25 a pod until 2026-11-16 (docs/PERFORMANCE.md §3.4).
+- At the maximum, about 23.3 GiB and 13.4 vCPU, which needs up to five Spot burst nodes (six allowed): the
   stages ask for the CPU they use under load (split 0.9, transform 1.6, convert 0.4 a pod;
   [PERFORMANCE.md](PERFORMANCE.md) §10), split runs up to 3 pods and transform up to 4.
 

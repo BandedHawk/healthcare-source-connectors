@@ -453,7 +453,9 @@ public record LandingProperties(
      *                     (docs/PERFORMANCE.md §3.4), from a source whose
      *                     requests stand alone, such as an object store; up
      *                     to this many, each up to {@code maxItemBytes}, are
-     *                     held in memory ahead of the one being written
+     *                     held in memory ahead of the one being written;
+     *                     and how many of a group's {@code item.landed}
+     *                     messages are sealed at once, from any source
      */
     public record Group(@DefaultValue("500") int maxItems,
             @DefaultValue("64MB") DataSize maxBytes,

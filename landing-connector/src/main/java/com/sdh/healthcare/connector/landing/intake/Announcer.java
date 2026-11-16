@@ -25,6 +25,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.Record;
@@ -46,6 +48,9 @@ import org.apache.iceberg.data.Record;
  */
 public final class Announcer
 {
+
+    /** The stage landing's steps are timed under. */
+    private static final String TIMED = "landing";
 
     /**
      * Where receipts go, and what they are read from.
@@ -80,6 +85,9 @@ public final class Announcer
     /** How long to wait for the broker's acknowledgement. */
     private final Duration timeout;
 
+    /** How many of a group's messages are sealed at once. */
+    private final int sealers;
+
     /**
      * Creates an announcer.
      *
@@ -113,6 +121,37 @@ public final class Announcer
             String catalogName, String namespace, RetryPolicy retry,
             Duration timeout, Receipts receipts)
     {
+        this(sealer, publisher, catalogName, namespace, retry, timeout,
+                receipts, 1);
+    }
+
+    /**
+     * Creates an announcer that also sends receipts, and seals a group's
+     * messages several at once (docs/PERFORMANCE.md §3.4): each is signed
+     * and encrypted on its own, so sealing takes as many CPUs as it is
+     * given. They are still sent in the order given.
+     *
+     * @param sealer      seals messages for the recipient
+     * @param publisher   sends them to the queue
+     * @param catalogName the landing catalog's name
+     * @param namespace   the landing namespace
+     * @param retry       how sends are retried
+     * @param timeout     how long to wait for each acknowledgement
+     * @param receipts    where receipts go; null for none
+     * @param sealers     how many of a group's messages are sealed at
+     *                    once; at least 1
+     * @throws IllegalArgumentException if {@code sealers} is less than 1
+     */
+    public Announcer(MessageSealer sealer, MessagePublisher publisher,
+            String catalogName, String namespace, RetryPolicy retry,
+            Duration timeout, Receipts receipts, int sealers)
+    {
+        if (sealers < 1)
+        {
+            throw new IllegalArgumentException(
+                    "sealers must be at least 1");
+        }
+        this.sealers = sealers;
         this.receipts = receipts;
         this.sealer = sealer;
         this.publisher = publisher;
@@ -189,8 +228,10 @@ public final class Announcer
     /**
      * Sends the {@code item.landed} messages of several items at once,
      * then waits for their acknowledgements: a group commit's items
-     * (docs/PERFORMANCE.md §3.1). One the broker didn't acknowledge is
-     * sent again on its own, with the retries {@link #announce} has. Each
+     * (docs/PERFORMANCE.md §3.1). They are sealed several at once, then
+     * sent in the order given (§3.4). One that couldn't be sealed or that
+     * the broker didn't acknowledge is sent again on its own, with the
+     * retries {@link #announce} has. Each
      * message is keyed by its item, so one sent twice is the same message.
      *
      * @param announcements the items, in order
@@ -208,16 +249,20 @@ public final class Announcer
                     announcements.get(0).sameAs());
             return;
         }
+        long started = System.nanoTime();
+        OutboundMessage[] sealed = sealAll(announcements);
+        long sending = System.nanoTime();
+        Telemetry.get().phaseDuration(TIMED, "seal", sending - started);
         List<CompletableFuture<?>> sent = new ArrayList<>();
-        for (Announcement announcement : announcements)
+        for (OutboundMessage outbound : sealed)
         {
-            ConnectorMessage.ItemLanded message = announcement.item()
-                    .message(catalogName, namespace, announcement.sameAs());
             CompletableFuture<?> acknowledged;
             try
             {
-                acknowledged = publisher.publish(
-                        OutboundMessage.of(message, sealer.seal(message)));
+                acknowledged = outbound == null
+                        ? CompletableFuture.failedFuture(
+                                new IllegalStateException("Not sealed"))
+                        : publisher.publish(outbound);
             }
             catch (RuntimeException failure)
             {
@@ -237,6 +282,76 @@ public final class Announcer
             {
                 announce(announcement.item(), announcement.sameAs());
             }
+        }
+        Telemetry.get().phaseDuration(TIMED, "send",
+                System.nanoTime() - sending);
+    }
+
+    /**
+     * Seals the messages of several items, up to {@link #sealers} at once,
+     * each on its own virtual thread.
+     *
+     * @param announcements the items
+     * @return their sealed messages, in the same order; null for one that
+     *         couldn't be sealed
+     * @throws InterruptedException if interrupted while they are sealed
+     */
+    private OutboundMessage[] sealAll(List<Announcement> announcements)
+            throws InterruptedException
+    {
+        int count = announcements.size();
+        OutboundMessage[] sealed = new OutboundMessage[count];
+        int slices = Math.min(sealers, count);
+        if (slices == 1)
+        {
+            for (int index = 0; index < count; index++)
+            {
+                sealed[index] = sealOrNull(announcements.get(index));
+            }
+            return sealed;
+        }
+        // Each thread seals every slices-th item; closing waits for them
+        // all, and so publishes what they wrote.
+        try (ExecutorService threads =
+                Executors.newVirtualThreadPerTaskExecutor())
+        {
+            for (int slice = 0; slice < slices; slice++)
+            {
+                int first = slice;
+                threads.execute(() ->
+                {
+                    for (int index = first; index < count; index += slices)
+                    {
+                        sealed[index] = sealOrNull(announcements.get(index));
+                    }
+                });
+            }
+        }
+        if (Thread.interrupted())
+        {
+            throw new InterruptedException();
+        }
+        return sealed;
+    }
+
+    /**
+     * Seals an item's message.
+     *
+     * @param announcement the item
+     * @return the sealed message; null if it couldn't be sealed (it is
+     *         tried again on its own, which says why)
+     */
+    private OutboundMessage sealOrNull(Announcement announcement)
+    {
+        ConnectorMessage.ItemLanded message = announcement.item()
+                .message(catalogName, namespace, announcement.sameAs());
+        try
+        {
+            return OutboundMessage.of(message, sealer.seal(message));
+        }
+        catch (RuntimeException failure)
+        {
+            return null;
         }
     }
 

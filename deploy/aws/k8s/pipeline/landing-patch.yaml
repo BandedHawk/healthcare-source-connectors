@@ -34,8 +34,10 @@ spec:
             - name: POD_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.instance.id=$(POD_NAME)" }
+          # 750m, not 250m: the active pod used 0.63 CPU landing at ~31 items/s and waited for one 31% of the time,
+          # mostly sealing the messages (docs/PERFORMANCE.md §3.4, 2026-11-16). No limit: it may use more.
           resources:
-            requests: { cpu: 250m, memory: 1Gi }
+            requests: { cpu: 750m, memory: 1Gi }
             limits: { memory: 1Gi }
           volumeMounts:
             - { mountPath: /data/intake, $patch: delete }
