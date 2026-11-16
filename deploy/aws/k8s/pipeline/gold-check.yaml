@@ -26,8 +26,15 @@ spec:
       serviceAccountName: gold-reader
       automountServiceAccountToken: false
       restartPolicy: Never
+      # Base nodes first: a burst node may be Spot, and a reclaim ends the check (2026-11-16, the read ended
+      # twelve minutes in with no failure of its own).
       tolerations:
         - { key: sdh-poc/burst, operator: Equal, value: "true", effect: NoSchedule }
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference: { matchExpressions: [{ key: sdh-poc/pool, operator: In, values: [base] }] }
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
