@@ -312,8 +312,35 @@ Gold passed the gold check. Two points for reading such a report:
   in the run before, on tables holding two runs' commits: every lookup read all 312 manifests of
   `split_records` in about 3.9 s (§2). The gold check's reader does the same lookups and took 23 minutes.
 
-Not yet run: the same with the queued messages deleted (`SDH_LOAD_OUTAGE_LOSE`), which leaves the
-reconcilers to rebuild them. At today's split rate it needs about 2 hours.
+**With the queued messages deleted, AWS, 2026-11-16** (a long test: `load-test.sh` defaults, 2,450 objects,
+with `SDH_LOAD_OUTAGE_AT=40`, `SDH_LOAD_OUTAGE_MIN=10`, `SDH_LOAD_OUTAGE_LOSE=landed,split,records`; report
+`load/load-20261116T032724Z`). Killed at 1,222 landed; the queued messages of all three stage topics deleted
+while down. **Not recovered in full.** Landing and split were whole: 2,450 objects landed as 2,450 items
+(exactly once), split ended them all (2,430 completed, the 20 error inputs failed), its reconciler splitting 22
+whose `item.landed` was lost. Convert and transform were not: 145 items split but never ended at convert, and
+828 converted but never ended at transform, so 1,602 of 2,430 reached gold. Once the queues drained (~1,085 s,
+275 s after the restart), nothing moved until the reconcilers' backlog wait ended (~2,940 s); that one pass
+rebuilt 215 records (`stage.records_recovered`) and completed 154 items (`stage.item_completion_recovered`),
+and no later pass came before the test's 45 minutes ran out (the interval is 15 minutes).
+`stage.item_total_missing` 87: items whose records are all here but whose item end (`item.split`,
+`item.converted`) was among the messages lost. That is as designed (STAGES.md §13.2, decided 2026-11-06):
+reconcilers rebuild lost record messages, but a lost item end is left for an operator, now by `reprocess`
+(STAGES.md §15.8). How many of the 973 items left are lost item ends, and how many a second reconcile pass would
+have finished, the run doesn't say: the pods' logs went with the cluster.
+
+**Rerun with lost item ends sent again (2026-11-16, load-20261116T060237Z; DESIGN.md revision (do)).** The
+same test, with a 90-minute settle. **Recovered in full:** 0 items left behind at convert and at transform;
+all 2,430 completed items reached gold (1,602 before), each exactly once. The 10 that convert failed have no
+record for transform, so transform ended 2,420 items. The last item was transformed 2,735 s after the restart:
+convert finished at ~1,420 s, and transform caught up in steps, one at each reconcile pass, 15 minutes apart.
+The audit counts are from the pods still running at the end, and those undercount after the scale-downs:
+`stage.item_completion_recovered` 490, `stage.records_recovered` 0, `stage.item_total_missing` 0, and
+`stage.item_end_resent` not yet counted by the report. The load test now counts it, and also counts from the
+registries the ends each stage asked for again (`total_wanted_at`) and how many came. Recovery is now
+automatic, but it is slow: the time is set by the reconcile interval and the backlog wait, not by the work.
+The gold check did not run to the end. Its pod was evicted four minutes into reading, when the cluster
+autoscaler emptied its burst node, and the Job (`backoffLimit: 0`) failed without a finding. Its pod is now
+marked not safe to evict. The content check is due on the next run.
 
 ### 3.7 One committer for a table, across pods (built 2026-11-15)
 
@@ -887,7 +914,7 @@ Each step is measured before the next, and each is useful alone.
 | Step | What | Expected effect |
 |---|---|---|
 | 0 | Measurement harness and a baseline at 1,000 documents (§10; 100,000 after step 1) | the numbers to beat. Harness built and baseline run 2026-11-13 (§10): 0.12 documents/s, p99 5,526 s; split slows as the landed table grows: three planned reads of it per item, 99% of split's time with the `split_records` lookups (§10, 2026-11-13); not the pod, not CPU |
-| 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage not yet run |
+| 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage run 2026-11-16 (§3.6): landing and split whole, 973 items left at convert and transform; lost item ends now sent again (DESIGN.md (do)), rerun the same day: 0 left, all 2,430 to gold, 2,735 s after the restart; gold check evicted, due again |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
 | 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace; transform clearing a 7,200-document backlog at 2, 4 and 6 pods (§10): 0.32 CPU-s a record at every count, 4.3–5.0 records a second a pod with work, so ~25 pods (~25 nodes, ~$4.70 per million documents) and 48 partitions for 100 documents/s; the test's identical copies share a Kafka key, so clearing stopped speeding up at 4 pods; two batches at once a transform pod (revision (dn)): 18.3 records a second at 4 pods (14.1), 4.6 a pod, all of its 1.6 CPU, so ~24 pods for 100 documents/s; with 48 partitions and distinct test copies, the pods evenly fed: 21.2 records a second at 4 pods, 5.3 a pod, so ~21 pods (~$3.90 per million documents) for 100 documents/s |

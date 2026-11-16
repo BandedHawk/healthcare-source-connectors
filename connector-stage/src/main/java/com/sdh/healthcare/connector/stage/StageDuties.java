@@ -64,6 +64,43 @@ public final class StageDuties implements AutoCloseable
          *                              next interval
          */
         void reconcile() throws Exception;
+
+        /**
+         * Two that run one after the other, each run: the second runs even
+         * if the first fails, and the first failure is thrown after.
+         *
+         * @param first  the first; null if none
+         * @param second the second; null if none
+         * @return both, either, or null if neither
+         */
+        static Reconciler both(Reconciler first, Reconciler second)
+        {
+            if (first == null || second == null)
+            {
+                return first == null ? second : first;
+            }
+            return () ->
+            {
+                Exception failed = null;
+                try
+                {
+                    first.reconcile();
+                }
+                catch (InterruptedException interrupted)
+                {
+                    throw interrupted;
+                }
+                catch (Exception failure)
+                {
+                    failed = failure;
+                }
+                second.reconcile();
+                if (failed != null)
+                {
+                    throw failed;
+                }
+            };
+        }
     }
 
     /** Makes the maintenance scheduler for a holder of the lease. */

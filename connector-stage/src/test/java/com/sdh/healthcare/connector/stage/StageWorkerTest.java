@@ -552,6 +552,58 @@ class StageWorkerTest
     }
 
     /**
+     * An item's end sent again for the stage after (STAGES.md §13.2) has
+     * the id, counts and number of the one sent, so the stage after drops a
+     * repeat; nothing is audited as completed again. An item not ended here
+     * has nothing sent.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void sendsAnItemsEndAgainUnderItsId() throws Exception
+    {
+        StageWorker<String> worker = worker("pod-a", processor());
+        assertThat(worker.resendEnd(item)).isFalse();
+        assertThat(worker.handle(batch(4)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+
+        assertThat(worker.resendEnd(item)).isTrue();
+        assertThat(sentItems()).hasSize(2);
+        ItemConverted first = sentItems().get(0);
+        assertThat(sentItems().get(1)).satisfies(again ->
+        {
+            assertThat(again.messageId()).isEqualTo(first.messageId());
+            assertThat(again.recordCount()).isEqualTo(4);
+            assertThat(again.failedRecordCount()).isZero();
+            assertThat(again.completion()).isEqualTo(first.completion());
+            assertThat(again.generation()).isEqualTo(first.generation());
+        });
+        assertThat(audit.names()).containsExactly("stage.item_completed");
+        assertThat(worker.resendEnd(UUID.randomUUID())).isFalse();
+    }
+
+    /**
+     * An item whose failure here is open has its last {@code item.progress}
+     * sent again, under its id; it isn't completed.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void sendsAnOpenItemsProgressAgain() throws Exception
+    {
+        StageWorker<String> worker = worker("pod-a", processor());
+        assertThat(worker.handle(batch(5)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(sentProgress()).hasSize(1);
+
+        assertThat(worker.resendEnd(item)).isTrue();
+        assertThat(sentProgress()).hasSize(2).extracting(
+                ItemProgressed::messageId).containsOnly(
+                        sentProgress().get(0).messageId());
+        assertThat(sentItems()).isEmpty();
+    }
+
+    /**
      * An item's total coming before its records, in another batch, and a
      * record twice in one batch, change nothing.
      *

@@ -496,6 +496,13 @@ public final class StageRegistry
                     + " ADD COLUMN IF NOT EXISTS generation integer"
                     + " NOT NULL DEFAULT 1");
             numberEarlierCompletions(statement);
+            // Added 2026-11-16 (STAGES.md §13.2): when the reconciler found
+            // the item's records all here but its end from the stage before
+            // missing, for that stage to send it again.
+            statement.execute("ALTER TABLE " + items
+                    + " ADD COLUMN IF NOT EXISTS total_wanted_at timestamptz");
+            statement.execute("CREATE INDEX IF NOT EXISTS stage_item_wanted"
+                    + " ON " + items + " (stage, total_wanted_at)");
             for (String ddl : FailureStore.ddls(failures,
                     failures.substring(0, failures.indexOf('.'))
                             + ".stage_failure_event"))
@@ -2065,9 +2072,77 @@ public final class StageRegistry
     public List<DueItem> due(Collection<UUID> itemIds)
     {
         List<DueItem> due = new ArrayList<>();
+        for (Counted counted : counted(itemIds, """
+                i.completed_at IS NULL AND i.expected IS NOT NULL
+                   AND i.done >= i.expected"""))
+        {
+            due.add(counted.due());
+        }
+        return due;
+    }
+
+    /**
+     * An item this stage completed, with the counts its item-complete
+     * message was made from (STAGES.md §13.2): to send that message again
+     * when the stage after never received it.
+     *
+     * @param itemId the item's id
+     * @return it, with its completions before the last, so that the
+     *         message it makes is numbered as the last was; empty if the
+     *         stage hasn't completed it
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Optional<Ended> ended(UUID itemId)
+    {
+        for (Counted counted : counted(List.of(itemId),
+                "i.completed_at IS NOT NULL AND i.completion > 0"))
+        {
+            DueItem due = counted.due();
+            ItemProgress progress = due.progress();
+            return Optional.of(new Ended(new DueItem(
+                    progress.withCompletion(progress.completion() - 1),
+                    due.total(), due.progressKey(), due.readAt(),
+                    due.reported()), counted.completedAt()));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * An item the stage completed, as {@link #ended} gives it.
+     *
+     * @param due         its counts, numbered as when it was completed
+     * @param completedAt when it was completed
+     */
+    public record Ended(DueItem due, Instant completedAt)
+    {
+    }
+
+    /**
+     * An item's counts, as {@link #counted} reads them.
+     *
+     * @param due         the counts
+     * @param completedAt when the item was completed here; null if it
+     *                    isn't
+     */
+    private record Counted(DueItem due, Instant completedAt)
+    {
+    }
+
+    /**
+     * The items, of those given, that meet a condition on their row
+     * ({@code i}), with their counts as {@link #due} gives them.
+     *
+     * @param itemIds   the items to look at
+     * @param condition the condition, in SQL, without parameters
+     * @return those that meet it
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private List<Counted> counted(Collection<UUID> itemIds, String condition)
+    {
+        List<Counted> found = new ArrayList<>();
         if (itemIds.isEmpty())
         {
-            return due;
+            return found;
         }
         // With the versions its records were made under, in the order first
         // used (STAGES.md §14.3).
@@ -2099,12 +2174,12 @@ public final class StageRegistry
                            AND f.state = 'SUPERSEDED'
                            AND COALESCE(f.superseded_how, 'REVISION')
                                = 'REVISION'),
-                       i.completion, i.generation, i.reported
+                       i.completion, i.generation, i.reported,
+                       i.completed_at
                   FROM %1$s i
                  WHERE i.stage = ? AND i.item_id = ANY (?)
-                   AND i.completed_at IS NULL AND i.expected IS NOT NULL
-                   AND i.done >= i.expected""".formatted(items, records,
-                failures, FailureStore.State.OPEN_SQL);
+                   AND %5$s""".formatted(items, records, failures,
+                FailureStore.State.OPEN_SQL, condition);
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement select = connection.prepareStatement(sql))
         {
@@ -2117,7 +2192,8 @@ public final class StageRegistry
                 while (rows.next())
                 {
                     java.sql.Array versions = rows.getArray(6);
-                    due.add(new DueItem(new ItemProgress(
+                    java.sql.Timestamp completedAt = rows.getTimestamp(16);
+                    found.add(new Counted(new DueItem(new ItemProgress(
                             rows.getObject(1, UUID.class), rows.getLong(2),
                             rows.getLong(3), rows.getLong(4))
                             .withVersions(versions == null ? List.of()
@@ -2129,10 +2205,44 @@ public final class StageRegistry
                             .withGeneration(rows.getInt(14)),
                             rows.getBytes(5), rows.getString(8),
                             rows.getTimestamp(11).toInstant(),
-                            rows.getBoolean(15)));
+                            rows.getBoolean(15)),
+                            completedAt == null ? null
+                                    : completedAt.toInstant()));
                 }
             }
-            return due;
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Notes that an item's records are all here but the end the stage
+     * before sends for it never came (STAGES.md §13.2), for that stage to
+     * send it again ({@link ItemEndResender}). The first time is kept; an
+     * item whose total is known isn't marked.
+     *
+     * @param itemId the item's id
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public void wantTotal(UUID itemId)
+    {
+        String sql = """
+                UPDATE %s
+                   SET total_wanted_at = COALESCE(total_wanted_at,
+                                                  clock_timestamp())
+                 WHERE stage = ? AND item_id = ? AND expected IS NULL"""
+                .formatted(items);
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement update = connection.prepareStatement(sql))
+        {
+            update.setQueryTimeout(queryTimeoutSeconds);
+            update.setString(1, stage);
+            update.setObject(2, itemId);
+            update.executeUpdate();
         }
         catch (SQLException failure)
         {

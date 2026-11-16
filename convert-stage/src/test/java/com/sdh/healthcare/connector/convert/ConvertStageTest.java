@@ -41,6 +41,7 @@ import com.sdh.healthcare.connector.record.RecordReconciler;
 import com.sdh.healthcare.connector.record.RecordStageProcessor;
 import com.sdh.healthcare.connector.record.SourceInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.ItemEndResender;
 import com.sdh.healthcare.connector.stage.StageRegistry;
 import com.sdh.healthcare.connector.stage.StageWorker;
 import io.opentelemetry.api.OpenTelemetry;
@@ -734,12 +735,27 @@ class ConvertStageTest
             Telemetry.install(OpenTelemetry.noop());
         }
         assertThat(sentOf("item.converted")).isZero();
+        // Marked for the split stage, which finds it here and sends its
+        // item.split again (STAGES.md §13.2).
+        List<UUID> asked = new ArrayList<>();
+        ItemEndResender split = ItemEndResender.of(
+                postgres.getPostgresDatabase(), schema, "split", itemId ->
+                {
+                    asked.add(itemId);
+                    return true;
+                }, Duration.ofSeconds(10));
+        assertThat(split.resend()).isOne();
+        assertThat(asked).containsExactly(item);
 
         ItemSplit total = new ItemSplit(item, "claims", 2, 0, 20, "digest",
                 null, null, null, SPLIT_AT, SPLIT_AT);
         assertThat(worker.handle(List.of(received(total))))
                 .isEqualTo(BatchHandler.Outcome.DONE);
         assertThat(sentOf("item.converted")).isEqualTo(1);
+        assertThat(split.resend()).isZero();
+        // And this stage's own end, sent again for the transform stage.
+        assertThat(worker.resendEnd(item)).isTrue();
+        assertThat(sentOf("item.converted")).isEqualTo(2);
         OutboundMessage stored = sent.stream()
                 .filter(message -> message.type().wireName()
                         .equals("record.stored"))

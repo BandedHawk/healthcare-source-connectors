@@ -82,7 +82,7 @@ class StagePropertiesTest
             StageProperties.Claim claim, int consumers)
     {
         return new StageProperties(input, output, dlq, 4, consumers, claim,
-                "sdh_stage",
+                "sdh_stage", null,
                 Duration.ofSeconds(30), null, -1, Duration.ofMinutes(1),
                 new StageProperties.TableSettings(null, null, null, null,
                         null),

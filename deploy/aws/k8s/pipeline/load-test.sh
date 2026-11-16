@@ -419,7 +419,7 @@ if [[ -n "$outage_state" ]]; then
     "$((${last_change[transformed]:-0} - (restored_at - t0)))s from the restart to the last item transformed"
   say "  what the reconcilers did (audit events, all pods since the restart):"
   for e in stage.records_recovered stage.item_completion_recovered stage.item_total_missing \
-      stage.placement_unknown stage.reconcile_deferral_capped split.recovered; do
+      stage.placement_unknown stage.reconcile_deferral_capped split.recovered stage.item_end_resent; do
     c=0
     for ns in "$N" sdh-fhir; do
       for pod in $(kubectl -n "$ns" get pods -o name 2>/dev/null); do
@@ -427,6 +427,13 @@ if [[ -n "$outage_state" ]]; then
       done
     done
     say "    $e: $c"
+  done
+  # From the registries, so it doesn't depend on which pods are still running: the items whose end a stage's
+  # reconciler asked the stage before to send again (STAGES.md §13.2), and how many of those ends came.
+  for s in convert transform; do
+    say "  ends asked for again at $s: $(db "SELECT count(*) || ', ' || count(expected) || ' came'
+      FROM ${s}_$PREFIX.stage_item WHERE item_id IN ($run_items) AND total_wanted_at IS NOT NULL" \
+      2>/dev/null || echo '?')"
   done
 fi
 copies="$(db "SELECT count(*) FROM split_$PREFIX.split_copy WHERE noted_at >= '$t0_db'" 2>/dev/null || echo '?')"

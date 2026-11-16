@@ -294,6 +294,35 @@ public final class ItemProcessor
     }
 
     /**
+     * Sends an item's end again, as it was sent, for the convert stage,
+     * which never received it (STAGES.md §13.2): {@code item.split}, or
+     * {@code item.progress} while a failure is open, as the fail store
+     * counts them. Its completion isn't counted again, so the message is
+     * the one sent, and the convert stage drops a repeat. Nothing is
+     * audited as ended again.
+     *
+     * @param itemId the item
+     * @param digest its digest, from landing
+     * @param refs   what landing kept about it
+     * @return true if it was sent; false if its splitting hasn't ended
+     * @throws Exception if the store or the broker fails
+     */
+    public boolean resendEnd(UUID itemId, String digest, LandedRefs refs)
+            throws Exception
+    {
+        Optional<Checkpoint> checkpoint = pipeline.checkpoint(itemId);
+        if (checkpoint.isEmpty()
+                || checkpoint.get().state() != Checkpoint.State.COMPLETED
+                && checkpoint.get().state() != Checkpoint.State.FAILED)
+        {
+            return false;
+        }
+        announce(checkpoint.get(), new Landing(digest, refs),
+                endedAt(itemId));
+        return true;
+    }
+
+    /**
      * The items whose splitting has ended one of whose failures changed
      * since their end was sent (an operator's decline or reopen), for a
      * pod to send their ends again with {@link #reannounce} (STAGES.md

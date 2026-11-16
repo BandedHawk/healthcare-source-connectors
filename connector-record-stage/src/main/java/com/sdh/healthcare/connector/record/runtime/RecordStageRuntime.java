@@ -36,6 +36,7 @@ import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.sdh.healthcare.connector.stage.DrainGate;
+import com.sdh.healthcare.connector.stage.ItemEndResender;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
@@ -290,12 +291,17 @@ public final class RecordStageRuntime implements AutoCloseable
                                     reconcile.backlogQuiet(),
                                     reconcile.maxDeferral()))
                     : null;
+            ItemEndResender resender = ItemEndResender.of(dataSource,
+                    stage.nextRegistrySchema(), stageName, worker::resendEnd,
+                    DATABASE_WAIT);
             CommonSettings.Lease lease = settings.lease();
             StageDuties duties = new StageDuties(leases, stageName,
                     settings.connectorId(),
                     new LeaseKeeper.Settings(lease.ttl(),
                             lease.renewInterval(), lease.safetyMargin()),
-                    reconciler == null ? null : reconciler::reconcile,
+                    StageDuties.Reconciler.both(
+                            reconciler == null ? null : reconciler::reconcile,
+                            resender == null ? null : resender::resend),
                     reconcile.interval(),
                     (committer, dutiesFatal) -> new MaintenanceScheduler(
                             committer, maintenanceSettings,

@@ -429,6 +429,48 @@ class ItemProcessorTest
     }
 
     /**
+     * An item's end sent again for the convert stage, which never received
+     * it (STAGES.md §13.2), is the {@code item.split} sent, unchanged, and
+     * isn't audited as ended again; an item not split has nothing sent.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void sendsAnItemsEndAgainUnchanged() throws Exception
+    {
+        InMemoryLogRecordExporter events = InMemoryLogRecordExporter.create();
+        try (OpenTelemetrySdk sdk = OpenTelemetrySdk.builder()
+                .setLoggerProvider(SdkLoggerProvider.builder()
+                        .addLogRecordProcessor(
+                                SimpleLogRecordProcessor.create(events))
+                        .build())
+                .build())
+        {
+            Telemetry.install(sdk);
+            LandedItem item = land(csv(3));
+            ItemProcessor processor = processor();
+            assertThat(processor.resendEnd(item.itemId(), item.digest(),
+                    LandedRefs.NONE)).isFalse();
+            process(processor, item);
+            ConnectorMessage first = messages().getLast();
+            assertThat(first).isInstanceOf(ItemSplit.class);
+
+            publisher.sent.clear();
+            assertThat(processor.resendEnd(item.itemId(), item.digest(),
+                    LandedRefs.NONE)).isTrue();
+            assertThat(messages()).containsExactly(first);
+            assertThat(events.getFinishedLogRecordItems().stream()
+                    .filter(event -> "sdh.audit.stage.item_completed"
+                            .equals(event.getEventName())))
+                    .hasSize(1);
+        }
+        finally
+        {
+            Telemetry.install(OpenTelemetry.noop());
+        }
+    }
+
+    /**
      * Splitting an item times each of its steps as a phase of the split
      * stage (docs/PERFORMANCE.md §10): the checkpoints, the records, the
      * file, the commit and its wait, and the sends.

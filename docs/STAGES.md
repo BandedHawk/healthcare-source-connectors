@@ -349,7 +349,8 @@ intake has results on.
   item whose records are all stored and whose total came, but which wasn't completed, the batch that would have
   completed it lost, is completed (`stage.item_completion_recovered`). An item whose `item.split` never arrived
   can't be completed this way (its producer's references are in landing); it is audited
-  (`stage.item_total_missing`, once per item), for an operator to recover by hand (§13.2).
+  (`stage.item_total_missing`, once per item) and, since 2026-11-16, marked for the split stage to send its
+  `item.split` again (§13.2).
 - **The reconciler's watermark** (decided 2026-11-07 with the user). Each run looks back `sdh.reconcile.lookback`
   (2 days), so a record split longer ago than that, whose `record.split` was lost while the stage was down (an SQS
   queue keeps messages 4 days by default; a queue purged during an outage), was never looked at again. So the
@@ -570,7 +571,9 @@ Each step builds and passes its tests before the next.
 
 - **A lost `item.split`** (§9). Resolved 2026-11-06: found by a query over the stages' `stage.item_completed`, and
   recovered by hand by replaying the item (§13.2). No automatic recovery: a message lost after the broker took it
-  points to a larger problem with the infrastructure, which needs an operator anyway (decided).
+  points to a larger problem with the infrastructure, which needs an operator anyway (decided). **Changed
+  2026-11-16 (revision (do)):** recovered automatically, by the stage that sent it (§13.2), after an outage that
+  lost the queued messages left 973 items for an operator.
 - **Replay tooling** (§13.2): an admin command per stage that sends all its output for a completed item again,
   with the rules of §13.2. Landing's, `replay --item-id`, built 2026-11-07; the split and convert stages' the
   same day (revision (cc)).
@@ -690,10 +693,27 @@ so recovery is by hand (decided 2026-11-06).
   `sdh.reconcile.lookback` (§9), and, after an outage longer than that, for every day since its watermark
   (§13.4). So is one whose claim a pod left to expire without storing it, and an item whose records are all
   stored, with its total, is completed (built 2026-11-07, §10).
-- Nothing else. A lost `item.split` (its producer's references are known only to landing), and anything a stage
-  sent on after it, such as `record.stored`, `item.converted` or `item.result`, stay lost: a stage re-sends only
-  what it stored and hasn't yet sent, and completes an item once. Corrected 2026-11-07: this said a lost
-  `item.landed` stayed lost too, but the split stage's reconciler has always recovered it.
+- A lost `record.stored` is rebuilt the same way by the transform stage's reconciler, from `records`.
+- **A lost item end, `item.split` or `item.converted`, is sent again by the stage that sent it (changed
+  2026-11-16, decided with the user; revision (do)).** Run on a 10-minute outage that deleted the queued messages
+  (docs/PERFORMANCE.md §3.6), recovery by hand left 973 items for an operator, and `reprocess` would have run them
+  all again. Now the next stage's reconciler, finding an item whose records are all there but whose end never
+  came, marks its row (`stage_item.total_wanted_at`) as well as auditing `stage.item_total_missing`; and the stage
+  before, on its duties pod after its own reconciler, reads those marks from the next stage's registry
+  (`sdh.stage.next-registry-schema`, in the same database: every stage's role acts as `sdh_catalog`, so no grant
+  is needed) and sends each item's end again, `stage.item_end_resent`. It is the end sent before, under the same
+  ID: split rebuilds `item.split` from its checkpoint, unchanged and not numbered as a new completion; a record
+  stage rebuilds its item end from its registry row, with the counts and completion number it was sent with and
+  the time the registry noted (moments after the first was made). The next stage drops a repeat. An item still
+  open at the stage before (`item.progress`) has its last `item.progress` sent again; one not yet ended there is
+  left, as its end follows when it ends. The mark is cleared by the total arriving. The resend waits on the next
+  stage's reconciler, so it waits out that stage's backlog the same way (§9), and a run sends at most 1,000.
+- Nothing else. Anything a stage sent on after an item's end, such as `item.result` to a producer, stays lost: a
+  stage re-sends only what it stored and hasn't yet sent, and completes an item once. Corrected 2026-11-07: this
+  said a lost `item.landed` stayed lost too, but the split stage's reconciler has always recovered it.
+- Not covered: an item with no records at the next stage at all (an empty file, or one whose every record
+  failed at the stage before), whose end the next stage's reconciler can't see, since it starts from the records
+  committed in its source. Its end, if lost, is still found by the audit query below and recovered by hand.
 
 **Recognising it.** Every stage audits the end of an item the same way, once: `stage.item_completed`, with
 `sdh.stage`, `sdh.item_id`, `sdh.result` (`COMPLETED` or `FAILED`), `sdh.count` (its records) and
@@ -825,8 +845,9 @@ this section is what the operator needs to know to recognise it and follow it.
   all is worth comparing with `stage.batch_failed` at the time.
 - `stage.placement_unknown` per failed record rebuilt (§13.3): each needs placing by hand if the producer is to
   be told where it was.
-- `stage.item_total_missing`: an item whose records are all converted but whose `item.split` never came; replay
-  it from landing (§13.2). During catch-up this can appear for an item whose `item.split` is still queued behind its
+- `stage.item_total_missing`: an item whose records are all converted but whose `item.split` never came; since
+  2026-11-16 the split stage sends it again (`stage.item_end_resent`, §13.2), so act only if that doesn't follow
+  within a reconcile interval or two (§13.2). During catch-up this can appear for an item whose `item.split` is still queued behind its
   records; it is reported once, and needs action only if the item still hasn't completed (no
   `stage.item_completed{stage=convert}`) once the queue has drained.
 - **The outage against the brokers' retention.** Kafka and Pub/Sub keep 7 days by default, SQS 4, Service Bus a

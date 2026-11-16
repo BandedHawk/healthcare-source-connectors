@@ -30,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -666,6 +667,47 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                                     failure.getClass().getSimpleName()));
             return Outcome.RETRY;
         }
+    }
+
+    /**
+     * Sends an item's end again for the stage after, which never received
+     * it (STAGES.md §13.2; {@link ItemEndResender}): the item-complete
+     * message of an item completed here, made again with the counts and
+     * number it was completed with, and the time the registry noted; or,
+     * for an item whose failures here are open, its last {@code
+     * item.progress}. The message's id is the one sent, so a stage that has
+     * it drops the repeat.
+     *
+     * @param itemId the item
+     * @return true if one was sent; false if neither has been sent here
+     * @throws InterruptedException if interrupted
+     * @throws ExecutionException   if the broker refused it
+     * @throws TimeoutException     if the broker didn't take it in time
+     */
+    public boolean resendEnd(UUID itemId) throws InterruptedException,
+            ExecutionException, TimeoutException
+    {
+        Optional<StageRegistry.Ended> ended = registry.ended(itemId);
+        if (ended.isPresent())
+        {
+            StageRegistry.DueItem due = ended.get().due();
+            ItemProgress progress = due.progress().withTotal(total(due));
+            send(output, List.of(outbound(processor.itemCompleteAgain(
+                    progress, ended.get().completedAt()))));
+            return true;
+        }
+        for (StageRegistry.DueItem due : registry.due(List.of(itemId)))
+        {
+            ItemProgress progress = due.progress().withTotal(total(due));
+            if (due.progressKey() != null && !progress.complete()
+                    && !interrupted(progress))
+            {
+                send(output, List.of(outbound(
+                        processor.itemProgress(progress))));
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

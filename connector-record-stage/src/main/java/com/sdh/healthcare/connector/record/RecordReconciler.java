@@ -44,10 +44,12 @@ import org.slf4j.LoggerFactory;
  * <p>
  * An item whose records are all here but whose item end never arrived
  * can't be completed: its producer's references come only with it. It is
- * audited, {@code stage.item_total_missing}, once per
- * item while this pod holds the duties (again after a restart), for an
- * operator to recover by hand (STAGES.md §13.2). Runs on the pod that
- * holds the duties lease.
+ * marked in the registry ({@link StageRegistry#wantTotal}), for the stage
+ * before to send its end again ({@link
+ * com.sdh.healthcare.connector.stage.ItemEndResender}), and audited, {@code
+ * stage.item_total_missing}, once per item while this pod holds the duties
+ * (again after a restart) (STAGES.md §13.2). Runs on the pod that holds the
+ * duties lease.
  * <p>
  * The registry keeps how far it has checked ({@link StageRegistry#checkedTo}),
  * so that after an outage longer than the lookback, the days in between are
@@ -406,6 +408,8 @@ public final class RecordReconciler
                 }
                 else
                 {
+                    // For the stage before to send it again (§13.2).
+                    registry.wantTotal(itemId);
                     if (reportedMissing.add(itemId))
                     {
                         Telemetry.get().auditWarn(

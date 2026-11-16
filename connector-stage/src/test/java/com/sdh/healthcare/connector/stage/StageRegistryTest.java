@@ -424,6 +424,47 @@ class StageRegistryTest
     }
 
     /**
+     * An item whose records are here but whose total never came is marked
+     * for the stage before, which finds it in this registry until the
+     * total comes (STAGES.md §13.2); an item with its total isn't marked.
+     * Once completed, the item is found with the counts and number its end
+     * was sent with.
+     */
+    @Test
+    void marksAMissingTotalAndKeepsAnEndedItemsCounts()
+    {
+        ItemEndResender before = new ItemEndResender(
+                StageTestSupport.database(), schema, "convert", "split",
+                itemId -> true, Duration.ofSeconds(10));
+        first.claim("r1", item, LONG);
+        first.store(List.of(entry("r1", false)));
+        assertThat(before.wanted()).isEmpty();
+        first.wantTotal(item);
+        first.wantTotal(item);
+        assertThat(before.wanted()).containsExactly(item);
+        assertThat(first.ended(item)).isEmpty();
+
+        byte[] total = {1, 2, 3};
+        first.expect(item, 1, total);
+        assertThat(before.wanted()).isEmpty();
+        first.wantTotal(item);
+        assertThat(before.wanted()).isEmpty();
+        assertThat(first.ended(item)).isEmpty();
+
+        first.markCompleted(item);
+        assertThat(first.ended(item)).hasValueSatisfying(ended ->
+        {
+            assertThat(ended.due().progress()).isEqualTo(
+                    new ItemProgress(item, 1, 1, 0)
+                            .withVersions(List.of("v1")));
+            assertThat(ended.due().progress().nextCompletion()).isOne();
+            assertThat(ended.due().total()).isEqualTo(total);
+            assertThat(ended.completedAt()).isNotNull();
+        });
+        assertThat(first.ended(UUID.randomUUID())).isEmpty();
+    }
+
+    /**
      * The same content in another item is a record of that item: claimed,
      * stored and counted there too.
      */

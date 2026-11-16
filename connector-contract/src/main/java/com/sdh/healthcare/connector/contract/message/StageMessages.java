@@ -18,6 +18,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef
 import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -112,6 +113,25 @@ public enum StageMessages
     public String stage()
     {
         return stage;
+    }
+
+    /**
+     * The name of the record stage that takes a stage's output.
+     *
+     * @param stage a stage's name, such as {@code split}
+     * @return the next stage's name, such as {@code convert}; empty if no
+     *         record stage follows it
+     */
+    public static Optional<String> after(String stage)
+    {
+        for (StageMessages next : values())
+        {
+            if (next.upstream.equals(stage))
+            {
+                return Optional.of(next.stage);
+            }
+        }
+        return Optional.empty();
     }
 
     /**

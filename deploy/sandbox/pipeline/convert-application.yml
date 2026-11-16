@@ -23,6 +23,9 @@ sdh:
       type: kafka
       uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}"
     registry-schema: convert_${ICEBERG_PREFIX}
+    # The next stage's registry, where its reconciler marks items whose end from this stage never came, for this
+    # stage to send it again (STAGES.md §13.2, 2026-11-16).
+    next-registry-schema: transform_${ICEBERG_PREFIX}
     # Reads split_records and stores in records (the convert stage's defaults), both in the silver bucket: the
     # sink has no catalog of its own, so it shares the source's (STAGES.md §17.7).
     source:

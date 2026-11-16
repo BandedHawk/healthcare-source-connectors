@@ -419,6 +419,35 @@ public final class ItemSplitter
     }
 
     /**
+     * Sends an item's end again, as it was sent, for the convert stage,
+     * which never received it (STAGES.md §13.2), under its lease.
+     *
+     * @param itemId the item
+     * @return true if it was sent; false if its splitting hasn't ended, or
+     *         another pod holds its lease now, so is at work on it
+     * @throws InterruptedException if interrupted while waiting
+     * @throws Exception            if the store or the broker fails
+     */
+    public boolean resendEnd(UUID itemId) throws Exception
+    {
+        permits.acquire();
+        try (LeaseKeeper lease = lease(itemId))
+        {
+            Landed landed = landed(itemId);
+            return processor.resendEnd(itemId, landed.digest(),
+                    landed.refs());
+        }
+        catch (LeaseHeldException held)
+        {
+            return false;
+        }
+        finally
+        {
+            permits.release();
+        }
+    }
+
+    /**
      * The items whose ends are to be sent again, their failures changed
      * since: see {@link ItemProcessor#changedEnds}.
      *

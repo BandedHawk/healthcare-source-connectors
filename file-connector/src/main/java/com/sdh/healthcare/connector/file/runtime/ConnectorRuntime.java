@@ -51,6 +51,7 @@ import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
 import com.sdh.healthcare.connector.stage.DrainGate;
+import com.sdh.healthcare.connector.stage.ItemEndResender;
 import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.StageProperties;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
@@ -441,9 +442,15 @@ public final class ConnectorRuntime implements AutoCloseable
                     ? new SplitReconciler(checkpoints, splitter, landedItems,
                             intake, reconcile.grace(), clock)
                     : null;
+            // Ends the convert stage never received, sent again (§13.2).
+            ItemEndResender resender = ItemEndResender.of(dataSource,
+                    stage.nextRegistrySchema(), "split", splitter::resendEnd,
+                    Duration.ofSeconds(10));
             StageDuties duties = new StageDuties(leases, "split",
                     properties.connectorId(), leaseSettings,
-                    reconciler == null ? null : reconciler::reconcile,
+                    StageDuties.Reconciler.both(
+                            reconciler == null ? null : reconciler::reconcile,
+                            resender == null ? null : resender::resend),
                     reconcile.interval(),
                     (committer, dutiesFatal) -> new MaintenanceScheduler(
                             committer, maintenanceSettings,

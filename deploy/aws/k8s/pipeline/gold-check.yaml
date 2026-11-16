@@ -17,7 +17,11 @@ spec:
   ttlSecondsAfterFinished: 7200
   activeDeadlineSeconds: 5400
   template:
-    metadata: { labels: { app: gold-check } }
+    # Not on a node the cluster autoscaler empties: with backoffLimit 0, an evicted check fails without a word
+    # (2026-11-16, its burst node was removed four minutes into the read).
+    metadata:
+      labels: { app: gold-check }
+      annotations: { cluster-autoscaler.kubernetes.io/safe-to-evict: "false" }
     spec:
       serviceAccountName: gold-reader
       automountServiceAccountToken: false

@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.stage;
 
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -116,6 +117,23 @@ public interface StageProcessor<O>
      *         is dropped
      */
     ConnectorMessage itemComplete(ItemProgress progress);
+
+    /**
+     * The message that said an item was done at this stage, made again to
+     * be sent again (STAGES.md §13.2): as {@link #itemComplete} made it,
+     * with the time the registry noted it completed (moments after the
+     * first was made). By default, {@link #itemComplete}'s.
+     *
+     * @param progress    the item and its counts, numbered as when it was
+     *                    completed
+     * @param completedAt when it was completed
+     * @return the message, with the id, counts and number of the one sent
+     */
+    default ConnectorMessage itemCompleteAgain(ItemProgress progress,
+            Instant completedAt)
+    {
+        return itemComplete(progress);
+    }
 
     /**
      * The message that says an item has had each of its records handled

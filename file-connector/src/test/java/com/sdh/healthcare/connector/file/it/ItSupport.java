@@ -110,6 +110,8 @@ final class ItSupport
         settings.put("sdh.stage.input.uri",
                 "kafka:sdh.landed?brokers=localhost:1&groupId=split");
         settings.put("sdh.stage.registry-schema", "sdh_split");
+        // Ends the convert stage never received, sent again (§13.2).
+        settings.put("sdh.stage.next-registry-schema", "sdh_convert");
         settings.put("sdh.stage.ready-port", "0");
         settings.put("sdh.stage.output.type", "camel");
         settings.put("sdh.stage.output.uri", output);

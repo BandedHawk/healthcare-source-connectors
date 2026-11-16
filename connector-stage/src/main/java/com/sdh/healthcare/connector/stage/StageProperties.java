@@ -32,6 +32,12 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param claim          how records are claimed
  * @param registrySchema the Postgres schema of the stage's registry, in
  *                       the lease database
+ * @param nextRegistrySchema the schema of the next stage's registry, in the
+ *                       same database, where its reconciler marks items
+ *                       whose end from this stage never came, for this
+ *                       stage to send it again (STAGES.md §13.2); unset
+ *                       for the last stage, or to leave them to an
+ *                       operator
  * @param sendTimeout    the longest to wait for the broker to take a
  *                       message
  * @param reprocess      the stage's own input, to send reprocess messages
@@ -56,6 +62,7 @@ public record StageProperties(ReceiveProperties input,
         @DefaultValue("4") int concurrency,
         @DefaultValue("1") int consumers, @DefaultValue Claim claim,
         @DefaultValue("sdh_stage") String registrySchema,
+        String nextRegistrySchema,
         @DefaultValue("30s") Duration sendTimeout,
         CommonSettings.Queue reprocess,
         @DefaultValue("8081") int readyPort,

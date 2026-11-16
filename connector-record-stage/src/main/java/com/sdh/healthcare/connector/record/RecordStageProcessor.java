@@ -42,6 +42,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -773,6 +774,32 @@ public final class RecordStageProcessor
     @Override
     public ConnectorMessage itemComplete(ItemProgress progress)
     {
+        return itemEnd(progress, clock.instant());
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @return {@code item.converted} or {@code item.transformed}, as it was
+     *         sent
+     */
+    @Override
+    public ConnectorMessage itemCompleteAgain(ItemProgress progress,
+            Instant completedAt)
+    {
+        return itemEnd(progress, completedAt);
+    }
+
+    /**
+     * An item's end at this stage.
+     *
+     * @param progress    the item and its counts
+     * @param completedAt when it was completed
+     * @return the message
+     */
+    private ConnectorMessage itemEnd(ItemProgress progress,
+            Instant completedAt)
+    {
         ResultReporter.Facts facts = ResultReporter.Facts.of(
                 progress.total());
         boolean resultsSent = results != null && facts != null
@@ -780,7 +807,7 @@ public final class RecordStageProcessor
                         && end.resultsSent();
         return messages.itemEnd(progress.itemId(),
                 facts == null ? UNKNOWN_INTAKE : facts.intake(),
-                progress.done(), progress.unresolved(), clock.instant(),
+                progress.done(), progress.unresolved(), completedAt,
                 progress.versions(), progress.nextCompletion(),
                 progress.generation(), facts == null ? null : facts.sameAs(),
                 facts == null ? null : facts.producerRef(),

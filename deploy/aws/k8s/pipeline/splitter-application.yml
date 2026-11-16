@@ -37,6 +37,9 @@ sdh:
       type: kafka
       uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}"
     registry-schema: split_${ICEBERG_PREFIX}
+    # The next stage's registry, where its reconciler marks items whose end from this stage never came, for this
+    # stage to send it again (STAGES.md §13.2, 2026-11-16).
+    next-registry-schema: convert_${ICEBERG_PREFIX}
   split:
     format: ccda
     # 8 Kafka consumers, each with batches of 2: 16 items at once, and a slow item holds back only its own batch
