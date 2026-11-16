@@ -946,6 +946,53 @@ What it showed, beyond §2's predictions:
     **For 100 documents/s** at 5.3 a pod: ~19 transform pods, 21 with headroom, ~21 nodes, ~$3.90 per million
     documents of transform nodes on-demand (from ~$4.50); 15M documents ~42 hours, ~$59 of transform
     nodes. 21 pods × 2 consumers fit the 48 partitions.
+  - **Where a transform record's CPU goes** (2026-11-16, locally: the 30 test documents mapped by
+    `MemoryProbe`, 4 at a time, 1 GiB heap, Java Flight Recorder for 60 s, 19,428 samples; a scratch probe
+    timing each document alone). On AWS the mapping is ~70% of a record's 0.30 CPU-seconds: 0.54 s of a
+    record's wall time, 4 at once on 1.6 CPU, against a pod's 0.19 s a record (§10 above; the read 0.11 s,
+    commit, register and seal per batch the rest). Locally it is 0.08–0.10 CPU-s a record, so a Graviton
+    core does the same work ~2.5 times slower than this x86 one. The cost **grows linearly with a record's
+    size**, 2.5–4 ms of CPU per KB of its JSON for those that map (387 ms for the largest, 154 KB): no
+    mapping is quadratic, and records that fail a check stop early (1–200 ms). **95% of the samples are the
+    Whistle runtime calling functions**, and no one line takes more than 5%; the runtime's own costs, by
+    the samples in each (self time unless said):
+    - choosing an overload on every call: `DefaultOverloadSelector.select` and `distance` with the lookup
+      in `OverloadLookupCache`, ~17% with what they call, though the result is the same for a call site
+      given the same kinds of arguments;
+    - `DefaultClosure.create`, 8%: a new `FunctionReference` and argument array for each call;
+    - `WhistleFunction.builtinSink` and `shortCircuit`, ~10%: the target registry and the argument
+      modifiers looked up again for each call, though the call's proto fixes them;
+    - `Container.isNullOrEmpty`, ~5%: it copies a container's field names into a sorted set
+      (`DefaultContainer.fields`) to see whether it has any;
+    - variables looked up through `HashMap`s in each stack frame, ~5%; reading the record's JSON, ~4%.
+
+    So the runtime, not the US Core set, is where to save. The estimate before building was ~25–30% off the
+    mapping (~20% off a record).
+
+    **Built and measured** (2026-11-16, in healthcare-data-harmonization's runtime):
+    - emptiness answered without a copy (`DefaultContainer.isNullOrEmpty`);
+    - a variadic overload's distance worked out in place, with no streams or copies;
+    - a single overload that takes any `Data` of the call's number taken without scoring;
+    - a function with no argument modifiers skipping `shortCircuit` and the modifier binding;
+    - one package's overloads returned as a read-only view rather than a union.
+
+    Caching each call site's overload was tried, as a hand-written lookup key, and was slower than the
+    record it replaced, so it was dropped. Locally, one document at a time over the 30 took ~18% less CPU
+    (2,322–2,408 ms to 1,939–2,030 ms); `MemoryProbe`, 4 at once, took ~12% less a record (38.5 to
+    43.0–44.0 records/s on the same CPU).
+
+    On AWS, the backlog test (load-20261116T221309Z, against load-20261116T004622Z) gave:
+    - 23.1 records/s at 4 pods (21.2), 5.78 a pod (5.3);
+    - ~0.25 CPU-s a record (0.30): 5.83 cores for 23.1 records/s, ~16% less;
+    - the 7,200-record backlog cleared in 403 s (494);
+    - exactly once, every item in gold, and the gold check passed (its Spot node was taken three times; the
+      Job's replacement pods carried it through).
+
+    The pods still waited for a CPU 54% of the time on the burst nodes. At 5.8 records/s a pod, 100
+    documents/s needs ~18 transform pods (21 before). Separately, the burst pool mixes Graviton2 (t4g, m6g),
+    3 (m7g) and 4 (m8g) nodes; the later ones are faster a core, and a t4g node at full CPU spends credits
+    beyond its baseline, billed on top in unlimited mode (EC2's default for T instances): neither is in
+    `measure.sh`'s cost.
 
 ## 11. Order of work
 
@@ -957,7 +1004,7 @@ Each step is measured before the next, and each is useful alone.
 | 0a | The outage mode of the load test (§3.6), run on the current code; find the failover duplicate | recovery checked before anything changes it. Duplicate found (the re-announce, §3.6 point 1); plain outage passed 2026-11-13; message-losing outage run 2026-11-16 (§3.6): landing and split whole, 973 items left at convert and transform; lost item ends now sent again (DESIGN.md (do)), rerun the same day: 0 left, all 2,430 to gold, 2,735 s after the restart; 231 ends resent; gold check passed |
 | 1 | Direct reads by location (§3.2), housekeeping (§3.3), split concurrency and partitions (§3.4, part) | split no longer slows as tables grow; split and convert at pod count × per-pod rate. Reads by location built and measured 2026-11-13 (DESIGN.md revision (db), §10): 10× the rate, p99 58.5 s, split flat as tables grow. Housekeeping, split concurrency (4 per pod) and 24 partitions built and measured 2026-11-13 (revisions (dc), (dd), §10): landing (~1.2 items/s) is now the limit; on a backlog the stages after it reach ~3.9 documents/s; no item bucket (§3.3); expiry doesn't yet follow the consumers (§3.6, 4) |
 | 2 | Group commit in every stage (§3.1) | landing from ~10 to hundreds of items/s; ~100× fewer snapshots. Built 2026-11-13 (DESIGN.md revision (de)): landing groups small items listed from a source (500 a commit, 64 MB, 1 s), split commits concurrent items together; the ledger is written after the items, not before. Measured 2026-11-14 (§10): landing ~10 items/s (was 1.2) in 2 commits for 1,020 items; 1.84 documents/s overall; split (1.9 items/s on 2 pods) is now the limit; a failover re-announced the whole last group, fixed in revision (df) |
-| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace; transform clearing a 7,200-document backlog at 2, 4 and 6 pods (§10): 0.32 CPU-s a record at every count, 4.3–5.0 records a second a pod with work, so ~25 pods (~25 nodes, ~$4.70 per million documents) and 48 partitions for 100 documents/s; the test's identical copies share a Kafka key, so clearing stopped speeding up at 4 pods; two batches at once a transform pod (revision (dn)): 18.3 records a second at 4 pods (14.1), 4.6 a pod, all of its 1.6 CPU, so ~24 pods for 100 documents/s; with 48 partitions and distinct test copies, the pods evenly fed: 21.2 records a second at 4 pods, 5.3 a pod, so ~21 pods (~$3.90 per million documents) for 100 documents/s |
+| 3 | Pod signing keys (§3.5) | removes the ~45 documents/s KMS ceiling. Built 2026-11-13 (DESIGN.md revision (dg)): the statement in every message, revocation by statement ID. With split pods taking several batches at once (§3.4, revision (dh)), since split, not KMS, was the limit. Measured 2026-11-14 (§10): 4.50 documents/s without a failover (1.84 before), 3 KMS signatures for 16,010 messages, $27 per million documents; split still the limit (~2.8 items/s a pod); a failover's repeats each read `split_records`, fixed in revision (di). Split's steps timed and an item of one chunk read in one open of its file (revision (dj), §10): 5.12 documents/s, split 2.9 s an item (4.7); the pods are short of CPU (a thread waiting for one up to 80% of the time); with CPU requests that match, 5.51 documents/s, split's CPU wait 0.25–0.32; the summary read in two requests and a third split pod (revision (dk)), 6.81 documents/s, transform now the limit; transform at 4 records a pod on 1.6 CPU, 8.37 documents/s at ~$20 per million documents (from $18), split the limit again; split's commit as one fast append with gzipped metadata (revision (dl)), no faster: 31% of its commits conflict between pods; split's commits through one queue across pods (revision (dm), §3.7): under 2% retried, split 1.38 s an item (1.85), 6.91–8.23 documents/s, landing and transform now set the pace; transform clearing a 7,200-document backlog at 2, 4 and 6 pods (§10): 0.32 CPU-s a record at every count, 4.3–5.0 records a second a pod with work, so ~25 pods (~25 nodes, ~$4.70 per million documents) and 48 partitions for 100 documents/s; the test's identical copies share a Kafka key, so clearing stopped speeding up at 4 pods; two batches at once a transform pod (revision (dn)): 18.3 records a second at 4 pods (14.1), 4.6 a pod, all of its 1.6 CPU, so ~24 pods for 100 documents/s; with 48 partitions and distinct test copies, the pods evenly fed: 21.2 records a second at 4 pods, 5.3 a pod, so ~21 pods (~$3.90 per million documents) for 100 documents/s; the Whistle runtime's call overheads cut (§10, 2026-11-16): 23.1 records a second at 4 pods, ~0.25 CPU-s a record (0.30), so ~18 pods for 100 documents/s |
 | 4 | Concurrent fetch in the landing node and sharded intakes (§3.4) | landing beyond one node's serial rate. Part 1, concurrent reads and source deletes in the one landing node, built 2026-11-16 (DESIGN.md revision (dp)), measured the same day (§3.4): landing 30.9 items/s (~11), gold check passed, 15.1 documents/s overall (6.9–8.2), split the pace again; sealing a group's messages several at once and landing's CPU request 0.75 (revision (dq), §3.4): landing 60 items/s, split 24 items/s on 3 pods, gold check passed; transform (4 pods) now the pace, 14.4 documents/s; finishing at the source landing's largest step. Part 2, sharded intakes, not started |
 | 5 | SQL dialects and batched registry updates (§8) | database work per batch, not per record; runs on four databases |
 | 6 | Large documents (§9) | 100 MB documents through, with bounded memory |
