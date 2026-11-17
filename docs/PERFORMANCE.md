@@ -976,8 +976,15 @@ What it showed, beyond §2's predictions:
     - a function with no argument modifiers skipping `shortCircuit` and the modifier binding;
     - one package's overloads returned as a read-only view rather than a union.
 
-    Caching each call site's overload was tried, as a hand-written lookup key, and was slower than the
-    record it replaced, so it was dropped. Locally, one document at a time over the 30 took ~18% less CPU
+    Caching each call site's overloads was tried twice, and dropped both times:
+    - a hand-written lookup key was slower than the record it replaced;
+    - a map keyed by the compiled `FunctionCall` (2026-11-16, after the above) was 3% slower than the
+      record. Equal calls at different sites made it compare protos whole. Keyed by identity it was no
+      faster, because the map read itself, over thousands of sites, took ~5.6% of samples, as much as the
+      lookup it replaced.
+
+    The overload work left (~7% finding, ~7–8% choosing) would only go if each call kept its overload
+    itself: the runtime would have to evaluate a compiled tree rather than the protos, a larger change. Locally, one document at a time over the 30 took ~18% less CPU
     (2,322–2,408 ms to 1,939–2,030 ms); `MemoryProbe`, 4 at once, took ~12% less a record (38.5 to
     43.0–44.0 records/s on the same CPU).
 
