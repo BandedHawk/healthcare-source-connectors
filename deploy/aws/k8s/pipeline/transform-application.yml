@@ -22,7 +22,7 @@ sdh:
     # pod used 0.8–1.3 of its node's 2 vCPU; with six, 1.3–1.9, and 39% more records a second. 48 partitions
     # (poc.sh).
     concurrency: 6
-    # Two batches a pod at once, sharing those four threads: one batch's records are mapped while the other's
+    # Two batches a pod at once, sharing those six threads: one batch's records are mapped while the other's
     # commit (docs/PERFORMANCE.md §10, 2026-11-15). 4 pods × 2 consumers within the 48 partitions.
     consumers: 2
     input:

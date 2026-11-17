@@ -226,7 +226,7 @@ month, so the forecast alert catches it within days. Lowered from $250 on 2026-1
 | Concern | Choice | Rejected, and why |
 |---|---|---|
 | Kubernetes | EKS 1.37, standard support only (`upgrade_policy`: a version in extended support costs $0.60/hour) | k3s on EC2: no control-plane fee, but no second node for landing's standby |
-| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst`, 0–6 Spot (six arm64 `.large` types, three zones; on demand with `--on-demand-burst`), with Cluster Autoscaler | Karpenter or Auto Mode: more to set up, or a fee on every instance |
+| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst`, 0–6 Spot (five arm64 `.large` types, not `t4g`, whose surplus credits make it the dearest busy node: PERFORMANCE.md §10; three zones; on demand with `--on-demand-burst`), with Cluster Autoscaler | Karpenter or Auto Mode: more to set up, or a fee on every instance |
 | Postgres | `postgres:18.4` StatefulSet on a kept 10 GiB gp3 volume, snapshotted at each `down` | RDS: restarts itself after 7 days stopped, and is a second start/stop. Aurora Serverless v2: dearer while running. |
 | Kafka | 1 KRaft broker (`apache/kafka:4.2.2`) on a kept 10 GiB volume, RF 1 | MSK: ≥ $100/month, or about $540/month serverless |
 | Iceberg catalog | JDBC on that Postgres (tested) | Glue: not supported by the code. S3 Tables, Polaris: untested, or one more pod |

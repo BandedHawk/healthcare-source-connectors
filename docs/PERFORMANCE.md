@@ -1027,6 +1027,13 @@ What it showed, beyond §2's predictions:
       vCPU above its baseline, ~$0.05 an hour on top of its Spot price (~$0.02), for 2/3 of a Graviton3 core's
       work. m6g/m6gd (Graviton2, ~$0.023–0.027 Spot on 2026-11-16) cost less for the same speed; m7gd
       (~$0.027–0.037) does 1.5 times as much. `measure.sh` still prices every node as an on-demand t4g.large.
+      **Dropped** from the burst group the same day: five types now (`burst_instance_types`), m6g, m6gd, m7g,
+      m7gd and m8g, in three zones. The base nodes stay t4g.large on demand, where Postgres, Kafka and landing
+      run below or near the baseline. The first run with the five (C, below) got all four pods Spot m7gd.
+    - **Eight at once (run C, load-20261117T030928Z, 4 GiB):** no gain. 28.7 records a second at 4 pods,
+      7.18 a pod (six: 28.6, 7.15); 1.19–1.82 cores a pod (six: 1.26–1.94), CPU wait 0.71; backlog clear in
+      358 s (371); $20 per million documents (19). Exactly once, nothing left behind, gold check passed.
+      Six already fills the node's CPU; two more threads only queue for it, for 1 GiB more. **Six kept.**
 
 ## 11. Order of work
 

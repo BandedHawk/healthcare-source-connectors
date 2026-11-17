@@ -27,10 +27,12 @@ variable "base_instance_type" {
 
 # Every arm64 type with 2 vCPUs and 8 GiB, so the Cluster Autoscaler's idea of a node's size holds for any of
 # them. Three types in one zone found no Spot capacity on 2026-11-12: more types and zones give Spot more pools
-# to choose from.
+# to choose from. Not t4g.large (2026-11-17, docs/PERFORMANCE.md §10): busy, as a burst node is, it spends
+# surplus CPU credits beyond its 0.6 vCPU baseline, ~$0.05 an hour on top of its Spot price, which makes it the
+# dearest per record; m6g and m6gd are as fast for less.
 variable "burst_instance_types" {
   type    = list(string)
-  default = ["t4g.large", "m7g.large", "m6g.large", "m8g.large", "m7gd.large", "m6gd.large"]
+  default = ["m7g.large", "m6g.large", "m8g.large", "m7gd.large", "m6gd.large"]
 }
 
 # The burst nodes may be in any of these zones: they hold no volumes. The base nodes stay in var.zones.
