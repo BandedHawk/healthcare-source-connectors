@@ -288,13 +288,27 @@ print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" 
 
 # The paced feed: slice k is started SLICE*k/RATE seconds after t0, each in its own copier, so a slow one doesn't
 # hold the pace; it fails if any slice's copy failed. A slice's copy is tried up to 3 times, 10 s apart: this
-# machine's connection to S3 can drop for a minute (2026-11-17), and a copy that failed listing copied nothing. One
-# that failed part-way copies its objects again, landed as resends (item.duplicate_content), which the report shows.
+# machine's connection to S3 can drop for a minute (2026-11-17). A copy that failed listing copied nothing, and is
+# tried again whole; one that failed part-way tries again only the objects that failed, never one that was copied,
+# which landing may have landed and deleted already. An object whose copy "failed" may still have been written, its
+# answer lost, and so may one the CLI retried itself: written twice, it is landed twice, as a new version of the
+# object (docs/PERFORMANCE.md §10). The report counts the objects tried again; the CLI's own retries it can't see.
 copy_slice() {  # <slice>
-  local try
-  for try in 1 2 3; do
-    aws s3 cp --recursive --only-show-errors "${staging}$(printf 's%05d' "$1")/" "$INTAKE" && return 0
+  local try src="${staging}$(printf 's%05d' "$1")/" err="$out/copy-errors/$1" left f
+  aws s3 cp --recursive --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
+  for try in 2 3; do
     sleep 10
+    left="$(sed -n 's/^copy failed: \(s3:[^ ]*\) to .*/\1/p' "$err")"
+    if [[ -z "$left" ]]; then
+      aws s3 cp --recursive --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
+      continue
+    fi
+    : > "$err"
+    for f in $left; do
+      echo "$f" >> "$out/copied-again"
+      aws s3 cp --only-show-errors "$f" "$INTAKE" 2>/dev/null || echo "copy failed: $f to $INTAKE" >> "$err"
+    done
+    [[ -s "$err" ]] || return 0
   done
   echo "load-test.sh: slice $1 not copied after 3 tries" >&2
   return 1
@@ -313,6 +327,7 @@ paced_copy() {
 }
 if [[ -n "$RATE" ]]; then
   slices="$(cat "$out/slices")"
+  mkdir -p "$out/copy-errors"; : > "$out/copied-again"
   say "t0: copying them under $INTAKE (server-side), $RATE a second ($slices slices of $SLICE)"
   paced_copy &
 else
@@ -515,6 +530,9 @@ say "Pushed: $files objects, $bytes bytes; all in the intake after ${pushed_at:-
 items="$(db "SELECT count(DISTINCT item_id) FROM split_$PREFIX.split_item WHERE updated_at >= '$t0_db'" 2>/dev/null || echo '?')"
 say "Landed: $items items for $files objects (exactly once: $([[ "$items" == "$files" ]] && echo yes || echo NO));" \
   "$landed $P.landed messages (one more per failover: the last item announced again)"
+# An object written twice is landed twice, as a new version (copy_slice says why): the ones the feed tried again.
+[[ -f "$out/copied-again" ]] && say "  objects the feed copied again after a failed copy: $(wc -l < "$out/copied-again")" \
+  "(each may have been written twice, and landed twice)"
 # Every item split must have ended at convert, and every item convert ended must have ended at transform: what
 # an outage could leave behind (docs/PERFORMANCE.md §3.6). 0 and 0 when nothing was. Ended, as in ended(): every
 # record ended, failed or not; completed_at is set only when none failed, so it can't be the test. An item with a

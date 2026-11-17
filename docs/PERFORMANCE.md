@@ -1082,9 +1082,18 @@ What it showed, beyond §2's predictions:
       104 / 653 s.
     - **Postgres:** up to 185 connections of 300, every read answered, no container restarted.
     - **Landing landed 2 objects twice** (36,002 items for 36,000 objects; split noted both as copies, and they
-      went on to gold as resends). No slice copy was retried, so these aren't the feed's. The first steady feed
-      had 500 more landed messages than objects too. Not yet explained: landing's exactly once under a steady
-      feed is the next thing to look at.
+      went on to gold as resends). Most likely the feed's, not landing's: an object written again is a new
+      version of it (`ListedItem.versionText`: the time changes even when the bytes don't), and landing keeps
+      both, as it must (nothing dropped or replaced). The AWS CLI retries a copy whose answer was lost by
+      itself, unseen, and this machine's link to S3 dropped for a minute earlier that day. For one object
+      version to be landed twice, landing would need two nodes landing at once, which its fenced commits stop,
+      or a restart, and neither pod restarted. The ledger, which would show whether the two items had the same
+      source version, can't be read from here: the bronze data's KMS key is denied to the deployer, by design.
+      Found on the way: a slice that failed part-way was copied again in full, rewriting objects that may have
+      been landed already. A retry now copies only the objects that failed, and the report counts them. The
+      first steady feed's 500 extra were messages, not items, and its landing pod restarted, so they were
+      probably the last group's announcements sent again at each restart (§3.6 point 1). That run's items
+      can't be counted now.
     - **Cost:** `measure.sh` says $17 per million documents (on-demand t4g prices, 29 nodes at most).
   **Adopted:** split `concurrency: 4` (`splitter-application.yml`). Its KEDA maximum stays 3 (96 items at once,
   ~45 a second by this run) until the stages' maximums are set for 100 documents a second.
