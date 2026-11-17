@@ -1,4 +1,4 @@
-# The transform stage README's Deployment on AWS (docs/AWS-POC.md §5): 2 GiB; KEDA 1-4 pods. ${PIPELINE} is
+# The transform stage README's Deployment on AWS (docs/AWS-POC.md §5): 3 GiB; KEDA 1-4 pods. ${PIPELINE} is
 # filled in by apply.sh.
 apiVersion: apps/v1
 kind: Deployment
@@ -28,7 +28,9 @@ spec:
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.instance.id=$(POD_NAME)" }
           # Four records at once on 1.6 CPU (docs/PERFORMANCE.md §10, 2026-11-15): transform is CPU-bound (~0.36
           # CPU-seconds a record), and two records at a time left a pod's CPUs idle while it committed. Against
-          # 8 pods of 0.8, as fast for less: one pod to a burst node. 2 GiB for four mappings at once.
+          # 8 pods of 0.8, as fast for less: one pod to a burst node. Six at once since 2026-11-16, on the same
+          # request: the pod has its node's CPU to itself, and four left a third of it idle. 3 GiB for six
+          # mappings at once (2 GiB for four).
           resources:
-            requests: { cpu: 1600m, memory: 2048Mi }
-            limits: { memory: 2048Mi }
+            requests: { cpu: 1600m, memory: 3072Mi }
+            limits: { memory: 3072Mi }

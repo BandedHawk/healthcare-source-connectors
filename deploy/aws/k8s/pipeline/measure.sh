@@ -26,6 +26,9 @@ P="${SDH_PIPELINES:-ccda-push}"; P="${P%% *}"; PREFIX="${P//-/_}"
 # us-east-2 list prices, from the AWS Price List API on 2026-11-13: an on-demand t4g.large hour (a Spot burst node
 # costs less), an EKS cluster hour, and one KMS asymmetric (ECC) request.
 NODE_HOUR=0.0672 EKS_HOUR=0.10 KMS_ASYMMETRIC=0.000015 KMS_REQUEST=0.000003
+# A T4g node's surplus CPU, in unlimited mode, beyond its baseline: $0.04 a vCPU-hour (EC2's T4g price); a
+# t4g.large earns credits at 30% of each of its 2 vCPUs, so 0.6 vCPU.
+SURPLUS_VCPU_HOUR=0.04 T4G_LARGE_BASELINE=0.6
 
 say() { printf '>> %s\n' "$*"; }
 die() { printf 'measure.sh: %s\n' "$*" >&2; exit 1; }
@@ -260,14 +263,40 @@ say "  signing every message in KMS instead would cap the pipeline at $((300 * $
 # --- Cost ---------------------------------------------------------------------------------------------------------
 
 nodes="$(cat "$out/nodes" 2>/dev/null || kubectl get nodes --no-headers 2>/dev/null | wc -l)"
+# The t4g nodes' CPU above their baseline in the run: each node's CPU and age now (node-cpu.sh) less at t0, for a
+# node there then; a node gone before now isn't counted, and credits a node banked before t0 aren't set against it.
+surplus="$("$HERE/node-cpu.sh" 2>/dev/null | python3 -I -c 'import sys
+then = {}
+try:
+    for line in open(sys.argv[1]):
+        p = line.split()
+        then[p[0]] = (float(p[2]), float(p[3]))
+except OSError:
+    pass
+base, nodes, vcpu = float(sys.argv[2]), 0, 0.0
+for line in sys.stdin:
+    node, kind, used, age = line.split()
+    if not kind.startswith("t4g."):
+        continue
+    used0, age0 = then.get(node, (0.0, 0.0))
+    nodes += 1
+    vcpu += max(0.0, (float(used) - used0) - base * (float(age) - age0)) / 3600
+print("%d %.3f" % (nodes, vcpu))' "$out/nodecpu0" "$T4G_LARGE_BASELINE" || echo "0 0")"
+read -r t4g_nodes surplus_vcpu_h <<<"$surplus"
+say "T4g nodes' CPU above baseline in the run: ${surplus_vcpu_h} vCPU-hours over $t4g_nodes node(s) still up" \
+  "(surplus credits, \$${SURPLUS_VCPU_HOUR} a vCPU-hour)"
 if [[ "$n_gold" -gt 0 ]]; then
   python3 -I -c 'import sys
 secs, docs, nodes, sign, other = (float(a) for a in sys.argv[1:6])
 node, eks, asym, req = (float(a) for a in sys.argv[6:10])
+surplus_h, surplus_price = float(sys.argv[10]), float(sys.argv[11])
 compute = secs / 3600 * (nodes * node + eks); kms = sign * asym + other * req
+credits = surplus_h * surplus_price
 per = 1e6 / docs
-print(f">> Estimated cost: ${compute:.2f} compute ({nodes:.0f} nodes at most, on-demand price) + ${kms:.2f} KMS;"
-      f" ${(compute + kms) * per:,.0f} per million documents at this rate ({compute * per:,.0f} compute,"
-      f" {kms * per:,.0f} KMS); storage and S3 requests not counted")' \
-    "$secs" "$n_gold" "$nodes" "$kms_sign" "$kms_other" "$NODE_HOUR" "$EKS_HOUR" "$KMS_ASYMMETRIC" "$KMS_REQUEST"
+print(f">> Estimated cost: ${compute:.2f} compute ({nodes:.0f} nodes at most, on-demand price) + ${credits:.2f}"
+      f" t4g surplus credits + ${kms:.2f} KMS; ${(compute + credits + kms) * per:,.0f} per million documents at"
+      f" this rate ({compute * per:,.0f} compute, {credits * per:,.1f} credits, {kms * per:,.0f} KMS); storage and"
+      f" S3 requests not counted")' \
+    "$secs" "$n_gold" "$nodes" "$kms_sign" "$kms_other" "$NODE_HOUR" "$EKS_HOUR" "$KMS_ASYMMETRIC" "$KMS_REQUEST" \
+    "$surplus_vcpu_h" "$SURPLUS_VCPU_HOUR"
 fi

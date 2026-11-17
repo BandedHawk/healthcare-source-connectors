@@ -18,8 +18,10 @@ sdh:
     # TRANSFORM_TOO_LARGE.
     max-bytes: 2MB
   stage:
-    # Four records at a time (docs/PERFORMANCE.md §10, 2026-11-15; the sandbox keeps 2); 48 partitions (poc.sh).
-    concurrency: 4
+    # Six records at a time (docs/PERFORMANCE.md §10, 2026-11-16; four before, the sandbox keeps 2): with four, a
+    # pod used 0.8–1.3 of its node's 2 vCPU; with six, 1.3–1.9, and 39% more records a second. 48 partitions
+    # (poc.sh).
+    concurrency: 6
     # Two batches a pod at once, sharing those four threads: one batch's records are mapped while the other's
     # commit (docs/PERFORMANCE.md §10, 2026-11-15). 4 pods × 2 consumers within the 48 partitions.
     consumers: 2

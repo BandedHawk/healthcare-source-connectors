@@ -140,6 +140,7 @@ t0_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 t0=$SECONDS
 echo "$t0_db" > "$out/t0"   # for measure.sh
 for t in "${topics[@]}"; do echo "$t ${before[$t]}"; done > "$out/offsets0"   # for measure.sh
+"$HERE/node-cpu.sh" > "$out/nodecpu0" 2>/dev/null || true   # for measure.sh: the T nodes' surplus CPU credits
 db "SELECT catalog_name || ':' || table_namespace || '.' || table_name, metadata_location FROM public.iceberg_tables" \
   | sed -E 's#\|.*/0*([0-9]+)-[^/]*\.metadata\.json$# \1#' > "$out/versions0" || true   # for measure.sh
 
@@ -155,7 +156,7 @@ backlog_restore() {
 }
 IFS=, read -r -a steps <<<"$BACKLOG"
 backlog_state="" step=0 step_at=0 ready_at="" win_at="" win_done=0 win_epoch=0 backlog_at="" backlog_msgs=""
-backlog_quiet=0 backlog_lines=() step_pods=0 win_closed=0
+backlog_quiet=0 backlog_lines=() backlog_pod_lines=() step_pods=0 win_closed=0
 if [[ -n "$BACKLOG" ]]; then
   hold sdh-fhir "transform-$P" 0
   kubectl -n sdh-fhir wait --for=delete pod -l "app=transform-$P" --timeout=180s >/dev/null 2>&1 || true
@@ -182,6 +183,45 @@ try:
 except Exception:
     pass'
 }
+prom_by() {  # <unix time> <PromQL summed by service_instance_id>: "<pod> <value>", one a line
+  kubectl -n sdh-infra exec deploy/prometheus -- wget -qO- \
+    "http://localhost:9090/api/v1/query?time=$1&query=$(python3 -I -c \
+      'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$2")" 2>/dev/null \
+    | python3 -I -c 'import json, sys
+try:
+    for r in json.load(sys.stdin)["data"]["result"]:
+        print(r["metric"].get("service_instance_id", "?"), r["value"][1])
+except Exception:
+    pass'
+}
+# Each transform pod in a step's window, for telling a slow node from a slow pod: its node's pool, instance type and
+# capacity type, the records it mapped a second, its CPU (cores) and the share of the time a thread of it waited
+# for a CPU.
+pod_lines() {  # <pods> <unix time> <window seconds>
+  local at="$2" w="$3" h=sdh_stage_phase_duration_seconds nodes
+  nodes="$(kubectl get nodes -o go-template='{{range .items}}{{.metadata.name}} {{index .metadata.labels "sdh-poc/pool"}} {{index .metadata.labels "node.kubernetes.io/instance-type"}} {{index .metadata.labels "eks.amazonaws.com/capacityType"}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+  python3 -I -c 'import sys
+pods, w = sys.argv[1], float(sys.argv[2])
+def table(text):
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            out[parts[0]] = parts[1:]
+    return out
+nodes, where = table(sys.argv[3]), table(sys.argv[4])
+rec, cpu, wait = (dict((k, float(v[0])) for k, v in table(t).items()) for t in sys.argv[5:8])
+for pod in sorted(rec, key=lambda p: -rec[p]):
+    node = where.get(pod, ["?"])[0]
+    pool, kind, cap = (nodes.get(node, []) + ["?", "?", "?"])[:3]
+    print("%5s %-34s %-6s %-11s %-9s %7.2f %6.2f %5.2f" % (pods, pod[-34:], pool, kind, cap,
+        rec[pod] / w, cpu.get(pod, 0) / w, wait.get(pod, 0) / w))' \
+    "$1" "$w" "$nodes" \
+    "$(kubectl -n sdh-fhir get pods -l "app=transform-$P" -o go-template='{{range .items}}{{.metadata.name}} {{.spec.nodeName}}{{"\n"}}{{end}}' 2>/dev/null || true)" \
+    "$(prom_by "$at" 'sum by (service_instance_id) (increase('"$h"'_count{sdh_stage="transform",sdh_phase="process"}['"$w"'s]))')" \
+    "$(prom_by "$at" 'sum by (service_instance_id) (increase(sdh_process_cpu_time_seconds_total{job="transform-stage"}['"$w"'s]))')" \
+    "$(prom_by "$at" 'sum by (service_instance_id) (increase(sdh_process_cpu_wait_seconds_total{job="transform-stage"}['"$w"'s]))')"
+}
 step_line() {  # <pods> <seconds to all ready> <window seconds> <records ended>
   local h=sdh_stage_phase_duration_seconds w="$3" at
   at="$(date -u +%s)"
@@ -193,6 +233,7 @@ step_line() {  # <pods> <seconds to all ready> <window seconds> <records ended>
   local c='sum('"$cnt"') / sum(increase('"$h"'_count{sdh_stage="transform",sdh_phase="batch"}['"$w"'s]))'
   local per_pod
   per_pod="$(prom_vec "$at" "sum by (service_instance_id) ($cnt)" | tr '\n' ' ')"
+  while IFS= read -r line; do backlog_pod_lines+=("$line"); done < <(pod_lines "$1" "$at" "$w")
   backlog_lines+=("$(python3 -I -c 'import sys
 p, ready, w, ended, pods = int(sys.argv[1]), sys.argv[2], float(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 v = [float(x) for x in pods.split()]
@@ -482,6 +523,9 @@ if [[ -n "$BACKLOG" ]]; then
   say "$(printf '  %5s %6s %6s %7s %7s %7s %5s %6s %6s %7s %6s %5s %6s %6s %5s' pods ready window mapped rec/s \
     per-pod busy least most ended cores wait batch record per)"
   for line in "${backlog_lines[@]}"; do say "  $line"; done
+  say "  by pod in each window: its node's pool, instance type and capacity; records a second; cores; share waiting"
+  say "$(printf '  %5s %-34s %-6s %-11s %-9s %7s %6s %5s' pods pod pool type capacity rec/s cores wait)"
+  for line in "${backlog_pod_lines[@]}"; do say "  $line"; done
 fi
 say "Report kept in $report"
 
