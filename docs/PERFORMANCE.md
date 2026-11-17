@@ -1069,6 +1069,25 @@ What it showed, beyond §2's predictions:
       (FailedScheduling). A few nodes shut down in the run (NodeShutdown).
     - **The run stopped at 891 s**, without its report: this machine lost its connection to S3 for about a
       minute, and 15 slices' copies failed. `load-test.sh` now tries a slice 3 times before giving up.
+- **Split at 4 items a consumer (2026-11-17, load-20261117T145619Z): split no longer the limit.** 36,000
+  documents at 60 a second for 10 minutes, the same maximums, split's `concurrency` 4 (32 items at once a pod, 16
+  before), Postgres max_connections 300.
+    - **Split kept up with landing:** both ended at 640 s; ~70 items a second at 6 pods while it caught up (~31
+      with 2 at once). An item 1.7–2.7 s (~4 before): its append 1.1 s (the commit queued 0.35 s, a group commit
+      0.7 s). Split now uses 4.0–4.6 cores over its 6 pods, near their 0.9 CPU requests (waiting 0.27–0.33).
+      Twice as many at once halved an item's time, rather than doubling it: commits took more groups each.
+    - **To gold:** ~67–74 documents a second in the middle tenths (4,000–4,400 a minute), 39.5 overall from
+      first landed to last in gold (the tail is transform clearing its queue). Transform was last (930 s):
+      some of its 15 pods waited for nodes (FailedScheduling; burst nodes at their 24). Landed → gold p50 / p99
+      104 / 653 s.
+    - **Postgres:** up to 185 connections of 300, every read answered, no container restarted.
+    - **Landing landed 2 objects twice** (36,002 items for 36,000 objects; split noted both as copies, and they
+      went on to gold as resends). No slice copy was retried, so these aren't the feed's. The first steady feed
+      had 500 more landed messages than objects too. Not yet explained: landing's exactly once under a steady
+      feed is the next thing to look at.
+    - **Cost:** `measure.sh` says $17 per million documents (on-demand t4g prices, 29 nodes at most).
+  **Adopted:** split `concurrency: 4` (`splitter-application.yml`). Its KEDA maximum stays 3 (96 items at once,
+  ~45 a second by this run) until the stages' maximums are set for 100 documents a second.
 
 ## 11. Order of work
 

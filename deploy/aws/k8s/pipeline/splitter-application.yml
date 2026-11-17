@@ -42,9 +42,11 @@ sdh:
     next-registry-schema: convert_${ICEBERG_PREFIX}
   split:
     format: ccda
-    # 8 Kafka consumers, each with batches of 2: 16 items at once, and a slow item holds back only its own batch
-    # (docs/PERFORMANCE.md §3.4). 3 pods × 8 consumers fit the topic's 48 partitions (poc.sh STAGE_PARTITIONS).
-    concurrency: 2
+    # 8 Kafka consumers, each with batches of 4: 32 items at once, and a slow item holds back only its own batch
+    # (docs/PERFORMANCE.md §3.4). 6 pods × 8 consumers fill the topic's 48 partitions (poc.sh STAGE_PARTITIONS).
+    # Four since 2026-11-17 (§10; two before): an item mostly waits for the shared commit, which takes every pod's
+    # waiting groups at once, so twice as many at once split ~70 items a second at 6 pods, not ~31.
+    concurrency: 4
     consumers: 8
   storage:
     catalog-name: sdh

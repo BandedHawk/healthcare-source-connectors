@@ -86,7 +86,9 @@ spec:
             - { name: POSTGRES_USER, value: postgres }
             - name: POSTGRES_PASSWORD
               valueFrom: { secretKeyRef: { name: postgres, key: password } }
-          args: [-c, max_connections=200, -c, shared_buffers=128MB]
+          # 300 connections since 2026-11-17: with the stages scaled out (splitter 6, convert 12, transform 15) they
+          # used 188 of 200 (docs/PERFORMANCE.md §10); an idle backend is a few MB, within the 2 GiB below.
+          args: [-c, max_connections=300, -c, shared_buffers=128MB]
           ports: [{ containerPort: 5432 }]
           readinessProbe: { exec: { command: [pg_isready, -U, postgres, -d, sdh] }, periodSeconds: 5 }
           securityContext:
