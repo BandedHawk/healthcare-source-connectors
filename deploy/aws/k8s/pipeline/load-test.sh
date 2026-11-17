@@ -175,6 +175,7 @@ t0_db="$(db "SELECT now()")"
 t0_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 t0=$SECONDS
 echo "$t0_db" > "$out/t0"   # for measure.sh
+mkdir -p "$out/events"; : > "$out/pg-connections"
 for t in "${topics[@]}"; do echo "$t ${before[$t]}"; done > "$out/offsets0"   # for measure.sh
 "$HERE/node-cpu.sh" > "$out/nodecpu0" 2>/dev/null || true   # for measure.sh: the T nodes' surplus CPU credits
 db "SELECT catalog_name || ':' || table_namespace || '.' || table_name, metadata_location FROM public.iceberg_tables" \
@@ -286,14 +287,25 @@ print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" 
 # --- Push --------------------------------------------------------------------------------------------------------
 
 # The paced feed: slice k is started SLICE*k/RATE seconds after t0, each in its own copier, so a slow one doesn't
-# hold the pace; it fails if any slice's copy failed.
+# hold the pace; it fails if any slice's copy failed. A slice's copy is tried up to 3 times, 10 s apart: this
+# machine's connection to S3 can drop for a minute (2026-11-17), and a copy that failed listing copied nothing. One
+# that failed part-way copies its objects again, landed as resends (item.duplicate_content), which the report shows.
+copy_slice() {  # <slice>
+  local try
+  for try in 1 2 3; do
+    aws s3 cp --recursive --only-show-errors "${staging}$(printf 's%05d' "$1")/" "$INTAKE" && return 0
+    sleep 10
+  done
+  echo "load-test.sh: slice $1 not copied after 3 tries" >&2
+  return 1
+}
 paced_copy() {
   local k start now due pids=() fail=0 pid
   start="$(date +%s%3N)"
   for ((k = 0; k < slices; k++)); do
     due=$((start + k * SLICE * 1000 / RATE)); now="$(date +%s%3N)"
     ((due > now)) && sleep "$(printf '%d.%03d' $(((due - now) / 1000)) $(((due - now) % 1000)))"
-    aws s3 cp --recursive --only-show-errors "${staging}$(printf 's%05d' "$k")/" "$INTAKE" &
+    copy_slice "$k" &
     pids+=($!)
   done
   for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
@@ -388,6 +400,12 @@ while :; do
   nodes="$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready' || true)"
   burst="$(kubectl get nodes -l sdh-poc/pool=burst --no-headers 2>/dev/null | grep -c ' Ready' || true)"
   ((nodes > max_nodes)) && max_nodes=$nodes; ((burst > max_burst)) && max_burst=$burst
+  # What went wrong, if anything (docs/PERFORMANCE.md §10, the first steady feed): Postgres' connections by role,
+  # "-" when it doesn't answer, and Kubernetes' Warning events, saved as they come (they expire after an hour).
+  { printf '%s ' "$now"; db "SELECT coalesce(sum(n), 0), coalesce(string_agg(u || '=' || n, ' ' ORDER BY n DESC), '') FROM (SELECT
+      coalesce(usename, '(system)') u, count(*) n FROM pg_stat_activity GROUP BY 1) a" 2>/dev/null \
+      | tr '|' ' ' || echo "-"; } >> "$out/pg-connections"
+  kubectl get events -A --field-selector type=Warning -o json > "$out/events/$now.json" 2>/dev/null || true
   printf '%6s %7s %6s %7s %9s %9s %6s %5s %s\n' "$now" "$in" "$landed" "$split" "$converted" "$transformed" "$l" \
     "$nodes" "$pods" | tee -a "$report"
   for k in landed split converted transformed; do
@@ -565,8 +583,62 @@ say "    end to end: ${end}s; $(per_min "$transformed" "$end") items/min," \
 for k in landed split converted transformed; do
   say "    $k: ${!k} items by ${last_change[$k]:-?}s, $(per_min "${!k}" "${last_change[$k]:-0}") items/min"
 done
-say "Pods at most: landing ${max_pods[landing]} (1 active), splitter ${max_pods[splitter]}/3," \
-  "convert ${max_pods[convert]}/3, transform ${max_pods[transform-$P]}/4; nodes $max_nodes, burst $max_burst"
+scaled_max() { kubectl -n "$1" get scaledobject "$2" -o jsonpath='{.spec.maxReplicaCount}' 2>/dev/null || echo '?'; }
+say "Pods at most: landing ${max_pods[landing]} (1 active), splitter ${max_pods[splitter]}/$(scaled_max "$N" splitter)," \
+  "convert ${max_pods[convert]}/$(scaled_max "$N" convert)," \
+  "transform ${max_pods[transform-$P]}/$(scaled_max sdh-fhir "transform-$P"); nodes $max_nodes, burst $max_burst"
+# Containers that stopped in the run, of pods still there: why (OOMKilled, Error and its exit code), how often.
+say "Containers restarted in the run (pods still there): namespace/pod container, restarts, last reason, when (s)"
+kubectl get pods -A -o json 2>/dev/null | python3 -I -c 'import datetime, json, sys
+t0 = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+n = 0
+for pod in json.load(sys.stdin)["items"]:
+    for c in pod.get("status", {}).get("containerStatuses", []):
+        last = c.get("lastState", {}).get("terminated")
+        if not c.get("restartCount") or not last or not last.get("finishedAt"):
+            continue
+        at = datetime.datetime.fromisoformat(last["finishedAt"].replace("Z", "+00:00"))
+        if at < t0:
+            continue
+        n += 1
+        print("    %s/%s %s, %d, %s (exit %s), at %ds" % (pod["metadata"]["namespace"], pod["metadata"]["name"],
+            c["name"], c["restartCount"], last.get("reason", "?"), last.get("exitCode", "?"), (at - t0).total_seconds()))
+if not n:
+    print("    none")' "$t0_iso" | tee -a "$report"
+say "Postgres connections (pg_stat_activity), at most: $(awk '$2 ~ /^[0-9]+$/ && $2 > m {m = $2; l = $0}
+  END {print (m ? m " at " l : "never read")}' "$out/pg-connections" | cut -c1-300);" \
+  "unanswered in $(awk '$2 == "-"' "$out/pg-connections" | wc -l) of $(wc -l < "$out/pg-connections") reads" \
+  "(by second and role: $out/pg-connections)"
+# The Warning events since t0, by namespace, kind, reason and the object's name without its pod hash; the
+# messages of the first of each, cut short (they name pods, nodes and probes, never documents).
+say "Warning events since t0: count, namespace kind/name reason: the first one's message"
+python3 -I -c 'import datetime, glob, json, re, sys
+t0 = datetime.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
+def ts(x):
+    return datetime.datetime.fromisoformat(x[:19] + "+00:00")
+groups = {}
+for f in sorted(glob.glob(sys.argv[1] + "/*.json"), key=lambda f: int(re.sub(r"\D", "", f.rsplit("/", 1)[1]) or 0)):
+    try:
+        items = json.load(open(f))["items"]
+    except Exception:
+        continue
+    for e in items:
+        uid = e["metadata"]["uid"]
+        last = e.get("lastTimestamp") or e.get("eventTime") or e["metadata"].get("creationTimestamp")
+        if not last or ts(last) < t0:
+            continue
+        o = e.get("involvedObject", {})
+        name = re.sub(r"-[0-9a-f]{8,10}-[0-9a-z]{5}$|-[0-9a-z]{5}$", "-*", o.get("name", "?"))
+        if o.get("kind") == "Node":
+            name = "*"
+        key = (e["metadata"]["namespace"], o.get("kind", "?"), name, e.get("reason", "?"))
+        count = e.get("count") or 1
+        g = groups.setdefault(key, [0, (e.get("message") or "").replace("\n", " ")[:160], {}])
+        g[2][uid] = count
+for key, (_, msg, uids) in sorted(groups.items(), key=lambda kv: -sum(kv[1][2].values())):
+    print("    %5d  %s %s/%s %s: %s" % (sum(uids.values()), key[0], key[1], key[2], key[3], msg))
+if not groups:
+    print("    none")' "$out/events" "$t0_iso" | head -40 | tee -a "$report"
 if [[ -n "$killed" ]]; then
   say "Landing failover: holder deleted at ${FAILOVER_AT}% landed; standby took the lease after ${takeover:-NEVER}s"
 fi

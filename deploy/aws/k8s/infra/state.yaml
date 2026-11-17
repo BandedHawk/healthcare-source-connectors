@@ -92,9 +92,11 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
+          # 2 GiB and half a CPU since 2026-11-17 (docs/PERFORMANCE.md §10, the first steady feed): with the
+          # stages scaled out, ~35 pods' pools come near max_connections, and 200 backends don't fit in 512 MiB.
           resources:
-            requests: { cpu: 100m, memory: 512Mi }
-            limits: { memory: 512Mi }
+            requests: { cpu: 500m, memory: 2Gi }
+            limits: { memory: 2Gi }
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql }
             - { name: run, mountPath: /var/run/postgresql }

@@ -1054,6 +1054,21 @@ What it showed, beyond §2's predictions:
       the old ones went; not checked (the deployer can't read CloudTrail).
     - **Cost:** ~3.3 hours up. `measure.sh` (every node priced as on-demand t4g) says $5.81 compute; at Spot prices
       nearer $2–3, plus ~$2–3 of S3 requests for 360,000 PUT and copy requests.
+- **The steady feed again, Postgres at 2 GiB (2026-11-17, load-20261117T130702Z): Postgres held.** 45,000
+  documents at 50 a second for 15 minutes, the same maximums, Postgres given 2 GiB and 500m CPU
+  (`k8s/infra/state.yaml`; 512 MiB and 100m before). `load-test.sh` now saves Postgres' connections by role and
+  Kubernetes' Warning events every 15 s, and reports containers restarted in the run.
+    - **Postgres:** answered all 60 reads, and up to **188 connections of its 200** (transform 74 at 15 pods, ~5 a
+      pod; splitter 53 at 6, ~9; convert 46 at 12, ~4; landing 5). With 512 MiB that many backends had nowhere to
+      go, which fits the first run's breakdown; no Postgres or landing event this time. 188 of 200 leaves no room
+      for more pods: max_connections, or the pools, must change before scaling further.
+    - **Rates, to 891 s:** landing kept up with the feed (42,401 by 891 s, ~48 a second, the intake at ~500
+      objects); split ~31 items a second with 6 pods, its lag growing (18,809 at the end); convert as split;
+      transform ~28. **Split is the limit**, at 6 pods by the partitions (48, 8 consumers a pod).
+    - **Nodes:** 24 burst nodes reached; transform, convert and splitter pods then waited for CPU
+      (FailedScheduling). A few nodes shut down in the run (NodeShutdown).
+    - **The run stopped at 891 s**, without its report: this machine lost its connection to S3 for about a
+      minute, and 15 slices' copies failed. `load-test.sh` now tries a slice 3 times before giving up.
 
 ## 11. Order of work
 
