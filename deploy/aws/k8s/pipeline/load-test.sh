@@ -24,7 +24,11 @@
 # slow as split's on a large load (docs/PERFORMANCE.md §2.1).
 #
 # How: the inputs go to a staging prefix in the intake bucket first, then are copied server-side under <p>/ at t0,
-# so the push isn't limited by this machine's upload. Progress every 15 s; done when the intake prefix is empty, no
+# so the push isn't limited by this machine's upload. All at once by default; SDH_LOAD_RATE (objects a second) feeds
+# them at that pace instead, a steady load (docs/PERFORMANCE.md §10): staged in slices of 100, one slice copied
+# every 100/RATE seconds. A large load's upload can be done first, with no session up: SDH_LOAD_STAGE_ONLY=1 makes
+# and stages the inputs and stops (no cluster needed, nothing deleted); SDH_LOAD_RUN=<run> then runs that staged
+# load, with the same arguments, and deletes it at the end. Progress every 15 s; done when the intake prefix is empty, no
 # consumer group lags and the registries have stopped changing. The report (counts, codes and timings only) is
 # printed and kept in $STATE/load/<run>/report.txt. The inputs are deleted at the end, locally and in S3.
 set -euo pipefail
@@ -37,6 +41,11 @@ export AWS_PROFILE="${AWS_PROFILE:-claude-poc}" AWS_REGION=us-east-2 AWS_PAGER="
 export KUBECONFIG="$STATE/kubeconfig"   # always the PoC's, never a sandbox's
 ACCOUNT=493469777520
 COPIES="${1:-80}" ERROR_COPIES="${2:-10}"
+RATE="${SDH_LOAD_RATE:-}"                # objects a second at t0; empty: all at once
+STAGE_ONLY="${SDH_LOAD_STAGE_ONLY:-0}"   # 1: make and stage the inputs, then stop
+REUSE="${SDH_LOAD_RUN:-}"                # a run staged with SDH_LOAD_STAGE_ONLY=1
+SLICE=100                                # objects a slice, with SDH_LOAD_RATE
+[[ -z "$RATE" || "$RATE" =~ ^[1-9][0-9]*$ ]] || { echo "SDH_LOAD_RATE: objects a second, as 100" >&2; exit 2; }
 P="${SDH_PIPELINES:-ccda-push}"; P="${P%% *}"
 N="sdh-$P"; PREFIX="${P//-/_}"
 BUCKET="s3://sdh-poc-intake-$ACCOUNT"
@@ -99,12 +108,16 @@ split_ended() { db "SELECT count(*) FROM split_$PREFIX.split_item WHERE ended_at
 # --- Checks and inputs -------------------------------------------------------------------------------------------
 
 for t in kubectl aws python3 envsubst; do command -v "$t" >/dev/null || die "missing tool: $t"; done
-kubectl get ns "$N" >/dev/null || die "no session: run deploy/aws/poc.sh up"
+if [[ "$STAGE_ONLY" != 1 ]]; then
+  kubectl get ns "$N" >/dev/null || die "no session: run deploy/aws/poc.sh up"
+fi
 docs="$TRANSFORMER/transform-stage/target/test-documents/documents"
 [[ -d "$docs" ]] || die "no test documents at $docs: build the transformer (./mvnw -o package)"
-[[ "$(intake_count)" == 0 ]] || die "$INTAKE isn't empty: wait for the pipeline, or look at the landing stage"
+if [[ "$STAGE_ONLY" != 1 ]]; then
+  [[ "$(intake_count)" == 0 ]] || die "$INTAKE isn't empty: wait for the pipeline, or look at the landing stage"
+fi
 
-run="load-$(date -u +%Y%m%dT%H%M%SZ)"
+run="${REUSE:-load-$(date -u +%Y%m%dT%H%M%SZ)}"
 out="$STATE/load/$run"
 mkdir -p "$STATE/load"; chmod 700 "$STATE/load"
 report="$out/report.txt"
@@ -112,20 +125,43 @@ staging="$BUCKET/staging/$run/"
 cleanup() {
   [[ "${outage_state:-}" == down ]] && { outage_restore || true; }
   [[ -n "$BACKLOG" ]] && { backlog_restore || true; }
-  aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
+  [[ "$STAGE_ONLY" == 1 ]] || aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
   rm -rf "$out/inputs"
 }
 trap cleanup EXIT
-python3 -I "$HERE/load-inputs.py" "$out/inputs" "$run" "$COPIES" "$ERROR_COPIES" "$docs" \
-  "$ROOT/connector-core/src/test/resources/ccda"
-mv "$out/inputs/manifest.json" "$out/manifest.json"
+if [[ -n "$REUSE" ]]; then
+  [[ -f "$out/manifest.json" ]] || die "no staged run $REUSE ($out/manifest.json)"
+  [[ -z "$RATE" || -f "$out/slices" ]] || die "$REUSE wasn't staged in slices: stage it with SDH_LOAD_RATE"
+  [[ -n "$RATE" || ! -f "$out/slices" ]] || die "$REUSE was staged in slices: run it with SDH_LOAD_RATE"
+else
+  python3 -I "$HERE/load-inputs.py" "$out/inputs" "$run" "$COPIES" "$ERROR_COPIES" "$docs" \
+    "$ROOT/connector-core/src/test/resources/ccda"
+  mv "$out/inputs/manifest.json" "$out/manifest.json"
+  if [[ -n "$RATE" ]]; then
+    # Slices of SLICE objects, in name order (a copy of each document, then the next copy), s00000/ on.
+    python3 -I -c 'import os, sys
+d, n = sys.argv[1], int(sys.argv[2])
+names = sorted(f for f in os.listdir(d) if f.endswith(".xml"))
+for i, f in enumerate(names):
+    s = os.path.join(d, "s%05d" % (i // n))
+    os.makedirs(s, exist_ok=True)
+    os.rename(os.path.join(d, f), os.path.join(s, f))
+print((len(names) + n - 1) // n)' "$out/inputs" "$SLICE" > "$out/slices"
+  fi
+fi
 read -r files bytes documents < <(python3 -I -c 'import json, sys; m = json.load(open(sys.argv[1]))
 print(m["files"], m["bytes"], len(m["clean"]))' "$out/manifest.json")
 : > "$report"
 say "Run $run: $files objects, $((bytes / 1048576)) MB ($COPIES copies of each of $documents test documents; $ERROR_COPIES of each of 5 error inputs)"
-say "Staging them in $staging"
-aws s3 cp --recursive --only-show-errors "$out/inputs/" "$staging"
-rm -rf "$out/inputs"
+if [[ -z "$REUSE" ]]; then
+  say "Staging them in $staging"
+  aws s3 cp --recursive --only-show-errors "$out/inputs/" "$staging"
+  rm -rf "$out/inputs"
+fi
+if [[ "$STAGE_ONLY" == 1 ]]; then
+  say "Staged. Run it with SDH_LOAD_RUN=$run${RATE:+ SDH_LOAD_RATE=$RATE} and the same arguments"
+  exit 0
+fi
 
 # --- Before ------------------------------------------------------------------------------------------------------
 
@@ -249,8 +285,28 @@ print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" 
 
 # --- Push --------------------------------------------------------------------------------------------------------
 
-say "t0: copying them under $INTAKE (server-side)"
-aws s3 cp --recursive --only-show-errors "$staging" "$INTAKE" &
+# The paced feed: slice k is started SLICE*k/RATE seconds after t0, each in its own copier, so a slow one doesn't
+# hold the pace; it fails if any slice's copy failed.
+paced_copy() {
+  local k start now due pids=() fail=0 pid
+  start="$(date +%s%3N)"
+  for ((k = 0; k < slices; k++)); do
+    due=$((start + k * SLICE * 1000 / RATE)); now="$(date +%s%3N)"
+    ((due > now)) && sleep "$(printf '%d.%03d' $(((due - now) / 1000)) $(((due - now) % 1000)))"
+    aws s3 cp --recursive --only-show-errors "${staging}$(printf 's%05d' "$k")/" "$INTAKE" &
+    pids+=($!)
+  done
+  for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+  return "$fail"
+}
+if [[ -n "$RATE" ]]; then
+  slices="$(cat "$out/slices")"
+  say "t0: copying them under $INTAKE (server-side), $RATE a second ($slices slices of $SLICE)"
+  paced_copy &
+else
+  say "t0: copying them under $INTAKE (server-side)"
+  aws s3 cp --recursive --only-show-errors "$staging" "$INTAKE" &
+fi
 copier=$!
 say "Putting 3 messages no stage can open on each of $P.split and $P.records"
 for t in split records; do

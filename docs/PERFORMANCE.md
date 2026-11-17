@@ -1034,6 +1034,26 @@ What it showed, beyond §2's predictions:
       7.18 a pod (six: 28.6, 7.15); 1.19–1.82 cores a pod (six: 1.26–1.94), CPU wait 0.71; backlog clear in
       358 s (371); $20 per million documents (19). Exactly once, nothing left behind, gold check passed.
       Six already fills the node's CPU; two more threads only queue for it, for 1 GiB more. **Six kept.**
+- **The first steady feed (2026-11-17, load-20261117T041926Z): it broke down.** 180,000 documents (6,000 copies of
+  each of the 30) fed at 100 a second for 30 minutes (`SDH_LOAD_RATE`, staged first with no session up:
+  `SDH_LOAD_STAGE_ONLY`), with the maximums raised for the run: 24 burst nodes, splitter 6 (48 partitions, 8
+  consumers a pod), convert 12, transform 15. Gold check off. What it showed:
+    - **The first five minutes:** landing ~45 items a second, split ~24 with 5–6 pods, as with 3: split doesn't
+      scale with pods, so its limit is shared (its commits to `split_records` go through the cross-pod queue, ~1.7
+      s each). Convert and transform kept up with split.
+    - **From ~11 minutes on:** the landing pods kept dropping to none ready, and the report's registry reads (psql
+      in postgres-0) failed again and again. From ~35 minutes split mapped about 1 item a second, ~44 s an item
+      against 4 (waiting, not CPU: 6 pods used ~1 core), and landing took nothing in for an hour, then the rest at
+      ~45 a second once transform and convert had scaled down. At the 150-minute timeout 14,278 had reached gold;
+      the 113 and 122 items "left behind" were still in flight, so the run says nothing about loss.
+    - **Most likely cause, not proven:** Postgres. One pod, a 512 MiB limit, 100m CPU requested, max_connections
+      200; 35 stage pods with a lease pool (2), Iceberg's JDBC catalogs and the commit pool each come to around
+      200 connections, and 200 backends don't fit in 512 MiB. Pod restarts, OOM kills and the connection count
+      weren't recorded, and the pods' logs went with the cluster at `down`.
+    - **Nodes:** up to 31 burst nodes Ready against a maximum of 24, most likely Spot replacements started before
+      the old ones went; not checked (the deployer can't read CloudTrail).
+    - **Cost:** ~3.3 hours up. `measure.sh` (every node priced as on-demand t4g) says $5.81 compute; at Spot prices
+      nearer $2–3, plus ~$2–3 of S3 requests for 360,000 PUT and copy requests.
 
 ## 11. Order of work
 
