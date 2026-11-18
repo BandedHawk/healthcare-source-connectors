@@ -1205,6 +1205,15 @@ What it showed, beyond §2's predictions:
       notes where each left item is (`left-items` in the run's directory) and waits up to
       `SDH_LOAD_RECOVER_MIN` (40) minutes for them to end, so the next run that leaves any shows whether they
       recover.
+    - **Checked in the sandbox** (2026-11-18, scale demo, the images of runs 41–44): 600 documents with every
+      convert and transform pod force-killed (no grace) at 25% and 60% ended at transform, and 1,200 with half
+      the transform pods and the convert pod deleted gracefully (as a Spot drain) at 15, 30, 45, 60 and 95%.
+      Every item ended at every stage within the demo, with none left for the reconcilers: 42 and 215
+      transform records (3 convert records in the second) were taken over once their first pod's claim
+      lapsed, no end was asked for again, and no reconciler event was logged. So a pod lost alone, at once or
+      drained, doesn't leave an item; what the sandbox can't do is lose a node, with its pods' Postgres and
+      Kafka connections left open, at AWS's pod counts. That case is the one left, for the next AWS run's
+      `left-items`.
     - **35 a second** (load-20261118T073238Z): every item landed exactly once, 0 left behind. **Landed →
       gold p50 / p99 29 / 131 s** (32 / 185); landed → split ended 9 / 68 s (10 / 100), split ended → convert's
       first record 8 / 61 s (9 / 122). 33.0 documents a second; up to 33 nodes (36), $24 per million (26).
