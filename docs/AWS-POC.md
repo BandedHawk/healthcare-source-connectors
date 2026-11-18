@@ -244,7 +244,7 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 | Pod | Replicas | CPU req | Mem req = limit | Notes |
 |---|---|---|---|---|
 | landing | 2 (1 active, 1 standby); never KEDA | 750m | 1 Gi | `SDH_LANDING_STANDBY=true`; required anti-affinity on hostname, so one on each base node; PDB `maxUnavailable: 1`; `Recreate` |
-| split | KEDA 1–3 | 900m | 2 Gi | `<p>.landed`, 48 partitions, lag 5, 8 consumers of 2 items a pod |
+| split | KEDA 1–3 | 1100m | 2 Gi | `<p>.landed`, 48 partitions, lag 5, 8 consumers of 8 items a pod |
 | convert | KEDA 1–3 | 400m | 1.25 Gi | `<p>.split`, 48 partitions, lag 5, results off |
 | transform | KEDA 1–4 | 1600m | 2 Gi | `<p>.records`, 48 partitions, concurrency 4, 2 consumers, lag 5, results off (below) |
 | kafka | 1 | 200m | 768 Mi | heap 384 MiB, as in the sandbox |

@@ -1182,6 +1182,28 @@ What it showed, beyond §2's predictions:
     - Up to 36 nodes (47): $26 per million documents (39), still from the stages scaling out on the queue's lag.
   **Adopted:** `sdh.stage.commit.shared: true` for transform. Next: split's rate a pod and the queue wait
   ahead of convert for the latency, and the stages' scale-out for the cost at low rates.
+- **Split 8 items a batch** (2026-11-18): in run 41 split's item took 2.16 s, 1.26 s of it the append (its
+  turn in the queue 0.45 s, the group's commit 0.79 s), while a pod used ~0.65 of a core and waited for a CPU
+  a fifth of the time. So split's `concurrency` goes from 4 to 8 (64 items at once a pod) and its CPU request
+  from 900m to 1100m (`splitter-application.yml`, `splitter-patch.yaml`), the 6 pods unchanged. Memory stays
+  2 GiB: split streams an item, at most 2 windows of 4 chunks decrypted at a time. Measured the same way as
+  runs 41 and 42, the images unchanged:
+    - **100 a second** (load-20261118T064205Z): split 70 items a second (65), but its item now takes 3.47 s
+      (2.16): the queue wait 0.65 s (0.45), the split step 2.33 s (1.66), a pod ~0.75 of a core, waiting for
+      a CPU about a fifth of the time again. 62.9 documents a second first landed to last in gold (65.1);
+      landed → gold p50 / p99 291 / 505 s (285 / 517). $12 per million documents (11), 35 nodes at most.
+      No container restarted.
+    - **16 items not ended at transform** when the test stopped waiting, its lag 0, as transform scaled in
+      from 18 pods (14 in run 39, before the shared commit; 0 in run 41). The logs went with the stack, so the
+      cause is open: whether convert's reconciler would have resent them (STAGES.md §13.2) after the test's
+      wait, or they were held by a pod taken away.
+    - **35 a second** (load-20261118T073238Z): every item landed exactly once, 0 left behind. **Landed →
+      gold p50 / p99 29 / 131 s** (32 / 185); landed → split ended 9 / 68 s (10 / 100), split ended → convert's
+      first record 8 / 61 s (9 / 122). 33.0 documents a second; up to 33 nodes (36), $24 per million (26).
+    - At 100 a second the gain is small: split's commits, back to back through the one queue, now bound it
+      (2,992 snapshots of split_records in 1,288 s, ~30 items each). More split at that rate needs fewer,
+      larger commits or a cheaper commit, not more items at once.
+  **Adopted:** split `concurrency: 8` and 1100m, for the latency at 35 a second at about the same cost.
 
 ## 11. Order of work
 
