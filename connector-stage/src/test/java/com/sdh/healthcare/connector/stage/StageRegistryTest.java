@@ -161,6 +161,49 @@ class StageRegistryTest
     }
 
     /**
+     * A batch's last check finds only the records this worker still holds
+     * claimed: not those it stored, nor another worker's.
+     */
+    @Test
+    void findsOnlyItsOwnRecordsStillClaimed()
+    {
+        first.claim("r1", item, LONG);
+        first.claim("r2", item, LONG);
+        first.store(List.of(entry("r2", false)));
+        second.claim("r3", item, LONG);
+        assertThat(first.stillClaimed(List.of(key("r1"), key("r2"),
+                key("r3"), key("r4")))).containsExactly(key("r1"));
+        assertThat(first.stillClaimed(List.of())).isEmpty();
+        first.store(List.of(entry("r1", false)));
+        assertThat(first.stillClaimed(List.of(key("r1")))).isEmpty();
+    }
+
+    /**
+     * The sweep finds claims expired at least the age ago, oldest first;
+     * not a live claim, one expired more recently, or a stored record.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void findsClaimsExpiredLongEnoughAgo() throws InterruptedException
+    {
+        first.claim("r1", item, BRIEF);
+        Thread.sleep(20);
+        first.claim("r2", item, BRIEF);
+        first.claim("r3", item, LONG);
+        first.claim("r4", item, BRIEF);
+        first.store(List.of(entry("r4", false)));
+        Thread.sleep(300);
+        first.claim("r5", item, BRIEF);
+        assertThat(second.expiredClaims(Duration.ofMillis(200), 10))
+                .containsExactly(key("r1"), key("r2"));
+        assertThat(second.expiredClaims(Duration.ofMillis(200), 1))
+                .containsExactly(key("r1"));
+        assertThat(second.expiredClaims(Duration.ofMinutes(1), 10))
+                .isEmpty();
+    }
+
+    /**
      * Stored records are counted on their item, keep their message until
      * it is sent, and say who stored them.
      */

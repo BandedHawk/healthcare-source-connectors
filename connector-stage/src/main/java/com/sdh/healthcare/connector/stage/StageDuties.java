@@ -137,6 +137,15 @@ public final class StageDuties implements AutoCloseable
     /** How often the reconciler runs. */
     private final Duration reconcileInterval;
 
+    /**
+     * Hands in again the records of claims that expired with nothing
+     * stored; null if that is off.
+     */
+    private final Reconciler sweeper;
+
+    /** How often the sweeper runs. */
+    private final Duration sweepInterval;
+
     /** Makes the maintenance scheduler. */
     private final Maintenance maintenance;
 
@@ -167,6 +176,45 @@ public final class StageDuties implements AutoCloseable
             Duration reconcileInterval, Maintenance maintenance,
             FatalExit fatal)
     {
+        this(leases, stage, connectorId, leaseSettings, reconciler,
+                reconcileInterval, null, reconcileInterval, maintenance,
+                fatal);
+    }
+
+    /**
+     * Creates the duties with a sweep of expired claims beside the
+     * reconciler (STAGES.md §10, 2026-11-18); {@link #start} starts them.
+     * The sweep runs first each time, and as often as its interval, so a
+     * record whose holder stopped is handed in again within minutes,
+     * without the reconciler's waits.
+     *
+     * @param leases            where the lease is kept
+     * @param stage             the stage's name, such as {@code split}
+     * @param connectorId       the stage's ID; with the name, it names the
+     *                          lease
+     * @param leaseSettings     the lease timings
+     * @param reconciler        finds lost work; null if that is off
+     * @param reconcileInterval how often the reconciler runs
+     * @param sweeper           hands in again the records of expired
+     *                          claims; null if that is off
+     * @param sweepInterval     how often the sweeper runs
+     * @param maintenance       makes the maintenance scheduler
+     * @param fatal             stops the process on a fatal error
+     * @throws IllegalArgumentException if the sweep interval isn't
+     *                                  positive
+     */
+    public StageDuties(LeaseStore leases, String stage, String connectorId,
+            LeaseKeeper.Settings leaseSettings, Reconciler reconciler,
+            Duration reconcileInterval, Reconciler sweeper,
+            Duration sweepInterval, Maintenance maintenance, FatalExit fatal)
+    {
+        if (!sweepInterval.isPositive())
+        {
+            throw new IllegalArgumentException(
+                    "The sweep interval must be positive");
+        }
+        this.sweeper = sweeper;
+        this.sweepInterval = sweepInterval;
         this.leases = leases;
         this.stage = stage;
         this.leaseName = stage + "/" + connectorId + "/duties";
@@ -253,11 +301,24 @@ public final class StageDuties implements AutoCloseable
             scheduler.start();
             try (scheduler)
             {
+                long nextReconcile = System.nanoTime();
                 while (running && lease.isHeld())
                 {
-                    reconcile();
-                    if (lost.await(reconcileInterval.toMillis(),
-                            TimeUnit.MILLISECONDS))
+                    runTask(sweeper, "claim_sweep", sweepInterval);
+                    long now = System.nanoTime();
+                    if (now - nextReconcile >= 0)
+                    {
+                        runTask(reconciler, "reconcile",
+                                reconcileInterval);
+                        now = System.nanoTime();
+                        nextReconcile = now + reconcileInterval.toNanos();
+                    }
+                    long wait = nextReconcile - now;
+                    if (sweeper != null)
+                    {
+                        wait = Math.min(wait, sweepInterval.toNanos());
+                    }
+                    if (lost.await(Math.max(0, wait), TimeUnit.NANOSECONDS))
                     {
                         return;
                     }
@@ -267,20 +328,26 @@ public final class StageDuties implements AutoCloseable
     }
 
     /**
-     * Runs the reconciler, if it is on. If it fails, it runs again at the
-     * next interval; only a fatal error stops the process.
+     * Runs the reconciler or the sweeper, if it is on. If it fails, it
+     * runs again at its next interval; only a fatal error stops the
+     * process.
      *
+     * @param task     the reconciler or the sweeper; null if off
+     * @param name     what it is, in the log: {@code reconcile} or
+     *                 {@code claim_sweep}
+     * @param interval how often it runs
      * @throws InterruptedException if interrupted
      */
-    private void reconcile() throws InterruptedException
+    private void runTask(Reconciler task, String name, Duration interval)
+            throws InterruptedException
     {
-        if (reconciler == null)
+        if (task == null)
         {
             return;
         }
         try
         {
-            reconciler.reconcile();
+            task.reconcile();
         }
         catch (InterruptedException interrupted)
         {
@@ -296,9 +363,9 @@ public final class StageDuties implements AutoCloseable
                 fatal.exit(reason.get());
                 throw new InterruptedException();
             }
-            LOG.warn("stage.reconcile_failed stage={} error={} next_in_s={}",
+            LOG.warn("stage.{}_failed stage={} error={} next_in_s={}", name,
                     stage, failure.getClass().getSimpleName(),
-                    reconcileInterval.toSeconds());
+                    interval.toSeconds());
         }
     }
 

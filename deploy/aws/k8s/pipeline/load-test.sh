@@ -17,6 +17,8 @@
 # checks every item ended at every stage, and counts what the reconcilers rebuilt.
 # With no outage, items left behind are noted where they are, and waited for up to SDH_LOAD_RECOVER_MIN (40)
 # minutes, for the reconcilers to end them (below).
+# Every convert and transform pod's warnings, errors and events are kept as the run goes, in pod-logs/ (gzipped at
+# the end), so a pod that stops part way leaves its log (STAGES.md §10, 2026-11-18). No content: they log none.
 #
 # SDH_LOAD_BACKLOG (say "1,2,4,6") is the backlog test (docs/PERFORMANCE.md §10): transform is held at no pods
 # while the load lands, splits and converts, then cleared at each of those pod counts in turn (below).
@@ -130,6 +132,7 @@ mkdir -p "$STATE/load"; chmod 700 "$STATE/load"
 report="$out/report.txt"
 staging="$BUCKET/staging/$run/"
 cleanup() {
+  declare -F stop_logs >/dev/null && stop_logs
   [[ "${outage_state:-}" == down ]] && { outage_restore || true; }
   [[ -n "$BACKLOG" ]] && { backlog_restore || true; }
   [[ "$STAGE_ONLY" == 1 ]] || aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
@@ -182,6 +185,38 @@ t0_db="$(db "SELECT now()")"
 t0_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 t0=$SECONDS
 echo "$t0_db" > "$out/t0"   # for measure.sh
+
+# Each stage pod's log, followed from its start until it goes, warnings, errors and events only (STAGES.md §10,
+# 2026-11-18): the only record of what a pod that stopped part way did. A loop looks for new pods every 15 s.
+mkdir -p "$out/pod-logs"
+follow_logs() {
+  local -A following=()
+  while :; do
+    for ns in "$N" sdh-fhir; do
+      for pod in $(kubectl -n "$ns" get pods -o name 2>/dev/null | grep -E 'convert|transform|splitter|landing'); do
+        [[ -n "${following[$ns/$pod]:-}" ]] && continue
+        following[$ns/$pod]=1
+        kubectl -n "$ns" logs -f --timestamps --all-containers "$pod" 2>/dev/null \
+          | grep --line-buffered -E ' (WARN|ERROR) |sdh\.audit|stage\.|record\.|broker\.|lease\.' \
+          >> "$out/pod-logs/${ns}_${pod#pod/}.log" &
+      done
+    done
+    sleep 15
+  done
+}
+follow_logs &
+log_follower=$!
+stop_logs() {
+  [[ -n "${log_follower:-}" ]] || return 0
+  kill "$log_follower" 2>/dev/null; pkill -P "$log_follower" 2>/dev/null
+  pkill -f "logs -f --timestamps --all-containers pod/" 2>/dev/null
+  log_follower=""
+  gzip -q "$out"/pod-logs/*.log 2>/dev/null
+  return 0
+}
+pod_events() {  # <event>: how many lines name it, across every pod kept
+  zcat -f "$out"/pod-logs/*.log* 2>/dev/null | grep -c -- "$1" || true
+}
 mkdir -p "$out/events"; : > "$out/pg-connections"
 for t in "${topics[@]}"; do echo "$t ${before[$t]}"; done > "$out/offsets0"   # for measure.sh
 "$HERE/node-cpu.sh" > "$out/nodecpu0" 2>/dev/null || true   # for measure.sh: the T nodes' surplus CPU credits
@@ -573,6 +608,22 @@ if [[ "$split_behind" =~ ^[0-9]+$ && "$convert_behind" =~ ^[0-9]+$ ]] && ((split
   say "  where they are (stage|item|total came|expected|done|failed|upstream open|end asked again|completed|records):"
   say "    $(cut -d'|' -f1,3- "$out/left-items" 2>/dev/null | sort | uniq -c | sed 's/^ *//' | paste -sd ';' -)"
   say "    (by item: $out/left-items)"
+  # Their records still claimed: the pod holding each, its attempts and when the claim expired (STAGES.md §10).
+  for pair in "convert:$left_split" "transform:$left_convert"; do
+    s="${pair%%:*}" ids="${pair#*:}"
+    db "SELECT '$s', r.item_id, r.record_id, split_part(r.owner, '/', 1), r.attempts, r.claim_expires
+          FROM ${s}_$PREFIX.stage_record r WHERE r.state = 'CLAIMED' AND r.item_id IN ($ids)" \
+      >> "$out/left-claims" 2>/dev/null || true
+  done
+  if [[ -s "$out/left-claims" ]]; then
+    live=" $(kubectl get pods -A -o custom-columns=N:.metadata.name --no-headers 2>/dev/null | paste -sd ' ' -) "
+    say "  records left claimed (stage|pod|attempts|claim expired|pod still there): $(wc -l < "$out/left-claims")"
+    say "    $(while IFS='|' read -r st _ _ pod att exp; do
+        [[ "$live" == *" $pod "* ]] && there=yes || there=no
+        echo "$st|$pod|$att|${exp%%.*}|$there"
+      done < "$out/left-claims" | sort | uniq -c | sed 's/^ *//' | paste -sd ';' -)"
+    say "    (by record: $out/left-claims; the pods' logs: $out/pod-logs/)"
+  fi
   if ((RECOVER_MIN > 0)); then
     say "  waiting up to $RECOVER_MIN minutes for the reconcilers to end them"
     waited=0 left=$((split_behind + convert_behind))
@@ -583,6 +634,8 @@ if [[ "$split_behind" =~ ^[0-9]+$ && "$convert_behind" =~ ^[0-9]+$ ]] && ((split
       [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] && left=$((a + b))
     done
     say "  after ${waited}s: $left left behind (split but not ended at convert ${a:-?}, not ended at transform ${b:-?})"
+    say "  expired claims handed in again (stage.claims_recovered): $(pod_events stage.claims_recovered);" \
+      "batches tried again for a record still claimed (stage.claims_left): $(pod_events stage.claims_left)"
     for s in convert transform; do
       say "  ends asked for again at $s: $(db "SELECT count(*) || ', ' || count(expected) || ' came'
         FROM ${s}_$PREFIX.stage_item WHERE item_id IN ($run_items) AND total_wanted_at IS NOT NULL" \

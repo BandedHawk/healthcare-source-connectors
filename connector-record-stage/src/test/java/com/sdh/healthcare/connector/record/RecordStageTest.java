@@ -575,6 +575,41 @@ class RecordStageTest
     }
 
     /**
+     * A record claimed by a pod that stopped part way, its claim long
+     * expired, is handed in again by the sweep and transformed, without
+     * waiting for the reconciler; a record whose message just hasn't come
+     * is left for its message, and a claim expired too recently is left
+     * for a broker's delivery.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void sweepsRecordsWhoseHolderStopped() throws Exception
+    {
+        List<RecordStored> messages = converted("{\"a\":1}", "{\"b\":2}",
+                "{\"c\":3}");
+        StageRegistry gone = new StageRegistry(postgres.getPostgresDatabase(),
+                schema, StageMessages.TRANSFORM.stage(), "pod-gone",
+                Duration.ofSeconds(10));
+        gone.claim(messages.get(1).recordId(), item, Duration.ofMillis(1));
+        Thread.sleep(300);
+        gone.claim(messages.get(2).recordId(), item, Duration.ofMillis(1));
+        RecordReconciler reconciler = new RecordReconciler(
+                new RecordTable("prod", NS, "records", records),
+                StageMessages.TRANSFORM, registry, worker, processor,
+                Duration.ofMinutes(10), Duration.ofDays(2),
+                Clock.systemUTC(), RecordReconciler.Deferral.OFF,
+                Duration.ofMillis(200));
+
+        assertThat(reconciler.sweepExpiredClaims()).isEqualTo(1);
+        assertThat(registry.knownRecords(item))
+                .containsExactly(messages.get(1).recordId());
+        assertThat(opened()).filteredOn(RecordTransformed.class::isInstance)
+                .hasSize(1);
+        assertThat(reconciler.sweepExpiredClaims()).isZero();
+    }
+
+    /**
      * A record off the queue is noted as backlog only if it was committed
      * more than the grace ago; one the reconciler rebuilt isn't; and a
      * snapshot no longer in the table was expired, so is old. Moved from

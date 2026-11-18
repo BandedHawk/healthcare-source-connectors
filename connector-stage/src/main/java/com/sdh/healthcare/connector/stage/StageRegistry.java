@@ -488,6 +488,11 @@ public final class StageRegistry
                     + " ADD COLUMN IF NOT EXISTS superseded_at timestamptz");
             statement.execute("CREATE INDEX IF NOT EXISTS stage_record_place"
                     + " ON " + records + " (stage, item_id, generation, seq)");
+            // Added 2026-11-18 (STAGES.md §10): the claims alone, few at
+            // any time, for the sweep of expired ones.
+            statement.execute("CREATE INDEX IF NOT EXISTS stage_record_claimed"
+                    + " ON " + records + " (stage, claim_expires)"
+                    + " WHERE state = 'CLAIMED'");
             // Added 2026-11-09 (§15.8.5): the correction a row was made
             // from, for one claimed under its place's key.
             statement.execute("ALTER TABLE " + records
@@ -2515,6 +2520,112 @@ public final class StageRegistry
                 while (rows.next())
                 {
                     found.add(rows.getString(1));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * The records, of those given, that this worker still holds claimed:
+     * for a batch's last check before its messages are acknowledged
+     * (STAGES.md §10, 2026-11-18). Once a batch has been through, each of
+     * its records is stored, failed, or held by another worker, so any
+     * found here would be acknowledged without being stored.
+     *
+     * @param keys the records
+     * @return those still claimed by this worker
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Set<Key> stillClaimed(Collection<Key> keys)
+    {
+        Set<Key> found = new HashSet<>();
+        if (keys.isEmpty())
+        {
+            return found;
+        }
+        String sql = """
+                SELECT r.item_id, r.record_id
+                  FROM %s r
+                  JOIN unnest(?::uuid[], ?::text[]) AS k(item_id, record_id)
+                    ON r.item_id = k.item_id AND r.record_id = k.record_id
+                 WHERE r.stage = ? AND r.owner = ?
+                   AND r.state = 'CLAIMED'""".formatted(records);
+        List<UUID> itemIds = new ArrayList<>(keys.size());
+        List<String> recordIds = new ArrayList<>(keys.size());
+        for (Key key : keys)
+        {
+            itemIds.add(key.itemId());
+            recordIds.add(key.recordId());
+        }
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setArray(1, connection.createArrayOf("uuid",
+                    itemIds.toArray()));
+            select.setArray(2, connection.createArrayOf("text",
+                    recordIds.toArray()));
+            select.setString(3, stage);
+            select.setString(4, owner);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(new Key(rows.getObject(1, UUID.class),
+                            rows.getString(2)));
+                }
+            }
+            return found;
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Stage registry unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Records whose claim expired at least a while ago with nothing stored:
+     * their holder stopped, and their messages may never come again
+     * (STAGES.md §10, 2026-11-18), so a reconciler hands them in again
+     * from their stored rows. Oldest first.
+     *
+     * @param age   how long ago a claim must have expired; longer than a
+     *              broker takes to deliver a stopped worker's messages
+     *              again, so that they are taken over first if they come
+     * @param limit the most to return
+     * @return their keys
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public List<Key> expiredClaims(Duration age, int limit)
+    {
+        String sql = """
+                SELECT item_id, record_id FROM %s
+                 WHERE stage = ? AND state = 'CLAIMED'
+                   AND claim_expires <= clock_timestamp()
+                       - ? * interval '1 millisecond'
+                 ORDER BY claim_expires
+                 LIMIT ?""".formatted(records);
+        List<Key> found = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, stage);
+            select.setLong(2, age.toMillis());
+            select.setInt(3, limit);
+            try (ResultSet rows = select.executeQuery())
+            {
+                while (rows.next())
+                {
+                    found.add(new Key(rows.getObject(1, UUID.class),
+                            rows.getString(2)));
                 }
             }
             return found;

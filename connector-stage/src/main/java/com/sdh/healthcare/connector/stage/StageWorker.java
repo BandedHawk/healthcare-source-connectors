@@ -794,6 +794,10 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                     Thread.sleep(settings.busyPoll().toMillis());
                 }
             }
+            if (!released(records.keySet()))
+            {
+                return Outcome.RETRY;
+            }
             long completing = System.nanoTime();
             completeItems(items);
             timed("complete", completing);
@@ -808,6 +812,33 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                                     failure.getClass().getSimpleName()));
             return Outcome.RETRY;
         }
+    }
+
+    /**
+     * Whether none of a batch's records is still claimed by this worker,
+     * its last check before its messages are acknowledged (STAGES.md §10,
+     * 2026-11-18). Each record should by now be stored, failed, or held
+     * by another worker; one still claimed here would be acknowledged
+     * without being stored, and its message never come again. If any is,
+     * that is audited, {@code stage.claims_left}, with how many, and the
+     * batch is to be tried again rather than acknowledged.
+     *
+     * @param keys the batch's records
+     * @return true if none is still claimed here
+     */
+    private boolean released(Set<StageRegistry.Key> keys)
+    {
+        long checking = System.nanoTime();
+        Set<StageRegistry.Key> left = registry.stillClaimed(keys);
+        timed("check", checking);
+        if (left.isEmpty())
+        {
+            return true;
+        }
+        Telemetry.get().auditError("stage.claims_left",
+                stageFields(ErrorCode.STAGE_BATCH_FAILED)
+                        .with(Attr.COUNT, left.size()));
+        return false;
     }
 
     /**

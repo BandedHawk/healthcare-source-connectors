@@ -510,6 +510,29 @@ The sandbox gets the KEDA operator, the stages as scaled deployments, and topics
   consumer left its group (no poll timeouts, rejoins or failed commits in the logs), the outage wasn't counted
   as restarts (`item.restart_not_counted` 7, no `RESUME_NO_PROGRESS`), and after it every item landed (110) was
   split and converted, none twice. Long items weren't tried there (its landing node takes 100 MiB at most).
+- **Records left claimed by a stopped pod, their messages acknowledged (found 2026-11-18, revision (du)).** In
+  AWS runs 45 and 46 (docs/PERFORMANCE.md §10), 52 and 5 items never ended at the transform stage: each had one
+  record claimed by a transform pod that had stopped, the claim long expired, nothing stored, and the stage's
+  consumer group with no lag, so the record's message had been acknowledged and would never come again. In run
+  46 the pod's node was one the Auto Scaling group took to rebalance its zones: the pod claimed the 5 records at
+  18:31:33, stopped renewing its claims within 15 s, ran on for about a minute, and ended without releasing them.
+  Which path acknowledged them is not yet known: a batch is acknowledged only once handled, its records stored;
+  Camel commits nothing at a rebalance or a stop under manual commits; and the logs went with the pod. Under
+  Kafka 4's group protocol a partition moves without waiting for a busy pod (above), so two pods can hold the
+  same records at once, which is the likeliest place. The reconciler would rebuild such a record, but late: a
+  pod newly holding the duties waits a backlog quiet (15 minutes) before its first run, and runs every 15
+  minutes, while the duties changed hands with each pod the cluster replaced; in run 45 it ended 6 of the 52 in
+  40 minutes. Three changes. A batch's last check (`StageWorker`, `StageRegistry.stillClaimed`): before its
+  messages are acknowledged, none of its records may still be claimed by the worker; if any is, the batch is
+  tried again rather than acknowledged, audited `stage.claims_left` (an error, with how many). A sweep of
+  expired claims (`RecordReconciler.sweepExpiredClaims`, `StageRegistry.expiredClaims`): the pod with the
+  duties, each minute (`sdh.reconcile.claim-sweep`), hands in again the records of claims that expired at
+  least a minute ago (`sdh.reconcile.claim-age`, longer than Kafka's 45 s session timeout, so a redelivery takes
+  the claim over first), rebuilt from their rows in the source, without the reconciler's waits, audited
+  `stage.claims_recovered`; the claim protocol makes it safe beside a message that does come again, which then
+  finds the record stored. A partial index on the claims (`stage_record_claimed`) keeps it cheap. And the load
+  test keeps every stage pod's event lines as the run goes (`load-test.sh`, `pod-logs/`), and notes each left
+  record's owner, attempts and claim expiry, so the next one can be traced.
 
 ## 11. Order of work
 

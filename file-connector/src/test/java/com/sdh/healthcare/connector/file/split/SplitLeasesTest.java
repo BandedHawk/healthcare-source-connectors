@@ -23,6 +23,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.junit.jupiter.api.AfterAll;
@@ -153,6 +154,50 @@ class SplitLeasesTest
                 LeaseLostException.Reason.FENCED))).isEmpty();
         assertThat(SplitHandler.fatalReason(
                 new IllegalStateException("database down"))).isEmpty();
+    }
+
+    /**
+     * The sweep of expired claims runs at its own interval beside a slower
+     * reconciler, which still runs at once and then at its own; a sweep
+     * that fails doesn't stop either.
+     *
+     * @throws Exception if interrupted
+     */
+    @Test
+    void sweepsAtItsOwnIntervalBesideTheReconciler() throws Exception
+    {
+        AtomicInteger reconciles = new AtomicInteger();
+        AtomicInteger sweeps = new AtomicInteger();
+        StageDuties duties = new StageDuties(leases, "split", "test",
+                TIMINGS, reconciles::incrementAndGet, Duration.ofHours(1),
+                () ->
+                {
+                    if (sweeps.incrementAndGet() == 2)
+                    {
+                        throw new IllegalStateException("database down");
+                    }
+                }, Duration.ofMillis(100), (committer, exit) ->
+                {
+                    started.add("pod-a");
+                    return new MaintenanceScheduler(committer,
+                            MaintenanceSettings.DEFAULT,
+                            new MaintenanceScheduler.Schedule(false,
+                                    Duration.ofHours(1), false,
+                                    Duration.ofHours(1)),
+                            List::of, new ReentrantLock(), exit,
+                            Clock.systemUTC());
+                }, fatal::add);
+        duties.start();
+        awaitStarted(1);
+        Thread.sleep(1000);
+        duties.close();
+        assertThat(reconciles).hasValue(1);
+        assertThat(sweeps.get()).isGreaterThanOrEqualTo(5);
+        assertThat(fatal).isEmpty();
+        assertThatThrownBy(() -> new StageDuties(leases, "split", "test",
+                TIMINGS, null, Duration.ofHours(1), null, Duration.ZERO,
+                null, fatal::add))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     /**

@@ -1229,7 +1229,8 @@ What it showed, beyond §2's predictions:
       (2,992 snapshots of split_records in 1,288 s, ~30 items each). More split at that rate needs fewer,
       larger commits or a cheaper commit, not more items at once.
   **Adopted:** split `concurrency: 8` and 1100m, for the latency at 35 a second at about the same cost.
-- **A split pod's groups wait for the commit side by side** (2026-11-18, DESIGN.md (dt), built, not yet measured).
+- **A split pod's groups wait for the commit side by side** (2026-11-18, DESIGN.md (dt); measured in runs 45-46,
+  not adopted).
   Run 43's timings put split's limit in the pod, not the queue: each pod commits through one thread, a group
   taking 0.84 s from its turn to its commit (7,632 groups on 6 pods in 1,288 s: each pod's thread busy ~83% of
   the time), and its items waiting 0.65 s for that thread. The queue's turns came one after another, 2.3 a
@@ -1237,6 +1238,23 @@ What it showed, beyond §2's predictions:
   `sdh.split.commit.groups-at-once: 4`, a pod's next groups wait for a turn beside its last, and a turn takes
   them all: the same turns, more files each, the turn's fixed cost shared. Checked in the sandbox (one split pod,
   2 at once): 13 of 220 commits took two of the pod's groups together; nothing refused or failed.
+  Measured on AWS, 2026-11-18, as runs 43 and 44 (8 items a batch, 1100m, the same loads), 4 at once:
+    - **100 a second** (load-20261118T152555Z): the groups did go in together, ~6.7 a commit (2,566 commits
+      for 17,245 groups; run 43 2,958 for 7,632, ~2.6). But a pod's four threads each took the files waiting
+      when free, so its groups were smaller, more than twice as many, and each still took its own turn of the
+      queue, one after another: a turn 1.03 s (0.58), a group 1.19 s (0.84), a commit 0.51 s (0.37). **Split
+      61 items a second** (70); the stages done in 1,519 s (1,462), 59.2 documents a second (62.9); up to 37
+      nodes (35), $13 per million (12).
+    - **35 a second** (load-20261118T161653Z): 7,805 groups (3,103) in 1,765 commits (1,793), a turn 0.75 s
+      (0.34): split fell behind at a third of the rate it keeps up with, ending at 1,020 s, 400 s after the
+      feed (run 44: 620 s, with it). Landed → gold p50 / p95 / p99 35 / 300 / 415 s (29 / 100 / 131).
+    - Both runs had heavy burst-node churn (the Auto Scaling group rebalancing its zones, and Spot), so the
+      end-to-end numbers are partly the nodes; the commit counts and timings are not. Both also left items
+      claimed at transform by a stopped pod (52 and 5; 16 in run 43): STAGES.md §10, revision (du). Their
+      last-in-gold rates (21.6 and 7.4 documents a second) are those items' recovery, not the stages'.
+  **Not adopted:** groups-at-once stays in the code at its default, 1, which the AWS and sandbox configs use
+  again. More groups means more turns, and the turns are what is serial. What would help is fewer, larger turns:
+  a pod's waiting groups going into one turn as one group.
 
 ## 11. Order of work
 

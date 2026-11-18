@@ -309,7 +309,8 @@ public final class RecordStageRuntime implements AutoCloseable
                             reconcile.lookback(), clock,
                             new RecordReconciler.Deferral(
                                     reconcile.backlogQuiet(),
-                                    reconcile.maxDeferral()))
+                                    reconcile.maxDeferral()),
+                            reconcile.claimAge())
                     : null;
             ItemEndResender resender = ItemEndResender.of(dataSource,
                     stage.nextRegistrySchema(), stageName, worker::resendEnd,
@@ -323,6 +324,12 @@ public final class RecordStageRuntime implements AutoCloseable
                             reconciler == null ? null : reconciler::reconcile,
                             resender == null ? null : resender::resend),
                     reconcile.interval(),
+                    // A record whose holder stopped part way, handed in
+                    // again within minutes (STAGES.md §10, 2026-11-18).
+                    reconciler == null || !reconcile.claimSweep().isPositive()
+                            ? null : reconciler::sweepExpiredClaims,
+                    reconcile.claimSweep().isPositive()
+                            ? reconcile.claimSweep() : reconcile.interval(),
                     (committer, dutiesFatal) -> new MaintenanceScheduler(
                             committer, maintenanceSettings,
                             maintenance.toSchedule(),

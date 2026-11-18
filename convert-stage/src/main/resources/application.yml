@@ -61,3 +61,8 @@ sdh:
     # waits rather than rebuild them, up to max-deferral.
     backlog-quiet: 15m
     max-deferral: 6h
+    # Each minute, the records of claims that expired a minute ago with
+    # nothing stored, their pod stopped part way, are converted again
+    # (STAGES.md §10, 2026-11-18); 0s turns it off.
+    claim-sweep: 1m
+    claim-age: 1m

@@ -46,8 +46,6 @@ sdh:
     next-registry-schema: convert_${ICEBERG_PREFIX}
   split:
     format: ${SPLIT_FORMAT}
-    # Two of the pod's groups may wait for the shared commit at once, as on AWS (four there).
-    commit: { groups-at-once: 2 }
   storage:
     catalog-name: sdh
     namespace: ${ICEBERG_PREFIX}

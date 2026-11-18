@@ -21,11 +21,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.slf4j.Logger;
@@ -74,6 +76,17 @@ public final class RecordReconciler
     /** The most rebuilt messages handed to the worker at once. */
     static final int BATCH = 100;
 
+    /** The most expired claims a sweep looks at. */
+    static final int SWEEP_LIMIT = 1000;
+
+    /**
+     * How long ago a claim must have expired for a sweep to take it up,
+     * unless set: longer than the broker takes to deliver a stopped
+     * worker's messages again (Kafka's session timeout is 45 seconds), so
+     * that they take it over first if they come.
+     */
+    public static final Duration DEFAULT_CLAIM_AGE = Duration.ofMinutes(1);
+
     /** The most of the source a run reads at once, by time. */
     static final Duration WINDOW = Duration.ofDays(1);
 
@@ -107,6 +120,9 @@ public final class RecordReconciler
 
     /** When to wait for a backlog to drain, and for how long at most. */
     private final Deferral deferral;
+
+    /** How long ago a claim must have expired for a sweep to take it up. */
+    private final Duration claimAge;
 
     /** Whether a run has cleared a wait left by an earlier duties holder. */
     private boolean started;
@@ -196,6 +212,33 @@ public final class RecordReconciler
             RecordStageProcessor processor, Duration grace,
             Duration lookback, Clock clock, Deferral deferral)
     {
+        this(source, messages, registry, worker, processor, grace, lookback,
+                clock, deferral, DEFAULT_CLAIM_AGE);
+    }
+
+    /**
+     * Creates a reconciler that also sweeps expired claims.
+     *
+     * @param source    the source table
+     * @param messages  the stage's messages
+     * @param registry  the stage's registry
+     * @param worker    processes the rebuilt records
+     * @param processor the worker's processor, told which records are
+     *                  rebuilt
+     * @param grace     how long a record may wait for its message
+     * @param lookback  how far back to look
+     * @param clock     the time
+     * @param deferral  when to wait for a backlog to drain
+     * @param claimAge  how long ago a claim must have expired for a sweep
+     *                  to take it up ({@link #sweepExpiredClaims})
+     */
+    public RecordReconciler(RecordTable source, StageMessages messages,
+            StageRegistry registry, StageWorker<?> worker,
+            RecordStageProcessor processor, Duration grace,
+            Duration lookback, Clock clock, Deferral deferral,
+            Duration claimAge)
+    {
+        this.claimAge = claimAge;
         this.deferral = deferral;
         this.source = source;
         this.messages = messages;
@@ -423,33 +466,113 @@ public final class RecordReconciler
                 }
                 continue;
             }
-            List<ConnectorMessage> lost = rebuild(itemId, known, snapshotId);
-            for (int start = 0; start < lost.size(); start += BATCH)
-            {
-                List<ConnectorMessage> batch = lost.subList(start,
-                        Math.min(lost.size(), start + BATCH));
-                BatchHandler.Outcome outcome;
-                processor.rebuilding(batch);
-                try
-                {
-                    outcome = worker.handleOpened(batch);
-                }
-                finally
-                {
-                    processor.rebuilt(batch);
-                }
-                if (outcome != BatchHandler.Outcome.DONE)
-                {
-                    throw new IllegalStateException(
-                            "The worker held back reconciled records");
-                }
-            }
+            List<ConnectorMessage> lost = rebuild(itemId,
+                    name -> !known.contains(name), snapshotId);
+            handIn(lost);
             Telemetry.get().auditWarn("stage.records_recovered",
                     Fields.of(Attr.STAGE, messages.stage())
                             .with(Attr.ITEM_ID, itemId)
                             .with(Attr.COUNT, lost.size()));
             tally.recovered += lost.size();
         }
+    }
+
+    /**
+     * Hands rebuilt messages to the worker, a batch at a time, as if
+     * received.
+     *
+     * @param lost the messages
+     * @throws InterruptedException  if interrupted
+     * @throws IllegalStateException if the worker held a batch back
+     */
+    private void handIn(List<ConnectorMessage> lost)
+            throws InterruptedException
+    {
+        for (int start = 0; start < lost.size(); start += BATCH)
+        {
+            List<ConnectorMessage> batch = lost.subList(start,
+                    Math.min(lost.size(), start + BATCH));
+            BatchHandler.Outcome outcome;
+            processor.rebuilding(batch);
+            try
+            {
+                outcome = worker.handleOpened(batch);
+            }
+            finally
+            {
+                processor.rebuilt(batch);
+            }
+            if (outcome != BatchHandler.Outcome.DONE)
+            {
+                throw new IllegalStateException(
+                        "The worker held back reconciled records");
+            }
+        }
+    }
+
+    /**
+     * Hands in again the records whose claims expired, at least the claim
+     * age ago, with nothing stored (STAGES.md §10, 2026-11-18): their
+     * holder stopped part way, and their messages may have been
+     * acknowledged with it, so they may never come again. Unlike a
+     * {@link #reconcile} run it doesn't wait for a backlog or at startup:
+     * a claim expired that long ago is held by no one, and taking it
+     * over is what its message, if it did come again, would do. The
+     * worker claims each again, so a record also handed in by its message
+     * is processed once. Each item's records are rebuilt from their rows
+     * in the source, as a run rebuilds them; a claim with no row there,
+     * such as an operator's correction's, which its own step takes up
+     * again, is left. Audited per item, {@code stage.claims_recovered},
+     * with how many; and each sweep that finds any is logged, with how
+     * many it found, handed in and left.
+     *
+     * @return how many records were handed to the worker
+     * @throws InterruptedException  if interrupted
+     * @throws IllegalStateException if the worker held a batch back, or the
+     *                               registry can't be reached; the rest are
+     *                               found again next time
+     */
+    public int sweepExpiredClaims() throws InterruptedException
+    {
+        List<StageRegistry.Key> expired =
+                registry.expiredClaims(claimAge, SWEEP_LIMIT);
+        if (expired.isEmpty())
+        {
+            return 0;
+        }
+        Table table = source.table();
+        table.refresh();
+        Snapshot snapshot = table.currentSnapshot();
+        if (snapshot == null)
+        {
+            return 0;
+        }
+        Map<UUID, Set<String>> byItem = new LinkedHashMap<>();
+        for (StageRegistry.Key key : expired)
+        {
+            byItem.computeIfAbsent(key.itemId(), item -> new HashSet<>())
+                    .add(key.recordId());
+        }
+        int recovered = 0;
+        for (Map.Entry<UUID, Set<String>> item : byItem.entrySet())
+        {
+            List<ConnectorMessage> lost = rebuild(item.getKey(),
+                    item.getValue()::contains, snapshot.snapshotId());
+            if (lost.isEmpty())
+            {
+                continue;
+            }
+            handIn(lost);
+            Telemetry.get().auditWarn("stage.claims_recovered",
+                    Fields.of(Attr.STAGE, messages.stage())
+                            .with(Attr.ITEM_ID, item.getKey())
+                            .with(Attr.COUNT, lost.size()));
+            recovered += lost.size();
+        }
+        LOG.info("stage.claims_swept stage={} expired={} recovered={}"
+                + " left={}", messages.stage(), expired.size(), recovered,
+                expired.size() - recovered);
+        return recovered;
     }
 
     /**
@@ -489,12 +612,13 @@ public final class RecordReconciler
      * know.
      *
      * @param itemId     the item
-     * @param known      the records the registry knows
+     * @param wanted     whether to rebuild a record, by its name in the
+     *                   registry ({@link StageRegistry.Key})
      * @param snapshotId the table's snapshot, which holds them all
      * @return the messages, in sequence order
      */
-    private List<ConnectorMessage> rebuild(UUID itemId, Set<String> known,
-            long snapshotId)
+    private List<ConnectorMessage> rebuild(UUID itemId,
+            Predicate<String> wanted, long snapshotId)
     {
         List<ConnectorMessage> lost = new ArrayList<>();
         // With the records operators' corrections made at the stage before
@@ -504,11 +628,11 @@ public final class RecordReconciler
         rows.addAll(CommittedRecords.corrections(source.table(), itemId));
         for (CommittedRecords.Row row : rows)
         {
-            if (known.contains(StageRegistry.Key.of(itemId, row.recordId(),
+            if (!wanted.test(StageRegistry.Key.of(itemId, row.recordId(),
                     row.lineage()).recordId()) || row.errorCode() != null)
             {
-                // Known, or one the stage before failed: in its fail store,
-                // never sent on (STAGES.md §15.1).
+                // Not wanted, or one the stage before failed: in its fail
+                // store, never sent on (STAGES.md §15.1).
                 continue;
             }
             lost.add(SourceInputs.rebuild(messages, itemId, row,

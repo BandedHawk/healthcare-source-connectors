@@ -142,13 +142,21 @@ public interface RecordStageSettings extends ConnectorSettings
      *                     rebuilds anything; zero never to wait
      * @param maxDeferral  the longest a run waits for the backlog before it
      *                     goes ahead anyway
+     * @param claimSweep   how often the pod with the duties hands in again
+     *                     the records of claims that expired with nothing
+     *                     stored (STAGES.md §10, 2026-11-18); zero not to
+     * @param claimAge     how long ago such a claim must have expired:
+     *                     longer than the broker takes to deliver a
+     *                     stopped pod's messages again
      */
     record Reconcile(@DefaultValue("true") boolean enabled,
             @DefaultValue("10m") Duration grace,
             @DefaultValue("2d") Duration lookback,
             @DefaultValue("15m") Duration interval,
             @DefaultValue("15m") Duration backlogQuiet,
-            @DefaultValue("6h") Duration maxDeferral)
+            @DefaultValue("6h") Duration maxDeferral,
+            @DefaultValue("1m") Duration claimSweep,
+            @DefaultValue("1m") Duration claimAge)
     {
     }
 
