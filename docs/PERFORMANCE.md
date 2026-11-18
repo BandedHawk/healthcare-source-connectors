@@ -1194,9 +1194,17 @@ What it showed, beyond §2's predictions:
       landed → gold p50 / p99 291 / 505 s (285 / 517). $12 per million documents (11), 35 nodes at most.
       No container restarted.
     - **16 items not ended at transform** when the test stopped waiting, its lag 0, as transform scaled in
-      from 18 pods (14 in run 39, before the shared commit; 0 in run 41). The logs went with the stack, so the
-      cause is open: whether convert's reconciler would have resent them (STAGES.md §13.2) after the test's
-      wait, or they were held by a pod taken away.
+      from 18 pods (14 in run 39, before the shared commit; 0 in run 41). Traced after the run: 8 burst
+      nodes had EC2 Spot interruption notices at 1,338 and 1,409 s (08:29:19 and 08:30:30), their transform and
+      convert pods went with them, and replacements failed for capacity; the items stopped at 1,462 s. The
+      registries were reset for run 44, so which state they were left in can't be read. The code has a way out
+      of each state found: a batch is acknowledged only once its records are stored and counted, an item's end
+      is sent before it is marked, a lost end is sent again by convert's `ItemEndResender` and lost records are
+      rebuilt by the reconciler (STAGES.md §9, §13.2); but those run after a 10-minute grace, every 15 minutes,
+      and the test stopped 45 s after nothing moved, so no run has yet waited for them. `load-test.sh` now
+      notes where each left item is (`left-items` in the run's directory) and waits up to
+      `SDH_LOAD_RECOVER_MIN` (40) minutes for them to end, so the next run that leaves any shows whether they
+      recover.
     - **35 a second** (load-20261118T073238Z): every item landed exactly once, 0 left behind. **Landed →
       gold p50 / p99 29 / 131 s** (32 / 185); landed → split ended 9 / 68 s (10 / 100), split ended → convert's
       first record 8 / 61 s (9 / 122). 33.0 documents a second; up to 33 nodes (36), $24 per million (26).

@@ -15,6 +15,8 @@
 #
 # SDH_LOAD_OUTAGE_AT, _MIN and _LOSE add an outage part way (below, and docs/PERFORMANCE.md §3.6); the report then
 # checks every item ended at every stage, and counts what the reconcilers rebuilt.
+# With no outage, items left behind are noted where they are, and waited for up to SDH_LOAD_RECOVER_MIN (40)
+# minutes, for the reconcilers to end them (below).
 #
 # SDH_LOAD_BACKLOG (say "1,2,4,6") is the backlog test (docs/PERFORMANCE.md §10): transform is held at no pods
 # while the load lands, splits and converts, then cleared at each of those pod counts in turn (below).
@@ -61,6 +63,11 @@ OUTAGE_MIN="${SDH_LOAD_OUTAGE_MIN:-10}"
 OUTAGE_LOSE="${SDH_LOAD_OUTAGE_LOSE:-}"
 SETTLE_MIN="${SDH_LOAD_SETTLE_MIN:-$([[ -n "$OUTAGE_LOSE" ]] && echo 45 || echo 0)}"
 GOLD_CHECK="${SDH_LOAD_GOLD_CHECK:-1}"
+# Items left behind with no outage (runs 39 and 43 of docs/PERFORMANCE.md §10, as Spot nodes were reclaimed): the
+# report notes where each is in the registries, then waits up to RECOVER_MIN minutes for the reconcilers to end them
+# (a 10-minute grace, every 15 minutes: STAGES.md §9 and §13.2), and says how long they took; 0 doesn't wait.
+RECOVER_MIN="${SDH_LOAD_RECOVER_MIN:-40}"
+[[ "$RECOVER_MIN" =~ ^[0-9]+$ ]] || { echo "SDH_LOAD_RECOVER_MIN: minutes, as 40" >&2; exit 2; }
 # The backlog test: once split and convert have nothing queued, transform is released at the first pod count of
 # BACKLOG, the others held at one pod. Each count is held until its pods have all been ready for BACKLOG_WARM
 # seconds and then BACKLOG_STEP more, its window; the next count follows, and the last stays until the backlog
@@ -547,6 +554,42 @@ convert_behind="$(db "SELECT count(*) FROM convert_$PREFIX.stage_item a WHERE a.
   AND a.failed < a.done AND $(not_ended "transform_$PREFIX" "a.failed > 0")" 2>/dev/null || echo '?')"
 say "Items left behind: split but not ended at convert $split_behind; converted (with a record sent on)" \
   "but not ended at transform $convert_behind (expected 0 and 0)"
+if [[ "$split_behind" =~ ^[0-9]+$ && "$convert_behind" =~ ^[0-9]+$ ]] && ((split_behind + convert_behind > 0)); then
+  # Where they are: at the stage they didn't end at, whether its total came, its counts, whether its reconciler asked
+  # for the end again, and its records by state. IDs and counts only, kept in the run's directory.
+  left_split="SELECT a.item_id FROM split_$PREFIX.split_item a WHERE a.updated_at >= '$t0_db'
+    AND a.state = 'COMPLETED' AND $(not_ended "convert_$PREFIX" false)"
+  left_convert="SELECT a.item_id FROM convert_$PREFIX.stage_item a WHERE a.item_id IN ($run_items)
+    AND a.failed < a.done AND $(not_ended "transform_$PREFIX" "a.failed > 0")"
+  for pair in "convert:$left_split" "transform:$left_convert"; do
+    s="${pair%%:*}" ids="${pair#*:}"
+    db "SELECT '$s', l.item_id, i.expected IS NOT NULL, i.expected, i.done, i.failed, i.upstream_open,
+          i.total_wanted_at IS NOT NULL, i.completed_at IS NOT NULL,
+          (SELECT string_agg(r.state || '=' || r.n, ',') FROM (SELECT state, count(*) n FROM ${s}_$PREFIX.stage_record
+             WHERE item_id = l.item_id GROUP BY state) r)
+        FROM (SELECT item_id FROM ($ids) x) l LEFT JOIN ${s}_$PREFIX.stage_item i ON i.item_id = l.item_id" \
+      >> "$out/left-items" 2>/dev/null || true
+  done
+  say "  where they are (stage|item|total came|expected|done|failed|upstream open|end asked again|completed|records):"
+  say "    $(cut -d'|' -f1,3- "$out/left-items" 2>/dev/null | sort | uniq -c | sed 's/^ *//' | paste -sd ';' -)"
+  say "    (by item: $out/left-items)"
+  if ((RECOVER_MIN > 0)); then
+    say "  waiting up to $RECOVER_MIN minutes for the reconcilers to end them"
+    waited=0 left=$((split_behind + convert_behind))
+    while ((left > 0 && waited < RECOVER_MIN * 60)); do
+      sleep 60; waited=$((waited + 60))
+      a="$(db "SELECT count(*) FROM ($left_split) x" 2>/dev/null || echo '?')"
+      b="$(db "SELECT count(*) FROM ($left_convert) x" 2>/dev/null || echo '?')"
+      [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] && left=$((a + b))
+    done
+    say "  after ${waited}s: $left left behind (split but not ended at convert ${a:-?}, not ended at transform ${b:-?})"
+    for s in convert transform; do
+      say "  ends asked for again at $s: $(db "SELECT count(*) || ', ' || count(expected) || ' came'
+        FROM ${s}_$PREFIX.stage_item WHERE item_id IN ($run_items) AND total_wanted_at IS NOT NULL" \
+        2>/dev/null || echo '?')"
+    done
+  fi
+fi
 if [[ -n "$outage_state" ]]; then
   say "Outage: at $outage_landed landed, down $OUTAGE_MIN minutes, messages lost: ${OUTAGE_LOSE:-none};" \
     "$((${last_change[transformed]:-0} - (restored_at - t0)))s from the restart to the last item transformed"
