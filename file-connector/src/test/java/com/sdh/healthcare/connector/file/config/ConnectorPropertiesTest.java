@@ -89,6 +89,7 @@ class ConnectorPropertiesTest
         assertThat(defaults.split().itemsAtOnce()).isEqualTo(4);
         assertThat(defaults.split().commit().shared()).isTrue();
         assertThat(defaults.split().commit().interval()).isZero();
+        assertThat(defaults.split().commit().groupsAtOnce()).isEqualTo(1);
 
         ConnectorProperties more = new Binder(
                 new MapConfigurationPropertySource(Map.of(
@@ -105,6 +106,31 @@ class ConnectorPropertiesTest
 
         assertThatThrownBy(() -> new ConnectorProperties.Split("ccda", null,
                 Map.of(), null, 4, 0, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * A pod's groups wait for the shared commit four at once when told,
+     * and more than one at once is refused when the pods commit alone, or
+     * fewer than one.
+     */
+    @Test
+    void groupsAtOnceNeedTheSharedCommit()
+    {
+        ConnectorProperties four = new Binder(
+                new MapConfigurationPropertySource(Map.of(
+                        "sdh.split.format", "ccda",
+                        "sdh.split.commit.groups-at-once", "4")))
+                .bindOrCreate("sdh", ConnectorProperties.class);
+        assertThat(four.split().commit().groupsAtOnce()).isEqualTo(4);
+        assertThat(four.split().commit().shared()).isTrue();
+
+        assertThatThrownBy(() -> new ConnectorProperties.SplitCommit(false,
+                Duration.ZERO, 2))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("sdh.split.commit.shared");
+        assertThatThrownBy(() -> new ConnectorProperties.SplitCommit(true,
+                Duration.ZERO, 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

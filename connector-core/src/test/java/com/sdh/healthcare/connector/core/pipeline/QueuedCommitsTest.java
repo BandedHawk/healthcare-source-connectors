@@ -319,6 +319,45 @@ class QueuedCommitsTest
     }
 
     /**
+     * One pod's appender taking two groups at once: its second group,
+     * sent while its first waits for a turn, waits beside it, and both go
+     * in one commit; with one at a time the second would wait behind.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aPodsGroupsAtOnceShareACommit() throws Exception
+    {
+        QueuedCommits commits = new QueuedCommits(ItemProcessor.STAGE,
+                database, schema, leaseTable, Duration.ofSeconds(1),
+                Duration.ZERO, Duration.ofSeconds(10), 2);
+        commits.createTablesIfMissing();
+        assertThat(commits.groupsAtOnce()).isEqualTo(2);
+        try (GroupAppender pod = new GroupAppender(table, commits))
+        {
+            Connection lock = holdLock();
+            Held first = lease();
+            Future<Snapshot> a = senders.submit(
+                    () -> pod.append(file("a"), first));
+            awaitQueued(1);
+            Held second = lease();
+            Future<Snapshot> b = senders.submit(
+                    () -> pod.append(file("b"), second));
+            awaitQueued(2);
+            lock.commit();
+            lock.close();
+            long snapshot = a.get(30, TimeUnit.SECONDS).snapshotId();
+            assertThat(b.get(30, TimeUnit.SECONDS).snapshotId())
+                    .isEqualTo(snapshot);
+            assertThat(files()).hasSize(2);
+        }
+        assertThatThrownBy(() -> new QueuedCommits(ItemProcessor.STAGE,
+                database, schema, leaseTable, Duration.ZERO, Duration.ZERO,
+                Duration.ofSeconds(10), 0))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
      * Many files from two pods at once are all committed, once each.
      *
      * @throws Exception if the test fails to run

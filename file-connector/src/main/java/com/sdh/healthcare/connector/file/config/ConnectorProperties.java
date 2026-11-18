@@ -142,7 +142,6 @@ public record ConnectorProperties(
      *                    once. Above 1 on Kafka only, whose topic needs a
      *                    partition per consumer of every pod
      * @param commit      how the records' files are committed
-     * @throws IllegalArgumentException if either is under 1
      */
     public record Split(String format, String boundary,
             Map<String, String> options, @DefaultValue Limits limits,
@@ -165,8 +164,8 @@ public record ConnectorProperties(
          */
         public Split
         {
-            commit = commit == null ? new SplitCommit(true, Duration.ZERO)
-                    : commit;
+            commit = commit == null
+                    ? new SplitCommit(true, Duration.ZERO, 1) : commit;
             if (concurrency < 1 || consumers < 1)
             {
                 throw new IllegalArgumentException("sdh.split.concurrency"
@@ -195,18 +194,26 @@ public record ConnectorProperties(
      *                 pods' commits conflict
      * @param interval the least time between two of the table's commits,
      *                 so that fewer snapshots are kept; zero for none
-     * @throws IllegalArgumentException if the interval is negative
+     * @param groupsAtOnce how many of a pod's groups may wait for a turn at
+     *                 once, when shared: with one, a pod's next group waits
+     *                 behind its last; with more, beside it, and a turn
+     *                 commits them together (docs/PERFORMANCE.md §10,
+     *                 2026-11-18)
      */
     public record SplitCommit(@DefaultValue("true") boolean shared,
-            @DefaultValue("0s") Duration interval)
+            @DefaultValue("0s") Duration interval,
+            @DefaultValue("1") int groupsAtOnce)
     {
 
         /**
-         * Checks the interval.
+         * Checks the interval and the count.
          *
-         * @param shared   whether the pods commit together
-         * @param interval the least time between commits
-         * @throws IllegalArgumentException if the interval is negative
+         * @param shared       whether the pods commit together
+         * @param interval     the least time between commits
+         * @param groupsAtOnce a pod's groups waiting at once
+         * @throws IllegalArgumentException if the interval is negative, the
+         *                                  count under 1, or over 1 when
+         *                                  not shared
          */
         public SplitCommit
         {
@@ -215,6 +222,18 @@ public record ConnectorProperties(
             {
                 throw new IllegalArgumentException(
                         "sdh.split.commit.interval can't be negative");
+            }
+            if (groupsAtOnce < 1)
+            {
+                throw new IllegalArgumentException(
+                        "sdh.split.commit.groups-at-once must be at least 1");
+            }
+            if (groupsAtOnce > 1 && !shared)
+            {
+                // A pod's own commits would conflict with each other.
+                throw new IllegalArgumentException(
+                        "sdh.split.commit.groups-at-once over 1 needs"
+                                + " sdh.split.commit.shared");
             }
         }
     }

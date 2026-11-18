@@ -356,13 +356,17 @@ public final class ConnectorRuntime implements AutoCloseable
             QueuedCommits queued = null;
             if (properties.split().commit().shared())
             {
+                // A connection for each group waiting at once, and two
+                // more: one to queue a group, one to settle an item.
+                int groups = properties.split().commit().groupsAtOnce();
                 commitPool = LeaseDatabase.dataSource(
-                        properties.lease().jdbc(), "sdh-append", 3);
-                queued = new QueuedCommits(commitPool, stage.registrySchema(),
+                        properties.lease().jdbc(), "sdh-append", groups + 2);
+                queued = new QueuedCommits(ItemProcessor.STAGE, commitPool,
+                        stage.registrySchema(),
                         properties.lease().jdbc().table(),
                         leaseSettings.safetyMargin(),
                         properties.split().commit().interval(),
-                        Duration.ofSeconds(10));
+                        Duration.ofSeconds(10), groups);
                 queued.createTablesIfMissing();
             }
             pipeline = new IngestPipeline(

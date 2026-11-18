@@ -49,6 +49,9 @@ sdh:
       fhir: { ndjson-group-size: 0 }
       delimited: { pattern: "^MSH\\|", mode: START }
     limits: { max-item-bytes: 1TB, max-record-bytes: 512MB }    # omitted = format defaults
+    # shared: every pod's files committed to split_records together, through the lease database. interval: least
+    # time between commits. groups-at-once: a pod's groups waiting for a turn at once (shared only; 1 = one at a time).
+    commit: { shared: true, interval: 0s, groups-at-once: 1 }
   storage:
     catalog-name: sdh             # also sent in messages
     namespace: sdh_ingest         # holds split_records, which every pod appends to

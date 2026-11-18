@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.core.pipeline;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -29,6 +30,12 @@ import org.slf4j.LoggerFactory;
  * commit. So a file sent while nothing else is committing is committed at
  * once, with no wait added, and under load each commit takes every file
  * that is waiting, up to {@link #MAX_FILES}.
+ * <p>
+ * A committer that combines groups itself, such as {@link QueuedCommits},
+ * may take several of the pod's groups at once
+ * ({@link Committer#groupsAtOnce}): as many threads commit, each taking the
+ * files waiting when it is free, so the pod's next group waits for a turn
+ * beside the last rather than behind it.
  * <p>
  * Each file comes with its item's lease. A file whose lease is lost by
  * the time of the commit is left out, and its sender is told; the commit
@@ -79,8 +86,8 @@ public final class GroupAppender implements AutoCloseable
     /** What commits a group. */
     private final Committer committer;
 
-    /** The thread that commits. */
-    private final Thread thread;
+    /** The threads that commit. */
+    private final List<Thread> threads;
 
     /** Whether the appender is closed. */
     private volatile boolean closed;
@@ -106,6 +113,18 @@ public final class GroupAppender implements AutoCloseable
          */
         Snapshot commit(Table table, List<DataFile> files,
                 List<LeaseToken> leases);
+
+        /**
+         * How many of a pod's groups may be committing at once: one, unless
+         * the committer combines the groups it is given, so that two of the
+         * pod's own don't conflict.
+         *
+         * @return the count, at least 1
+         */
+        default int groupsAtOnce()
+        {
+            return 1;
+        }
 
         /**
          * Settles, for an item leased again, any of its files that an
@@ -143,17 +162,31 @@ public final class GroupAppender implements AutoCloseable
     }
 
     /**
-     * Creates an appender and starts its thread.
+     * Creates an appender and starts its threads, as many as the committer
+     * takes groups at once.
      *
      * @param table     the table the files are appended to
      * @param committer what commits a group
+     * @throws IllegalArgumentException if the committer takes fewer than
+     *                                  one group at once
      */
     public GroupAppender(Table table, Committer committer)
     {
+        int count = committer.groupsAtOnce();
+        if (count < 1)
+        {
+            throw new IllegalArgumentException(
+                    "A committer takes at least one group at once");
+        }
         this.table = table;
         this.committer = committer;
-        this.thread = Thread.ofPlatform().name("sdh-append").daemon(true)
-                .start(this::run);
+        List<Thread> started = new ArrayList<>(count);
+        for (int i = 0; i < count; i++)
+        {
+            started.add(Thread.ofPlatform().name("sdh-append-" + i)
+                    .daemon(true).start(this::run));
+        }
+        this.threads = List.copyOf(started);
     }
 
     /**
@@ -207,7 +240,10 @@ public final class GroupAppender implements AutoCloseable
         }
     }
 
-    /** Commits the waiting files, a group at a time, until closed. */
+    /**
+     * Commits the waiting files, a group at a time, until closed: each of
+     * the appender's threads.
+     */
     private void run()
     {
         List<Request> group = new ArrayList<>();
@@ -361,17 +397,25 @@ public final class GroupAppender implements AutoCloseable
     }
 
     /**
-     * Stops the commit thread. Files still waiting are failed, and their
+     * Stops the commit threads. Files still waiting are failed, and their
      * items tried again later from their checkpoints.
      */
     @Override
     public void close()
     {
         closed = true;
-        thread.interrupt();
+        threads.forEach(Thread::interrupt);
+        long until = System.nanoTime() + 30_000_000_000L;
         try
         {
-            thread.join(30_000);
+            for (Thread thread : threads)
+            {
+                long left = until - System.nanoTime();
+                if (left > 0)
+                {
+                    thread.join(Duration.ofNanos(left));
+                }
+            }
         }
         catch (InterruptedException interrupted)
         {

@@ -53,6 +53,10 @@ sdh:
     # used ~0.65 of a core.
     concurrency: 8
     consumers: 8
+    # Each pod's next group of files waits for the shared commit beside its last, 4 at once, and a turn commits all
+    # that wait (docs/PERFORMANCE.md §10, 2026-11-18): with one, a pod's commits went one after another, 0.84 s
+    # each, and a turn took ~2.5 groups of the 64 it can.
+    commit: { groups-at-once: 4 }
   storage:
     catalog-name: sdh
     namespace: ${ICEBERG_PREFIX}

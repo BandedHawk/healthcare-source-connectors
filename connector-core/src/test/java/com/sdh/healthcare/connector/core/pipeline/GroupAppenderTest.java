@@ -23,6 +23,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
@@ -176,6 +178,117 @@ class GroupAppenderTest
         {
             senders.shutdownNow();
         }
+    }
+
+    /**
+     * A committer that takes groups at once: two groups of the pod commit
+     * at the same time, each on a thread of its own, rather than the second
+     * waiting for the first; with one at a time, as by default, the second
+     * waits.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void groupsAtOnceCommitSideBySide() throws Exception
+    {
+        assertThat(atOnce(2)).isEqualTo(2);
+        assertThat(atOnce(1)).isEqualTo(1);
+    }
+
+    /**
+     * Sends two files, one at a time, to an appender whose committer takes
+     * a number of groups at once and holds each commit until two are under
+     * way or a moment has passed, and says how many were under way at most.
+     *
+     * @param groups the groups the committer takes at once
+     * @return the most commits under way together
+     * @throws Exception if the test fails to run
+     */
+    int atOnce(int groups) throws Exception
+    {
+        AtomicInteger running = new AtomicInteger();
+        AtomicInteger most = new AtomicInteger();
+        CountDownLatch both = new CountDownLatch(2);
+        GroupAppender.Committer committer = new GroupAppender.Committer()
+        {
+            @Override
+            public Snapshot commit(Table into, List<DataFile> files,
+                    List<LeaseToken> leases)
+            {
+                most.accumulateAndGet(running.incrementAndGet(), Math::max);
+                both.countDown();
+                try
+                {
+                    both.await(500, TimeUnit.MILLISECONDS);
+                    synchronized (this)
+                    {
+                        AppendFiles append = into.newFastAppend();
+                        files.forEach(append::appendFile);
+                        append.commit();
+                        return into.currentSnapshot();
+                    }
+                }
+                catch (InterruptedException interrupted)
+                {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+                finally
+                {
+                    running.decrementAndGet();
+                }
+            }
+
+            @Override
+            public int groupsAtOnce()
+            {
+                return groups;
+            }
+        };
+        ExecutorService senders = Executors.newVirtualThreadPerTaskExecutor();
+        try (GroupAppender appender = new GroupAppender(table, committer))
+        {
+            Future<Snapshot> first = senders.submit(
+                    () -> appender.append(file("first-" + groups),
+                            new Lease()));
+            // The first is taken alone before the second is sent.
+            Thread.sleep(100);
+            Future<Snapshot> second = senders.submit(
+                    () -> appender.append(file("second-" + groups),
+                            new Lease()));
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+        }
+        finally
+        {
+            senders.shutdownNow();
+        }
+        return most.get();
+    }
+
+    /**
+     * A committer that takes fewer than one group at once is refused.
+     */
+    @Test
+    void refusesACommitterTakingNoGroups()
+    {
+        GroupAppender.Committer none = new GroupAppender.Committer()
+        {
+            @Override
+            public Snapshot commit(Table into, List<DataFile> files,
+                    List<LeaseToken> leases)
+            {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public int groupsAtOnce()
+            {
+                return 0;
+            }
+        };
+        assertThatThrownBy(() -> new GroupAppender(table, none))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     /**

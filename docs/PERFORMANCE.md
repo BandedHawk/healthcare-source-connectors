@@ -1229,6 +1229,14 @@ What it showed, beyond §2's predictions:
       (2,992 snapshots of split_records in 1,288 s, ~30 items each). More split at that rate needs fewer,
       larger commits or a cheaper commit, not more items at once.
   **Adopted:** split `concurrency: 8` and 1100m, for the latency at 35 a second at about the same cost.
+- **A split pod's groups wait for the commit side by side** (2026-11-18, DESIGN.md (dt), built, not yet measured).
+  Run 43's timings put split's limit in the pod, not the queue: each pod commits through one thread, a group
+  taking 0.84 s from its turn to its commit (7,632 groups on 6 pods in 1,288 s: each pod's thread busy ~83% of
+  the time), and its items waiting 0.65 s for that thread. The queue's turns came one after another, 2.3 a
+  second, ~0.36 s each to combine, but took ~2.5 groups each of the 64 they can, so ~30 items a commit. With
+  `sdh.split.commit.groups-at-once: 4`, a pod's next groups wait for a turn beside its last, and a turn takes
+  them all: the same turns, more files each, the turn's fixed cost shared. Checked in the sandbox (one split pod,
+  2 at once): 13 of 220 commits took two of the pod's groups together; nothing refused or failed.
 
 ## 11. Order of work
 

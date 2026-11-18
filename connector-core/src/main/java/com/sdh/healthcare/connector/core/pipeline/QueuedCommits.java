@@ -189,6 +189,9 @@ public final class QueuedCommits implements GroupAppender.Committer
     /** The stage whose commits these are, for its timings. */
     private final String stage;
 
+    /** How many of a pod's groups may be queued at once. */
+    private final int groupsAtOnce;
+
     /** Makes group IDs. */
     private final SecureRandom random = new SecureRandom();
 
@@ -243,12 +246,49 @@ public final class QueuedCommits implements GroupAppender.Committer
             String leaseTable, Duration margin, Duration interval,
             Duration queryTimeout)
     {
+        this(stage, dataSource, schema, leaseTable, margin, interval,
+                queryTimeout, 1);
+    }
+
+    /**
+     * Creates a stage's committer that takes several of a pod's groups at
+     * once ({@link GroupAppender.Committer#groupsAtOnce}): each waits for a
+     * turn beside the others, and a turn commits all that are waiting, so
+     * a pod's next group needn't wait behind its last (docs/PERFORMANCE.md
+     * §10, 2026-11-18).
+     *
+     * @param stage        the stage, for its timings
+     * @param dataSource   connections to the stage database, of their own:
+     *                     each group waiting for the lock holds one, so
+     *                     at least {@code groupsAtOnce}; closed with the
+     *                     committer if it can be
+     * @param schema       the schema its tables are in
+     * @param leaseTable   the item leases' table
+     * @param margin       how long before a lease runs out its files are no
+     *                     longer committed
+     * @param interval     the least time between two commits of a table;
+     *                     zero for none
+     * @param queryTimeout how long a statement may run; at least a second
+     * @param groupsAtOnce how many of a pod's groups may be queued at once
+     * @throws IllegalArgumentException if a name isn't a plain identifier,
+     *                                  or the count is under 1
+     */
+    public QueuedCommits(String stage, DataSource dataSource, String schema,
+            String leaseTable, Duration margin, Duration interval,
+            Duration queryTimeout, int groupsAtOnce)
+    {
+        if (groupsAtOnce < 1)
+        {
+            throw new IllegalArgumentException(
+                    "A committer takes at least one group at once");
+        }
         if (!NAME.matcher(schema).matches() || schema.contains(".")
                 || !NAME.matcher(leaseTable).matches())
         {
             throw new IllegalArgumentException("Invalid table name");
         }
         this.stage = stage;
+        this.groupsAtOnce = groupsAtOnce;
         this.dataSource = dataSource;
         this.locks = schema + ".append_lock";
         this.queue = schema + ".append_queue";
@@ -258,6 +298,17 @@ public final class QueuedCommits implements GroupAppender.Committer
         this.interval = interval;
         this.queryTimeoutSeconds =
                 (int) Math.max(1, queryTimeout.toSeconds());
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * @return the count given when it was made; 1 unless given
+     */
+    @Override
+    public int groupsAtOnce()
+    {
+        return groupsAtOnce;
     }
 
     /**
