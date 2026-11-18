@@ -7,6 +7,9 @@
 # secret transform-<pipeline>-env. Keys are in the secret transform-<pipeline>-keys, at /run/secrets. Producer
 # results are off, as at the other stages here (docs/SANDBOX.md).
 sdh:
+  # Synthetic data only, on plaintext in-cluster services and Vault over HTTP: the HIPAA profile is off (design
+  # §7.6). A deployment holding PHI leaves it at its default, hipaa.
+  compliance: { profile: none }
   connector-id: transform-${PIPELINE}
   transform:
     wstl: /etc/sdh/wstl/set.tar.gz

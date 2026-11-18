@@ -25,6 +25,7 @@ import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.route.RemoteIntakeRoute;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
+import com.sdh.healthcare.connector.runtime.compliance.ComplianceConfiguration;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -56,7 +57,7 @@ import org.springframework.context.annotation.Import;
  */
 @Configuration
 @EnableConfigurationProperties(LandingProperties.class)
-@Import(TelemetryConfiguration.class)
+@Import({ComplianceConfiguration.class, TelemetryConfiguration.class})
 public class LandingConfiguration
 {
 

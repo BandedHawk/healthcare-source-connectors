@@ -287,8 +287,8 @@ print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" 
 # --- Push --------------------------------------------------------------------------------------------------------
 
 # The paced feed: slice k is started SLICE*k/RATE seconds after t0, each in its own copier, so a slow one doesn't
-# hold the pace; it fails if any slice's copy failed. A slice's copy is tried up to 3 times, 10 s apart: this
-# machine's connection to S3 can drop for a minute (2026-11-17). A copy that failed listing copied nothing, and is
+# hold the pace; it fails if any slice's copy failed. A slice's copy is tried up to 7 times, 20 s apart (2 minutes):
+# this machine's connection to S3 can drop for a minute or more (2026-11-17; 3 tries 10 s apart weren't enough). A copy that failed listing copied nothing, and is
 # tried again whole; one that failed part-way tries again only the objects that failed, never one that was copied,
 # which landing may have landed and deleted already. An object whose copy "failed" may still have been written, its
 # answer lost, and so may one the CLI retried itself: written twice, it is landed twice, as a new version of the
@@ -296,8 +296,8 @@ print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" 
 copy_slice() {  # <slice>
   local try src="${staging}$(printf 's%05d' "$1")/" err="$out/copy-errors/$1" left f
   aws s3 cp --recursive --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
-  for try in 2 3; do
-    sleep 10
+  for try in 2 3 4 5 6 7; do
+    sleep 20
     left="$(sed -n 's/^copy failed: \(s3:[^ ]*\) to .*/\1/p' "$err")"
     if [[ -z "$left" ]]; then
       aws s3 cp --recursive --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
@@ -310,7 +310,7 @@ copy_slice() {  # <slice>
     done
     [[ -s "$err" ]] || return 0
   done
-  echo "load-test.sh: slice $1 not copied after 3 tries" >&2
+  echo "load-test.sh: slice $1 not copied after 7 tries" >&2
   return 1
 }
 paced_copy() {

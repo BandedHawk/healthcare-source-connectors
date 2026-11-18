@@ -215,7 +215,30 @@ public enum Attr
     LET_IN_BY("sdh.let_in_by"),
 
     /** How many versions something names, a number. */
-    VERSION_COUNT("sdh.version_count");
+    VERSION_COUNT("sdh.version_count"),
+
+    /**
+     * The compliance profile a node started under (docs/HIPAA.md §8.1),
+     * such as {@code hipaa}.
+     */
+    PROFILE("sdh.profile"),
+
+    /**
+     * A compliance profile's check, such as {@code transport-plaintext}.
+     */
+    CHECK("sdh.check"),
+
+    /**
+     * The name of a setting, such as {@code sdh.crypto.wrap-provider}, or
+     * of a JVM option: never its value.
+     */
+    SETTING("sdh.setting"),
+
+    /**
+     * Why an operator waived a compliance check, as configured: text about
+     * the deployment, never about documents.
+     */
+    WAIVER_REASON("sdh.waiver_reason");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

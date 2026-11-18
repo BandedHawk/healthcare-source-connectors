@@ -5,6 +5,14 @@
 # mount.
 sdh:
   connector-id: convert-stage     # names the duties lease (convert/<connector-id>/duties)
+  # The compliance profile (design §7.6, HIPAA.md §8.1): hipaa, the default, refuses to start on a setting that breaks
+  # HIPAA's technical safeguards (a plaintext endpoint, Postgres without sslmode=verify-full, a broker without TLS,
+  # local keys, no audit export, a JVM that may dump memory), naming each. Accept one by waiving its check with the
+  # reason, which is audited at every start.
+  compliance:
+    profile: hipaa                # hipaa | none (no checks: only for a deployment that holds no PHI)
+    # waive:
+    #   keys-local: "Keystore on an encrypted volume until the HSM is installed; risk register RA-12"
   stage:
     input:                        # where the split stage sends record.split and item.split
       type: kafka                 # kafka | sqs | rabbitmq | artemis | pubsub | servicebus | eventhubs
@@ -65,7 +73,7 @@ sdh:
     renew-interval: 15s
     safety-margin: 10s
   crypto:
-    wrap-provider: local          # local | aws-kms | gcp-kms | azure-keyvault | vault-transit
+    wrap-provider: local          # local | aws-kms | gcp-kms | azure-keyvault | vault-transit; local: waive keys-local
     sign-provider: local          # same choices, independently
     keystore: { path: /run/secrets/keks.p12 }               # local only; password: SDH_CRYPTO_KEYSTORE_PASSWORD
     keys:

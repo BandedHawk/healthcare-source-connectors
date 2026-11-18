@@ -327,6 +327,8 @@ This configuration is for synthetic data only. Real PHI would need:
 - Kafka TLS and ACLs;
 - CloudTrail data events.
 
+The full list, with the HIPAA provisions behind each item, is [HIPAA.md](HIPAA.md) §8.5; what the product itself still lacks is §8.1.
+
 ## 10. Order of deployment
 
 0. **Access:** done (`deploy/aws/iam`).

@@ -4,6 +4,9 @@
 # scripts/sandbox.sh; ${S3_SECRET_ACCESS_KEY} and ${SDH_LEASE_JDBC_PASSWORD} are left for Spring, from the secret
 # splitter-env. Keys are in the secret splitter-keys, at /run/secrets.
 sdh:
+  # Synthetic data only, on plaintext in-cluster services and Vault over HTTP: the HIPAA profile is off (design
+  # §7.6). A deployment holding PHI leaves it at its default, hipaa.
+  compliance: { profile: none }
   connector-id: split-${PIPELINE}
   landing:
     intake: ${PIPELINE}

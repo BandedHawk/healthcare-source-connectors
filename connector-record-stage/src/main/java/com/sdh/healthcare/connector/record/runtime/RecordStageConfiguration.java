@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.record.RecordTransform;
 import com.sdh.healthcare.connector.record.config.RecordStageSettings;
 import com.sdh.healthcare.connector.runtime.FatalExit;
+import com.sdh.healthcare.connector.runtime.compliance.ComplianceConfiguration;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
 import org.apache.camel.CamelContext;
 import org.springframework.boot.ApplicationRunner;
@@ -31,7 +32,7 @@ import org.springframework.context.annotation.Import;
  */
 @AutoConfiguration
 @ConditionalOnBean(RecordTransform.class)
-@Import(TelemetryConfiguration.class)
+@Import({ComplianceConfiguration.class, TelemetryConfiguration.class})
 public class RecordStageConfiguration
 {
 

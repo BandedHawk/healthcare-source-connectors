@@ -450,6 +450,9 @@ abstract class ContainerImageItBase
                 .withEnv("SDH_CRYPTO_KEYS_SIGNING_PASSPHRASE",
                         TestKeys.SIGNING_PASSPHRASE)
                 .withEnv("JDK_JAVA_OPTIONS", "-Xss1m")
+                // Local keys and plaintext test services: the HIPAA profile
+                // is off, unless a test sets it (design §7.6).
+                .withEnv("SDH_COMPLIANCE_PROFILE", "none")
                 .withCreateContainerCmdModifier(command -> command
                         .getHostConfig()
                         .withReadonlyRootfs(true)
@@ -963,6 +966,46 @@ abstract class ContainerImageItBase
             file.append(row);
         }
         return file.toString();
+    }
+
+    /**
+     * The image's JVM options meet the HIPAA profile (design §7.6): started
+     * under it with this test's local keys and plaintext services, the
+     * split stage refuses to start, naming those settings, never a value,
+     * and not the JVM.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void theImageMeetsTheProfilesJvmChecks() throws Exception
+    {
+        ToStringConsumer log = new ToStringConsumer();
+        try (GenericContainer<?> hipaa = lockedDown(
+                new GenericContainer<>(image(SPLITTER)), splitterConfig(),
+                log)
+                .withEnv("SDH_CRYPTO_KEYS_INBOX_PASSPHRASE",
+                        TestKeys.INBOX_PASSPHRASE)
+                .withEnv("SDH_COMPLIANCE_PROFILE", "hipaa")
+                .withStartupCheckStrategy(new OneShotStartupCheckStrategy()
+                        .withTimeout(Duration.ofMinutes(2))))
+        {
+            try
+            {
+                hipaa.start();
+            }
+            catch (RuntimeException expected)
+            {
+                // The node exits with an error, as it should.
+            }
+        }
+
+        String output = log.toUtf8String();
+        assertThat(output)
+                .contains("sdh.compliance.profile=hipaa refuses")
+                .contains("keys-local: sdh.crypto.wrap-provider")
+                .contains("transport-broker: sdh.stage.input.uri")
+                .doesNotContain("jvm-dumps")
+                .doesNotContain(TestKeys.KS_PASSWORD);
     }
 
     /**

@@ -57,7 +57,7 @@ variable "burst_capacity_type" {
 # of 1.6, all of them at the most need about 12.4 vCPU: two base and five burst nodes, one spare.
 variable "burst_max" {
   type    = number
-  default = 6
+  default = 30
 }
 
 # Who may reach the Kubernetes API. poc.sh sets this machine's public address (/32).

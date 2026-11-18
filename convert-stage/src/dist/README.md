@@ -83,6 +83,19 @@ variables, never in the file:
 - `SDH_LEASE_JDBC_PASSWORD`
 - catalog and storage credentials
 
+**Compliance profile.** The node starts under `sdh.compliance.profile: hipaa` by default. It refuses to start on a
+setting that breaks HIPAA's technical safeguards, and lists each check and setting it refuses (never a value):
+- a plaintext endpoint;
+- Postgres without `sslmode=verify-ca` or `verify-full`;
+- a broker without TLS;
+- keys held locally rather than in a KMS;
+- no audit export (`sdh.telemetry.otlp.endpoint`);
+- a JVM that may dump memory. The JVM options in `config/jvm.options` and the image meet this check.
+
+To accept one, set `sdh.compliance.waive.<check>` to the reason. That is your documented decision for an
+addressable safeguard, and it is audited at every start. Set the profile to `none` only for a deployment that holds
+no PHI.
+
 Any setting can also be given as an environment variable (`sdh.lease.jdbc.url` becomes `SDH_LEASE_JDBC_URL`) or as an argument (`--sdh.lease.jdbc.url=…`).
 
 ## Run on a host

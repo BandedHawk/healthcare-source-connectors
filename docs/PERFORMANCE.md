@@ -1097,6 +1097,27 @@ What it showed, beyond §2's predictions:
     - **Cost:** `measure.sh` says $17 per million documents (on-demand t4g prices, 29 nodes at most).
   **Adopted:** split `concurrency: 4` (`splitter-application.yml`). Its KEDA maximum stays 3 (96 items at once,
   ~45 a second by this run) until the stages' maximums are set for 100 documents a second.
+- **100 documents a second for 15 minutes, every stage scaled out** (2026-11-17, load-20261117T200747Z): 90,000
+  documents, split 6 pods, convert 12, transform 18, burst nodes up to 30.
+    - **Landing kept nothing twice:** 90,000 items for 90,000 objects, and the feed copied nothing again.
+    - **Landing held at ~54 items a second** (one pod), and the intake's backlog grew to 40,000. A group of ~480
+      took 9.1 s: reads 3.6 s and deletes 2.6 s, 8 at a time (S3 round trips), messages 1.6 s, sealing 1.3 s.
+    - **Transform held at ~37–49 items a second** (~2 records an item), on 14 of its 29 requested cores. Not CPU:
+      a batch's commit to the gold table took 4.1 s on average (p95 13.8), with 18 pods taking their turns on one
+      table, as split's appends did before its shared commit queue (§10, revision dm).
+    - Split ~55–60 items a second, ~40 late in the run (1.7–2.8 s an item). Postgres up to 201 of 300
+      connections; no container restarted. Burst nodes counted up to 33 against a maximum of 30 (Spot
+      replacements, probably); transform and convert pods waited for nodes at times.
+    - 39.2 documents a second first landed to last in gold; landed → gold p50 / p99 170 / 1,071 s, from the
+      backlog. 25 items hadn't reached gold when the test stopped waiting: 4 still splitting, 5 not ended at
+      convert, 16 not ended at transform. Nodes were shut down in the run, so probably pods lost with them,
+      waiting to be taken up again; not checked. $19 per million documents.
+- **35 a second for 10 minutes, the latency floor** (2026-11-17, load-20261117T205936Z): stopped at ~590 s, when
+  this machine's link to S3 dropped for longer than the feed's retries (3 tries, 10 s apart), so no report.
+  Until then landing and split kept up with the feed, and transform ran ~2,500–3,000 items behind all along:
+  gold ~80 s behind even with no backlog upstream. The 20 s p99 needs transform's gold commit fixed first.
+  **Changed after them:** landing reads, deletes and seals 32 at once (`landing-application.yml`), and the feed
+  retries a slice for 2 minutes (7 tries, 20 s apart).
 
 ## 11. Order of work
 

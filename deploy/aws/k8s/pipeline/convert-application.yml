@@ -5,6 +5,9 @@
 # deploy/aws/k8s/pipeline/apply.sh; ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret convert-env.
 # Keys are in the secret convert-keys, at /run/secrets.
 sdh:
+  # The PoC holds synthetic data only (docs/AWS-POC.md §9), with Kafka, Postgres and the collector in plaintext: the
+  # HIPAA profile is off (design §7.6). Real PHI needs it at its default, hipaa, and the changes HIPAA.md §8.5 lists.
+  compliance: { profile: none }
   connector-id: convert-${PIPELINE}
   # Metrics for measuring the pipeline (docs/PERFORMANCE.md §10); the collector drops traces and logs.
   telemetry:

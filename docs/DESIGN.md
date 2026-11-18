@@ -191,6 +191,18 @@ Revision 2026-11-16 (dp), built: step 4 part 1 of [PERFORMANCE.md](PERFORMANCE.m
 
 Revision 2026-11-16 (dq), built: step 4 of [PERFORMANCE.md](PERFORMANCE.md) §11, after (dp) (§3.4). **A group's `item.landed` messages are sealed several at once.** (dp)'s timings showed announcing at 8 ms an item; the messages were already sent together and their acknowledgements awaited together, so the time was sealing each (an ES256 signature, then ECDH-ES encryption to the splitter's inbox key) one after another, on a pod with 0.25 CPU. `Announcer.announceAll` now seals up to `sealers` messages at once, each slice on its own virtual thread (`sealAll`), and sends them in the order given; one that can't be sealed, or isn't acknowledged, is sent again on its own as before. `sealers` is `sdh.storage.group.concurrency` (the new constructor `Announcer(…, receipts, sealers)`; the others seal one at a time). Sealing and sending are timed as `seal` and `send` under the stage `landing`. On AWS landing's CPU request is 0.75 (from 0.25; AWS-POC.md §5). Unchanged: message IDs, order, the announced marker, recovery. Tested: `AnnouncerTest`. Measured on AWS the same day (§3.4, 7,200 documents): landing 60 items/s (30.9), sealing and sending 2.3 ms an item (8), each item exactly once, the gold check passed; transform now sets the pace, 14.4 documents/s overall.
 
+Revision 2026-11-17 (dr), built: [HIPAA.md](HIPAA.md) §8.1 item 6, decided 2026-11-17 with the user. **Every stage starts under a compliance profile, `hipaa` by default** (§7.6). Before any other bean is made, the profile reads the node's settings and JVM options, and refuses to start on any of these:
+- a plaintext endpoint;
+- Postgres that doesn't verify the server;
+- a broker without TLS;
+- a connection it can't judge;
+- keys held locally;
+- no audit export;
+- storage without authentication;
+- a JVM that may dump memory.
+
+It names each check and setting, never a value. A check can be waived with a one-line reason, which is audited at every start. `sdh.compliance.profile: none` turns the profile off, which is audited too. The tests, the demonstration, the sandbox and the AWS PoC set it to `none`: they hold synthetic data, on local keys and plaintext test services.
+
 Revision 2026-11-14 (dj), built: from measuring split's steps on AWS ([PERFORMANCE.md](PERFORMANCE.md) §10). **An item of one chunk is read with its summary row, in one open of its file.** Timed step by step, split spent 1.6 s of an item's 4.7 s before the first record: a second open of the landed data file (footer, offset index, pages: several S3 GETs) for the chunk, after the first for the summary row. `LandedItemSource.summary` now reads, by position, the row before the summary row as well; when it is the item's last chunk (`Summary.lastChunk`) the source decrypts it from there, so an item of one chunk (8 MB, nearly every document) reads its file once. An item of more chunks reads the others as before. **Also:** a split pod keeps the landing data keys it has unwrapped (`UnwrapCache`, 64, by KEK and wrapped key; callers get copies; one dropped is wiped), since a landing group's items share one key; the split timers name each step (`lookup_table`, `lookup_row`, `refs`, `resume`, `start`, `first_record`, `records`, `write`, `publish_wait`, `prepare`, `append`, `commit_queue`, `commit_group`, `save`, `send_wait`, `archive`); and each pod reports what it gets of the machine (`ProcessMetrics`: `sdh.process.cpu_time` from its cgroup's `cpu.stat`, `sdh.process.cpu_wait` from `cpu.pressure`, `sdh.process.gc_time` from the JVM), which `measure.sh` shows by service and quarter of the run. Tested: `LandedItemSourceTest.readsAOneChunkItemWithItsSummary` (with the file deleted after the summary read, the item still reads), `UnwrapCacheTest`, `ItemProcessorTest.timesEachStepOfSplittingAnItem`, `ProcessMetricsTest`.
 
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
@@ -1377,10 +1389,64 @@ Wrapping (the three KEKs) and signing are configured independently (`sdh.crypto.
 
 ### 7.5 PHI hygiene
 
+How these and the other controls map onto the HIPAA Security, Privacy and Breach Notification Rules: [HIPAA.md](HIPAA.md).
+
 - **Logging:** no PHI, filenames or exception messages from parsers are ever logged. Exceptions are mapped to stable error codes (`PARSE_UNBALANCED_ELEMENT`, `LIMIT_RECORD_SIZE`, …), and only the code, exception class, offset and seq are emitted.
 - **Camel:** body logging, tracing, message history and dead-letter body dumps are disabled.
 - **Temp files:** no plaintext is ever written to temporary files.
 - **Container:** runs as non-root with a read-only root filesystem; no heap dumps, core dumps, crash logs or JVM attach; and TLS everywhere (object store, catalog, KMS, brokers). See §14.1.
+
+### 7.6 Compliance profile (built, revision (dr))
+
+A product its customers operate must refuse to start in a way that would break HIPAA's technical safeguards, unless the operator decides otherwise and says why ([HIPAA.md](HIPAA.md) §1, §8.1). Each stage applies the profile `sdh.compliance.profile` when it starts (`connector-runtime` `compliance/`).
+
+**When:**
+- **Before any other bean is made** (a `BeanFactoryPostProcessor`), so a refused node never connects to a store, a broker or a KMS.
+- **Startup fails** with the list of refusals. Each refusal is also logged as a `compliance.refused` audit event, which reaches the console only, since nothing is exported yet.
+- **Once the node has started,** the outcome is audited through the exporter as well:
+  - `compliance.checked` (profile, and the number of waived findings);
+  - one `compliance.waived` per waived finding (check, setting, reason);
+  - or `compliance.off`, a warning, under `none`.
+- **The admin commands don't apply it.** They bind the settings without starting the stage, and run in a pod whose stage was checked; an emergency restore must not be blocked.
+
+**Profiles:**
+- `hipaa`, the default: every check below must pass, or be waived.
+- `none`: no checks, for deployments that hold no PHI.
+
+**What it reads:**
+- Every setting under `sdh.`, `camel.component.` and `spring.rabbitmq.`, by Spring's canonical name, however it was set (a file, the environment, an argument), with placeholders resolved.
+- **Endpoints are recognised by their values,** not by a list of settings, so a setting added later is checked too.
+- **The settings it reads by name are looked up by name:** the profile, the key providers, the audit endpoint, Kafka's and RabbitMQ's component TLS, and the waivers. An environment variable's name gives dots where the setting has dashes (`SDH_CRYPTO_WRAP_PROVIDER` lists as `sdh.crypto.wrap.provider`). Waiver IDs match with dashes, dots or underscores.
+- **Values are never logged, audited or put in the error:** a value can hold a password or a token. Only the check and the setting are named.
+
+| Check (`waive` ID) | Refuses | Why ([HIPAA.md](HIPAA.md)) |
+|---|---|---|
+| `transport-plaintext` | `http://` or `ws://` (except `sdh.telemetry.otlp.endpoint`, whose exports hold no PHI by construction, §12); `amqp://`; an Artemis `tcp://` URL without `sslEnabled=true`; an Azure connection string with `DefaultEndpointsProtocol=http` or `UseDevelopmentEmulator=true` | § 164.312(e) |
+| `transport-database` | A `jdbc:postgresql:` URL whose `sslmode` (in the URL, or a catalog's `jdbc.sslmode` beside it) isn't `verify-ca` or `verify-full`. `require` encrypts but doesn't authenticate the server. | § 164.312(d), (e) |
+| `transport-broker` | Kafka without `securityProtocol` `SSL` or `SASL_SSL` (on the URI, or `camel.component.kafka.security-protocol`); RabbitMQ without TLS (`spring.rabbitmq.ssl.enabled` for sending, `rabbitmq.ssl` beside a receiving URI); SQS with a plaintext `uriEndpointOverride`; Pub/Sub with `authenticate=false` | § 164.312(d), (e) |
+| `transport-unchecked` | A Camel component it doesn't know, or a JDBC driver other than Postgres. In-process components (`direct`, `seda`, …) pass. JMS and Artemis are judged by their broker URL, and the Azure brokers by their connection string. | — |
+| `keys-local` | `sdh.crypto.wrap-provider` or `sign-provider` `local`, which is also the default: keys in a keystore beside the node, not a KMS | § 164.312(a)(2)(iv); 74 FR 42742 |
+| `audit-export` | No `sdh.telemetry.otlp.endpoint`: audit events would reach only the console | § 164.312(b) |
+| `storage-no-auth` | A `*.no-auth` setting that is `true`, such as `gcs.no-auth` | § 164.312(d) |
+| `jvm-dumps` | A JVM without the image's options (§14.1): `HeapDumpOnOutOfMemoryError` and `CreateCoredumpOnCrash` off, `ErrorFile=/dev/null`, `DisableAttachMechanism` on, as HotSpot reports them | §7.5 |
+
+**Waivers:**
+- **The setting:** `sdh.compliance.waive.<check>: <reason>` accepts every finding of that check.
+- **The reason** is one line of at most 200 characters, about the deployment, never about documents. It is audited at every start, so it documents an addressable choice (§ 164.306(d)(3)).
+- **Refused at startup:** a waiver that names no check, or gives no reason.
+
+**Where it is off:**
+- the tests (surefire and failsafe, in the parent POM; a test of the profile sets it itself);
+- the demonstration;
+- the image ITs, apart from `theImageMeetsTheProfilesJvmChecks`;
+- the sandbox, the Kubernetes test and the AWS PoC.
+
+All of these hold synthetic data, on local keys or plaintext test services.
+
+**Tests:**
+- **`ComplianceRulesTest`:** each check, the waivers, the profiles, and that no value reaches a message.
+- **`ComplianceConfigurationTest`:** the guard stops a Spring context, waivers let it start, and settings from environment variables are read by canonical name.
+- **`theImageMeetsTheProfilesJvmChecks`** (the image ITs): the image's JVM options pass the profile, and the test's own settings are refused.
 
 ## 8. Storage
 

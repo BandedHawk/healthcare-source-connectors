@@ -2,6 +2,8 @@
 # README describes. Secrets come from the file-connector-env secret as environment variables. The recipient
 # fingerprint and the services' namespace (SERVICES_NS) are filled in by the script.
 sdh:
+  # A test with synthetic data, local keys and plaintext test services: the HIPAA profile is off (design §7.6).
+  compliance: { profile: none }
   landing:
     intake: claims
     # Automatic offset commits, one message per poll, so a commit covers only messages already handled;

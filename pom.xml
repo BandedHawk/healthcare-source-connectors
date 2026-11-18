@@ -497,6 +497,13 @@
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
           <version>3.6.1</version>
+          <configuration>
+            <!-- Tests hold no PHI and use local keys and plaintext test services: the compliance profile is off for
+                 them (design §7.6). A test of the profile sets it itself. -->
+            <systemPropertyVariables>
+              <sdh.compliance.profile>none</sdh.compliance.profile>
+            </systemPropertyVariables>
+          </configuration>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -510,6 +517,10 @@
           <configuration>
             <!-- Test the compiled classes, not the packaged jar: Spring Boot's repackaged jar keeps them under BOOT-INF/. -->
             <classesDirectory>${project.build.outputDirectory}</classesDirectory>
+            <!-- As for surefire: the profile is off in the integration tests (design §7.6). -->
+            <systemPropertyVariables>
+              <sdh.compliance.profile>none</sdh.compliance.profile>
+            </systemPropertyVariables>
           </configuration>
         </plugin>
         <plugin>

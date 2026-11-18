@@ -81,6 +81,9 @@ public final class DemoApp implements AutoCloseable
                 .redirectErrorStream(true);
         builder.environment().put("SPRING_APPLICATION_JSON",
                 new ObjectMapper().writeValueAsString(settings));
+        // The demonstration holds synthetic data, with local keys and
+        // plaintext test services: the HIPAA profile is off (design §7.6).
+        builder.environment().put("SDH_COMPLIANCE_PROFILE", "none");
         Files.createDirectories(log.getParent());
         process = builder.start();
         PrintWriter file = new PrintWriter(Files.newBufferedWriter(log, UTF_8),

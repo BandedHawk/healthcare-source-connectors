@@ -8,6 +8,9 @@
 # ${...} in capitals are filled in by deploy/aws/k8s/pipeline/apply.sh; ${SDH_LEASE_JDBC_PASSWORD} is left for
 # Spring, from the secret landing-env. Keys are in the secret landing-keys, at /run/secrets.
 sdh:
+  # The PoC holds synthetic data only (docs/AWS-POC.md §9), with Kafka, Postgres and the collector in plaintext: the
+  # HIPAA profile is off (design §7.6). Real PHI needs it at its default, hipaa, and the changes HIPAA.md §8.5 lists.
+  compliance: { profile: none }
   connector-id: landing-${PIPELINE}
   # Metrics for measuring the pipeline (docs/PERFORMANCE.md §10); the collector drops traces and logs.
   telemetry:
@@ -31,8 +34,11 @@ sdh:
   storage:
     catalog-name: sdh
     namespace: ${ICEBERG_PREFIX}_landing
-    # Small items landed 500 a commit, 8 read, and deleted after, at once (docs/PERFORMANCE.md §3.4; the default).
-    group: { concurrency: 8 }
+    # Small items landed 500 a commit (docs/PERFORMANCE.md §3.4), 32 read, deleted and sealed at once. 32 since
+    # 2026-11-17 (§10; the default 8 before): at 8, a group of ~480 waited 3.6 s on reads and 2.6 s on deletes, S3
+    # round trips, and landing held at ~54 items a second. 32 is within the S3 client's 50 connections, and holds
+    # at most 32 items of up to 8 MB in memory.
+    group: { concurrency: 32 }
     catalog:
       type: jdbc
       uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
