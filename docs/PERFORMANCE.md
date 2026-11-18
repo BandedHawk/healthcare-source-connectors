@@ -1211,9 +1211,17 @@ What it showed, beyond §2's predictions:
       Every item ended at every stage within the demo, with none left for the reconcilers: 42 and 215
       transform records (3 convert records in the second) were taken over once their first pod's claim
       lapsed, no end was asked for again, and no reconciler event was logged. So a pod lost alone, at once or
-      drained, doesn't leave an item; what the sandbox can't do is lose a node, with its pods' Postgres and
-      Kafka connections left open, at AWS's pod counts. That case is the one left, for the next AWS run's
-      `left-items`.
+      drained, doesn't leave an item.
+    - **A node lost, too** (the same day): 1,200 documents, and at 40% the VM of the node holding the convert
+      pod, a transform pod and a Kafka broker powered off at once (`virsh destroy`), its connections left
+      open; it came back 8 minutes later. Convert stood still meanwhile, for the sandbox's own reasons: its one
+      pod has nowhere else to go (the control plane is tainted, the other node had no memory for it), and a
+      minikube node's kubelet doesn't start with its VM, so the node stayed `NotReady` until `minikube start`
+      (which restarted the other node's pods as well). Once convert ran again every item ended at every stage,
+      1,200 of 1,200: 15 transform records taken over, none at convert, no end asked for again, no reconciler
+      event. So nothing in the sandbox (pods killed, drained, or lost with their node) leaves an item for the
+      reconcilers; what it can't reproduce is AWS's pod counts, 18 transform pods and 48 partitions moving at
+      once. That is for the next AWS run's `left-items`.
     - **35 a second** (load-20261118T073238Z): every item landed exactly once, 0 left behind. **Landed →
       gold p50 / p99 29 / 131 s** (32 / 185); landed → split ended 9 / 68 s (10 / 100), split ended → convert's
       first record 8 / 61 s (9 / 122). 33.0 documents a second; up to 33 nodes (36), $24 per million (26).
