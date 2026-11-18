@@ -186,6 +186,9 @@ public final class QueuedCommits implements GroupAppender.Committer
     /** How long a statement may run. */
     private final int queryTimeoutSeconds;
 
+    /** The stage whose commits these are, for its timings. */
+    private final String stage;
+
     /** Makes group IDs. */
     private final SecureRandom random = new SecureRandom();
 
@@ -196,7 +199,7 @@ public final class QueuedCommits implements GroupAppender.Committer
     private volatile long cleaned = System.nanoTime();
 
     /**
-     * Creates the committer.
+     * Creates the split stage's committer.
      *
      * @param dataSource   connections to the stage database, of their own:
      *                     a pod waiting for the lock holds one; closed with
@@ -214,11 +217,38 @@ public final class QueuedCommits implements GroupAppender.Committer
             String leaseTable, Duration margin, Duration interval,
             Duration queryTimeout)
     {
+        this(ItemProcessor.STAGE, dataSource, schema, leaseTable, margin,
+                interval, queryTimeout);
+    }
+
+    /**
+     * Creates a stage's committer. A stage that commits groups with no
+     * leases, as the record stages do (their registry settles what was
+     * stored, STAGES.md §6), has every group committed.
+     *
+     * @param stage        the stage, for its timings
+     * @param dataSource   connections to the stage database, of their own:
+     *                     a pod waiting for the lock holds one; closed with
+     *                     the committer if it can be
+     * @param schema       the schema its tables are in
+     * @param leaseTable   the item leases' table
+     * @param margin       how long before a lease runs out its files are no
+     *                     longer committed
+     * @param interval     the least time between two commits of a table;
+     *                     zero for none
+     * @param queryTimeout how long a statement may run; at least a second
+     * @throws IllegalArgumentException if a name isn't a plain identifier
+     */
+    public QueuedCommits(String stage, DataSource dataSource, String schema,
+            String leaseTable, Duration margin, Duration interval,
+            Duration queryTimeout)
+    {
         if (!NAME.matcher(schema).matches() || schema.contains(".")
                 || !NAME.matcher(leaseTable).matches())
         {
             throw new IllegalArgumentException("Invalid table name");
         }
+        this.stage = stage;
         this.dataSource = dataSource;
         this.locks = schema + ".append_lock";
         this.queue = schema + ".append_queue";
@@ -321,7 +351,7 @@ public final class QueuedCommits implements GroupAppender.Committer
             throw new IllegalStateException("Could not queue a commit",
                     failure);
         }
-        telemetry.phaseDuration(ItemProcessor.STAGE, "commit_manifest",
+        telemetry.phaseDuration(stage, "commit_manifest",
                 System.nanoTime() - started);
         Found found = awaitTurns(table, id);
         if (found.state() == State.REFUSED)
@@ -484,14 +514,14 @@ public final class QueuedCommits implements GroupAppender.Committer
             {
                 long waited = System.nanoTime();
                 Long sinceLast = lock(connection, table.name());
-                telemetry.phaseDuration(ItemProcessor.STAGE, "commit_turn",
+                telemetry.phaseDuration(stage, "commit_turn",
                         System.nanoTime() - waited);
                 Found found = find(connection, id);
                 if (found.state() == State.WAITING)
                 {
                     long combined = System.nanoTime();
                     combine(connection, table, sinceLast);
-                    telemetry.phaseDuration(ItemProcessor.STAGE,
+                    telemetry.phaseDuration(stage,
                             "commit_combine", System.nanoTime() - combined);
                     found = find(connection, id);
                 }

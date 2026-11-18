@@ -54,6 +54,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *                       makes in; unset for its default
  * @param autostart      false to leave the input and duties stopped, for
  *                       tests that hand messages to the worker themselves
+ * @param commit         for a record stage, how its pods commit to the
+ *                       sink
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -68,8 +70,17 @@ public record StageProperties(ReceiveProperties input,
         @DefaultValue("8081") int readyPort,
         @DefaultValue("1m") Duration versionCheckInterval,
         @DefaultValue TableSettings source, @DefaultValue TableSettings sink,
-        @DefaultValue("true") boolean autostart)
+        @DefaultValue("true") boolean autostart,
+        @DefaultValue Commit commit)
 {
+
+    /**
+     * No commit settings is the default's: each pod commits its own.
+     */
+    public StageProperties
+    {
+        commit = commit == null ? new Commit(false, Duration.ZERO) : commit;
+    }
 
     /** Where the settings are configured, to name them in errors. */
     public static final String PREFIX = "sdh.stage";
@@ -86,6 +97,39 @@ public record StageProperties(ReceiveProperties input,
             @DefaultValue("15s") Duration renewInterval,
             @DefaultValue("1s") Duration busyPoll)
     {
+    }
+
+    /**
+     * How a record stage's pods commit their batches to the sink
+     * (docs/PERFORMANCE.md §3.7).
+     *
+     * @param shared   whether every pod's batches are committed together,
+     *                 a pod at a time taking all that wait, through the
+     *                 stage database; if not, each pod commits its own,
+     *                 and the pods' commits conflict
+     * @param interval the least time between two of the sink's commits,
+     *                 so that fewer snapshots are kept; zero for none
+     */
+    public record Commit(@DefaultValue("false") boolean shared,
+            @DefaultValue("0s") Duration interval)
+    {
+
+        /**
+         * Checks the interval.
+         *
+         * @param shared   whether the pods commit together
+         * @param interval the least time between commits
+         * @throws IllegalArgumentException if the interval is negative
+         */
+        public Commit
+        {
+            interval = interval == null ? Duration.ZERO : interval;
+            if (interval.isNegative())
+            {
+                throw new IllegalArgumentException(
+                        PREFIX + ".commit.interval can't be negative");
+            }
+        }
     }
 
     /**

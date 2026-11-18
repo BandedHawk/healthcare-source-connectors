@@ -286,6 +286,39 @@ class QueuedCommitsTest
     }
 
     /**
+     * A record stage's groups, queued with no leases, go in one commit
+     * too: nothing refuses them, since its registry settles what was
+     * stored.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void groupsWithNoLeasesGoInOneCommit() throws Exception
+    {
+        try (QueuedCommits one = new QueuedCommits("transform", database,
+                schema, leaseTable, Duration.ZERO, Duration.ZERO,
+                Duration.ofSeconds(10));
+                QueuedCommits two = new QueuedCommits("transform", database,
+                        schema, leaseTable, Duration.ZERO, Duration.ZERO,
+                        Duration.ofSeconds(10)))
+        {
+            one.createTablesIfMissing();
+            Connection lock = holdLock();
+            Future<Snapshot> a = senders.submit(() -> one.commit(table,
+                    List.of(file("a")), List.of()));
+            Future<Snapshot> b = senders.submit(() -> two.commit(other,
+                    List.of(file("b")), List.of()));
+            awaitQueued(2);
+            lock.commit();
+            lock.close();
+            long snapshot = a.get(30, TimeUnit.SECONDS).snapshotId();
+            assertThat(b.get(30, TimeUnit.SECONDS).snapshotId())
+                    .isEqualTo(snapshot);
+            assertThat(files()).hasSize(2);
+        }
+    }
+
+    /**
      * Many files from two pods at once are all committed, once each.
      *
      * @throws Exception if the test fails to run

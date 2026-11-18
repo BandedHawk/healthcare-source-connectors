@@ -16,6 +16,7 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
+import com.sdh.healthcare.connector.core.pipeline.QueuedCommits;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
@@ -261,11 +262,30 @@ public final class RecordStageRuntime implements AutoCloseable
                     ? new BacklogWatch(tables.source().table(), registry,
                             reconcile.grace(), clock)
                     : null;
+            // Every pod's batches committed to the sink together, a pod at
+            // a time (docs/PERFORMANCE.md §3.7), on a pool of its own: a
+            // pod waiting for its turn holds a connection, one for each
+            // batch it handles at once.
+            QueuedCommits queued = null;
+            StageProperties.Commit commit = stage.commit();
+            if (commit.shared())
+            {
+                HikariDataSource commitPool = LeaseDatabase.dataSource(
+                        settings.lease().jdbc(), "sdh-append",
+                        stage.consumers() + 1);
+                opened.add(commitPool);
+                queued = new QueuedCommits(stageName, commitPool,
+                        stage.registrySchema(),
+                        settings.lease().jdbc().table(), Duration.ZERO,
+                        commit.interval(), DATABASE_WAIT);
+                queued.createTablesIfMissing();
+                opened.add(queued);
+            }
             RecordStageProcessor processor = new RecordStageProcessor(
                     transform, reader, new RecordStageProcessor.Tables(
                             source, new RecordStageProcessor.Sink(sink,
                                     keys.wrap(), sinkKek, ids), earlier),
-                    memory, results, clock, backlog);
+                    memory, results, clock, backlog, queued);
             StageWorker.Reprocessing reprocessing = reprocessing(camel,
                     stage, keys, new ReprocessStore(dataSource,
                             stage.registrySchema(), stageName, DATABASE_WAIT),

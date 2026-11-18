@@ -21,6 +21,7 @@ import com.sdh.healthcare.connector.core.convert.ConversionBudget;
 import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.core.pipeline.GroupAppender;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
 import com.sdh.healthcare.connector.core.split.SplitRecord;
 import com.sdh.healthcare.connector.core.storage.CommittedRecords;
@@ -55,6 +56,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -226,6 +228,12 @@ public final class RecordStageProcessor
     private final BacklogWatch backlog;
 
     /**
+     * Commits every pod's batches to the sink together
+     * (docs/PERFORMANCE.md §3.7); null for each batch committing its own.
+     */
+    private final GroupAppender.Committer committer;
+
+    /**
      * Creates the processor.
      *
      * @param transform   the stage's own step
@@ -241,6 +249,32 @@ public final class RecordStageProcessor
             Tables tables, long memoryBytes, ResultReporter results,
             Clock clock, BacklogWatch backlog)
     {
+        this(transform, reader, tables, memoryBytes, results, clock, backlog,
+                null);
+    }
+
+    /**
+     * Creates the processor, committing through a committer shared by the
+     * stage's pods.
+     *
+     * @param transform   the stage's own step
+     * @param reader      reads records from the source
+     * @param tables      where records are read, stored and reported from
+     * @param memoryBytes the heap the transforms running at once may use
+     * @param results     sends the producer's results; null if they are off
+     * @param clock       stamps batches and completions
+     * @param backlog     told of each record that comes off the queue, for
+     *                    the reconciler (STAGES.md §9); null if none
+     * @param committer   commits every pod's batches to the sink together
+     *                    (docs/PERFORMANCE.md §3.7); null for each batch
+     *                    to commit its own
+     */
+    public RecordStageProcessor(RecordTransform transform, QueueReader reader,
+            Tables tables, long memoryBytes, ResultReporter results,
+            Clock clock, BacklogWatch backlog,
+            GroupAppender.Committer committer)
+    {
+        this.committer = committer;
         this.transform = transform;
         this.messages = transform.messages();
         this.reader = reader;
@@ -612,8 +646,12 @@ public final class RecordStageProcessor
     /**
      * {@inheritDoc}
      * <p>
-     * One data file, appended to the sink; the table's commit retries
-     * cover the other workers appending at the same time.
+     * One data file, appended to the sink. With a shared committer it is
+     * queued and committed with every pod's batches waiting
+     * (docs/PERFORMANCE.md §3.7), with no leases: the registry settles
+     * what was stored (STAGES.md §6), as it does for a batch committed
+     * alone. Without one, the table's commit retries cover the other
+     * workers appending at the same time.
      *
      * @return the stage's record message for each record that passed;
      *         null for one that failed, which isn't sent on (STAGES.md
@@ -645,11 +683,22 @@ public final class RecordStageProcessor
         {
             writer.close();
         }
-        AppendFiles append = table.newAppend();
-        append.appendFile(file);
-        append.commit();
-        StorageRef ref = sink.table().ref(writer.ingestedDate(),
-                table.currentSnapshot().snapshotId(), writer.kekRef());
+        long snapshotId;
+        if (committer == null)
+        {
+            AppendFiles append = table.newAppend();
+            append.appendFile(file);
+            append.commit();
+            snapshotId = table.currentSnapshot().snapshotId();
+        }
+        else
+        {
+            Snapshot snapshot = committer.commit(table, List.of(file),
+                    List.of());
+            snapshotId = snapshot.snapshotId();
+        }
+        StorageRef ref = sink.table().ref(writer.ingestedDate(), snapshotId,
+                writer.kekRef());
         List<ConnectorMessage> sent = new ArrayList<>(written.size());
         for (int index = 0; index < written.size(); index++)
         {

@@ -20,6 +20,8 @@ sdh:
     # Two records at a time, decided with the user on 2026-11-11 from the measures in docs/SANDBOX.md "Checked":
     # 7.2 a second on one pod, 14% of the time in GC, 128 MiB live (4.6 and 8% at one; 8.9 and 22% at four).
     concurrency: 2
+    # Every pod's batches committed to gold together, a pod at a time (docs/PERFORMANCE.md §3.7).
+    commit: { shared: true }
     input:
       # groupProtocol=consumer (KIP-848, Kafka 4): a rebalance doesn't wait for every pod's next poll.
       type: kafka

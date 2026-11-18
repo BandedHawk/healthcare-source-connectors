@@ -27,6 +27,7 @@ import com.sdh.healthcare.connector.contract.position.RecordOrigin;
 import com.sdh.healthcare.connector.contract.position.SourcePosition;
 import com.sdh.healthcare.connector.core.convert.Representation;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.core.pipeline.GroupAppender;
 import com.sdh.healthcare.connector.core.split.ResumePoint;
 import com.sdh.healthcare.connector.core.split.SplitRecord;
 import com.sdh.healthcare.connector.core.storage.CommittedRecords;
@@ -44,12 +45,14 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import javax.crypto.KeyGenerator;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.junit.jupiter.api.AfterEach;
@@ -338,6 +341,54 @@ class RecordStageProcessorTest
                                 "m1", "earlier/m0"),
                         new Failed(3, 22, "PARSE_UNTERMINATED_QUOTE", null, 3,
                                 "m3", null));
+    }
+
+    /**
+     * With a shared committer, a batch's file goes to it with no leases
+     * (the registry settles what was stored, STAGES.md §6), and each
+     * record's location names the snapshot it returned.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void commitsThroughASharedCommitter() throws Exception
+    {
+        List<Integer> calls = new ArrayList<>();
+        GroupAppender.Committer committer = (table, files, leases) ->
+        {
+            calls.add(files.size());
+            assertThat(leases).isEmpty();
+            table.newAppend().appendFile(files.get(0)).commit();
+            Snapshot committed = table.currentSnapshot();
+            // Another pod's commit after it: the record must still name
+            // the snapshot that holds it.
+            table.newAppend().appendFile(files.get(0)).commit();
+            return committed;
+        };
+        RecordStageProcessor processor = new RecordStageProcessor(
+                new UpperTransform(StageMessages.CONVERT), reader,
+                new RecordStageProcessor.Tables(
+                        table(IngestTables.SPLIT_RECORDS, splitRecords),
+                        new RecordStageProcessor.Sink(
+                                table("records", records), kms, KEK,
+                                new RecordIds(new byte[32])), null),
+                64L << 20, null, Clock.fixed(NOW, ZoneOffset.UTC), null,
+                committer);
+        List<RecordSplit> messages = split(List.of("csv"),
+                Collections.singletonList(null), "hello");
+
+        List<ConnectorMessage> sent = run(processor, messages);
+
+        assertThat(calls).containsExactly(1);
+        records.refresh();
+        long held = records.currentSnapshot().parentId();
+        assertThat(sent.get(0)).isInstanceOfSatisfying(RecordStored.class,
+                stored ->
+                {
+                    assertThat(stored.storage().snapshotId()).isEqualTo(held);
+                    assertThat(new String(reader.readRecord(stored, 1 << 10),
+                            UTF_8)).isEqualTo("HELLO");
+                });
     }
 
     /**

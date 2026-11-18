@@ -394,6 +394,12 @@ groups stay `waiting` until it marks them, so a pod that dies part way leaves th
 commit finds the IDs in the summaries of the snapshots since they were queued. A commit takes at most 64
 groups. Measured in §10: retries from 31% of commits to under 2%, split 1.38 s an item from 1.85.
 
+**The record stages too** (DESIGN.md revision (ds), 2026-11-17): `sdh.stage.commit.shared` sends a convert or
+transform batch's data file through the same queue, with no leases, since their registry settles what was
+stored (STAGES.md §6). On for transform, whose 18 pods' own commits to gold took 4.1 s (p95 13.8) at 100 a
+second and held gold ~80 s and more behind the feed at 35 (§10, runs of 2026-11-17). Checked in the sandbox (2
+pods: 11 commits, all through the queue, none refused); not yet measured on AWS.
+
 **The problem.** Each split pod commits its own groups to `split_records`. With three pods, 31% of their
 commits found another's had gone in first (§10, revision (dl)): Iceberg then reads the table again, rebuilds
 the manifest list and tries again, after a 100 ms wait. That took a group commit from 0.38 s to 0.75 s once
@@ -1126,8 +1132,17 @@ What it showed, beyond §2's predictions:
       quarter, 4.9 s in the second and 2.0 s in the third; its whole step 1.6, 7.0, 3.4 s (1.4–2.3 s in the run
       before). In the same quarters split resumed items left by other pods (1.9 s an item), splitter pods fell
       from 6 to 4 at ~626 s, nodes were shut down, and the autoscaler failed to add 7 burst nodes
-      (`OutOfResources`). Which caused which isn't known: lost burst capacity, or split's commits to one table
-      at twice the feed. Not looked into yet.
+      (`OutOfResources`).
+    - **The cause was Spot churn, not split** (the burst group's scaling activities, read after the run):
+      in the second quarter 24 burst nodes were replaced, 14 on EC2 rebalance recommendations (EKS managed
+      Spot groups rebalance capacity) and 10 to balance the group's zones, while new Spot launches kept
+      failing (`UnfulfillableCapacity`); the third quarter had 2. Each took the pods on it, so their items
+      were resumed by other pods and the commit queue waited for the lost holder. With the nodes steady
+      (442–980 s, all 6 split pods up) split did 43 items a second, as in the run before (41): 6 split pods
+      are ~43 items a second, so 100 needs ~14, or a faster pod, whatever the nodes do.
+    - For runs that measure the pipeline rather than Spot, `burst_capacity_type = "ON_DEMAND"`
+      (`compute/variables.tf`), at about 2.5 times the burst price; or more instance types in the burst
+      group, so a replacement finds capacity.
     - 19.4 documents a second first landed to last in gold (39.2), landed → gold p50 / p99 1,040 / 3,973 s.
       14 items not ended at transform when the test stopped waiting. $45 per million documents (19); 38 nodes
       at most.

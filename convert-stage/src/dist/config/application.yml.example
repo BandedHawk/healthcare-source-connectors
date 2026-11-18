@@ -32,6 +32,9 @@ sdh:
       uri: "kafka:sdh.split.claims?brokers=kafka:9093&securityProtocol=SSL"
     concurrency: 4                # records a pod converts at once
     claim: { ttl: 60s, renew-interval: 15s, busy-poll: 1s }
+    # true: every pod's batches are committed to the sink together, a pod at a time, through the lease database,
+    # so many pods' commits don't conflict; false: each pod commits its own. interval: least time between commits.
+    commit: { shared: false, interval: 0s }
     registry-schema: sdh_stage    # Postgres schema of the stage's registry, in the lease database
     send-timeout: 30s
     source:                       # where split records are read: the split stage's table
