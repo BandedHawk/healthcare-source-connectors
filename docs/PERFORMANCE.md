@@ -398,7 +398,8 @@ groups. Measured in §10: retries from 31% of commits to under 2%, split 1.38 s 
 transform batch's data file through the same queue, with no leases, since their registry settles what was
 stored (STAGES.md §6). On for transform, whose 18 pods' own commits to gold took 4.1 s (p95 13.8) at 100 a
 second and held gold ~80 s and more behind the feed at 35 (§10, runs of 2026-11-17). Checked in the sandbox (2
-pods: 11 commits, all through the queue, none refused); not yet measured on AWS.
+pods: 11 commits, all through the queue, none refused). Measured on AWS (§10, runs of 2026-11-18): a commit's
+turn 0.46 s (p95 0.95), 65.1 documents a second at 100 a second (39.2), landed → gold p99 185 s at 35 (385).
 
 **The problem.** Each split pod commits its own groups to `split_records`. With three pods, 31% of their
 commits found another's had gone in first (§10, revision (dl)): Iceberg then reads the table again, rebuilds
@@ -1157,6 +1158,30 @@ What it showed, beyond §2's predictions:
     - The 20 s p99 needs transform's gold commit fixed first (as above), and the stages' scale-out tuned
       for the cost.
   **Adopted:** landing 32 at once, and the feed's 2-minute retries.
+- **100 documents a second, transform's gold commit through the shared queue** (2026-11-18,
+  load-20261118T035717Z; DESIGN.md (ds), §3.7): 90,000 documents, the same stage maximums (6 / 12 / 18),
+  burst nodes still Spot.
+    - **65.1 documents a second** first landed to last in gold (39.2 in run 37, 19.4 in run 39), every item
+      landed exactly once and 0 left behind. $11 per million documents (19, 45); 33 nodes at most.
+    - Transform's commits waited their turn 0.46 s on average (p95 0.95) and combined in 0.35 s, against
+      4.1 s (p95 13.8) for each pod's own commit before. Gold took 2,963 snapshots.
+    - Landing 94 items a second (all landed by 957 s); split 65 items a second on 6 pods (41–43 before), its
+      step 1.5–1.75 s an item in every quarter.
+    - **Split is now the pace:** landed → split ended p50 / p99 249 / 437 s, while convert's last record →
+      transform's first was 13 / 36 s. Landed → gold p50 / p99 285 / 517 s.
+    - Spot churn happened again: over both runs, ~20 burst nodes were replaced on
+      rebalance recommendations and 11 to balance zones, and 5 Spot launches failed (`UnfulfillableCapacity`).
+      Split kept its rate through it.
+- **35 a second for 10 minutes, the latency floor, with the shared gold commit** (2026-11-18,
+  load-20261118T044826Z): 21,000 documents.
+    - Every item landed exactly once (35 a second, by 605 s); 0 left behind; 32.1 documents a second first
+      landed to last in gold (27.4).
+    - **Landed → gold p50 / p99 32 / 185 s** (56 / 385). Convert's last record → transform's first p50 / p99
+      11 / 52 s (23 / 367), so transform no longer sets the latency; landed → split ended (10 / 100 s) and split
+      ended → convert's first record (9 / 122 s) now do. Target 20 s p99.
+    - Up to 36 nodes (47): $26 per million documents (39), still from the stages scaling out on the queue's lag.
+  **Adopted:** `sdh.stage.commit.shared: true` for transform. Next: split's rate a pod and the queue wait
+  ahead of convert for the latency, and the stages' scale-out for the cost at low rates.
 
 ## 11. Order of work
 
