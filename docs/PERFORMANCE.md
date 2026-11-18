@@ -1118,6 +1118,30 @@ What it showed, beyond §2's predictions:
   gold ~80 s behind even with no backlog upstream. The 20 s p99 needs transform's gold commit fixed first.
   **Changed after them:** landing reads, deletes and seals 32 at once (`landing-application.yml`), and the feed
   retries a slice for 2 minutes (7 tries, 20 s apart).
+- **100 documents a second again, landing 32 at once** (2026-11-17, load-20261117T230333Z): 90,000 documents,
+  the same stage maximums.
+    - **Landing kept up:** 92 items a second, all 90,000 landed by 980 s (54 a second before); one item
+      announced twice (a failover's re-announce, §3.6 point 1).
+    - **Split became the pace, at 19 items a second** (41 before). Its append took 1.2 s an item in the first
+      quarter, 4.9 s in the second and 2.0 s in the third; its whole step 1.6, 7.0, 3.4 s (1.4–2.3 s in the run
+      before). In the same quarters split resumed items left by other pods (1.9 s an item), splitter pods fell
+      from 6 to 4 at ~626 s, nodes were shut down, and the autoscaler failed to add 7 burst nodes
+      (`OutOfResources`). Which caused which isn't known: lost burst capacity, or split's commits to one table
+      at twice the feed. Not looked into yet.
+    - 19.4 documents a second first landed to last in gold (39.2), landed → gold p50 / p99 1,040 / 3,973 s.
+      14 items not ended at transform when the test stopped waiting. $45 per million documents (19); 38 nodes
+      at most.
+- **35 a second for 10 minutes, the latency floor, again** (2026-11-17, load-20261117T235454Z): 21,000
+  documents; the feed's longer retries got it through.
+    - Landing and split kept up with the feed: every item landed exactly once (33 a second, by 631 s), and
+      landed → split ended p50 / p99 9 / 89 s.
+    - **Transform set the latency:** convert's last record → transform's first p50 / p95 / p99 23 / 254 / 367 s,
+      so landed → gold p50 / p99 56 / 385 s (target 20 s p99). 0 left behind; 27.4 documents a second first
+      landed to last in gold. Up to 47 nodes for 35 a second, from the stages scaling out on the queue's lag
+      and staying out: $39 per million documents.
+    - The 20 s p99 needs transform's gold commit fixed first (as above), and the stages' scale-out tuned
+      for the cost.
+  **Adopted:** landing 32 at once, and the feed's 2-minute retries.
 
 ## 11. Order of work
 
