@@ -13,6 +13,9 @@ spec:
       # again.
       tolerations:
         - { key: sdh-poc/burst, operator: Equal, value: "true", effect: NoSchedule }
+      # Time to finish the batch in hand and hand back its records' claims (STAGES.md §10) and any duties lease,
+      # within the two minutes' notice of a Spot reclaim, so another pod takes them up at once (2026-11-18).
+      terminationGracePeriodSeconds: 90
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

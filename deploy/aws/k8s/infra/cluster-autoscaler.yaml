@@ -1,7 +1,7 @@
-# Cluster Autoscaler for the Spot burst node group: adds a node when pods can't be placed, and removes it 10
-# minutes after it empties. It finds node groups by the tags EKS puts on their Auto Scaling groups. The base
-# groups are fixed at one node each, so it leaves them alone. AWS credentials come from Pod Identity (the
-# compute layer's association for kube-system/cluster-autoscaler).
+# Cluster Autoscaler for the Spot burst node groups (one a zone): adds a node when pods can't be placed, and
+# removes it 10 minutes after it empties, draining it first. It finds node groups by the tags EKS puts on their
+# Auto Scaling groups. The base groups are fixed at one node each, so it leaves them alone. AWS credentials
+# come from Pod Identity (the compute layer's association for kube-system/cluster-autoscaler).
 #
 # The RBAC follows the upstream AWS example (kubernetes/autoscaler, cluster-autoscaler-autodiscover.yaml). The
 # image minor version matches the cluster's (1.37) and is pinned by digest.
@@ -88,6 +88,9 @@ spec:
             - --skip-nodes-with-local-storage=false
             - --scale-down-unneeded-time=10m
             - --scale-down-delay-after-add=5m
+            # The two base nodes and at most six burst nodes (terraform/compute: zones, burst_max), now
+            # that each zone's burst group may grow to six on its own.
+            - --max-nodes-total=8
           env:
             - { name: AWS_REGION, value: us-east-2 }
           resources:

@@ -1255,6 +1255,13 @@ What it showed, beyond §2's predictions:
   **Not adopted:** groups-at-once stays in the code at its default, 1, which the AWS and sandbox configs use
   again. More groups means more turns, and the turns are what is serial. What would help is fewer, larger turns:
   a pod's waiting groups going into one turn as one group.
+- **Postgres connections, 2026-11-18 (revision (dv), not yet measured):** at the stages' scaled-out maxima (split
+  6, convert 12, transform 18 pods) run 46 held 272 of 300: transform 144 (8 a pod), split 66 (11), convert 48
+  (4). Each pod's own pools are small (the lease pool 2, the commit queue's consumers + 1), so the count follows
+  the pods. Each Iceberg JDBC catalog holds up to two (`clients`); the transform stage's source catalog and the
+  split stage's landing catalog only read, so now hold one: about 24 fewer at those maxima, ~248 of 300. Convert's
+  one catalog also commits, so keeps two. Raising `max_connections` again was the other way, but each backend
+  takes memory within Postgres' 2 GiB.
 
 ## 11. Order of work
 

@@ -1060,6 +1060,31 @@ class ConvertStageTest
     }
 
     /**
+     * A pod that takes the duties over from a holder that went ahead
+     * recently doesn't wait at startup: the other pods kept noting any
+     * backlog up to the hand-over. One whose last holder went ahead long
+     * ago still waits.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void skipsTheWaitAtStartupAfterAQuickHandOver() throws Exception
+    {
+        split("1,2", "3,4");
+        Instant now = SPLIT_AT.plus(Duration.ofHours(1));
+        RecordReconciler.Deferral deferral = new RecordReconciler.Deferral(
+                Duration.ofMinutes(15), Duration.ofHours(6));
+        // Ahead 40 minutes ago, before the grace and two quiet times.
+        registry.markChecked(now.minus(Duration.ofMinutes(40)));
+        assertThat(reconcilerAt(now, deferral).reconcile()).isZero();
+        registry.endDeferral();
+
+        // Ahead 30 minutes ago: within them.
+        registry.markChecked(now.minus(Duration.ofMinutes(30)));
+        assertThat(reconcilerAt(now, deferral).reconcile()).isEqualTo(2);
+    }
+
+    /**
      * At startup on a stage where no backlog has ever been seen, so the
      * registry has no row for it yet, the wait still ends after one quiet
      * time. The sandbox found it didn't: the wait was never recorded.

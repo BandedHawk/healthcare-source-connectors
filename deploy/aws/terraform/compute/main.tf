@@ -91,9 +91,15 @@ resource "aws_eks_cluster" "poc" {
 # base: one on-demand node per zone. They hold the active and standby landing pods (one per node), Postgres and
 # Kafka (on the node in the state volumes' zone), and one pod of each scaled stage.
 #
-# burst: Spot nodes (on-demand for a performance test), 0 to 6, in any of three zones and six instance types,
+# burst: Spot nodes (on-demand for a performance test), 0 to 6 in all, in three zones and five instance types,
 # tainted so only the KEDA-scaled stages and the gold check run there. Cluster Autoscaler adds one when
-# pods can't be placed, and removes it 10 minutes after it empties.
+# pods can't be placed, and removes it 10 minutes after it empties, draining it first.
+#
+# One burst group per zone (2026-11-18): a group over three zones let Auto Scaling end busy nodes to even the
+# zones out (AZRebalance), without the Cluster Autoscaler's drain: part of run 39's churn of 24 burst nodes. A
+# group in one zone has nothing to rebalance. Each may grow to burst_max; the Cluster Autoscaler's
+# --max-nodes-total (k8s/infra/cluster-autoscaler.yaml) keeps the whole cluster to the base nodes plus
+# burst_max, and --balance-similar-node-groups spreads the burst nodes over the zones.
 
 resource "aws_eks_node_group" "base" {
   for_each        = data.aws_subnet.zone
@@ -119,10 +125,11 @@ resource "aws_eks_node_group" "base" {
 }
 
 resource "aws_eks_node_group" "burst" {
+  for_each        = data.aws_subnet.burst_zone
   cluster_name    = aws_eks_cluster.poc.name
-  node_group_name = "burst"
+  node_group_name = "burst-${substr(each.key, -1, 1)}"
   node_role_arn   = local.p.node_role_arn
-  subnet_ids      = [for s in data.aws_subnet.burst_zone : s.id]
+  subnet_ids      = [each.value.id]
   ami_type        = "AL2023_ARM_64_STANDARD"
   capacity_type   = var.burst_capacity_type
   instance_types  = var.burst_instance_types

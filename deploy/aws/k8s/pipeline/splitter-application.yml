@@ -27,6 +27,9 @@ sdh:
         warehouse: s3://${BRONZE_BUCKET}/warehouse
         io-impl: org.apache.iceberg.aws.s3.S3FileIO
         client: { region: ${AWS_REGION} }
+        # Read only, so one Postgres connection, not Iceberg's two: with the stages scaled out, ~36 pods' pools
+        # came within 28 of max_connections (docs/PERFORMANCE.md §10, 2026-11-18).
+        clients: 1
   stage:
     # groupProtocol=consumer (KIP-848, Kafka 4): the group rebalances without waiting for a pod busy splitting.
     input:

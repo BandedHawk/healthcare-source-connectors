@@ -377,7 +377,10 @@ intake has results on.
   `stage.reconcile_deferral_capped`, so a queue that is always behind can't hide a real loss for long; then it
   waits again. At startup the pods haven't received anything yet, so a pod newly holding the duties waits one
   `backlog-quiet` whatever the queue shows (`sdh.reason` `STARTING`; `BACKLOG` otherwise). The wait is counted
-  from when this pod took the duties. `sdh.reconcile.backlog-quiet: 0s` turns waiting off. (The first build of
+  from when this pod took the duties. It doesn't wait at startup when it takes over from a holder whose last run
+  went ahead within the grace and two `backlog-quiet`s (revision (dv), 2026-11-18): the other pods kept noting
+  any backlog up to the hand-over, so the backlog check alone decides (`stage.reconcile_handed_over`, logged).
+  `sdh.reconcile.backlog-quiet: 0s` turns waiting off. (The first build of
   this never ended the wait at startup on a stage that had never seen a backlog; fixed 2026-11-07, revision (bu).) A drained-queue signal
   from the brokers was rejected: there is none common to the seven.
 - **Settings:** `sdh.stage.*` (§7); `sdh.convert.options`, `.max-bytes`, `.memory`; `sdh.stage.source` and
@@ -532,7 +535,11 @@ The sandbox gets the KEDA operator, the stages as scaled deployments, and topics
   `stage.claims_recovered`; the claim protocol makes it safe beside a message that does come again, which then
   finds the record stored. A partial index on the claims (`stage_record_claimed`) keeps it cheap. And the load
   test keeps every stage pod's event lines as the run goes (`load-test.sh`, `pod-logs/`), and notes each left
-  record's owner, attempts and claim expiry, so the next one can be traced.
+  record's owner, attempts and claim expiry, so the next one can be traced. Then, on AWS (revision (dv)): the
+  burst nodes are one node group per zone, which Auto Scaling never rebalances, so a node goes only through the
+  Cluster Autoscaler's drain or a Spot reclaim, each of which stops its pods gracefully; the stage pods have
+  90 s to stop, to finish the batch in hand and hand back its claims and any duties lease; and a pod taking the
+  duties over from a holder that ran lately skips the reconciler's wait at startup (§9).
 
 ## 11. Order of work
 

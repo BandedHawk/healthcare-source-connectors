@@ -226,7 +226,7 @@ month, so the forecast alert catches it within days. Lowered from $250 on 2026-1
 | Concern | Choice | Rejected, and why |
 |---|---|---|
 | Kubernetes | EKS 1.37, standard support only (`upgrade_policy`: a version in extended support costs $0.60/hour) | k3s on EC2: no control-plane fee, but no second node for landing's standby |
-| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst`, 0–6 Spot (five arm64 `.large` types, not `t4g`, whose surplus credits make it the dearest busy node: PERFORMANCE.md §10; three zones; on demand with `--on-demand-burst`), with Cluster Autoscaler | Karpenter or Auto Mode: more to set up, or a fee on every instance |
+| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst-a`, `-b` and `-c`, one a zone, 0–6 Spot in all (five arm64 `.large` types, not `t4g`, whose surplus credits make it the dearest busy node: PERFORMANCE.md §10; on demand with `--on-demand-burst`), with Cluster Autoscaler (`--max-nodes-total=8`). One group a zone since 2026-11-18 (DESIGN.md revision (dv)): a group over three zones let Auto Scaling end busy nodes to rebalance its zones, without a drain | Karpenter or Auto Mode: more to set up, or a fee on every instance |
 | Postgres | `postgres:18.4` StatefulSet on a kept 10 GiB gp3 volume, snapshotted at each `down` | RDS: restarts itself after 7 days stopped, and is a second start/stop. Aurora Serverless v2: dearer while running. |
 | Kafka | 1 KRaft broker (`apache/kafka:4.2.2`) on a kept 10 GiB volume, RF 1 | MSK: ≥ $100/month, or about $540/month serverless |
 | Iceberg catalog | JDBC on that Postgres (tested) | Glue: not supported by the code. S3 Tables, Polaris: untested, or one more pod |
@@ -253,7 +253,9 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 | otel-collector, prometheus | 1 each | 150m | 768 Mi | the stages' metrics for measure.sh (docs/PERFORMANCE.md §10); Prometheus on an emptyDir, so lost at `down` |
 
 - The scaled stages tolerate the `sdh-poc/burst` taint and prefer the base nodes; everything else runs on the base
-  nodes only.
+  nodes only. They have 90 s to stop (DESIGN.md revision (dv)), within a Spot reclaim's two minutes' notice, to
+  finish the batch in hand and hand back its claims and any duties lease. Their duties can still be on a Spot
+  node: pinning them to the base nodes would need a third base node (revision (dv)).
 - Producer results are off at every stage, changed from "on at transform" on 2026-11-12: with a bucket intake no
   producer listens for them, and they would need a producer key pair and a results topic. Turn them on at the
   transform stage only if a test needs them (its README).

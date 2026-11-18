@@ -147,7 +147,10 @@ public final class RecordReconciler
      * where it is. After waiting {@code most}, a run goes ahead anyway, so
      * a queue that is always behind can't hide a real loss for long; then
      * it waits again. At startup, before the pods have received anything,
-     * it waits one {@code quiet} whatever. Times are the database's.
+     * it waits one {@code quiet} whatever; but not when it takes over from
+     * a holder that went ahead within the grace and two {@code quiet}s
+     * (2026-11-18): the other pods kept receiving, and noting any backlog,
+     * up to the hand-over. Times are the database's.
      *
      * @param quiet how long since the last backlog record before a run
      *              goes ahead; zero never to wait
@@ -266,7 +269,7 @@ public final class RecordReconciler
         Table table = source.table();
         table.refresh();
         Snapshot snapshot = table.currentSnapshot();
-        if (snapshot == null || deferred())
+        if (snapshot == null || deferred(now))
         {
             return 0;
         }
@@ -324,10 +327,11 @@ public final class RecordReconciler
      * stops waiting because it has waited the most, each with
      * {@code sdh.count}, the minutes it has waited.
      *
+     * @param now the time of this run
      * @return whether to rebuild nothing this time
      * @throws IllegalStateException if the registry can't be reached
      */
-    private boolean deferred()
+    private boolean deferred(Instant now)
     {
         if (!deferral.enabled())
         {
@@ -338,6 +342,7 @@ public final class RecordReconciler
             // A wait left by a pod that held the duties before.
             registry.endDeferral();
             started = true;
+            warmedUp = handedOver(now);
         }
         Optional<Duration> since = registry.sinceBacklog();
         boolean backlog = since.isPresent()
@@ -368,6 +373,31 @@ public final class RecordReconciler
                         .with(Attr.COUNT, waited.toMinutes()));
         registry.endDeferral();
         return false;
+    }
+
+    /**
+     * Whether this pod took the duties over from a holder that was past its
+     * own startup: one whose last run went ahead within the grace and two
+     * {@code quiet}s, so moved the watermark to within two {@code quiet}s
+     * of now less the grace. The pods kept noting any backlog up to the
+     * hand-over, so the wait at startup is not needed. Logged if so.
+     *
+     * @param now the time of this run
+     * @return whether the wait at startup can be skipped
+     * @throws IllegalStateException if the registry can't be reached
+     */
+    private boolean handedOver(Instant now)
+    {
+        Instant recent = now.minus(grace)
+                .minus(deferral.quiet().multipliedBy(2));
+        boolean recently = registry.checkedTo()
+                .filter(checked -> checked.isAfter(recent)).isPresent();
+        if (recently)
+        {
+            LOG.info("stage.reconcile_handed_over stage={}",
+                    messages.stage());
+        }
+        return recently;
     }
 
     /**

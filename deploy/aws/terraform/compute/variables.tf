@@ -53,7 +53,8 @@ variable "burst_capacity_type" {
   }
 }
 
-# Six: with the stages asking for the CPU they use (docs/PERFORMANCE.md §10), split at 3 pods and transform at 4
+# Six in all, over the per-zone burst groups (each may reach six; the Cluster Autoscaler caps the total). With
+# the stages asking for the CPU they use (docs/PERFORMANCE.md §10), split at 3 pods and transform at 4
 # of 1.6, all of them at the most need about 12.4 vCPU: two base and five burst nodes, one spare.
 variable "burst_max" {
   type    = number
