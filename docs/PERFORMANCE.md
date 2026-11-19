@@ -1255,13 +1255,24 @@ What it showed, beyond §2's predictions:
   **Not adopted:** groups-at-once stays in the code at its default, 1, which the AWS and sandbox configs use
   again. More groups means more turns, and the turns are what is serial. What would help is fewer, larger turns:
   a pod's waiting groups going into one turn as one group.
-- **Postgres connections, 2026-11-18 (revision (dv), not yet measured):** at the stages' scaled-out maxima (split
+- **Postgres connections, 2026-11-18 (revision (dv), measured in runs 47 and 48: peaks 245 and 238 of 300):** at the stages' scaled-out maxima (split
   6, convert 12, transform 18 pods) run 46 held 272 of 300: transform 144 (8 a pod), split 66 (11), convert 48
   (4). Each pod's own pools are small (the lease pool 2, the commit queue's consumers + 1), so the count follows
   the pods. Each Iceberg JDBC catalog holds up to two (`clients`); the transform stage's source catalog and the
   split stage's landing catalog only read, so now hold one: about 24 fewer at those maxima, ~248 of 300. Convert's
   one catalog also commits, so keeps two. Raising `max_connections` again was the other way, but each backend
   takes memory within Postgres' 2 GiB.
+- **Steadiness check of revisions (du) and (dv), 2026-11-18 (runs 47 and 48, the scaled-out maxima as in runs 45
+  and 46):** nothing lost or left. Run 47 (100 a second, 90,000 documents): every item landed once, none left
+  behind at the end, no `stage.claims_left`; 101 expired claims handed in again by the sweep (38 convert, 63
+  transform; a lower bound, below) while Spot capacity came and went: the cluster fell to 17 nodes at 467 s, an
+  Auto Scaling group couldn't add 15 Spot nodes in one zone (no capacity), 400-odd pods waited for CPU. 51.8
+  documents a second while busy (89,688 in gold by 1,733 s; 62.9 in run 44), then the last 85 items reached gold
+  over 30 minutes after the stages scaled down to a pod each: not traced, since about half the pods left no log
+  (the log follower took up pods still starting; fixed). Landed → gold p50 / p99 268 / 1,101 s; $31 a million,
+  with the tail. Run 48 (35 a second, 21,000): all to gold in 652 s, p50 / p95 / p99 35 / 135 / 168 s (131 in
+  run 44), $29 a million (the scaled-out maxima at a third of the load). Both runs' load test ended with 1 from
+  its exit trap under `set -e`, leaving the staged copies in S3 (fixed).
 
 ## 11. Order of work
 

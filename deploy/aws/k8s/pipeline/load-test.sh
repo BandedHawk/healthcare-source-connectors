@@ -187,13 +187,16 @@ t0=$SECONDS
 echo "$t0_db" > "$out/t0"   # for measure.sh
 
 # Each stage pod's log, followed from its start until it goes, warnings, errors and events only (STAGES.md §10,
-# 2026-11-18): the only record of what a pod that stopped part way did. A loop looks for new pods every 15 s.
+# 2026-11-18): the only record of what a pod that stopped part way did. A loop looks for new pods every 15 s, and
+# takes up only those running: a pod still starting has no log yet, so `logs -f` would end at once and the pod
+# would never be looked at again (half of run 47's pods left no log).
 mkdir -p "$out/pod-logs"
 follow_logs() {
   local -A following=()
   while :; do
     for ns in "$N" sdh-fhir; do
-      for pod in $(kubectl -n "$ns" get pods -o name 2>/dev/null | grep -E 'convert|transform|splitter|landing'); do
+      for pod in $(kubectl -n "$ns" get pods -o name --field-selector=status.phase=Running 2>/dev/null \
+          | grep -E 'convert|transform|splitter|landing'); do
         [[ -n "${following[$ns/$pod]:-}" ]] && continue
         following[$ns/$pod]=1
         kubectl -n "$ns" logs -f --timestamps --all-containers "$pod" 2>/dev/null \
@@ -208,10 +211,13 @@ follow_logs &
 log_follower=$!
 stop_logs() {
   [[ -n "${log_follower:-}" ]] || return 0
-  kill "$log_follower" 2>/dev/null; pkill -P "$log_follower" 2>/dev/null
-  pkill -f "logs -f --timestamps --all-containers pod/" 2>/dev/null
+  # Each may find nothing left to stop; under set -e a bare failure here would end the EXIT trap, and the run,
+  # with 1, and leave the staged copies in S3.
+  kill "$log_follower" 2>/dev/null || true
+  pkill -P "$log_follower" 2>/dev/null || true
+  pkill -f "logs -f --timestamps --all-containers pod/" 2>/dev/null || true
   log_follower=""
-  gzip -q "$out"/pod-logs/*.log 2>/dev/null
+  gzip -q "$out"/pod-logs/*.log 2>/dev/null || true
   return 0
 }
 pod_events() {  # <event>: how many lines name it, across every pod kept
