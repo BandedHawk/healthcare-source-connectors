@@ -1306,6 +1306,16 @@ What it showed, beyond §2's predictions:
   the log keeps no message. Split slowed in the last quarter (12.1 s an item), so the last tenth ran at 903 a
   minute. The gold check didn't run: it reached Postgres through PgBouncer, whose user list has no `gold_reader`
   (fixed: the gold check connects to Postgres itself).
+- **Run 50 again for its gold check, 2026-11-19 (run 51):** nothing lost; 90,001 items for 90,000 objects, all to
+  gold, 0 left; no container restarted. 65.9 documents a second end to end (52.4); landed → gold p50 / p95 / p99
+  222 / 460 / 551 s (172 / 410 / 790); 36 nodes at most; $12 a million (16); Postgres connections at most 85. Split
+  kept the pace to the end this time (4,051 items a minute). **One object landed twice**, 70 s apart, the feed
+  having copied nothing again: landing found the second's content the same as the first's (`item.duplicate_content`)
+  and the split stage noted it as a copy, so it went on as a linked copy and supplanted nothing. Not traced: landing
+  logs no object key, by design, and landing deletes each object it lands, so S3 keeps no second version to show.
+  **The gold check failed again,** at its Job's 90-minute deadline, its `read` container still running after a Kafka
+  `TimeoutException` (the pod and its log went with the Job). It had passed only on runs of up to 7,200 documents
+  (about 12,000 messages); here it read 177,892 one at a time in one pod, which the deadline was never sized for.
 
 ## 11. Order of work
 
