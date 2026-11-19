@@ -65,6 +65,20 @@ public enum Attr
      */
     REASON("sdh.reason"),
 
+    /**
+     * A failure's chain of causes, by class name, outermost first, joined
+     * by commas, such as {@code ExecutionException,IllegalStateException}
+     * ({@link Fields#failure}): never a message.
+     */
+    CAUSES("sdh.causes"),
+
+    /**
+     * Where the innermost cause of a failure was thrown: its top frames,
+     * each a class, method and line, joined by commas ({@link
+     * Fields#failure}). Names code, never data.
+     */
+    THROWN_AT("sdh.thrown_at"),
+
     /** A record's sequence number in its file, from 0. */
     SEQ("sdh.seq"),
 

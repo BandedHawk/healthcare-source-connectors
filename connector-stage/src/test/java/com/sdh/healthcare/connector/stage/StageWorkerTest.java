@@ -915,6 +915,15 @@ class StageWorkerTest
                 .isEqualTo(BatchHandler.Outcome.RETRY);
         assertThat(committed).isEmpty();
         assertThat(audit.names()).containsExactly("stage.batch_failed");
+        assertThat(audit.attributes("stage.batch_failed"))
+                .containsEntry("sdh.reason", "ExecutionException")
+                .containsEntry("sdh.causes",
+                        "ExecutionException,IllegalStateException")
+                .hasEntrySatisfying("sdh.thrown_at", where -> assertThat(
+                        (String) where).startsWith(
+                                StageTestSupport.TestProcessor.class.getName()
+                                        + ".process:"))
+                .doesNotContainValue("A dependency is down");
         assertThat(worker.handle(batch(3)))
                 .isEqualTo(BatchHandler.Outcome.DONE);
         assertThat(committed).hasSize(3);

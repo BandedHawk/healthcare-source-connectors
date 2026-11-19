@@ -760,8 +760,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         {
             Telemetry.get().auditWarn("stage.batch_failed",
                     stageFields(ErrorCode.STAGE_BATCH_FAILED)
-                            .with(Attr.REASON,
-                                    failure.getClass().getSimpleName()));
+                            .failure(failure));
             return Outcome.RETRY;
         }
     }
@@ -910,8 +909,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         {
             Telemetry.get().auditWarn("stage.batch_failed",
                     stageFields(ErrorCode.STAGE_BATCH_FAILED)
-                            .with(Attr.REASON,
-                                    failure.getClass().getSimpleName()));
+                            .failure(failure));
             return Outcome.RETRY;
         }
         finally

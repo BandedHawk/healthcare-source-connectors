@@ -191,8 +191,9 @@ Two new modules, both published, so `healthcare-data-transformer` can use them:
   (`stage.unreadable_version`). One of an earlier major version, which no upgrade reads, is rejected
   (`stage.message_rejected`, reason `EARLIER_VERSION`), so it blocks nothing behind it; its record is found by
   the reconciler, an item total recovered by replay (§13.2; decided 2026-11-07). Other audit events: `record.duplicate`,
-  `record.conflict` (`RECORD_CONFLICT`), `record.claim_lost`, `stage.batch_failed` (`STAGE_BATCH_FAILED`) and
-  `stage.item_completed`; none carries a record ID. Messages are still keyed by item ID on the broker; record
+  `record.conflict` (`RECORD_CONFLICT`), `record.claim_lost`, `stage.batch_failed` (`STAGE_BATCH_FAILED`, with the
+  failure's class, its causes' classes and where the innermost was thrown, never a message: DESIGN.md revision (eb))
+  and `stage.item_completed`; none carries a record ID. Messages are still keyed by item ID on the broker; record
   messages move to the record ID in step 4 (§4). Tested by `StageRegistryTest` and `StageWorkerTest` (embedded
   Postgres, real sealing), and `StageWorkerIT` on all seven brokers: a worker stops part-way with records claimed,
   two more run at once, wait out its claims and take them over, and store every record exactly once. Its output is
