@@ -464,6 +464,9 @@ public final class RecordReconciler
     {
         Set<UUID> completed = registry.completed(committed.keySet());
         reportedMissing.removeAll(completed);
+        // The items short of records, with those known: rebuilt below from
+        // one scan of the source for them all, not two an item.
+        Map<UUID, Set<String>> shortOf = new LinkedHashMap<>();
         for (Map.Entry<UUID, Set<String>> item : committed.entrySet())
         {
             UUID itemId = item.getKey();
@@ -496,14 +499,118 @@ public final class RecordReconciler
                 }
                 continue;
             }
-            List<ConnectorMessage> lost = rebuild(itemId,
-                    name -> !known.contains(name), snapshotId);
-            handIn(lost);
-            Telemetry.get().auditWarn("stage.records_recovered",
-                    Fields.of(Attr.STAGE, messages.stage())
-                            .with(Attr.ITEM_ID, itemId)
-                            .with(Attr.COUNT, lost.size()));
-            tally.recovered += lost.size();
+            shortOf.put(itemId, known);
+        }
+        if (shortOf.isEmpty())
+        {
+            return;
+        }
+        Map<UUID, List<CommittedRecords.Row>> rows =
+                CommittedRecords.withCorrections(source.table(),
+                        shortOf.keySet());
+        Recovery recovery = new Recovery("stage.records_recovered");
+        for (Map.Entry<UUID, Set<String>> item : shortOf.entrySet())
+        {
+            UUID itemId = item.getKey();
+            Set<String> known = item.getValue();
+            recovery.add(itemId, rebuild(itemId, rows.get(itemId),
+                    name -> !known.contains(name), snapshotId));
+        }
+        tally.recovered += recovery.finish();
+    }
+
+    /**
+     * Rebuilt records handed to the worker several items at a time, in full
+     * batches, not an item a batch: each batch waits its turn to commit, so
+     * an item a batch took one batch's time an item (on AWS under load, 4 s
+     * on average and 18 s at the 95th percentile, run 47, 2026-11-18). Each
+     * item is audited once the batch holding its records is in.
+     */
+    private final class Recovery
+    {
+
+        /** The audit event for each item recovered. */
+        private final String event;
+
+        /** The records gathered and not yet handed in. */
+        private final List<ConnectorMessage> gathered = new ArrayList<>();
+
+        /** How many records of each item gathered are in it. */
+        private final Map<UUID, Integer> items = new LinkedHashMap<>();
+
+        /** How many records have been handed in. */
+        private int handedIn;
+
+        /**
+         * Starts a recovery.
+         *
+         * @param event the audit event for each item recovered
+         */
+        Recovery(String event)
+        {
+            this.event = event;
+        }
+
+        /**
+         * Gathers an item's rebuilt records, and hands in what is gathered
+         * once it fills a batch.
+         *
+         * @param itemId the item
+         * @param lost   its records; none leaves it out
+         * @throws InterruptedException  if interrupted
+         * @throws IllegalStateException if the worker held a batch back
+         */
+        void add(UUID itemId, List<ConnectorMessage> lost)
+                throws InterruptedException
+        {
+            if (lost.isEmpty())
+            {
+                return;
+            }
+            gathered.addAll(lost);
+            items.merge(itemId, lost.size(), Integer::sum);
+            if (gathered.size() >= BATCH)
+            {
+                handInGathered();
+            }
+        }
+
+        /**
+         * Hands in the rest.
+         *
+         * @return how many records were handed in, in all
+         * @throws InterruptedException  if interrupted
+         * @throws IllegalStateException if the worker held a batch back
+         */
+        int finish() throws InterruptedException
+        {
+            handInGathered();
+            return handedIn;
+        }
+
+        /**
+         * Hands in what is gathered and audits its items.
+         *
+         * @throws InterruptedException  if interrupted
+         * @throws IllegalStateException if the worker held a batch back
+         */
+        private void handInGathered() throws InterruptedException
+        {
+            if (gathered.isEmpty())
+            {
+                return;
+            }
+            handIn(List.copyOf(gathered));
+            for (Map.Entry<UUID, Integer> item : items.entrySet())
+            {
+                Telemetry.get().auditWarn(event,
+                        Fields.of(Attr.STAGE, messages.stage())
+                                .with(Attr.ITEM_ID, item.getKey())
+                                .with(Attr.COUNT, item.getValue()));
+            }
+            handedIn += gathered.size();
+            gathered.clear();
+            items.clear();
         }
     }
 
@@ -583,22 +690,18 @@ public final class RecordReconciler
             byItem.computeIfAbsent(key.itemId(), item -> new HashSet<>())
                     .add(key.recordId());
         }
-        int recovered = 0;
+        // One scan of the source for every item, not two an item: on AWS
+        // those took about 20 s an item (run 47, 2026-11-18).
+        Map<UUID, List<CommittedRecords.Row>> rows =
+                CommittedRecords.withCorrections(table, byItem.keySet());
+        Recovery recovery = new Recovery("stage.claims_recovered");
         for (Map.Entry<UUID, Set<String>> item : byItem.entrySet())
         {
-            List<ConnectorMessage> lost = rebuild(item.getKey(),
-                    item.getValue()::contains, snapshot.snapshotId());
-            if (lost.isEmpty())
-            {
-                continue;
-            }
-            handIn(lost);
-            Telemetry.get().auditWarn("stage.claims_recovered",
-                    Fields.of(Attr.STAGE, messages.stage())
-                            .with(Attr.ITEM_ID, item.getKey())
-                            .with(Attr.COUNT, lost.size()));
-            recovered += lost.size();
+            recovery.add(item.getKey(), rebuild(item.getKey(),
+                    rows.get(item.getKey()), item.getValue()::contains,
+                    snapshot.snapshotId()));
         }
+        int recovered = recovery.finish();
         LOG.info("stage.claims_swept stage={} expired={} recovered={}"
                 + " left={}", messages.stage(), expired.size(), recovered,
                 expired.size() - recovered);
@@ -642,20 +745,20 @@ public final class RecordReconciler
      * know.
      *
      * @param itemId     the item
+     * @param rows       its rows in the source, then those made from
+     *                   corrections ({@link CommittedRecords#withCorrections})
      * @param wanted     whether to rebuild a record, by its name in the
      *                   registry ({@link StageRegistry.Key})
      * @param snapshotId the table's snapshot, which holds them all
      * @return the messages, in sequence order
      */
     private List<ConnectorMessage> rebuild(UUID itemId,
-            Predicate<String> wanted, long snapshotId)
+            List<CommittedRecords.Row> rows, Predicate<String> wanted,
+            long snapshotId)
     {
         List<ConnectorMessage> lost = new ArrayList<>();
         // With the records operators' corrections made at the stage before
         // (STAGES.md §15.6d), sent on as any record.
-        List<CommittedRecords.Row> rows = new ArrayList<>(
-                CommittedRecords.all(source.table(), itemId));
-        rows.addAll(CommittedRecords.corrections(source.table(), itemId));
         for (CommittedRecords.Row row : rows)
         {
             if (!wanted.test(StageRegistry.Key.of(itemId, row.recordId(),

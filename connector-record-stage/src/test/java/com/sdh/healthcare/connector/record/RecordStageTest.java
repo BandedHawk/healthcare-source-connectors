@@ -68,6 +68,7 @@ import javax.crypto.KeyGenerator;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
+import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -306,6 +307,21 @@ class RecordStageTest
      */
     List<RecordStored> converted(String... texts) throws Exception
     {
+        return converted(item, texts);
+    }
+
+    /**
+     * Writes an item's records to {@code records}, as
+     * {@link #converted(String...)} writes the test's item's.
+     *
+     * @param itemId the item
+     * @param texts  the records' JSON; null for a failed one
+     * @return a {@code record.stored} for each stored, null for each failed
+     * @throws Exception if one can't be written
+     */
+    List<RecordStored> converted(UUID itemId, String... texts)
+            throws Exception
+    {
         RecordBatchWriter writer = new RecordBatchWriter(records, kms, KEK,
                 new RecordIds(new byte[32]), STORED_AT);
         long offset = 0;
@@ -316,13 +332,15 @@ class RecordStageTest
                     ResumePoint.at(offset + text.length()));
             if (texts[seq] == null)
             {
-                writer.addBytes(item, seq, "csv", lineage, text.getBytes(UTF_8),
+                writer.addBytes(itemId, seq, "csv", lineage,
+                        text.getBytes(UTF_8),
                         new Representation("text/csv", null),
                         ErrorCode.CONVERT_CSV_FIELD_COUNT, 0, null);
             }
             else
             {
-                writer.addBytes(item, seq, "csv", lineage, text.getBytes(UTF_8),
+                writer.addBytes(itemId, seq, "csv", lineage,
+                        text.getBytes(UTF_8),
                         Representation.json("csv/1"), null, -1, null);
             }
             offset += text.length();
@@ -336,7 +354,7 @@ class RecordStageTest
         {
             int seq = (int) record.seq();
             messages.add(texts[seq] == null ? null : new RecordStored(
-                    record.recordId(), item, seq, record.sourceOffset(),
+                    record.recordId(), itemId, seq, record.sourceOffset(),
                     record.sourceLength(), "csv", Representation.JSON,
                     "csv/1", record.plaintextLength(), record.chunkCount(),
                     ref, null, "convert-v", null, null, false, null, seq,
@@ -607,6 +625,45 @@ class RecordStageTest
         assertThat(opened()).filteredOn(RecordTransformed.class::isInstance)
                 .hasSize(1);
         assertThat(reconciler.sweepExpiredClaims()).isZero();
+    }
+
+    /**
+     * The sweep hands several items' records to the worker in one batch, so
+     * one commit, not a batch an item, each waiting its turn to commit
+     * (run 47, 2026-11-18); each item is still audited.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void sweepsSeveralItemsInOneBatch() throws Exception
+    {
+        UUID other = UUID.randomUUID();
+        RecordStored first = converted("{\"a\":1}").get(0);
+        RecordStored second = converted(other, "{\"b\":2}").get(0);
+        StageRegistry gone = new StageRegistry(postgres.getPostgresDatabase(),
+                schema, StageMessages.TRANSFORM.stage(), "pod-gone",
+                Duration.ofSeconds(10));
+        gone.claim(first.recordId(), item, Duration.ofMillis(1));
+        gone.claim(second.recordId(), other, Duration.ofMillis(1));
+        Thread.sleep(300);
+        RecordReconciler reconciler = new RecordReconciler(
+                new RecordTable("prod", NS, "records", records),
+                StageMessages.TRANSFORM, registry, worker, processor,
+                Duration.ofMinutes(10), Duration.ofDays(2),
+                Clock.systemUTC(), RecordReconciler.Deferral.OFF,
+                Duration.ofMillis(200));
+        gold.refresh();
+        int commits = Iterables.size(gold.snapshots());
+
+        assertThat(reconciler.sweepExpiredClaims()).isEqualTo(2);
+        gold.refresh();
+        assertThat(Iterables.size(gold.snapshots())).isEqualTo(commits + 1);
+        assertThat(registry.knownRecords(item))
+                .containsExactly(first.recordId());
+        assertThat(registry.knownRecords(other))
+                .containsExactly(second.recordId());
+        assertThat(opened()).filteredOn(RecordTransformed.class::isInstance)
+                .hasSize(2);
     }
 
     /**

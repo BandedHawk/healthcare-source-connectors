@@ -26,7 +26,9 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Arrays;
@@ -36,6 +38,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
@@ -57,6 +60,9 @@ public final class CommittedRecords
     private static final int MAX_REFS_BYTES = 64 << 10;
 
     /** The columns a {@link Row} is read from. */
+    /** The most items {@link #withCorrections} asks for in one scan. */
+    public static final int ITEMS_A_SCAN = 500;
+
     private static final String[] ROW_COLUMNS = {RECORD_ID, SEQ,
         SOURCE_OFFSET, SOURCE_LENGTH, FORMAT, CONTENT_TYPE, MAPPING,
         ERROR_CODE, PLAINTEXT_LENGTH, CHUNK_COUNT, INGESTED_AT, KEK_REF,
@@ -412,6 +418,75 @@ public final class CommittedRecords
             throw new UncheckedIOException(error);
         }
         return new ArrayList<>(found.values());
+    }
+
+    /**
+     * Reads, for several items in one scan, what {@link #all(Table, UUID)}
+     * then {@link #corrections(Table, UUID)} read for each: its records,
+     * then those made from operators' corrections. A reconciler rebuilding
+     * many items needs this: each scan reads every manifest of the table,
+     * so two scans an item took about 20 s an item on AWS with a few
+     * thousand commits behind (run 47, 2026-11-18).
+     *
+     * @param table   the table
+     * @param itemIds the items, at most {@link #ITEMS_A_SCAN} a scan
+     * @return each item's rows, in the order of the ids given; an item with
+     *         none has an empty list
+     * @throws UncheckedIOException if the table can't be read
+     */
+    public static Map<UUID, List<Row>> withCorrections(Table table,
+            Collection<UUID> itemIds)
+    {
+        Map<UUID, Map<String, Row>> records = new LinkedHashMap<>();
+        Map<UUID, Map<String, Row>> corrections = new HashMap<>();
+        for (UUID itemId : itemIds)
+        {
+            records.put(itemId, new TreeMap<>());
+            corrections.put(itemId, new TreeMap<>());
+        }
+        List<UUID> ids = new ArrayList<>(records.keySet());
+        String[] columns = Stream.concat(Stream.of(ITEM_ID),
+                Arrays.stream(rowColumns(table))).toArray(String[]::new);
+        for (int from = 0; from < ids.size(); from += ITEMS_A_SCAN)
+        {
+            List<UUID> some = ids.subList(from,
+                    Math.min(ids.size(), from + ITEMS_A_SCAN));
+            try (CloseableIterable<Record> rows = IcebergGenerics.read(table)
+                    .where(Expressions.and(Expressions.in(ITEM_ID, some),
+                            Expressions.equal(CHUNK_INDEX, 0)))
+                    .select(columns)
+                    .build())
+            {
+                for (Record row : rows)
+                {
+                    UUID itemId = (UUID) row.getField(ITEM_ID);
+                    Row read = row(row);
+                    String place = placeKey(read.lineage().generation(),
+                            read.seq());
+                    if (read.correctionOf() == null)
+                    {
+                        records.get(itemId).putIfAbsent(place, read);
+                    }
+                    else
+                    {
+                        corrections.get(itemId).putIfAbsent(
+                                place + "/" + read.recordId(), read);
+                    }
+                }
+            }
+            catch (IOException error)
+            {
+                throw new UncheckedIOException(error);
+            }
+        }
+        Map<UUID, List<Row>> found = new LinkedHashMap<>();
+        for (Map.Entry<UUID, Map<String, Row>> item : records.entrySet())
+        {
+            List<Row> rows = new ArrayList<>(item.getValue().values());
+            rows.addAll(corrections.get(item.getKey()).values());
+            found.put(item.getKey(), rows);
+        }
+        return found;
     }
 
     /**

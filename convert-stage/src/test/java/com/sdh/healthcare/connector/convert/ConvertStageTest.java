@@ -536,6 +536,24 @@ class ConvertStageTest
                     assertThat(row.lineage()).isEqualTo(Lineage.FIRST
                             .nextRevision(Lineage.CONVERT));
                 });
+        // Read for several items in one scan, as a reconciler reads them:
+        // the same rows, in the same order, and none for an item without.
+        UUID none = UUID.randomUUID();
+        List<CommittedRecords.Row> both = new ArrayList<>(
+                CommittedRecords.all(records, item));
+        both.addAll(CommittedRecords.corrections(records, item));
+        assertThat(CommittedRecords.withCorrections(records,
+                List.of(none, item)))
+                .containsExactly(Map.entry(none, List.of()),
+                        Map.entry(item, both));
+        List<UUID> many = new ArrayList<>();
+        for (int k = 0; k < 2 * CommittedRecords.ITEMS_A_SCAN; k++)
+        {
+            many.add(UUID.randomUUID());
+        }
+        many.add(item);
+        assertThat(CommittedRecords.withCorrections(records, many))
+                .hasSize(many.size()).containsEntry(item, both);
         assertThat(sentOf("record.stored")).isEqualTo(2);
         assertThat(sentOf("item.converted")).isEqualTo(1);
         assertThat(registry.failureStore().failure(item, 1)).get()

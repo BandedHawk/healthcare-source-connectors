@@ -539,7 +539,10 @@ The sandbox gets the KEDA operator, the stages as scaled deployments, and topics
   burst nodes are one node group per zone, which Auto Scaling never rebalances, so a node goes only through the
   Cluster Autoscaler's drain or a Spot reclaim, each of which stops its pods gracefully; the stage pods have
   90 s to stop, to finish the batch in hand and hand back its claims and any duties lease; and a pod taking the
-  duties over from a holder that ran lately skips the reconciler's wait at startup (§9).
+  duties over from a holder that ran lately skips the reconciler's wait at startup (§9). And then (revision (dw),
+  2026-11-19): run 47's sweep took about 20 s an item, two scans of the source table an item and a batch an item,
+  so the last 85 items reached gold over 30 minutes; a sweep, and a reconcile run, now read every item they need
+  in one scan and hand the records in several items a batch.
 
 ## 11. Order of work
 
