@@ -1316,6 +1316,12 @@ What it showed, beyond §2's predictions:
   **The gold check failed again,** at its Job's 90-minute deadline, its `read` container still running after a Kafka
   `TimeoutException` (the pod and its log went with the Job). It had passed only on runs of up to 7,200 documents
   (about 12,000 messages); here it read 177,892 one at a time in one pod, which the deadline was never sized for.
+- **The gold check at its own size, 2026-11-19 (run 52, 7,200 documents at once, the committed defaults):** passed.
+  7,200 landed exactly once, all to gold, 0 left; p50 / p95 / p99 212 / 340 / 370 s; 16.8 documents a second on 9
+  nodes; $15 a million. The check's first pod lost its Spot node and the Job started another, which read 13,087
+  messages, checked 3,600 bundles with no failure and found no validator error mapping's baseline doesn't expect,
+  in 27 minutes. At that pace run 51's 177,892 messages would take about six hours: the gold check belongs on a
+  load of this size, and the large runs show every item in gold by their own count.
 
 ## 11. Order of work
 
