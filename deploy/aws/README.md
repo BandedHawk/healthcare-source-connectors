@@ -36,10 +36,18 @@ sudo apt-get update && sudo apt-get install -y terraform kubectl
 | `deploy/aws/poc.sh reset` | With a session up: deletes all pipeline data (database, topics, offsets, buckets, intake) and deploys the pipeline again on nothing. Asks first; `--yes` doesn't. |
 | `deploy/aws/poc.sh up --on-demand-burst` | Burst nodes on demand instead of Spot, for a performance test. |
 | `deploy/aws/poc.sh up --long-test "landing failover" --hours 12` | Goes beyond the 8-hour day, for resilience or performance tests only (at most 24 h per session). |
+| `deploy/aws/check-config.sh` | Checks, offline, that the deploy settings and the load test still hold the fixes found on AWS (below). Run it before `up` and after changing anything under `deploy/aws`. |
 
 If you forget `down`, the guard on AWS deletes the cluster at the session's deadline, even with this machine off.
 Run `down` afterwards anyway: it records the session's end, snapshots the volumes, and tidies the Terraform
 state.
+
+`check-config.sh` needs no AWS or cluster. It checks the settings: the stage pods' 90 s to stop, the read-only
+catalogs' one connection, one burst node group a zone and the autoscaler's cap, the gold check's tolerance of a
+lost node, landing's two pods unscaled, and Postgres' memory and connections against KEDA's maxima. And it runs
+the load test's own functions against stand-ins for `aws` and `kubectl`: stopping the log follower, its taking up
+only running pods, a failed slice copy trying again only what failed, and each copy of a document differing. A
+test run's raised maxima pass too, so long as the cap follows `burst_max` (32 with 30). The transformer's `GoldCheckTest` holds the gold check to the copies' marker.
 
 `kubectl` works once a session is up:
 
