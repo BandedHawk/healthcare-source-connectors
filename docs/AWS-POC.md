@@ -269,8 +269,9 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 - The landing pods have no readiness port (a bucket intake opens none), so `apply.sh` tells the active node from
   the standby by its `lease.acquired` audit event.
 - Postgres and Kafka run on the base node in us-east-2a, where their volumes are; PgBouncer beside them. Every
-  stage, its Iceberg catalog clients and the gold check connect to `pgbouncer.sdh-infra.svc:5432`, never to
-  Postgres itself (`check-config.sh` checks it); psql and `poc.sh` go to Postgres directly. PgBouncer's users
+  stage and its Iceberg catalog clients connect to `pgbouncer.sdh-infra.svc:5432`, never to Postgres itself
+  (`check-config.sh` checks it); psql, `poc.sh` and the gold check (whose role `gold-check.sh` makes, so
+  PgBouncer doesn't know it) go to Postgres directly. PgBouncer's users
   are the stages' roles, written by `poc.sh` (`setup_database`) to the secret `pgbouncer-users`.
 
 **Totals:**

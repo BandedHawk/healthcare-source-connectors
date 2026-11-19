@@ -1294,6 +1294,18 @@ What it showed, beyond §2's predictions:
   down two at a time, fits managed Spot groups' Capacity Rebalance. Since then the duties run on an on-demand node
   (revision (dz)) and the stages reach Postgres through PgBouncer (revision (ea)); none of the three is measured on
   AWS yet.
+- **Revisions (dy), (dz) and (ea) at 100 a second, 2026-11-19 (run 50, the maxima of run 49, the transform duties
+  pod deleted part way):** nothing lost; all 90,000 landed once and reached gold, 0 left; no container restarted.
+  52.4 documents a second from first landed to last in gold (47.7); landed → gold p50 / p95 / p99 172 / 410 /
+  790 s (254 / 863 / 1,032); 39 nodes at most; $16 a million (15). Postgres connections at most 87 (241). No tail:
+  the sweep recovered no claims (146), so (dx) and (dy) closed what run 49 traced. The duties pods held the duties
+  all run; the deleted one's replacement took them 31 s later and no stage pod fell back. Ten `append.failed_stopping`
+  and no other `append.failed`; three `broker.kafka_stale_left`. Of 14 `stage.batch_failed`, all retried, 7 were
+  convert pods stopping (`RejectedExecutionException`), 4 transform `CommitFailedException`s in the stopping
+  holders' own groups, and 3 `IllegalStateException`s, at least two in pods that weren't stopping: not traced, as
+  the log keeps no message. Split slowed in the last quarter (12.1 s an item), so the last tenth ran at 903 a
+  minute. The gold check didn't run: it reached Postgres through PgBouncer, whose user list has no `gold_reader`
+  (fixed: the gold check connects to Postgres itself).
 
 ## 11. Order of work
 

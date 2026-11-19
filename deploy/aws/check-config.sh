@@ -111,8 +111,12 @@ check "Postgres allows the scaled-out maxima of runs 45-48 (6/12/18: ~$((6 * 8 +
 # Every client comes through PgBouncer (k8s/infra/state.yaml, DESIGN.md revision (ea)), in transaction pooling,
 # which pgjdbc's prepared statements need 1.21 or later for, with max_prepared_statements; its connections stay
 # under max_connections.
-check "no stage or job connects to Postgres but through PgBouncer" \
-  bash -c "! grep -qE 'postgres\.sdh-infra\.svc' '$P'/*-application.yml '$P/gold-check.yaml'"
+check "no stage connects to Postgres but through PgBouncer" \
+  bash -c "! grep -qE 'postgres\.sdh-infra\.svc' '$P'/*-application.yml"
+# The gold check's role is made by gold-check.sh, which PgBouncer's users (poc.sh) don't include: it goes to
+# Postgres itself, as psql does (run 50, 2026-11-19: through PgBouncer its login failed).
+check "the gold check connects to Postgres itself" \
+  grep -qE 'CATALOG_URI, value: "jdbc:postgresql://postgres\.sdh-infra\.svc' "$P/gold-check.yaml"
 check "PgBouncer pools transactions and keeps pgjdbc's prepared statements" \
   bash -c "grep -qE '^ +pool_mode = transaction$' '$K8S/infra/state.yaml' \
     && grep -qE '^ +max_prepared_statements = [1-9]' '$K8S/infra/state.yaml' \

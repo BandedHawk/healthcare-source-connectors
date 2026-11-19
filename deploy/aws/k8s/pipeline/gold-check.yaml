@@ -63,7 +63,9 @@ spec:
             - { name: GOLD_WAREHOUSE, value: "s3://${GOLD_BUCKET}/warehouse" }
             - { name: SILVER_CATALOG, value: sdh }
             - { name: SILVER_WAREHOUSE, value: "s3://${SILVER_BUCKET}/warehouse" }
-            - { name: CATALOG_URI, value: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh" }
+            # Postgres itself, not PgBouncer (DESIGN.md revision (ea)): the check's role is made by gold-check.sh, not
+            # poc.sh, so PgBouncer doesn't know it, and a one-off reader needs no pool (run 50: SASL failed).
+            - { name: CATALOG_URI, value: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh" }
             - { name: CATALOG_USER, value: "gold_reader_${ICEBERG_PREFIX}" }
             - { name: KAFKA_BROKERS, value: "${KAFKA_BROKERS}" }
             - { name: TOPIC, value: "${PIPELINE}.fhir" }
