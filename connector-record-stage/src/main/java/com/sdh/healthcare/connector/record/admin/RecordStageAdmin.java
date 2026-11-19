@@ -37,6 +37,7 @@ import com.sdh.healthcare.connector.stage.admin.FailureCommands;
 import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
 import com.sdh.healthcare.connector.stage.admin.StageAdmin;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
+import com.sdh.healthcare.connector.stage.admin.StuckCommand;
 import com.sdh.healthcare.connector.stage.admin.VersionCommand;
 import java.io.PrintStream;
 import java.time.Duration;
@@ -146,6 +147,7 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
     {
         List<AdminCommand<RecordStageAdmin<P>>> commands =
                 new ArrayList<>(List.of(new StageStatusCommand<>(),
+                        new StuckCommand<>(),
                         new ReprocessCommand<>(), new DrainCheckCommand<>(),
                         new VersionCommand<>()));
         commands.addAll(FailureCommands.<RecordStageAdmin<P>>all());

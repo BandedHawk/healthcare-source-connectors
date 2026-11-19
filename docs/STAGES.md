@@ -937,6 +937,43 @@ first total it gets for an item and completes each once, and the item's `item.sp
 Splitting it again in place would mean undoing those rules; landing it again as a new item changes nothing
 downstream, and nothing in place.
 
+### 13.6 Items stuck, and records left claimed (built 2026-11-19)
+
+The stages recover a stopped pod's work on their own: another pod takes over its messages and claims as they are
+redelivered, the sweep hands in again records whose claims expired (§10), the reconciler rebuilds records that never
+came (§9), and the stage before sends again an item end that was lost (§13.2). Asked by the user 2026-11-18: if Spot
+churn under real conditions left work that none of these recovers, can it be recovered by hand? Yes, by
+`reprocess` (§15.8.4); `stuck` finds what to reprocess.
+
+```sh
+sdh-admin stuck [--idle <minutes>] --operator alice     # on the convert or transform stage
+```
+
+It lists, read only:
+- **the items stuck:** not complete, none of their records claimed with a live claim, and none stored for `--idle`
+  minutes (10, the reconciler's grace, by default), by item ID. Each shows its counts, how long since its last record
+  was stored, why it waits, and its `sdh-admin reprocess --item-id <id>` line. Why, in order: records left claimed
+  past their claim (the sweep hands them in again within a few minutes); its end from the stage before not
+  received (asked for again once the reconciler has seen all its records, §13.2); all stored but not completed (the
+  reconciler completes it); still open at the stage before; or records not received (the reconciler rebuilds them).
+- **the records claimed now,** by item and the pod that claimed it (from the claim's owner), with their most
+  attempts and how long their claims have been expired, the longest first; a live claim says when it expires. A
+  pod that is gone and still has claims a few minutes later is the sign of a sweep not running: check its duties pod
+  (`status`).
+
+Up to 50 of each, with how many more. It names no record (record IDs are the producer's) and no content: item IDs,
+pod names, counts and times. It is audited as `admin.stuck` with the count of stuck items. The split stage has
+no records to claim: its `status` lists the items not finished with who holds each one's lease (§8).
+
+**What to do:** wait out what the automation recovers (each reason says which part does, and in what time); an
+item still listed after that, and after the reconciler's next run (`status` shows how far it has checked), is
+reprocessed with its line, with a reason on standard input. A reprocess at this stage runs the item's records that
+are here again. For an item whose total or records never came, reprocess it at the stage before instead, which
+sends them again. An item with no records here at all, and no total, is found by the audit query of §13.2.
+
+**Later, a web console** (DESIGN.md §11.4): the command's logic returns rows (`RegistryReport.stuck`, `leftClaims`),
+so a console can show the same list, and offer the reprocess to a user whose role allows it.
+
 ## 14. A version at every stage (proposed 2026-11-08, for review)
 
 What a stage's change does to the data passing through it, and how it is kept from mixing versions unnoticed.

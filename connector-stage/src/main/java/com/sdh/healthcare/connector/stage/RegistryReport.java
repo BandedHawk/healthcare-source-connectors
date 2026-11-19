@@ -247,6 +247,157 @@ public final class RegistryReport
     }
 
     /**
+     * An item not complete that nothing is working on (STAGES.md §13.6):
+     * none of its records claimed with a live claim, and none stored for
+     * a while.
+     *
+     * @param itemId      the item
+     * @param expected    its record count, from the stage before; -1 until
+     *                    that stage's item end is received
+     * @param done        its records stored
+     * @param failed      those of them stored as failed
+     * @param upstreamOpen whether its total is from the stage before's
+     *                    {@code item.progress}, so may still grow
+     * @param totalWanted whether the reconciler found its records all here
+     *                    and asked the stage before to send its end again
+     *                    (§13.2)
+     * @param idle        how long since one of its records was stored;
+     *                    null if none has been
+     * @param expired     its records left claimed past their claim
+     */
+    public record Stuck(UUID itemId, long expected, long done, long failed,
+            boolean upstreamOpen, boolean totalWanted, Duration idle,
+            long expired)
+    {
+    }
+
+    /**
+     * Records left claimed: one item's, by one pod.
+     *
+     * @param itemId   the item
+     * @param pod      the pod that claimed them, from the claim's owner
+     * @param records  how many
+     * @param attempts the most attempts any of them has taken
+     * @param expiry   how long since the earliest of the claims expired;
+     *                 negative while all are live, by how long until the
+     *                 earliest expires
+     */
+    public record LeftClaim(UUID itemId, String pod, long records,
+            int attempts, Duration expiry)
+    {
+    }
+
+    /**
+     * Some of a longer list, and how long it is.
+     *
+     * @param rows  the rows listed
+     * @param total how many there are in all
+     * @param <T>   a row
+     */
+    public record Listed<T>(List<T> rows, long total)
+    {
+
+        /**
+         * Copies the rows.
+         *
+         * @param rows  the rows listed
+         * @param total how many there are in all
+         */
+        public Listed
+        {
+            rows = List.copyOf(rows);
+        }
+    }
+
+    /**
+     * The items not complete that nothing is working on: none of their
+     * records claimed with a live claim, and none stored for longer than
+     * {@code idle}, or never, by item ID.
+     *
+     * @param idle  how long since a record was stored, at least
+     * @param limit the most to list
+     * @return the items, and how many there are
+     */
+    public Listed<Stuck> stuck(Duration idle, int limit)
+    {
+        return query("SELECT i.item_id, i.expected, i.done, i.failed,"
+                + " i.upstream_open, i.total_wanted_at IS NOT NULL,"
+                + " extract(epoch FROM now() - max(r.stored_at)),"
+                + " count(r.record_id) FILTER (WHERE r.state = 'CLAIMED'"
+                + " AND r.claim_expires < now()), count(*) OVER ()"
+                + " FROM " + items + " i LEFT JOIN " + records + " r"
+                + " ON r.stage = i.stage AND r.item_id = i.item_id"
+                + " WHERE i.stage = ? AND i.completed_at IS NULL"
+                + " GROUP BY i.item_id, i.expected, i.done, i.failed,"
+                + " i.upstream_open, i.total_wanted_at"
+                + " HAVING count(r.record_id) FILTER (WHERE"
+                + " r.state = 'CLAIMED' AND r.claim_expires >= now()) = 0"
+                + " AND (max(r.stored_at) IS NULL"
+                + " OR max(r.stored_at) < now() - ? * interval '1 second')"
+                + " ORDER BY i.item_id LIMIT " + Math.max(0, limit),
+                statement -> statement.setDouble(2,
+                        idle.toMillis() / 1000.0), result ->
+                {
+                    List<Stuck> found = new ArrayList<>();
+                    long total = 0;
+                    while (result.next())
+                    {
+                        long expected = result.getLong(2);
+                        if (result.wasNull())
+                        {
+                            expected = -1;
+                        }
+                        double seconds = result.getDouble(7);
+                        Duration since = result.wasNull() ? null
+                                : Duration.ofMillis(Math.round(
+                                        seconds * 1000));
+                        found.add(new Stuck(result.getObject(1, UUID.class),
+                                expected, result.getLong(3),
+                                result.getLong(4), result.getBoolean(5),
+                                result.getBoolean(6), since,
+                                result.getLong(8)));
+                        total = result.getLong(9);
+                    }
+                    return new Listed<>(found, total);
+                });
+    }
+
+    /**
+     * The records claimed now, by item and the pod that claimed them, the
+     * longest expired first. It names no record: their IDs are the
+     * producer's.
+     *
+     * @param limit the most to list
+     * @return the claims, and how many item and pod pairs there are
+     */
+    public Listed<LeftClaim> leftClaims(int limit)
+    {
+        return query("SELECT item_id, split_part(owner, '/', 1), count(*),"
+                + " max(attempts), extract(epoch FROM now()"
+                + " - min(claim_expires)), count(*) OVER ()"
+                + " FROM " + records + " WHERE stage = ? AND state = 'CLAIMED'"
+                + " GROUP BY 1, 2 ORDER BY min(claim_expires), 1, 2"
+                + " LIMIT " + Math.max(0, limit), statement ->
+                {
+                }, result ->
+                {
+                    List<LeftClaim> found = new ArrayList<>();
+                    long total = 0;
+                    while (result.next())
+                    {
+                        found.add(new LeftClaim(
+                                result.getObject(1, UUID.class),
+                                result.getString(2), result.getLong(3),
+                                result.getInt(4), Duration.ofMillis(
+                                        Math.round(result.getDouble(5)
+                                                * 1000))));
+                        total = result.getLong(6);
+                    }
+                    return new Listed<>(found, total);
+                });
+    }
+
+    /**
      * Runs a query for items.
      *
      * @param sql the query, with the stage as its first parameter
