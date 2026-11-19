@@ -1144,7 +1144,8 @@ public final class IntakeService implements LandingIntake
                             .with(Attr.COUNT, others.size())
                             .with(Attr.REASON, "same content as item "
                                     + (sameAs != null ? sameAs
-                                            : others.get(0))));
+                                            : others.get(0)))
+                            .with(SourceRef.fields(landed.source())));
         }
         return sameAs;
     }

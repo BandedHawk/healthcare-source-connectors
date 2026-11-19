@@ -7,10 +7,13 @@
 package com.sdh.healthcare.connector.core.landing;
 
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import javax.crypto.Mac;
 
 /**
@@ -77,6 +80,28 @@ public record SourceRef(String hash, long size, String version)
         mac.update((byte) 0);
         mac.update(reference.getBytes(StandardCharsets.UTF_8));
         return new SourceRef(RecordIds.encode(mac.doFinal()), size, version);
+    }
+
+    /**
+     * This sighting for an audit event: the reference hash ({@link
+     * Attr#SOURCE_REF}) and the ledger's key ({@link Attr#SIGHTING}), so
+     * that two items with the same content show whether they came from the
+     * same source, and from the same version of it. Neither holds PHI.
+     *
+     * @param source the sighting; null, for an item with no source, adds
+     *               nothing
+     * @return the attributes
+     */
+    public static Fields fields(SourceRef source)
+    {
+        if (source == null)
+        {
+            return Fields.of();
+        }
+        LedgerIndex.Key key = source.key();
+        return Fields.of(Attr.SOURCE_REF, source.hash()).with(Attr.SIGHTING,
+                HexFormat.of().toHexDigits(key.high())
+                        + HexFormat.of().toHexDigits(key.low()));
     }
 
     /**

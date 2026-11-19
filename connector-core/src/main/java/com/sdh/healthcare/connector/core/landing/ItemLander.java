@@ -696,7 +696,8 @@ public final class ItemLander
                         Fields.of(Attr.ITEM_ID, item.itemId())
                                 .with(Attr.INTAKE, settings.intake())
                                 .with(Attr.KIND, item.kind().wireName())
-                                .with(Attr.BYTES, each.size()));
+                                .with(Attr.BYTES, each.size())
+                                .with(SourceRef.fields(item.source())));
                 landed.add(new LandedItem(item.itemId(), settings.intake(),
                         item.kind(), item.source(), each.size(),
                         each.digest(), landedAt, snapshotId(snapshot),
@@ -1157,7 +1158,8 @@ public final class ItemLander
                             Fields.of(Attr.ITEM_ID, item.itemId())
                                     .with(Attr.INTAKE, settings.intake())
                                     .with(Attr.KIND, item.kind().wireName())
-                                    .with(Attr.BYTES, bytesRead));
+                                    .with(Attr.BYTES, bytesRead)
+                                    .with(SourceRef.fields(item.source())));
                     return new LandedItem(item.itemId(), settings.intake(),
                             item.kind(), item.source(), bytesRead, digest,
                             landedAt, snapshotId(snapshot),

@@ -121,6 +121,22 @@ public enum Attr
     /** An item's ID, a UUID: never its name or path. */
     ITEM_ID("sdh.item_id"),
 
+    /**
+     * Where an item came from, as its keyed hash ({@code SourceRef#hash},
+     * design §5.3.2), which the landing tables already hold in the clear:
+     * two items with the same one came from the same path, object key or
+     * message ID. Never the reference itself.
+     */
+    SOURCE_REF("sdh.source_ref"),
+
+    /**
+     * Which sighting of its source an item was, as the ledger keys it
+     * ({@code SourceRef#key}): a hash of the reference hash, size and
+     * version, in hex. Two items from the same source with different ones
+     * came from different versions, such as an object written twice.
+     */
+    SIGHTING("sdh.sighting"),
+
     /** What kind of item was landed, such as {@code file}. */
     KIND("sdh.kind"),
 

@@ -745,6 +745,13 @@ class PushServiceTest
         assertThat(results).hasSize(2);
         assertThat(telemetry.events()).contains("item.resubmitted",
                 "item.duplicate_content");
+        assertThat(telemetry.attributesOf("item.landed"))
+                .as("each landed item says where from, as hashes")
+                .allSatisfy(each -> assertThat(each.get(AttributeKey
+                        .stringKey("sdh.sighting"))).hasSize(32))
+                .extracting(each -> each.get(AttributeKey
+                        .stringKey("sdh.source_ref")))
+                .doesNotContainNull();
 
         assertThat(poller.poll()).isZero();
         assertThat(push(service, "a", null, "after").status())
