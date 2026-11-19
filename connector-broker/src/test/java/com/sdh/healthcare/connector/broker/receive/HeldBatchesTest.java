@@ -50,6 +50,11 @@ class HeldBatchesTest
     /** The processor under test. */
     HeldBatches held;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    HeldBatchesTest()
+    {
+    }
+
     /** Creates the context. */
     @BeforeEach
     void setUp()

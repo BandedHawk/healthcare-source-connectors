@@ -81,6 +81,11 @@ public class PushWebConfiguration
     /** The authority every accepted sender has. */
     static final String SENDER = "SDH_PUSH_SENDER";
 
+    /** Created by Spring. */
+    public PushWebConfiguration()
+    {
+    }
+
     /**
      * The endpoint's checked settings.
      *

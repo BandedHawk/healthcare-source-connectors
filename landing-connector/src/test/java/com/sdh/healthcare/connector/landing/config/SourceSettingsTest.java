@@ -24,6 +24,11 @@ import org.junit.jupiter.api.io.TempDir;
 class SourceSettingsTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    SourceSettingsTest()
+    {
+    }
+
     /**
      * Source settings as bound.
      *

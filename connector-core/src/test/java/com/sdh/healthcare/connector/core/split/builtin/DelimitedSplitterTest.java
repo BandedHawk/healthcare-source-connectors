@@ -26,6 +26,11 @@ class DelimitedSplitterTest
     /** The splitter under test. */
     private final DelimitedSplitter splitter = new DelimitedSplitter();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    DelimitedSplitterTest()
+    {
+    }
+
     /**
      * Settings with a pattern and mode.
      *

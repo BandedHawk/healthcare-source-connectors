@@ -96,6 +96,11 @@ public final class EventHubsSupport
         /** For serialization. */
         private static final long serialVersionUID = 1L;
 
+        /** Creates the positions. */
+        EarliestPositions()
+        {
+        }
+
         @Override
         public EventPosition get(Object partitionId)
         {

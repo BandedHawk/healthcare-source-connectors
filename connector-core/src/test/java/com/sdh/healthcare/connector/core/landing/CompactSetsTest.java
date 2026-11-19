@@ -19,6 +19,11 @@ import org.junit.jupiter.api.Test;
 class CompactSetsTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    CompactSetsTest()
+    {
+    }
+
     /**
      * A set is sized to the smallest power of two that keeps it at most
      * two-thirds full, and never fewer than 1,024 slots.

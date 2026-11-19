@@ -22,6 +22,11 @@ final class RecordingHealth implements BrokerHealth
     /** How many times the broker answered. */
     private int answers;
 
+    /** Creates the recorder, with nothing recorded. */
+    RecordingHealth()
+    {
+    }
+
     @Override
     public synchronized void answered()
     {

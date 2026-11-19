@@ -180,12 +180,23 @@ class QueueIntakeIT
     static final ReceiveProperties.Eventhubs NO_EVENTHUBS =
             new ReceiveProperties.Eventhubs(null, null, null);
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    QueueIntakeIT()
+    {
+    }
+
     /** Thrown by the publisher of a node that is to crash. */
     static final class Crash extends Error
     {
 
         /** For serialization. */
         private static final long serialVersionUID = 1L;
+
+        /** Creates the exception. */
+        Crash()
+        {
+        }
+
     }
 
     /** The landed items table. */

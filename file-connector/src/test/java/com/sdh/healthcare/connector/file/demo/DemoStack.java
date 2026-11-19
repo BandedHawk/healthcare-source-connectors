@@ -699,7 +699,7 @@ interface DemoStack extends AutoCloseable
         /** The minikube profile. */
         static final String PROFILE = "sdh-it";
 
-        /** Not instantiable. */
+        /** Not instantiated. */
         private MinikubeDocker()
         {
         }

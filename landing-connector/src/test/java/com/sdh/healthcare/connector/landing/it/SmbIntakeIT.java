@@ -85,6 +85,11 @@ class SmbIntakeIT
     /** The source under test; closed after each test. */
     SmbSource source;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    SmbIntakeIT()
+    {
+    }
+
     /**
      * A Samba server with one share for the account.
      *

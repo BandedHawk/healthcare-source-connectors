@@ -67,6 +67,11 @@ class IcebergUpgradeGuardTest
                 design §2.
             """;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    IcebergUpgradeGuardTest()
+    {
+    }
+
     /** Iceberg is the version reviewed. */
     @Test
     void icebergIsTheReviewedVersion()

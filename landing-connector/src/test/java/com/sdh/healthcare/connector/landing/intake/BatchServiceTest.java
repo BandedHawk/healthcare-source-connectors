@@ -82,12 +82,23 @@ class BatchServiceTest
     static final RetryPolicy RETRY =
             new RetryPolicy(1, Duration.ofMillis(1), Duration.ofMillis(1));
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    BatchServiceTest()
+    {
+    }
+
     /** Thrown from the commit hook to stand in for a crash. */
     static final class Crash extends Error
     {
 
         /** For serialization. */
         private static final long serialVersionUID = 1L;
+
+        /** Creates the exception. */
+        Crash()
+        {
+        }
+
     }
 
     /** The landed items table. */

@@ -33,7 +33,7 @@ import java.util.UUID;
 final class KmsItSupport
 {
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private KmsItSupport()
     {
     }

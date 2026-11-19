@@ -23,6 +23,11 @@ import org.junit.jupiter.api.Test;
 class BucketSettingsTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    BucketSettingsTest()
+    {
+    }
+
     /**
      * Bucket settings as bound.
      *

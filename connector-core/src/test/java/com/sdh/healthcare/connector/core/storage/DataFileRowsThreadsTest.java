@@ -57,6 +57,11 @@ class DataFileRowsThreadsTest
     @TempDir
     Path folder;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    DataFileRowsThreadsTest()
+    {
+    }
+
     /**
      * Writes a file compressed with zstd, as the tables' are, then reads it
      * from a new JVM with two carrier threads, as a pod with two CPUs has.

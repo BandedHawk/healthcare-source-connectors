@@ -139,6 +139,11 @@ class PushOAuth2ApplicationTest extends PushTestSupport
         }
     }
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    PushOAuth2ApplicationTest()
+    {
+    }
+
     /** Stops the key server and puts the JVM's TLS defaults back. */
     @AfterAll
     static void stopKeyServer()

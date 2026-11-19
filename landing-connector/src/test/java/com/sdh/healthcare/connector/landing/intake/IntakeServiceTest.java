@@ -90,12 +90,23 @@ class IntakeServiceTest
     static final RetryPolicy RETRY =
             new RetryPolicy(1, Duration.ofMillis(1), Duration.ofMillis(1));
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    IntakeServiceTest()
+    {
+    }
+
     /** Thrown from the commit hook to stand in for a crash. */
     static final class Crash extends Error
     {
 
         /** For serialization. */
         private static final long serialVersionUID = 1L;
+
+        /** Creates the exception. */
+        Crash()
+        {
+        }
+
     }
 
     /** The source directory's parent. */
@@ -484,6 +495,8 @@ class IntakeServiceTest
     /**
      * A settled file is landed, announced and deleted from a read-write
      * source.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void landsAnnouncesAndDeletesASettledFile() throws Exception
@@ -514,6 +527,8 @@ class IntakeServiceTest
     /**
      * A read-only source lands each version of an item once, and the same
      * content under another name again.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void readOnlyLandsEachVersionOnce() throws Exception
@@ -556,6 +571,8 @@ class IntakeServiceTest
     /**
      * A message the broker didn't take is sent again before anything
      * else, and the item stays in the source until it is.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void retriesTheMessageBeforeTheNextItem() throws Exception
@@ -578,6 +595,8 @@ class IntakeServiceTest
     /**
      * Small items wait for the end of the listing, then are landed in one
      * data file and commit, recorded, announced in order, and deleted.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void landsSmallItemsTogetherAtTheEndOfAListing() throws Exception
@@ -618,6 +637,8 @@ class IntakeServiceTest
      * A group is landed once it is full, or once its first item has
      * waited long enough; an item listed again while it waits isn't added
      * twice.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void landsAGroupOnceItIsFullOrHasWaited() throws Exception
@@ -707,6 +728,8 @@ class IntakeServiceTest
      * once: each waits until the others have started, which only finishing
      * them at once allows. One that fails stays in the source and is
      * finished next time, and the others are finished all the same.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void finishesAGroupAtTheSourceSeveralAtOnce() throws Exception
@@ -739,6 +762,8 @@ class IntakeServiceTest
     /**
      * An item too large for a group is landed alone, after the items
      * waiting before it, so they keep their order.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void landsALargeItemAloneAfterTheGroup() throws Exception
@@ -757,6 +782,8 @@ class IntakeServiceTest
     /**
      * A group whose messages were all acknowledged isn't announced again
      * at a restart, as a takeover would otherwise do for every item of it.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void anAnnouncedGroupIsntAnnouncedAgainAtARestart() throws Exception
@@ -780,6 +807,8 @@ class IntakeServiceTest
     /**
      * After a crash between a group's commit and its messages, a restart
      * announces every item of the group, and records them all.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void announcesTheWholeLastGroupAgainAfterACrash() throws Exception
@@ -814,6 +843,8 @@ class IntakeServiceTest
     /**
      * A group whose commit went through, but whose landing then failed,
      * is tried again and landed once, under the same IDs.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void aGroupTriedAgainAfterItsCommitIsLandedOnce() throws Exception
@@ -850,6 +881,8 @@ class IntakeServiceTest
      * An item whose source changed before its group was landed is left
      * out, and landed afresh once listed again; the rest of its group
      * isn't held up.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void leavesAChangedItemOutOfItsGroup() throws Exception
@@ -876,6 +909,8 @@ class IntakeServiceTest
      * announced before it aren't sent again (docs/DEPLOYMENT.md). This is
      * the landing node's half of keeping items from being stranded; the
      * splitter's reconciling covers a message the broker lost.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void announcesTheLastItemAgainAfterACrashBeforeItsMessage()
@@ -908,6 +943,8 @@ class IntakeServiceTest
     /**
      * An item landed before a crash, but not removed from the source, is
      * removed later without being landed again.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void finishesTheSourceSideOfALandedItem() throws Exception
@@ -957,6 +994,8 @@ class IntakeServiceTest
     /**
      * After a crash part-way through an item, a restart resumes it under
      * the same ID.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void resumesAnUnfinishedItemAfterACrash() throws Exception
@@ -1101,6 +1140,8 @@ class IntakeServiceTest
     /**
      * An unfinished item missing from the first full listing is given up,
      * and the intake moves on.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void abandonsAnUnfinishedItemThatHasGone() throws Exception
@@ -1128,7 +1169,11 @@ class IntakeServiceTest
         assertThat(sent).hasSize(1);
     }
 
-    /** An item that changed after it was listed is landed afresh later. */
+    /**
+     * An item that changed after it was listed is landed afresh later.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void landsAChangedItemAfresh() throws Exception
     {
@@ -1145,7 +1190,11 @@ class IntakeServiceTest
                 ConnectorMessage.ItemLanded::size).isEqualTo(14L);
     }
 
-    /** An unreachable source is reported, and so is its return. */
+    /**
+     * An unreachable source is reported, and so is its return.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void reportsAnUnreachableSource() throws Exception
     {

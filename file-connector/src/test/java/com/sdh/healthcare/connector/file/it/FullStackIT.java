@@ -196,6 +196,11 @@ class FullStackIT
     @Autowired
     ConnectorRuntime runtime;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    FullStackIT()
+    {
+    }
+
     /**
      * The object store's endpoint as this JVM reaches it.
      *
@@ -251,6 +256,11 @@ class FullStackIT
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * Records fatal exits instead of exiting.

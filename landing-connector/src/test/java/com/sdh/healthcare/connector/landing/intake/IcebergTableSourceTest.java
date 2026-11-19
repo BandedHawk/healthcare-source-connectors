@@ -84,6 +84,11 @@ class IcebergTableSourceTest
     /** The sources made; closed after each test. */
     final List<IcebergTableSource> sources = new ArrayList<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    IcebergTableSourceTest()
+    {
+    }
+
     /** Progress kept in memory, as the ledger would keep it. */
     static final class Memory extends TableProgress
     {

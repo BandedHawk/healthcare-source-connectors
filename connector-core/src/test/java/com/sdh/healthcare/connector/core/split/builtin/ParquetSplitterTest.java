@@ -74,6 +74,11 @@ class ParquetSplitterTest
             Types.NestedField.required(1, "id", Types.LongType.get()),
             Types.NestedField.optional(2, "name", Types.StringType.get()));
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ParquetSplitterTest()
+    {
+    }
+
     /**
      * Writes rows with Iceberg's writer.
      *

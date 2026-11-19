@@ -36,6 +36,11 @@ class FencedCommitterTest
     /** The checkpoint property the tests write. */
     static final String CHECKPOINT = "sdh.checkpoint.file-connector";
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    FencedCommitterTest()
+    {
+    }
+
     /**
      * A lease that is always believed held: a stale instance that thinks
      * it still holds the lease (resumed after a long pause, say).

@@ -97,6 +97,11 @@ class LandingPerf
     /** How long a run may take, at most. */
     static final Duration RUN_LIMIT = Duration.ofMinutes(30);
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    LandingPerf()
+    {
+    }
+
     /**
      * An {@code item.landed} message, as the broker got it.
      *
@@ -132,6 +137,11 @@ class LandingPerf
     @Configuration(proxyBeanMethods = false)
     static class PerfBeans
     {
+
+        /** Created by Spring. */
+        PerfBeans()
+        {
+        }
 
         /**
          * A recording exit hook in place of the real one.

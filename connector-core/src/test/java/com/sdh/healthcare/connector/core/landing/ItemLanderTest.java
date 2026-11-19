@@ -82,6 +82,11 @@ class ItemLanderTest
     /** The last lease epoch handed out. */
     long epoch;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ItemLanderTest()
+    {
+    }
+
     /**
      * Creates the catalog, the table and the KEK.
      *
@@ -1007,5 +1012,11 @@ class ItemLanderTest
     /** Thrown by a test hook to simulate a crash. */
     static final class Crash extends RuntimeException
     {
+
+        /** Creates the exception. */
+        Crash()
+        {
+        }
+
     }
 }

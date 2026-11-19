@@ -31,6 +31,11 @@ class MessageSessionTest
     /** Splits CSV. */
     static final CsvSplitter CSV = new CsvSplitter();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    MessageSessionTest()
+    {
+    }
+
     /**
      * CSV settings with a header row, repeated in each record.
      *

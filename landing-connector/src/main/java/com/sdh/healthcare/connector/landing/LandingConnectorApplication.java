@@ -23,6 +23,11 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class LandingConnectorApplication
 {
 
+    /** Created by Spring. */
+    public LandingConnectorApplication()
+    {
+    }
+
     /**
      * Starts the node, or with {@code admin <command> …} an operator
      * command instead (design §11.4).

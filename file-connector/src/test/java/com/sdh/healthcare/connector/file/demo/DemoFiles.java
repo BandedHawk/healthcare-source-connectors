@@ -108,7 +108,7 @@ final class DemoFiles
     private static final String BATCH_START =
             "<batch xmlns=\"urn:hl7-org:v3\">\n";
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private DemoFiles()
     {
     }

@@ -42,6 +42,11 @@ class RecordCryptoTest
     static final byte[] STORED =
             RecordCrypto.encryptChunk(KEY, FILE, SEQ, 1, 3, TEXT);
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    RecordCryptoTest()
+    {
+    }
+
     /** A chunk and a small value read back as written. */
     @Test
     void readsBackWhatWasWritten()

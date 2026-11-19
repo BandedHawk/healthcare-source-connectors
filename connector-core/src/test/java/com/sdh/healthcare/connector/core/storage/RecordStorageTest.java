@@ -44,6 +44,11 @@ import org.junit.jupiter.api.Test;
 class RecordStorageTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    RecordStorageTest()
+    {
+    }
+
     /**
      * Records are written encrypted, in chunks, and decrypt back.
      *

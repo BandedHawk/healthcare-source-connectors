@@ -23,6 +23,11 @@ import org.junit.jupiter.api.function.Executable;
 class ConversionBudgetTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ConversionBudgetTest()
+    {
+    }
+
     /**
      * Room is taken in KiB, rounded up, and a request larger than the
      * budget takes all of it.

@@ -50,7 +50,7 @@ public final class IdKeys
     /** Attempts to store a shared key while the table keeps moving. */
     private static final int CREATE_ATTEMPTS = 10;
 
-    /** Not used: there are only static methods. */
+    /** Not instantiated: this class only has static methods. */
     private IdKeys()
     {
     }

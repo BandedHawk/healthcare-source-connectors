@@ -92,6 +92,11 @@ class RabbitLandingApplicationIT
     /** The reasons given to the exit hook. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    RabbitLandingApplicationIT()
+    {
+    }
+
     /**
      * A connection factory for the test's own use.
      *
@@ -117,6 +122,11 @@ class RabbitLandingApplicationIT
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * The recording hook.

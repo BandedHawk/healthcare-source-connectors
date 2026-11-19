@@ -61,6 +61,11 @@ class EventHubsIT
     /** The Event Hubs emulator. */
     static EventHubsEmulatorContainer eventhubs;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    EventHubsIT()
+    {
+    }
+
     /** Starts the storage and the emulator. */
     @BeforeAll
     static void start()

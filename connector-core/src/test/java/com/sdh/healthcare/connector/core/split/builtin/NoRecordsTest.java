@@ -58,6 +58,11 @@ class NoRecordsTest
             new Format(new X12Splitter(), config("x12")),
             new Format(new EdifactSplitter(), config("edifact")));
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    NoRecordsTest()
+    {
+    }
+
     /**
      * A splitter and its settings.
      *

@@ -111,6 +111,11 @@ class TableMaintenanceTest
     /** The committer holding the current epoch. */
     FencedCommitter committer;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    TableMaintenanceTest()
+    {
+    }
+
     /**
      * Creates the catalog, a KEK and the first committer.
      *

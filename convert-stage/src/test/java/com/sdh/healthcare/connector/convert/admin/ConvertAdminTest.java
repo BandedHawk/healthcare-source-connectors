@@ -40,7 +40,7 @@ class ConvertAdminTest
     /** An item with one of its two records stored. */
     static final UUID ITEM = UUID.randomUUID();
 
-    /** Creates the tests. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     ConvertAdminTest()
     {
     }

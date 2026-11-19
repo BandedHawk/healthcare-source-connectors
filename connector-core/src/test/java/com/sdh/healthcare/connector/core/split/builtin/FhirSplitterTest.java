@@ -40,6 +40,11 @@ class FhirSplitterTest
     /** The splitter under test. */
     private final FhirSplitter splitter = new FhirSplitter();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    FhirSplitterTest()
+    {
+    }
+
     /**
      * An array of Bundles, after a byte order mark, splits into them.
      *

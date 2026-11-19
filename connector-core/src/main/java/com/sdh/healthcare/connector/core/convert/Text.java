@@ -33,7 +33,7 @@ import java.nio.charset.CodingErrorAction;
 final class Text
 {
 
-    /** Not used: the class only has static methods. */
+    /** Not instantiated: this class only has static methods. */
     private Text()
     {
     }

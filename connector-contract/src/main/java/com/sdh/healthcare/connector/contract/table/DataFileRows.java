@@ -129,6 +129,11 @@ public final class DataFileRows
     private static final class Codecs implements Runnable
     {
 
+        /** Creates the task. */
+        private Codecs()
+        {
+        }
+
         @Override
         public void run()
         {

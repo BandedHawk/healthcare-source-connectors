@@ -97,6 +97,11 @@ class SftpIntakeIT
     /** The source under test; closed after each test. */
     SftpSource source;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    SftpIntakeIT()
+    {
+    }
+
     /**
      * Starts the server and the proxy, and pins the server's host key.
      *

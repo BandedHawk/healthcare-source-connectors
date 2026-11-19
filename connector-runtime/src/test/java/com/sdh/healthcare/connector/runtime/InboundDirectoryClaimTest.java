@@ -43,6 +43,11 @@ class InboundDirectoryClaimTest
     @TempDir
     Path directory;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    InboundDirectoryClaimTest()
+    {
+    }
+
     /**
      * The first node claims the directory, without its path in the claim,
      * and keeps it across restarts.

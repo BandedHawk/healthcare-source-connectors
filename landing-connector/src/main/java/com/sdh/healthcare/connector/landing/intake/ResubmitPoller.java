@@ -44,6 +44,7 @@ public final class ResubmitPoller implements AutoCloseable
     /** The most requests read at each run. */
     static final int BATCH = 10;
 
+    /** Logs failures and waits, by class and code only, never content. */
     private static final Logger LOG =
             LoggerFactory.getLogger(ResubmitPoller.class);
 

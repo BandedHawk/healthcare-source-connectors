@@ -24,6 +24,11 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 class ConnectorPropertiesTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ConnectorPropertiesTest()
+    {
+    }
+
     /**
      * Nested YAML keys bind as dotted catalog properties and split
      * options, record messages go to the stage's output, and unset

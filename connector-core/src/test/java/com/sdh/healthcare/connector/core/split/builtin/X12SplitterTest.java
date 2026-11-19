@@ -61,6 +61,11 @@ class X12SplitterTest
     /** The splitter under test. */
     private final X12Splitter splitter = new X12Splitter();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    X12SplitterTest()
+    {
+    }
+
     /**
      * Each transaction set is a record, in its own group and interchange.
      *

@@ -43,6 +43,11 @@ class BrokerSettingsTest
     static final ReceiveProperties.Eventhubs NO_EVENTHUBS =
             new ReceiveProperties.Eventhubs(null, null, null);
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    BrokerSettingsTest()
+    {
+    }
+
     /**
      * Broker settings as configured.
      *

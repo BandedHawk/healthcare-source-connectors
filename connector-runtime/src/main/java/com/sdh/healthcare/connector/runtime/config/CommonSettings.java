@@ -28,7 +28,7 @@ import org.springframework.util.unit.DataSize;
 public final class CommonSettings
 {
 
-    /** Not used: this class only holds the settings records. */
+    /** Not instantiated: this class only holds the settings records. */
     private CommonSettings()
     {
     }

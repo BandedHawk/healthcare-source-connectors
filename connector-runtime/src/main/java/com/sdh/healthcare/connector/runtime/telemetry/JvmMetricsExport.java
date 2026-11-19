@@ -43,7 +43,7 @@ public final class JvmMetricsExport
     static final Set<String> TAGS = Set.of("area", "id", "gc", "action",
             "cause", "state", "version", "vendor", "runtime");
 
-    /** Not made: static methods only. */
+    /** Not instantiated: this class only has static methods. */
     private JvmMetricsExport()
     {
     }

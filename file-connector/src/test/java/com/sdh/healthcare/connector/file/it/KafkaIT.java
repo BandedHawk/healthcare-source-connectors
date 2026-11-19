@@ -48,6 +48,11 @@ class KafkaIT
     /** The broker. */
     static KafkaContainer kafka;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    KafkaIT()
+    {
+    }
+
     /** Starts the broker. */
     @BeforeAll
     static void start()

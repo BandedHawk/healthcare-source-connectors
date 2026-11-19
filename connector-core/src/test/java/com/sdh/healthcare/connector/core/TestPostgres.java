@@ -35,7 +35,7 @@ public final class TestPostgres
     public static final String POOLED_URL =
             System.getProperty("sdh.test.pooled-url");
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private TestPostgres()
     {
     }

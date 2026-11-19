@@ -34,7 +34,7 @@ import java.util.Set;
 final class OutputFiles
 {
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private OutputFiles()
     {
     }

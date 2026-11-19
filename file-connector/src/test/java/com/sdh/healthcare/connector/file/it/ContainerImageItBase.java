@@ -209,6 +209,13 @@ abstract class ContainerImageItBase
     static final List<ConnectorMessage> MESSAGES = new ArrayList<>();
 
     /**
+     * Creates the tests; JUnit runs each test on a new instance of a subclass.
+     */
+    ContainerImageItBase()
+    {
+    }
+
+    /**
      * An application's image under test ({@value #LANDING},
      * {@value #SPLITTER} or {@value #CONVERTER}), built from what Maven
      * packaged.

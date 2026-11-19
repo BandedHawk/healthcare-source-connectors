@@ -132,6 +132,11 @@ class ThroughputPerf
     /** The message recipient's key. */
     KeyPair recipient;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ThroughputPerf()
+    {
+    }
+
     /**
      * The formats to run.
      *

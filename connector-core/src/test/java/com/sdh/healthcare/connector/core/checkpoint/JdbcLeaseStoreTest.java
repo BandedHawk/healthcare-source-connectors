@@ -37,6 +37,11 @@ class JdbcLeaseStoreTest
     /** A lease name of this test's own. */
     private String name;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    JdbcLeaseStoreTest()
+    {
+    }
+
     /** Creates the store and table, and picks a fresh lease name. */
     @BeforeEach
     void setUp()

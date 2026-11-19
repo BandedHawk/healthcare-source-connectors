@@ -22,7 +22,7 @@ public final class UuidV7
     /** The source of the random bits. */
     private static final SecureRandom RANDOM = new SecureRandom();
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private UuidV7()
     {
     }

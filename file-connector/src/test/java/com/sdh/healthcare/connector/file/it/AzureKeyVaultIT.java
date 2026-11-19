@@ -50,6 +50,11 @@ class AzureKeyVaultIT
     /** The Key Vault emulator. */
     static LowkeyVaultContainer lowkey;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    AzureKeyVaultIT()
+    {
+    }
+
     /** Starts the emulator. */
     @BeforeAll
     static void start()

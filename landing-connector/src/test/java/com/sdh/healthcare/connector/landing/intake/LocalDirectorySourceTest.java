@@ -34,6 +34,11 @@ class LocalDirectorySourceTest
     @TempDir
     Path root;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    LocalDirectorySourceTest()
+    {
+    }
+
     /**
      * Checked settings for a source under {@link #root}.
      *
@@ -68,7 +73,11 @@ class LocalDirectorySourceTest
                 Files.getLastModifiedTime(file).toMillis());
     }
 
-    /** Items are read from any offset, and a changed one is refused. */
+    /**
+     * Items are read from any offset, and a changed one is refused.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void readsFromAnOffsetAndRefusesAChangedItem() throws Exception
     {
@@ -89,7 +98,11 @@ class LocalDirectorySourceTest
                 0)).hasMessageContaining("outside the source");
     }
 
-    /** A read-only source is never changed. */
+    /**
+     * A read-only source is never changed.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void readOnlyLeavesItemsAlone() throws Exception
     {
@@ -101,7 +114,11 @@ class LocalDirectorySourceTest
         assertThat(root.resolve("in/a.csv")).exists();
     }
 
-    /** Delete removes the item and its marker. */
+    /**
+     * Delete removes the item and its marker.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void deleteRemovesTheItemAndItsMarker() throws Exception
     {
@@ -114,7 +131,11 @@ class LocalDirectorySourceTest
         assertThat(root.resolve("in/a.csv.done")).doesNotExist();
     }
 
-    /** Move keeps the relative path and never overwrites. */
+    /**
+     * Move keeps the relative path and never overwrites.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void moveKeepsThePathAndNeverOverwrites() throws Exception
     {
@@ -129,7 +150,11 @@ class LocalDirectorySourceTest
         assertThat(root.resolve("in/sub/a.csv")).doesNotExist();
     }
 
-    /** Rename adds the suffix beside the item. */
+    /**
+     * Rename adds the suffix beside the item.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void renameAddsTheSuffix() throws Exception
     {
@@ -139,7 +164,11 @@ class LocalDirectorySourceTest
         assertThat(root.resolve("in/a.csv.landed")).hasContent("x");
     }
 
-    /** An item that changed since it was listed is a new version: kept. */
+    /**
+     * An item that changed since it was listed is a new version: kept.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void leavesAChangedItemForItsTurn() throws Exception
     {
@@ -151,7 +180,11 @@ class LocalDirectorySourceTest
         assertThat(root.resolve("in/a.csv")).hasContent("longer now");
     }
 
-    /** The probe finds a source that can't be written, and its reach. */
+    /**
+     * The probe finds a source that can't be written, and its reach.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void probesWritingAndReach() throws Exception
     {

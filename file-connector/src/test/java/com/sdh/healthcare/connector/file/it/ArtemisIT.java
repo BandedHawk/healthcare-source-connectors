@@ -46,6 +46,11 @@ class ArtemisIT
     /** The broker. */
     static ArtemisContainer artemis;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ArtemisIT()
+    {
+    }
+
     /** Starts the broker. */
     @BeforeAll
     static void start()

@@ -77,10 +77,20 @@ class LandingConnectorApplicationTest
     /** The reasons given to the exit hook. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    LandingConnectorApplicationTest()
+    {
+    }
+
     /** Puts a recording exit hook in place of the real one. */
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * The recording hook.
@@ -160,6 +170,8 @@ class LandingConnectorApplicationTest
     /**
      * Files dropped in the source are landed, announced with
      * {@code item.landed}, and deleted.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void landsAnnouncesAndDeletesDroppedFiles() throws Exception

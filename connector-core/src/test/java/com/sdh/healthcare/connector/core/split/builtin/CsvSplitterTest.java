@@ -29,6 +29,11 @@ class CsvSplitterTest
     /** The splitter under test. */
     private final CsvSplitter splitter = new CsvSplitter();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    CsvSplitterTest()
+    {
+    }
+
     /**
      * Each record is a record; quoted newlines, delimiters and quotes
      * stay inside it, and empty lines are skipped.

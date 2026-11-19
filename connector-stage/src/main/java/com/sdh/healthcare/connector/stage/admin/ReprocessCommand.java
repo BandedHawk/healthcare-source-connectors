@@ -58,6 +58,11 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     private static final Pattern VERSION =
             Pattern.compile("[A-Za-z0-9._@:/+-]{1,200}");
 
+    /** Creates the command. */
+    public ReprocessCommand()
+    {
+    }
+
     @Override
     public String name()
     {

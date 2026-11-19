@@ -33,7 +33,7 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 class OutageTest
 {
 
-    /** Creates the tests; JUnit runs each on a new instance. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     OutageTest()
     {
     }

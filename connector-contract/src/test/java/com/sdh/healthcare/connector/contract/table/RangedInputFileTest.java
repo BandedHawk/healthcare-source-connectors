@@ -31,12 +31,23 @@ import org.junit.jupiter.api.Test;
 class RangedInputFileTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    RangedInputFileTest()
+    {
+    }
+
     /** A missing object, as the S3 client names it. */
     static final class NoSuchKeyException extends RuntimeException
     {
 
         /** For serialization. */
         private static final long serialVersionUID = 1L;
+
+        /** Creates the exception. */
+        NoSuchKeyException()
+        {
+        }
+
     }
 
     /**
@@ -93,6 +104,11 @@ class RangedInputFileTest
         final class Ranges extends SeekableInputStream
                 implements RangeReadable
         {
+
+            /** Creates the stream. */
+            Ranges()
+            {
+            }
 
             @Override
             public long getPos()

@@ -25,6 +25,11 @@ import org.springframework.mock.env.MockEnvironment;
 class WebServerSwitchTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    WebServerSwitchTest()
+    {
+    }
+
     /**
      * The web application type the switch gives.
      *

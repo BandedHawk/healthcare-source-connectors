@@ -61,7 +61,7 @@ public final class LandedItems
     /** How long the digest chain's links are: 32 bytes. */
     private static final int CHAIN_BYTES = 32;
 
-    /** Not used: there are only static methods. */
+    /** Not instantiated: this class only has static methods. */
     private LandedItems()
     {
     }

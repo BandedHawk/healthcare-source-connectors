@@ -73,6 +73,11 @@ class SftpSourceTest
     /** The source under test; closed after each test. */
     SftpSource source;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    SftpSourceTest()
+    {
+    }
+
     /**
      * Makes the keys and starts the server.
      *
@@ -88,7 +93,11 @@ class SftpSourceTest
         start(0);
     }
 
-    /** Closes the source and stops the server. */
+    /**
+     * Closes the source and stops the server.
+     *
+     * @throws Exception if either can't be closed
+     */
     @AfterEach
     void tearDown() throws Exception
     {
@@ -121,7 +130,11 @@ class SftpSourceTest
         port = server.getPort();
     }
 
-    /** Stops the server and drops its sessions. */
+    /**
+     * Stops the server and drops its sessions.
+     *
+     * @throws Exception if the server can't be stopped
+     */
     void stop() throws Exception
     {
         if (server != null)
@@ -260,7 +273,11 @@ class SftpSourceTest
         }
     }
 
-    /** Logs in with a password when no key is set. */
+    /**
+     * Logs in with a password when no key is set.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void logsInWithAPassword() throws Exception
     {
@@ -289,7 +306,11 @@ class SftpSourceTest
         assertThat(source.reachable()).isFalse();
     }
 
-    /** A key the server doesn't accept is reported as an auth failure. */
+    /**
+     * A key the server doesn't accept is reported as an auth failure.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void reportsRejectedCredentials() throws Exception
     {

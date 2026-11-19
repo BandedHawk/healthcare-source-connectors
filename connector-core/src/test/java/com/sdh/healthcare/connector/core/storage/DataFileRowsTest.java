@@ -85,6 +85,11 @@ class DataFileRowsTest
     /** Each record's chunk count, by sequence number. */
     private final Map<Long, Integer> chunks = new HashMap<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    DataFileRowsTest()
+    {
+    }
+
     /**
      * Writes one batch: 40 small records, then five of 3 MiB; with at most
      * two rows a page, many pages.

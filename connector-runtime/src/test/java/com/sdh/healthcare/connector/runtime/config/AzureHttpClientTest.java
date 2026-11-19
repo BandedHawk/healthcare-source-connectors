@@ -26,6 +26,11 @@ import org.junit.jupiter.api.Test;
 class AzureHttpClientTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    AzureHttpClientTest()
+    {
+    }
+
     /** The JDK client is the only provider, and the default. */
     @Test
     void azureUsesTheJdkHttpClientOnly()

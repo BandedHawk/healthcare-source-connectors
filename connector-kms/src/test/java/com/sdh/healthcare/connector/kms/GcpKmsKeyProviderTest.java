@@ -82,6 +82,11 @@ class GcpKmsKeyProviderTest
     /** The provider under test, talking to the fake. */
     GcpKmsKeyProvider provider;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    GcpKmsKeyProviderTest()
+    {
+    }
+
     /**
      * Starts the fake and a provider connected to it.
      *

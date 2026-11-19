@@ -28,6 +28,11 @@ class PushWebConfigurationTest
     /** The issuer. */
     static final String ISSUER = "https://idp.example.org";
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    PushWebConfigurationTest()
+    {
+    }
+
     /**
      * OAuth2 settings.
      *

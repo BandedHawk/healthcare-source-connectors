@@ -33,6 +33,11 @@ public final class DrainCheckCommand<C extends DrainAdmin>
         implements AdminCommand<C>
 {
 
+    /** Creates the command. */
+    public DrainCheckCommand()
+    {
+    }
+
     @Override
     public String name()
     {

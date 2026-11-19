@@ -41,6 +41,11 @@ class AwsKmsIT
     /** The KMS-compatible server. */
     static GenericContainer<?> kms;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    AwsKmsIT()
+    {
+    }
+
     /** Starts the server. */
     @BeforeAll
     static void start()

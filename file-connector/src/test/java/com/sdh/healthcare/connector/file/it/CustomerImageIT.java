@@ -33,6 +33,11 @@ import org.testcontainers.images.builder.ImageFromDockerfile;
 class CustomerImageIT extends ContainerImageItBase
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    CustomerImageIT()
+    {
+    }
+
     /**
      * {@inheritDoc}
      */

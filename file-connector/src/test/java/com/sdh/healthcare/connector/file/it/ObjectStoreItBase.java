@@ -67,10 +67,22 @@ abstract class ObjectStoreItBase
     /** Fatal errors the connector reported; there should be none. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
+    /**
+     * Creates the tests; JUnit runs each test on a new instance of a subclass.
+     */
+    ObjectStoreItBase()
+    {
+    }
+
     /** Records fatal errors instead of exiting the test JVM. */
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * The recording exit hook.

@@ -46,6 +46,11 @@ class RabbitMqIT
     /** The broker. */
     static RabbitMQContainer rabbit;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    RabbitMqIT()
+    {
+    }
+
     /** Starts the broker. */
     @BeforeAll
     static void start()

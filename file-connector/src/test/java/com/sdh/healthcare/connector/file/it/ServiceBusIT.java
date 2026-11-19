@@ -71,6 +71,11 @@ class ServiceBusIT
     /** The Service Bus emulator. */
     static ServiceBusEmulatorContainer servicebus;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ServiceBusIT()
+    {
+    }
+
     /** Starts the database and the emulator. */
     @BeforeAll
     static void start()

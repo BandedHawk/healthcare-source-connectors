@@ -39,6 +39,11 @@ class LeaseKeeperTest
     /** The sleeps asked for, in order. */
     final List<Duration> sleeps = new ArrayList<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    LeaseKeeperTest()
+    {
+    }
+
     /** A store whose renew behaviour the test controls. */
     static class FakeStore implements LeaseStore
     {
@@ -48,6 +53,11 @@ class LeaseKeeperTest
 
         /** Whether the lease was released. */
         volatile boolean released;
+
+        /** Creates the store. */
+        FakeStore()
+        {
+        }
 
         /**
          * {@inheritDoc}
@@ -103,6 +113,11 @@ class LeaseKeeperTest
 
         /** How many times acquire was called. */
         int attempts;
+
+        /** Creates the store. */
+        HeldStore()
+        {
+        }
 
         /**
          * {@inheritDoc}

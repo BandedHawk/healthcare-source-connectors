@@ -31,6 +31,11 @@ class ProcessMetricsTest
     @TempDir
     Path cgroup;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ProcessMetricsTest()
+    {
+    }
+
     /**
      * Reads the counters' values, by name.
      *

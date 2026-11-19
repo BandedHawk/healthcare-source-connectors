@@ -123,10 +123,20 @@ class FileConnectorApplicationTest
     /** Fatal exits the stage asked for. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    FileConnectorApplicationTest()
+    {
+    }
+
     /** Records fatal exits rather than ending the test JVM. */
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * The recording exit hook.

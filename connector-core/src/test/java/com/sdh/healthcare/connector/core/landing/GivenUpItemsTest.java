@@ -60,6 +60,11 @@ class GivenUpItemsTest
     /** Makes the digests and MACs. */
     RecordIds ids;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    GivenUpItemsTest()
+    {
+    }
+
     /**
      * Creates the catalog, the table and the KEK.
      *

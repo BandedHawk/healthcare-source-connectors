@@ -30,6 +30,11 @@ class ComplianceConfigurationTest
             new ApplicationContextRunner()
                     .withUserConfiguration(ComplianceConfiguration.class);
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ComplianceConfigurationTest()
+    {
+    }
+
     /** The default profile refuses a plaintext endpoint at startup. */
     @Test
     void theDefaultProfileStopsStartup()

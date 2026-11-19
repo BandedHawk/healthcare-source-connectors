@@ -49,6 +49,11 @@ class EdifactSplitterTest
     /** The splitter under test. */
     private final EdifactSplitter splitter = new EdifactSplitter();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    EdifactSplitterTest()
+    {
+    }
+
     /**
      * Each message is a record, in its own interchange.
      *

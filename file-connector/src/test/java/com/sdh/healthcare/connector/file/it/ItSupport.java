@@ -59,7 +59,7 @@ final class ItSupport
     /** The intake the splitter serves in the integration tests. */
     static final String INTAKE = "claims";
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private ItSupport()
     {
     }

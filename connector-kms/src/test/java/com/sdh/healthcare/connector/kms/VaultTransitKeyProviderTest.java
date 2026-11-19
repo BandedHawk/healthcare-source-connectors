@@ -41,7 +41,7 @@ class VaultTransitKeyProviderTest
     /** The server standing in for Vault. */
     HttpServer server;
 
-    /** Creates the tests; JUnit runs each on a new instance. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     VaultTransitKeyProviderTest()
     {
     }

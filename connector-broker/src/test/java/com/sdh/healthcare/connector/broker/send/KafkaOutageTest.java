@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Test;
 class KafkaOutageTest
 {
 
-    /** Creates the tests; JUnit runs each on a new instance. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     KafkaOutageTest()
     {
     }

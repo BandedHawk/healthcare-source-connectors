@@ -35,6 +35,11 @@ import org.w3c.dom.NodeList;
 class CcdaSamplesTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    CcdaSamplesTest()
+    {
+    }
+
     /**
      * A sample converts, and every value in it appears in the JSON.
      *

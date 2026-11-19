@@ -46,7 +46,12 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 final class PushTestPki
 {
 
-    /** A certificate and its key. */
+    /**
+     * A certificate and its key.
+     *
+     * @param certificate the certificate
+     * @param key         its private key
+     */
     record Issued(X509Certificate certificate, PrivateKey key)
     {
     }

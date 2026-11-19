@@ -59,6 +59,11 @@ class MaintenanceSpikeTest
         }
     });
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    MaintenanceSpikeTest()
+    {
+    }
+
     /**
      * A new records table with one small data file per commit.
      *

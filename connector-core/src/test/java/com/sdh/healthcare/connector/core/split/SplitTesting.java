@@ -22,7 +22,7 @@ import java.util.Optional;
 public final class SplitTesting
 {
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private SplitTesting()
     {
     }

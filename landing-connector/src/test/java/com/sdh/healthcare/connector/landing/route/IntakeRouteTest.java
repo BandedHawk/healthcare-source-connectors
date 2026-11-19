@@ -39,6 +39,11 @@ class IntakeRouteTest
     @TempDir
     Path directory;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    IntakeRouteTest()
+    {
+    }
+
     /**
      * Each listing is timed and its size passed on before its first file;
      * an empty listing has size 0.

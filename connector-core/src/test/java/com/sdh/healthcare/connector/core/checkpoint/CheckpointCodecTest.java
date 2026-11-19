@@ -28,6 +28,11 @@ class CheckpointCodecTest
     private final CheckpointCodec codec =
             new CheckpointCodec(new RecordIds(new byte[32]));
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    CheckpointCodecTest()
+    {
+    }
+
     /**
      * A checkpoint after one batch.
      *

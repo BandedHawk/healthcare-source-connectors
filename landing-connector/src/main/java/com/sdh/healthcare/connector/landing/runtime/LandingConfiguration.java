@@ -65,6 +65,11 @@ public class LandingConfiguration
     private static final Logger LOG =
             LoggerFactory.getLogger(LandingConfiguration.class);
 
+    /** Created by Spring. */
+    public LandingConfiguration()
+    {
+    }
+
     /**
      * Exits the process on a fatal error; tests put their own in its place.
      *
@@ -152,17 +157,6 @@ public class LandingConfiguration
     }
 
     /**
-     * Runs table maintenance on the landing tables between items (design
-     * §5.3.13). Retention purges whole days of {@code landed_items}, never
-     * part of an item, and the chunks of items given up are removed after
-     * {@code retention.given-up}; the ledger is kept forever.
-     *
-     * @param runtime    the runtime
-     * @param properties the node's settings
-     * @param fatal      the exit hook
-     * @return the scheduler
-     */
-    /**
      * Carries out operators' requests to land an item again (STAGES.md
      * §13.5).
      *
@@ -180,6 +174,17 @@ public class LandingConfiguration
                 ResubmitPoller.INTERVAL);
     }
 
+    /**
+     * Runs table maintenance on the landing tables between items (design
+     * §5.3.13). Retention purges whole days of {@code landed_items}, never
+     * part of an item, and the chunks of items given up are removed after
+     * {@code retention.given-up}; the ledger is kept forever.
+     *
+     * @param runtime    the node's runtime
+     * @param properties the node's settings
+     * @param fatal      stops the process for a fatal error
+     * @return the scheduler
+     */
     @Bean(initMethod = "start", destroyMethod = "close")
     MaintenanceScheduler maintenanceScheduler(LandingRuntime runtime,
             LandingProperties properties, FatalExit fatal)

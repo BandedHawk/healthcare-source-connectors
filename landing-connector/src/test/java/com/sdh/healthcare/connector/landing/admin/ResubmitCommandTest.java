@@ -88,7 +88,7 @@ class ResubmitCommandTest
     /** The reasons given to the exit hook. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
-    /** Creates the tests; JUnit runs each on a new instance. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     ResubmitCommandTest()
     {
     }

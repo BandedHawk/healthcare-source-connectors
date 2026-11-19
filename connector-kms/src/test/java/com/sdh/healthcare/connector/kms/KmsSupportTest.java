@@ -37,7 +37,7 @@ import software.amazon.awssdk.services.kms.model.KmsException;
 class KmsSupportTest
 {
 
-    /** Creates the tests; JUnit runs each on a new instance. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     KmsSupportTest()
     {
     }

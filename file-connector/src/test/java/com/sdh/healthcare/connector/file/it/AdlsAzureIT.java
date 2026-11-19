@@ -55,6 +55,11 @@ import org.springframework.test.context.DynamicPropertySource;
 class AdlsAzureIT extends ObjectStoreItBase
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    AdlsAzureIT()
+    {
+    }
+
     /**
      * Set up on first use, so nothing touches Azure or Docker when the test
      * is skipped.
@@ -120,7 +125,7 @@ class AdlsAzureIT extends ObjectStoreItBase
             }
         }
 
-        /** Not instantiable. */
+        /** Not instantiated. */
         private Azure()
         {
         }

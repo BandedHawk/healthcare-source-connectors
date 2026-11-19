@@ -53,7 +53,7 @@ public final class SyntheticFiles
         "Okafor", "Novak", "Mensah", "Rossi", "Brown", "Patel", "Larsen",
         "Haddad", "Silva", "Wong", "Miller", "Khan", "Petrov"};
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private SyntheticFiles()
     {
     }

@@ -142,6 +142,11 @@ class BucketIntakeIT
     /** The source under test; closed after each test. */
     BucketSource source;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    BucketIntakeIT()
+    {
+    }
+
     /**
      * Starts the stores and the proxy, and makes the buckets.
      *

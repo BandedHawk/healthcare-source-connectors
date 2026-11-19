@@ -103,7 +103,7 @@ public final class ComplianceRules
     /** The JVM options that must be off, and those that must be on. */
     private static final Map<String, String> JVM_OPTIONS = jvmOptions();
 
-    /** Not used: the rules are static. */
+    /** Not instantiated: the rules are static. */
     private ComplianceRules()
     {
     }

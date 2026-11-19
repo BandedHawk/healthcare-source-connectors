@@ -217,6 +217,11 @@ class PolarisIT
     CamelContext camel;
 
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    PolarisIT()
+    {
+    }
+
     /**
      * The object store's endpoint as this JVM reaches it.
      *
@@ -374,6 +379,11 @@ class PolarisIT
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * Records fatal exits instead of exiting.

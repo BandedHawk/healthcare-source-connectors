@@ -35,6 +35,11 @@ public final class WebServerSwitch implements EnvironmentPostProcessor
     /** The property source this adds, ahead of all others. */
     static final String SOURCE_NAME = "sdh-web-server-switch";
 
+    /** Created by Spring. */
+    public WebServerSwitch()
+    {
+    }
+
     /**
      * Sets the web application type from the intake's type.
      *

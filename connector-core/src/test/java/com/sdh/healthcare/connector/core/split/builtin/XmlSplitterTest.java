@@ -67,6 +67,11 @@ class XmlSplitterTest
     /** The splitter under test. */
     private final CcdaSplitter ccda = new CcdaSplitter();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    XmlSplitterTest()
+    {
+    }
+
     /**
      * Each record has the XML declaration and the namespaces in scope,
      * and parses as a C-CDA document; one in another namespace is skipped.

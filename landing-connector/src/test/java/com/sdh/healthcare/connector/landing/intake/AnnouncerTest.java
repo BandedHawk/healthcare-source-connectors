@@ -129,7 +129,11 @@ class AnnouncerTest
                 assertThat(message.body()).isNotEmpty());
     }
 
-    /** At least one message is sealed at a time. */
+    /**
+     * At least one message is sealed at a time.
+     *
+     * @throws Exception if the test fails to run
+     */
     @Test
     void needsAtLeastOneSealer() throws Exception
     {

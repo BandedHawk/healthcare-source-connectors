@@ -26,6 +26,11 @@ import org.junit.jupiter.api.Test;
 class SplitterRegistryTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    SplitterRegistryTest()
+    {
+    }
+
     /** The service loader finds every built-in splitter. */
     @Test
     void serviceLoaderFindsBuiltIns()

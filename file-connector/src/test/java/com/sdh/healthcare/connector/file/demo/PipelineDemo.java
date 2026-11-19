@@ -145,6 +145,11 @@ class PipelineDemo
     /** Pretty-prints the converted JSON, and reads push receipts. */
     static final ObjectMapper JSON = new ObjectMapper();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    PipelineDemo()
+    {
+    }
+
     /**
      * One item and what became of it.
      *

@@ -24,7 +24,7 @@ import org.springframework.boot.context.properties.source.MapConfigurationProper
 class ConvertPropertiesTest
 {
 
-    /** Creates the tests; JUnit runs each on a new instance. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     ConvertPropertiesTest()
     {
     }

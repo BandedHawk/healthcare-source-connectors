@@ -61,7 +61,7 @@ public final class ParquetRowJson
     private static final Set<String> UNSUPPORTED =
             Set.of("VARIANT", "GEOMETRY", "GEOGRAPHY");
 
-    /** Not made. */
+    /** Not instantiated. */
     private ParquetRowJson()
     {
     }

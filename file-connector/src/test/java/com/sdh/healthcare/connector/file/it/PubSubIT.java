@@ -57,6 +57,11 @@ class PubSubIT
     /** The Pub/Sub emulator. */
     static PubSubEmulatorContainer emulator;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    PubSubIT()
+    {
+    }
+
     /** Starts the emulator. */
     @BeforeAll
     static void start()

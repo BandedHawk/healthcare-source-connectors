@@ -35,7 +35,7 @@ import java.util.Set;
 final class TelemetryReport
 {
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private TelemetryReport()
     {
     }

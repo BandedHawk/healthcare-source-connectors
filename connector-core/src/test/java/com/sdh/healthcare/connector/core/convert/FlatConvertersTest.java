@@ -35,6 +35,11 @@ class FlatConvertersTest
             + "*ZZ*SUBMITTER01    *ZZ*PAYER0000001   "
             + "*261028*1200*^*00501*000000001*0*P*:~\n";
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    FlatConvertersTest()
+    {
+    }
+
     /**
      * Converts text.
      *

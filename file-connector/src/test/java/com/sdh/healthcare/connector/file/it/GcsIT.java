@@ -84,6 +84,11 @@ class GcsIT extends ObjectStoreItBase
         }
     }
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    GcsIT()
+    {
+    }
+
     /**
      * The emulator's endpoint.
      *

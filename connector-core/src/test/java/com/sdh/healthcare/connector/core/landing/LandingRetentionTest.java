@@ -78,6 +78,11 @@ class LandingRetentionTest
     /** Commits under epoch 1. */
     FencedCommitter committer;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    LandingRetentionTest()
+    {
+    }
+
     /**
      * Creates the catalog, the table and the KEK.
      *

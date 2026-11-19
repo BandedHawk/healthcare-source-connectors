@@ -48,6 +48,11 @@ class BrokerWatchTest
     /** Whether the next restart fails. */
     boolean restartFails;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    BrokerWatchTest()
+    {
+    }
+
     /**
      * Settings for a broker.
      *

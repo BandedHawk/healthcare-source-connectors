@@ -55,6 +55,11 @@ class LedgerHeapTest
     /** The ledger, with {@link #ENTRIES} entries. */
     LandingLedger ledger;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    LedgerHeapTest()
+    {
+    }
+
     /**
      * Creates the ledger table and records its entries.
      *

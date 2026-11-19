@@ -28,6 +28,11 @@ class TableSettingsTest
     static final Map<String, String> CATALOG = Map.of("type", "rest",
             "uri", "https://catalog", "credential", "id:s3cret");
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    TableSettingsTest()
+    {
+    }
+
     /**
      * Table settings as bound.
      *

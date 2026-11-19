@@ -42,7 +42,7 @@ class ResultReporterTest
     /** When it finished. */
     static final Instant AT = Instant.parse("2026-11-06T12:00:00Z");
 
-    /** Creates the tests. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     ResultReporterTest()
     {
     }

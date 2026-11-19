@@ -123,6 +123,11 @@ class ItemProcessorTest
     /** Lands items for the tests. */
     ItemLander lander;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ItemProcessorTest()
+    {
+    }
+
     /**
      * Creates the tables, keys and lander.
      *

@@ -36,6 +36,11 @@ class QueueTypeTest
     static final OutboundMessage MESSAGE = new OutboundMessage("sec-abc",
             MessageType.RECORD_STORED, FILE, "rec-key", new byte[0]);
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    QueueTypeTest()
+    {
+    }
+
     /**
      * Applies a type's headers to a new exchange.
      *

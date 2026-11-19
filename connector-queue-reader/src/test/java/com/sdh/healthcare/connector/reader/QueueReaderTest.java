@@ -88,6 +88,11 @@ class QueueReaderTest
     /** Seals messages as the connector does. */
     MessageSealer sealer;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    QueueReaderTest()
+    {
+    }
+
     /**
      * Creates keys, a catalog with the records table, and a sealer.
      *

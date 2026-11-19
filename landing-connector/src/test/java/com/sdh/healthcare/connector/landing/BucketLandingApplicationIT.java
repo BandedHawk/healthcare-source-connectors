@@ -126,6 +126,11 @@ class BucketLandingApplicationIT
     /** The reasons given to the exit hook. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    BucketLandingApplicationIT()
+    {
+    }
+
     /**
      * SeaweedFS's S3 address.
      *
@@ -149,6 +154,11 @@ class BucketLandingApplicationIT
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * The recording hook.

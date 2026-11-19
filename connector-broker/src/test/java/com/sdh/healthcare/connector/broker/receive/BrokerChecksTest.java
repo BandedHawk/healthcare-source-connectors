@@ -52,6 +52,11 @@ class BrokerChecksTest
     /** The broker's health. */
     final RecordingHealth health = new RecordingHealth();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    BrokerChecksTest()
+    {
+    }
+
     /**
      * An SQS service error.
      *

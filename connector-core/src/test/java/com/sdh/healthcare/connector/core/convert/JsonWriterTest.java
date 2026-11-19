@@ -21,6 +21,11 @@ import org.junit.jupiter.api.Test;
 class JsonWriterTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    JsonWriterTest()
+    {
+    }
+
     /**
      * One string, as JSON.
      *

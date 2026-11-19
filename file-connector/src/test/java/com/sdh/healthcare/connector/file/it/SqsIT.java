@@ -50,6 +50,11 @@ class SqsIT
     /** The SQS-compatible server. */
     static GenericContainer<?> elasticmq;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    SqsIT()
+    {
+    }
+
     /** Starts the server. */
     @BeforeAll
     static void start()

@@ -74,7 +74,7 @@ class ThirdPartyAttributionIT
             "License text not provided by the dependency POM",
             "PLACEHOLDER");
 
-    /** Creates the test; JUnit runs each test on a new instance. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     ThirdPartyAttributionIT()
     {
     }

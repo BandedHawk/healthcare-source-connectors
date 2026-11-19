@@ -45,6 +45,11 @@ class KeyMaterialTest
     @TempDir
     Path dir;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    KeyMaterialTest()
+    {
+    }
+
     /**
      * Local key settings.
      *

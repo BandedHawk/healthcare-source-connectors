@@ -38,6 +38,11 @@ class IntakeHealthTest
     /** The health under test. */
     final IntakeHealth health = new IntakeHealth("claims", now::get);
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    IntakeHealthTest()
+    {
+    }
+
     /**
      * Moves the clock on.
      *

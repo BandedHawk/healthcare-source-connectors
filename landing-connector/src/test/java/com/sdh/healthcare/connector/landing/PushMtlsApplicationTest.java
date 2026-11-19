@@ -74,6 +74,11 @@ class PushMtlsApplicationTest extends PushTestSupport
         }
     }
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    PushMtlsApplicationTest()
+    {
+    }
+
     /**
      * Points the node at the test's database, keys and client CA.
      *

@@ -91,6 +91,11 @@ class AdlsIT extends ObjectStoreItBase
         }
     }
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    AdlsIT()
+    {
+    }
+
     /**
      * The emulator's account endpoint.
      *

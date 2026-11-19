@@ -122,6 +122,11 @@ class SftpLandingApplicationTest
     /** The reasons given to the exit hook. */
     static final List<String> FATAL = new CopyOnWriteArrayList<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    SftpLandingApplicationTest()
+    {
+    }
+
     /**
      * Starts the test server.
      *
@@ -141,7 +146,11 @@ class SftpLandingApplicationTest
         server.start();
     }
 
-    /** Stops the server after the tests. */
+    /**
+     * Stops the server after the tests.
+     *
+     * @throws Exception if the server can't be stopped
+     */
     @AfterAll
     static void stopServer() throws Exception
     {
@@ -155,6 +164,11 @@ class SftpLandingApplicationTest
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * The recording hook.
@@ -240,6 +254,8 @@ class SftpLandingApplicationTest
      * Files on the server are landed, announced and deleted; while the
      * server is down the intake is reported unreachable, and once it is
      * back the node reconnects and carries on.
+     *
+     * @throws Exception if the test fails to run
      */
     @Test
     void landsFromSftpAndRidesOutAnOutage() throws Exception

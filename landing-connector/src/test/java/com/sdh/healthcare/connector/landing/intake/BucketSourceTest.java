@@ -36,6 +36,11 @@ import org.junit.jupiter.api.Test;
 class BucketSourceTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    BucketSourceTest()
+    {
+    }
+
     /**
      * Settings for a bucket source on {@code /in}.
      *

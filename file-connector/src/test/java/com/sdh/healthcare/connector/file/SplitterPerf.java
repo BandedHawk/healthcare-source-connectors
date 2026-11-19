@@ -120,10 +120,20 @@ class SplitterPerf
     /** Notes for the report. */
     static final List<String> NOTES = new ArrayList<>();
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    SplitterPerf()
+    {
+    }
+
     /** The beans the splitter gets for the test. */
     @Configuration(proxyBeanMethods = false)
     static class PerfBeans
     {
+
+        /** Created by Spring. */
+        PerfBeans()
+        {
+        }
 
         /**
          * A recording exit hook in place of the real one.

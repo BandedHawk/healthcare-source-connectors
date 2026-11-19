@@ -44,6 +44,11 @@ class VaultTransitIT
     /** Vault's address. */
     static URI address;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    VaultTransitIT()
+    {
+    }
+
     /**
      * Starts Vault and creates the transit keys.
      *

@@ -185,10 +185,20 @@ class AdminCommandsTest
         CONFIG.put("sdh.retry.initial-backoff", "10ms");
     }
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    AdminCommandsTest()
+    {
+    }
+
     /** Records fatal errors instead of exiting the test JVM. */
     @TestConfiguration
     static class Overrides
     {
+
+        /** Created by Spring. */
+        Overrides()
+        {
+        }
 
         /**
          * The recording exit hook.

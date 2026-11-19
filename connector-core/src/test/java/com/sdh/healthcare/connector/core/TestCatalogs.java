@@ -52,7 +52,7 @@ public final class TestCatalogs
         Catalog newClient();
     }
 
-    /** Not instantiable. */
+    /** Not instantiated. */
     private TestCatalogs()
     {
     }

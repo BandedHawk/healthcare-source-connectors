@@ -34,6 +34,11 @@ class CamelMessagePublisherTest
     /** How many messages are sent. */
     static final int COUNT = 200;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    CamelMessagePublisherTest()
+    {
+    }
+
     /**
      * Messages arrive in the order sent, and a failed send fails its
      * future.

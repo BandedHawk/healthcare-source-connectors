@@ -68,6 +68,11 @@ class RemoteIntakeRouteTest
     /** The route under test. */
     RemoteIntakeRoute route;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    RemoteIntakeRouteTest()
+    {
+    }
+
     /** Builds the route over the fake source. */
     @BeforeEach
     void setUp()

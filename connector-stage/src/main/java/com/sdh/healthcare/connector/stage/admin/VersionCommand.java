@@ -39,6 +39,11 @@ public final class VersionCommand<C extends DrainAdmin>
     /** The event number an acceptance's reason is sealed with. */
     private static final int REASON_EVENT = 1;
 
+    /** Creates the command. */
+    public VersionCommand()
+    {
+    }
+
     @Override
     public String name()
     {

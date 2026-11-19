@@ -23,7 +23,7 @@ public final class LeaseDatabase
     /** How long to wait for a connection, in milliseconds. */
     private static final long CONNECTION_TIMEOUT_MS = 10_000;
 
-    /** Not used: this class only has static methods. */
+    /** Not instantiated: this class only has static methods. */
     private LeaseDatabase()
     {
     }

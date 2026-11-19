@@ -163,6 +163,11 @@ public final class FailureCommands
             implements AdminCommand<C>
     {
 
+        /** Creates the command. */
+        ListCommand()
+        {
+        }
+
         @Override
         public String name()
         {
@@ -468,6 +473,11 @@ public final class FailureCommands
             implements AdminCommand<C>
     {
 
+        /** Creates the command. */
+        CorrectCommand()
+        {
+        }
+
         @Override
         public String name()
         {
@@ -558,6 +568,11 @@ public final class FailureCommands
     static final class RetryCommand<C extends FailureAdmin>
             implements AdminCommand<C>
     {
+
+        /** Creates the command. */
+        RetryCommand()
+        {
+        }
 
         @Override
         public String name()
@@ -662,6 +677,11 @@ public final class FailureCommands
 
         /** What starts the line the export is printed on. */
         static final String PREFIX = "sdh-export: ";
+
+        /** Creates the command. */
+        ExportCommand()
+        {
+        }
 
         @Override
         public String name()

@@ -63,6 +63,11 @@ class AbandonedBatchTest
     /** A fresh in-memory catalog. */
     InMemoryCatalog catalog;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    AbandonedBatchTest()
+    {
+    }
+
     /**
      * Creates the catalog and a KEK.
      *

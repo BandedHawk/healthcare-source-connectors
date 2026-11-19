@@ -210,7 +210,7 @@ public final class LandingTables
             optional(9, ITEM_SHA256, Types.StringType.get(),
                     "SHA-256 of the item, in hex"));
 
-    /** Not used: there are only static methods. */
+    /** Not instantiated: this class only has static methods. */
     private LandingTables()
     {
     }

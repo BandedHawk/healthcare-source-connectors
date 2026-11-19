@@ -39,6 +39,11 @@ class JvmMetricsExportTest
     private static final Resource RESOURCE = Resource.create(Attributes.of(
             AttributeKey.stringKey("service.name"), "test-stage"));
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    JvmMetricsExportTest()
+    {
+    }
+
     /**
      * Settings for a test.
      *

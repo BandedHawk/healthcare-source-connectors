@@ -37,6 +37,11 @@ class ComplianceRulesTest
                 default -> "false";
             });
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ComplianceRulesTest()
+    {
+    }
+
     /**
      * A node's settings that pass: TLS everywhere, keys in a KMS, an audit
      * export.

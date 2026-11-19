@@ -45,6 +45,11 @@ class LandedItemSourceTest
     /** Wraps and unwraps the data keys. */
     AesKeyWrapProvider keys;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    LandedItemSourceTest()
+    {
+    }
+
     /**
      * Creates the table and key.
      *

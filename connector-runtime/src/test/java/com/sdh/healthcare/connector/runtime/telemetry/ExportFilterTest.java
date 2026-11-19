@@ -31,6 +31,11 @@ import org.junit.jupiter.api.Test;
 class ExportFilterTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ExportFilterTest()
+    {
+    }
+
     /** A span keeps only listed attributes, and no exception events. */
     @Test
     void spansLoseUnlistedAttributesAndExceptionEvents()

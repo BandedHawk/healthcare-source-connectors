@@ -28,6 +28,11 @@ class ReadinessTest
     final Readiness readiness =
             new Readiness(Duration.ofMinutes(1), now::get);
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    ReadinessTest()
+    {
+    }
+
     /**
      * Moves the clock on.
      *

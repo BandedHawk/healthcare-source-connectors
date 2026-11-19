@@ -20,7 +20,7 @@ import org.junit.jupiter.api.Test;
 class StageBuildTest
 {
 
-    /** Creates the tests. */
+    /** Creates the tests; JUnit runs each test on a new instance. */
     StageBuildTest()
     {
     }

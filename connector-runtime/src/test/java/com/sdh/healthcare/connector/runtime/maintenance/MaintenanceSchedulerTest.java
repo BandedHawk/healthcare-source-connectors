@@ -21,6 +21,11 @@ import org.junit.jupiter.api.Test;
 class MaintenanceSchedulerTest
 {
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    MaintenanceSchedulerTest()
+    {
+    }
+
     /** A retention below the minimum is refused, naming the setting. */
     @Test
     void refusesRetentionBelowTheMinimum()

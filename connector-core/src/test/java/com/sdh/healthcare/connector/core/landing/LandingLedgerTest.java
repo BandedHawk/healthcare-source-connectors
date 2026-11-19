@@ -74,6 +74,11 @@ class LandingLedgerTest
     /** The last lease epoch handed out. */
     long epoch;
 
+    /** Creates the tests; JUnit runs each test on a new instance. */
+    LandingLedgerTest()
+    {
+    }
+
     /**
      * Creates the catalog, both tables and the KEK.
      *

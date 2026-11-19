@@ -175,6 +175,11 @@ public final class IntakeRoute extends RouteBuilder
     private final class ListingTimer implements PollingConsumerPollStrategy
     {
 
+        /** Creates the timer. */
+        private ListingTimer()
+        {
+        }
+
         /**
          * Notes when a poll begins.
          *
