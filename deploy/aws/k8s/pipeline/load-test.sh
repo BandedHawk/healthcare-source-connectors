@@ -20,6 +20,10 @@
 # Every convert and transform pod's warnings, errors and events are kept as the run goes, in pod-logs/ (gzipped at
 # the end), so a pod that stops part way leaves its log (STAGES.md §10, 2026-11-18). No content: they log none.
 #
+# What the run used is sampled every SDH_LOAD_SAMPLE_SEC (60) seconds (resources.py): each pod's and node's CPU and
+# memory from the kubelets, Postgres' size, commits, cache hits and waits, and Kafka's bytes on disk by topic; the
+# report gives each stage's and service's pods, CPU and memory against their requests and limits, min / avg / max.
+#
 # SDH_LOAD_BACKLOG (say "1,2,4,6") is the backlog test (docs/PERFORMANCE.md §10): transform is held at no pods
 # while the load lands, splits and converts, then cleared at each of those pod counts in turn (below).
 #
@@ -55,6 +59,7 @@ N="sdh-$P"; PREFIX="${P//-/_}"
 BUCKET="s3://sdh-poc-intake-$ACCOUNT"
 INTAKE="$BUCKET/$P/"
 TIMEOUT_MIN="${SDH_LOAD_TIMEOUT_MIN:-120}"
+SAMPLE_SEC="${SDH_LOAD_SAMPLE_SEC:-60}"   # seconds between samples of what the run used (resources.py)
 FAILOVER_AT="${SDH_LOAD_FAILOVER_AT:-30}"   # % of objects landed when the lease holder is deleted; 0: never
 # The outage (docs/PERFORMANCE.md §3.6): at OUTAGE_AT % landed, every stage, Postgres and Kafka are killed at once,
 # with no graceful stop; they stay down OUTAGE_MIN minutes. OUTAGE_LOSE names topics whose queued messages are
@@ -133,6 +138,7 @@ report="$out/report.txt"
 staging="$BUCKET/staging/$run/"
 cleanup() {
   declare -F stop_logs >/dev/null && stop_logs
+  declare -F stop_sampler >/dev/null && stop_sampler
   [[ "${outage_state:-}" == down ]] && { outage_restore || true; }
   [[ -n "$BACKLOG" ]] && { backlog_restore || true; }
   [[ "$STAGE_ONLY" == 1 ]] || aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
@@ -224,6 +230,25 @@ pod_events() {  # <event>: how many lines name it, across every pod kept
   zcat -f "$out"/pod-logs/*.log* 2>/dev/null | grep -c -- "$1" || true
 }
 mkdir -p "$out/events"; : > "$out/pg-connections"
+# What the run used (resources.py, docs/PERFORMANCE.md §10): every pod's and node's CPU and memory, Postgres' size,
+# activity and waits, and Kafka's bytes by topic, every SAMPLE_SEC seconds, for min / avg / max in the report.
+t0_epoch="$(date -u +%s)"
+rm -f "$out/usage" "$out/pg-stats" "$out/kafka-disk" "$out/pg-schemas" "$out/pg-settings"
+sample_resources() {
+  while :; do
+    python3 -I "$HERE/resources.py" sample "$out" "$t0_epoch" "$N" sdh-fhir sdh-infra 2>/dev/null || true
+    sleep "$SAMPLE_SEC"
+  done
+}
+sample_resources &
+sampler=$!
+stop_sampler() {
+  [[ -n "${sampler:-}" ]] || return 0
+  kill "$sampler" 2>/dev/null || true   # a sample under way finishes; its lines are whole
+  pkill -P "$sampler" -f 'sleep' 2>/dev/null || true
+  sampler=""
+  return 0
+}
 for t in "${topics[@]}"; do echo "$t ${before[$t]}"; done > "$out/offsets0"   # for measure.sh
 "$HERE/node-cpu.sh" > "$out/nodecpu0" 2>/dev/null || true   # for measure.sh: the T nodes' surplus CPU credits
 db "SELECT catalog_name || ':' || table_namespace || '.' || table_name, metadata_location FROM public.iceberg_tables" \
@@ -565,6 +590,8 @@ while :; do
 done
 end=$(( ${last_change[transformed]:-$((SECONDS - t0))} ))
 db "SELECT now()" > "$out/t1"; echo "$max_nodes" > "$out/nodes"   # for measure.sh
+stop_sampler
+python3 -I "$HERE/resources.py" sample "$out" "$t0_epoch" "$N" sdh-fhir sdh-infra --final 2>/dev/null || true
 [[ -n "$BACKLOG" ]] && backlog_restore
 
 # --- Report ------------------------------------------------------------------------------------------------------
@@ -729,6 +756,7 @@ say "Postgres connections (pg_stat_activity), at most: $(awk '$2 ~ /^[0-9]+$/ &&
   END {print (m ? m " at " l : "never read")}' "$out/pg-connections" | cut -c1-300);" \
   "unanswered in $(awk '$2 == "-"' "$out/pg-connections" | wc -l) of $(wc -l < "$out/pg-connections") reads" \
   "(by second and role: $out/pg-connections)"
+python3 -I "$HERE/resources.py" report "$out" "$report" | tee -a "$report" || say "resources.py failed (above)"
 # The Warning events since t0, by namespace, kind, reason and the object's name without its pod hash; the
 # messages of the first of each, cut short (they name pods, nodes and probes, never documents).
 say "Warning events since t0: count, namespace kind/name reason: the first one's message"

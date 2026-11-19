@@ -585,6 +585,14 @@ and 1M once step 1 makes split fast.
   the run by when items reached gold (flat, or falling as the tables grow), snapshots kept and made per table
   and their metadata size, KMS calls by API from CloudWatch, and the cost per million documents at the run's rate
   (on-demand node price, EKS and KMS; storage and S3 requests not counted).
+- **What the run used** (`deploy/aws/k8s/pipeline/resources.py`, sampled by `load-test.sh` every
+  `SDH_LOAD_SAMPLE_SEC`, 60, seconds; 2026-11-19): min / avg / max of each stage's pods and of the nodes; by app,
+  a pod's CPU (cores, against its request) and memory (working set, against its limit), the app's total at its
+  peak, and pods that came within 10% of their limit; by node pool, the share of allocatable CPU and memory used;
+  Postgres' size and growth, its volume, commits a second, cache hits, temp files, deadlocks, backends active and
+  waiting on locks or I/O, connections, its sizing settings and the largest schemas; Kafka's volume and bytes by
+  topic. From the kubelets' stats summaries, `pg_stat_database`, `pg_stat_activity`, `df` and `du`: names and
+  numbers only. Kept in the run's directory (`usage`, `pg-stats`, `kafka-disk`, `pg-schemas`, `pg-settings`).
 - **Not yet:** the sandbox (SeaweedFS) run of the same report; it has its own telemetry stack, and `measure.sh`
   reads the AWS PoC's.
 - **Changed after the first run:** commits per table come from the metadata version in the catalog, and KMS
