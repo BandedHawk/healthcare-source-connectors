@@ -52,15 +52,30 @@ burst="$(awk '/^resource "aws_eks_node_group" "burst"/ { on = 1 } on { print } o
 check "burst nodes are one node group a zone" grep -qE 'for_each += data\.aws_subnet\.burst_zone' <<<"$burst"
 check "each burst group is in one subnet" grep -qE 'subnet_ids += \[each\.value\.id\]' <<<"$burst"
 
-# The Cluster Autoscaler caps the cluster at the base nodes plus burst_max, over all the burst groups.
+# The Cluster Autoscaler caps the cluster at the base nodes, the duties node and burst_max, over all the burst
+# groups.
 zones="$(awk '/^variable "zones"/ { on = 1 } on && /default/ { print; exit }' "$TF/variables.tf" \
   | grep -o '"[a-z0-9-]*"' | wc -l)"
 burst_max="$(awk '/^variable "burst_max"/ { on = 1 } on && /default/ { print $3; exit }' "$TF/variables.tf")"
 cap="$(setting "$K8S/infra/cluster-autoscaler.yaml" '^ *- --max-nodes-total=([0-9]+).*')"
-check "the autoscaler's cap is the $zones base nodes + burst_max $burst_max (have ${cap:-none})" \
-  test "${cap:-0}" -eq $((zones + burst_max))
+check "the autoscaler's cap is the $zones base nodes + the duties node + burst_max $burst_max (have ${cap:-none})" \
+  test "${cap:-0}" -eq $((zones + 1 + burst_max))
 check "the autoscaler balances the per-zone groups" \
   grep -qE '^ *- --balance-similar-node-groups' "$K8S/infra/cluster-autoscaler.yaml"
+
+# Each scaled stage's duties are its duties pod's, on the on-demand duties node, never Spot; the stage's own pods
+# take them up only as a fallback (DESIGN.md revision (dz), 2026-11-19).
+duties="$(awk '/^resource "aws_eks_node_group" "duties"/ { on = 1 } on { print } on && /^}/ { exit }' "$TF/main.tf")"
+check "the duties node is on-demand" grep -qE 'capacity_type += "ON_DEMAND"' <<<"$duties"
+check "the duties node is tainted for the duties pods alone" grep -qE 'key += "sdh-poc/duties"' <<<"$duties"
+check "the duties pod takes no input and needs the duties node" \
+  bash -c "grep -qE 'SDH_STAGE_DUTIES_ONLY, value: \"true\"' '$P/duties-patch.yaml' \
+    && grep -qE 'requiredDuringScheduling' '$P/duties-patch.yaml' && grep -qE 'values: \[duties\]' '$P/duties-patch.yaml'"
+for stage in splitter convert transform; do
+  check "$stage pods take the duties only as a fallback" \
+    grep -qE 'SDH_STAGE_DUTIES_FALLBACKAFTER, value: [1-9]' "$P/$stage-patch.yaml"
+done
+check "apply.sh deploys each scaled stage's duties pod" test "$(grep -c 'duties-patch.yaml' "$P/apply.sh")" -ge 4
 
 # The gold check's Job survives a pod disrupted by a node going, and keeps off nodes the autoscaler empties
 # (2026-11-16: its burst node was removed part way through the read).
@@ -92,6 +107,21 @@ check "Postgres allows the stages' connections at their maxima ($split_max/$conv
  ${max_conn:-none})" test "${max_conn:-0}" -ge "$needed"
 check "Postgres allows the scaled-out maxima of runs 45-48 (6/12/18: ~$((6 * 8 + 12 * 4 + 18 * 8 + 15)))" \
   test "${max_conn:-0}" -ge $((6 * 8 + 12 * 4 + 18 * 8 + 15))
+
+# Every client comes through PgBouncer (k8s/infra/state.yaml, DESIGN.md revision (ea)), in transaction pooling,
+# which pgjdbc's prepared statements need 1.21 or later for, with max_prepared_statements; its connections stay
+# under max_connections.
+check "no stage or job connects to Postgres but through PgBouncer" \
+  bash -c "! grep -qE 'postgres\.sdh-infra\.svc' '$P'/*-application.yml '$P/gold-check.yaml'"
+check "PgBouncer pools transactions and keeps pgjdbc's prepared statements" \
+  bash -c "grep -qE '^ +pool_mode = transaction$' '$K8S/infra/state.yaml' \
+    && grep -qE '^ +max_prepared_statements = [1-9]' '$K8S/infra/state.yaml' \
+    && grep -qE 'image: edoburu/pgbouncer:v1\.(2[1-9]|[3-9][0-9])' '$K8S/infra/state.yaml'"
+pooled="$(setting "$K8S/infra/state.yaml" '^ +max_db_connections = ([0-9]+)$')"
+check "PgBouncer keeps under max_connections, with room for psql (${pooled:-none} of ${max_conn:-none})" \
+  test "${pooled:-999}" -le $((${max_conn:-0} - 20))
+check "the clients' network policy lets the stages reach PgBouncer" \
+  grep -qE 'name: clients-to-pgbouncer' "$K8S/infra/namespace.yaml"
 
 echo "Load test"
 

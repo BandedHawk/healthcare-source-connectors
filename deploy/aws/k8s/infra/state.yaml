@@ -87,7 +87,8 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom: { secretKeyRef: { name: postgres, key: password } }
           # 300 connections since 2026-11-17: with the stages scaled out (splitter 6, convert 12, transform 15) they
-          # used 188 of 200 (docs/PERFORMANCE.md §10); an idle backend is a few MB, within the 2 GiB below.
+          # used 188 of 200 (docs/PERFORMANCE.md §10); an idle backend is a few MB, within the 2 GiB below. Since
+          # revision (ea) the stages come through PgBouncer (below), which keeps at most 220 of them.
           args: [-c, max_connections=300, -c, shared_buffers=128MB]
           ports: [{ containerPort: 5432 }]
           readinessProbe: { exec: { command: [pg_isready, -U, postgres, -d, sdh] }, periodSeconds: 5 }
@@ -110,6 +111,96 @@ spec:
         accessModes: [ReadWriteOnce]
         storageClassName: ""
         resources: { requests: { storage: 10Gi } }
+---
+# PgBouncer in front of Postgres (DESIGN.md revision (ea), 2026-11-19): every stage pod's pools, Iceberg's catalog
+# clients and the landing pods connect here, and it keeps only as many Postgres connections as there are
+# transactions in flight. Without it the backends grow with the pods (241 of max_connections 300 at 6/12/18 pods,
+# run 49) though most sit idle; with it they grow with the work, and a buyer can scale the stages out without
+# raising max_connections or Postgres's memory. Transaction pooling: the stages hold no session state (no
+# advisory locks, LISTEN, temporary tables or SET; a role's `SET role` default applies when its server connection
+# logs in, and PgBouncer keeps a server connection to one role). pgjdbc's prepared statements need PgBouncer 1.21
+# or later with max_prepared_statements; extra_float_digits is a startup parameter pgjdbc sends.
+#
+# A pool per role, 40 each and 10 more when they wait: a transform pod's commit turn holds a connection while it
+# waits for the table's lock (QueuedCommits), two a pod at the most, so 18 pods' turns fit with room for their
+# claims. max_db_connections keeps the whole under max_connections, with room for psql and poc.sh.
+# The users and their passwords (userlist.txt) are in the secret pgbouncer-users, which poc.sh makes from its
+# state directory (setup_database).
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: pgbouncer, namespace: sdh-infra }
+data:
+  pgbouncer.ini: |
+    [databases]
+    sdh = host=postgres.sdh-infra.svc port=5432 dbname=sdh
+
+    [pgbouncer]
+    listen_addr = 0.0.0.0
+    listen_port = 5432
+    unix_socket_dir =
+    auth_type = scram-sha-256
+    auth_file = /etc/pgbouncer/users/userlist.txt
+    pool_mode = transaction
+    max_client_conn = 2000
+    default_pool_size = 40
+    reserve_pool_size = 10
+    reserve_pool_timeout = 2
+    max_db_connections = 220
+    max_prepared_statements = 200
+    ignore_startup_parameters = extra_float_digits
+    server_idle_timeout = 120
+    query_wait_timeout = 120
+    log_connections = 0
+    log_disconnections = 0
+---
+apiVersion: v1
+kind: Service
+metadata: { name: pgbouncer, namespace: sdh-infra }
+spec:
+  selector: { app: pgbouncer }
+  ports: [{ port: 5432 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: pgbouncer, namespace: sdh-infra }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: pgbouncer } }
+  # A new pod ready before the old one goes, so a change to the settings or the users drops no client for long.
+  strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }
+  template:
+    metadata: { labels: { app: pgbouncer } }
+    spec:
+      # Beside Postgres: one hop less, and nothing to lose that Postgres's node doesn't also take.
+      nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70                     # the image's postgres user
+        runAsGroup: 70
+        fsGroup: 70                       # so it can read the users' secret (0440)
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: pgbouncer
+          image: edoburu/pgbouncer:v1.26.1-p0
+          # PgBouncer itself, not the image's entrypoint, which writes the settings from its environment.
+          command: [/usr/bin/pgbouncer, /etc/pgbouncer/config/pgbouncer.ini]
+          ports: [{ containerPort: 5432 }]
+          readinessProbe: { tcpSocket: { port: 5432 }, periodSeconds: 5 }
+          livenessProbe: { tcpSocket: { port: 5432 }, periodSeconds: 20, failureThreshold: 3 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/pgbouncer/config, readOnly: true }
+            - { name: users, mountPath: /etc/pgbouncer/users, readOnly: true }
+      volumes:
+        - { name: config, configMap: { name: pgbouncer } }
+        - { name: users, secret: { secretName: pgbouncer-users, defaultMode: 0440 } }
 ---
 # One Kafka node in KRaft mode, a broker and a controller (docs/AWS-POC.md §3: one broker accepted for the PoC,
 # so replication factor 1). Otherwise as in the sandbox (deploy/sandbox/infra/kafka.yaml). Topics are made by

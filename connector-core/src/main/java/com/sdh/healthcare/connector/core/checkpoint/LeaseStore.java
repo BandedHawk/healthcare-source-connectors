@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.core.checkpoint;
 
 import java.time.Duration;
+import java.util.Optional;
 
 /**
  * A durable store for the single-instance lease (design §9.3).
@@ -56,4 +57,20 @@ public interface LeaseStore
      * @param grant the grant
      */
     void release(LeaseGrant grant);
+
+    /**
+     * Reads a lease without taking or changing it. A stage's fallback
+     * pods read the duties lease this way, to take it only once it has
+     * been free a while (STAGES.md §8).
+     *
+     * @param leaseName the lease's name
+     * @return its state; empty if it has never been held
+     * @throws UnsupportedOperationException if the store can't read a
+     *                                       lease, as this default
+     */
+    default Optional<LeaseStatus> inspect(String leaseName)
+    {
+        throw new UnsupportedOperationException(
+                "This lease store can't read a lease");
+    }
 }

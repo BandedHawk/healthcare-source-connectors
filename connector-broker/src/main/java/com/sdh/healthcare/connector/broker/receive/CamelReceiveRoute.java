@@ -113,6 +113,14 @@ public final class CamelReceiveRoute extends RouteBuilder
             ThreadLocal.withInitial(() -> 0);
 
     /**
+     * Each Kafka consumer thread's partitions sought back, whose later
+     * records Camel has already taken in, to be left until the records
+     * sought back come again ({@link KafkaOffsets#current}).
+     */
+    private final ThreadLocal<KafkaOffsets.Rewound> kafkaRewound =
+            ThreadLocal.withInitial(KafkaOffsets.Rewound::new);
+
+    /**
      * Creates the route. It doesn't start with the Camel context: the caller
      * starts it by its ID when ready.
      *
@@ -216,7 +224,9 @@ public final class CamelReceiveRoute extends RouteBuilder
      * {@code max.poll.interval.ms} to stay in its group, and Kafka keeps no
      * delivery count that polling again would raise. So after its pause the
      * records handled are committed, the rest are sought back, and the
-     * route returns, for the next poll to bring them again.
+     * route returns, for the next poll to bring them again. Records Camel
+     * had taken in after them are left until they come
+     * ({@link KafkaOffsets#current}).
      *
      * @param exchange the poll, its records as a list of exchanges
      * @throws Exception if the node is stopping, so nothing is committed
@@ -228,10 +238,16 @@ public final class CamelReceiveRoute extends RouteBuilder
         {
             return;
         }
-        List<Exchange> polled = new ArrayList<>(records.size());
+        List<Exchange> all = new ArrayList<>(records.size());
         for (Object record : records)
         {
-            polled.add((Exchange) record);
+            all.add((Exchange) record);
+        }
+        KafkaOffsets.Rewound rewound = kafkaRewound.get();
+        List<Exchange> polled = KafkaOffsets.current(all, rewound);
+        if (polled.isEmpty())
+        {
+            return;
         }
         boolean polling = KafkaOffsets.consumer(polled) != null;
         int handled;
@@ -241,13 +257,14 @@ public final class CamelReceiveRoute extends RouteBuilder
         }
         catch (Exception | Error notHandled)
         {
-            KafkaOffsets.rewind(polled);
+            KafkaOffsets.rewind(polled, rewound);
             throw notHandled;
         }
         KafkaOffsets.commit(polled.subList(0, handled));
         if (handled < polled.size())
         {
-            KafkaOffsets.rewind(polled.subList(handled, polled.size()));
+            KafkaOffsets.rewind(polled.subList(handled, polled.size()),
+                    rewound);
         }
     }
 

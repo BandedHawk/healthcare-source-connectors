@@ -28,6 +28,9 @@ spec:
             - name: POD_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.instance.id=$(POD_NAME)" }
+            # The duties are the duties pod's (duties-patch.yaml); this pod takes them up only once their lease has
+            # been free 3 minutes, and hands them back after 30 (STAGES.md §8, DESIGN.md revision (dz)).
+            - { name: SDH_STAGE_DUTIES_FALLBACKAFTER, value: 3m }
           # CPU near what a pod uses under load (docs/PERFORMANCE.md §10, 2026-11-14): asking for less packed pods onto
           # too few CPUs, and they waited for them.
           resources:

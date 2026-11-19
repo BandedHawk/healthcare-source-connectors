@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.security.SecureRandom;
 import java.sql.Connection;
@@ -29,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
@@ -571,7 +573,7 @@ public final class QueuedCommits implements GroupAppender.Committer
                 if (found.state() == State.WAITING)
                 {
                     long combined = System.nanoTime();
-                    combine(connection, table, sinceLast);
+                    combine(connection, table, sinceLast, id);
                     telemetry.phaseDuration(stage,
                             "commit_combine", System.nanoTime() - combined);
                     found = find(connection, id);
@@ -597,10 +599,11 @@ public final class QueuedCommits implements GroupAppender.Committer
      * @param table      the table
      * @param sinceLast  milliseconds since the table's last commit; null if
      *                   none
+     * @param own        the lock holder's own group
      * @throws SQLException if the database fails
      */
-    private void combine(Connection connection, Table table, Long sinceLast)
-            throws SQLException
+    private void combine(Connection connection, Table table, Long sinceLast,
+            long own) throws SQLException
     {
         if (!interval.isZero() && sinceLast != null
                 && sinceLast < interval.toMillis())
@@ -657,6 +660,20 @@ public final class QueuedCommits implements GroupAppender.Committer
         }
         catch (RuntimeException failure)
         {
+            if (stopping(failure))
+            {
+                // This pod's own failure, as it stops (run 49: its executor
+                // rejected the work): the other pods' groups stay waiting,
+                // for their own next turn, and only this pod's is refused.
+                // The next holder finds any that did reach the table named
+                // in a snapshot, so none is committed twice.
+                Set<Long> mine = open.contains(own) ? Set.of(own) : Set.of();
+                LOG.warn("append.failed_stopping groups={} left={} error={}",
+                        mine.size(), open.size() - mine.size(),
+                        failure.getClass().getSimpleName());
+                refuse(connection, mine, "failed");
+                return;
+            }
             LOG.warn("append.failed groups={} error={}", open.size(),
                     failure.getClass().getSimpleName());
             refuse(connection, new HashSet<>(open), "failed");
@@ -674,6 +691,37 @@ public final class QueuedCommits implements GroupAppender.Committer
             update.executeUpdate();
         }
         LOG.debug("append.combined groups={}", open.size());
+    }
+
+    /**
+     * Whether a commit failed because this pod is stopping, not because of
+     * the groups or the table: one of its executors rejected the work, or
+     * its thread was interrupted.
+     *
+     * @param failure the failure
+     * @return true if so
+     */
+    static boolean stopping(Throwable failure)
+    {
+        if (Thread.currentThread().isInterrupted())
+        {
+            return true;
+        }
+        for (Throwable cause = failure; cause != null;
+                cause = cause.getCause())
+        {
+            if (cause instanceof RejectedExecutionException
+                    || cause instanceof InterruptedException
+                    || cause instanceof InterruptedIOException)
+            {
+                return true;
+            }
+            if (cause.getCause() == cause)
+            {
+                break;
+            }
+        }
+        return false;
     }
 
     /**

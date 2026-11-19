@@ -1286,7 +1286,14 @@ What it showed, beyond §2's predictions:
   every claim it owns (`StageRegistry.renew`), not only those of records in a batch it is running, so a record
   left claimed after a failed batch, whose message came back elsewhere or not at all, stays claimed while its pod
   lives, out of the sweep's reach. That is likely run 47's 30-minute tail too. Who acknowledged the 10 messages
-  without storing them is still not traced; transform logs no claim per record.
+  without storing them is still not traced; transform logs no claim per record. **Traced since (2026-11-19,
+  DESIGN.md revision (dy)):** after a batch failed and was sought back, Camel's Kafka batching handed on the rest
+  of that poll, whose commit moved the group past the records sought back (reproduced in `KafkaRewindIT`); and
+  the two `CommitFailedException`s were the queue's lock holder stopping (`RejectedExecutionException`, all 25 of
+  the run's `append.failed`), which refused every pod's waiting groups. Both fixed; the burst nodes' churn, 25 shut
+  down two at a time, fits managed Spot groups' Capacity Rebalance. Since then the duties run on an on-demand node
+  (revision (dz)) and the stages reach Postgres through PgBouncer (revision (ea)); none of the three is measured on
+  AWS yet.
 
 ## 11. Order of work
 

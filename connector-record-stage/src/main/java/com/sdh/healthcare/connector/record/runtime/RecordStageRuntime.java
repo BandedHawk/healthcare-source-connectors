@@ -337,7 +337,7 @@ public final class RecordStageRuntime implements AutoCloseable
                                     sink.table(), RecordsTable.INGESTED_AT,
                                     retention)),
                             new ReentrantLock(), dutiesFatal, clock),
-                    fatal);
+                    fatal).placed(stage.duties());
             opened.add(duties);
             // Last, so closed first: shutting down stops a held pod's wait.
             opened.add(gate);
@@ -431,7 +431,10 @@ public final class RecordStageRuntime implements AutoCloseable
     /**
      * Waits until the drain check lets this pod's release in (STAGES.md
      * §14.4a), then starts the worker's claim renewal, the duties and the
-     * input. Nothing starts if the runtime is closed while it waits.
+     * input; a pod for the duties alone ({@code sdh.stage.duties.only})
+     * takes no input, its worker renewing the claims of what the duties
+     * hand in again. Nothing starts if the runtime is closed while it
+     * waits.
      *
      * @throws Exception if the input route can't start
      */
@@ -444,6 +447,11 @@ public final class RecordStageRuntime implements AutoCloseable
         }
         worker.start();
         duties.start();
+        if (duties.placement().only())
+        {
+            LOG.info("stage.started stage={} duties_only=true", stage);
+            return;
+        }
         receiver.start();
         LOG.info("stage.started stage={}", stage);
     }

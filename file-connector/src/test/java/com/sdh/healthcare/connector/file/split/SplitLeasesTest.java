@@ -17,6 +17,7 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.stage.StageDuties;
+import com.sdh.healthcare.connector.stage.StageProperties;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.time.Clock;
 import java.time.Duration;
@@ -137,6 +138,83 @@ class SplitLeasesTest
         assertThat(started).containsExactly("pod-a", "pod-b");
         second.close();
         assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * A fallback pod leaves the duties to the duties pod: a restart of it,
+     * quicker than the fallback's wait, doesn't move them; once it has
+     * been gone that long, the fallback takes them.
+     *
+     * @throws Exception if interrupted
+     */
+    @Test
+    void aFallbackWaitsForTheDutiesPod() throws Exception
+    {
+        StageDuties pod = duties("duties-a");
+        StageDuties fallback = duties("worker").placed(
+                new StageProperties.Duties(false, Duration.ofSeconds(3),
+                        Duration.ofMinutes(30)));
+        pod.start();
+        awaitStarted(1);
+        fallback.start();
+        pod.close();
+        Thread.sleep(500);
+        StageDuties again = duties("duties-b");
+        again.start();
+        awaitStarted(2);
+        Thread.sleep(4000);
+        assertThat(started).containsExactly("duties-a", "duties-b");
+
+        long gone = System.nanoTime();
+        again.close();
+        awaitStarted(3);
+        assertThat(started).containsExactly("duties-a", "duties-b", "worker");
+        assertThat(Duration.ofNanos(System.nanoTime() - gone))
+                .isGreaterThanOrEqualTo(Duration.ofSeconds(3));
+        fallback.close();
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * A fallback holder hands the duties back after a while, and the
+     * duties pod, back by then, takes them; with no duties pod, the
+     * fallback takes them again.
+     *
+     * @throws Exception if interrupted
+     */
+    @Test
+    void aFallbackHandsTheDutiesBack() throws Exception
+    {
+        StageProperties.Duties after = new StageProperties.Duties(false,
+                Duration.ofSeconds(1), Duration.ofSeconds(2));
+        StageDuties fallback = duties("worker").placed(after);
+        fallback.start();
+        awaitStarted(1);
+        awaitStarted(2);
+        assertThat(started).containsExactly("worker", "worker");
+
+        StageDuties pod = duties("duties");
+        pod.start();
+        awaitStarted(3);
+        Thread.sleep(3000);
+        assertThat(started).containsExactly("worker", "worker", "duties");
+        pod.close();
+        fallback.close();
+        assertThat(fatal).isEmpty();
+    }
+
+    /** The duties pod can't also be a fallback; nor hand back at once. */
+    @Test
+    void refusesDutiesSettingsThatDontFit()
+    {
+        assertThatThrownBy(() -> new StageProperties.Duties(true,
+                Duration.ofSeconds(1), Duration.ofMinutes(1)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new StageProperties.Duties(false,
+                Duration.ofSeconds(1), Duration.ZERO))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(new StageProperties.Duties(false, null, null))
+                .isEqualTo(StageProperties.Duties.ANY);
     }
 
     /** Only errors that leave the stage unsafe stop the process. */

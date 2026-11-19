@@ -410,7 +410,13 @@ became `sdh.stage.autostart`, and the audit events moved from `convert.*` to `st
   a successor appends too (§6). The reader now reads a record's chunks from the batch of the first row it meets and
   skips rows of the same record from another batch; `CommittedRecords` reads each record once.
 - The duties are the split stage's, moved to `connector-stage` as `StageDuties` (lease `<stage>/<id>/duties`),
-  with `StageFailures` deciding what is fatal. The reconciler hands rebuilt messages to
+  with `StageFailures` deciding what is fatal. Which pods take them is `sdh.stage.duties` (revision (dz),
+  2026-11-19): by default any pod, at once, as a standby; `only: true` makes a pod that does the duties alone,
+  with no input (and at the split stage no corrections), its worker renewing the claims of what the duties hand
+  in again; `fallback-after` makes a pod take the lease only once it has been free that long, so a duties pod
+  that is there always has it, and a fallback holder gives it up after `hand-back-after` (30 minutes) for the
+  duties pod to take back. The AWS deployment runs a duties pod per stage on an on-demand node and the stage's
+  own pods as fallbacks after 3 minutes ([AWS-POC.md](AWS-POC.md) §5). The reconciler hands rebuilt messages to
   `StageWorker.handleOpened`, using the registry's `knownRecords` and `completed`. A rebuilt `record.split` has no
   queue message, so a failed record found this way is reported without one, and audited
   `stage.placement_unknown` (stage, item, record number, error code) for the operator (§12). A record of a
@@ -549,7 +555,15 @@ The sandbox gets the KEDA operator, the stages as scaled deployments, and topics
   pod stopped. Now a worker renews only the claims of records in the batches and corrections it is running
   (`StageWorker` counts them), and a batch or correction that fails releases its claims at once, logged
   `stage.batch_claims_released`. The worker its messages come back to takes them over straight away, and if they
-  don't come back, the sweep hands them in within the claim's time and a sweep or two.
+  don't come back, the sweep hands them in within the claim's time and a sweep or two. And (revision (dy),
+  2026-11-19): two causes of those failed batches. Camel's Kafka batching kept adding the rest of a poll after a
+  batch failed and its partitions were sought back, and handed those later offsets on alone; committed, they moved
+  the group's offset past the records sought back, which a rebalance then lost: the messages acknowledged without
+  their records stored. `KafkaOffsets.current` now leaves such records until the poll that reads them again. And
+  run 49's gold commits failed only because the pod holding the commit queue's lock was stopping (a Spot node
+  replaced by Capacity Rebalance); its failure refused every pod's waiting groups. Now it refuses only its own,
+  and the others are committed on their own pods' turns. And (revision (dz)): on AWS each scaled stage's duties
+  are a pod's of their own on an on-demand node (§8), so a Spot reclaim no longer moves them.
 
 ## 11. Order of work
 

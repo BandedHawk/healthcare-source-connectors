@@ -1,0 +1,39 @@
+# A scaled stage's duties pod on AWS (docs/AWS-POC.md §5, STAGES.md §8, DESIGN.md revision (dz)): the stage's
+# README Deployment once more, renamed <stage>-duties by apply.sh, one pod that takes no input and does the
+# stage's duties alone (its reconciler, its claim sweep and its table maintenance), on the on-demand duties node
+# (terraform/compute: aws_eks_node_group.duties), which Spot never reclaims. The stage's own pods take the duties
+# up only as a fallback, once the duties lease has been free 3 minutes (the patches' SDH_STAGE_DUTIES_FALLBACKAFTER):
+# longer than this pod takes to start again, shorter than the node group takes to replace a lost node.
+# ${DUTIES_NAME}, ${CONTAINER}, ${SERVICE_ACCOUNT}, ${DUTIES_MEMORY} and ${DUTIES_CPU} are filled in by apply.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ${DUTIES_NAME} }
+spec:
+  replicas: 1
+  # One duties pod at a time: a second would only wait for the lease, and two of the transform stage's wouldn't
+  # fit the node beside the others. The README's rolling update settings go (null), as Recreate takes none.
+  strategy: { type: Recreate, rollingUpdate: null }
+  template:
+    spec:
+      serviceAccountName: ${SERVICE_ACCOUNT}   # the stage's own, so its Pod Identity role: nothing new in IAM
+      automountServiceAccountToken: false
+      tolerations:
+        - { key: sdh-poc/duties, operator: Equal, value: "true", effect: NoSchedule }
+      terminationGracePeriodSeconds: 90
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions: [{ key: sdh-poc/pool, operator: In, values: [duties] }]
+      containers:
+        - name: ${CONTAINER}
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: OTEL_RESOURCE_ATTRIBUTES, value: "service.instance.id=$(POD_NAME)" }
+            - { name: SDH_STAGE_DUTIES_ONLY, value: "true" }
+          # Idle but for what the duties hand in again, a batch at a time: less than a stage pod, which takes
+          # several batches at once. The three fit the duties node (t4g.large, ~6.9 GiB allocatable) with room.
+          resources:
+            requests: { cpu: "${DUTIES_CPU}", memory: "${DUTIES_MEMORY}" }
+            limits: { memory: "${DUTIES_MEMORY}" }

@@ -25,6 +25,12 @@ variable "base_instance_type" {
   default = "t4g.large"
 }
 
+# The duties node (main.tf): the scaled stages' duties pods, one a stage, mostly idle. 8 GiB for their 4.5.
+variable "duties_instance_type" {
+  type    = string
+  default = "t4g.large"
+}
+
 # Every arm64 type with 2 vCPUs and 8 GiB, so the Cluster Autoscaler's idea of a node's size holds for any of
 # them. Three types in one zone found no Spot capacity on 2026-11-12: more types and zones give Spot more pools
 # to choose from. Not t4g.large (2026-11-17, docs/PERFORMANCE.md §10): busy, as a burst node is, it spends

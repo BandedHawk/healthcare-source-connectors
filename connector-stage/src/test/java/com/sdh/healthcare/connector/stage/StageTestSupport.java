@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
+import org.postgresql.ds.PGSimpleDataSource;
 
 /**
  * What the stage tests share: a Postgres, the keys messages are sealed
@@ -121,12 +122,21 @@ final class StageTestSupport
     }
 
     /**
-     * The database.
+     * The database: the embedded one, or {@code -Dsdh.test.pooled-url}'s
+     * if set, such as PgBouncer's in front of Postgres (DESIGN.md
+     * revision (ea)).
      *
      * @return its data source
      */
     static DataSource database()
     {
+        String pooled = System.getProperty("sdh.test.pooled-url");
+        if (pooled != null)
+        {
+            PGSimpleDataSource source = new PGSimpleDataSource();
+            source.setURL(pooled);
+            return source;
+        }
         return POSTGRES.getPostgresDatabase();
     }
 
@@ -137,7 +147,10 @@ final class StageTestSupport
      */
     static String freshSchema()
     {
-        return "stage_test_" + SCHEMAS.incrementAndGet();
+        // Unique beyond this JVM too, for a database that outlives it
+        // (sdh.test.pooled-url).
+        return "stage_test_" + SCHEMAS.incrementAndGet() + "_"
+                + UUID.randomUUID().toString().substring(0, 8);
     }
 
     /**

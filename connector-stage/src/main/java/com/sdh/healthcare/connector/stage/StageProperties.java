@@ -56,6 +56,9 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *                       tests that hand messages to the worker themselves
  * @param commit         for a record stage, how its pods commit to the
  *                       sink
+ * @param duties         which of the stage's pods do its duties (STAGES.md
+ *                       §8): a pod for the duties alone, the others taking
+ *                       them up only if it is gone
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -71,15 +74,17 @@ public record StageProperties(ReceiveProperties input,
         @DefaultValue("1m") Duration versionCheckInterval,
         @DefaultValue TableSettings source, @DefaultValue TableSettings sink,
         @DefaultValue("true") boolean autostart,
-        @DefaultValue Commit commit)
+        @DefaultValue Commit commit, @DefaultValue Duties duties)
 {
 
     /**
-     * No commit settings is the default's: each pod commits its own.
+     * No commit settings is the default's: each pod commits its own; no
+     * duties settings, any pod does the duties.
      */
     public StageProperties
     {
         commit = commit == null ? new Commit(false, Duration.ZERO) : commit;
+        duties = duties == null ? Duties.ANY : duties;
     }
 
     /** Where the settings are configured, to name them in errors. */
@@ -129,6 +134,77 @@ public record StageProperties(ReceiveProperties input,
                 throw new IllegalArgumentException(
                         PREFIX + ".commit.interval can't be negative");
             }
+        }
+    }
+
+    /**
+     * Which pods do the stage's duties (STAGES.md §8): its reconciler, its
+     * claim sweep and its table maintenance, one pod for all under the
+     * duties lease. By default any pod takes the lease when it is free. A
+     * deployment can give the duties a pod of their own, on a node that
+     * isn't reclaimed as a Spot node is ({@code only}), and have the
+     * stage's other pods take them up only as a fallback, once that pod
+     * has been gone for a while ({@code fallbackAfter}).
+     *
+     * @param only          whether this pod does the duties alone: it takes
+     *                      no input, so the work it does is what the
+     *                      duties hand in again
+     * @param fallbackAfter how long the lease must have been free before
+     *                      this pod takes it; zero to take it at once.
+     *                      Longer than the duties pod takes to start again,
+     *                      so a restart doesn't move the duties
+     * @param handBackAfter for a fallback holder, how long it keeps the
+     *                      lease before it gives it up, for the duties pod
+     *                      to take back if it has come back; the fallback
+     *                      takes it again after {@code fallbackAfter} if
+     *                      it hasn't
+     */
+    public record Duties(@DefaultValue("false") boolean only,
+            @DefaultValue("0s") Duration fallbackAfter,
+            @DefaultValue("30m") Duration handBackAfter)
+    {
+
+        /** Any pod does the duties, taking the lease at once. */
+        public static final Duties ANY = new Duties(false, Duration.ZERO,
+                Duration.ofMinutes(30));
+
+        /**
+         * Checks the timings.
+         *
+         * @param only          whether the pod does the duties alone
+         * @param fallbackAfter how long the lease must be free first
+         * @param handBackAfter how long a fallback holder keeps it
+         * @throws IllegalArgumentException if a timing is negative, a
+         *                                  fallback hands back at once, or
+         *                                  the duties pod is a fallback
+         */
+        public Duties
+        {
+            fallbackAfter = fallbackAfter == null ? Duration.ZERO
+                    : fallbackAfter;
+            handBackAfter = handBackAfter == null ? Duration.ofMinutes(30)
+                    : handBackAfter;
+            if (fallbackAfter.isNegative() || !handBackAfter.isPositive())
+            {
+                throw new IllegalArgumentException(PREFIX + ".duties:"
+                        + " fallback-after can't be negative, and"
+                        + " hand-back-after must be more than zero");
+            }
+            if (only && fallbackAfter.isPositive())
+            {
+                throw new IllegalArgumentException(PREFIX + ".duties: the"
+                        + " duties pod (only) can't be a fallback");
+            }
+        }
+
+        /**
+         * Whether this pod takes the duties only as a fallback.
+         *
+         * @return true if it waits before taking a free lease
+         */
+        public boolean fallback()
+        {
+            return fallbackAfter.isPositive();
         }
     }
 

@@ -16,6 +16,8 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseGrant;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseToken;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -30,6 +32,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
@@ -38,6 +41,7 @@ import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
@@ -461,6 +465,68 @@ class QueuedCommitsTest
                     .isInstanceOf(ExecutionException.class)
                     .hasCauseInstanceOf(LeaseLostException.class);
             assertThat(files()).isEmpty();
+        }
+    }
+
+    /**
+     * A table as a stopping pod has it: its appends are rejected, as its
+     * executor rejected the work in run 49.
+     *
+     * @param table the table
+     * @return it, stopping
+     */
+    static Table stopping(Table table)
+    {
+        return (Table) Proxy.newProxyInstance(
+                QueuedCommitsTest.class.getClassLoader(),
+                new Class<?>[] {Table.class, HasTableOperations.class},
+                (proxy, method, arguments) ->
+                {
+                    if (method.getName().equals("newFastAppend"))
+                    {
+                        throw new RejectedExecutionException("stopping");
+                    }
+                    try
+                    {
+                        return method.invoke(table, arguments);
+                    }
+                    catch (InvocationTargetException thrown)
+                    {
+                        throw thrown.getCause();
+                    }
+                });
+    }
+
+    /**
+     * A pod whose append fails as it stops, while holding the lock,
+     * refuses only its own group: the other pod's stays waiting and is
+     * committed on that pod's turn, where before it was refused too.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void aStoppingPodRefusesOnlyItsOwnGroup() throws Exception
+    {
+        try (QueuedCommits one = committer(); QueuedCommits two = committer())
+        {
+            Connection lock = holdLock();
+            // One waits for the lock first, so it holds it first.
+            Future<Snapshot> a = senders.submit(() -> one.commit(
+                    stopping(table), List.of(file("a")), List.of()));
+            awaitQueued(1);
+            Thread.sleep(300);
+            Future<Snapshot> b = senders.submit(() -> two.commit(other,
+                    List.of(file("b")), List.of()));
+            awaitQueued(2);
+            Thread.sleep(300);
+            lock.commit();
+            lock.close();
+            assertThatThrownBy(() -> a.get(30, TimeUnit.SECONDS))
+                    .isInstanceOf(ExecutionException.class);
+            Snapshot snapshot = b.get(30, TimeUnit.SECONDS);
+            assertThat(QueuedCommits.names(snapshot)).hasSize(1);
+            assertThat(files()).containsExactly(
+                    table.location() + "/data/b.parquet");
         }
     }
 

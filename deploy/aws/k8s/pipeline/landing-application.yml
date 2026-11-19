@@ -41,7 +41,7 @@ sdh:
     group: { concurrency: 32 }
     catalog:
       type: jdbc
-      uri: jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh
+      uri: jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh
       jdbc.user: landing_${ICEBERG_PREFIX}
       jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
       jdbc.schema-version: V1
@@ -49,7 +49,7 @@ sdh:
       io-impl: org.apache.iceberg.aws.s3.S3FileIO
       client: { region: ${AWS_REGION} }
   lease:
-    jdbc: { url: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh", username: landing_${ICEBERG_PREFIX} }
+    jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh", username: landing_${ICEBERG_PREFIX} }
   crypto:
     wrap-provider: aws-kms
     sign-provider: aws-kms

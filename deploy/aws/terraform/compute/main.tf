@@ -98,8 +98,8 @@ resource "aws_eks_cluster" "poc" {
 # One burst group per zone (2026-11-18): a group over three zones let Auto Scaling end busy nodes to even the
 # zones out (AZRebalance), without the Cluster Autoscaler's drain: part of run 39's churn of 24 burst nodes. A
 # group in one zone has nothing to rebalance. Each may grow to burst_max; the Cluster Autoscaler's
-# --max-nodes-total (k8s/infra/cluster-autoscaler.yaml) keeps the whole cluster to the base nodes plus
-# burst_max, and --balance-similar-node-groups spreads the burst nodes over the zones.
+# --max-nodes-total (k8s/infra/cluster-autoscaler.yaml) keeps the whole cluster to the base nodes, the duties node
+# and burst_max, and --balance-similar-node-groups spreads the burst nodes over the zones.
 
 resource "aws_eks_node_group" "base" {
   for_each        = data.aws_subnet.zone
@@ -121,6 +121,38 @@ resource "aws_eks_node_group" "base" {
   update_config { max_unavailable = 1 }
 
   # The cluster has no self-managed add-ons: the nodes need the CNI and kube-proxy before they're ready.
+  depends_on = [aws_eks_addon.vpc_cni, aws_eks_addon.kube_proxy, aws_eks_addon.pod_identity]
+}
+
+# duties: one on-demand node, never Spot, for the scaled stages' duties pods (k8s/pipeline/duties-patch.yaml): their
+# reconcilers, claim sweeps and table maintenance, which moved with every Spot reclaim while the burst nodes' pods
+# held them (run 49: a sweep cut off part way, and taken up again 2 minutes later; DESIGN.md revision (dz)).
+# Tainted, so only the duties pods go there; in the second zone, away from the state node. A lost node is replaced
+# by its group; until then the stages' own pods take the duties up after 3 minutes.
+resource "aws_eks_node_group" "duties" {
+  cluster_name    = aws_eks_cluster.poc.name
+  node_group_name = "duties"
+  node_role_arn   = local.p.node_role_arn
+  subnet_ids      = [data.aws_subnet.zone[var.zones[1]].id]
+  ami_type        = "AL2023_ARM_64_STANDARD"
+  capacity_type   = "ON_DEMAND"
+  instance_types  = [var.duties_instance_type]
+  disk_size       = 20
+  labels          = { "sdh-poc/pool" = "duties" }
+
+  taint {
+    key    = "sdh-poc/duties"
+    value  = "true"
+    effect = "NO_SCHEDULE"
+  }
+
+  scaling_config {
+    min_size     = 1
+    desired_size = 1
+    max_size     = 1
+  }
+  update_config { max_unavailable = 1 }
+
   depends_on = [aws_eks_addon.vpc_cni, aws_eks_addon.kube_proxy, aws_eks_addon.pod_identity]
 }
 

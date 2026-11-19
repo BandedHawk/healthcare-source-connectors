@@ -463,7 +463,7 @@ public final class ConnectorRuntime implements AutoCloseable
                                     splitRecords, RecordsTable.INGESTED_AT,
                                     retention)),
                             new ReentrantLock(), dutiesFatal, clock),
-                    fatal);
+                    fatal).placed(stage.duties());
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.FORMAT, format).with(Attr.INTAKE, intake));
             return new ConnectorRuntime(new Parts(dataSource, catalog,
@@ -655,8 +655,9 @@ public final class ConnectorRuntime implements AutoCloseable
     /**
      * Waits until the drain check lets this pod's release in (STAGES.md
      * §14.4a), then starts the duties, the corrections and the input
-     * (design §5.3.6). Nothing starts if the runtime is closed while it
-     * waits.
+     * (design §5.3.6); a pod for the duties alone
+     * ({@code sdh.stage.duties.only}) starts only the duties. Nothing
+     * starts if the runtime is closed while it waits.
      *
      * @throws Exception if the input route can't start
      */
@@ -668,6 +669,11 @@ public final class ConnectorRuntime implements AutoCloseable
             return;
         }
         duties.start();
+        if (duties.placement().only())
+        {
+            LOG.info("split.started duties_only=true");
+            return;
+        }
         corrections.start();
         receiver.start();
         LOG.info("split.started");

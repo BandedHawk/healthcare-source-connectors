@@ -8,7 +8,8 @@
 #     the stage's own role (EKS Pod Identity), so no token or access key is in a secret;
 #   - the bucket intake (s3://sdh-poc-intake-<account>/<pipeline>/) in place of HTTP push;
 #   - the landing node as an active pod and a hot standby;
-#   - KEDA maxima of 2, 3 and 4 pods, the scaled stages allowed onto the Spot burst nodes.
+#   - KEDA maxima of 2, 3 and 4 pods, the scaled stages allowed onto the Spot burst nodes;
+#   - beside each scaled stage, its duties pod (<stage>-duties, duties-patch.yaml) on the on-demand duties node.
 #
 # Needs: $SDH_POC_STATE/images.env (deploy/aws/build-images.sh), the transformer's US Core set
 # (healthcare-data-transformer/transform-stage/target/test-sets/us-core.tar.gz, made by its Maven build), and
@@ -83,13 +84,15 @@ apply_config() {  # <namespace> <name> <kubectl create configmap args>...
 readme_yaml() { awk '/^```yaml$/ {on=1; next} /^```$/ {on=0} on' "$1"; }
 settings_digest() { cat "$@" | sha256sum | cut -c1-16; }
 
-# stage_kustomization <stage> <resources> <patch> [scaled]: as scripts/sandbox.sh's. With "scaled", replicas are
-# left to KEDA; $CONFIG_SHA goes on the pods, so a change to the settings restarts them.
+# stage_kustomization <stage> <resources> <patch> [scaled [duties patch]]: as scripts/sandbox.sh's. With
+# "scaled", replicas are left to KEDA; $CONFIG_SHA goes on the pods, so a change to the settings restarts them.
+# A duties patch is for the stage's duties pod, among the resources.
 stage_kustomization() {
   local patches="{ path: $3 }"
   if [[ "${4:-}" == "scaled" ]]; then
     patches+=", { target: { kind: Deployment, name: $1 }, patch: '[{\"op\": \"remove\", \"path\": \"/spec/replicas\"}]' }"
   fi
+  if [[ -n "${5:-}" ]]; then patches+=", { path: $5 }"; fi
   cat <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -235,6 +238,18 @@ deploy_pipeline() {
   for f in landing.yaml splitter.yaml convert.yaml transform.yaml; do
     grep -q '@sha256:' "$work/${f%.yaml}/$f" || die "the ${f%.yaml} README's Deployment no longer matches (image)"
   done
+  # Each scaled stage's duties pod: its Deployment again, as <stage>-duties (duties-patch.yaml).
+  local d name container account memory cpu
+  for d in "splitter splitter file-connector splitter 1536Mi 250m" "convert convert convert-stage convert 1024Mi 250m" \
+           "transform $t transform-stage transform 2048Mi 250m"; do
+    read -r stage name container account memory cpu <<<"$d"
+    sed -e "s/name: $name }/name: $name-duties }/" -e "s/app: $name }/app: $name-duties }/g" \
+      "$work/$stage/$stage.yaml" > "$work/$stage/duties.yaml"
+    grep -q "name: $name-duties }" "$work/$stage/duties.yaml" || die "the $stage README's Deployment no longer matches (name)"
+    DUTIES_NAME="$name-duties" CONTAINER="$container" SERVICE_ACCOUNT="$account" DUTIES_MEMORY="$memory" \
+      DUTIES_CPU="$cpu" envsubst '$DUTIES_NAME $CONTAINER $SERVICE_ACCOUNT $DUTIES_MEMORY $DUTIES_CPU' \
+      < "$HERE/duties-patch.yaml" > "$work/$stage/duties-patch.yaml"
+  done
   cp "$HERE/landing-patch.yaml" "$HERE/landing-pdb.yaml" "$work/landing/"
   cp "$HERE/splitter-patch.yaml" "$work/splitter/"
   cp "$HERE/convert-patch.yaml" "$work/convert/"
@@ -242,11 +257,13 @@ deploy_pipeline() {
   CONFIG_SHA="$(settings_digest "$work/landing-application.yml" "$k-inbox-public.pem")" \
     stage_kustomization landing "landing.yaml, landing-pdb.yaml" landing-patch.yaml > "$work/landing/kustomization.yaml"
   CONFIG_SHA="$(settings_digest "$work/splitter-application.yml" "$landing_signer")" \
-    stage_kustomization splitter "splitter.yaml" splitter-patch.yaml scaled > "$work/splitter/kustomization.yaml"
+    stage_kustomization splitter "splitter.yaml, duties.yaml" splitter-patch.yaml scaled duties-patch.yaml \
+    > "$work/splitter/kustomization.yaml"
   CONFIG_SHA="$(settings_digest "$work/convert-application.yml" "$split_signer")" \
-    stage_kustomization convert "convert.yaml" convert-patch.yaml scaled > "$work/convert/kustomization.yaml"
+    stage_kustomization convert "convert.yaml, duties.yaml" convert-patch.yaml scaled duties-patch.yaml \
+    > "$work/convert/kustomization.yaml"
   CONFIG_SHA="$(settings_digest "$work/transform-application.yml" "$convert_signer" "$wstl")" \
-    K8S_NS=sdh-fhir stage_kustomization "$t" "transform.yaml" transform-patch.yaml scaled \
+    K8S_NS=sdh-fhir stage_kustomization "$t" "transform.yaml, duties.yaml" transform-patch.yaml scaled duties-patch.yaml \
     > "$work/transform/kustomization.yaml"
 
   if [[ "${SDH_POC_RENDER_ONLY:-0}" == "1" ]]; then   # for checking offline: print what would be applied
@@ -269,6 +286,14 @@ deploy_pipeline() {
   kc apply -k "$work/transform" >/dev/null
   { kc -n sdh-fhir rollout status "deploy/$t" --timeout=420s >/dev/null \
       && wait_for 300 logged sdh-fhir "deploy/$t" "Started TransformStageApplication"; } || failed sdh-fhir "deploy/$t"
+
+  local duties
+  for duties in "$n splitter-duties" "$n convert-duties" "sdh-fhir $t-duties"; do
+    kc -n "${duties% *}" rollout status "deploy/${duties#* }" --timeout=420s >/dev/null \
+      && wait_for 300 logged "${duties% *}" "deploy/${duties#* }" 'duties_only=true' \
+      || failed "${duties% *}" "deploy/${duties#* }"
+  done
+  say "  duties pods running on the duties node, one a stage"
 
   envsubst '$PIPELINE $K8S_NS $KAFKA_BROKERS' < "$HERE/scaling.yaml" | kc apply -f - >/dev/null
   local scaled

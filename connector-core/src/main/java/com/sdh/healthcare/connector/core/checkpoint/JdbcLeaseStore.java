@@ -212,6 +212,7 @@ public final class JdbcLeaseStore implements LeaseStore
      *         there
      * @throws IllegalStateException if the database can't be reached
      */
+    @Override
     public Optional<LeaseStatus> inspect(String leaseName)
     {
         String sql = """

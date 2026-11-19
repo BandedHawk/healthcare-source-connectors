@@ -87,7 +87,7 @@ class StagePropertiesTest
                 new StageProperties.TableSettings(null, null, null, null,
                         null),
                 new StageProperties.TableSettings(null, null, null, null,
-                        null), true, null);
+                        null), true, null, null);
     }
 
     /** The input is checked as any receiver's, named by the stage. */

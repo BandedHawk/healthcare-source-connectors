@@ -10,6 +10,7 @@ import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import javax.sql.DataSource;
+import org.postgresql.ds.PGSimpleDataSource;
 
 /**
  * One embedded PostgreSQL (real binaries, no Docker) shared by all tests in
@@ -23,6 +24,16 @@ public final class TestPostgres
 
     /** The database; null until first asked for. */
     private static EmbeddedPostgres postgres;
+
+    /**
+     * A database to test against in place of the embedded one, from
+     * {@code -Dsdh.test.pooled-url}: a JDBC URL with its user and password,
+     * such as PgBouncer's in front of Postgres, to check that what the
+     * stages do works through a pool in transaction mode (DESIGN.md
+     * revision (ea)); unset for the embedded one.
+     */
+    public static final String POOLED_URL =
+            System.getProperty("sdh.test.pooled-url");
 
     /** Not instantiable. */
     private TestPostgres()
@@ -63,22 +74,31 @@ public final class TestPostgres
     }
 
     /**
-     * Connections to the {@code postgres} database.
+     * Connections to the {@code postgres} database, or to
+     * {@link #POOLED_URL}'s if set.
      *
      * @return the data source
      */
     public static DataSource dataSource()
     {
+        if (POOLED_URL != null)
+        {
+            PGSimpleDataSource pooled = new PGSimpleDataSource();
+            pooled.setURL(POOLED_URL);
+            return pooled;
+        }
         return get().getPostgresDatabase();
     }
 
     /**
-     * The JDBC URL of the {@code postgres} database.
+     * The JDBC URL of the {@code postgres} database, or
+     * {@link #POOLED_URL} if set.
      *
      * @return the URL
      */
     public static String jdbcUrl()
     {
-        return get().getJdbcUrl("postgres", "postgres");
+        return POOLED_URL != null ? POOLED_URL
+                : get().getJdbcUrl("postgres", "postgres");
     }
 }

@@ -8,15 +8,19 @@ package com.sdh.healthcare.connector.stage;
 
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
+import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
+import com.sdh.healthcare.connector.core.checkpoint.LeaseStatus;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeasedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,6 +43,9 @@ import org.slf4j.LoggerFactory;
  */
 public final class StageDuties implements AutoCloseable
 {
+
+    /** How often a fallback pod looks whether the lease is free. */
+    static final Duration FREE_POLL = Duration.ofSeconds(10);
 
     /** How long to wait before taking the lease again after an error. */
     static final Duration ERROR_PAUSE = Duration.ofSeconds(30);
@@ -155,6 +162,10 @@ public final class StageDuties implements AutoCloseable
     /** False once closing has begun. */
     private volatile boolean running = true;
 
+    /** Which pods take the lease, and when; set before {@link #start()}. */
+    private volatile StageProperties.Duties placement =
+            StageProperties.Duties.ANY;
+
     /** The duties' thread, once started. */
     private Thread thread;
 
@@ -225,6 +236,29 @@ public final class StageDuties implements AutoCloseable
         this.fatal = fatal;
     }
 
+    /**
+     * Sets which pods take the lease: by default any, at once. Called
+     * before {@link #start()}.
+     *
+     * @param duties the setting
+     * @return these duties
+     */
+    public StageDuties placed(StageProperties.Duties duties)
+    {
+        placement = Objects.requireNonNull(duties, "duties");
+        return this;
+    }
+
+    /**
+     * Which pods take the lease, and when.
+     *
+     * @return the setting
+     */
+    public StageProperties.Duties placement()
+    {
+        return placement;
+    }
+
     /** Starts waiting for the lease, on a thread of its own. */
     public synchronized void start()
     {
@@ -259,33 +293,29 @@ public final class StageDuties implements AutoCloseable
     }
 
     /**
-     * Waits for the lease, then does the duties until it is lost or the
-     * duties close.
+     * Waits for the lease, then does the duties until it is lost, a
+     * fallback holder hands it back, or the duties close.
      *
      * @throws InterruptedException if the duties are closing
      */
     private void holdAndRun() throws InterruptedException
     {
         CountDownLatch lost = new CountDownLatch(1);
-        LeaseKeeper lease;
-        try
+        Consumer<LeaseLostException> onLost = failure ->
         {
-            lease = LeaseKeeper.acquireAsStandby(leases, leaseName,
-                    LeaseKeeper.defaultOwner(), leaseSettings, failure ->
-                    {
-                        LOG.warn("stage.duties_lost stage={} reason={}",
-                                stage, failure.reason());
-                        lost.countDown();
-                    });
-        }
-        catch (LeaseHeldException held)
-        {
-            // Only an interrupted wait gives up.
-            throw new InterruptedException();
-        }
+            LOG.warn("stage.duties_lost stage={} reason={}", stage,
+                    failure.reason());
+            lost.countDown();
+        };
+        StageProperties.Duties duties = placement;
+        LeaseKeeper lease = duties.fallback() ? takeAsFallback(duties, onLost)
+                : takeAsStandby(onLost);
+        long handBackAt = duties.fallback()
+                ? System.nanoTime() + duties.handBackAfter().toNanos() : 0;
         try (lease)
         {
-            LOG.info("stage.duties_taken stage={}", stage);
+            LOG.info("stage.duties_taken stage={} fallback={}", stage,
+                    duties.fallback());
             MaintenanceScheduler scheduler = maintenance.create(
                     new LeasedCommitter(lease), reason ->
                     {
@@ -304,6 +334,14 @@ public final class StageDuties implements AutoCloseable
                 long nextReconcile = System.nanoTime();
                 while (running && lease.isHeld())
                 {
+                    if (handBackAt != 0 && System.nanoTime() - handBackAt >= 0)
+                    {
+                        // For the duties pod to take back, if it has come
+                        // back; if not, this or another fallback takes the
+                        // lease again once it has been free a while.
+                        LOG.info("stage.duties_handed_back stage={}", stage);
+                        return;
+                    }
                     runTask(sweeper, "claim_sweep", sweepInterval);
                     long now = System.nanoTime();
                     if (now - nextReconcile >= 0)
@@ -318,6 +356,10 @@ public final class StageDuties implements AutoCloseable
                     {
                         wait = Math.min(wait, sweepInterval.toNanos());
                     }
+                    if (handBackAt != 0)
+                    {
+                        wait = Math.min(wait, handBackAt - now);
+                    }
                     if (lost.await(Math.max(0, wait), TimeUnit.NANOSECONDS))
                     {
                         return;
@@ -325,6 +367,89 @@ public final class StageDuties implements AutoCloseable
                 }
             }
         }
+    }
+
+    /**
+     * Waits for the lease as a standby, taking it as soon as it is free.
+     *
+     * @param onLost told when the lease is lost
+     * @return the lease
+     * @throws InterruptedException if the duties are closing
+     */
+    private LeaseKeeper takeAsStandby(Consumer<LeaseLostException> onLost)
+            throws InterruptedException
+    {
+        try
+        {
+            return LeaseKeeper.acquireAsStandby(leases, leaseName,
+                    LeaseKeeper.defaultOwner(), leaseSettings, onLost);
+        }
+        catch (LeaseHeldException held)
+        {
+            // Only an interrupted wait gives up.
+            throw new InterruptedException();
+        }
+    }
+
+    /**
+     * Takes the lease as a fallback: only once it has been free, neither
+     * held nor renewed, for the setting's time, so that the duties pod,
+     * which takes it at once, has it whenever it is there.
+     *
+     * @param duties the setting
+     * @param onLost told when the lease is lost
+     * @return the lease
+     * @throws InterruptedException if the duties are closing
+     */
+    private LeaseKeeper takeAsFallback(StageProperties.Duties duties,
+            Consumer<LeaseLostException> onLost) throws InterruptedException
+    {
+        long freeSince = 0;
+        boolean free = false;
+        while (running)
+        {
+            boolean held;
+            try
+            {
+                held = leases.inspect(leaseName).map(LeaseStatus::live)
+                        .orElse(false);
+            }
+            catch (RuntimeException unreadable)
+            {
+                // Can't tell: as held, so the wait starts again.
+                held = true;
+            }
+            long now = System.nanoTime();
+            if (held)
+            {
+                free = false;
+            }
+            else if (!free)
+            {
+                free = true;
+                freeSince = now;
+            }
+            else if (now - freeSince >= duties.fallbackAfter().toNanos())
+            {
+                try
+                {
+                    LeaseKeeper lease = LeaseKeeper.tryAcquire(leases,
+                            leaseName, LeaseKeeper.defaultOwner(),
+                            leaseSettings, onLost);
+                    LOG.warn("stage.duties_fallback stage={} free_s={}",
+                            stage, Duration.ofNanos(now - freeSince)
+                                    .toSeconds());
+                    return lease;
+                }
+                catch (LeaseHeldException taken)
+                {
+                    free = false;
+                }
+            }
+            Thread.sleep(Math.min(FREE_POLL.toMillis(),
+                    Math.max(1, duties.fallbackAfter().toMillis() / 4)));
+        }
+        throw new InterruptedException();
     }
 
     /**

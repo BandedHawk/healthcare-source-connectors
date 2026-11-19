@@ -59,10 +59,10 @@ public final class CommittedRecords
     /** The most bytes a failed record's broker IDs may take, decrypted. */
     private static final int MAX_REFS_BYTES = 64 << 10;
 
-    /** The columns a {@link Row} is read from. */
     /** The most items {@link #withCorrections} asks for in one scan. */
     public static final int ITEMS_A_SCAN = 500;
 
+    /** The columns a {@link Row} is read from. */
     private static final String[] ROW_COLUMNS = {RECORD_ID, SEQ,
         SOURCE_OFFSET, SOURCE_LENGTH, FORMAT, CONTENT_TYPE, MAPPING,
         ERROR_CODE, PLAINTEXT_LENGTH, CHUNK_COUNT, INGESTED_AT, KEK_REF,

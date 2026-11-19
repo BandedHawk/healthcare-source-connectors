@@ -334,6 +334,21 @@ setup_database() {
     done
   done
   printf '%s\n' "$sql" | infra exec -i postgres-0 -- psql -q -v ON_ERROR_STOP=1 -U postgres -d sdh >/dev/null
+
+  # The same roles for PgBouncer (k8s/infra/state.yaml, DESIGN.md revision (ea)), which the stages connect
+  # through: it checks each client's password and logs in to Postgres as that role. A change restarts it.
+  local users="" digest
+  for p in $PIPELINES; do
+    for role in landing splitter convert fhir; do
+      users+="\"${role}_$(prefix "$p")\" \"$(secret "db-$role-$p")\""$'\n'
+    done
+  done
+  printf '%s' "$users" | infra create secret generic pgbouncer-users --from-file=userlist.txt=/dev/stdin \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  digest="$(printf '%s' "$users" | sha256sum | cut -c1-16)"
+  infra patch deployment/pgbouncer --type merge \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"sdh.poc/users\":\"$digest\"}}}}}" >/dev/null
+  infra rollout status deployment/pgbouncer --timeout=300s >/dev/null || die "PgBouncer didn't start"
 }
 
 pipeline_namespaces() {

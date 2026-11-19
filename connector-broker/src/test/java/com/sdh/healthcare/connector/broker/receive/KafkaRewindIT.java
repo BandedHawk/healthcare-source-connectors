@@ -270,7 +270,118 @@ class KafkaRewindIT
     }
 
     /**
-     * The route's settings on a test broker.
+     * A batch that fails after Camel's batching consumer has taken in more
+     * of its poll leaves those later records in Camel's next batch, which
+     * comes alone once the batching interval has passed: they are left,
+     * not handled and committed, until the records sought back come again
+     * (STAGES.md §10, found 2026-11-19 after run 49). Handled and
+     * committed first, they moved the partition's commit past the records
+     * still to come again, which a rebalance then lost: their new owner
+     * started past them.
+     *
+     * @throws Exception if the test fails
+     */
+    @Test
+    void aBatchFailedMidPollIsNotPassedByTheRestOfThePoll() throws Exception
+    {
+        try (KafkaContainer kafka = new KafkaContainer("apache/kafka:4.2.2"))
+        {
+            kafka.start();
+            Properties config = new Properties();
+            config.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+                    kafka.getBootstrapServers());
+            try (Admin admin = Admin.create(config))
+            {
+                admin.createTopics(List.of(new NewTopic(TOPIC, 1, (short) 1)))
+                        .all().get();
+                AtomicInteger batches = new AtomicInteger();
+                List<Long> committedWhenRedone = Collections.synchronizedList(
+                        new ArrayList<>());
+                ReceiveSettings settings = settings(kafka, "",
+                        Duration.ofSeconds(1));
+                try (DefaultCamelContext camel = new DefaultCamelContext())
+                {
+                    camel.addRoutes(new CamelReceiveRoute(ROUTE, settings,
+                            messages ->
+                            {
+                                List<String> bodies = new ArrayList<>();
+                                for (BrokerMessage message : messages)
+                                {
+                                    bodies.add(new String(message.body(),
+                                            UTF_8));
+                                }
+                                if (batches.getAndIncrement() == 0)
+                                {
+                                    // Slow, as a batch whose commit fails
+                                    // is: Camel's interval passes meanwhile.
+                                    Thread.sleep(1500);
+                                    givenUp.addAll(bodies);
+                                    return BatchHandler.Outcome.RETRY;
+                                }
+                                if (bodies.contains("r-0"))
+                                {
+                                    committedWhenRedone.add(committed(admin)
+                                            .getOrDefault(0, 0L));
+                                }
+                                handled.addAll(bodies);
+                                return BatchHandler.Outcome.DONE;
+                            }, Duration.ofMillis(50), Duration.ofMillis(200)));
+                    camel.start();
+                    camel.getRouteController().startRoute(ROUTE);
+                    await(() -> assigned(admin) == 1, "the partition assigned");
+                    // Four in Camel's batch, then ten in one poll: the batch
+                    // fills at the sixth, and four are left in Camel's next.
+                    sendOne(config, 0, 4);
+                    Thread.sleep(300);
+                    sendOne(config, 4, 10);
+                    await(() -> handled.size() >= 14, "every record handled");
+                    assertThat(givenUp).startsWith("r-0");
+                    assertThat(committedWhenRedone).as("the commit before the"
+                            + " records sought back came again").isNotEmpty()
+                            .first().isEqualTo(0L);
+                    await(() -> committed(admin).equals(Map.of(0, 14L)),
+                            "the partition committed to its end");
+                }
+            }
+        }
+    }
+
+    /**
+     * Sends records to the first partition, together, so that one poll
+     * takes them all.
+     *
+     * @param config the broker's address
+     * @param from   the first record's number
+     * @param count  how many
+     * @throws Exception if one isn't taken
+     */
+    static void sendOne(Properties config, int from, int count)
+            throws Exception
+    {
+        Properties producing = new Properties();
+        producing.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
+                config.get(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG));
+        producing.put(ProducerConfig.LINGER_MS_CONFIG, "100");
+        try (KafkaProducer<String, byte[]> producer = new KafkaProducer<>(
+                producing, new StringSerializer(), new ByteArraySerializer()))
+        {
+            List<java.util.concurrent.Future<?>> sent = new ArrayList<>();
+            for (int seq = from; seq < from + count; seq++)
+            {
+                sent.add(producer.send(new ProducerRecord<>(TOPIC, 0, "k",
+                        ("r-" + seq).getBytes(UTF_8))));
+            }
+            producer.flush();
+            for (java.util.concurrent.Future<?> one : sent)
+            {
+                one.get();
+            }
+        }
+    }
+
+    /**
+     * The route's settings on a test broker, with Camel's batching
+     * interval of 500 ms.
      *
      * @param kafka the broker
      * @param more  more URI options, each from {@code &}
@@ -278,14 +389,28 @@ class KafkaRewindIT
      */
     static ReceiveSettings settings(KafkaContainer kafka, String more)
     {
+        return settings(kafka, more, Duration.ofMillis(500));
+    }
+
+    /**
+     * The route's settings on a test broker.
+     *
+     * @param kafka    the broker
+     * @param more     more URI options, each from {@code &}
+     * @param interval how long Camel's batching consumer waits to fill a
+     *                 batch
+     * @return the settings
+     */
+    static ReceiveSettings settings(KafkaContainer kafka, String more,
+            Duration interval)
+    {
         return ReceiveSettings.of(
                 new ReceiveProperties("kafka", "kafka:" + TOPIC
                         + "?brokers=" + kafka.getBootstrapServers()
                         + "&groupId=" + GROUP
                         + "&autoOffsetReset=earliest" + more,
                         new ReceiveProperties.Batch(10,
-                                DataSize.ofKilobytes(64),
-                                Duration.ofMillis(500)),
+                                DataSize.ofKilobytes(64), interval),
                         Duration.ofSeconds(30),
                         new ReceiveProperties.Rabbitmq(null, "/",
                                 null, null, false),

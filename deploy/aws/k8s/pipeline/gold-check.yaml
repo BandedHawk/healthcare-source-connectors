@@ -63,7 +63,7 @@ spec:
             - { name: GOLD_WAREHOUSE, value: "s3://${GOLD_BUCKET}/warehouse" }
             - { name: SILVER_CATALOG, value: sdh }
             - { name: SILVER_WAREHOUSE, value: "s3://${SILVER_BUCKET}/warehouse" }
-            - { name: CATALOG_URI, value: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh" }
+            - { name: CATALOG_URI, value: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh" }
             - { name: CATALOG_USER, value: "gold_reader_${ICEBERG_PREFIX}" }
             - { name: KAFKA_BROKERS, value: "${KAFKA_BROKERS}" }
             - { name: TOPIC, value: "${PIPELINE}.fhir" }

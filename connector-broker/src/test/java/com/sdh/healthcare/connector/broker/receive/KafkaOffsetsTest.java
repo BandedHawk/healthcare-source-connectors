@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.apache.camel.CamelContext;
 import org.apache.camel.Exchange;
 import org.apache.camel.component.kafka.KafkaConstants;
@@ -20,6 +21,7 @@ import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
 import org.apache.camel.component.kafka.consumer.KafkaManualCommitFactory;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.camel.support.DefaultExchange;
+import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.MockConsumer;
 import org.apache.kafka.common.TopicPartition;
@@ -49,8 +51,10 @@ class KafkaOffsetsTest
     final CamelContext camel = new DefaultCamelContext();
 
     /** The consumer the records were polled by. */
-    final MockConsumer<Object, Object> consumer =
-            new MockConsumer<>("earliest");
+    final GroupConsumer consumer = new GroupConsumer();
+
+    /** The partitions sought back, as the polling thread keeps them. */
+    final KafkaOffsets.Rewound rewound = new KafkaOffsets.Rewound();
 
     /** The offsets committed, in order: partition, then offset. */
     final List<String> committed = new ArrayList<>();
@@ -136,7 +140,7 @@ class KafkaOffsetsTest
     void rewindsEachPartitionToThePollsStart()
     {
         assignedPastThePoll(P0, P1);
-        assertThat(KafkaOffsets.rewind(poll())).isEqualTo(2);
+        assertThat(KafkaOffsets.rewind(poll(), rewound)).isEqualTo(2);
         assertThat(consumer.position(P0)).isEqualTo(5);
         assertThat(consumer.position(P1)).isEqualTo(7);
         assertThat(committed).isEmpty();
@@ -150,8 +154,100 @@ class KafkaOffsetsTest
     void leavesAPartitionNoLongerAssigned()
     {
         assignedPastThePoll(P1);
-        assertThat(KafkaOffsets.rewind(poll())).isEqualTo(1);
+        assertThat(KafkaOffsets.rewind(poll(), rewound)).isEqualTo(1);
         assertThat(consumer.position(P1)).isEqualTo(7);
+    }
+
+    /**
+     * Once a partition is sought back, the later records Camel took in
+     * before the seek are left, and the earlier ones kept, until the
+     * record it was sought back to comes again; another partition is
+     * untouched. Then nothing more is left.
+     */
+    @Test
+    void leavesTheRecordsTakenInPastARewind()
+    {
+        assignedPastThePoll(P0, P1);
+        KafkaOffsets.rewind(List.of(record(P0, 5), record(P0, 6)), rewound);
+        assertThat(rewound.pending()).isEqualTo(Map.of(P0, 5L));
+        List<Exchange> later = List.of(record(P0, 7), record(P1, 7),
+                record(P0, 8));
+        assertThat(offsets(KafkaOffsets.current(later, rewound)))
+                .containsExactly(TOPIC + "-1@7");
+        List<Exchange> again = List.of(record(P0, 4), record(P0, 5),
+                record(P0, 6), record(P0, 7));
+        assertThat(offsets(KafkaOffsets.current(again, rewound)))
+                .containsExactly(TOPIC + "-0@4", TOPIC + "-0@5",
+                        TOPIC + "-0@6", TOPIC + "-0@7");
+        assertThat(rewound.pending()).isEmpty();
+        assertThat(KafkaOffsets.current(later, rewound)).hasSize(3);
+    }
+
+    /**
+     * Two rewinds of a partition wait for the earlier record; a partition
+     * that couldn't be sought back isn't waited on.
+     */
+    @Test
+    void waitsForTheEarliestRecordSoughtBack()
+    {
+        assignedPastThePoll(P0);
+        KafkaOffsets.rewind(List.of(record(P0, 6)), rewound);
+        KafkaOffsets.rewind(List.of(record(P0, 5), record(P1, 7)), rewound);
+        assertThat(rewound.pending()).isEqualTo(Map.of(P0, 5L));
+    }
+
+    /**
+     * After a rebalance, a partition no longer assigned, or whose position
+     * is past the record sought back to, is no longer waited on: its
+     * records come from its committed offset, wherever that is.
+     */
+    @Test
+    void stopsWaitingAfterARebalance()
+    {
+        assignedPastThePoll(P0, P1);
+        KafkaOffsets.rewind(poll(), rewound);
+        consumer.assign(List.of(P1));
+        consumer.seek(P1, 9);
+        consumer.generation++;
+        assertThat(KafkaOffsets.current(List.of(record(P1, 9)), rewound))
+                .hasSize(1);
+        assertThat(rewound.pending()).isEmpty();
+    }
+
+    /**
+     * The partitions and offsets of some records.
+     *
+     * @param records the records
+     * @return each as {@code <topic>-<partition>@<offset>}
+     */
+    static List<String> offsets(List<Exchange> records)
+    {
+        return records.stream().map(record -> record.getMessage()
+                .getHeader(KafkaConstants.TOPIC) + "-"
+                + record.getMessage().getHeader(KafkaConstants.PARTITION)
+                + "@" + record.getMessage().getHeader(KafkaConstants.OFFSET))
+                .toList();
+    }
+
+    /** A mock consumer whose group generation a test moves on. */
+    static final class GroupConsumer extends MockConsumer<Object, Object>
+    {
+
+        /** The group's generation. */
+        int generation = 1;
+
+        /** Creates the consumer, reset to the earliest offset. */
+        GroupConsumer()
+        {
+            super("earliest");
+        }
+
+        @Override
+        public synchronized ConsumerGroupMetadata groupMetadata()
+        {
+            return new ConsumerGroupMetadata("group", generation, "member",
+                    Optional.empty());
+        }
     }
 
     /** Records the commits Camel's per-record commits force. */

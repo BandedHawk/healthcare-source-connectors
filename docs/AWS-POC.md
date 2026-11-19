@@ -147,7 +147,8 @@
                        transform (KEDA 1..4, concurrency 2)
                           │  gold: sdh_fhir.fhir
                           ▼  Kafka <p>.fhir (1)   + DLQs, results
- Iceberg catalog: JDBC on the Postgres pod  ·  data: S3 (SSE-KMS)  ·  keys: AWS KMS
+ Iceberg catalog: JDBC on the Postgres pod, through PgBouncer  ·  data: S3 (SSE-KMS)  ·  keys: AWS KMS
+ duties: a pod a scaled stage (<stage>-duties) on the on-demand duties node
 ```
 
 ## 3. Two layers, so it can be shut down
@@ -226,7 +227,7 @@ month, so the forecast alert catches it within days. Lowered from $250 on 2026-1
 | Concern | Choice | Rejected, and why |
 |---|---|---|
 | Kubernetes | EKS 1.37, standard support only (`upgrade_policy`: a version in extended support costs $0.60/hour) | k3s on EC2: no control-plane fee, but no second node for landing's standby |
-| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, plus `burst-a`, `-b` and `-c`, one a zone, 0–6 Spot in all (five arm64 `.large` types, not `t4g`, whose surplus credits make it the dearest busy node: PERFORMANCE.md §10; on demand with `--on-demand-burst`), with Cluster Autoscaler (`--max-nodes-total=8`). One group a zone since 2026-11-18 (DESIGN.md revision (dv)): a group over three zones let Auto Scaling end busy nodes to rebalance its zones, without a drain | Karpenter or Auto Mode: more to set up, or a fee on every instance |
+| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, `duties`, one more for the stages' duties pods (since revision (dz)), plus `burst-a`, `-b` and `-c`, one a zone, 0–6 Spot in all (five arm64 `.large` types, not `t4g`, whose surplus credits make it the dearest busy node: PERFORMANCE.md §10; on demand with `--on-demand-burst`), with Cluster Autoscaler (`--max-nodes-total=9`). Managed Spot groups replace a node at risk of reclaim (Capacity Rebalance, which can't be turned off for them): run 49's 25 burst nodes shut down two at a time, and the stages now take that in their stride (revisions (dy), (dz)); self-managed groups or Karpenter could turn it off. One group a zone since 2026-11-18 (DESIGN.md revision (dv)): a group over three zones let Auto Scaling end busy nodes to rebalance its zones, without a drain | Karpenter or Auto Mode: more to set up, or a fee on every instance |
 | Postgres | `postgres:18.4` StatefulSet on a kept 10 GiB gp3 volume, snapshotted at each `down` | RDS: restarts itself after 7 days stopped, and is a second start/stop. Aurora Serverless v2: dearer while running. |
 | Kafka | 1 KRaft broker (`apache/kafka:4.2.2`) on a kept 10 GiB volume, RF 1 | MSK: ≥ $100/month, or about $540/month serverless |
 | Iceberg catalog | JDBC on that Postgres (tested) | Glue: not supported by the code. S3 Tables, Polaris: untested, or one more pod |
@@ -248,20 +249,29 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 | convert | KEDA 1–3 | 400m | 1.25 Gi | `<p>.split`, 48 partitions, lag 5, results off |
 | transform | KEDA 1–4 | 1600m | 2 Gi | `<p>.records`, 48 partitions, concurrency 4, 2 consumers, lag 5, results off (below) |
 | kafka | 1 | 200m | 768 Mi | heap 384 MiB, as in the sandbox |
-| postgres | 1 | 100m | 512 Mi | as in the sandbox |
+| postgres | 1 | 500m | 2 Gi | `max_connections` 300; 2 GiB since 2026-11-17 (512 MiB ran out at 200 backends) |
+| pgbouncer | 1 | 100m | 128 Mi limit | beside Postgres; every client connects through it, transaction pooling, at most 220 server connections (DESIGN.md revision (ea)) |
+| splitter-, convert-, transform-*-duties | 1 each; never KEDA | 250m each | 1.5, 1 and 2 Gi | `SDH_STAGE_DUTIES_ONLY=true`: the duties alone, no input; required onto the duties node (revision (dz)) |
 | KEDA (3 pods), Cluster Autoscaler, CoreDNS, CNI, EBS CSI, Pod Identity agent | — | ~0.5 | ~1.5 Gi | — |
 | otel-collector, prometheus | 1 each | 150m | 768 Mi | the stages' metrics for measure.sh (docs/PERFORMANCE.md §10); Prometheus on an emptyDir, so lost at `down` |
 
 - The scaled stages tolerate the `sdh-poc/burst` taint and prefer the base nodes; everything else runs on the base
   nodes only. They have 90 s to stop (DESIGN.md revision (dv)), within a Spot reclaim's two minutes' notice, to
-  finish the batch in hand and hand back its claims and any duties lease. Their duties can still be on a Spot
-  node: pinning them to the base nodes would need a third base node (revision (dv)).
+  finish the batch in hand and hand back its claims and any duties lease. Since revision (dz) their duties are
+  their duties pods', on a third on-demand node (`aws_eks_node_group.duties`, t4g.large, tainted
+  `sdh-poc/duties`, in the second zone), so a Spot reclaim no longer moves them; the stage pods take them up only
+  once the duties lease has been free 3 minutes (`SDH_STAGE_DUTIES_FALLBACKAFTER`), as when the duties node is
+  lost and its group replaces it, and hand them back after 30. The Cluster Autoscaler's cap counts the duties
+  node (`--max-nodes-total=9`), and the on-demand vCPU quota must cover it (2 more vCPUs).
 - Producer results are off at every stage, changed from "on at transform" on 2026-11-12: with a bucket intake no
   producer listens for them, and they would need a producer key pair and a results topic. Turn them on at the
   transform stage only if a test needs them (its README).
 - The landing pods have no readiness port (a bucket intake opens none), so `apply.sh` tells the active node from
   the standby by its `lease.acquired` audit event.
-- Postgres and Kafka run on the base node in us-east-2a, where their volumes are.
+- Postgres and Kafka run on the base node in us-east-2a, where their volumes are; PgBouncer beside them. Every
+  stage, its Iceberg catalog clients and the gold check connect to `pgbouncer.sdh-infra.svc:5432`, never to
+  Postgres itself (`check-config.sh` checks it); psql and `poc.sh` go to Postgres directly. PgBouncer's users
+  are the stages' roles, written by `poc.sh` (`setup_database`) to the secret `pgbouncer-users`.
 
 **Totals:**
 - At rest, about 10.8 GiB and 5.45 vCPU requested: more CPU than the two base nodes have (about 14 GiB and 3.86
@@ -269,6 +279,8 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
   pod asks for 1.6. What runs only on the base nodes asks for about 2.45 vCPU (landing 2 × 0.75, Kafka, Postgres,
   the system pods, the collector), so 1.4 is left there for split's and convert's resting pods (0.9 and 0.4);
   landing asked for 0.25 a pod until 2026-11-16 (docs/PERFORMANCE.md §3.4).
+- The duties node holds the three duties pods alone: 4.5 GiB and 0.75 vCPU of its ~6.9 GiB and ~1.9 vCPU
+  (revision (dz)); the totals here leave it out.
 - At the maximum, about 23.3 GiB and 13.4 vCPU, which needs up to five Spot burst nodes (six allowed): the
   stages ask for the CPU they use under load (split 0.9, transform 1.6, convert 0.4 a pod;
   [PERFORMANCE.md](PERFORMANCE.md) §10), split runs up to 3 pods and transform up to 4.
