@@ -98,7 +98,7 @@ stage before sends again after a crash. So each stage keeps a registry in Postgr
 `stage_record(stage, record_id, item_id, state, output_digest, owner, claim_expires, stored_at)`, primary key
 `(stage, record_id)`. For each record a worker (as built in step 3):
 1. **claims** the record first: insert-if-absent, as `CLAIMED` with its own owner and an expiry, renewed while it
-   works. A claim taken over from a worker that let it expire counts one more attempt, which the processor is
+   works (only while a batch of its worker has the record, since revision (dx)). A claim taken over from a worker that let it expire counts one more attempt, which the processor is
    told, so a record that keeps stopping workers can be stored unprocessed (§9);
 2. if the claim is its own: does the work, commits it with the rest of the batch, then marks it `STORED` (only if
    it still owns the claim) with the record's sealed message, sends the message, marks it `SENT` (dropping the
@@ -542,7 +542,14 @@ The sandbox gets the KEDA operator, the stages as scaled deployments, and topics
   duties over from a holder that ran lately skips the reconciler's wait at startup (§9). And then (revision (dw),
   2026-11-19): run 47's sweep took about 20 s an item, two scans of the source table an item and a batch an item,
   so the last 85 items reached gold over 30 minutes; a sweep, and a reconcile run, now read every item they need
-  in one scan and hand the records in several items a batch.
+  in one scan and hand the records in several items a batch. And (revision (dx), 2026-11-19, after run 49): a
+  worker renewed every claim it owned, so a record left claimed after a batch failed (run 49: Iceberg's
+  `CommitFailedException` on the gold commit), whose message then came back elsewhere or not at all, stayed claimed
+  for as long as its pod lived, out of the sweep's reach; run 49's last 10 items waited on such claims until their
+  pod stopped. Now a worker renews only the claims of records in the batches and corrections it is running
+  (`StageWorker` counts them), and a batch or correction that fails releases its claims at once, logged
+  `stage.batch_claims_released`. The worker its messages come back to takes them over straight away, and if they
+  don't come back, the sweep hands them in within the claim's time and a sweep or two.
 
 ## 11. Order of work
 

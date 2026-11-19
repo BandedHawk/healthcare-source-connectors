@@ -1273,6 +1273,20 @@ What it showed, beyond §2's predictions:
   with the tail. Run 48 (35 a second, 21,000): all to gold in 652 s, p50 / p95 / p99 35 / 135 / 168 s (131 in
   run 44), $29 a million (the scaled-out maxima at a third of the load). Both runs' load test ended with 1 from
   its exit trap under `set -e`, leaving the staged copies in S3 (fixed).
+- **Revision (dw) at 100 a second, 2026-11-19 (run 49, the maxima of run 47):** nothing lost; every item landed
+  once and reached gold; no container restarted; no `stage.claims_left`. 89,990 in gold by 1,631 s, 55.2 documents
+  a second by run 47's measure (51.8), 47.7 from first landed to last in gold; landed → gold p50 / p95 / p99
+  254 / 863 / 1,032 s (268 / – / 1,101); 37 nodes at most; $15 a million (31). Postgres connections at most 241.
+  The tail is down from 30 minutes to about 4.5: the last 10 items, all at transform and all claimed by one pod,
+  reached gold at 1,901 s. Five sweeps handed in 146 expired claims (43, 23, 47, 23, 10), each sweep in one batch
+  (its 10 to 47 audit lines within 8 ms) with `left=0`; one sweep was cut short when its duties pod stopped at
+  scale-in, and the next holder swept 2 minutes later. **Why the last 10 waited:** their pod had two batches
+  fail on Iceberg's `CommitFailedException` (05:33 and 05:37), then sat idle from 05:41 while still holding the
+  10 claims, until it stopped at 05:44 and released them; the sweep took them 2.7 minutes later. A worker renews
+  every claim it owns (`StageRegistry.renew`), not only those of records in a batch it is running, so a record
+  left claimed after a failed batch, whose message came back elsewhere or not at all, stays claimed while its pod
+  lives, out of the sweep's reach. That is likely run 47's 30-minute tail too. Who acknowledged the 10 messages
+  without storing them is still not traced; transform logs no claim per record.
 
 ## 11. Order of work
 

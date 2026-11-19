@@ -726,27 +726,93 @@ public final class StageRegistry
     }
 
     /**
-     * Renews every live claim this worker holds.
+     * Renews this worker's claims of the records given: those in the
+     * batches it is running now (STAGES.md §10, revised 2026-11-19). A
+     * claim it holds of any other record, one left by a batch that failed
+     * or whose messages came back elsewhere, is not renewed, so it expires
+     * and the sweep of expired claims hands its record in again; renewing
+     * every claim kept such records out of the sweep's reach for as long
+     * as the pod lived (docs/PERFORMANCE.md §10, run 49).
      *
-     * @param ttl how long they last from now
+     * @param ttl  how long they last from now
+     * @param keys the records
      * @return how many were renewed
      * @throws IllegalStateException if the database can't be reached
      */
-    public int renew(Duration ttl)
+    public int renew(Duration ttl, Collection<Key> keys)
     {
-        String sql = """
-                UPDATE %s
+        if (keys.isEmpty())
+        {
+            return 0;
+        }
+        return updateClaims("""
+                UPDATE %s r
                    SET claim_expires = clock_timestamp()
                                        + ? * interval '1 millisecond'
-                 WHERE stage = ? AND owner = ? AND state = 'CLAIMED'"""
-                .formatted(records);
+                  FROM unnest(?::uuid[], ?::text[]) AS k(item_id, record_id)
+                 WHERE r.item_id = k.item_id AND r.record_id = k.record_id
+                   AND r.stage = ? AND r.owner = ? AND r.state = 'CLAIMED'"""
+                .formatted(records), ttl.toMillis(), keys);
+    }
+
+    /**
+     * Ends this worker's live claims of the records given now, rather than
+     * when they would expire: those of a batch that failed, so that the
+     * worker its messages come back to takes them over at once, and the
+     * sweep hands them in if they don't come back. A stored record and
+     * another worker's claim are left alone.
+     *
+     * @param keys the records
+     * @return how many were released
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public int release(Collection<Key> keys)
+    {
+        if (keys.isEmpty())
+        {
+            return 0;
+        }
+        return updateClaims("""
+                UPDATE %s r
+                   SET claim_expires = clock_timestamp()
+                                       + ? * interval '1 millisecond'
+                  FROM unnest(?::uuid[], ?::text[]) AS k(item_id, record_id)
+                 WHERE r.item_id = k.item_id AND r.record_id = k.record_id
+                   AND r.stage = ? AND r.owner = ? AND r.state = 'CLAIMED'
+                   AND r.claim_expires > clock_timestamp()"""
+                .formatted(records), 0, keys);
+    }
+
+    /**
+     * Updates this worker's claims of some records.
+     *
+     * @param sql    the update: the milliseconds to add to now, the item
+     *               and record IDs as arrays, the stage and the owner
+     * @param millis the milliseconds to add to now
+     * @param keys   the records
+     * @return how many were updated
+     * @throws IllegalStateException if the database can't be reached
+     */
+    private int updateClaims(String sql, long millis, Collection<Key> keys)
+    {
+        List<UUID> itemIds = new ArrayList<>(keys.size());
+        List<String> recordIds = new ArrayList<>(keys.size());
+        for (Key key : keys)
+        {
+            itemIds.add(key.itemId());
+            recordIds.add(key.recordId());
+        }
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement update = connection.prepareStatement(sql))
         {
             update.setQueryTimeout(queryTimeoutSeconds);
-            update.setLong(1, ttl.toMillis());
-            update.setString(2, stage);
-            update.setString(3, owner);
+            update.setLong(1, millis);
+            update.setArray(2, connection.createArrayOf("uuid",
+                    itemIds.toArray()));
+            update.setArray(3, connection.createArrayOf("text",
+                    recordIds.toArray()));
+            update.setString(4, stage);
+            update.setString(5, owner);
             return update.executeUpdate();
         }
         catch (SQLException failure)

@@ -13,7 +13,7 @@ spec:
   scaleTargetRef: { name: splitter }
   minReplicaCount: 1
   # 3 pods × 8 consumers: the 24 partitions (docs/PERFORMANCE.md §10, 2026-11-14: split, at 2, set the pace).
-  maxReplicaCount: 6
+  maxReplicaCount: 3
   pollingInterval: 15
   cooldownPeriod: 120
   advanced:
@@ -35,7 +35,7 @@ metadata: { name: convert, namespace: ${K8S_NS} }
 spec:
   scaleTargetRef: { name: convert }
   minReplicaCount: 1
-  maxReplicaCount: 12
+  maxReplicaCount: 3
   pollingInterval: 15
   cooldownPeriod: 120
   advanced:
@@ -57,7 +57,7 @@ metadata: { name: transform-${PIPELINE}, namespace: sdh-fhir }
 spec:
   scaleTargetRef: { name: transform-${PIPELINE} }
   minReplicaCount: 1
-  maxReplicaCount: 18
+  maxReplicaCount: 4
   pollingInterval: 15
   cooldownPeriod: 120
   advanced:

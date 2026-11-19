@@ -921,6 +921,34 @@ class StageWorkerTest
     }
 
     /**
+     * A batch that fails releases its claims at once, though its worker
+     * runs on: another worker its messages come to takes them over, as
+     * second attempts, rather than waiting on claims the first would
+     * otherwise renew for as long as it ran (docs/PERFORMANCE.md §10, run
+     * 49). The first worker renews no claim once no batch has it.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void releasesAFailedBatchsClaimsAtOnce() throws InterruptedException
+    {
+        StageTestSupport.TestProcessor failing = processor();
+        failing.failures.set(1);
+        StageWorker<String> first = worker("pod-a", failing);
+        assertThat(first.handle(batch(3)))
+                .isEqualTo(BatchHandler.Outcome.RETRY);
+        assertThat(audit.names()).contains("stage.batch_failed");
+        StageTestSupport.TestProcessor processor = processor();
+        long start = System.nanoTime();
+        assertThat(worker("pod-b", processor).handle(batch(3)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(Duration.ofNanos(System.nanoTime() - start))
+                .isLessThan(Duration.ofSeconds(10));
+        assertThat(committed).hasSize(3);
+        assertThat(processor.attempts.values()).containsOnly(2);
+    }
+
+    /**
      * A worker closed with records claimed but not stored releases them:
      * another worker takes them over at once, as second attempts, rather
      * than after the claims' 30 seconds.

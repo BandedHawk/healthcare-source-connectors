@@ -119,7 +119,8 @@ class StageRegistryTest
 
     /**
      * A claim left to expire is taken over, with one more attempt; one
-     * renewed stays its owner's.
+     * renewed stays its owner's. Only the claims asked for are renewed,
+     * and only the owner's: one the worker isn't working on expires.
      *
      * @throws InterruptedException if interrupted
      */
@@ -128,8 +129,11 @@ class StageRegistryTest
     {
         first.claim("r1", item, BRIEF);
         first.claim("r2", item, BRIEF);
-        assertThat(first.renew(LONG)).isEqualTo(2);
         first.claim("r3", item, BRIEF);
+        assertThat(second.renew(LONG, List.of(key("r1")))).isZero();
+        assertThat(first.renew(LONG, List.of(key("r1"), key("r2"),
+                key("r4")))).isEqualTo(2);
+        assertThat(first.renew(LONG, List.of())).isZero();
         Thread.sleep(50);
         assertThat(second.claim("r1", item, LONG))
                 .isInstanceOf(StageRegistry.Busy.class);
@@ -158,6 +162,31 @@ class StageRegistryTest
         assertThat(first.claim("r3", item, LONG))
                 .isInstanceOf(StageRegistry.Busy.class);
         assertThat(first.release()).isZero();
+    }
+
+    /**
+     * A failed batch's claims are released at once, and only those: not
+     * the worker's other claims, a stored record, or another worker's
+     * claim. A released claim is taken over with one more attempt.
+     */
+    @Test
+    void releasesTheClaimsOfAFailedBatch()
+    {
+        first.claim("r1", item, LONG);
+        first.claim("r2", item, LONG);
+        first.claim("r3", item, LONG);
+        first.store(List.of(entry("r3", false)));
+        second.claim("r4", item, LONG);
+        assertThat(first.release(List.of(key("r1"), key("r3"), key("r4"))))
+                .isEqualTo(1);
+        assertThat(first.release(List.of(key("r1")))).isZero();
+        assertThat(first.release(List.of())).isZero();
+        assertThat(second.claim("r1", item, LONG))
+                .isEqualTo(new StageRegistry.Owned(2));
+        assertThat(second.claim("r2", item, LONG))
+                .isInstanceOf(StageRegistry.Busy.class);
+        assertThat(first.claim("r4", item, LONG))
+                .isInstanceOf(StageRegistry.Busy.class);
     }
 
     /**

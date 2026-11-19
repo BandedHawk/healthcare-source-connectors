@@ -127,6 +127,14 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     /** Renews this worker's claims. */
     private final ScheduledExecutorService renewer;
 
+    /**
+     * The records in the batches and corrections this worker is running
+     * now, each with how many of them have it: only their claims are
+     * renewed, so a claim left by one that failed expires (STAGES.md §10,
+     * revised 2026-11-19). Guarded by itself.
+     */
+    private final Map<StageRegistry.Key, Integer> inFlight = new HashMap<>();
+
     /** Looks again at items whose failures changed (STAGES.md §15.3). */
     private final ScheduledExecutorService revisiter;
 
@@ -460,10 +468,23 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             for (CorrectionStore.Pending pending : registry
                     .correctionStore().pending(CORRECTION_LIMIT))
             {
-                if (registry.claim(pending.claimId(), pending.itemId(),
-                        settings.claimTtl()) instanceof StageRegistry.Owned)
+                List<StageRegistry.Key> key = List.of(new StageRegistry.Key(
+                        pending.itemId(), pending.claimId()));
+                hold(key);
+                boolean applied = false;
+                try
                 {
-                    applyCorrection(pending);
+                    if (registry.claim(pending.claimId(), pending.itemId(),
+                            settings.claimTtl())
+                            instanceof StageRegistry.Owned)
+                    {
+                        applyCorrection(pending);
+                    }
+                    applied = true;
+                }
+                finally
+                {
+                    letGo(key, !applied);
                 }
             }
         }
@@ -537,18 +558,94 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     }
 
     /**
-     * Renews this worker's claims. A failure is logged and tried again at
-     * the next interval; claims last several intervals.
+     * Renews this worker's claims of the records it is working on now. A
+     * failure is logged and tried again at the next interval; claims last
+     * several intervals.
      */
     private void renew()
     {
         try
         {
-            registry.renew(settings.claimTtl());
+            registry.renew(settings.claimTtl(), working());
         }
         catch (RuntimeException failure)
         {
             LOG.warn("stage.claims_not_renewed stage={}", processor.stage());
+        }
+    }
+
+    /**
+     * The records this worker is working on now.
+     *
+     * @return a copy of them
+     */
+    private Set<StageRegistry.Key> working()
+    {
+        synchronized (inFlight)
+        {
+            return Set.copyOf(inFlight.keySet());
+        }
+    }
+
+    /**
+     * Notes records as being worked on, before any of them is claimed, so
+     * that their claims are renewed.
+     *
+     * @param keys the records
+     */
+    private void hold(Collection<StageRegistry.Key> keys)
+    {
+        synchronized (inFlight)
+        {
+            for (StageRegistry.Key key : keys)
+            {
+                inFlight.merge(key, 1, Integer::sum);
+            }
+        }
+    }
+
+    /**
+     * Notes records as no longer being worked on, once their batch or
+     * correction has ended. If it failed, this worker's claims of those no
+     * other of its batches has are released at once: the worker their
+     * messages come back to takes them over, and if they don't come back,
+     * the sweep of expired claims hands them in (STAGES.md §10). A failure
+     * to release is logged; the claims then expire, no longer renewed.
+     *
+     * @param keys   the records
+     * @param failed whether it failed
+     */
+    private void letGo(Collection<StageRegistry.Key> keys, boolean failed)
+    {
+        List<StageRegistry.Key> free = new ArrayList<>(keys.size());
+        synchronized (inFlight)
+        {
+            for (StageRegistry.Key key : keys)
+            {
+                if (inFlight.merge(key, -1, Integer::sum) <= 0)
+                {
+                    inFlight.remove(key);
+                    free.add(key);
+                }
+            }
+        }
+        if (!failed || free.isEmpty())
+        {
+            return;
+        }
+        try
+        {
+            int released = registry.release(free);
+            if (released > 0)
+            {
+                LOG.info("stage.batch_claims_released stage={} count={}",
+                        processor.stage(), released);
+            }
+        }
+        catch (RuntimeException failure)
+        {
+            LOG.warn("stage.batch_claims_not_released stage={} count={}",
+                    processor.stage(), free.size());
         }
     }
 
@@ -735,6 +832,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     private Outcome run(List<Opened> batch) throws InterruptedException
     {
         long started = System.nanoTime();
+        Set<StageRegistry.Key> held = Set.of();
+        boolean done = false;
         try
         {
             Map<StageRegistry.Key, Pending> records =
@@ -785,6 +884,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                                                     unwanted.reason()));
                 }
             }
+            held = Set.copyOf(records.keySet());
+            hold(held);
             List<Pending> waiting = new ArrayList<>(records.values());
             while (!waiting.isEmpty())
             {
@@ -802,6 +903,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
             completeItems(items);
             timed("complete", completing);
             timed("batch", started);
+            done = true;
             return Outcome.DONE;
         }
         catch (RuntimeException | ExecutionException | TimeoutException failure)
@@ -811,6 +913,10 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                             .with(Attr.REASON,
                                     failure.getClass().getSimpleName()));
             return Outcome.RETRY;
+        }
+        finally
+        {
+            letGo(held, !done);
         }
     }
 
