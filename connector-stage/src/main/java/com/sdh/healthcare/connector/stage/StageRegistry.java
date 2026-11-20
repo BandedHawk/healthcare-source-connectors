@@ -59,6 +59,13 @@ public final class StageRegistry
     private static final Pattern IDENTIFIER =
             Pattern.compile("[a-z_][a-z0-9_]{0,62}");
 
+    /**
+     * What a release adds to its update to take a claim's attempt back: the
+     * next worker's claim adds it again, so the two cancel.
+     */
+    private static final String TAKE_BACK =
+            ",\n                       attempts = GREATEST(r.attempts - 1, 0)";
+
     /** Connections to the database. */
     private final DataSource dataSource;
 
@@ -761,12 +768,19 @@ public final class StageRegistry
      * worker its messages come back to takes them over at once, and the
      * sweep hands them in if they don't come back. A stored record and
      * another worker's claim are left alone.
+     * <p>
+     * A batch that failed because its worker is stopping takes its attempt
+     * back: the next worker's claim then counts none, so a record isn't
+     * stored unprocessed for pods scaled in or drained under it (STAGES.md
+     * §6). Any other failure counts, as an expiry does.
      *
-     * @param keys the records
+     * @param keys     the records
+     * @param stopping whether the batch failed because this worker is
+     *                 stopping
      * @return how many were released
      * @throws IllegalStateException if the database can't be reached
      */
-    public int release(Collection<Key> keys)
+    public int release(Collection<Key> keys, boolean stopping)
     {
         if (keys.isEmpty())
         {
@@ -775,12 +789,12 @@ public final class StageRegistry
         return updateClaims("""
                 UPDATE %s r
                    SET claim_expires = clock_timestamp()
-                                       + ? * interval '1 millisecond'
+                                       + ? * interval '1 millisecond'%s
                   FROM unnest(?::uuid[], ?::text[]) AS k(item_id, record_id)
                  WHERE r.item_id = k.item_id AND r.record_id = k.record_id
                    AND r.stage = ? AND r.owner = ? AND r.state = 'CLAIMED'
                    AND r.claim_expires > clock_timestamp()"""
-                .formatted(records), 0, keys);
+                .formatted(records, stopping ? TAKE_BACK : ""), 0, keys);
     }
 
     /**
@@ -825,8 +839,11 @@ public final class StageRegistry
     /**
      * Ends every live claim this worker holds now, rather than when it
      * would expire: at shutdown, once nothing is being processed, so that
-     * another worker can take its records over at once. The rows are kept:
-     * a record taken over counts one more attempt, as after an expiry.
+     * another worker can take its records over at once. The rows are kept,
+     * and each takes its attempt back: a worker that stops in order isn't
+     * one a record stopped (STAGES.md §6), so the next worker's claim counts
+     * none. A crash, an out-of-memory exit or threads that don't stop in
+     * time release nothing, and the expiry counts, as before.
      *
      * @return how many were released
      * @throws IllegalStateException if the database can't be reached
@@ -834,11 +851,11 @@ public final class StageRegistry
     public int release()
     {
         String sql = """
-                UPDATE %s
-                   SET claim_expires = clock_timestamp()
+                UPDATE %s r
+                   SET claim_expires = clock_timestamp()%s
                  WHERE stage = ? AND owner = ? AND state = 'CLAIMED'
                    AND claim_expires > clock_timestamp()"""
-                .formatted(records);
+                .formatted(records, TAKE_BACK);
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement update = connection.prepareStatement(sql))
         {

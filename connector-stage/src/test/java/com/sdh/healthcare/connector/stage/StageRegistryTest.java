@@ -144,8 +144,9 @@ class StageRegistryTest
     }
 
     /**
-     * Released claims are taken over at once, with one more attempt; a
-     * stored record and another worker's claim are left alone.
+     * Claims released at shutdown are taken over at once, their attempt
+     * taken back, so the next claim is still the first attempt; a stored
+     * record and another worker's claim are left alone.
      */
     @Test
     void releasesItsClaimsForAnotherWorker()
@@ -156,7 +157,7 @@ class StageRegistryTest
         second.claim("r3", item, LONG);
         assertThat(first.release()).isEqualTo(1);
         assertThat(second.claim("r1", item, LONG))
-                .isEqualTo(new StageRegistry.Owned(2));
+                .isEqualTo(new StageRegistry.Owned(1));
         assertThat(second.claim("r2", item, LONG))
                 .isInstanceOf(StageRegistry.Stored.class);
         assertThat(first.claim("r3", item, LONG))
@@ -177,16 +178,40 @@ class StageRegistryTest
         first.claim("r3", item, LONG);
         first.store(List.of(entry("r3", false)));
         second.claim("r4", item, LONG);
-        assertThat(first.release(List.of(key("r1"), key("r3"), key("r4"))))
+        assertThat(first.release(List.of(key("r1"), key("r3"), key("r4")),
+                false))
                 .isEqualTo(1);
-        assertThat(first.release(List.of(key("r1")))).isZero();
-        assertThat(first.release(List.of())).isZero();
+        assertThat(first.release(List.of(key("r1")), false)).isZero();
+        assertThat(first.release(List.of(), false)).isZero();
         assertThat(second.claim("r1", item, LONG))
                 .isEqualTo(new StageRegistry.Owned(2));
         assertThat(second.claim("r2", item, LONG))
                 .isInstanceOf(StageRegistry.Busy.class);
         assertThat(first.claim("r4", item, LONG))
                 .isInstanceOf(StageRegistry.Busy.class);
+    }
+
+    /**
+     * A batch that failed because its worker is stopping takes its attempt
+     * back: a record taken over after two such pods is still on its first
+     * attempt, while an expiry after them counts one.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void aStoppingWorkersFailedBatchTakesItsAttemptBack()
+            throws InterruptedException
+    {
+        first.claim("r1", item, LONG);
+        assertThat(first.release(List.of(key("r1")), true)).isEqualTo(1);
+        assertThat(second.claim("r1", item, LONG))
+                .isEqualTo(new StageRegistry.Owned(1));
+        assertThat(second.release(List.of(key("r1")), true)).isEqualTo(1);
+        assertThat(first.claim("r1", item, BRIEF))
+                .isEqualTo(new StageRegistry.Owned(1));
+        Thread.sleep(50);
+        assertThat(second.claim("r1", item, LONG))
+                .isEqualTo(new StageRegistry.Owned(2));
     }
 
     /**

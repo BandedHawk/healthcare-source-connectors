@@ -99,7 +99,10 @@ stage before sends again after a crash. So each stage keeps a registry in Postgr
 `(stage, record_id)`. For each record a worker (as built in step 3):
 1. **claims** the record first: insert-if-absent, as `CLAIMED` with its own owner and an expiry, renewed while it
    works (only while a batch of its worker has the record, since revision (dx)). A claim taken over from a worker that let it expire counts one more attempt, which the processor is
-   told, so a record that keeps stopping workers can be stored unprocessed (§9);
+   told, so a record that keeps stopping workers can be stored unprocessed (§9). A claim a worker hands back
+   while it stops in order (scaled in, drained: its close, or a batch that failed because it was stopping) takes
+   its attempt back, so it counts none (revision (ed), after run 54): only a crash, an out-of-memory exit
+   (`ExitOnOutOfMemoryError` runs no shutdown) or threads that don't stop in time leave a claim to expire;
 2. if the claim is its own: does the work, commits it with the rest of the batch, then marks it `STORED` (only if
    it still owns the claim) with the record's sealed message, sends the message, marks it `SENT` (dropping the
    message), and only then acknowledges. A crash between the commit and the send loses nothing: whichever worker
@@ -471,7 +474,9 @@ The sandbox gets the KEDA operator, the stages as scaled deployments, and topics
   and processing, waits for its threads to stop (at most the claim's time to live), and then releases the claims
   it holds on records it didn't store (`StageRegistry.release`: they expire now; `stage.claims_released` with the
   count). Another pod takes them over at the broker's redelivery, still as one more attempt, as after an expiry,
-  so the third-claim rule above is unchanged. If its threads don't stop in time, or Postgres can't be reached
+  so the third-claim rule above is unchanged. Changed since (revision (ed), 2026-11-20): a claim handed back this
+  way takes its attempt back, since in run 54 two convert pods scaled in under the same batch made 36 valid records
+  reach their third claim and be stored unconverted. If its threads don't stop in time, or Postgres can't be reached
   (`stage.claims_not_released`, with the reason), the claims are left to expire, as after a crash. Measured
   (2026-11-07, scale-demo 300, one pod deleted and three scaled in): each convert pod stopped in 1.6 to 5 s of
   its 30 s grace, Camel's drain of the batch in hand being most of it; the release itself took under 5 ms.

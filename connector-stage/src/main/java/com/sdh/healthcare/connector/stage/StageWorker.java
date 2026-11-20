@@ -139,6 +139,13 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     private final ScheduledExecutorService revisiter;
 
     /**
+     * Set once {@link #close} begins: a batch that fails from then on
+     * failed because the worker is stopping, so its claims take their
+     * attempt back when released.
+     */
+    private volatile boolean stopping;
+
+    /**
      * Held while the processor commits: batches and corrections commit
      * from different threads, and the processor commits one at a time.
      */
@@ -609,8 +616,11 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * correction has ended. If it failed, this worker's claims of those no
      * other of its batches has are released at once: the worker their
      * messages come back to takes them over, and if they don't come back,
-     * the sweep of expired claims hands them in (STAGES.md §10). A failure
-     * to release is logged; the claims then expire, no longer renewed.
+     * the sweep of expired claims hands them in (STAGES.md §10). A batch
+     * that failed while the worker is stopping takes its attempt back, so
+     * that pods scaled in or drained don't make a record look as if it
+     * stopped them (STAGES.md §6). A failure to release is logged; the
+     * claims then expire, no longer renewed.
      *
      * @param keys   the records
      * @param failed whether it failed
@@ -635,7 +645,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         }
         try
         {
-            int released = registry.release(free);
+            int released = registry.release(free, stopping);
             if (released > 0)
             {
                 LOG.info("stage.batch_claims_released stage={} count={}",
@@ -1543,6 +1553,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     public void close()
     {
         long start = System.nanoTime();
+        stopping = true;
         renewer.shutdownNow();
         revisiter.shutdownNow();
         workers.shutdownNow();

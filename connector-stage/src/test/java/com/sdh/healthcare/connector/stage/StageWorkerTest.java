@@ -984,6 +984,62 @@ class StageWorkerTest
     }
 
     /**
+     * A worker stopped mid-batch, as a pod scaled in or drained (run 54),
+     * hands its claims back with their attempt taken back, whether its
+     * close or the failed batch releases them first: the next worker takes
+     * them over as first attempts, so pods stopped under a record never get
+     * it stored unprocessed.
+     *
+     * @throws Exception if a worker fails
+     */
+    @Test
+    void aBatchFailedByStoppingCountsNoAttempt() throws Exception
+    {
+        CountDownLatch processing = new CountDownLatch(1);
+        StageTestSupport.TestProcessor blocking =
+                new StageTestSupport.TestProcessor(1, committed)
+                {
+                    @Override
+                    public StageOutput<String> process(
+                            ConnectorMessage message, int attempt)
+                    {
+                        processing.countDown();
+                        try
+                        {
+                            Thread.sleep(TimeUnit.SECONDS.toMillis(30));
+                        }
+                        catch (InterruptedException interrupted)
+                        {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(interrupted);
+                        }
+                        return super.process(message, attempt);
+                    }
+                };
+        StageWorker<String> stopping = worker("pod-a", blocking);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try
+        {
+            Future<BatchHandler.Outcome> batch =
+                    pool.submit(() -> stopping.handle(batch(3)));
+            assertThat(processing.await(10, TimeUnit.SECONDS)).isTrue();
+            stopping.close();
+            assertThat(batch.get(10, TimeUnit.SECONDS))
+                    .isEqualTo(BatchHandler.Outcome.RETRY);
+        }
+        finally
+        {
+            pool.shutdownNow();
+        }
+        assertThat(audit.names()).contains("stage.batch_failed");
+        StageTestSupport.TestProcessor processor = processor();
+        assertThat(worker("pod-b", processor).handle(batch(3)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(committed).hasSize(3);
+        assertThat(processor.attempts.values()).containsOnly(1);
+    }
+
+    /**
      * Once the item-complete message is sent, the processor's step gets the
      * message that gave the total; if the step fails, the batch is tried
      * again and the item isn't marked complete until it succeeds.

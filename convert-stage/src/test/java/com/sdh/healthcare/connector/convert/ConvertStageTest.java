@@ -805,11 +805,13 @@ class ConvertStageTest
                 postgres.getPostgresDatabase(), schema, "convert",
                 "pod-z", Duration.ofSeconds(10));
         String held = messages.get(1).recordId();
-        stopped.claim(held, item, Duration.ofMinutes(5));
+        stopped.claim(held, item, Duration.ofSeconds(1));
         RecordReconciler reconciler = reconcilerAt(SPLIT_AT.plusSeconds(3600));
         assertThat(reconciler.reconcile()).as("its claim lives").isZero();
 
-        stopped.release();
+        // Left to expire, as after a crash: a pod that stops in order hands
+        // its claims back with their attempt (StageRegistry.release).
+        Thread.sleep(1200);
         assertThat(reconciler.reconcile()).isEqualTo(1);
         assertThat(registry.item(item)).hasValueSatisfying(
                 progress -> assertThat(progress.done()).isEqualTo(2));

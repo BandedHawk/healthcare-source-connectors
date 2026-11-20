@@ -1331,6 +1331,57 @@ What it showed, beyond §2's predictions:
   in 27 minutes. At that pace run 51's 177,892 messages would take about six hours: the gold check belongs on a
   load of this size, and the large runs show every item in gold by their own count.
 
+- **What the run used, at 100 a second, 2026-11-19 (run 53, 90,000 documents, the maxima of run 49 (splitter 6,
+  convert 12, transform 18, 30 burst nodes), the first run of `resources.py`):** nothing lost; all 90,000 landed
+  once and reached gold, 0 left; no container restarted. **72.4 documents a second** from first landed to last in
+  gold (65.9, run 51); landed → gold p50 / p95 / p99 201 / 351 / 425 s; 34 nodes at most, 28.3 on average; **$10
+  a million** (12). Split still sets the pace: landing was done at 935 s, split at 1,204 s, gold at 1,277 s.
+  What it used, min / avg / max (21 samples):
+  - **Pods:** splitter 1 / 4.9 / 6, convert 1 / 10 / 12, transform 1 / 14.9 / 20 (the progress rows: 1 / 15.5 /
+    18). A transform pod used 0.92 cores on average of its 1.6 requested (1.94 at most) and 1.2 GiB of its 3 GiB
+    (1.6 at most); a splitter 0.74 of 1.1 (1.25), 1.1 GiB of 2; a convert pod 0.24 of 0.4 (0.91), 0.8 GiB of
+    1.25. No pod came within 90% of its memory limit.
+  - **Nodes:** the burst nodes, 96% m7gd.large Spot, used 44% of their allocatable CPU on average (90% at most) and
+    24% of their memory (31%): CPU fills them, so a smaller transform memory limit would save no node. The base
+    nodes ran at 61% CPU (82%), the duties node at 13%.
+  - **Postgres:** 0.84 cores on average on a 0.5 request (1.35 at most), 0.65 GiB of 2; 1,738 commits a second
+    (3,170 at most), 98.6% cache hits, no temporary files; backends active 10.2 on average (31), waiting on a lock
+    3.8 (7); connections 19 / 63 / 81 of 300 through PgBouncer; **82 deadlocks**. The database grew 0.85 GiB,
+    about 9.6 KB a document (transform's schema 358 MiB, convert's 334, split's 119), 2.1 GiB an hour at this
+    pace. **At that rate 15 million documents need about 140 GiB; the PoC's volume is 10 GiB** (§1, the initial
+    load): what the registry keeps per record, and for how long, needs deciding before a load of that size.
+  - **Kafka:** 0.34 cores on a 0.2 request (0.76), 588 of 768 MiB (681); 1.9 GiB of its 10 GiB volume, about
+    550 MiB each for the split, records and FHIR topics and 267 MiB for landed.
+  Six `stage.batch_failed`, all `IllegalStateException`s, all retried: four with a `PSQLException` cause, whose
+  `thrown_at` (the innermost cause's top three frames, revision (eb)) shows only the driver's frames, so which
+  statement failed isn't known (the 82 deadlocks are the likeliest); two from Iceberg adding a shutdown hook in a
+  transform pod that was stopping. The report's junk check read 0 rejected at each stage, though the pods' logs
+  have all three rejected at each: the counter is read from pods that had gone.
+- **Kill checks at AWS pod counts, 2026-11-20 (run 54, run 53's load and maxima, `SDH_LOAD_KILLS`):** at shares
+  ended at transform, half of transform's pods stopped gracefully three times (15%, 45%, 95%: 9 of 18 each time),
+  one forced kill of a convert and a transform pod at 25% and again at 60%, of a splitter at 35% and 80%, and half
+  of convert gracefully at 70% (6 of 12). **Nothing lost or left:** 0 left behind at convert or transform; 69
+  expired claims handed in again by the sweep, no batch tried again for a claim left, no end asked for again; no
+  container restarted. 59.4 documents a second (72.4 with no kills); p50 / p95 / p99 180 / 556 / 695 s; 34 nodes
+  at most; $12 a million. Three findings, fixed since (DESIGN.md revision (ed)):
+  - **36 valid records stored unconverted, `CONVERT_SKIPPED`,** by the third-claim rule, at 431 s, before any
+    convert pod was killed: KEDA was scaling convert in (00:09:45 to 00:09:54), and each pod that stopped mid-batch
+    failed its batch (`RejectedExecutionException`) and released its claims, which counted as an attempt when the
+    next pod took them, as an expiry does. Two pods stopping under the same batch made the third pod's claim its
+    third attempt. Kept in convert's fail store, not lost, but not in gold: 89,965 of 90,001 reached it. Now a
+    claim a stopping worker hands back takes its attempt back (below).
+  - **The failover at 30% landed never ran,** and the report didn't say so: `load-test.sh` found the lease holder
+    by the `lease.acquired` line in `kubectl logs`, which by then had rotated away (the landing pod logged 180,000
+    lines in the run). None of the 90,000-document runs since 2026-11-17 reports a failover, though some asked for
+    one; the 7,200-document run 52 had its own. Now it reads the lease table, and says when a failover asked for
+    didn't run.
+  - **One object landed twice** (90,001 items), and it settles run 51's: the second `item.landed` has the first's
+    `sdh.source_ref` and size, a new `sdh.sighting`, 60 s later, and the feed noted no failed copy. So the feed
+    wrote the object twice, the AWS CLI sending the copy again after its 60-second read timeout though the first
+    had been written; landing rightly took the new version as a new item, found it the same content as the first
+    and supplanted nothing. Now the feed's CLI tries once, and a copy it reports failed is sent again only if the
+    object isn't in the intake already.
+
 ## 11. Order of work
 
 Each step is measured before the next, and each is useful alone.

@@ -24,6 +24,13 @@
 # memory from the kubelets, Postgres' size, commits, cache hits and waits, and Kafka's bytes on disk by topic; the
 # report gives each stage's and service's pods, CPU and memory against their requests and limits, min / avg / max.
 #
+# SDH_LOAD_KILLS (say "25:force:transform:1,30:graceful:transform:half") stops stage pods part way, at AWS's pod
+# counts (docs/PERFORMANCE.md §10, as the sandbox's kill checks of 2026-11-18): each entry is the share of objects
+# ended at transform, in %; force (deleted with no grace: killed mid-batch, as a crash) or graceful (deleted with
+# their grace, as a Spot drain); the stage (splitter, convert or transform); and how many of its running pods,
+# chosen at random, or half. The report lists what was stopped, and the claims and ends the stages took up again;
+# items left behind and exactly once are its verdict, as for any run.
+#
 # SDH_LOAD_BACKLOG (say "1,2,4,6") is the backlog test (docs/PERFORMANCE.md §10): transform is held at no pods
 # while the load lands, splits and converts, then cleared at each of those pod counts in turn (below).
 #
@@ -59,6 +66,11 @@ N="sdh-$P"; PREFIX="${P//-/_}"
 BUCKET="s3://sdh-poc-intake-$ACCOUNT"
 INTAKE="$BUCKET/$P/"
 TIMEOUT_MIN="${SDH_LOAD_TIMEOUT_MIN:-120}"
+KILLS="${SDH_LOAD_KILLS:-}"                # stage pods stopped part way: <% ended>:<force|graceful>:<stage>:<n|half>,...
+for k in ${KILLS//,/ }; do
+  [[ "$k" =~ ^[0-9]{1,2}:(force|graceful):(splitter|convert|transform):([1-9][0-9]*|half)$ ]] \
+    || { echo "SDH_LOAD_KILLS: $k isn't <% ended>:<force|graceful>:<splitter|convert|transform>:<n|half>" >&2; exit 2; }
+done
 SAMPLE_SEC="${SDH_LOAD_SAMPLE_SEC:-60}"   # seconds between samples of what the run used (resources.py)
 FAILOVER_AT="${SDH_LOAD_FAILOVER_AT:-30}"   # % of objects landed when the lease holder is deleted; 0: never
 # The outage (docs/PERFORMANCE.md §3.6): at OUTAGE_AT % landed, every stage, Postgres and Kafka are killed at once,
@@ -366,20 +378,31 @@ print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" 
 # which landing may have landed and deleted already. An object whose copy "failed" may still have been written, its
 # answer lost, and so may one the CLI retried itself: written twice, it is landed twice, as a new version of the
 # object (docs/PERFORMANCE.md §10). The report counts the objects tried again; the CLI's own retries it can't see.
+# Each object is written once (run 54): with the CLI's own retries a copy whose answer was late (its 60 s read
+# timeout) was sent again and wrote the object a second time, a new version the landing node rightly took as a new
+# item. So the CLI tries once (AWS_MAX_ATTEMPTS=1), and a copy it reports failed is tried again only if the object
+# isn't in the intake already: a failed copy may have been written all the same. A slice that failed with no
+# object named is synced, which copies only what isn't there.
 copy_slice() {  # <slice>
-  local try src="${staging}$(printf 's%05d' "$1")/" err="$out/copy-errors/$1" left f
-  aws s3 cp --recursive --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
+  local try src="${staging}$(printf 's%05d' "$1")/" err="$out/copy-errors/$1" left f dst
+  AWS_MAX_ATTEMPTS=1 aws s3 cp --recursive --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
   for try in 2 3 4 5 6 7; do
     sleep 20
     left="$(sed -n 's/^copy failed: \(s3:[^ ]*\) to .*/\1/p' "$err")"
     if [[ -z "$left" ]]; then
-      aws s3 cp --recursive --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
+      AWS_MAX_ATTEMPTS=1 aws s3 sync --size-only --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
       continue
     fi
     : > "$err"
     for f in $left; do
+      dst="${INTAKE}${f#"$src"}"; dst="${dst#s3://}"
+      if aws s3api head-object --bucket "${dst%%/*}" --key "${dst#*/}" >/dev/null 2>&1; then
+        echo "$f" >> "$out/written-anyway"
+        continue
+      fi
       echo "$f" >> "$out/copied-again"
-      aws s3 cp --only-show-errors "$f" "$INTAKE" 2>/dev/null || echo "copy failed: $f to $INTAKE" >> "$err"
+      AWS_MAX_ATTEMPTS=1 aws s3 cp --only-show-errors "$f" "$INTAKE" 2>/dev/null \
+        || echo "copy failed: $f to $INTAKE" >> "$err"
     done
     [[ -s "$err" ]] || return 0
   done
@@ -400,7 +423,7 @@ paced_copy() {
 }
 if [[ -n "$RATE" ]]; then
   slices="$(cat "$out/slices")"
-  mkdir -p "$out/copy-errors"; : > "$out/copied-again"
+  mkdir -p "$out/copy-errors"; : > "$out/copied-again"; : > "$out/written-anyway"
   say "t0: copying them under $INTAKE (server-side), $RATE a second ($slices slices of $SLICE)"
   paced_copy &
 else
@@ -416,14 +439,35 @@ done
 
 # --- Watch -------------------------------------------------------------------------------------------------------
 
-holder() {  # the running landing pod that has logged lease.acquired (with two, the standby that took over)
-  local pod logs
-  for pod in $(kubectl -n "$N" get pods -l app=landing --field-selector=status.phase=Running -o name); do
-    [[ "$pod" == "${killed:-}" ]] && continue
-    # Not `logs | grep -q`: grep's early exit is a SIGPIPE, which pipefail turns into a failure.
-    logs="$(kubectl -n "$N" logs "$pod" 2>/dev/null || true)"
-    if grep -qE 'lease\.acquired' <<<"$logs"; then echo "$pod"; return 0; fi
-  done
+declare -A kill_done=()
+kill_lines=()
+kill_pods() {  # <force|graceful> <stage> <n|half>: stops them; prints "<stopped> <running before>"
+  local how="$1" stage="$2" count="$3" ns="$N" app="$2" n pods=()
+  [[ "$stage" == transform ]] && { ns=sdh-fhir; app="transform-$P"; }
+  mapfile -t pods < <(kubectl -n "$ns" get pods -l "app=$app" --field-selector=status.phase=Running -o name \
+    2>/dev/null | shuf)
+  n="$count"; [[ "$count" == half ]] && n=$(((${#pods[@]} + 1) / 2))
+  ((n > ${#pods[@]})) && n=${#pods[@]}
+  if ((n > 0)); then
+    if [[ "$how" == force ]]; then
+      kubectl -n "$ns" delete "${pods[@]:0:n}" --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
+    else
+      kubectl -n "$ns" delete "${pods[@]:0:n}" --wait=false >/dev/null 2>&1 || true
+    fi
+  fi
+  echo "$n ${#pods[@]}"
+}
+holder() {  # the running landing pod holding the intake's lease (with two, the standby that took over), from the
+  # lease tables (sdh_lease, in whichever schema), not the pod's log: a long run's log has rotated past
+  # lease.acquired by then (run 54). An owner is "<pod>/<pid>/<suffix>".
+  local union pod
+  union="$(db "SELECT string_agg(format('SELECT owner, acquired_at FROM %I.sdh_lease WHERE expires_at > now()',
+    schemaname), ' UNION ALL ') FROM pg_tables WHERE tablename = 'sdh_lease'" 2>/dev/null || true)"
+  [[ -n "$union" ]] || return 0
+  pod="$(db "SELECT split_part(owner, '/', 1) FROM ($union) l WHERE owner LIKE 'landing-%'
+    ORDER BY acquired_at DESC LIMIT 1" 2>/dev/null || true)"
+  [[ -n "$pod" && "pod/$pod" != "${killed:-}" ]] || return 0
+  [[ "$(kubectl -n "$N" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)" == Running ]] && echo "pod/$pod"
   return 0
 }
 killed="" killed_at="" takeover=""
@@ -511,6 +555,19 @@ while :; do
   if [[ -n "$killed" && -z "$takeover" && -n "$(holder)" ]]; then
     takeover=$((SECONDS - killed_at)); say "  failover: $(holder) took the lease ${takeover}s later"
   fi
+
+  # The kills: at each share ended at transform, stop that many of the stage's running pods (never its duties pod,
+  # which has an app label of its own).
+  for k in ${KILLS//,/ }; do
+    [[ -n "${kill_done[$k]:-}" ]] && continue
+    IFS=: read -r pct how stage count <<<"$k"
+    ((transformed * 100 >= files * pct)) || continue
+    kill_done[$k]=1
+    stopped="$(kill_pods "$how" "$stage" "$count")"
+    kill_lines+=("$(printf '%3s%% at %5ss (%6s ended): %-8s %-9s %s of %s' "$pct" "$now" "$transformed" "$how" \
+      "$stage" "${stopped%% *}" "${stopped#* }")")
+    say "  kill: ${kill_lines[-1]}"
+  done
 
   # The outage: down for OUTAGE_MIN minutes, losing OUTAGE_LOSE's queued messages, then started again.
   if [[ -z "$outage_state" && "$OUTAGE_AT" != 0 ]] && ((landed * 100 >= files * OUTAGE_AT)); then
@@ -605,9 +662,10 @@ say "Pushed: $files objects, $bytes bytes; all in the intake after ${pushed_at:-
 items="$(db "SELECT count(DISTINCT item_id) FROM split_$PREFIX.split_item WHERE updated_at >= '$t0_db'" 2>/dev/null || echo '?')"
 say "Landed: $items items for $files objects (exactly once: $([[ "$items" == "$files" ]] && echo yes || echo NO));" \
   "$landed $P.landed messages (one more per failover: the last item announced again)"
-# An object written twice is landed twice, as a new version (copy_slice says why): the ones the feed tried again.
-[[ -f "$out/copied-again" ]] && say "  objects the feed copied again after a failed copy: $(wc -l < "$out/copied-again")" \
-  "(each may have been written twice, and landed twice)"
+# An object written twice is landed twice, as a new version (copy_slice says why). The feed now copies again only
+# what isn't there, so the count of items landed twice should be 0.
+[[ -f "$out/copied-again" ]] && say "  objects the feed copied again after a failed copy: $(wc -l < "$out/copied-again");" \
+  "found written after a failed copy, so not copied again: $(wc -l < "$out/written-anyway" 2>/dev/null || echo 0)"
 # Every item split must have ended at convert, and every item convert ended must have ended at transform: what
 # an outage could leave behind (docs/PERFORMANCE.md §3.6). 0 and 0 when nothing was. Ended, as in ended(): every
 # record ended, failed or not; completed_at is set only when none failed, so it can't be the test. An item with a
@@ -789,6 +847,19 @@ if not groups:
     print("    none")' "$out/events" "$t0_iso" | head -40 | tee -a "$report"
 if [[ -n "$killed" ]]; then
   say "Landing failover: holder deleted at ${FAILOVER_AT}% landed; standby took the lease after ${takeover:-NEVER}s"
+elif [[ "$FAILOVER_AT" != 0 ]]; then
+  say "Landing failover: NOT DONE at ${FAILOVER_AT}% landed: no lease holder found, or the run ended first"
+fi
+if [[ -n "$KILLS" ]]; then
+  say "Kills (share ended at transform; when; how; stage; pods stopped of those running):"
+  for line in "${kill_lines[@]}"; do say "    $line"; done
+  ((${#kill_lines[@]})) || say "    none: the run ended before the first"
+  say "  expired claims handed in again (stage.claims_recovered): $(pod_events stage.claims_recovered);" \
+    "batches tried again for a record still claimed (stage.claims_left): $(pod_events stage.claims_left)"
+  for s in convert transform; do
+    say "  ends asked for again at $s: $(db "SELECT count(*) FROM ${s}_$PREFIX.stage_item
+      WHERE item_id IN ($run_items) AND total_wanted_at IS NOT NULL" 2>/dev/null || echo '?')"
+  done
 fi
 if [[ -n "$BACKLOG" ]]; then
   say "Backlog: ${backlog_records:-?} records (${backlog_msgs:-?} messages) queued at ${backlog_at:-?}s; ${backlog_state}" \
