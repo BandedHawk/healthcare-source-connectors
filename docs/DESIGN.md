@@ -227,6 +227,8 @@ Revision 2026-11-19 (ec), built: §5.3.2, §12, after run 51 (PERFORMANCE.md §1
 
 Revision 2026-11-20 (ed), built: [STAGES.md](STAGES.md) §6, §10, after runs 53 and 54 (PERFORMANCE.md §10). **A claim a stopping worker hands back counts no attempt; and the load test fails over, and feeds each object once, at any size.** (1) In run 54, 36 valid records were stored unconverted, `CONVERT_SKIPPED`, by the third-claim rule: KEDA scaled convert in, each pod that stopped mid-batch failed its batch (`RejectedExecutionException`) and released its claims, and the next pod's claim counted one more attempt, as after an expiry; two such pods under one batch made the third claim. A poison record crashes its pod, and a crash releases nothing: the JVMs run with `ExitOnOutOfMemoryError`, which runs no shutdown, and a worker whose threads don't stop within the claim's time to live releases nothing either. So a claim a worker releases while it stops (`StageWorker.close`, and the claims of a batch that failed once closing had begun, `StageRegistry.release(keys, true)`) now takes its attempt back (`attempts = GREATEST(attempts - 1, 0)`), and the next claim adds it again. A batch that fails while the worker runs on still counts, so a record that makes its batch fail each time is still stored unprocessed at its third claim. (2) `load-test.sh` found the landing lease holder by `lease.acquired` in `kubectl logs`, which a 90,000-document run's landing pod has rotated away by 30% landed, so run 54's failover never ran, and nothing said so. It now reads the holder from the lease tables (`sdh_lease`, the owner's pod), and the report says when a failover asked for didn't run. (3) Run 54 settled run 51's double landing with (ec)'s hashes: the same `sdh.source_ref` and size, a new `sdh.sighting` 60 s later, no failed copy noted. The AWS CLI had sent a copy again after its 60-second read timeout though the first was written. The feed's CLI now tries once (`AWS_MAX_ATTEMPTS=1`), a copy it reports failed is sent again only if `head-object` doesn't find it in the intake (counted apart, `written-anyway`), and a slice that failed naming no object is synced by size rather than copied again. Tested: `StageRegistryTest.aStoppingWorkersFailedBatchTakesItsAttemptBack`, `releasesItsClaimsForAnotherWorker` (now a first attempt), `StageWorkerTest.aBatchFailedByStoppingCountsNoAttempt` (a worker closed mid-batch; fails before the change, a second attempt), `ConvertStageTest.reconcilesARecordLeftClaimed` (now left to expire, as a crash); the holder query on Postgres 18 with two schemas' lease tables; the feed's retry with a stub CLI. Not yet run on AWS.
 
+Revision 2026-11-20 (ee), decided with the user, not built: §5.3.2a, PERFORMANCE.md §1, §12. **A sizing basis for retention, and revised targets.** C-CDA kept at least 5 years, possibly a lifetime, for populations up to a smaller nation's (or a US state's); measured at about 24 KB a document for bronze and gold together, so 19 TB in 5 years for 40 million people, which S3 holds without slowing the daily flow. What grows with retention and must change before such a term: the stage registries in Postgres (a duplicates window, older rows archived), the in-memory landing ledger index (sharded intakes), and hot tables holding years (archive tables). The targets are revised to what C-CDA needs: 60 documents a second sustained and p99 landed → gold under 200 s, over a 15-million-document initial load.
+
 Revision 2026-11-14 (dj), built: from measuring split's steps on AWS ([PERFORMANCE.md](PERFORMANCE.md) §10). **An item of one chunk is read with its summary row, in one open of its file.** Timed step by step, split spent 1.6 s of an item's 4.7 s before the first record: a second open of the landed data file (footer, offset index, pages: several S3 GETs) for the chunk, after the first for the summary row. `LandedItemSource.summary` now reads, by position, the row before the summary row as well; when it is the item's last chunk (`Summary.lastChunk`) the source decrypts it from there, so an item of one chunk (8 MB, nearly every document) reads its file once. An item of more chunks reads the others as before. **Also:** a split pod keeps the landing data keys it has unwrapped (`UnwrapCache`, 64, by KEK and wrapped key; callers get copies; one dropped is wiped), since a landing group's items share one key; the split timers name each step (`lookup_table`, `lookup_row`, `refs`, `resume`, `start`, `first_record`, `records`, `write`, `publish_wait`, `prepare`, `append`, `commit_queue`, `commit_group`, `save`, `send_wait`, `archive`); and each pod reports what it gets of the machine (`ProcessMetrics`: `sdh.process.cpu_time` from its cgroup's `cpu.stat`, `sdh.process.cpu_wait` from `cpu.pressure`, `sdh.process.gc_time` from the JVM), which `measure.sh` shows by service and quarter of the run. Tested: `LandedItemSourceTest.readsAOneChunkItemWithItsSummary` (with the file deleted after the summary read, the item still reads), `UnwrapCacheTest`, `ItemProcessorTest.timesEachStepOfSplittingAnItem`, `ProcessMetricsTest`.
 
 Revision 2026-11-03 (au): built retention and maintenance of the landing tables (§5.3.13). The landing node runs the same maintenance as the splitter on `landed_items` and `landing_ledger`, between items under the intake's writer lock. Retention of `landed_items` (`sdh.maintenance.retention.landed-items`, off by default, at least 7 days) purges whole days but never part of an item: the cutoff moves back to the start of any item that spans it. The ledger is never purged. `MaintenanceScheduler` moved from `file-connector` to `connector-runtime`, with the compaction and orphan settings (§8.4). Not built: removing the chunks of an item that was given up; retention removes them with their day.
@@ -642,6 +644,58 @@ Chunks committed without a summary row belong to an item that wasn't finished (a
 **Checkpoint.** `sdh.landing.<intake>` on `landed_items` (`LandingCheckpoint`), MAC'd like §9.1: the item in progress, its kind, its source reference (the keyed hash, size and version: no PHI, and the intake finds the item again by hashing what it lists), the next block and the chain hash; once done, the size, digest and landing time. Resuming checks that the source reference is unchanged, or fails with `ItemChangedException`. An unfinished item must be finished or cleared (`ItemLander.clear`) before another starts. Large items are committed every `commit-bytes`, as archives are today, so a 1 TB file isn't read again from the start after a restart.
 
 **Retention:** `maintenance.retention.landed-items`, set by the customer (unset keeps items forever), at least 7 days. Purging uses the existing retention run (§8.4), and never takes part of an item (§5.3.13). The landing node can't see the splitter's progress, so the retention must be longer than the splitter can fall behind; an item purged before it is read fails in the splitter with `SOURCE_READ_FAILED`.
+
+#### 5.3.2a Sizing basis for retention (decided 2026-11-20, with the user)
+
+Not built: the basis for sizing storage, and what retention means for the pipeline's own state. To be revisited
+with each buyer's figures.
+
+**Retention.** C-CDA kept for legal purposes at least **5 years**, and possibly for the **patient's or payer's
+lifetime**. What must be kept is the original as received (bronze, `landed_items`) and the FHIR record (gold);
+silver (`split_records`, `records`) can be rebuilt from bronze, so it can be kept for less.
+
+**Populations.** As large as a smaller nation (Australia about 27 million, Saudi Arabia about 35 million, Canada
+about 41 million). For the USA, a state at a time: California about 39 million, Texas about 31 million, a
+mid-sized state about 5 million.
+
+**Documents.** The examples (CCDAtoFHIRSamples, about 119 KB each) are a never-before-seen patient's documents,
+the shape of the initial load. Once the FHIR repository is loaded, a known patient's later documents are mostly
+incremental updates, smaller; large C-CDAs come mainly with new patients. The rate assumed here is 4 C-CDA
+documents a person a year (about one an encounter), the least certain figure: 2 to 10 is plausible.
+
+**Measured per document** (run 54, PERFORMANCE.md §10: 90,000 documents of 30 samples, so compression may
+differ on real data): bronze about 11 KB, silver at least 23 KB (`split_records`) plus 13 KB (`records`), gold
+about 12 KB, the stage registries in Postgres about 9.6 KB. Kept for the legal term, bronze and gold: about
+**24 KB a document**; all layers about 60 KB. Iceberg metadata is bounded by snapshot retention (24 hours), not
+by history.
+
+| Population | Documents a year | Bronze + gold a year | 5 years | Lifetime (about 80 years) | Average rate |
+|---|---|---|---|---|---|
+| 5 million (a mid-sized state) | 20 million | 0.5 TB | 2.4 TB | 38 TB | 0.6/s |
+| 30 million (Australia, Texas) | 120 million | 2.9 TB | 14 TB | 230 TB | 3.8/s |
+| 40 million (Canada, California, Saudi Arabia) | 160 million | 3.8 TB | 19 TB | 300 TB | 5.1/s |
+
+S3 is not the limit: 19 TB in S3 Standard costs about $450 a month, 300 TB about $6,500 (a colder class for old
+years, about a fifth of that), and the daily flow reads by location, so a larger table doesn't slow it. Even a
+40-million population averages about 5 documents a second (perhaps 15 to 25 at a weekday peak); one pipeline
+sustains about 60 to 70 (PERFORMANCE.md §1). The initial load of a population's history is the large flow: 10
+years for 40 million is about 1.6 billion documents, several pipelines or intake shards (§5.3.5, PERFORMANCE.md
+§3.4) at once.
+
+**What grows with retention, and must not stay as it is** (open, to decide before such a term):
+- **The stage registries** keep a row per record per stage as long as the records (it is how duplicates are
+  recognised, STAGES.md §6): about 7.7 TB in Postgres for 40 million people over 5 years, and their indexes
+  outgrow memory long before, slowing every claim. Proposed: duplicates recognised within a window (months, the
+  buyer's choice), and older registry rows archived out of Postgres. A design change.
+- **The landing ledger and its index** are kept forever, and the index is held in memory, 36 to 72 bytes an item
+  (§5.3.2): 800 million items for 40 million people over 5 years is 29 to 58 GB of heap, past which startup fails
+  with `LEDGER_TOO_LARGE`. Sharded intakes divide it (16 shards: 2 to 4 GB each); loading it at startup also
+  lengthens a failover.
+- **Hot tables holding years:** the daily path doesn't plan, but the reconcilers (a first run looks at every
+  landed item, §5.3.12), compaction and orphan clean-up grow with the table. Proposed: aged data moved to archive
+  tables, in the same buckets on a colder class, out of the daily path.
+- **Kafka and Postgres volumes** are sized for the PoC (10 GiB each): enough for about 500,000 and 1 million
+  documents (PERFORMANCE.md §11.1).
 
 #### 5.3.3 Already landed, and duplicates
 

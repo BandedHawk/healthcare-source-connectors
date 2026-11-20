@@ -7,14 +7,24 @@ STAGES.md as a revision; this file is removed once all are.
 
 | | Target | Why |
 |---|---|---|
-| Initial load | **15M C-CDAs in under 48 hours** (≥ 100 documents/s sustained); headroom to 250/s (17 h) by adding pods and intakes | the current system takes over 10 days (≈ 17/s) |
-| Latency, landed → gold | **p50 under 5 s, p99 under 20 s** per document, while sustaining the load above | the user's figure is 20 s per document |
+| Initial load | **15M C-CDAs at ≥ 60 documents/s sustained** (about 70 hours); more by adding pods and intakes (§3.4) | revised 2026-11-20 with the user (below); the current system takes over 10 days (≈ 17/s) |
+| Latency, landed → gold | **p99 under 200 s** per document, while sustaining the load above | revised 2026-11-20 with the user (below) |
 | Stores | S3 and SeaweedFS measured; ADLS Gen2 and GCS equal by construction (§4) | customers choose the store |
 | Databases | Postgres measured; SQL that runs unchanged on SQL Server, Oracle and DB2 (§8) | customer policy |
 | Documents | typical ≤ 500 KB; large ones (base64 PDFs, images) of 100 MB and more stream, never held whole in memory (§9) | |
 
-100 documents/s means about 660 messages/s and, per stage, 100 items/s. A per-document latency of 20 s
-leaves each of the four stages about 5 s, of which waiting for a batch to fill may take at most 1 s (§3.1).
+**Revised 2026-11-20, with the user.** The targets agreed on 2026-11-13 were 15M in under 48 hours (at least
+100 documents/s, headroom to 250/s) and p50 under 5 s, p99 under 20 s. Realistically 60 documents/s and 200 s are
+enough for C-CDA, if they hold over a 15-million-document initial load. The examples, about 119 KB each, are a
+never-before-seen patient's documents: the shape of the initial load. Once the FHIR repository is loaded, a known
+patient's later documents are mostly incremental updates, smaller, and large C-CDAs come mainly with new patients;
+the steady flow afterwards is a few documents a second for a population of tens of millions (DESIGN.md §5.3.2a).
+Where it stands: runs of 90,000 documents sustained 52 to 72 documents/s on run 49's maxima (§10, runs 50 to 54),
+p99 131 to 168 s fed at 35/s and 425 s fed at 100/s, faster than split's pace. Not yet shown: the rate and p99 at a
+feed of 60/s, over hours rather than 20 minutes, and with the stores sized for 15 million (§11.1).
+
+At 60 documents/s that is about 400 messages/s and, per stage, 60 items/s. A per-document p99 of 200 s leaves
+each of the four stages about 50 s, waiting included.
 
 ## 2. What limits it now
 
@@ -565,8 +575,8 @@ A measurement harness before any change, so every change is measured against the
 - **Loads:** 1,000, 100,000 and 1M documents, made from mapping's test documents as now, run on SeaweedFS
   in the sandbox and on S3 in the PoC, with a report: documents/s per stage and overall, latency p50/p95/p99,
   commits and snapshots per table, KMS calls, and cost per million documents on AWS.
-- **Pass:** ≥ 100 documents/s sustained over the 1M load, p99 landed → gold under 20 s, and documents/s that
-  stays flat as the tables grow (the regression we have now).
+- **Pass:** ≥ 60 documents/s sustained over the 15M initial load, p99 landed → gold under 200 s, and
+  documents/s that stays flat as the tables grow (revised 2026-11-20, §1; until then ≥ 100/s and 20 s over 1M).
 
 **Built, 2026-11-13 (step 0; DESIGN.md revision (cz)).** Decided with the user: the time per document comes from
 the registries rather than from a time carried in every message, so no contract change and no figure lost to a
@@ -1398,10 +1408,32 @@ Each step is measured before the next, and each is useful alone.
 | 6 | Large documents (§9) | 100 MB documents through, with bounded memory |
 | 7 | 1M documents on S3 and SeaweedFS, against §10's pass mark, with an outage part way (§3.6) | every document in gold once, after the restart |
 
+### 11.1 Still to measure, as demand arises (noted 2026-11-20, with the user)
+
+Everything above was measured on one pipeline, C-CDA to FHIR, with 30 test documents of about 119 KB each, one
+record a document, half of them failing the US Core checks. Each other format runs as its own pipeline (its own
+namespace, topics, tables and split commit line), so it neither slows nor is slowed by this one in the code, but its
+numbers can't be read off C-CDA's. Each is to be run on AWS when a buyer's feed calls for it, with a realistic mix
+of that feed's batch sizes:
+- **X12, a transaction a file:** smaller than C-CDA and cheaper to parse, but split's commits cost the same an
+  item: expected at or above C-CDA's items a second, for less a million.
+- **X12 batches** (an 837 interchange of thousands of claims) **and large CSV files:** few items, many records.
+  Records a second, set by convert and transform and by each record's registry rows (Postgres growth goes with
+  records, not bytes), is then the measure, not items a second.
+- **C-CDA that mostly maps:** run 53's half that failed the checks cost transform little; a mostly mappable feed
+  costs more a million, though split, not transform, sets the pace.
+- **Hours, not minutes (a soak):** the runs so far last about 20 minutes. A day or two at a steady feed just under
+  capacity shows the plateau once a day of snapshots is kept (24 hours, §12), with the commit step's own timings
+  (table refresh, metadata write, catalog update) to say whether S3 or Postgres grows. Before it, the stores need
+  sizing for it: Kafka's 10 GiB holds about 500,000 documents at run 53's 21 KB each (30 days' retention is decided,
+  §12), Postgres's 10 GiB about 1 million at 9.6 KB, and the landing node's ledger index takes 36 to 72 bytes an
+  item, kept for good.
+
 ## 12. Decided with the user, 2026-11-13
 
 1. **Targets (§1):** at least 100 documents/s sustained (15M in under 48 h), and p99 landed → gold under 20 s,
-   measured over 1M documents.
+   measured over 1M documents. **Revised 2026-11-20:** at least 60 documents/s sustained and p99 under 200 s,
+   over a 15M initial load (§1).
 2. **Snapshot retention (§3.3):** 24 hours in the hot tables, and never before the consumers have read past
    it (§3.6, 4).
 3. **Signing (§3.5):** pod keys, each vouched for by a KMS-signed statement valid for 1 hour, verified at the
