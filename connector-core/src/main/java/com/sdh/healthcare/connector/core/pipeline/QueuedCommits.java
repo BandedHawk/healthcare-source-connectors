@@ -121,6 +121,9 @@ public final class QueuedCommits implements GroupAppender.Committer
     /** How long a pod may wait for the lock. */
     static final Duration LOCK_WAIT = Duration.ofMinutes(2);
 
+    /** The reason a group is refused when its own pod is stopping. */
+    static final String STOPPING = "stopping";
+
     /** A table name: a plain identifier, or a schema and one. */
     private static final Pattern NAME = Pattern.compile(
             "[A-Za-z_][A-Za-z0-9_]{0,62}(\\.[A-Za-z_][A-Za-z0-9_]{0,62})?");
@@ -415,6 +418,15 @@ public final class QueuedCommits implements GroupAppender.Committer
                 throw new LeaseLostException(
                         LeaseLostException.Reason.FENCED);
             }
+            if (STOPPING.equals(found.reason()))
+            {
+                // This pod's own group, refused as it stops: the cause says
+                // so, for the worker to take the batch's attempt back
+                // (run 55: the commit pool went first, at SIGTERM).
+                throw new CommitFailedException(
+                        new RejectedExecutionException("Stopping"),
+                        "This pod stopped before its group was committed");
+            }
             throw new CommitFailedException(
                     "The commit that took this group failed");
         }
@@ -671,7 +683,7 @@ public final class QueuedCommits implements GroupAppender.Committer
                 LOG.warn("append.failed_stopping groups={} left={} error={}",
                         mine.size(), open.size() - mine.size(),
                         failure.getClass().getSimpleName());
-                refuse(connection, mine, "failed");
+                refuse(connection, mine, STOPPING);
                 return;
             }
             LOG.warn("append.failed groups={} error={}", open.size(),
@@ -696,12 +708,13 @@ public final class QueuedCommits implements GroupAppender.Committer
     /**
      * Whether a commit failed because this pod is stopping, not because of
      * the groups or the table: one of its executors rejected the work, or
-     * its thread was interrupted.
+     * its thread was interrupted. A stage worker asks it of a failed
+     * batch, too, to take the batch's attempt back.
      *
      * @param failure the failure
      * @return true if so
      */
-    static boolean stopping(Throwable failure)
+    public static boolean stopping(Throwable failure)
     {
         if (Thread.currentThread().isInterrupted())
         {
@@ -1250,7 +1263,8 @@ public final class QueuedCommits implements GroupAppender.Committer
      *
      * @param connection a connection holding the lock
      * @param ids        the groups
-     * @param reason     {@code lease} or {@code failed}
+     * @param reason     {@code lease}, {@code failed} or
+     *                   {@value #STOPPING}
      * @throws SQLException if the database fails
      */
     private void refuse(Connection connection, Set<Long> ids, String reason)

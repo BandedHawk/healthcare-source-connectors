@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
+import java.sql.SQLException;
 import java.util.concurrent.ExecutionException;
 import org.junit.jupiter.api.Test;
 
@@ -72,6 +73,59 @@ class FieldsTest
         assertThat(Fields.of().failure(failure).toLogString())
                 .as("one key=value pair to a space, for the log follower")
                 .matches("( \\w+=\\S+){3}");
+    }
+
+    /**
+     * A database failure thrown in a driver's code says where in this
+     * product's code the call was made, and its SQLSTATE, but not its
+     * message; a failure whose top frames are already this product's adds
+     * no second place.
+     */
+    @Test
+    void saysWhereOurCodeCalledAndTheSqlState()
+    {
+        SQLException deadlock = new SQLException(VALUE, "40P01");
+        deadlock.setStackTrace(new StackTraceElement[] {
+            new StackTraceElement("org.postgresql.core.v3.QueryExecutorImpl",
+                    "receiveErrorResponse", "QueryExecutorImpl.java", 2993),
+            new StackTraceElement("org.postgresql.core.v3.QueryExecutorImpl",
+                    "processResults", "QueryExecutorImpl.java", 2656),
+            new StackTraceElement("org.postgresql.core.v3.QueryExecutorImpl",
+                    "execute", "QueryExecutorImpl.java", 446),
+            new StackTraceElement("org.postgresql.jdbc.PgStatement",
+                    "executeInternal", "PgStatement.java", 525),
+            new StackTraceElement(
+                    "com.sdh.healthcare.connector.stage.StageRegistry",
+                    "store", "StageRegistry.java", 1012)});
+        Attributes attributes = Fields.of()
+                .failure(new IllegalStateException(VALUE, deadlock))
+                .toAttributes();
+        assertThat(attributes.get(AttributeKey.stringKey("sdh.thrown_at")))
+                .startsWith("org.postgresql.core.v3.QueryExecutorImpl");
+        assertThat(attributes.get(AttributeKey.stringKey("sdh.thrown_from")))
+                .isEqualTo("com.sdh.healthcare.connector.stage.StageRegistry"
+                        + ".store:1012");
+        assertThat(attributes.get(AttributeKey.stringKey("sdh.sql_state")))
+                .isEqualTo("40P01");
+        assertThat(attributes.toString()).doesNotContain("Smith");
+
+        Throwable ours;
+        try
+        {
+            check();
+            throw new AssertionError("check() returned");
+        }
+        catch (IllegalStateException thrown)
+        {
+            ours = thrown;
+        }
+        Attributes own = Fields.of().failure(ours).toAttributes();
+        assertThat(own.get(AttributeKey.stringKey("sdh.thrown_from")))
+                .isNull();
+        assertThat(own.get(AttributeKey.stringKey("sdh.sql_state"))).isNull();
+        assertThat(Fields.of().failure(new SQLException(VALUE, VALUE))
+                .toAttributes().get(AttributeKey.stringKey("sdh.sql_state")))
+                .as("a state that isn't one is left out").isNull();
     }
 
     /**

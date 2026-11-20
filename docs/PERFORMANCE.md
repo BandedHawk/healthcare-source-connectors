@@ -304,7 +304,10 @@ pod's key is thought exposed; messages under it are then refused, as for a rotat
 **6. Brokers' retention against the length of an outage.** Nothing configures it now, so Kafka keeps 7 days.
 Beyond that the reconcilers rebuild records, but a lost `item.split` needs a replay by hand (STAGES.md §13.2).
 Proposed: **30 days on every pipeline topic**, set by the deployment. Messages carry references only, so a
-month of 15M documents' messages is a few GB. For an initial load the backlog sits mostly in `.landed`,
+month of 15M documents' messages is a few GB. **Measured since (run 53, 2026-11-19):** about 21 KB of messages
+a document across the four topics, signed and sealed, so a month of 15M is about 315 GB, not a few. Set
+2026-11-20 for the PoC's broker (`KAFKA_LOG_RETENTION_HOURS` 720, `k8s/infra/state.yaml`); its 10 GiB volume holds
+about 500,000 documents' messages (§11.1). For an initial load the backlog sits mostly in `.landed`,
 since landing is the fastest stage.
 
 **7. Timers that run out during an outage.** Leases, claims and lease TTLs all expire while nothing runs.
@@ -1391,6 +1394,32 @@ What it showed, beyond §2's predictions:
     had been written; landing rightly took the new version as a new item, found it the same content as the first
     and supplanted nothing. Now the feed's CLI tries once, and a copy it reports failed is sent again only if the
     object isn't in the intake already.
+- **Kill checks with (ed), and the revised targets, 2026-11-20 (runs 55 and 56, run 53's maxima, images with (ed) and
+  (ef)'s telemetry, read, retention and junk count; not its renewal or stopping fixes):**
+  - **Run 55, run 54's kills and the landing failover at 30%, fed at 100 a second:** the failover ran (the standby
+    took the lease 3 s after the holder was deleted); 62 expired claims handed in again, 0 left behind; the junk
+    count read 3 and 3. 49.9 documents a second; p50 / p95 / p99 364 / 636 / 793 s; 31 nodes; $14 a million.
+    **8 records stored unmapped, `TRANSFORM_SKIPPED`,** all in one pod at their third claim: 11 batches failed on
+    deadlocks (`sql_state` 40P01, `thrown_from` `StageRegistry.holds`: claim renewal against the batch store), and
+    32 transform and 7 convert batches failed with `RejectedExecutionException` about 80 s after each graceful
+    kill, their pod's commit pool stopped before the worker's close, so (ed)'s take-back didn't apply. Both fixed
+    in (ef), not yet run.
+  - **Run 56, fed at 60 a second, no failover or kills, then the gold check:** **41.2 documents a second, p99 854 s,
+    $18 a million: neither target met.** p50 / p95 79 / 269 s; 35 nodes at most. Landing kept pace (all landed by
+    1,544 s); split stalled at about 87,100 from 1,674 s to 2,027 s, after a splitter pod stopped at 06:12 and the
+    split duties recovered its 156 items over 06:14 to 06:16; why it stayed stalled to 06:19 isn't traced yet.
+    Postgres counted 147 deadlocks, and **40 records were stored unconverted, `CONVERT_SKIPPED`**, as in run 55.
+    **The gold check failed:** it printed none of its lines in 90 minutes and the Job's deadline stopped it, so 16
+    read threads weren't enough at 90,000 documents, or the read stalled; nothing says which.
+  - **Both runs lost objects at landing: 89,974 and 89,985 of 90,000 landed,** with every stage agreeing and the
+    intake empty at the end. Staging held all 90,000; the feed reported no failed copy (`copied-again` and
+    `written-anyway` empty, exit 0); landing logged no `item.changed`, `item.abandoned`, `item.duplicate_content`,
+    warning or error, and as many `item.landed` as items. Run 56 had no failover, so the hand-over isn't the cause.
+    Landing deletes an object only after landing it or finding its sighting in the ledger index, and only if its
+    size, time and ETag still match the listing; no path found in the code deletes one it hasn't landed. Runs 53
+    (90,000) and 54 (90,001) lost none; the feed's one-try copies (`AWS_MAX_ATTEMPTS=1`) came in with run 55. Not
+    known yet whether the 15 and 26 were never written or were deleted unlanded: the next run needs the feed's
+    acknowledged copies counted, landing's deletes counted by path (PHI-free), or the intake's S3 access log.
 
 ## 11. Order of work
 

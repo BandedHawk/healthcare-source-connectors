@@ -25,6 +25,10 @@ variable "images" {
 }
 
 # Volume name => size in GiB. Kafka holds only the 2-4 KB announcements, not documents (DESIGN.md §11).
+# GiB. 10 each holds the PoC's runs of 90,000 documents: about 1 million documents in Postgres (9.6 KB a document in
+# the stage registries) and 500,000 in Kafka (21 KB of messages a document, kept 30 days), from run 53. The 15-million
+# initial load needs about 200 and 350 (docs/PERFORMANCE.md §11.1), about $44 a month in gp3 while they exist, since
+# they outlive each session. An EBS volume can grow in place but never shrink.
 variable "state_volumes" {
   type    = map(number)
   default = { postgres = 10, kafka = 10 }

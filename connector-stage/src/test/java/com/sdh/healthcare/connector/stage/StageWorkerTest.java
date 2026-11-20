@@ -34,6 +34,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -1031,6 +1032,38 @@ class StageWorkerTest
         {
             pool.shutdownNow();
         }
+        assertThat(audit.names()).contains("stage.batch_failed");
+        StageTestSupport.TestProcessor processor = processor();
+        assertThat(worker("pod-b", processor).handle(batch(3)))
+                .isEqualTo(BatchHandler.Outcome.DONE);
+        assertThat(committed).hasSize(3);
+        assertThat(processor.attempts.values()).containsOnly(1);
+    }
+
+    /**
+     * A batch failed by its pod stopping, though its worker isn't closed
+     * yet, takes its attempt back too: at SIGTERM the commit pool can stop
+     * first, and its batches fail with the work rejected (run 55). The next
+     * worker takes the records over as first attempts.
+     *
+     * @throws InterruptedException if interrupted
+     */
+    @Test
+    void aBatchFailedByItsPodStoppingCountsNoAttempt()
+            throws InterruptedException
+    {
+        StageTestSupport.TestProcessor rejecting =
+                new StageTestSupport.TestProcessor(1, committed)
+                {
+                    @Override
+                    public StageOutput<String> process(
+                            ConnectorMessage message, int attempt)
+                    {
+                        throw new RejectedExecutionException("stopping");
+                    }
+                };
+        assertThat(worker("pod-a", rejecting).handle(batch(3)))
+                .isEqualTo(BatchHandler.Outcome.RETRY);
         assertThat(audit.names()).contains("stage.batch_failed");
         StageTestSupport.TestProcessor processor = processor();
         assertThat(worker("pod-b", processor).handle(batch(3)))

@@ -777,10 +777,12 @@ for t in "${topics[@]}"; do say "    $P.$t: $(($(offsets "$P.$t") - before[$t]))
 say "  expected: $P.convert.dlq and $P.fhir.dlq 0 (the junk is rejected, not dead-lettered)"
 say "Junk rejected (stage.message_rejected reason=MALFORMED, since t0; expected 3 each$([[ -n "$outage_state" ]] \
   && echo ', or fewer: counted from the pods'"'"' logs, and the outage killed the pods that read them')):"
+# From the logs the run keeps of every pod (pod-logs), not the pods still running: the pods that read the junk
+# have often been scaled in by the end (run 53 read 0 though their logs had all three).
 for d in "$N convert" "sdh-fhir transform-$P"; do
   read -r ns app <<<"$d"
-  logs="$(kubectl -n "$ns" logs -l "app=$app" --tail=-1 --max-log-requests=10 --since-time="$t0_iso" 2>/dev/null || true)"
-  say "    $app: $(grep -c 'stage\.message_rejected.*reason=MALFORMED' <<<"$logs" || true)"
+  say "    $app: $(zcat -f "$out/pod-logs/${ns}_${app}-"*.log* 2>/dev/null \
+    | grep -c 'stage\.message_rejected.*reason=MALFORMED' || true)"
 done
 say "Throughput (from t0 to each stage's last change):"
 say "    end to end: ${end}s; $(per_min "$transformed" "$end") items/min," \

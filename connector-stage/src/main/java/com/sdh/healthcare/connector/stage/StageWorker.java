@@ -15,6 +15,7 @@ import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
 import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
+import com.sdh.healthcare.connector.core.pipeline.QueuedCommits;
 import com.sdh.healthcare.connector.core.publish.MessagePublisher;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
@@ -491,7 +492,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
                 }
                 finally
                 {
-                    letGo(key, !applied);
+                    letGo(key, !applied, false);
                 }
             }
         }
@@ -577,7 +578,8 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         }
         catch (RuntimeException failure)
         {
-            LOG.warn("stage.claims_not_renewed stage={}", processor.stage());
+            LOG.warn("stage.claims_not_renewed stage={} reason={}",
+                    processor.stage(), failure.getClass().getSimpleName());
         }
     }
 
@@ -617,15 +619,20 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * other of its batches has are released at once: the worker their
      * messages come back to takes them over, and if they don't come back,
      * the sweep of expired claims hands them in (STAGES.md §10). A batch
-     * that failed while the worker is stopping takes its attempt back, so
-     * that pods scaled in or drained don't make a record look as if it
-     * stopped them (STAGES.md §6). A failure to release is logged; the
-     * claims then expire, no longer renewed.
+     * that failed while the worker is stopping, or because its pod is
+     * stopping, takes its attempt back, so that pods scaled in or drained
+     * don't make a record look as if it stopped them (STAGES.md §6). A
+     * failure to release is logged; the claims then expire, no longer
+     * renewed.
      *
-     * @param keys   the records
-     * @param failed whether it failed
+     * @param keys    the records
+     * @param failed  whether it failed
+     * @param stopped whether it failed because its pod is stopping: an
+     *                executor rejected the work, or the thread was
+     *                interrupted
      */
-    private void letGo(Collection<StageRegistry.Key> keys, boolean failed)
+    private void letGo(Collection<StageRegistry.Key> keys, boolean failed,
+            boolean stopped)
     {
         List<StageRegistry.Key> free = new ArrayList<>(keys.size());
         synchronized (inFlight)
@@ -645,7 +652,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         }
         try
         {
-            int released = registry.release(free, stopping);
+            int released = registry.release(free, stopping || stopped);
             if (released > 0)
             {
                 LOG.info("stage.batch_claims_released stage={} count={}",
@@ -843,6 +850,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         long started = System.nanoTime();
         Set<StageRegistry.Key> held = Set.of();
         boolean done = false;
+        boolean stopped = false;
         try
         {
             Map<StageRegistry.Key, Pending> records =
@@ -917,6 +925,9 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         }
         catch (RuntimeException | ExecutionException | TimeoutException failure)
         {
+            // Failed by this pod stopping, though close() hasn't begun: at
+            // SIGTERM the commit pool can stop first (run 55).
+            stopped = QueuedCommits.stopping(failure);
             Telemetry.get().auditWarn("stage.batch_failed",
                     stageFields(ErrorCode.STAGE_BATCH_FAILED)
                             .failure(failure));
@@ -924,7 +935,7 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
         }
         finally
         {
-            letGo(held, !done);
+            letGo(held, !done, stopped);
         }
     }
 

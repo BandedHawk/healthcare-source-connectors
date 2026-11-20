@@ -79,6 +79,20 @@ public enum Attr
      */
     THROWN_AT("sdh.thrown_at"),
 
+    /**
+     * The first frame of a failure in this product's own code, when the
+     * innermost cause's top frames are a library's ({@link
+     * Fields#failure}): a class, method and line. Names code, never data.
+     */
+    THROWN_FROM("sdh.thrown_from"),
+
+    /**
+     * A database failure's SQLSTATE, such as {@code 40P01} for a deadlock
+     * ({@link Fields#failure}): the SQL standard's five-character class and
+     * subclass, never the message.
+     */
+    SQL_STATE("sdh.sql_state"),
+
     /** A record's sequence number in its file, from 0. */
     SEQ("sdh.seq"),
 

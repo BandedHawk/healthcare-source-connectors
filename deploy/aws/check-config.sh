@@ -151,10 +151,12 @@ cat > "$work/bin/aws" <<'EOF'
 #!/usr/bin/env bash
 # s3 cp: notes each call; the first whole-slice copy fails as $AWS_MODE says.
 echo "$*" >> "$CALLS"
+# head-object: the object is in the intake only after a failed copy that was written all the same.
+if [[ "$1 $2" == "s3api head-object" ]]; then [[ "$AWS_MODE" == written ]] && exit 0; exit 254; fi
 if [[ "$*" == *--recursive* && ! -e "$CALLS.once" ]]; then
   touch "$CALLS.once"
   case "$AWS_MODE" in
-    part-way) echo "copy failed: s3://staging/s00000/b.xml to s3://intake/" >&2; exit 1 ;;
+    part-way|written) echo "copy failed: s3://staging/s00000/b.xml to s3://intake/" >&2; exit 1 ;;
     listing) echo "An error occurred (RequestTimeout) when calling the ListObjectsV2 operation" >&2; exit 1 ;;
   esac
 fi
@@ -184,24 +186,32 @@ check "the log follower leaves a starting pod for later" \
   bash -c "! ls '$work/follow/pod-logs' | grep -q starting"
 
 # A slice copy that failed part way copies again only the objects that failed, never one already copied, which
-# landing may have landed and deleted (2026-11-17: re-copied objects were landed twice). One that failed listing
-# copied nothing, and is tried again whole.
+# landing may have landed and deleted (2026-11-17: re-copied objects were landed twice); and of those, only one not
+# in the intake already, since a copy reported failed may have been written (run 54: the CLI's own retry wrote an
+# object twice). One that failed listing copied nothing, and is synced, which copies only what isn't there.
 copy_slice_with() {  # <mode>
-  mkdir -p "$work/$1/copy-errors"; : > "$work/$1/copied-again"
+  mkdir -p "$work/$1/copy-errors"; : > "$work/$1/copied-again"; : > "$work/$1/written-anyway"
   CALLS="$work/$1/calls" AWS_MODE="$1" PATH="$work/bin:$PATH" bash -c "
     source '$(func "$P/load-test.sh" copy_slice)'
     sleep() { :; }
     staging=s3://staging/ out='$work/$1' INTAKE=s3://intake/; copy_slice 0"
 }
 check "a slice copy that failed part way ends copied" copy_slice_with part-way
-check "it copies again only the object that failed" bash -c "
+check "it copies again only the object that failed, once it finds it isn't there" bash -c "
   [[ \$(grep -c -- --recursive '$work/part-way/calls') == 1 ]] \
+    && grep -qx 's3api head-object --bucket intake --key b.xml' '$work/part-way/calls' \
     && grep -qx 's3 cp --only-show-errors s3://staging/s00000/b.xml s3://intake/' '$work/part-way/calls' \
-    && [[ \$(wc -l < '$work/part-way/calls') == 2 ]] \
+    && [[ \$(wc -l < '$work/part-way/calls') == 3 ]] \
     && grep -qx 's3://staging/s00000/b.xml' '$work/part-way/copied-again'"
+check "a copy reported failed but written ends copied" copy_slice_with written
+check "it isn't copied again" bash -c "
+  [[ \$(wc -l < '$work/written/calls') == 2 ]] && [[ ! -s '$work/written/copied-again' ]] \
+    && grep -qx 's3://staging/s00000/b.xml' '$work/written/written-anyway'"
 check "a slice copy whose listing failed ends copied" copy_slice_with listing
-check "it copies the slice again whole" bash -c "
-  [[ \$(grep -c -- --recursive '$work/listing/calls') == 2 ]] && [[ ! -s '$work/listing/copied-again' ]]"
+check "it syncs the slice, copying only what isn't there" bash -c "
+  [[ \$(grep -c -- --recursive '$work/listing/calls') == 1 ]] \
+    && grep -qx 's3 sync --size-only --only-show-errors s3://staging/s00000/ s3://intake/' '$work/listing/calls' \
+    && [[ ! -s '$work/listing/copied-again' ]]"
 
 # Each copy of a test document differs, by an element of the load test's own namespace, so no stage takes one
 # for a resend of another (2026-11-15: comments were stripped, and transform's copies were identical again); and

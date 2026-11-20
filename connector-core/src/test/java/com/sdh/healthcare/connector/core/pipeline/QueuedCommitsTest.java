@@ -521,8 +521,12 @@ class QueuedCommitsTest
             Thread.sleep(300);
             lock.commit();
             lock.close();
+            // Its own failure says it was stopping, for the worker to take
+            // the batch's attempt back (run 55).
             assertThatThrownBy(() -> a.get(30, TimeUnit.SECONDS))
-                    .isInstanceOf(ExecutionException.class);
+                    .isInstanceOf(ExecutionException.class)
+                    .satisfies(thrown -> assertThat(
+                            QueuedCommits.stopping(thrown)).isTrue());
             Snapshot snapshot = b.get(30, TimeUnit.SECONDS);
             assertThat(QueuedCommits.names(snapshot)).hasSize(1);
             assertThat(files()).containsExactly(

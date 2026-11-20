@@ -249,6 +249,11 @@ spec:
             - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-0.kafka.sdh-infra.svc:9093" }
             - { name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data/logs }
             - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false" }
+            # 30 days on every topic, as decided (docs/PERFORMANCE.md §12, point 6): longer than an outage lasts, so a
+            # backlog isn't deleted before it is read. Kafka's own default is 7 days. Set for the broker, so it holds
+            # for the topics made before it too, with no tool run in this pod. Size the volume for it: run 53 wrote
+            # about 21 KB of messages a document (§11.1).
+            - { name: KAFKA_LOG_RETENTION_HOURS, value: "720" }
             - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "1" }
             - { name: KAFKA_MIN_INSYNC_REPLICAS, value: "1" }
             - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }

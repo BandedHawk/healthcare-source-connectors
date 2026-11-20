@@ -14,6 +14,9 @@ import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -115,6 +118,42 @@ class StageRegistryTest
                 .isEqualTo(new StageRegistry.Owned(1));
         assertThat(second.claim("r1", item, LONG))
                 .isInstanceOf(StageRegistry.Busy.class);
+    }
+
+    /**
+     * A renewal never waits for a row another transaction has locked, as a
+     * batch storing it has: it renews the others and skips that one, which
+     * is renewed once the lock is gone. Waiting, a renewal locking its rows
+     * in no set order deadlocked with the store (run 55, 40P01).
+     *
+     * @throws SQLException if the database fails
+     */
+    @Test
+    void aRenewalSkipsARowBeingStored() throws SQLException
+    {
+        first.claim("r1", item, LONG);
+        first.claim("r2", item, LONG);
+        try (Connection storing =
+                StageTestSupport.database().getConnection())
+        {
+            storing.setAutoCommit(false);
+            try (PreparedStatement lock = storing.prepareStatement(
+                    "SELECT 1 FROM " + schema + ".stage_record"
+                            + " WHERE item_id = ? AND record_id = 'r1'"
+                            + " FOR UPDATE"))
+            {
+                lock.setObject(1, item);
+                lock.executeQuery().close();
+            }
+            long start = System.nanoTime();
+            assertThat(first.renew(LONG, List.of(key("r1"), key("r2"))))
+                    .isEqualTo(1);
+            assertThat(Duration.ofNanos(System.nanoTime() - start))
+                    .isLessThan(Duration.ofSeconds(5));
+            storing.rollback();
+        }
+        assertThat(first.renew(LONG, List.of(key("r1"), key("r2"))))
+                .isEqualTo(2);
     }
 
     /**

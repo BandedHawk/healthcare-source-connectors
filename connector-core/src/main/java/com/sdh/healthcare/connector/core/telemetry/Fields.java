@@ -8,12 +8,16 @@ package com.sdh.healthcare.connector.core.telemetry;
 
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
+import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.regex.Pattern;
 
 /**
  * The attributes of a span, a metric or an audit event. The keys can only be
@@ -36,6 +40,12 @@ public final class Fields
      * check such as {@code Preconditions.checkState} in its caller.
      */
     static final int FRAMES = 3;
+
+    /** The package prefix of this product's code. */
+    static final String OWN_CODE = "com.sdh.";
+
+    /** A SQLSTATE: five digits or capital letters, never a message. */
+    private static final Pattern SQL_STATE = Pattern.compile("[0-9A-Z]{5}");
 
     /**
      * The values, by attribute, in the order they were added: each a
@@ -115,8 +125,14 @@ public final class Fields
      * hold PHI: its class ({@link Attr#REASON}), the classes of its chain
      * of causes ({@link Attr#CAUSES}), and the top {@value #FRAMES} frames
      * of the innermost cause ({@link Attr#THROWN_AT}), which name only code.
-     * No message, of the failure or any cause, is read. A chain that comes
-     * round to a cause already seen ends there.
+     * When none of those frames is this product's, the first that is, in
+     * the innermost cause or, failing that, the nearest cause outward that
+     * has one ({@link Attr#THROWN_FROM}): a driver's or library's frames
+     * alone don't say which call failed. A database failure in the chain
+     * adds its SQLSTATE ({@link Attr#SQL_STATE}), five characters of the
+     * SQL standard, when it is one. No message, of the failure or any
+     * cause, is read. A chain that comes round to a cause already seen ends
+     * there.
      *
      * @param failure the failure; null adds nothing
      * @return these attributes with the failure's
@@ -130,25 +146,79 @@ public final class Fields
         StringJoiner causes = new StringJoiner(",");
         Set<Throwable> seen = Collections.newSetFromMap(
                 new IdentityHashMap<>());
-        Throwable innermost = failure;
+        List<Throwable> chain = new ArrayList<>();
+        String sqlState = null;
         for (Throwable cause = failure; cause != null && seen.add(cause);
                 cause = cause.getCause())
         {
             causes.add(cause.getClass().getSimpleName());
-            innermost = cause;
+            chain.add(cause);
+            if (sqlState == null && cause instanceof SQLException sql
+                    && sql.getSQLState() != null
+                    && SQL_STATE.matcher(sql.getSQLState()).matches())
+            {
+                sqlState = sql.getSQLState();
+            }
         }
         StringJoiner frames = new StringJoiner(",");
-        StackTraceElement[] trace = innermost.getStackTrace();
+        StackTraceElement[] trace = chain.getLast().getStackTrace();
+        boolean ours = false;
         for (int i = 0; i < Math.min(FRAMES, trace.length); i++)
         {
-            frames.add(trace[i].getClassName() + "." + trace[i].getMethodName()
-                    + (trace[i].getLineNumber() >= 0
-                            ? ":" + trace[i].getLineNumber() : ""));
+            frames.add(frame(trace[i]));
+            ours |= trace[i].getClassName().startsWith(OWN_CODE);
         }
         Fields added = with(Attr.REASON, failure.getClass().getSimpleName())
                 .with(Attr.CAUSES, causes.toString());
-        return trace.length == 0 ? added
-                : added.with(Attr.THROWN_AT, frames.toString());
+        if (trace.length > 0)
+        {
+            added = added.with(Attr.THROWN_AT, frames.toString());
+        }
+        if (!ours)
+        {
+            String from = firstOwnFrame(chain);
+            if (from != null)
+            {
+                added = added.with(Attr.THROWN_FROM, from);
+            }
+        }
+        return sqlState == null ? added
+                : added.with(Attr.SQL_STATE, sqlState);
+    }
+
+    /**
+     * The first frame in this product's code, from the innermost cause
+     * outward.
+     *
+     * @param chain the causes, outermost first
+     * @return the frame; null if no cause has one
+     */
+    private static String firstOwnFrame(List<Throwable> chain)
+    {
+        for (int i = chain.size() - 1; i >= 0; i--)
+        {
+            for (StackTraceElement element : chain.get(i).getStackTrace())
+            {
+                if (element.getClassName().startsWith(OWN_CODE))
+                {
+                    return frame(element);
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * A frame as a class, method and line.
+     *
+     * @param element the frame
+     * @return it, such as {@code com.example.Foo.bar:12}
+     */
+    private static String frame(StackTraceElement element)
+    {
+        return element.getClassName() + "." + element.getMethodName()
+                + (element.getLineNumber() >= 0
+                        ? ":" + element.getLineNumber() : "");
     }
 
     /**

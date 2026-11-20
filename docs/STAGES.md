@@ -98,9 +98,11 @@ stage before sends again after a crash. So each stage keeps a registry in Postgr
 `stage_record(stage, record_id, item_id, state, output_digest, owner, claim_expires, stored_at)`, primary key
 `(stage, record_id)`. For each record a worker (as built in step 3):
 1. **claims** the record first: insert-if-absent, as `CLAIMED` with its own owner and an expiry, renewed while it
-   works (only while a batch of its worker has the record, since revision (dx)). A claim taken over from a worker that let it expire counts one more attempt, which the processor is
+   works (only while a batch of its worker has the record, since revision (dx); a renewal skips a row a store has
+   locked, since revision (ef), after run 55's deadlocks). A claim taken over from a worker that let it expire counts one more attempt, which the processor is
    told, so a record that keeps stopping workers can be stored unprocessed (§9). A claim a worker hands back
-   while it stops in order (scaled in, drained: its close, or a batch that failed because it was stopping) takes
+   while it stops in order (scaled in, drained: its close, or a batch that failed because it was stopping, told by
+   the failure itself since revision (ef): at SIGTERM the commit pool can stop before the close begins) takes
    its attempt back, so it counts none (revision (ed), after run 54): only a crash, an out-of-memory exit
    (`ExitOnOutOfMemoryError` runs no shutdown) or threads that don't stop in time leave a claim to expire;
 2. if the claim is its own: does the work, commits it with the rest of the batch, then marks it `STORED` (only if

@@ -3,7 +3,7 @@
 # transformer's tests) mounted from a ConfigMap and started with Spring Boot's PropertiesLauncher. Its service account
 # has the read-only role gold-reader (terraform/persistent/iam.tf) through EKS Pod Identity.
 #   read      every bundle on <pipeline>.fhir, from gold, with its source document from silver; checks each against
-#             mapping's baselines; keeps a few per document in the work directory. Small heap.
+#             mapping's baselines; keeps a few per document in the work directory. 16 threads.
 #   validate  the HL7 FHIR validator (fetched from the tools bucket by a pre-signed URL, checked against its SHA-256)
 #             on the bundles kept, compared with mapping's expected errors. The validator needs the internet
 #             (packages.fhir.org, tx.fhir.org), which the namespace's egress policy allows on 443.
@@ -50,13 +50,16 @@ spec:
       initContainers:
         - name: read
           image: ${TRANSFORM_IMAGE}
-          command: ["java", "@/app/jvm.options", "@/app/container.options", "-Xmx768m",
+          command: ["java", "@/app/jvm.options", "@/app/container.options", "-Xmx1536m",
                     "-Dloader.path=/check/gold-check.jar", "-Dloader.main=com.sdh.healthcare.transform.GoldCheck",
                     "-cp", "/app/app.jar", "org.springframework.boot.loader.launch.PropertiesLauncher", "read"]
           env: &env
             - { name: DOCS, value: /docs }
             - { name: WORK, value: /work }
             - { name: KEEP_PER_DOCUMENT, value: "${KEEP_PER_DOCUMENT}" }
+            # Messages read at once (GoldCheck.read): run 52 read one at a time, 13,087 in 27 minutes, too slow for
+            # a 90,000-document run's 180,000 inside the deadline.
+            - { name: READ_THREADS, value: "16" }
             - { name: AWS_REGION, value: "${AWS_REGION}" }
             - { name: NAMESPACE, value: "${ICEBERG_PREFIX}" }
             - { name: GOLD_CATALOG, value: sdh-gold }
@@ -82,8 +85,8 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
           resources:
-            requests: { cpu: 500m, memory: 1536Mi }
-            limits: { memory: 1536Mi }
+            requests: { cpu: 1000m, memory: 2560Mi }
+            limits: { memory: 2560Mi }
           volumeMounts: &mounts
             - { name: work, mountPath: /work }
             - { name: tmp, mountPath: /tmp }

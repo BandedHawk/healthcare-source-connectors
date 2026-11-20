@@ -739,7 +739,10 @@ public final class StageRegistry
      * or whose messages came back elsewhere, is not renewed, so it expires
      * and the sweep of expired claims hands its record in again; renewing
      * every claim kept such records out of the sweep's reach for as long
-     * as the pod lived (docs/PERFORMANCE.md §10, run 49).
+     * as the pod lived (docs/PERFORMANCE.md §10, run 49). It never waits
+     * for a row another transaction has locked: such a record is being
+     * stored, which ends its claim, and if the store fails it is renewed
+     * next time.
      *
      * @param ttl  how long they last from now
      * @param keys the records
@@ -752,14 +755,27 @@ public final class StageRegistry
         {
             return 0;
         }
+        // Never waits for a row: one a batch of this worker's is storing,
+        // and so has locked, is skipped, its claim ended by the store or
+        // renewed next time. Waiting, a renewal locking its rows in no set
+        // order deadlocked with the store locking them in its own (run 55,
+        // 40P01 in holds).
         return updateClaims("""
                 UPDATE %s r
                    SET claim_expires = clock_timestamp()
                                        + ? * interval '1 millisecond'
-                  FROM unnest(?::uuid[], ?::text[]) AS k(item_id, record_id)
-                 WHERE r.item_id = k.item_id AND r.record_id = k.record_id
-                   AND r.stage = ? AND r.owner = ? AND r.state = 'CLAIMED'"""
-                .formatted(records), ttl.toMillis(), keys);
+                  FROM (SELECT c.stage, c.item_id, c.record_id
+                          FROM %s c
+                          JOIN unnest(?::uuid[], ?::text[])
+                               AS k(item_id, record_id)
+                            ON c.item_id = k.item_id
+                           AND c.record_id = k.record_id
+                         WHERE c.stage = ? AND c.owner = ?
+                           AND c.state = 'CLAIMED'
+                           FOR UPDATE OF c SKIP LOCKED) l
+                 WHERE r.stage = l.stage AND r.item_id = l.item_id
+                   AND r.record_id = l.record_id"""
+                .formatted(records, records), ttl.toMillis(), keys);
     }
 
     /**
