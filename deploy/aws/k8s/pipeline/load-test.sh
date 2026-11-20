@@ -387,16 +387,21 @@ print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" 
 # item. So the CLI tries once (AWS_MAX_ATTEMPTS=1), and a copy it reports failed is tried again only if the object
 # isn't in the intake already: a failed copy may have been written all the same. A slice that failed with no
 # object named is synced, which copies only what isn't there. Each copy S3 answered for is noted (acks/, the CLI's
-# "copy:" lines), so the report can name any object staged but never acknowledged (runs 55 and 56 lost objects
-# with no copy reported failed: never written, or taken from the intake unlanded?).
+# "copy:" lines), so the report can name any object staged but never acknowledged.
+#
+# And a copy that ends well is not taken at its word (run 57): the CLI's recursive copy exited 0 with nothing on
+# stderr yet left 30 of 90,000 objects unwritten, which no stage ever saw: the objects runs 55 and 56 lost. So
+# once the copy ends, the slice is listed and each object in it neither acknowledged nor found written is copied
+# on its own (unreported/), if it isn't in the intake already, until the listing and the acknowledgements agree.
 copy_slice() {  # <slice>
-  local try src="${staging}$(printf 's%05d' "$1")/" err="$out/copy-errors/$1" ack="$out/acks/$1" left f dst
-  AWS_MAX_ATTEMPTS=1 aws s3 cp --recursive --no-progress "$src" "$INTAKE" 2> "$err" >> "$ack" && return 0
+  local try src="${staging}$(printf 's%05d' "$1")/" err="$out/copy-errors/$1" ack="$out/acks/$1" left f dst ok=""
+  if AWS_MAX_ATTEMPTS=1 aws s3 cp --recursive --no-progress "$src" "$INTAKE" 2> "$err" >> "$ack"; then ok=1; fi
   for try in 2 3 4 5 6 7; do
+    [[ -n "$ok" ]] && break
     sleep 20
     left="$(sed -n 's/^copy failed: \(s3:[^ ]*\) to .*/\1/p' "$err")"
     if [[ -z "$left" ]]; then
-      AWS_MAX_ATTEMPTS=1 aws s3 sync --size-only --no-progress "$src" "$INTAKE" 2> "$err" >> "$ack" && return 0
+      if AWS_MAX_ATTEMPTS=1 aws s3 sync --size-only --no-progress "$src" "$INTAKE" 2> "$err" >> "$ack"; then ok=1; fi
       continue
     fi
     : > "$err"
@@ -410,9 +415,31 @@ copy_slice() {  # <slice>
       AWS_MAX_ATTEMPTS=1 aws s3 cp --no-progress "$f" "$INTAKE" 2>/dev/null >> "$ack" \
         || echo "copy failed: $f to $INTAKE" >> "$err"
     done
-    [[ -s "$err" ]] || return 0
+    [[ -s "$err" ]] || ok=1
   done
-  echo "load-test.sh: slice $1 not copied after 7 tries" >&2
+  if [[ -z "$ok" ]]; then
+    echo "load-test.sh: slice $1 not copied after 7 tries" >&2
+    return 1
+  fi
+  # The check: the slice's objects, less those acknowledged or found written. Names sorted alike (LC_ALL=C).
+  for try in 1 2 3 4 5 6; do
+    ((try > 1)) && sleep 20
+    left="$(aws s3 ls "$src" 2>/dev/null)" || continue
+    left="$(awk '{print $4}' <<< "$left" | LC_ALL=C sort | LC_ALL=C comm -23 - <(
+      { sed -n 's#^copy: .* to s3://.*/##p' "$ack"; grep -F "$src" "$out/written-anyway" | sed 's#.*/##'; } \
+        | LC_ALL=C sort -u))" || continue
+    [[ -z "$left" ]] && return 0
+    for f in $left; do
+      echo "$src$f" >> "$out/unreported/$1"
+      dst="${INTAKE}${f}"; dst="${dst#s3://}"
+      if aws s3api head-object --bucket "${dst%%/*}" --key "${dst#*/}" >/dev/null 2>&1; then
+        echo "$src$f" >> "$out/written-anyway"
+        continue
+      fi
+      AWS_MAX_ATTEMPTS=1 aws s3 cp --no-progress "$src$f" "$INTAKE" 2>/dev/null >> "$ack" || true
+    done
+  done
+  echo "load-test.sh: slice $1 not all acknowledged after 6 checks" >&2
   return 1
 }
 paced_copy() {
@@ -429,7 +456,7 @@ paced_copy() {
 }
 if [[ -n "$RATE" ]]; then
   slices="$(cat "$out/slices")"
-  mkdir -p "$out/copy-errors" "$out/acks"; : > "$out/copied-again"; : > "$out/written-anyway"
+  mkdir -p "$out/copy-errors" "$out/acks" "$out/unreported"; : > "$out/copied-again"; : > "$out/written-anyway"
   say "t0: copying them under $INTAKE (server-side), $RATE a second ($slices slices of $SLICE)"
   paced_copy &
 else
@@ -672,6 +699,9 @@ say "Landed: $items items for $files objects (exactly once: $([[ "$items" == "$f
 # what isn't there, so the count of items landed twice should be 0.
 [[ -f "$out/copied-again" ]] && say "  objects the feed copied again after a failed copy: $(wc -l < "$out/copied-again");" \
   "found written after a failed copy, so not copied again: $(wc -l < "$out/written-anyway" 2>/dev/null || echo 0)"
+# Objects a copy that ended well left out, found by the slice check (copy_slice): run 57 lost 30 of 90,000 so.
+[[ -d "$out/unreported" ]] && say "  objects a copy that ended well left unacknowledged, copied by the slice check:" \
+  "$(sort -u "$out"/unreported/* 2>/dev/null | wc -l) (names in $out/unreported/)"
 # Where a lost object went (runs 55 and 56): staged but never acknowledged by S3 nor found written is the feed's;
 # acknowledged but never landed is landing's, and landing's own audit says whether it took any object from the
 # intake that it hadn't landed: each item.finished_at_source names a sighting, which must be one an item.landed

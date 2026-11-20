@@ -90,7 +90,7 @@ spec:
             - --scale-down-delay-after-add=5m
             # The two base nodes, the duties node and at most six burst nodes (terraform/compute: zones,
             # aws_eks_node_group.duties, burst_max), now that each zone's burst group may grow to six on its own.
-            - --max-nodes-total=33
+            - --max-nodes-total=9
           env:
             - { name: AWS_REGION, value: us-east-2 }
           resources:

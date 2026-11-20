@@ -149,8 +149,12 @@ esac
 EOF
 cat > "$work/bin/aws" <<'EOF'
 #!/usr/bin/env bash
-# s3 cp: notes each call; the first whole-slice copy fails as $AWS_MODE says.
+# s3 cp: notes each call; the first whole-slice copy fails as $AWS_MODE says. The slice holds a.xml and b.xml.
 echo "$*" >> "$CALLS"
+if [[ "$1 $2" == "s3 ls" ]]; then
+  printf '2026-11-20 10:00:00 100 %s\n' a.xml b.xml
+  exit 0
+fi
 # head-object: the object is in the intake only after a failed copy that was written all the same.
 if [[ "$1 $2" == "s3api head-object" ]]; then [[ "$AWS_MODE" == written ]] && exit 0; exit 254; fi
 if [[ "$*" == *--recursive* && ! -e "$CALLS.once" ]]; then
@@ -161,7 +165,14 @@ if [[ "$*" == *--recursive* && ! -e "$CALLS.once" ]]; then
     part-way|written) echo "copy failed: s3://staging/s00000/b.xml to s3://intake/" >&2; exit 1 ;;
     listing) echo "An error occurred (RequestTimeout) when calling the ListObjectsV2 operation" >&2; exit 1 ;;
   esac
+  # silent (run 57): the copy ends well, b.xml left out with nothing said; otherwise all the rest is copied.
+  [[ "$AWS_MODE" == silent ]] || echo "copy: s3://staging/s00000/b.xml to s3://intake/b.xml"
+  exit 0
 fi
+case "$*" in
+  "s3 sync "*) echo "copy: s3://staging/s00000/b.xml to s3://intake/b.xml" ;;
+  "s3 cp --no-progress s3://"*) echo "copy: $4 to $5${4##*/}" ;;
+esac
 exit 0
 EOF
 chmod +x "$work/bin/kubectl" "$work/bin/aws"
@@ -192,7 +203,8 @@ check "the log follower leaves a starting pod for later" \
 # in the intake already, since a copy reported failed may have been written (run 54: the CLI's own retry wrote an
 # object twice). One that failed listing copied nothing, and is synced, which copies only what isn't there.
 copy_slice_with() {  # <mode>
-  mkdir -p "$work/$1/copy-errors" "$work/$1/acks"; : > "$work/$1/copied-again"; : > "$work/$1/written-anyway"
+  mkdir -p "$work/$1/copy-errors" "$work/$1/acks" "$work/$1/unreported"
+  : > "$work/$1/copied-again"; : > "$work/$1/written-anyway"
   CALLS="$work/$1/calls" AWS_MODE="$1" PATH="$work/bin:$PATH" bash -c "
     source '$(func "$P/load-test.sh" copy_slice)'
     sleep() { :; }
@@ -203,19 +215,32 @@ check "it copies again only the object that failed, once it finds it isn't there
   [[ \$(grep -c -- --recursive '$work/part-way/calls') == 1 ]] \
     && grep -qx 's3api head-object --bucket intake --key b.xml' '$work/part-way/calls' \
     && grep -qx 's3 cp --no-progress s3://staging/s00000/b.xml s3://intake/' '$work/part-way/calls' \
-    && [[ \$(wc -l < '$work/part-way/calls') == 3 ]] \
+    && [[ \$(grep -vc '^s3 ls ' '$work/part-way/calls') == 3 ]] \
     && grep -qx 's3://staging/s00000/b.xml' '$work/part-way/copied-again'"
 check "it keeps each copy S3 acknowledged, for the report's count of those never acknowledged" \
   grep -qx 'copy: s3://staging/s00000/a.xml to s3://intake/a.xml' "$work/part-way/acks/0"
 check "a copy reported failed but written ends copied" copy_slice_with written
 check "it isn't copied again" bash -c "
-  [[ \$(wc -l < '$work/written/calls') == 2 ]] && [[ ! -s '$work/written/copied-again' ]] \
+  [[ \$(grep -vc '^s3 ls ' '$work/written/calls') == 2 ]] && [[ ! -s '$work/written/copied-again' ]] \
     && grep -qx 's3://staging/s00000/b.xml' '$work/written/written-anyway'"
 check "a slice copy whose listing failed ends copied" copy_slice_with listing
 check "it syncs the slice, copying only what isn't there" bash -c "
   [[ \$(grep -c -- --recursive '$work/listing/calls') == 1 ]] \
     && grep -qx 's3 sync --size-only --no-progress s3://staging/s00000/ s3://intake/' '$work/listing/calls' \
     && [[ ! -s '$work/listing/copied-again' ]]"
+for m in part-way written listing; do
+  check "the slice check then finds nothing left unacknowledged ($m)" bash -c "
+    grep -qx 's3 ls s3://staging/s00000/' '$work/$m/calls' && ! ls '$work/$m/unreported' | grep -q ."
+done
+# A copy that ends well may still have left objects out, with nothing said (run 57: 30 of 90,000 never written):
+# the slice check finds each, and copies it if it isn't in the intake.
+check "a slice copy that ended well but left an object out ends copied" copy_slice_with silent
+check "the slice check copies the object left out, once it finds it isn't there" bash -c "
+  grep -qx 's3://staging/s00000/b.xml' '$work/silent/unreported/0' \
+    && grep -qx 's3api head-object --bucket intake --key b.xml' '$work/silent/calls' \
+    && grep -qx 's3 cp --no-progress s3://staging/s00000/b.xml s3://intake/' '$work/silent/calls' \
+    && grep -qx 'copy: s3://staging/s00000/b.xml to s3://intake/b.xml' '$work/silent/acks/0' \
+    && [[ \$(grep -c '^s3 ls ' '$work/silent/calls') == 2 ]]"
 
 # Each copy of a test document differs, by an element of the load test's own namespace, so no stage takes one
 # for a resend of another (2026-11-15: comments were stripped, and transform's copies were identical again); and
