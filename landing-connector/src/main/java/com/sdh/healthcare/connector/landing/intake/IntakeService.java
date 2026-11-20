@@ -91,6 +91,12 @@ public final class IntakeService implements LandingIntake
     /** The longest wait after repeated errors. */
     private static final Duration MAX_BACKOFF = Duration.ofMinutes(5);
 
+    /** An item finished at its source after this node landed it. */
+    static final String LANDED = "landed";
+
+    /** An item finished at its source because the ledger had it already. */
+    static final String IN_LEDGER = "in_ledger";
+
     /** The stage the landing steps are timed under (PERFORMANCE.md §10). */
     private static final String TIMED = "landing";
 
@@ -437,6 +443,7 @@ public final class IntakeService implements LandingIntake
         if (storage.index().contains(ref.key()))
         {
             source.afterLanding(item);
+            finished(ref, IN_LEDGER);
             readiness.forget(item.ref());
             landWaitingIfDue();
             return;
@@ -616,6 +623,7 @@ public final class IntakeService implements LandingIntake
             {
                 ListedItem item = next.next();
                 source.afterLanding(item);
+                finished(item, LANDED);
                 readiness.forget(item.ref());
                 next.remove();
             }
@@ -652,6 +660,7 @@ public final class IntakeService implements LandingIntake
             Future<Void> finished = finishing.get(index);
             if (finished.state() == Future.State.SUCCESS)
             {
+                finished(item, LANDED);
                 readiness.forget(item.ref());
                 continue;
             }
@@ -669,6 +678,38 @@ public final class IntakeService implements LandingIntake
         {
             throw failure;
         }
+    }
+
+    /**
+     * Audits an item finished at its source (deleted, moved or renamed, as
+     * the source is set to; or left, if it changed since it was listed,
+     * which the source audits itself): {@code item.finished_at_source} with
+     * its reference's hashes and how it was known to be landed. Each
+     * finish is logged, so a run can tell an object that was never written
+     * from one taken from the source unlanded: every sighting finished
+     * should be one landed (run 56). Names no reference, only its hashes.
+     *
+     * @param item the item as listed
+     * @param how  {@link #LANDED} or {@link #IN_LEDGER}
+     */
+    private void finished(ListedItem item, String how)
+    {
+        finished(SourceRef.of(storage.ids(), intake, item.ref(), item.size(),
+                item.versionText()), how);
+    }
+
+    /**
+     * Audits an item finished at its source, as {@link
+     * #finished(ListedItem, String)}.
+     *
+     * @param ref the item's source reference
+     * @param how {@link #LANDED} or {@link #IN_LEDGER}
+     */
+    private void finished(SourceRef ref, String how)
+    {
+        Telemetry.get().audit("item.finished_at_source",
+                Fields.of(Attr.INTAKE, intake).with(Attr.REASON, how)
+                        .with(SourceRef.fields(ref)));
     }
 
     /**

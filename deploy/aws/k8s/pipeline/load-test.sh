@@ -193,6 +193,10 @@ fi
 
 # --- Before ------------------------------------------------------------------------------------------------------
 
+# The objects staged, by name (the test inputs' names, no PHI), so the report can name any the feed never had
+# acknowledged (copy_slice). Listed before t0, so the feed isn't held up.
+{ aws s3 ls --recursive "$staging" || true; } | awk '{print $4}' | sed 's#.*/##' | sort > "$out/staged"
+
 topics=(landed split records fhir convert.dlq fhir.dlq)
 declare -A before
 for t in "${topics[@]}"; do before[$t]="$(offsets "$P.$t")"; done
@@ -382,15 +386,17 @@ print("%5d %6s %6.0f %7.0f %7.2f %7.2f %5d %6.0f %6.0f %7d %6s %5s %6s %6s %5s" 
 # timeout) was sent again and wrote the object a second time, a new version the landing node rightly took as a new
 # item. So the CLI tries once (AWS_MAX_ATTEMPTS=1), and a copy it reports failed is tried again only if the object
 # isn't in the intake already: a failed copy may have been written all the same. A slice that failed with no
-# object named is synced, which copies only what isn't there.
+# object named is synced, which copies only what isn't there. Each copy S3 answered for is noted (acks/, the CLI's
+# "copy:" lines), so the report can name any object staged but never acknowledged (runs 55 and 56 lost objects
+# with no copy reported failed: never written, or taken from the intake unlanded?).
 copy_slice() {  # <slice>
-  local try src="${staging}$(printf 's%05d' "$1")/" err="$out/copy-errors/$1" left f dst
-  AWS_MAX_ATTEMPTS=1 aws s3 cp --recursive --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
+  local try src="${staging}$(printf 's%05d' "$1")/" err="$out/copy-errors/$1" ack="$out/acks/$1" left f dst
+  AWS_MAX_ATTEMPTS=1 aws s3 cp --recursive --no-progress "$src" "$INTAKE" 2> "$err" >> "$ack" && return 0
   for try in 2 3 4 5 6 7; do
     sleep 20
     left="$(sed -n 's/^copy failed: \(s3:[^ ]*\) to .*/\1/p' "$err")"
     if [[ -z "$left" ]]; then
-      AWS_MAX_ATTEMPTS=1 aws s3 sync --size-only --only-show-errors "$src" "$INTAKE" 2> "$err" && return 0
+      AWS_MAX_ATTEMPTS=1 aws s3 sync --size-only --no-progress "$src" "$INTAKE" 2> "$err" >> "$ack" && return 0
       continue
     fi
     : > "$err"
@@ -401,7 +407,7 @@ copy_slice() {  # <slice>
         continue
       fi
       echo "$f" >> "$out/copied-again"
-      AWS_MAX_ATTEMPTS=1 aws s3 cp --only-show-errors "$f" "$INTAKE" 2>/dev/null \
+      AWS_MAX_ATTEMPTS=1 aws s3 cp --no-progress "$f" "$INTAKE" 2>/dev/null >> "$ack" \
         || echo "copy failed: $f to $INTAKE" >> "$err"
     done
     [[ -s "$err" ]] || return 0
@@ -423,7 +429,7 @@ paced_copy() {
 }
 if [[ -n "$RATE" ]]; then
   slices="$(cat "$out/slices")"
-  mkdir -p "$out/copy-errors"; : > "$out/copied-again"; : > "$out/written-anyway"
+  mkdir -p "$out/copy-errors" "$out/acks"; : > "$out/copied-again"; : > "$out/written-anyway"
   say "t0: copying them under $INTAKE (server-side), $RATE a second ($slices slices of $SLICE)"
   paced_copy &
 else
@@ -666,6 +672,21 @@ say "Landed: $items items for $files objects (exactly once: $([[ "$items" == "$f
 # what isn't there, so the count of items landed twice should be 0.
 [[ -f "$out/copied-again" ]] && say "  objects the feed copied again after a failed copy: $(wc -l < "$out/copied-again");" \
   "found written after a failed copy, so not copied again: $(wc -l < "$out/written-anyway" 2>/dev/null || echo 0)"
+# Where a lost object went (runs 55 and 56): staged but never acknowledged by S3 nor found written is the feed's;
+# acknowledged but never landed is landing's, and landing's own audit says whether it took any object from the
+# intake that it hadn't landed: each item.finished_at_source names a sighting, which must be one an item.landed
+# names, and item.left_at_source counts objects it found changed or gone. Hashes and counts only: no names.
+if [[ -d "$out/acks" ]]; then
+  { sed -n 's#^copy: .* to \(s3://.*\)$#\1#p' "$out"/acks/* 2>/dev/null || true; } | sed 's#.*/##' | sort -u \
+    > "$out/acknowledged"
+  sed 's#.*/##' "$out/acknowledged" "$out/written-anyway" | sort -u > "$out/written"
+  comm -23 "$out/staged" "$out/written" > "$out/unacknowledged"
+  say "  copies S3 acknowledged: $(wc -l < "$out/acknowledged") distinct, of $(wc -l < "$out/staged") staged;" \
+    "staged but never acknowledged nor found written: $(wc -l < "$out/unacknowledged") (expected 0;" \
+    "names in $out/unacknowledged)"
+fi
+python3 -I "$HERE/landing-takes.py" "$out"/pod-logs/"${N}"_landing-*.log* | tee -a "$report" \
+  || say "  landing's takes from the intake couldn't be read from its logs"
 # Every item split must have ended at convert, and every item convert ended must have ended at transform: what
 # an outage could leave behind (docs/PERFORMANCE.md §3.6). 0 and 0 when nothing was. Ended, as in ended(): every
 # record ended, failed or not; completed_at is set only when none failed, so it can't be the test. An item with a

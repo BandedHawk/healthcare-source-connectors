@@ -28,6 +28,8 @@ import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.landing.TelemetryCapture;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -522,6 +524,39 @@ class IntakeServiceTest
         assertThat(new LandingLedger(ledgerTable, committer(), RETRY)
                 .contains(messages.get(0).itemId())).isTrue();
         assertThat(fatal).isEmpty();
+    }
+
+    /**
+     * Each item finished at the source is audited with its sighting, which
+     * is a landed item's, and how it was known to be landed: after landing
+     * it, or by the ledger when it is listed again (run 56).
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void auditsEachItemFinishedAtTheSource() throws Exception
+    {
+        IntakeService service = service(
+                new LocalDirectorySource(settings("read-only")),
+                Duration.ZERO);
+        ListedItem item = write("a.csv", "1,first\n");
+        service.onListed(item);
+        service.onListingDone();
+        service.onListed(item);
+
+        AttributeKey<String> sighting = AttributeKey.stringKey("sdh.sighting");
+        AttributeKey<String> reason = AttributeKey.stringKey("sdh.reason");
+        List<Attributes> landedEvents = telemetry.attributesOf("item.landed");
+        List<Attributes> finished =
+                telemetry.attributesOf("item.finished_at_source");
+        assertThat(landedEvents).hasSize(1);
+        assertThat(finished).extracting(each -> each.get(reason))
+                .containsExactly(IntakeService.LANDED,
+                        IntakeService.IN_LEDGER);
+        assertThat(finished).extracting(each -> each.get(sighting))
+                .containsOnly(landedEvents.get(0).get(sighting))
+                .doesNotContainNull();
+        assertThat(telemetry.events()).doesNotContain("item.left_at_source");
     }
 
     /**

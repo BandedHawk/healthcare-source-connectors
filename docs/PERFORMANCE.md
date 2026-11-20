@@ -1418,8 +1418,9 @@ What it showed, beyond §2's predictions:
     Landing deletes an object only after landing it or finding its sighting in the ledger index, and only if its
     size, time and ETag still match the listing; no path found in the code deletes one it hasn't landed. Runs 53
     (90,000) and 54 (90,001) lost none; the feed's one-try copies (`AWS_MAX_ATTEMPTS=1`) came in with run 55. Not
-    known yet whether the 15 and 26 were never written or were deleted unlanded: the next run needs the feed's
-    acknowledged copies counted, landing's deletes counted by path (PHI-free), or the intake's S3 access log.
+    known yet whether the 15 and 26 were never written or were deleted unlanded: the next run counts both: the feed's
+    acknowledged copies, by name, and landing's takes from the intake by sighting, against those it landed
+    (DESIGN.md revision (ef) (7)).
 
 ## 11. Order of work
 

@@ -8,6 +8,9 @@ package com.sdh.healthcare.connector.landing.intake;
 
 import com.sdh.healthcare.connector.core.landing.ItemKind;
 import com.sdh.healthcare.connector.core.landing.ItemLander;
+import com.sdh.healthcare.connector.core.telemetry.Attr;
+import com.sdh.healthcare.connector.core.telemetry.Fields;
+import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.landing.config.BucketSettings;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
@@ -264,6 +267,10 @@ public abstract class BucketSource implements RemoteSource
             Found found = stat(key);
             if (!same(found, item))
             {
+                // Left, to be landed afresh if it changed (run 56: every
+                // object taken from the source should be one landed).
+                Telemetry.get().audit("item.left_at_source", Fields.of(
+                        Attr.REASON, found == null ? "gone" : "changed"));
                 return;
             }
             boolean done = switch (settings.after())

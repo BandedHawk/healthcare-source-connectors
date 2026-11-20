@@ -11,9 +11,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.core.landing.ItemLander;
+import com.sdh.healthcare.connector.landing.TelemetryCapture;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.config.SourceSettings;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
+import io.opentelemetry.api.common.AttributeKey;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 /**
  * Tests for {@link BucketSource}'s listing rules, reads and after-actions,
@@ -35,6 +38,10 @@ import org.junit.jupiter.api.Test;
  */
 class BucketSourceTest
 {
+
+    /** Captures the audit events. */
+    @RegisterExtension
+    final TelemetryCapture telemetry = new TelemetryCapture();
 
     /** Creates the tests; JUnit runs each test on a new instance. */
     BucketSourceTest()
@@ -127,7 +134,8 @@ class BucketSourceTest
 
     /**
      * {@code move} copies to a free key under {@code move-to}, then
-     * deletes the item and its marker, only if it is unchanged.
+     * deletes the item and its marker, only if it is unchanged; one
+ * changed or gone is left, and audited.
      *
      * @throws Exception if the test fails
      */
@@ -151,6 +159,15 @@ class BucketSourceTest
         source.put("in/b.csv", "b2", 3);
         source.afterLanding(changed);
         assertThat(source.objects).containsKey("in/b.csv");
+
+        ListedItem gone = source.list().getFirst();
+        source.objects.remove("in/b.csv");
+        source.afterLanding(gone);
+        assertThat(telemetry.attributesOf("item.left_at_source"))
+                .extracting(each -> each.get(
+                        AttributeKey.stringKey("sdh.reason")))
+                .as("each object left, and why")
+                .containsExactly("changed", "gone");
     }
 
     /**
