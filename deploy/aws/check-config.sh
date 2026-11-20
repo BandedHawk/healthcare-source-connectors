@@ -155,6 +155,8 @@ echo "$*" >> "$CALLS"
 if [[ "$1 $2" == "s3api head-object" ]]; then [[ "$AWS_MODE" == written ]] && exit 0; exit 254; fi
 if [[ "$*" == *--recursive* && ! -e "$CALLS.once" ]]; then
   touch "$CALLS.once"
+  # The copy S3 acknowledged before the failure, on stdout as the CLI does.
+  echo "copy: s3://staging/s00000/a.xml to s3://intake/a.xml"
   case "$AWS_MODE" in
     part-way|written) echo "copy failed: s3://staging/s00000/b.xml to s3://intake/" >&2; exit 1 ;;
     listing) echo "An error occurred (RequestTimeout) when calling the ListObjectsV2 operation" >&2; exit 1 ;;
@@ -190,7 +192,7 @@ check "the log follower leaves a starting pod for later" \
 # in the intake already, since a copy reported failed may have been written (run 54: the CLI's own retry wrote an
 # object twice). One that failed listing copied nothing, and is synced, which copies only what isn't there.
 copy_slice_with() {  # <mode>
-  mkdir -p "$work/$1/copy-errors"; : > "$work/$1/copied-again"; : > "$work/$1/written-anyway"
+  mkdir -p "$work/$1/copy-errors" "$work/$1/acks"; : > "$work/$1/copied-again"; : > "$work/$1/written-anyway"
   CALLS="$work/$1/calls" AWS_MODE="$1" PATH="$work/bin:$PATH" bash -c "
     source '$(func "$P/load-test.sh" copy_slice)'
     sleep() { :; }
@@ -200,9 +202,11 @@ check "a slice copy that failed part way ends copied" copy_slice_with part-way
 check "it copies again only the object that failed, once it finds it isn't there" bash -c "
   [[ \$(grep -c -- --recursive '$work/part-way/calls') == 1 ]] \
     && grep -qx 's3api head-object --bucket intake --key b.xml' '$work/part-way/calls' \
-    && grep -qx 's3 cp --only-show-errors s3://staging/s00000/b.xml s3://intake/' '$work/part-way/calls' \
+    && grep -qx 's3 cp --no-progress s3://staging/s00000/b.xml s3://intake/' '$work/part-way/calls' \
     && [[ \$(wc -l < '$work/part-way/calls') == 3 ]] \
     && grep -qx 's3://staging/s00000/b.xml' '$work/part-way/copied-again'"
+check "it keeps each copy S3 acknowledged, for the report's count of those never acknowledged" \
+  grep -qx 'copy: s3://staging/s00000/a.xml to s3://intake/a.xml' "$work/part-way/acks/0"
 check "a copy reported failed but written ends copied" copy_slice_with written
 check "it isn't copied again" bash -c "
   [[ \$(wc -l < '$work/written/calls') == 2 ]] && [[ ! -s '$work/written/copied-again' ]] \
@@ -210,7 +214,7 @@ check "it isn't copied again" bash -c "
 check "a slice copy whose listing failed ends copied" copy_slice_with listing
 check "it syncs the slice, copying only what isn't there" bash -c "
   [[ \$(grep -c -- --recursive '$work/listing/calls') == 1 ]] \
-    && grep -qx 's3 sync --size-only --only-show-errors s3://staging/s00000/ s3://intake/' '$work/listing/calls' \
+    && grep -qx 's3 sync --size-only --no-progress s3://staging/s00000/ s3://intake/' '$work/listing/calls' \
     && [[ ! -s '$work/listing/copied-again' ]]"
 
 # Each copy of a test document differs, by an element of the load test's own namespace, so no stage takes one
