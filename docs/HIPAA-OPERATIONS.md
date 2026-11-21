@@ -167,7 +167,7 @@ on local disk.
 
 The exporters and their options belong to the collector, not to the product. Check them against the documentation
 for the collector version you deploy. **Only the Loki path has been run** (the sandbox); the others have not been
-tried in our environments.
+tried in our environments. Example configurations for each store are to come (HIPAA.md §8.1 item 15).
 
 #### Checking it works
 

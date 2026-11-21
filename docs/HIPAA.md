@@ -511,6 +511,16 @@ or the **operator's** own duty that the product can only support.
     line, each a part of up to 8 MiB, its protected header naming the item, part, offset and whether it is the
     last, so parts can't be dropped, reordered or moved unseen. Plaintext needs `--plaintext --ticket <ref>`, with
     the ticket audited.
+15. **No ready-made collector configurations for the audit store.** To do before the product is final (deferred
+    2026-11-20).
+    - [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §2.7 says what the operator's collector must do and what each
+      store needs (exporter, identity and rights, network, retention and lock), but in words only. The one full
+      configuration is the sandbox's Loki one, a demonstration without a disk-backed queue or TLS.
+    - **To do:** ship in the distribution kit one example collector configuration per store (CloudWatch Logs,
+      Cloud Logging, Azure Monitor, Splunk, Elastic, Loki, OTLP or syslog to another SIEM), each keeping every
+      event, with a disk-backed queue, unlimited retry and TLS, beside its minimal identity (an IAM policy, a
+      role binding). Check each with the collector's `validate` command; run the CloudWatch one end to end on the
+      AWS PoC once its collector has its IAM role (§8.5), and the others as customers' clouds allow.
 
 ### 8.2 Documentation we owe customers
 
