@@ -1,6 +1,6 @@
 # The pipeline control API: design
 
-Status: **Designed 2026-11-20 with the user; not built** · Puts into effect the intent in
+Status: **Designed 2026-11-20 with the user; step C1 built 2026-11-20, the rest not built** · Puts into effect the intent in
 [CONTROL-API.md](CONTROL-API.md), and is the design for [HIPAA.md](HIPAA.md) §11.1 P1–P6. The operator commands
 it serves are those in DESIGN.md §11.4.
 
@@ -420,7 +420,7 @@ depends on neither of the others.
 
 | Step | Builds | Closes |
 |---|---|---|
-| C1 | The operation layer (§3), with the CLI on it. No change in behaviour: the CLI's tests pass unchanged | |
+| C1 | The operation layer (§3), with the CLI on it. No change in behaviour: the CLI's tests pass unchanged. **Built 2026-11-20** (§15.1) | |
 | C2 | Control mode: TLS, authentication, permissions, audit (§1, §2, §4, §10); the query operations; the OpenAPI file; the compliance checks | part of P1 |
 | C3 | Actions, `Idempotency-Key`, the operation record and its leases (§5, §8) | P1 |
 | C4 | Sealing keys and sealed results (§7) | P1 |
@@ -432,6 +432,32 @@ depends on neither of the others.
 | H1 | The harness with its Testcontainers target, growing with C2–C9 | P6 |
 | H2 | The sandbox target | P6 |
 | H3 | The AWS target | P6 |
+
+### 15.1 C1, as built
+
+- **Types** (`connector-stage`, `stage.admin`):
+  - `Operation<C, Q, R>`: `name`, `permission`, `permissions(request)`, `kind` (`QUERY`, `ACTION`, `LONG`, `SEALED`),
+    `approval(request)` (`NONE`, `FOUR_EYES`), and `run(request, context, invocation)`;
+  - `Permission`: the eight permissions of CONTROL-API.md, with their names in settings;
+  - `Invocation`: the `Caller` (principal, and `CLI`, `JWT` or `MTLS`), the audit event, and a `Sink` for streamed
+    rows and sealed parts;
+  - `Given<T>`: what a request carries that is read only when the operation needs it (a reason, a corrected record,
+    a public key), so the CLI reads standard input at the moment it always has;
+  - `Partial<T>`: a part of a result read on its own, kept with its failure, as the CLI's status always showed one;
+  - `CliOperation<C, Q, R>`: an operation with its CLI binding, `bind(arguments, context)` and
+    `print(result, out)`. It is an `AdminCommand`, so `AdminCli` is unchanged.
+- **Every command is an operation:** `status` (both), `stuck`, `drain-check`, `version`, `reprocess`, `failures`,
+  `decline`, `reopen`, `correct`, `retry`, `export`, `patients`, `audit-verify`, `audit-export`, `audit-prune`,
+  `restore`, `release` and `resubmit`. Each keeps its class, its options and its text.
+  - Their requests and results are records. A result holds rows (registry rows, leases, failures, runs), not text.
+  - What a result can't hold is streamed to the `Sink`: the audit journal's events as rows, and sealed parts.
+  - `FailureAdmin.changed` returns its note instead of printing it.
+- **What a caller sees differently:** a malformed option is now refused before anything is read or printed. Before,
+  `status --item x` printed the duties lease first. A command that fails part way prints nothing of what it had read.
+  Before, `drain-check` printed the releases first. Its exit status is the same.
+- **Not yet:** nothing checks permissions or approvals; that is C2 and C5. `restore` writes to the CLI's directory
+  through a `Destination` in its request; C4 adds a destination that streams. `OperationsTest` checks each
+  command's permission, kind and approval against §5.
 
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
 (HIPAA.md §11.2 D13).

@@ -12,8 +12,10 @@ import com.sdh.healthcare.connector.core.pipeline.UuidV7;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.landing.intake.ResubmitRequests;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
-import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.CliOperation;
+import com.sdh.healthcare.connector.stage.admin.Invocation;
+import com.sdh.healthcare.connector.stage.admin.Permission;
 import java.io.PrintStream;
 import java.time.Clock;
 import java.time.Duration;
@@ -44,7 +46,8 @@ import org.apache.iceberg.data.Record;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class ResubmitCommand implements AdminCommand<LandingAdminContext>
+final class ResubmitCommand implements CliOperation<LandingAdminContext,
+        ResubmitCommand.Request, ResubmitCommand.Result>
 {
 
     /** The command's help. */
@@ -127,11 +130,101 @@ final class ResubmitCommand implements AdminCommand<LandingAdminContext>
         return Set.of("item-id");
     }
 
+    /**
+     * What is asked.
+     *
+     * @param itemId the item to land again
+     * @param again  whether to land another copy of one landed again
+     *               before
+     */
+    record Request(UUID itemId, boolean again)
+    {
+    }
+
+    /**
+     * The request left for the landing node.
+     *
+     * @param itemId  the item
+     * @param request the request
+     * @param earlier whether it was left before, and is waited for again
+     */
+    record Asked(UUID itemId, ResubmitRequests.Request request,
+            boolean earlier)
+    {
+    }
+
+    /**
+     * What came of it.
+     *
+     * @param asked the request left
+     * @param done  the request as last read: finished, or still waiting
+     *              after {@link #WAIT}
+     */
+    record Result(Asked asked, ResubmitRequests.Request done)
+    {
+    }
+
+    @Override
+    public Permission permission()
+    {
+        return Permission.PIPELINE_OPERATE;
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.LONG;
+    }
+
+    @Override
+    public Request bind(AdminArgs arguments, LandingAdminContext context)
+    {
+        return new Request(parseId(arguments.required("item-id")),
+                arguments.flag("again"));
+    }
+
+    @Override
+    public Result run(Request request, LandingAdminContext context,
+            Invocation invocation) throws Exception
+    {
+        Asked asked = ask(request, context, invocation.audit());
+        return finish(asked, context, invocation.audit());
+    }
+
+    /**
+     * Leaves the request, says so, and only then waits for it, so an
+     * operator sees it was asked for while the node lands it.
+     */
     @Override
     public void run(AdminArgs arguments, LandingAdminContext context,
             AuditRecord audit, PrintStream out) throws Exception
     {
-        UUID itemId = parseId(arguments.required("item-id"));
+        Asked asked = ask(bind(arguments, context), context, audit);
+        print(asked, out);
+        printOutcome(finish(asked, context, audit), out);
+    }
+
+    @Override
+    public void print(Result result, PrintStream out) throws Exception
+    {
+        print(result.asked(), out);
+        printOutcome(result, out);
+    }
+
+    /**
+     * Leaves a request for the landing node, unless one is open already.
+     *
+     * @param request what is asked
+     * @param context the landing node's admin context
+     * @param audit   the audit event
+     * @return the request left, or found open
+     * @throws Exception if the item can't be resubmitted, or the tables
+     *                   can't be read
+     */
+    private Asked ask(Request request, LandingAdminContext context,
+            AuditRecord audit) throws Exception
+    {
+        UUID itemId = request.itemId();
         audit.add(Attr.ITEM_ID, itemId);
         String intake = context.properties().landing().intake();
         audit.add(Attr.INTAKE, intake);
@@ -153,50 +246,53 @@ final class ResubmitCommand implements AdminCommand<LandingAdminContext>
         List<ResubmitRequests.Request> earlier =
                 requests.forItem(intake, itemId);
         Optional<ResubmitRequests.Request> open = earlier.stream()
-                .filter(request -> !request.finished()).findFirst();
-        ResubmitRequests.Request request;
+                .filter(each -> !each.finished()).findFirst();
         if (open.isPresent())
         {
-            request = open.get();
-            out.printf("the item already has a request, %s, from %s: waiting"
-                    + " for it%n", request.requestId(), request.operator());
+            return new Asked(itemId, open.get(), true);
         }
-        else
+        Optional<ResubmitRequests.Request> landed = earlier.stream()
+                .filter(r -> r.outcome() == ResubmitRequests.Outcome.LANDED)
+                .reduce((first, second) -> second);
+        if (landed.isPresent() && !request.again())
         {
-            Optional<ResubmitRequests.Request> landed = earlier.stream()
-                    .filter(r -> r.outcome()
-                            == ResubmitRequests.Outcome.LANDED)
-                    .reduce((first, second) -> second);
-            if (landed.isPresent() && !arguments.flag("again"))
-            {
-                throw new IllegalStateException("The item was landed again"
-                        + " before, as " + landed.get().newItemId()
-                        + "; give --again to land another copy");
-            }
-            try
-            {
-                request = requests.add(intake, itemId, audit.operator(),
-                        UuidV7.next(clock.millis()));
-            }
-            catch (ResubmitRequests.AlreadyOpenException raced)
-            {
-                request = requests.forItem(intake, itemId).stream()
-                        .filter(r -> !r.finished()).findFirst()
-                        .orElseThrow(() -> raced);
-            }
-            out.printf("asked the landing node to land %s again (request"
-                    + " %s)%n", itemId, request.requestId());
+            throw new IllegalStateException("The item was landed again"
+                    + " before, as " + landed.get().newItemId()
+                    + "; give --again to land another copy");
         }
+        ResubmitRequests.Request left;
+        try
+        {
+            left = requests.add(intake, itemId, audit.operator(),
+                    UuidV7.next(clock.millis()));
+        }
+        catch (ResubmitRequests.AlreadyOpenException raced)
+        {
+            left = requests.forItem(intake, itemId).stream()
+                    .filter(r -> !r.finished()).findFirst()
+                    .orElseThrow(() -> raced);
+        }
+        return new Asked(itemId, left, false);
+    }
 
-        ResubmitRequests.Request done = waitFor(requests, request);
+    /**
+     * Waits for the node to finish the request, up to {@link #WAIT}.
+     *
+     * @param asked   the request left
+     * @param context the landing node's admin context
+     * @param audit   the audit event, given the outcome
+     * @return what came of it
+     * @throws Exception if the node refused it, or it can't be read
+     */
+    private Result finish(Asked asked, LandingAdminContext context,
+            AuditRecord audit) throws Exception
+    {
+        ResubmitRequests.Request done = waitFor(context.resubmitRequests(),
+                asked.request());
         if (!done.finished())
         {
             audit.add(Attr.STATE, "WAITING");
-            out.printf("not landed yet after %d s: the node lands it once"
-                    + " it holds the intake's lease and has no unfinished"
-                    + " item of its own. Run this again to wait for it; it"
-                    + " won't ask twice.%n", WAIT.toSeconds());
-            return;
+            return new Result(asked, done);
         }
         if (done.outcome() == ResubmitRequests.Outcome.REFUSED)
         {
@@ -206,8 +302,48 @@ final class ResubmitCommand implements AdminCommand<LandingAdminContext>
         }
         audit.add(Attr.STATE, "LANDED");
         audit.add(Attr.REASON, "new item " + done.newItemId());
+        return new Result(asked, done);
+    }
+
+    /**
+     * Says the request was left, or found open.
+     *
+     * @param asked the request
+     * @param out   where to
+     */
+    private static void print(Asked asked, PrintStream out)
+    {
+        ResubmitRequests.Request request = asked.request();
+        if (asked.earlier())
+        {
+            out.printf("the item already has a request, %s, from %s: waiting"
+                    + " for it%n", request.requestId(), request.operator());
+            return;
+        }
+        out.printf("asked the landing node to land %s again (request"
+                + " %s)%n", asked.itemId(), request.requestId());
+    }
+
+    /**
+     * Says what came of the request.
+     *
+     * @param result what came of it
+     * @param out    where to
+     */
+    private static void printOutcome(Result result, PrintStream out)
+    {
+        ResubmitRequests.Request done = result.done();
+        if (!done.finished())
+        {
+            out.printf("not landed yet after %d s: the node lands it once"
+                    + " it holds the intake's lease and has no unfinished"
+                    + " item of its own. Run this again to wait for it; it"
+                    + " won't ask twice.%n", WAIT.toSeconds());
+            return;
+        }
         out.printf("landed again as %s, which replaces %s; the split stage"
-                + " splits it as any new item%n", done.newItemId(), itemId);
+                + " splits it as any new item%n", done.newItemId(),
+                result.asked().itemId());
     }
 
     /**

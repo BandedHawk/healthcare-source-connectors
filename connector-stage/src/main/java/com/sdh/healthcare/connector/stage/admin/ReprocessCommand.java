@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -39,7 +40,8 @@ import java.util.regex.Pattern;
  * @since 0.1.0
  */
 public final class ReprocessCommand<C extends ReprocessAdmin>
-        implements AdminCommand<C>
+        implements CliOperation<C, ReprocessCommand.Request,
+                ReprocessCommand.Result>
 {
 
     /** The most objects one run chooses. */
@@ -58,6 +60,76 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     private static final Pattern VERSION =
             Pattern.compile("[A-Za-z0-9._@:/+-]{1,200}");
 
+    /**
+     * What is asked: a run's status, its cancelling, or a new run.
+     *
+     * @param status     the status of a run
+     * @param cancel     cancelling what of a run isn't yet queued
+     * @param runId      the run, for its status or cancelling
+     * @param itemIds    the items chosen; empty for any
+     * @param seq        one record number of one item; null for all
+     * @param madeBy     the version whose output is chosen; null for any
+     * @param landedFrom the start of the landing times chosen; null for
+     *                   any
+     * @param landedTo   their end, excluded; null for any
+     * @param intake     the intake the items were landed by; null for any
+     * @param dryRun     whether to show what would be chosen, recording
+     *                   nothing
+     * @param reason     why, for a run; read only once it is to be
+     *                   recorded
+     */
+    public record Request(boolean status, boolean cancel, UUID runId,
+            List<UUID> itemIds, Long seq, String madeBy, Instant landedFrom,
+            Instant landedTo, String intake, boolean dryRun,
+            Given<String> reason)
+    {
+    }
+
+    /** What was found or done. */
+    public sealed interface Result permits Status, Cancelled, Chosen
+    {
+    }
+
+    /**
+     * A run, object by object.
+     *
+     * @param run     the run
+     * @param objects its objects
+     * @param counts  its objects counted by outcome, or else state
+     */
+    public record Status(ReprocessStore.Run run,
+            List<ReprocessStore.Listed> objects, Map<String, Integer> counts)
+            implements Result
+    {
+    }
+
+    /**
+     * A run's objects cancelled.
+     *
+     * @param runId     the run
+     * @param cancelled how many were cancelled
+     */
+    public record Cancelled(UUID runId, int cancelled) implements Result
+    {
+    }
+
+    /**
+     * The objects chosen, and the run recorded for them.
+     *
+     * @param stage    the stage
+     * @param selector what they were chosen by
+     * @param chosen   the objects
+     * @param pending  how many operators' corrections are pending at their
+     *                 places
+     * @param runId    the run recorded; null for a dry run or for nothing
+     *                 chosen
+     */
+    public record Chosen(String stage, String selector,
+            List<ReprocessStore.Chosen> chosen, int pending, UUID runId)
+            implements Result
+    {
+    }
+
     /** Creates the command. */
     public ReprocessCommand()
     {
@@ -67,6 +139,32 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     public String name()
     {
         return "reprocess";
+    }
+
+    @Override
+    public Permission permission()
+    {
+        return Permission.PIPELINE_OPERATE;
+    }
+
+    /**
+     * A run's status needs only a viewer's permission; anything else, an
+     * operator's.
+     *
+     * @param request the request
+     * @return the permission
+     */
+    @Override
+    public Set<Permission> permissions(Request request)
+    {
+        return EnumSet.of(request.status() ? Permission.PIPELINE_VIEW
+                : Permission.PIPELINE_OPERATE);
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.LONG;
     }
 
     @Override
@@ -112,61 +210,94 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     }
 
     @Override
-    public void run(AdminArgs arguments, C context, AuditRecord audit,
-            PrintStream out) throws Exception
+    public Request bind(AdminArgs arguments, C context)
     {
+        return new Request(arguments.flag("status"),
+                arguments.flag("cancel"),
+                arguments.option("run").map(ReprocessCommand::runId)
+                        .orElse(null),
+                itemIds(arguments.option("item-id").orElse(null)),
+                arguments.option("seq").map(FailureCommands::seq)
+                        .orElse(null),
+                arguments.option("made-by").orElse(null),
+                arguments.option("landed-from")
+                        .map(text -> instant(text, "--landed-from"))
+                        .orElse(null),
+                arguments.option("landed-to")
+                        .map(text -> instant(text, "--landed-to"))
+                        .orElse(null),
+                arguments.option("intake").orElse(null),
+                arguments.flag("dry-run"),
+                () -> FailureCommands.reason(context.reasonInput()));
+    }
+
+    @Override
+    public Result run(Request request, C context, Invocation invocation)
+            throws Exception
+    {
+        AuditRecord audit = invocation.audit();
         audit.add(Attr.STAGE, context.stage());
-        boolean status = arguments.flag("status");
-        boolean cancel = arguments.flag("cancel");
-        if (status || cancel)
+        if (request.status() || request.cancel())
         {
-            if (status && cancel || arguments.flag("dry-run")
-                    || arguments.option("item-id").isPresent()
-                    || arguments.option("seq").isPresent()
-                    || arguments.option("made-by").isPresent()
-                    || landed(arguments))
+            if (request.status() && request.cancel() || request.dryRun()
+                    || !request.itemIds().isEmpty() || request.seq() != null
+                    || request.madeBy() != null || landed(request))
             {
                 throw new AdminArgs.UsageException("--status and --cancel"
                         + " take --run alone");
             }
-            UUID runId = runId(arguments.required("run"));
-            audit.add(Attr.RUN_ID, runId);
-            if (status)
+            if (request.runId() == null)
             {
-                status(context.reprocessRuns(), runId, out);
+                throw new AdminArgs.UsageException("--run is required");
             }
-            else
+            audit.add(Attr.RUN_ID, request.runId());
+            if (request.status())
             {
-                cancel(context.reprocessRunsToChange(), runId, audit, out);
+                return status(context.reprocessRuns(), request.runId());
             }
-            return;
+            return cancel(context.reprocessRunsToChange(), request.runId(),
+                    audit);
         }
-        if (arguments.option("run").isPresent())
+        if (request.runId() != null)
         {
             throw new AdminArgs.UsageException("--run is for --status and"
                     + " --cancel");
         }
-        choose(arguments, context, audit, out);
+        return choose(request, context, audit);
+    }
+
+    @Override
+    public void print(Result result, PrintStream out)
+    {
+        switch (result)
+        {
+            case Status status -> print(status, out);
+            case Cancelled cancelled -> out.println("Run "
+                    + cancelled.runId() + ": " + cancelled.cancelled()
+                    + " object(s) not yet queued cancelled; any queued are"
+                    + " processed");
+            case Chosen chosen -> print(chosen, out);
+        }
     }
 
     /**
-     * Chooses objects, and records a run of them unless it is a dry run.
+     * Chooses the objects, and records a run for them unless it is a dry
+     * run.
      *
-     * @param arguments the options
-     * @param context   the stage
-     * @param audit     the audit record
-     * @param out       where results go
-     * @throws Exception if the stage's input or runs can't be reached
+     * @param request the request
+     * @param context the stage
+     * @param audit   the audit record
+     * @return what was chosen, and the run
+     * @throws Exception if the input, the registry or the reason can't be
+     *                   read, or the run can't be recorded
      */
-    private void choose(AdminArgs arguments, C context, AuditRecord audit,
-            PrintStream out) throws Exception
+    private Chosen choose(Request request, C context, AuditRecord audit)
+            throws Exception
     {
-        List<UUID> itemIds = itemIds(arguments.option("item-id")
-                .orElse(null));
-        String madeBy = arguments.option("made-by").orElse(null);
-        Long seq = arguments.option("seq").map(FailureCommands::seq)
-                .orElse(null);
-        Landed landed = landedRange(arguments);
+        List<UUID> itemIds = request.itemIds();
+        String madeBy = request.madeBy();
+        Long seq = request.seq();
+        Landed landed = landedRange(request);
         if (context.wholeItems() && seq != null)
         {
             throw new AdminArgs.UsageException("--seq is refused at the "
@@ -204,35 +335,21 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
         List<ReprocessStore.Chosen> chosen = chosen(context, itemIds, seq,
                 madeBy, landed);
         audit.add(Attr.COUNT, chosen.size());
-        ReprocessStore runs = arguments.flag("dry-run")
-                ? context.reprocessRuns() : context.reprocessRunsToChange();
+        ReprocessStore runs = request.dryRun() ? context.reprocessRuns()
+                : context.reprocessRunsToChange();
         int pending = runs.pendingCorrections(chosen);
         if (chosen.isEmpty())
         {
-            out.println("Nothing chosen: no current piece of the input at"
-                    + " the places given");
-            return;
+            return new Chosen(context.stage(), selector, chosen, pending,
+                    null);
         }
-        if (arguments.flag("dry-run"))
+        if (request.dryRun())
         {
             audit.add(Attr.STATE, "dry_run");
-            out.println("Would reprocess " + chosen.size() + " object(s) at"
-                    + " the " + context.stage() + " stage (" + selector
-                    + "):");
-            for (int index = 0; index < chosen.size()
-                    && index < MAX_PRINTED; index++)
-            {
-                out.println("  " + line(chosen.get(index)));
-            }
-            if (chosen.size() > MAX_PRINTED)
-            {
-                out.println("  ... and " + (chosen.size() - MAX_PRINTED)
-                        + " more");
-            }
-            warn(pending, out);
-            return;
+            return new Chosen(context.stage(), selector, chosen, pending,
+                    null);
         }
-        String text = FailureCommands.reason(context.reasonInput());
+        String text = request.reason().get();
         KeyProvider keys = context.reasonKeys();
         String kek = context.reasonKek();
         UUID runId = runs.record(selector, audit.operator(),
@@ -240,11 +357,49 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
                         REASON_SEQ, REASON_EVENT, text), chosen);
         audit.add(Attr.RUN_ID, runId);
         audit.add(Attr.STATE, ReprocessStore.RunState.PENDING.name());
-        out.println("Run " + runId + ": " + chosen.size() + " object(s) to"
-                + " reprocess at the " + context.stage() + " stage, queued"
-                + " by its pods within a renewal interval; the reason kept"
-                + " encrypted. See reprocess --status --run " + runId);
-        warn(pending, out);
+        return new Chosen(context.stage(), selector, chosen, pending, runId);
+    }
+
+    /**
+     * Prints what was chosen: nothing, what a dry run would reprocess, or
+     * the run recorded.
+     *
+     * @param chosen what was chosen
+     * @param out    where to
+     */
+    private static void print(Chosen chosen, PrintStream out)
+    {
+        List<ReprocessStore.Chosen> objects = chosen.chosen();
+        if (objects.isEmpty())
+        {
+            out.println("Nothing chosen: no current piece of the input at"
+                    + " the places given");
+            return;
+        }
+        if (chosen.runId() == null)
+        {
+            out.println("Would reprocess " + objects.size() + " object(s) at"
+                    + " the " + chosen.stage() + " stage ("
+                    + chosen.selector() + "):");
+            for (int index = 0; index < objects.size()
+                    && index < MAX_PRINTED; index++)
+            {
+                out.println("  " + line(objects.get(index)));
+            }
+            if (objects.size() > MAX_PRINTED)
+            {
+                out.println("  ... and " + (objects.size() - MAX_PRINTED)
+                        + " more");
+            }
+            warn(chosen.pending(), out);
+            return;
+        }
+        out.println("Run " + chosen.runId() + ": " + objects.size()
+                + " object(s) to reprocess at the " + chosen.stage()
+                + " stage, queued by its pods within a renewal interval; the"
+                + " reason kept encrypted. See reprocess --status --run "
+                + chosen.runId());
+        warn(chosen.pending(), out);
     }
 
     /**
@@ -313,14 +468,13 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     }
 
     /**
-     * Prints a run, object by object.
+     * Reads a run, object by object.
      *
      * @param runs  the stage's runs
      * @param runId the run
-     * @param out   where to
+     * @return the run
      */
-    private static void status(ReprocessStore runs, UUID runId,
-            PrintStream out)
+    private static Status status(ReprocessStore runs, UUID runId)
     {
         ReprocessStore.Run run = runs.run(runId).orElseThrow(
                 () -> new IllegalStateException("No run " + runId
@@ -332,12 +486,25 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
             counts.merge(each.outcome() != null ? each.outcome()
                     : each.state().name(), 1, Integer::sum);
         }
-        out.println("Run " + runId + " " + run.state() + ": "
+        return new Status(run, objects, counts);
+    }
+
+    /**
+     * Prints a run, object by object.
+     *
+     * @param status the run
+     * @param out    where to
+     */
+    private static void print(Status status, PrintStream out)
+    {
+        ReprocessStore.Run run = status.run();
+        out.println("Run " + run.runId() + " " + run.state() + ": "
                 + run.selector() + ", by " + run.operator() + " at "
                 + run.askedAt() + " under " + run.version()
                 + (run.doneAt() == null ? "" : ", ended " + run.doneAt()));
-        out.println("  " + objects.size() + " object(s): " + counts);
-        for (ReprocessStore.Listed each : objects)
+        out.println("  " + status.objects().size() + " object(s): "
+                + status.counts());
+        for (ReprocessStore.Listed each : status.objects())
         {
             StringBuilder line = new StringBuilder("  ")
                     .append(line(each.chosen())).append(' ')
@@ -369,10 +536,10 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
      * @param runs  the stage's runs
      * @param runId the run
      * @param audit the audit record
-     * @param out   where to say what was done
+     * @return what was cancelled
      */
-    private static void cancel(ReprocessStore runs, UUID runId,
-            AuditRecord audit, PrintStream out)
+    private static Cancelled cancel(ReprocessStore runs, UUID runId,
+            AuditRecord audit)
     {
         if (runs.run(runId).isEmpty())
         {
@@ -381,8 +548,7 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
         }
         int cancelled = runs.cancel(runId);
         audit.add(Attr.COUNT, cancelled);
-        out.println("Run " + runId + ": " + cancelled + " object(s) not yet"
-                + " queued cancelled; any queued are processed");
+        return new Cancelled(runId, cancelled);
     }
 
     /**
@@ -425,47 +591,44 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
     }
 
     /**
-     * Whether any of the landing-time options is given.
+     * Whether a request chooses by landing time at all.
      *
-     * @param arguments the options
-     * @return whether one is
+     * @param request the request
+     * @return true if it gives any of the landing options
      */
-    private static boolean landed(AdminArgs arguments)
+    private static boolean landed(Request request)
     {
-        return arguments.option("landed-from").isPresent()
-                || arguments.option("landed-to").isPresent()
-                || arguments.option("intake").isPresent();
+        return request.landedFrom() != null || request.landedTo() != null
+                || request.intake() != null;
     }
 
     /**
-     * Reads the range of landing times chosen.
+     * The landing times chosen by, checked.
      *
-     * @param arguments the options
-     * @return the range; null if none is given
-     * @throws AdminArgs.UsageException if it is given in part, a time
-     *                                  isn't ISO-8601, or it is empty
+     * @param request the request
+     * @return the times; null if none are given
+     * @throws AdminArgs.UsageException if they don't make a range, or the
+     *                                  intake isn't a name
      */
-    private static Landed landedRange(AdminArgs arguments)
+    private static Landed landedRange(Request request)
     {
-        if (!landed(arguments))
+        if (!landed(request))
         {
             return null;
         }
-        String from = arguments.option("landed-from").orElse(null);
-        String to = arguments.option("landed-to").orElse(null);
-        if (from == null || to == null)
+        Instant start = request.landedFrom();
+        Instant end = request.landedTo();
+        if (start == null || end == null)
         {
             throw new AdminArgs.UsageException("--landed-from and"
                     + " --landed-to go together, and --intake with them");
         }
-        Instant start = instant(from, "--landed-from");
-        Instant end = instant(to, "--landed-to");
         if (!start.isBefore(end))
         {
             throw new AdminArgs.UsageException("--landed-from must be before"
                     + " --landed-to");
         }
-        String intake = arguments.option("intake").orElse(null);
+        String intake = request.intake();
         if (intake != null && !VERSION.matcher(intake).matches())
         {
             throw new AdminArgs.UsageException("--intake must be an"
@@ -581,3 +744,4 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
         }
     }
 }
+

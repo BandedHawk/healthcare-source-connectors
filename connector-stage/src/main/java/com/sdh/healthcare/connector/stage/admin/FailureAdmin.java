@@ -10,7 +10,6 @@ import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import java.io.InputStream;
-import java.io.PrintStream;
 import java.util.UUID;
 
 /**
@@ -148,10 +147,9 @@ public interface FailureAdmin
      *
      * @param itemId the item
      * @param audit  the command's audit record
-     * @param out    where to say what was done
+     * @return what was done, as a line for the operator; null if nothing
      * @throws Exception if it fails; the change stays made, and the
      *                   stage's pods act on it
      */
-    void changed(UUID itemId, AuditRecord audit, PrintStream out)
-            throws Exception;
+    String changed(UUID itemId, AuditRecord audit) throws Exception;
 }

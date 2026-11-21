@@ -41,7 +41,6 @@ import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
-import java.io.PrintStream;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
@@ -393,11 +392,11 @@ final class SplitAdminContext implements DrainAdmin, AutoCloseable
      * step 5): the admin sends nothing.
      */
     @Override
-    public void changed(UUID itemId, AuditRecord audit, PrintStream out)
+    public String changed(UUID itemId, AuditRecord audit)
     {
-        out.println("The stage's pods send the item's end within a renewal"
+        return "The stage's pods send the item's end within a renewal"
                 + " interval: item.split once none of its failures is"
-                + " open, else item.progress");
+                + " open, else item.progress";
     }
 
     @Override

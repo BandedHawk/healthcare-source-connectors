@@ -207,10 +207,10 @@ class FailureCommandsTest
         }
 
         @Override
-        public void changed(UUID itemId, AuditRecord audit, PrintStream out)
+        public String changed(UUID itemId, AuditRecord audit)
         {
             CHANGED.add(itemId);
-            out.println("told the stage");
+            return "told the stage";
         }
 
         @Override

@@ -30,8 +30,35 @@ import java.util.stream.Collectors;
  * @since 0.1.0
  */
 public final class DrainCheckCommand<C extends DrainAdmin>
-        implements AdminCommand<C>
+        implements CliOperation<C, DrainCheckCommand.Request,
+                DrainCheckCommand.Result>
 {
+
+    /** What is asked: nothing but the check. */
+    public record Request()
+    {
+    }
+
+    /**
+     * What was found.
+     *
+     * @param stage    the stage
+     * @param mine     this release
+     * @param decision whether a pod of it would be let in now
+     * @param current  the stage's current release; null if none
+     * @param previous its previous release; null if none
+     * @param partWay  the items part way, by version
+     * @param open     the open failures, by version and state
+     * @param held     the items held, by version
+     * @param waiting  how many reprocess objects wait to be queued
+     */
+    public record Result(String stage, StageReleases.Release mine,
+            DrainGate.Decision decision, StageReleases.LetIn current,
+            StageReleases.LetIn previous, List<PartWay.Items> partWay,
+            List<FailureStore.OpenByVersion> open, List<PartWay.Items> held,
+            long waiting)
+    {
+    }
 
     /** Creates the command. */
     public DrainCheckCommand()
@@ -72,15 +99,28 @@ public final class DrainCheckCommand<C extends DrainAdmin>
     }
 
     @Override
-    public boolean readsOnly()
+    public Permission permission()
     {
-        return true;
+        return Permission.PIPELINE_VIEW;
     }
 
     @Override
-    public void run(AdminArgs arguments, C context, AuditRecord audit,
-            PrintStream out) throws Exception
+    public Kind kind()
     {
+        return Kind.QUERY;
+    }
+
+    @Override
+    public Request bind(AdminArgs arguments, C context)
+    {
+        return new Request();
+    }
+
+    @Override
+    public Result run(Request request, C context, Invocation invocation)
+            throws Exception
+    {
+        AuditRecord audit = invocation.audit();
         audit.add(Attr.STAGE, context.stage());
         StageReleases releases = context.stageReleases();
         StageReleases.Release mine = StageReleases.Release.of(
@@ -93,15 +133,27 @@ public final class DrainCheckCommand<C extends DrainAdmin>
             decision = gate.decide();
         }
         audit.add(Attr.COUNT, decision.blockingCount());
-        out.println("Stage " + context.stage() + ", this release "
+        StageReleases.LetIn[] both = releases.currentAndPrevious();
+        return new Result(context.stage(), mine, decision, both[0], both[1],
+                context.partWay().partWay(DrainGate.FIRST_ITEMS),
+                context.failures().openByVersion(),
+                context.held(DrainGate.FIRST_ITEMS),
+                context.reprocessRuns().waiting());
+    }
+
+    @Override
+    public void print(Result result, PrintStream out)
+    {
+        StageReleases.Release mine = result.mine();
+        DrainGate.Decision decision = result.decision();
+        out.println("Stage " + result.stage() + ", this release "
                 + mine.digest() + ":");
         for (String version : mine.versions())
         {
             out.println("  " + version);
         }
-        StageReleases.LetIn[] both = releases.currentAndPrevious();
-        out.println("Current: " + letIn(both[0]));
-        out.println("Previous: " + letIn(both[1]));
+        out.println("Current: " + letIn(result.current()));
+        out.println("Previous: " + letIn(result.previous()));
         if (decision.letIn())
         {
             out.println("Would be let in: " + decision.how().wireName());
@@ -114,28 +166,24 @@ public final class DrainCheckCommand<C extends DrainAdmin>
                     + " stamp; see version --accept to let it in anyway");
         }
         out.println("Part way:");
-        print(context.partWay().partWay(DrainGate.FIRST_ITEMS), out);
+        print(result.partWay(), out);
         out.println("Waiting on an operator (never holds a release back):");
-        List<FailureStore.OpenByVersion> open =
-                context.failures().openByVersion();
-        if (open.isEmpty())
+        if (result.open().isEmpty())
         {
             out.println("  no open failures");
         }
-        for (FailureStore.OpenByVersion each : open)
+        for (FailureStore.OpenByVersion each : result.open())
         {
             out.println("  " + each.count() + " " + each.state().name()
                     .toLowerCase(Locale.ROOT) + " failure(s) under "
                     + each.version());
         }
-        List<PartWay.Items> held = context.held(DrainGate.FIRST_ITEMS);
-        if (!held.isEmpty())
+        if (!result.held().isEmpty())
         {
             out.println("  held items:");
-            print(held, out);
+            print(result.held(), out);
         }
-        out.println("  " + context.reprocessRuns().waiting()
-                + " reprocess object(s) waiting");
+        out.println("  " + result.waiting() + " reprocess object(s) waiting");
     }
 
     /**

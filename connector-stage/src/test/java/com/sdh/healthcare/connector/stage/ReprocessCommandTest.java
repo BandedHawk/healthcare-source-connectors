@@ -126,8 +126,9 @@ class ReprocessCommandTest
         }
 
         @Override
-        public void changed(UUID itemId, AuditRecord record, PrintStream out)
+        public String changed(UUID itemId, AuditRecord record)
         {
+            return null;
         }
 
         @Override

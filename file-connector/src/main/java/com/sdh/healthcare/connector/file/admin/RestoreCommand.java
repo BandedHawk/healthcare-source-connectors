@@ -11,10 +11,13 @@ import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
-import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.CliOperation;
 import com.sdh.healthcare.connector.stage.admin.ExportSealer;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
+import com.sdh.healthcare.connector.stage.admin.Given;
+import com.sdh.healthcare.connector.stage.admin.Invocation;
+import com.sdh.healthcare.connector.stage.admin.Permission;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -22,6 +25,7 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -43,7 +47,8 @@ import org.apache.iceberg.io.CloseableIterable;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class RestoreCommand implements AdminCommand<SplitAdminContext>
+final class RestoreCommand implements CliOperation<SplitAdminContext,
+        RestoreCommand.Request, RestoreCommand.Result>
 {
 
     /** The command's help. */
@@ -75,9 +80,107 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
     /** How much plaintext goes in one sealed part. */
     static final int PART_BYTES = 8 << 20;
 
+    /**
+     * What is asked.
+     *
+     * @param itemId       the item
+     * @param destination  where the output is written
+     * @param plaintext    whether to write it unsealed, for break-glass
+     * @param ticket       the change or incident a plaintext restore is
+     *                     for; null otherwise
+     * @param publicKey    the key to seal to, PEM; read only for a sealed
+     *                     restore
+     * @param fromOffset   the byte offset to start at; null for 0
+     * @param unprocessed  whether to start after the item's last split
+     *                     record
+     * @param originalName whether to name the output after the original
+     *                     file
+     */
+    record Request(UUID itemId, Destination destination, boolean plaintext,
+            String ticket, Given<byte[]> publicKey, Long fromOffset,
+            boolean unprocessed, boolean originalName)
+    {
+    }
+
+    /** Where a restore's output goes. */
+    interface Destination
+    {
+
+        /**
+         * Writes the output, as a new file, only once it is whole.
+         *
+         * @param name   its name
+         * @param writer writes it
+         * @return the bytes written
+         * @throws Exception if it can't be written; nothing is left
+         */
+        long write(String name, OutputFiles.Writer writer) throws Exception;
+
+        /**
+         * Where an output is, to say so.
+         *
+         * @param name its name; null for where outputs go, as when its
+         *             name is the original's, which is PHI
+         * @return the place
+         */
+        String where(String name);
+    }
+
+    /**
+     * What was restored.
+     *
+     * @param restored  the bytes restored, before sealing
+     * @param from      the offset it started at
+     * @param size      the item's size
+     * @param plaintext whether it was written unsealed
+     * @param where     where it was written, without the original name
+     */
+    record Result(long restored, long from, long size, boolean plaintext,
+            String where)
+    {
+    }
+
     /** Creates the command. */
     RestoreCommand()
     {
+    }
+
+    @Override
+    public Permission permission()
+    {
+        return Permission.PHI_EXPORT;
+    }
+
+    /**
+     * A plaintext restore needs break-glass; a sealed one, PHI export.
+     *
+     * @param request the request
+     * @return the permission
+     */
+    @Override
+    public Set<Permission> permissions(Request request)
+    {
+        return EnumSet.of(request.plaintext() ? Permission.PHI_BREAK_GLASS
+                : Permission.PHI_EXPORT);
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.SEALED;
+    }
+
+    /**
+     * A plaintext restore needs a second person (CONTROL-API-DESIGN.md
+     * §6); a sealed one doesn't.
+     *
+     * @param request the request
+     * @return the approval needed
+     */
+    @Override
+    public Approval approval(Request request)
+    {
+        return request.plaintext() ? Approval.FOUR_EYES : Approval.NONE;
     }
 
     @Override
@@ -105,20 +208,52 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
     }
 
     @Override
-    public void run(AdminArgs arguments, SplitAdminContext context,
-            AuditRecord audit, PrintStream out) throws Exception
+    public Request bind(AdminArgs arguments, SplitAdminContext context)
     {
         UUID itemId = parseId(arguments.required("item-id"));
-        audit.add(Attr.ITEM_ID, itemId);
         Path directory = OutputFiles.directory(arguments.required("to"));
-        boolean plaintext = arguments.flag("plaintext");
+        return new Request(itemId, new Destination()
+        {
+            @Override
+            public long write(String name, OutputFiles.Writer writer)
+                    throws Exception
+            {
+                return OutputFiles.writeNew(directory, name, writer);
+            }
+
+            @Override
+            public String where(String name)
+            {
+                return name == null ? directory.toString()
+                        : directory.resolve(name).toString();
+            }
+        }, arguments.flag("plaintext"), arguments.option("ticket")
+                .orElse(null), () -> FailureCommands.input(System.in,
+                        ExportSealer.MAX_KEY_BYTES, "public key"),
+                arguments.option("from-offset")
+                        .map(RestoreCommand::parseOffset).orElse(null),
+                arguments.flag("unprocessed"),
+                arguments.flag("original-name"));
+    }
+
+    @Override
+    public Result run(Request request, SplitAdminContext context,
+            Invocation invocation) throws Exception
+    {
+        AuditRecord audit = invocation.audit();
+        UUID itemId = request.itemId();
+        audit.add(Attr.ITEM_ID, itemId);
+        boolean plaintext = request.plaintext();
         ExportSealer sealer = null;
         if (plaintext)
         {
-            String ticket = arguments.option("ticket").orElseThrow(() ->
-                    new AdminArgs.UsageException("--plaintext requires"
-                            + " --ticket <ref>, the change or incident it"
-                            + " is for"));
+            String ticket = request.ticket();
+            if (ticket == null)
+            {
+                throw new AdminArgs.UsageException("--plaintext requires"
+                        + " --ticket <ref>, the change or incident it"
+                        + " is for");
+            }
             if (!TICKET.matcher(ticket).matches())
             {
                 throw new AdminArgs.UsageException("--ticket must be a"
@@ -130,19 +265,16 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
         }
         else
         {
-            if (arguments.option("ticket").isPresent())
+            if (request.ticket() != null)
             {
                 throw new AdminArgs.UsageException(
                         "--ticket goes with --plaintext");
             }
-            sealer = new ExportSealer(FailureCommands.input(
-                    System.in, ExportSealer.MAX_KEY_BYTES,
-                    "public key"));
+            sealer = new ExportSealer(request.publicKey().get());
             audit.add(Attr.RECIPIENT_KEY, sealer.fingerprint());
             audit.add(Attr.OUTCOME, "sealed");
         }
-        if (arguments.option("from-offset").isPresent()
-                && arguments.flag("unprocessed"))
+        if (request.fromOffset() != null && request.unprocessed())
         {
             throw new AdminArgs.UsageException(
                     "Use --from-offset or --unprocessed, not both");
@@ -155,10 +287,9 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
         audit.add(Attr.TABLE, LandingTables.LANDED_ITEMS);
         long size = (Long) summary.getField(LandingTables.ITEM_SIZE);
 
-        long from = arguments.flag("unprocessed")
+        long from = request.unprocessed()
                 ? unprocessedFrom(context.splitRecords(), itemId)
-                : arguments.option("from-offset")
-                        .map(RestoreCommand::parseOffset).orElse(0L);
+                : request.fromOffset() == null ? 0L : request.fromOffset();
         if (from > size)
         {
             throw new AdminArgs.UsageException("--from-offset is beyond the"
@@ -170,7 +301,7 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
                 + (plaintext ? "" : ".jwe");
         String outputName = itemId + suffix;
         Optional<String> original = Optional.empty();
-        if (arguments.flag("original-name"))
+        if (request.originalName())
         {
             original = LandedItems.originalName(summary,
                     context.keys().wrap());
@@ -184,7 +315,7 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
 
         ExportSealer sealing = sealer;
         long[] plain = new long[1];
-        long written = OutputFiles.writeNew(directory, outputName, output ->
+        long written = request.destination().write(outputName, output ->
         {
             if (sealing == null)
             {
@@ -205,12 +336,20 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
         audit.add(Attr.BYTES, restored);
         // The original name is PHI, and stays out of output that may end
         // up in logs.
+        return new Result(restored, from, size, plaintext,
+                original.isPresent() ? request.destination().where(null)
+                        + " under its original name"
+                        : request.destination().where(outputName));
+    }
+
+    @Override
+    public void print(Result result, PrintStream out)
+    {
         out.printf("restored %d bytes (offset %d of %d) from landing,"
-                + " digest verified, %s to %s%n", restored, from, size,
-                plaintext ? "IN PLAINTEXT" : "sealed",
-                original.isPresent()
-                        ? directory + " under its original name"
-                        : directory.resolve(outputName));
+                + " digest verified, %s to %s%n", result.restored(),
+                result.from(), result.size(),
+                result.plaintext() ? "IN PLAINTEXT" : "sealed",
+                result.where());
     }
 
     /**

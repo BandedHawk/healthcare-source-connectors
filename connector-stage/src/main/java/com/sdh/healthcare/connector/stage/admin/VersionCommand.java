@@ -12,7 +12,9 @@ import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.stage.StageReleases;
 import java.io.PrintStream;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -27,7 +29,8 @@ import java.util.Set;
  * @since 0.1.0
  */
 public final class VersionCommand<C extends DrainAdmin>
-        implements AdminCommand<C>
+        implements CliOperation<C, VersionCommand.Request,
+                VersionCommand.Result>
 {
 
     /** How many releases are listed. */
@@ -39,6 +42,33 @@ public final class VersionCommand<C extends DrainAdmin>
     /** The event number an acceptance's reason is sealed with. */
     private static final int REASON_EVENT = 1;
 
+    /**
+     * What is asked.
+     *
+     * @param accept whether to let this release in
+     * @param reason why, for an acceptance; read only then
+     */
+    public record Request(boolean accept, Given<String> reason)
+    {
+    }
+
+    /**
+     * What was found, or done.
+     *
+     * @param mine          this release
+     * @param history       the releases let in, newest first; empty for
+     *                      an acceptance
+     * @param acceptedEarly when this release was accepted before, if it
+     *                      was; empty for an acceptance
+     * @param accepted      the acceptance made; null for a listing
+     */
+    public record Result(StageReleases.Release mine,
+            List<StageReleases.LetIn> history,
+            Optional<StageReleases.Accepted> acceptedEarly,
+            StageReleases.Accepted accepted)
+    {
+    }
+
     /** Creates the command. */
     public VersionCommand()
     {
@@ -48,6 +78,31 @@ public final class VersionCommand<C extends DrainAdmin>
     public String name()
     {
         return "version";
+    }
+
+    @Override
+    public Permission permission()
+    {
+        return Permission.PIPELINE_OPERATE;
+    }
+
+    /**
+     * Listing needs only a viewer's permission; accepting, an operator's.
+     *
+     * @param request the request
+     * @return the permission
+     */
+    @Override
+    public Set<Permission> permissions(Request request)
+    {
+        return EnumSet.of(request.accept() ? Permission.PIPELINE_OPERATE
+                : Permission.PIPELINE_VIEW);
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.ACTION;
     }
 
     @Override
@@ -77,16 +132,42 @@ public final class VersionCommand<C extends DrainAdmin>
     }
 
     @Override
-    public void run(AdminArgs arguments, C context, AuditRecord audit,
-            PrintStream out) throws Exception
+    public Request bind(AdminArgs arguments, C context)
     {
+        return new Request(arguments.flag("accept"),
+                () -> FailureCommands.reason(context.reasonInput()));
+    }
+
+    @Override
+    public Result run(Request request, C context, Invocation invocation)
+            throws Exception
+    {
+        AuditRecord audit = invocation.audit();
         audit.add(Attr.STAGE, context.stage());
         StageReleases.Release mine = StageReleases.Release.of(
                 context.releaseVersions());
         audit.add(Attr.RELEASE, mine.digest());
-        if (arguments.flag("accept"))
+        if (request.accept())
         {
-            accept(context, mine, audit, out);
+            return new Result(mine, List.of(), Optional.empty(),
+                    accept(context, mine, request.reason(), audit));
+        }
+        List<StageReleases.LetIn> history = context.stageReleases()
+                .history(LISTED);
+        return new Result(mine, history,
+                context.stageReleases().accepted(mine), null);
+    }
+
+    @Override
+    public void print(Result result, PrintStream out)
+    {
+        StageReleases.Release mine = result.mine();
+        if (result.accepted() != null)
+        {
+            out.println("Release " + mine.digest() + " accepted ("
+                    + result.accepted().acceptId() + "), the reason kept"
+                    + " encrypted: a held pod of it is let in within its"
+                    + " check interval");
             return;
         }
         out.println("This release: " + mine.digest() + " ("
@@ -95,18 +176,16 @@ public final class VersionCommand<C extends DrainAdmin>
         {
             out.println("  " + version);
         }
-        List<StageReleases.LetIn> history = context.stageReleases()
-                .history(LISTED);
         out.println("Let in, newest first:");
-        if (history.isEmpty())
+        if (result.history().isEmpty())
         {
             out.println("  none");
         }
-        for (StageReleases.LetIn letIn : history)
+        for (StageReleases.LetIn letIn : result.history())
         {
             out.println("  " + DrainCheckCommand.letIn(letIn));
         }
-        context.stageReleases().accepted(mine).ifPresent(accepted ->
+        result.acceptedEarly().ifPresent(accepted ->
                 out.println("This release was accepted by "
                         + accepted.operator() + " at " + accepted.at()));
     }
@@ -116,13 +195,15 @@ public final class VersionCommand<C extends DrainAdmin>
      *
      * @param context the stage
      * @param mine    this release
+     * @param reason  why
      * @param audit   the command's audit event
-     * @param out     where to report
+     * @return the acceptance
      * @throws Exception if the reason can't be read or sealed, or the
      *                   database can't be reached
      */
-    private void accept(C context, StageReleases.Release mine,
-            AuditRecord audit, PrintStream out) throws Exception
+    private StageReleases.Accepted accept(C context,
+            StageReleases.Release mine, Given<String> reason,
+            AuditRecord audit) throws Exception
     {
         StageReleases.LetIn current = context.stageReleases()
                 .currentAndPrevious()[0];
@@ -132,7 +213,7 @@ public final class VersionCommand<C extends DrainAdmin>
             throw new AdminArgs.UsageException("This release, "
                     + mine.digest() + ", is the stage's current one already");
         }
-        String text = FailureCommands.reason(context.reasonInput());
+        String text = reason.get();
         KeyProvider keys = context.reasonKeys();
         String kek = context.reasonKek();
         StageReleases.Accepted accepted = context.stageReleasesToChange()
@@ -140,8 +221,6 @@ public final class VersionCommand<C extends DrainAdmin>
                         keys, kek, id, REASON_SEQ, REASON_EVENT, text));
         Telemetry.get().auditWarn("stage.version_forced", audit.fields()
                 .with(Attr.VERSION_COUNT, mine.versions().size()));
-        out.println("Release " + mine.digest() + " accepted ("
-                + accepted.acceptId() + "), the reason kept encrypted: a"
-                + " held pod of it is let in within its check interval");
+        return accepted;
     }
 }

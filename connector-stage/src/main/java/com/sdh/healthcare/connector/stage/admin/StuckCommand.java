@@ -32,7 +32,7 @@ import java.util.Set;
  * @since 0.1.0
  */
 public final class StuckCommand<C extends StageAdmin>
-        implements AdminCommand<C>
+        implements CliOperation<C, StuckCommand.Request, StuckCommand.Result>
 {
 
     /** The most items, and item and pod pairs, listed. */
@@ -45,9 +45,44 @@ public final class StuckCommand<C extends StageAdmin>
      */
     static final Duration IDLE = Duration.ofMinutes(10);
 
+    /**
+     * What is asked.
+     *
+     * @param idle how long since an item's last record was stored, at
+     *             least, for it to count as stuck
+     */
+    public record Request(Duration idle)
+    {
+    }
+
+    /**
+     * What was found, each part read on its own.
+     *
+     * @param idle   the idle time asked for
+     * @param items  the items stuck
+     * @param claims the records left claimed, by item and pod
+     */
+    public record Result(Duration idle,
+            Partial<RegistryReport.Listed<RegistryReport.Stuck>> items,
+            Partial<RegistryReport.Listed<RegistryReport.LeftClaim>> claims)
+    {
+    }
+
     /** Creates the command. */
     public StuckCommand()
     {
+    }
+
+    @Override
+    public Permission permission()
+    {
+        return Permission.PIPELINE_VIEW;
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.QUERY;
     }
 
     @Override
@@ -84,39 +119,48 @@ public final class StuckCommand<C extends StageAdmin>
     }
 
     @Override
-    public boolean readsOnly()
+    public Request bind(AdminArgs arguments, C context)
     {
-        return true;
+        return new Request(arguments.option("idle")
+                .map(StuckCommand::minutes).orElse(IDLE));
     }
 
     @Override
-    public void run(AdminArgs arguments, C context, AuditRecord audit,
-            PrintStream out) throws Exception
+    public Result run(Request request, C context, Invocation invocation)
     {
+        AuditRecord audit = invocation.audit();
         audit.add(Attr.STAGE, context.stage());
-        Duration idle = arguments.option("idle").map(StuckCommand::minutes)
-                .orElse(IDLE);
+        Partial<RegistryReport.Listed<RegistryReport.Stuck>> items =
+                Partial.of(() -> context.registry().stuck(request.idle(),
+                        LISTED));
+        if (items.value() != null)
+        {
+            audit.add(Attr.COUNT, items.value().total());
+        }
+        return new Result(request.idle(), items, Partial.of(() ->
+                context.registry().leftClaims(LISTED)));
+    }
+
+    @Override
+    public void print(Result result, PrintStream out) throws Exception
+    {
         StatusParts status = new StatusParts(out);
         status.show("stuck items",
-                () -> items(context.registry(), idle, audit));
-        status.show("claims", () -> claims(context.registry()));
+                () -> items(result.items().get(), result.idle()));
+        status.show("claims", () -> claims(result.claims().get()));
         status.end();
     }
 
     /**
      * The items stuck, each with why and its {@code reprocess} line.
      *
-     * @param registry the stage's registry
-     * @param idle     how long since a record was stored, at least
-     * @param audit    the audit event, given the count
+     * @param stuck the items
+     * @param idle  how long since a record was stored, at least
      * @return the text to show
      */
-    private static String items(RegistryReport registry, Duration idle,
-            AuditRecord audit)
+    private static String items(
+            RegistryReport.Listed<RegistryReport.Stuck> stuck, Duration idle)
     {
-        RegistryReport.Listed<RegistryReport.Stuck> stuck =
-                registry.stuck(idle, LISTED);
-        audit.add(Attr.COUNT, stuck.total());
         StringBuilder text = new StringBuilder();
         text.append(stuck.total()).append(" (none claimed, none stored for ")
                 .append(StatusParts.human(idle)).append(')');
@@ -188,13 +232,12 @@ public final class StuckCommand<C extends StageAdmin>
     /**
      * The records left claimed, by item and pod.
      *
-     * @param registry the stage's registry
+     * @param claims the claims
      * @return the text to show
      */
-    private static String claims(RegistryReport registry)
+    private static String claims(
+            RegistryReport.Listed<RegistryReport.LeftClaim> claims)
     {
-        RegistryReport.Listed<RegistryReport.LeftClaim> claims =
-                registry.leftClaims(LISTED);
         if (claims.total() == 0)
         {
             return "none";

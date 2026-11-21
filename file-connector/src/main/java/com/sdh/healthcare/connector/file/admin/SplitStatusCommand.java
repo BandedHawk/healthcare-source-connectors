@@ -14,13 +14,18 @@ import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
-import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.CliOperation;
+import com.sdh.healthcare.connector.stage.admin.Invocation;
+import com.sdh.healthcare.connector.stage.admin.Partial;
+import com.sdh.healthcare.connector.stage.admin.Permission;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
 import com.sdh.healthcare.connector.stage.admin.StatusParts;
 import java.io.PrintStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -35,7 +40,8 @@ import java.util.stream.Collectors;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
+final class SplitStatusCommand implements CliOperation<SplitAdminContext,
+        StageStatusCommand.Request, SplitStatusCommand.Result>
 {
 
     /** The most unfinished items listed. */
@@ -44,6 +50,59 @@ final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
     /** Creates the command. */
     SplitStatusCommand()
     {
+    }
+
+    /**
+     * What was found, each part read on its own.
+     *
+     * @param duties     the duties lease
+     * @param itemId     the item asked for; null for the stage
+     * @param lease      the item's lease; null for the stage
+     * @param checkpoint the item's checkpoint, if it has one; null for the
+     *                   stage
+     * @param releases   requests to release the item's hold; null for the
+     *                   stage
+     * @param items      the stage's items; null for one item
+     */
+    record Result(Partial<StatusParts.Lease> duties, UUID itemId,
+            Partial<StatusParts.Lease> lease,
+            Partial<Optional<ItemCheckpoints.Stored>> checkpoint,
+            Partial<List<HoldReleases.Listed>> releases,
+            Partial<Items> items)
+    {
+    }
+
+    /**
+     * The stage's items.
+     *
+     * @param counts the items by state
+     * @param listed the first of those not finished, each with its lease
+     */
+    record Items(Map<String, Long> counts, List<Unfinished> listed)
+    {
+    }
+
+    /**
+     * An item not finished, with its lease.
+     *
+     * @param item  the item
+     * @param lease its lease
+     */
+    record Unfinished(SplitItemReport.Unfinished item,
+            StatusParts.Lease lease)
+    {
+    }
+
+    @Override
+    public Permission permission()
+    {
+        return Permission.PIPELINE_VIEW;
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.QUERY;
     }
 
     @Override
@@ -77,35 +136,60 @@ final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
     }
 
     @Override
-    public boolean readsOnly()
+    public StageStatusCommand.Request bind(AdminArgs arguments,
+            SplitAdminContext context)
     {
-        return true;
+        return new StageStatusCommand.Request(arguments.option("item")
+                .map(StageStatusCommand::itemId).orElse(null));
     }
 
     @Override
-    public void run(AdminArgs arguments, SplitAdminContext context,
-            AuditRecord audit, PrintStream out) throws Exception
+    public Result run(StageStatusCommand.Request request,
+            SplitAdminContext context, Invocation invocation)
     {
+        AuditRecord audit = invocation.audit();
         audit.add(Attr.STAGE, ItemProcessor.STAGE);
-        StatusParts status = new StatusParts(out);
-        status.show("duties", () -> StatusParts.lease(context.leases(),
-                ItemProcessor.STAGE + "/" + context.properties().connectorId()
+        Partial<StatusParts.Lease> duties = Partial.of(() ->
+                StatusParts.Lease.read(context.leases(), ItemProcessor.STAGE
+                        + "/" + context.properties().connectorId()
                         + "/duties"));
-        if (arguments.option("item").isPresent())
+        UUID itemId = request.itemId();
+        if (itemId == null)
         {
-            UUID itemId = StageStatusCommand.itemId(
-                    arguments.required("item"));
-            audit.add(Attr.ITEM_ID, itemId);
-            status.show("lease", () -> StatusParts.lease(context.leases(),
-                    itemLease(context, itemId)));
+            return new Result(duties, null, null, null, null,
+                    Partial.of(() -> items(context, audit)));
+        }
+        audit.add(Attr.ITEM_ID, itemId);
+        Partial<StatusParts.Lease> lease = Partial.of(() ->
+                StatusParts.Lease.read(context.leases(),
+                        itemLease(context, itemId)));
+        Partial<Optional<ItemCheckpoints.Stored>> checkpoint =
+                Partial.of(() -> context.checkpoints().load(itemId));
+        if (checkpoint.value() != null)
+        {
+            checkpoint.value().ifPresent(stored ->
+                    audit.add(Attr.STATE, stored.checkpoint().state()));
+        }
+        return new Result(duties, itemId, lease, checkpoint,
+                Partial.of(() -> context.releases().list(itemId)), null);
+    }
+
+    @Override
+    public void print(Result result, PrintStream out) throws Exception
+    {
+        StatusParts status = new StatusParts(out);
+        status.show("duties", () -> result.duties().get().text());
+        if (result.itemId() != null)
+        {
+            status.show("lease", () -> result.lease().get().text());
             status.show("checkpoint", () -> checkpoint(
-                    context.checkpoints(), itemId, audit));
-            status.show("releases", () -> releases(context.releases(),
-                    itemId));
+                    result.checkpoint().get().orElse(null)));
+            status.show("releases",
+                    () -> releases(result.releases().get()));
         }
         else
         {
-            status.show("items", () -> items(context, audit));
+            status.show("items", () -> items(result.items().get()));
         }
         status.end();
     }
@@ -124,41 +208,75 @@ final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
     }
 
     /**
-     * The items by state, and those not yet finished.
+     * Reads the items by state, and those not yet finished, each with its
+     * lease.
      *
      * @param context the admin context
      * @param audit   the audit event, given how many aren't finished
-     * @return the text to show
+     * @return the items
      */
-    private static String items(SplitAdminContext context, AuditRecord audit)
+    private static Items items(SplitAdminContext context, AuditRecord audit)
     {
         SplitItemReport report = context.items();
         Map<String, Long> counts = report.countsByState();
         if (counts.isEmpty())
         {
             audit.add(Attr.COUNT, 0);
-            return "none (no item split yet)";
+            return new Items(counts, List.of());
         }
-        long unfinished = counts.entrySet().stream()
+        audit.add(Attr.COUNT, unfinished(counts));
+        List<Unfinished> listed = new ArrayList<>();
+        for (SplitItemReport.Unfinished item : report.unfinished(LISTED))
+        {
+            listed.add(new Unfinished(item, StatusParts.Lease.read(
+                    context.leases(), itemLease(context, item.itemId()))));
+        }
+        return new Items(counts, listed);
+    }
+
+    /**
+     * How many items aren't finished.
+     *
+     * @param counts the items by state
+     * @return how many are neither completed nor failed
+     */
+    private static long unfinished(Map<String, Long> counts)
+    {
+        return counts.entrySet().stream()
                 .filter(count -> !count.getKey().equals("COMPLETED")
                         && !count.getKey().equals("FAILED"))
                 .mapToLong(Map.Entry::getValue).sum();
-        audit.add(Attr.COUNT, unfinished);
+    }
+
+    /**
+     * The items by state, and those not yet finished.
+     *
+     * @param items the items
+     * @return the text to show
+     */
+    private static String items(Items items)
+    {
+        Map<String, Long> counts = items.counts();
+        if (counts.isEmpty())
+        {
+            return "none (no item split yet)";
+        }
+        long unfinished = unfinished(counts);
         StringBuilder text = new StringBuilder(counts.entrySet().stream()
                 .map(count -> count.getValue() + " " + count.getKey())
                 .collect(Collectors.joining(", ")));
-        List<SplitItemReport.Unfinished> listed = report.unfinished(LISTED);
-        for (SplitItemReport.Unfinished item : listed)
+        for (Unfinished each : items.listed())
         {
+            SplitItemReport.Unfinished item = each.item();
             text.append(StatusParts.more(item.itemId() + " " + item.state()
                     + ", epoch " + item.epoch() + ", last written "
                     + item.updatedAt()));
-            text.append(StatusParts.more("  lease " + StatusParts.lease(
-                    context.leases(), itemLease(context, item.itemId()))));
+            text.append(StatusParts.more("  lease " + each.lease().text()));
         }
-        if (unfinished > listed.size())
+        if (unfinished > items.listed().size())
         {
-            text.append(StatusParts.more("and " + (unfinished - listed.size())
+            text.append(StatusParts.more("and "
+                    + (unfinished - items.listed().size())
                     + " more; --item <id> shows one"));
         }
         return text.toString();
@@ -167,21 +285,17 @@ final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
     /**
      * An item's checkpoint: how far it got, and how it ended.
      *
-     * @param checkpoints the stage's checkpoints
-     * @param itemId      the item
-     * @param audit       the audit event, given the item's state
+     * @param stored the checkpoint; null if the stage hasn't started the
+     *               item
      * @return the text to show
      */
-    private static String checkpoint(ItemCheckpoints checkpoints, UUID itemId,
-            AuditRecord audit)
+    private static String checkpoint(ItemCheckpoints.Stored stored)
     {
-        ItemCheckpoints.Stored stored = checkpoints.load(itemId).orElse(null);
         if (stored == null)
         {
             return "none: the stage hasn't started this item";
         }
         Checkpoint checkpoint = stored.checkpoint();
-        audit.add(Attr.STATE, checkpoint.state());
         StringBuilder text = new StringBuilder();
         text.append(checkpoint.state()).append(" (")
                 .append(checkpoint.format()).append(")");
@@ -238,13 +352,11 @@ final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
      * An item's requests to release it from a hold (STAGES.md §15.6e),
      * without their reasons.
      *
-     * @param releases the release store
-     * @param itemId   the item
+     * @param listed the requests
      * @return one line per request, or none
      */
-    private static String releases(HoldReleases releases, UUID itemId)
+    private static String releases(List<HoldReleases.Listed> listed)
     {
-        List<HoldReleases.Listed> listed = releases.list(itemId);
         if (listed.isEmpty())
         {
             return "none";

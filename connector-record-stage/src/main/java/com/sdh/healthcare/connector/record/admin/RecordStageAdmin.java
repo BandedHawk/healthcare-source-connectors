@@ -44,7 +44,6 @@ import com.sdh.healthcare.connector.stage.admin.StageAdmin;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
 import com.sdh.healthcare.connector.stage.admin.StuckCommand;
 import com.sdh.healthcare.connector.stage.admin.VersionCommand;
-import java.io.PrintStream;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -464,11 +463,11 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
      * whose failures changed (STAGES.md §15.3).
      */
     @Override
-    public void changed(UUID itemId, AuditRecord audit, PrintStream out)
+    public String changed(UUID itemId, AuditRecord audit)
     {
-        out.println("The stage's workers count the change within a renewal"
+        return "The stage's workers count the change within a renewal"
                 + " interval: the item's end once none of its failures is"
-                + " open, else item.progress");
+                + " open, else item.progress";
     }
 
     @Override

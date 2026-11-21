@@ -115,21 +115,53 @@ public final class StatusParts
      */
     public static String lease(JdbcLeaseStore leases, String name)
     {
-        Optional<LeaseStatus> inspected = leases.inspect(name);
-        if (inspected.isEmpty())
+        return Lease.read(leases, name).text();
+    }
+
+    /**
+     * A lease, as inspected: who holds it and until when, or when it
+     * expired.
+     *
+     * @param name   the lease's name
+     * @param status what was found; empty if it was never held
+     */
+    public record Lease(String name, Optional<LeaseStatus> status)
+    {
+
+        /**
+         * Inspects a lease. Inspecting it never takes it.
+         *
+         * @param leases where the leases are kept
+         * @param name   the lease's name
+         * @return the lease
+         */
+        public static Lease read(JdbcLeaseStore leases, String name)
         {
-            return name + " never held";
+            return new Lease(name, leases.inspect(name));
         }
-        LeaseStatus lease = inspected.get();
-        if (lease.live())
+
+        /**
+         * The lease, as the CLI shows it.
+         *
+         * @return the text
+         */
+        public String text()
         {
-            return "%s held by %s, epoch %d, renewed %s, expires in %s"
-                    .formatted(name, lease.owner(), lease.epoch(),
-                            lease.renewedAt(), human(lease.remaining()));
+            if (status.isEmpty())
+            {
+                return name + " never held";
+            }
+            LeaseStatus lease = status.get();
+            if (lease.live())
+            {
+                return "%s held by %s, epoch %d, renewed %s, expires in %s"
+                        .formatted(name, lease.owner(), lease.epoch(),
+                                lease.renewedAt(), human(lease.remaining()));
+            }
+            return "%s free (expired %s ago; last holder %s, epoch %d)"
+                    .formatted(name, human(lease.remaining().negated()),
+                            lease.owner(), lease.epoch());
         }
-        return "%s free (expired %s ago; last holder %s, epoch %d)"
-                .formatted(name, human(lease.remaining().negated()),
-                        lease.owner(), lease.epoch());
     }
 
     /**

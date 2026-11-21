@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
@@ -160,8 +161,49 @@ public final class FailureCommands
      * @param <C> the stage's context
      */
     static final class ListCommand<C extends FailureAdmin>
-            implements AdminCommand<C>
+            implements CliOperation<C, ListCommand.Request,
+                    ListCommand.Result>
     {
+
+        /**
+         * What is asked.
+         *
+         * @param all    every state, not only the open
+         * @param itemId one item's failures, with their changes; null for
+         *               the stage's
+         */
+        record Request(boolean all, UUID itemId)
+        {
+        }
+
+        /**
+         * What was found.
+         *
+         * @param stage  the stage
+         * @param itemId the item asked for; null for the stage's
+         * @param item   the item's failures, each with its changes; null
+         *               for the stage's
+         * @param open   how many are open, and the oldest; null for an
+         *               item
+         * @param listed the stage's failures listed; null for an item
+         */
+        record Result(String stage, UUID itemId, List<ItemFailure> item,
+                FailureStore.Open open, List<FailureStore.Listed> listed)
+        {
+        }
+
+        /**
+         * One of an item's failures, with its own changes and corrections.
+         *
+         * @param failure     the failure
+         * @param events      its changes of state
+         * @param corrections its corrections and retries
+         */
+        record ItemFailure(FailureStore.Listed failure,
+                List<FailureStore.Event> events,
+                List<CorrectionStore.Listed> corrections)
+        {
+        }
 
         /** Creates the command. */
         ListCommand()
@@ -172,6 +214,18 @@ public final class FailureCommands
         public String name()
         {
             return "failures";
+        }
+
+        @Override
+        public Permission permission()
+        {
+            return Permission.PIPELINE_VIEW;
+        }
+
+        @Override
+        public Kind kind()
+        {
+            return Kind.QUERY;
         }
 
         @Override
@@ -201,92 +255,117 @@ public final class FailureCommands
         }
 
         @Override
-        public boolean readsOnly()
+        public Request bind(AdminArgs arguments, C context)
         {
-            return true;
+            return new Request(arguments.flag("all"), arguments
+                    .option("item-id").map(FailureCommands::itemId)
+                    .orElse(null));
         }
 
         @Override
-        public void run(AdminArgs arguments, C context, AuditRecord audit,
-                PrintStream out) throws Exception
+        public Result run(Request request, C context, Invocation invocation)
+                throws Exception
         {
+            AuditRecord audit = invocation.audit();
             audit.add(Attr.STAGE, context.stage());
             FailureStore failures = context.failures();
-            if (arguments.option("item-id").isPresent())
+            UUID itemId = request.itemId();
+            if (itemId == null)
             {
-                UUID itemId = itemId(arguments.required("item-id"));
-                audit.add(Attr.ITEM_ID, itemId);
-                List<FailureStore.Listed> listed = failures.listItem(itemId);
+                List<FailureStore.Listed> listed = failures.list(
+                        !request.all(), LISTED);
                 audit.add(Attr.COUNT, listed.size());
-                if (listed.isEmpty())
+                return new Result(context.stage(), null, null,
+                        failures.open(), listed);
+            }
+            audit.add(Attr.ITEM_ID, itemId);
+            List<FailureStore.Listed> listed = failures.listItem(itemId);
+            audit.add(Attr.COUNT, listed.size());
+            int place = Lineage.stageOf(context.stage());
+            List<ItemFailure> item = new ArrayList<>();
+            for (FailureStore.Listed failure : listed)
+            {
+                FailureStore.Failure what = failure.stored().failure();
+                // A number's failures, one per revision, share its events
+                // and corrections: each shows its own.
+                List<FailureStore.Event> events = new ArrayList<>();
+                for (FailureStore.Event event : failures.events(itemId,
+                        what.seq()))
                 {
-                    out.println("no failures for " + itemId + " at the "
-                            + context.stage() + " stage");
+                    if (event.lineage().equals(what.lineage()))
+                    {
+                        events.add(event);
+                    }
                 }
-                int place = Lineage.stageOf(context.stage());
-                for (FailureStore.Listed failure : listed)
+                List<CorrectionStore.Listed> corrections = new ArrayList<>();
+                CorrectionStore store = context.corrections();
+                for (CorrectionStore.Listed correction : store == null
+                        ? List.<CorrectionStore.Listed>of()
+                        : store.list(itemId, what.seq()))
+                {
+                    if (correction.lineage() == null
+                            ? first(listed, failure)
+                            : correction.lineage().equals(what.lineage()
+                                    .nextRevision(place)))
+                    {
+                        corrections.add(correction);
+                    }
+                }
+                item.add(new ItemFailure(failure, events, corrections));
+            }
+            return new Result(context.stage(), itemId, item, null, null);
+        }
+
+        @Override
+        public void print(Result result, PrintStream out)
+        {
+            if (result.itemId() == null)
+            {
+                FailureStore.Open open = result.open();
+                out.println(open.count() + " open at the " + result.stage()
+                        + " stage" + (open.oldest() == null ? ""
+                                : ", the oldest failed " + open.oldest()));
+                for (FailureStore.Listed failure : result.listed())
                 {
                     out.println(line(failure));
-                    FailureStore.Failure what = failure.stored().failure();
-                    // A number's failures, one per revision, share its
-                    // events and corrections: each shows its own.
-                    for (FailureStore.Event event : failures.events(itemId,
-                            what.seq()))
-                    {
-                        if (!event.lineage().equals(what.lineage()))
-                        {
-                            continue;
-                        }
-                        out.println("  " + event.at() + " "
-                                + (event.resentBy() == null
-                                        ? event.from() + " -> " + event.to()
-                                        : "resent as " + event.resentBy())
-                                + " by " + event.operator()
-                                + (event.reason() == null ? ""
-                                        : " (reason kept, encrypted)"));
-                    }
-                    CorrectionStore corrections = context.corrections();
-                    for (CorrectionStore.Listed correction
-                            : corrections == null
-                                    ? List.<CorrectionStore.Listed>of()
-                                    : corrections.list(itemId,
-                                            what.seq()))
-                    {
-                        if (correction.lineage() == null
-                                ? !first(listed, failure)
-                                : !correction.lineage().equals(what.lineage()
-                                        .nextRevision(place)))
-                        {
-                            continue;
-                        }
-                        out.println("  " + (correction.kind()
-                                == CorrectionStore.Kind.RETRY ? "retry "
-                                        : "correction ")
-                                + correction.correction()
-                                + " " + correction.state() + " by "
-                                + correction.submittedBy() + " at "
-                                + correction.submittedAt() + ", "
-                                + correction.length() + " bytes"
-                                + (correction.errorCode() == null ? ""
-                                        : ", " + correction.errorCode())
-                                + (correction.lineage() == null ? ""
-                                        : ", as " + correction.lineage())
-                                + (correction.recordId() == null ? ""
-                                        : ", made " + correction.recordId()));
-                    }
                 }
                 return;
             }
-            boolean all = arguments.flag("all");
-            List<FailureStore.Listed> listed = failures.list(!all, LISTED);
-            audit.add(Attr.COUNT, listed.size());
-            FailureStore.Open open = failures.open();
-            out.println(open.count() + " open at the " + context.stage()
-                    + " stage" + (open.oldest() == null ? ""
-                            : ", the oldest failed " + open.oldest()));
-            for (FailureStore.Listed failure : listed)
+            if (result.item().isEmpty())
             {
-                out.println(line(failure));
+                out.println("no failures for " + result.itemId() + " at the "
+                        + result.stage() + " stage");
+            }
+            for (ItemFailure each : result.item())
+            {
+                out.println(line(each.failure()));
+                for (FailureStore.Event event : each.events())
+                {
+                    out.println("  " + event.at() + " "
+                            + (event.resentBy() == null
+                                    ? event.from() + " -> " + event.to()
+                                    : "resent as " + event.resentBy())
+                            + " by " + event.operator()
+                            + (event.reason() == null ? ""
+                                    : " (reason kept, encrypted)"));
+                }
+                for (CorrectionStore.Listed correction : each.corrections())
+                {
+                    out.println("  " + (correction.kind()
+                            == CorrectionStore.Kind.RETRY ? "retry "
+                                    : "correction ")
+                            + correction.correction()
+                            + " " + correction.state() + " by "
+                            + correction.submittedBy() + " at "
+                            + correction.submittedAt() + ", "
+                            + correction.length() + " bytes"
+                            + (correction.errorCode() == null ? ""
+                                    : ", " + correction.errorCode())
+                            + (correction.lineage() == null ? ""
+                                    : ", as " + correction.lineage())
+                            + (correction.recordId() == null ? ""
+                                    : ", made " + correction.recordId()));
+                }
             }
         }
 
@@ -335,6 +414,7 @@ public final class FailureCommands
         }
     }
 
+
     /**
      * Changes a failure's state, with a reason, then has the stage act on
      * it.
@@ -342,32 +422,59 @@ public final class FailureCommands
      * @param <C> the stage's context
      */
     static final class ChangeCommand<C extends FailureAdmin>
-            implements AdminCommand<C>
+            implements CliOperation<C, ChangeCommand.Request,
+                    ChangeCommand.Result>
     {
+
+        /**
+         * What is asked.
+         *
+         * @param itemId the failure's item
+         * @param seq    its record number; -1 for the item as a whole
+         * @param reason why, kept encrypted
+         */
+        record Request(UUID itemId, long seq, Given<String> reason)
+        {
+        }
+
+        /**
+         * What was done.
+         *
+         * @param stage  the stage
+         * @param itemId the failure's item
+         * @param seq    its record number
+         * @param before its state before
+         * @param next   what the stage does next, as the context says;
+         *               its failure, if it failed, after the change made
+         */
+        record Result(String stage, UUID itemId, long seq,
+                FailureStore.State before, Partial<String> next)
+        {
+        }
 
         /** The command's name. */
         private final String name;
 
-        /** The audit event's last part. */
+        /** What the change is called in its event, such as declined. */
         private final String action;
 
-        /** The states it changes from. */
+        /** The states the failure may be changed from. */
         private final Set<FailureStore.State> from;
 
-        /** The state it changes to. */
+        /** The state it is changed to. */
         private final FailureStore.State to;
 
-        /** Its usage. */
+        /** The command's help. */
         private final String usage;
 
         /**
          * Creates the command.
          *
          * @param name   its name
-         * @param action the audit event's last part
+         * @param action what the change is called in its event
          * @param from   the states it changes from
          * @param to     the state it changes to
-         * @param usage  its usage
+         * @param usage  its help
          */
         ChangeCommand(String name, String action,
                 Set<FailureStore.State> from, FailureStore.State to,
@@ -384,6 +491,18 @@ public final class FailureCommands
         public String name()
         {
             return name;
+        }
+
+        @Override
+        public Permission permission()
+        {
+            return Permission.PIPELINE_OPERATE;
+        }
+
+        @Override
+        public Kind kind()
+        {
+            return Kind.ACTION;
         }
 
         @Override
@@ -405,15 +524,24 @@ public final class FailureCommands
         }
 
         @Override
-        public void run(AdminArgs arguments, C context, AuditRecord audit,
-                PrintStream out) throws Exception
+        public Request bind(AdminArgs arguments, C context)
         {
-            UUID itemId = itemId(arguments.required("item-id"));
-            long seq = seq(arguments.required("seq"));
+            return new Request(itemId(arguments.required("item-id")),
+                    seq(arguments.required("seq")),
+                    () -> reason(context.reasonInput()));
+        }
+
+        @Override
+        public Result run(Request request, C context, Invocation invocation)
+                throws Exception
+        {
+            AuditRecord audit = invocation.audit();
+            UUID itemId = request.itemId();
+            long seq = request.seq();
             audit.add(Attr.STAGE, context.stage());
             audit.add(Attr.ITEM_ID, itemId);
             audit.add(Attr.SEQ, seq);
-            String text = reason(context.reasonInput());
+            String text = request.reason().get();
             FailureStore failures = context.failuresToChange();
             KeyProvider keys = context.reasonKeys();
             String kek = context.reasonKek();
@@ -421,8 +549,8 @@ public final class FailureCommands
             try
             {
                 changed = failures.change(itemId, seq, from, to, action,
-                        audit.operator(), event -> FailureReason.seal(keys, kek,
-                                itemId, seq, event, text));
+                        audit.operator(), event -> FailureReason.seal(keys,
+                                kek, itemId, seq, event, text));
             }
             catch (FailureStore.RefusedException refused)
             {
@@ -430,11 +558,23 @@ public final class FailureCommands
             }
             audit.add(Attr.FROM_STATE, changed.before().state().name());
             audit.add(Attr.STATE, to.name());
-            out.println(action + " failure " + seq + " of " + itemId
-                    + " at the " + context.stage() + " stage: "
-                    + changed.before().state() + " -> " + to
+            return new Result(context.stage(), itemId, seq,
+                    changed.before().state(),
+                    Partial.of(() -> context.changed(itemId, audit)));
+        }
+
+        @Override
+        public void print(Result result, PrintStream out) throws Exception
+        {
+            out.println(action + " failure " + result.seq() + " of "
+                    + result.itemId() + " at the " + result.stage()
+                    + " stage: " + result.before() + " -> " + to
                     + ", the reason kept encrypted");
-            context.changed(itemId, audit, out);
+            String next = result.next().get();
+            if (next != null)
+            {
+                out.println(next);
+            }
         }
     }
 
@@ -476,8 +616,20 @@ public final class FailureCommands
      * @param <C> the stage's context
      */
     static final class CorrectCommand<C extends FailureAdmin>
-            implements AdminCommand<C>
+            implements CliOperation<C, CorrectCommand.Request, Submitted>
     {
+
+        /**
+         * What is asked.
+         *
+         * @param itemId  the failure's item
+         * @param seq     its record number
+         * @param content the corrected record, read only once the stage is
+         *                known to take corrections
+         */
+        record Request(UUID itemId, long seq, Given<byte[]> content)
+        {
+        }
 
         /** Creates the command. */
         CorrectCommand()
@@ -488,6 +640,32 @@ public final class FailureCommands
         public String name()
         {
             return "correct";
+        }
+
+        @Override
+        public Permission permission()
+        {
+            return Permission.PIPELINE_OPERATE;
+        }
+
+        /**
+         * An operator's permission, and PHI export's: whoever corrects a
+         * record has read it (CONTROL-API-DESIGN.md §4).
+         *
+         * @param request the request
+         * @return both
+         */
+        @Override
+        public Set<Permission> permissions(Request request)
+        {
+            return EnumSet.of(Permission.PIPELINE_OPERATE,
+                    Permission.PHI_EXPORT);
+        }
+
+        @Override
+        public Kind kind()
+        {
+            return Kind.ACTION;
         }
 
         @Override
@@ -519,11 +697,22 @@ public final class FailureCommands
         }
 
         @Override
-        public void run(AdminArgs arguments, C context, AuditRecord audit,
-                PrintStream out) throws Exception
+        public Request bind(AdminArgs arguments, C context)
         {
-            UUID itemId = itemId(arguments.required("item-id"));
-            long seq = seq(arguments.required("seq"));
+            return new Request(itemId(arguments.required("item-id")),
+                    seq(arguments.required("seq")),
+                    () -> input(context.reasonInput(),
+                            context.maxCorrectionBytes(),
+                            "corrected record"));
+        }
+
+        @Override
+        public Submitted run(Request request, C context,
+                Invocation invocation) throws Exception
+        {
+            AuditRecord audit = invocation.audit();
+            UUID itemId = request.itemId();
+            long seq = request.seq();
             audit.add(Attr.STAGE, context.stage());
             audit.add(Attr.ITEM_ID, itemId);
             audit.add(Attr.SEQ, seq);
@@ -532,8 +721,7 @@ public final class FailureCommands
                 throw new IllegalStateException("The " + context.stage()
                         + " stage doesn't take corrections yet");
             }
-            byte[] content = input(context.reasonInput(),
-                    context.maxCorrectionBytes(), "corrected record");
+            byte[] content = request.content().get();
             int length = content.length;
             int number;
             try
@@ -554,12 +742,34 @@ public final class FailureCommands
             audit.add(Attr.BYTES, length);
             audit.add(Attr.STATE,
                     FailureStore.State.REVISION_PENDING.name());
-            out.println("submitted correction " + number + " of failure "
-                    + seq + " of " + itemId + " at the " + context.stage()
-                    + " stage (" + length + " bytes, kept encrypted); the"
-                    + " stage's workers process it within a renewal"
-                    + " interval: see failures --item-id");
+            return new Submitted(context.stage(), itemId, seq, number,
+                    length);
         }
+
+        @Override
+        public void print(Submitted result, PrintStream out)
+        {
+            out.println("submitted correction " + result.number()
+                    + " of failure " + result.seq() + " of "
+                    + result.itemId() + " at the " + result.stage()
+                    + " stage (" + result.length() + " bytes, kept"
+                    + " encrypted); the stage's workers process it within a"
+                    + " renewal interval: see failures --item-id");
+        }
+    }
+
+    /**
+     * A correction or retry submitted.
+     *
+     * @param stage  the stage
+     * @param itemId the failure's item
+     * @param seq    its record number
+     * @param number the correction's number
+     * @param length its length, in bytes
+     */
+    record Submitted(String stage, UUID itemId, long seq, int number,
+            int length)
+    {
     }
 
     /**
@@ -572,7 +782,7 @@ public final class FailureCommands
      * @param <C> the stage's context
      */
     static final class RetryCommand<C extends FailureAdmin>
-            implements AdminCommand<C>
+            implements CliOperation<C, Failure, Submitted>
     {
 
         /** Creates the command. */
@@ -584,6 +794,18 @@ public final class FailureCommands
         public String name()
         {
             return "retry";
+        }
+
+        @Override
+        public Permission permission()
+        {
+            return Permission.PIPELINE_OPERATE;
+        }
+
+        @Override
+        public Kind kind()
+        {
+            return Kind.ACTION;
         }
 
         @Override
@@ -616,11 +838,18 @@ public final class FailureCommands
         }
 
         @Override
-        public void run(AdminArgs arguments, C context, AuditRecord audit,
-                PrintStream out) throws Exception
+        public Failure bind(AdminArgs arguments, C context)
         {
-            UUID itemId = itemId(arguments.required("item-id"));
-            long seq = seq(arguments.required("seq"));
+            return Failure.of(arguments);
+        }
+
+        @Override
+        public Submitted run(Failure request, C context,
+                Invocation invocation) throws Exception
+        {
+            AuditRecord audit = invocation.audit();
+            UUID itemId = request.itemId();
+            long seq = request.seq();
             audit.add(Attr.STAGE, context.stage());
             audit.add(Attr.ITEM_ID, itemId);
             audit.add(Attr.SEQ, seq);
@@ -662,11 +891,43 @@ public final class FailureCommands
             audit.add(Attr.BYTES, length);
             audit.add(Attr.STATE,
                     FailureStore.State.REVISION_PENDING.name());
-            out.println("submitted retry " + number + " of failure " + seq
-                    + " of " + itemId + " at the " + context.stage()
-                    + " stage (" + length + " bytes, kept encrypted); the"
-                    + " stage's workers process it within a renewal"
-                    + " interval: see failures --item-id");
+            return new Submitted(context.stage(), itemId, seq, number,
+                    length);
+        }
+
+        @Override
+        public void print(Submitted result, PrintStream out)
+        {
+            out.println("submitted retry " + result.number() + " of failure "
+                    + result.seq() + " of " + result.itemId() + " at the "
+                    + result.stage() + " stage (" + result.length()
+                    + " bytes, kept encrypted); the stage's workers process"
+                    + " it within a renewal interval: see failures"
+                    + " --item-id");
+        }
+    }
+
+    /**
+     * A failure, by its item and record number.
+     *
+     * @param itemId the item
+     * @param seq    the record number; -1 for the item as a whole
+     */
+    record Failure(UUID itemId, long seq)
+    {
+
+        /**
+         * The failure an operator's options name.
+         *
+         * @param arguments the options
+         * @return the failure
+         * @throws AdminArgs.UsageException if they don't name one
+         */
+        static Failure of(AdminArgs arguments)
+        {
+            return new Failure(FailureCommands.itemId(
+                    arguments.required("item-id")),
+                    FailureCommands.seq(arguments.required("seq")));
         }
     }
 
@@ -678,11 +939,22 @@ public final class FailureCommands
      * @param <C> the stage's context
      */
     static final class ExportCommand<C extends FailureAdmin>
-            implements AdminCommand<C>
+            implements CliOperation<C, ExportCommand.Request, Integer>
     {
 
-        /** What starts the line the export is printed on. */
-        static final String PREFIX = "sdh-export: ";
+        /** What each line of output starts with. */
+        static final String PREFIX = ExportSealer.LINE_PREFIX;
+
+        /**
+         * What is asked.
+         *
+         * @param itemId    the failure's item
+         * @param seq       its record number
+         * @param publicKey the key to seal to, PEM
+         */
+        record Request(UUID itemId, long seq, Given<byte[]> publicKey)
+        {
+        }
 
         /** Creates the command. */
         ExportCommand()
@@ -693,6 +965,18 @@ public final class FailureCommands
         public String name()
         {
             return "export";
+        }
+
+        @Override
+        public Permission permission()
+        {
+            return Permission.PHI_EXPORT;
+        }
+
+        @Override
+        public Kind kind()
+        {
+            return Kind.SEALED;
         }
 
         @Override
@@ -720,17 +1004,30 @@ public final class FailureCommands
         }
 
         @Override
-        public void run(AdminArgs arguments, C context, AuditRecord audit,
-                PrintStream out) throws Exception
+        public Request bind(AdminArgs arguments, C context)
         {
-            UUID itemId = itemId(arguments.required("item-id"));
-            long seq = seq(arguments.required("seq"));
+            return new Request(itemId(arguments.required("item-id")),
+                    seq(arguments.required("seq")),
+                    () -> input(context.reasonInput(),
+                            ExportSealer.MAX_KEY_BYTES, "public key"));
+        }
+
+        /**
+         * Seals what the failure failed on to the sink.
+         *
+         * @return the bytes sealed
+         */
+        @Override
+        public Integer run(Request request, C context, Invocation invocation)
+                throws Exception
+        {
+            AuditRecord audit = invocation.audit();
+            UUID itemId = request.itemId();
+            long seq = request.seq();
             audit.add(Attr.STAGE, context.stage());
             audit.add(Attr.ITEM_ID, itemId);
             audit.add(Attr.SEQ, seq);
-            ExportSealer sealer = new ExportSealer(input(
-                    context.reasonInput(), ExportSealer.MAX_KEY_BYTES,
-                    "public key"));
+            ExportSealer sealer = new ExportSealer(request.publicKey().get());
             audit.add(Attr.RECIPIENT_KEY, sealer.fingerprint());
             if (context.failures().failure(itemId, seq).isEmpty())
             {
@@ -749,7 +1046,19 @@ public final class FailureCommands
                 Arrays.fill(content, (byte) 0);
             }
             audit.add(Attr.BYTES, length);
-            out.println(PREFIX + sealed);
+            invocation.sink().sealed(sealed);
+            return length;
+        }
+
+        /**
+         * Prints nothing more: the sealed line went to the sink.
+         *
+         * @param result the bytes sealed
+         * @param out    unused
+         */
+        @Override
+        public void print(Integer result, PrintStream out)
+        {
         }
     }
 }

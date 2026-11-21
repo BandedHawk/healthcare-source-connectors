@@ -10,10 +10,14 @@ import com.sdh.healthcare.connector.core.checkpoint.Checkpoint;
 import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
-import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.CliOperation;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
+import com.sdh.healthcare.connector.stage.admin.Given;
+import com.sdh.healthcare.connector.stage.admin.Invocation;
+import com.sdh.healthcare.connector.stage.admin.Permission;
 import java.io.PrintStream;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 
@@ -29,8 +33,36 @@ import java.util.UUID;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class ReleaseCommand implements AdminCommand<SplitAdminContext>
+final class ReleaseCommand implements CliOperation<SplitAdminContext,
+        ReleaseCommand.Request, ReleaseCommand.Result>
 {
+
+    /**
+     * What is asked.
+     *
+     * @param itemId the item held
+     * @param resume split it on from its checkpoint
+     * @param close  end it, CLOSED
+     * @param reason why, for closing; read only then
+     */
+    record Request(UUID itemId, boolean resume, boolean close,
+            Given<String> reason)
+    {
+    }
+
+    /**
+     * What was requested.
+     *
+     * @param itemId   the item
+     * @param action   resume or close
+     * @param version  the version it is held under
+     * @param number   the request's number
+     * @param reasoned whether a reason was kept
+     */
+    record Result(UUID itemId, HoldReleases.Action action, String version,
+            int number, boolean reasoned)
+    {
+    }
 
     /** Creates the command. */
     ReleaseCommand()
@@ -75,12 +107,34 @@ final class ReleaseCommand implements AdminCommand<SplitAdminContext>
     }
 
     @Override
-    public void run(AdminArgs arguments, SplitAdminContext context,
-            AuditRecord audit, PrintStream out) throws Exception
+    public Permission permission()
     {
-        UUID itemId = FailureCommands.itemId(arguments.required("item-id"));
-        boolean resume = arguments.flag("resume");
-        boolean close = arguments.flag("close");
+        return Permission.PIPELINE_OPERATE;
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.ACTION;
+    }
+
+    @Override
+    public Request bind(AdminArgs arguments, SplitAdminContext context)
+    {
+        return new Request(FailureCommands.itemId(
+                arguments.required("item-id")), arguments.flag("resume"),
+                arguments.flag("close"),
+                () -> FailureCommands.reason(context.reasonInput()));
+    }
+
+    @Override
+    public Result run(Request request, SplitAdminContext context,
+            Invocation invocation) throws Exception
+    {
+        AuditRecord audit = invocation.audit();
+        UUID itemId = request.itemId();
+        boolean resume = request.resume();
+        boolean close = request.close();
         if (resume == close)
         {
             throw new AdminArgs.UsageException(
@@ -90,8 +144,7 @@ final class ReleaseCommand implements AdminCommand<SplitAdminContext>
                 : HoldReleases.Action.CLOSE;
         audit.add(Attr.ITEM_ID, itemId);
         audit.add(Attr.ACTION, action.name());
-        String reason = close ? FailureCommands.reason(context.reasonInput())
-                : null;
+        String reason = close ? request.reason().get() : null;
         Checkpoint checkpoint = context.checkpoints().load(itemId)
                 .orElseThrow(() -> new IllegalStateException(
                         "The item was never split"))
@@ -113,11 +166,18 @@ final class ReleaseCommand implements AdminCommand<SplitAdminContext>
             throw new IllegalStateException(refused.getMessage());
         }
         audit.add(Attr.CORRECTION, number);
-        out.println("requested " + action.name().toLowerCase(
-                java.util.Locale.ROOT) + " of " + itemId + ", held under "
-                + checkpoint.version() + " (request " + number
-                + (reason == null ? "" : ", the reason kept encrypted")
+        return new Result(itemId, action, checkpoint.version(), number,
+                reason != null);
+    }
+
+    @Override
+    public void print(Result result, PrintStream out)
+    {
+        out.println("requested " + result.action().name().toLowerCase(
+                Locale.ROOT) + " of " + result.itemId() + ", held under "
+                + result.version() + " (request " + result.number()
+                + (result.reasoned() ? ", the reason kept encrypted" : "")
                 + "); the stage's pods apply it within a renewal interval:"
-                + " see status --item " + itemId);
+                + " see status --item " + result.itemId());
     }
 }

@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.stage.admin;
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -46,7 +47,8 @@ import java.util.UUID;
  * @since 0.1.0
  */
 public final class PatientsCommand<C extends PatientAdmin>
-        implements AdminCommand<C>
+        implements CliOperation<C, PatientsCommand.Request,
+                PatientsCommand.Result>
 {
 
     /** The FHIR JSON media type, whose records are read. */
@@ -64,9 +66,61 @@ public final class PatientsCommand<C extends PatientAdmin>
     /** The end of a PEM public key, after which identifiers follow. */
     private static final String PEM_END = "-----END PUBLIC KEY-----";
 
+    /**
+     * What is asked: the records of some items, or of a span of time.
+     *
+     * @param itemIds the items; null for a span
+     * @param from    the span's start; null for items
+     * @param to      its end; null for items
+     * @param lookup  the key to seal to, and the identifiers looked for
+     */
+    public record Request(List<UUID> itemIds, Instant from, Instant to,
+            Given<Lookup> lookup)
+    {
+    }
+
+    /**
+     * The key the result is sealed to, and what is looked for.
+     *
+     * @param publicKey the key, PEM
+     * @param wanted    the identifiers looked for; empty to list every
+     *                  record
+     */
+    public record Lookup(byte[] publicKey,
+            List<PatientIdentifiers.Identifier> wanted)
+    {
+    }
+
+    /**
+     * What was read: counts only, the records found having gone, sealed,
+     * to the sink.
+     *
+     * @param read         records read
+     * @param skipped      records not FHIR, not read
+     * @param withPatients records naming a patient
+     * @param listed       records listed
+     * @param parts        parts sealed
+     */
+    public record Result(long read, long skipped, long withPatients,
+            long listed, int parts)
+    {
+    }
+
     /** Creates the command. */
     public PatientsCommand()
     {
+    }
+
+    @Override
+    public Permission permission()
+    {
+        return Permission.PHI_EXPORT;
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.SEALED;
     }
 
     @Override
@@ -109,10 +163,39 @@ public final class PatientsCommand<C extends PatientAdmin>
     }
 
     @Override
-    public void run(AdminArgs arguments, C context, AuditRecord audit,
-            PrintStream out) throws Exception
+    public Request bind(AdminArgs arguments, C context)
     {
-        audit.add(Attr.STAGE, context.stage());
+        List<UUID> items = null;
+        if (arguments.option("item-id").isPresent())
+        {
+            items = new ArrayList<>();
+            for (String id : arguments.required("item-id").split(","))
+            {
+                items.add(FailureCommands.itemId(id.strip()));
+            }
+        }
+        return new Request(items,
+                arguments.option("from")
+                        .map(text -> AuditCommands.time("from", text))
+                        .orElse(null),
+                arguments.option("to")
+                        .map(text -> AuditCommands.time("to", text))
+                        .orElse(null),
+                () -> lookup(context));
+    }
+
+    /**
+     * Reads the key and the identifiers looked for from standard input:
+     * the key, PEM, then one identifier a line.
+     *
+     * @param context the stage
+     * @return them
+     * @throws IOException if standard input can't be read
+     * @throws AdminArgs.UsageException if no key is given
+     */
+    private static Lookup lookup(PatientAdmin context)
+            throws IOException
+    {
         byte[] input = FailureCommands.input(context.patientInput(),
                 MAX_INPUT, "key and identifiers");
         String text = new String(input, StandardCharsets.US_ASCII);
@@ -124,9 +207,6 @@ public final class PatientsCommand<C extends PatientAdmin>
                     + " standard input, then any identifiers");
         }
         end += PEM_END.length();
-        ExportSealer sealer = new ExportSealer(text.substring(0, end)
-                .getBytes(StandardCharsets.US_ASCII));
-        audit.add(Attr.RECIPIENT_KEY, sealer.fingerprint());
         List<PatientIdentifiers.Identifier> wanted = new ArrayList<>();
         for (String line : text.substring(end).split("\\R"))
         {
@@ -136,31 +216,39 @@ public final class PatientsCommand<C extends PatientAdmin>
                 wanted.add(PatientIdentifiers.Identifier.parse(trimmed));
             }
         }
+        return new Lookup(text.substring(0, end)
+                .getBytes(StandardCharsets.US_ASCII), wanted);
+    }
+
+    @Override
+    public Result run(Request request, C context, Invocation invocation)
+            throws Exception
+    {
+        AuditRecord audit = invocation.audit();
+        audit.add(Attr.STAGE, context.stage());
+        Lookup lookup = request.lookup().get();
+        ExportSealer sealer = new ExportSealer(lookup.publicKey());
+        audit.add(Attr.RECIPIENT_KEY, sealer.fingerprint());
+        List<PatientIdentifiers.Identifier> wanted = lookup.wanted();
         audit.add(Attr.OUTCOME, wanted.isEmpty() ? "list" : "find");
 
-        Found found = new Found(sealer, wanted, out);
-        if (arguments.option("item-id").isPresent())
+        Found found = new Found(sealer, wanted, invocation.sink());
+        if (request.itemIds() != null)
         {
-            if (arguments.option("from").isPresent()
-                    || arguments.option("to").isPresent())
+            if (request.from() != null || request.to() != null)
             {
                 throw new AdminArgs.UsageException("Give --item-id or"
                         + " --from and --to, not both");
             }
-            List<UUID> items = new ArrayList<>();
-            for (String id : arguments.required("item-id").split(","))
-            {
-                items.add(FailureCommands.itemId(id.strip()));
-            }
+            List<UUID> items = request.itemIds();
             audit.add(Attr.ITEM_ID, items.size() == 1 ? items.getFirst()
                     : null);
             context.records(items, found::visit);
         }
         else
         {
-            Instant from = AuditCommands.time("from",
-                    arguments.required("from"));
-            Instant to = AuditCommands.time("to", arguments.required("to"));
+            Instant from = required(request.from(), "from");
+            Instant to = required(request.to(), "to");
             if (!to.isAfter(from)
                     || Duration.between(from, to).compareTo(MAX_SPAN) > 0)
             {
@@ -171,10 +259,34 @@ public final class PatientsCommand<C extends PatientAdmin>
         }
         found.finish();
         audit.add(Attr.COUNT, found.read);
-        out.println("records read " + found.read + ", not FHIR "
-                + found.skipped + ", with patients " + found.withPatients
-                + ", listed " + found.listed + ", in " + found.parts
-                + " sealed parts");
+        return new Result(found.read, found.skipped, found.withPatients,
+                found.listed, found.parts);
+    }
+
+    @Override
+    public void print(Result result, PrintStream out)
+    {
+        out.println("records read " + result.read() + ", not FHIR "
+                + result.skipped() + ", with patients "
+                + result.withPatients() + ", listed " + result.listed()
+                + ", in " + result.parts() + " sealed parts");
+    }
+
+    /**
+     * A time the request must give.
+     *
+     * @param time the time, or null
+     * @param name its option's name
+     * @return the time
+     * @throws AdminArgs.UsageException if it isn't given
+     */
+    private static Instant required(Instant time, String name)
+    {
+        if (time == null)
+        {
+            throw new AdminArgs.UsageException("--" + name + " is required");
+        }
+        return time;
     }
 
     /** Collects what is found, and seals it in parts. */
@@ -188,7 +300,7 @@ public final class PatientsCommand<C extends PatientAdmin>
         private final List<PatientIdentifiers.Identifier> wanted;
 
         /** Where sealed parts go. */
-        private final PrintStream out;
+        private final Invocation.Sink out;
 
         /** The current part's lines. */
         private final ByteArrayOutputStream part =
@@ -217,7 +329,7 @@ public final class PatientsCommand<C extends PatientAdmin>
          * @param out    where sealed parts go
          */
         Found(ExportSealer sealer, List<PatientIdentifiers.Identifier> wanted,
-                PrintStream out)
+                Invocation.Sink out)
         {
             this.sealer = sealer;
             this.wanted = wanted;
@@ -304,8 +416,8 @@ public final class PatientsCommand<C extends PatientAdmin>
             parts++;
             try
             {
-                out.println(ExportSealer.LINE_PREFIX + sealer.seal(lines,
-                        Map.of("sdh_part", parts, "sdh_last", last)));
+                out.sealed(sealer.seal(lines, Map.of("sdh_part", parts,
+                        "sdh_last", last)));
             }
             finally
             {

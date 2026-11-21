@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.RegistryReport;
 import java.io.PrintStream;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -28,17 +29,66 @@ import java.util.stream.Collectors;
  * @since 0.1.0
  */
 public final class StageStatusCommand<C extends StageAdmin>
-        implements AdminCommand<C>
+        implements CliOperation<C, StageStatusCommand.Request,
+                StageStatusCommand.Result>
 {
 
-    /** The most items listed. */
+    /** How many incomplete items are listed. */
     static final int LISTED = 20;
 
-    /**
-     * How far behind the reconciler's watermark may be before the status
-     * warns: ordinarily it is about 25 minutes, the grace and one interval.
-     */
+    /** How far behind the reconciler may be before it is flagged. */
     static final Duration STALE = Duration.ofHours(1);
+
+    /**
+     * What is asked.
+     *
+     * @param itemId one item to show; null for the stage as a whole
+     */
+    public record Request(UUID itemId)
+    {
+    }
+
+    /**
+     * What was found, each part read on its own.
+     *
+     * @param duties     the duties lease
+     * @param item       the item asked for; null for the stage
+     * @param items      the items not complete; null for one item
+     * @param claims     the records claimed now; null for one item
+     * @param reconciled how far the reconciler has checked; null for one
+     *                   item
+     */
+    public record Result(Partial<StatusParts.Lease> duties,
+            Partial<ItemDetail> item, Partial<Items> items,
+            Partial<RegistryReport.Claims> claims,
+            Partial<Optional<RegistryReport.Reconciled>> reconciled)
+    {
+    }
+
+    /**
+     * The stage's items.
+     *
+     * @param incomplete how many are in progress
+     * @param complete   how many are complete
+     * @param listed     the first of those in progress
+     */
+    public record Items(long incomplete, Long complete,
+            List<RegistryReport.Item> listed)
+    {
+    }
+
+    /**
+     * One item.
+     *
+     * @param itemId   the item
+     * @param item     its progress; null if none of its records came yet
+     * @param states   its records counted by state
+     * @param attempts the most attempts any of its records has had
+     */
+    public record ItemDetail(UUID itemId, RegistryReport.Item item,
+            Map<String, Long> states, long attempts)
+    {
+    }
 
     /** Creates the command. */
     public StageStatusCommand()
@@ -49,6 +99,18 @@ public final class StageStatusCommand<C extends StageAdmin>
     public String name()
     {
         return "status";
+    }
+
+    @Override
+    public Permission permission()
+    {
+        return Permission.PIPELINE_VIEW;
+    }
+
+    @Override
+    public Kind kind()
+    {
+        return Kind.QUERY;
     }
 
     @Override
@@ -76,73 +138,101 @@ public final class StageStatusCommand<C extends StageAdmin>
     }
 
     @Override
-    public boolean readsOnly()
+    public Request bind(AdminArgs arguments, C context)
     {
-        return true;
+        return new Request(arguments.option("item")
+                .map(StageStatusCommand::itemId).orElse(null));
     }
 
     @Override
-    public void run(AdminArgs arguments, C context, AuditRecord audit,
-            PrintStream out) throws Exception
+    public Result run(Request request, C context, Invocation invocation)
     {
+        AuditRecord audit = invocation.audit();
         audit.add(Attr.STAGE, context.stage());
-        StatusParts status = new StatusParts(out);
-        status.show("duties", () -> StatusParts.lease(context.leases(),
-                context.stage() + "/" + context.connectorId() + "/duties"));
-        if (arguments.option("item").isPresent())
+        Partial<StatusParts.Lease> duties = Partial.of(() ->
+                StatusParts.Lease.read(context.leases(), context.stage()
+                        + "/" + context.connectorId() + "/duties"));
+        if (request.itemId() != null)
         {
-            UUID itemId = itemId(arguments.required("item"));
-            audit.add(Attr.ITEM_ID, itemId);
-            status.show("item", () -> item(context.registry(), itemId));
+            audit.add(Attr.ITEM_ID, request.itemId());
+            return new Result(duties, Partial.of(() -> item(
+                    context.registry(), request.itemId())), null, null,
+                    null);
+        }
+        return new Result(duties, null,
+                Partial.of(() -> items(context.registry(), audit)),
+                Partial.of(() -> context.registry().claims()),
+                Partial.of(() -> context.registry().reconciled()));
+    }
+
+    @Override
+    public void print(Result result, PrintStream out) throws Exception
+    {
+        StatusParts status = new StatusParts(out);
+        status.show("duties", () -> result.duties().get().text());
+        if (result.item() != null)
+        {
+            status.show("item", () -> item(result.item().get()));
         }
         else
         {
-            status.show("items", () -> items(context.registry(), audit));
-            status.show("records", () -> claims(context.registry()));
+            status.show("items", () -> items(result.items().get()));
+            status.show("records", () -> claims(result.claims().get()));
             status.show("reconciler",
-                    () -> reconciled(context.registry()));
+                    () -> reconciled(result.reconciled().get()));
         }
         status.end();
     }
 
     /**
-     * The items not yet complete.
+     * Reads the items not complete, with the first of them.
      *
      * @param registry the stage's registry
-     * @param audit    the audit event, given the count
-     * @return the text to show
+     * @param audit    the audit event, given the count in progress
+     * @return the items
      */
-    private static String items(RegistryReport registry, AuditRecord audit)
+    private static Items items(RegistryReport registry, AuditRecord audit)
     {
         Map<String, Long> counts = registry.itemCounts();
         long incomplete = counts.get("incomplete");
         audit.add(Attr.COUNT, incomplete);
+        return new Items(incomplete, counts.get("complete"),
+                registry.incomplete(LISTED));
+    }
+
+    /**
+     * The items not complete, with the first of them.
+     *
+     * @param items the items
+     * @return the text to show
+     */
+    private static String items(Items items)
+    {
         StringBuilder text = new StringBuilder();
-        text.append(incomplete).append(" in progress, ")
-                .append(counts.get("complete")).append(" complete");
-        List<RegistryReport.Item> listed = registry.incomplete(LISTED);
-        for (RegistryReport.Item item : listed)
+        text.append(items.incomplete()).append(" in progress, ")
+                .append(items.complete()).append(" complete");
+        for (RegistryReport.Item item : items.listed())
         {
             text.append(StatusParts.more(item.itemId() + " "
                     + progress(item)));
         }
-        if (incomplete > listed.size())
+        if (items.incomplete() > items.listed().size())
         {
-            text.append(StatusParts.more("and " + (incomplete - listed.size())
+            text.append(StatusParts.more("and " + (items.incomplete()
+                    - items.listed().size())
                     + " more; --item <id> shows one"));
         }
         return text.toString();
     }
 
     /**
-     * The records claimed now.
+     * The records claimed now, and how many of those claims expired.
      *
-     * @param registry the stage's registry
+     * @param claims the claims
      * @return the text to show
      */
-    private static String claims(RegistryReport registry)
+    private static String claims(RegistryReport.Claims claims)
     {
-        RegistryReport.Claims claims = registry.claims();
         String text = claims.claimed() + " claimed";
         if (claims.expired() > 0)
         {
@@ -154,16 +244,14 @@ public final class StageStatusCommand<C extends StageAdmin>
     }
 
     /**
-     * How far the reconciler has checked, and a warning if that is long
-     * ago: it runs every 15 minutes by default, after a 10-minute grace.
+     * How far the reconciler has checked, flagged when it is far behind.
      *
-     * @param registry the stage's registry
+     * @param reconciled where it has checked to; empty if it hasn't yet
      * @return the text to show
      */
-    private static String reconciled(RegistryReport registry)
+    private static String reconciled(
+            Optional<RegistryReport.Reconciled> reconciled)
     {
-        Optional<RegistryReport.Reconciled> reconciled =
-                registry.reconciled();
         if (reconciled.isEmpty())
         {
             return "hasn't checked yet: it starts at the lookback";
@@ -182,15 +270,35 @@ public final class StageStatusCommand<C extends StageAdmin>
     }
 
     /**
-     * One item, and its records by state.
+     * Reads one item and its records by state.
      *
      * @param registry the stage's registry
      * @param itemId   the item
-     * @return the text to show
+     * @return the item
      */
-    private static String item(RegistryReport registry, UUID itemId)
+    private static ItemDetail item(RegistryReport registry, UUID itemId)
     {
         RegistryReport.Item item = registry.item(itemId).orElse(null);
+        if (item == null)
+        {
+            return new ItemDetail(itemId, null, Map.of(), 0);
+        }
+        Map<String, Long> states = new LinkedHashMap<>(
+                registry.recordStates(itemId));
+        long attempts = states.remove("attempts");
+        return new ItemDetail(itemId, item, states, attempts);
+    }
+
+    /**
+     * One item and its records by state.
+     *
+     * @param detail the item
+     * @return the text to show
+     */
+    private static String item(ItemDetail detail)
+    {
+        UUID itemId = detail.itemId();
+        RegistryReport.Item item = detail.item();
         if (item == null)
         {
             return itemId + " none of its records received yet";
@@ -199,14 +307,13 @@ public final class StageStatusCommand<C extends StageAdmin>
         text.append(itemId).append(' ').append(progress(item));
         text.append(item.completedAt() == null ? ", in progress"
                 : ", complete " + item.completedAt());
-        Map<String, Long> states = registry.recordStates(itemId);
-        long attempts = states.remove("attempts");
+        Map<String, Long> states = detail.states();
         text.append(StatusParts.more("records " + (states.isEmpty() ? "none"
                 : states.entrySet().stream()
                         .map(state -> state.getKey() + " " + state.getValue())
                         .collect(Collectors.joining(", ")))
-                + (attempts > 1 ? "; at most " + attempts + " attempts"
-                        : "")));
+                + (detail.attempts() > 1 ? "; at most " + detail.attempts()
+                        + " attempts" : "")));
         if (item.expected() < 0)
         {
             text.append(StatusParts.more("its item message hasn't been"

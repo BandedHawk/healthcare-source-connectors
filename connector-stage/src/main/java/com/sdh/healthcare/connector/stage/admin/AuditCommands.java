@@ -6,7 +6,6 @@
  */
 package com.sdh.healthcare.connector.stage.admin;
 
-import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.core.audit.AuditTrail;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import java.io.PrintStream;
@@ -93,8 +92,32 @@ final class AuditCommands
     }
 
     /** {@code audit-verify}. */
-    static final class Verify implements AdminCommand<AuditTarget>
+    static final class Verify implements CliOperation<AuditTarget,
+            Verify.Request, Verify.Result>
     {
+
+        /**
+         * What is asked.
+         *
+         * @param from  the span's start; null for the first chain
+         * @param to    its end; null for now
+         * @param stale how long unwritten before an open chain is a
+         *              warning
+         */
+        record Request(Instant from, Instant to, Duration stale)
+        {
+        }
+
+        /**
+         * What was found.
+         *
+         * @param found  each chain, with what is wrong with it
+         * @param sealed whether seals were checked: false with no public
+         *               signing key configured
+         */
+        record Result(AuditTrail.Verification found, boolean sealed)
+        {
+        }
 
         /** Creates the command. */
         Verify()
@@ -138,22 +161,55 @@ final class AuditCommands
         }
 
         @Override
-        public boolean readsOnly()
+        public Permission permission()
         {
-            return true;
+            return Permission.AUDIT_READ;
         }
 
         @Override
-        public void run(AdminArgs arguments, AuditTarget context,
-                AuditRecord audit, PrintStream out) throws Exception
+        public Kind kind()
         {
-            Duration stale = arguments.option("stale")
-                    .map(Verify::minutes).orElse(STALE);
+            return Kind.QUERY;
+        }
+
+        @Override
+        public Request bind(AdminArgs arguments, AuditTarget context)
+        {
+            return new Request(time(arguments, "from").orElse(null),
+                    time(arguments, "to").orElse(null),
+                    arguments.option("stale").map(Verify::minutes)
+                            .orElse(STALE));
+        }
+
+        @Override
+        public Result run(Request request, AuditTarget context,
+                Invocation invocation) throws Exception
+        {
             Optional<AuditTrail.SealKey> key = context.sealKey();
             AuditTrail.Verification found = context.trail().verify(
-                    time(arguments, "from").orElse(null),
-                    time(arguments, "to").orElse(null), key.orElse(null),
-                    Instant.now(), stale);
+                    request.from(), request.to(), key.orElse(null),
+                    Instant.now(), request.stale());
+            long tampered = found.chains().stream()
+                    .filter(AuditTrail.ChainReport::tampered).count();
+            invocation.audit().add(Attr.COUNT, found.entries());
+            invocation.audit().add(Attr.OUTCOME, tampered == 0 ? "intact"
+                    : "changed");
+            return new Result(found, key.isPresent());
+        }
+
+        /**
+         * Prints each chain with what is wrong with it.
+         *
+         * @param result what was found
+         * @param out    where to
+         * @throws StatusParts.Unavailable if a chain was changed, so the
+         *                                 exit status is 1
+         */
+        @Override
+        public void print(Result result, PrintStream out)
+                throws StatusParts.Unavailable
+        {
+            AuditTrail.Verification found = result.found();
             for (AuditTrail.ChainReport chain : found.chains())
             {
                 out.println(chain.chainId() + " " + chain.source() + " pod="
@@ -177,12 +233,10 @@ final class AuditCommands
                     .filter(AuditTrail.ChainReport::tampered).count();
             out.println(found.chains().size() + " chains, " + found.entries()
                     + " entries"
-                    + (key.isEmpty() ? "; seals not checked: no public"
+                    + (!result.sealed() ? "; seals not checked: no public"
                             + " signing key configured" : "")
                     + "; " + (tampered == 0 ? "no changes found"
                             : tampered + " chains changed"));
-            audit.add(Attr.COUNT, found.entries());
-            audit.add(Attr.OUTCOME, tampered == 0 ? "intact" : "changed");
             if (tampered > 0)
             {
                 throw new StatusParts.Unavailable();
@@ -217,8 +271,19 @@ final class AuditCommands
     }
 
     /** {@code audit-export}. */
-    static final class Export implements AdminCommand<AuditTarget>
+    static final class Export implements CliOperation<AuditTarget,
+            Export.Request, Long>
     {
+
+        /**
+         * What is asked.
+         *
+         * @param from the span's start; null for the first event
+         * @param to   its end; null for now
+         */
+        record Request(Instant from, Instant to)
+        {
+        }
 
         /** Creates the command. */
         Export()
@@ -256,19 +321,36 @@ final class AuditCommands
         }
 
         @Override
-        public boolean readsOnly()
+        public Permission permission()
         {
-            return true;
+            return Permission.AUDIT_READ;
         }
 
         @Override
-        public void run(AdminArgs arguments, AuditTarget context,
-                AuditRecord audit, PrintStream out) throws Exception
+        public Kind kind()
+        {
+            return Kind.QUERY;
+        }
+
+        @Override
+        public Request bind(AdminArgs arguments, AuditTarget context)
+        {
+            return new Request(time(arguments, "from").orElse(null),
+                    time(arguments, "to").orElse(null));
+        }
+
+        /**
+         * Streams the events to the sink, one row each.
+         *
+         * @return how many
+         */
+        @Override
+        public Long run(Request request, AuditTarget context,
+                Invocation invocation) throws Exception
         {
             HexFormat hex = HexFormat.of();
-            long count = context.trail().export(
-                    time(arguments, "from").orElse(null),
-                    time(arguments, "to").orElse(null), event ->
+            long count = context.trail().export(request.from(),
+                    request.to(), event ->
                     {
                         Map<String, Object> line = new LinkedHashMap<>();
                         line.put("chain", event.chainId().toString());
@@ -278,15 +360,47 @@ final class AuditCommands
                         line.put("severity", event.severity());
                         line.put("attributes", event.attributes());
                         line.put("hash", hex.formatHex(event.hash()));
-                        out.println(JSONObjectUtils.toJSONString(line));
+                        invocation.sink().row(line);
                     });
-            audit.add(Attr.COUNT, count);
+            invocation.audit().add(Attr.COUNT, count);
+            return count;
+        }
+
+        /**
+         * Prints nothing more: the events went to the sink.
+         *
+         * @param result how many
+         * @param out    unused
+         */
+        @Override
+        public void print(Long result, PrintStream out)
+        {
         }
     }
 
     /** {@code audit-prune}. */
-    static final class Prune implements AdminCommand<AuditTarget>
+    static final class Prune implements CliOperation<AuditTarget,
+            Prune.Request, Prune.Result>
     {
+
+        /**
+         * What is asked.
+         *
+         * @param before the time the chains pruned were last written before
+         */
+        record Request(Instant before)
+        {
+        }
+
+        /**
+         * What was done.
+         *
+         * @param before the time asked for
+         * @param pruned the chains and entries deleted
+         */
+        record Result(Instant before, AuditTrail.Pruned pruned)
+        {
+        }
 
         /** Creates the command. */
         Prune()
@@ -324,10 +438,40 @@ final class AuditCommands
         }
 
         @Override
-        public void run(AdminArgs arguments, AuditTarget context,
-                AuditRecord audit, PrintStream out) throws Exception
+        public Permission permission()
         {
-            Instant before = time("before", arguments.required("before"));
+            return Permission.AUDIT_ADMIN;
+        }
+
+        @Override
+        public Kind kind()
+        {
+            return Kind.LONG;
+        }
+
+        /**
+         * A second person approves (CONTROL-API-DESIGN.md §6).
+         *
+         * @param request the request
+         * @return four eyes
+         */
+        @Override
+        public Approval approval(Request request)
+        {
+            return Approval.FOUR_EYES;
+        }
+
+        @Override
+        public Request bind(AdminArgs arguments, AuditTarget context)
+        {
+            return new Request(time("before", arguments.required("before")));
+        }
+
+        @Override
+        public Result run(Request request, AuditTarget context,
+                Invocation invocation) throws Exception
+        {
+            Instant before = request.before();
             if (before.isAfter(Instant.now().minus(STALE)))
             {
                 throw new AdminArgs.UsageException("--before must be at least"
@@ -335,10 +479,16 @@ final class AuditCommands
                         + " chain still being written is pruned");
             }
             AuditTrail.Pruned pruned = context.trailToChange().prune(before);
-            audit.add(Attr.COUNT, pruned.entries());
-            out.println("Pruned " + pruned.chains() + " chains, "
-                    + pruned.entries() + " entries, last written before "
-                    + before);
+            invocation.audit().add(Attr.COUNT, pruned.entries());
+            return new Result(before, pruned);
+        }
+
+        @Override
+        public void print(Result result, PrintStream out)
+        {
+            out.println("Pruned " + result.pruned().chains() + " chains, "
+                    + result.pruned().entries()
+                    + " entries, last written before " + result.before());
         }
     }
 }
