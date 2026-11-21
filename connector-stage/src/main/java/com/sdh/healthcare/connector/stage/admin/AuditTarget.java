@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.audit.AuditTrail;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.ControlState;
 import java.time.Duration;
 import java.util.Optional;
 
@@ -114,6 +115,20 @@ public final class AuditTarget implements AutoCloseable
     public AuditTrail trailToChange()
     {
         return new AuditTrail(writing.dataSource(), tables, TIMEOUT);
+    }
+
+    /**
+     * Whether the stage is paused (CONTROL-API-DESIGN.md §9), for its
+     * scope: what its chains are of.
+     *
+     * @param change whether it is to be paused or resumed, on a connection
+     *               that may write
+     * @return the state
+     */
+    public ControlState controlState(boolean change)
+    {
+        return new ControlState((change ? writing : reading).dataSource(),
+                tables.schema(), source);
     }
 
     /**

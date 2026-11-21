@@ -48,9 +48,14 @@ info:
     in the clear at rest, for its requester to fetch once, within the
     break-glass TTL, from `/operations/{id}/result`; it is then deleted.
 
+    A pause (`/pause`) stops the stage's pods taking new work within
+    seconds, whatever pods start or stop, until `/resume`; work already
+    taken finishes, and nothing is dropped. `/drain` pauses, then is
+    followed as an operation until no pod holds a live claim.
+
     This version serves the queries (build step C2), the actions (C3),
-    the sealed results and sealing keys (C4), and four eyes and
-    break-glass (C5).
+    the sealed results and sealing keys (C4), four eyes and break-glass
+    (C5), and pause, resume and drain (C6).
 servers:
   - url: https://{host}:8443/api/v1
     variables:
@@ -102,6 +107,61 @@ paths:
       description: Permission `pipeline.view`.
       responses:
         "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+    post:
+      operationId: drain
+      summary: Pauses the stage, then follows it until nothing is claimed
+      description: >-
+        Pauses as `/pause` does, with the reason kept with the pause, and
+        is answered `202` with its record. The record is done once the
+        stage has been paused for 15 seconds, so every pod has read the
+        pause, and no pod holds a live claim on a record or item; failed
+        if the stage is resumed first. The stage stays paused. Not on the
+        landing node. Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
+  /control-state:
+    get:
+      operationId: controlState
+      summary: Whether the stage is paused, by whom, since when, and why
+      description: Permission `pipeline.view`.
+      responses:
+        "200": {$ref: "#/components/responses/Paused"}
+        default: {$ref: "#/components/responses/Problem"}
+  /pause:
+    post:
+      operationId: pause
+      summary: Stops the stage's pods taking new work
+      description: >-
+        Within seconds, the stage's input is suspended, a reprocess run's
+        objects aren't queued and corrections aren't applied; the landing
+        node lists nothing and answers pushes `503`. Work already taken
+        finishes and commits, and leases are still renewed. Kept, with who
+        paused, when and the reason, until `/resume`. A stage already
+        paused keeps its first pause (`changed` false). Permission
+        `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Paused"}
+        default: {$ref: "#/components/responses/Problem"}
+  /resume:
+    post:
+      operationId: resume
+      summary: Clears the stage's pause; its pods take work again
+      description: >-
+        Within seconds. A stage not paused is left as it is (`changed`
+        false). Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Paused"}
         default: {$ref: "#/components/responses/Problem"}
   /version:
     get:
@@ -795,6 +855,13 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Operation"}
+    Paused:
+      description: The stage's pause, as it stands after the call.
+      headers:
+        X-Request-Id: {$ref: "#/components/headers/RequestId"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Paused"}
     Answer:
       description: The operation's answer.
       headers:
@@ -849,6 +916,22 @@ components:
         expiresAt: {type: string, format: date-time}
         revokedBy: {type: [string, "null"]}
         revokedAt: {type: [string, "null"], format: date-time}
+    Paused:
+      type: object
+      required: [scope, paused]
+      properties:
+        scope:
+          type: string
+          description: >-
+            The stage's deployment, as its audit chains name it, such as
+            `convert/<connector ID>`; a landing node's is its intake's.
+        paused: {type: boolean}
+        pausedBy: {type: [string, "null"]}
+        pausedAt: {type: [string, "null"], format: date-time}
+        reason: {type: [string, "null"]}
+        changed:
+          type: boolean
+          description: Whether this call paused or resumed it.
     Operation:
       type: object
       properties:

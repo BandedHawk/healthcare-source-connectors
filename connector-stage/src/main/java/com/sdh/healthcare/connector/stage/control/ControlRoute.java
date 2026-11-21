@@ -208,6 +208,8 @@ public record ControlRoute(String method, String path, String operation,
                 query("/stuck", "stuck", Map.of("idle", "idle"), Map.of()),
                 query("/drain", "drain-check", Map.of(), Map.of()),
                 query("/version", "version", Map.of(), Map.of()),
+                query("/control-state", "control-state", Map.of(),
+                        Map.of()),
                 query("/failures", "failures",
                         Map.of("itemId", "item-id"), Map.of("all", "all")),
                 new ControlRoute("GET", PREFIX + "/reprocess-runs/{runId}",
@@ -222,7 +224,8 @@ public record ControlRoute(String method, String path, String operation,
     }
 
     /**
-     * The action routes (build step C3).
+     * The action routes (build step C3), with the approved ones (C5) and
+     * the pause's (C6).
      *
      * @return them
      */
@@ -258,6 +261,12 @@ public record ControlRoute(String method, String path, String operation,
                 action("POST", "/items/{itemId}/resubmit", "resubmit",
                         Map.of("itemId", "item-id"),
                         Map.of("again", "again"), Set.of(), Input.NONE),
+                action("POST", "/pause", "pause", Map.of(), Map.of(),
+                        Set.of(), Input.REASON),
+                action("POST", "/resume", "resume", Map.of(), Map.of(),
+                        Set.of(), Input.NONE),
+                action("POST", "/drain", "drain", Map.of(), Map.of(),
+                        Set.of(), Input.REASON),
                 action("POST", "/audit/prune", "audit-prune",
                         Map.of("before", "before"), Map.of(), Set.of(),
                         Input.NONE),

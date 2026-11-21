@@ -32,6 +32,7 @@ import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
 import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
@@ -485,6 +486,25 @@ final class SplitAdminContext implements DrainAdmin, AutoCloseable
         return new StageReleases(writing.dataSource(),
                 properties.stage().registrySchema(), ItemProcessor.STAGE,
                 Duration.ofSeconds(10));
+    }
+
+    /** Beside the stage's journal, under its chains' scope. */
+    @Override
+    public ControlState controlState(boolean change)
+    {
+        return new ControlState((change ? writing : database).dataSource(),
+                properties.stage().registrySchema(),
+                ItemProcessor.STAGE + "/" + properties.connectorId());
+    }
+
+    /**
+     * The items held now by a pod's live item lease: those being split.
+     */
+    @Override
+    public long liveClaims()
+    {
+        return leases().live(ItemProcessor.STAGE + "/"
+                + properties.connectorId() + "/");
     }
 
     /** The items being split, archived or failed, as the pods find. */

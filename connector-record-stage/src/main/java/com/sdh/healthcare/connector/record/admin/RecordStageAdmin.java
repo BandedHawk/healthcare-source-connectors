@@ -22,6 +22,7 @@ import com.sdh.healthcare.connector.record.SourceInputs;
 import com.sdh.healthcare.connector.record.config.RecordStageSettings;
 import com.sdh.healthcare.connector.record.runtime.StageTables;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.RegistryReport;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
@@ -36,6 +37,7 @@ import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.AuditTarget;
 import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
 import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
+import com.sdh.healthcare.connector.stage.admin.DrainCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
 import com.sdh.healthcare.connector.stage.admin.PatientAdmin;
 import com.sdh.healthcare.connector.stage.admin.PatientsCommand;
@@ -162,7 +164,8 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
                 new ArrayList<>(List.of(new StageStatusCommand<>(),
                         new StuckCommand<>(),
                         new ReprocessCommand<>(), new DrainCheckCommand<>(),
-                        new VersionCommand<>(), new PatientsCommand<>()));
+                        new DrainCommand<>(), new VersionCommand<>(),
+                        new PatientsCommand<>()));
         commands.addAll(FailureCommands.<RecordStageAdmin<P>>all());
         return List.copyOf(commands);
     }
@@ -271,6 +274,23 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
     {
         return new StageReleases(writing.dataSource(),
                 settings.stage().registrySchema(), stage(), DATABASE_WAIT);
+    }
+
+    /** Beside the stage's journal, under its chains' scope. */
+    @Override
+    public ControlState controlState(boolean change)
+    {
+        return new ControlState((change ? writing : database).dataSource(),
+                settings.stage().registrySchema(),
+                messages.stage() + "/" + settings.connectorId());
+    }
+
+    /** The records claimed now with a live claim, in the registry. */
+    @Override
+    public long liveClaims()
+    {
+        RegistryReport.Claims claims = registry().claims();
+        return claims.claimed() - claims.expired();
     }
 
     /** The registry's unfinished items with output, as the pods find. */

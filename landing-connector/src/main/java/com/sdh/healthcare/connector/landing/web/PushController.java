@@ -14,6 +14,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.http.CacheControl;
@@ -48,8 +49,8 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code 413} for a body over {@code max-item-bytes};</li>
  *   <li>{@code 415} for a form or multipart body;</li>
  *   <li>{@code 503} with {@code Retry-After} while another push holds the
- *       intake past {@code max-wait}, or storage or the broker is down.
- *       </li>
+ *       intake past {@code max-wait}, storage or the broker is down, or
+ *       the intake is paused (CONTROL-API-DESIGN.md §9).</li>
  * </ul>
  * Answers are never cached, request headers are never echoed, and nothing
  * about a push's content or sender is logged.
@@ -90,6 +91,9 @@ public class PushController
     /** Lands the pushes. */
     private final PushService service;
 
+    /** Whether the intake is paused, when pushes are refused. */
+    private final BooleanSupplier paused;
+
     /** The {@code Retry-After} sent with a 503, in seconds. */
     private final long retryAfterSeconds;
 
@@ -105,6 +109,7 @@ public class PushController
     {
         this.intake = properties.landing().intake();
         this.service = runtime.pushService();
+        this.paused = runtime::paused;
         this.retryAfterSeconds = settings.retryAfter().toSeconds();
     }
 
@@ -149,6 +154,10 @@ public class PushController
         {
             return answer(HttpStatus.FORBIDDEN, null);
         }
+        if (paused.getAsBoolean())
+        {
+            return unavailable();
+        }
         String type = request.getContentType() == null ? ""
                 : request.getContentType().toLowerCase(Locale.ROOT);
         if (type.startsWith("application/x-www-form-urlencoded")
@@ -188,12 +197,21 @@ public class PushController
             case BROKEN -> answer(HttpStatus.BAD_REQUEST, null);
             case UNKNOWN_REPLACES -> answer(HttpStatus.BAD_REQUEST,
                     "{\"error\":\"unknown-replaces\"}");
-            case BUSY, UNAVAILABLE -> ResponseEntity
-                    .status(HttpStatus.SERVICE_UNAVAILABLE)
-                    .cacheControl(CacheControl.noStore())
-                    .header("Retry-After", Long.toString(retryAfterSeconds))
-                    .build();
+            case BUSY, UNAVAILABLE -> unavailable();
         };
+    }
+
+    /**
+     * A {@code 503}, with when to try again.
+     *
+     * @return the answer
+     */
+    private ResponseEntity<String> unavailable()
+    {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .cacheControl(CacheControl.noStore())
+                .header("Retry-After", Long.toString(retryAfterSeconds))
+                .build();
     }
 
     /**

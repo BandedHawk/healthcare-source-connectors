@@ -30,10 +30,16 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
  * the stage's health whether the broker answers. Artemis has a route of its
  * own, which reports its health itself.
  *
+ * <p>A pause (CONTROL-API-DESIGN.md §9) suspends the route, which finishes
+ * the batch being handled first; resuming starts it again. A route paused
+ * before it is started isn't started until it is resumed, and the watch
+ * doesn't restart a paused route.
+ *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class StageReceiver implements AutoCloseable
+public final class StageReceiver implements PauseWatch.Pausable,
+        AutoCloseable
 {
 
     /** The input route's ID. */
@@ -45,6 +51,9 @@ public final class StageReceiver implements AutoCloseable
 
     /** The stage's Camel context. */
     private final CamelContext camel;
+
+    /** Starts, pauses and stops the route. */
+    private final PausableRoute route;
 
     /** The RabbitMQ connections; null for other brokers. */
     private final CachingConnectionFactory rabbitmq;
@@ -80,36 +89,50 @@ public final class StageReceiver implements AutoCloseable
             EventHubsSupport.bind(camel, settings.eventhubs());
         }
         this.rabbitmq = factory;
-        RouteBuilder route = settings.kind() == BrokerKind.ARTEMIS
+        RouteBuilder builder = settings.kind() == BrokerKind.ARTEMIS
                 ? new ArtemisReceiveRoute(ROUTE_ID, labels, settings, handler,
                         health, initialBackoff, maxBackoff)
                 : new CamelReceiveRoute(ROUTE_ID, settings, handler,
                         initialBackoff, maxBackoff);
-        camel.addRoutes(route);
+        camel.addRoutes(builder);
+        this.route = new PausableRoute(camel, ROUTE_ID);
         if (settings.kind() == BrokerKind.ARTEMIS)
         {
             this.watch = null;
         }
         else
         {
-            this.watch = new BrokerWatch(ROUTE_ID, settings, health, camel);
+            this.watch = new BrokerWatch(ROUTE_ID, settings, health, camel,
+                    route::restart);
             watch.bind(factory);
         }
     }
 
     /**
-     * Starts taking messages.
+     * Starts taking messages, unless paused: then once resumed.
      *
      * @throws Exception if the route can't start
      */
     public void start() throws Exception
     {
-        camel.getRouteController().startRoute(ROUTE_ID);
+        route.start();
         if (watch != null)
         {
             watch.start();
         }
         LOG.info("stage.input_started");
+    }
+
+    /**
+     * Stops or starts taking messages again, for a pause.
+     *
+     * @param paused true to stop, false to start again
+     * @throws Exception if the route can't be suspended or started
+     */
+    @Override
+    public void paused(boolean paused) throws Exception
+    {
+        route.paused(paused);
     }
 
     /**
@@ -121,7 +144,7 @@ public final class StageReceiver implements AutoCloseable
     {
         try
         {
-            camel.getRouteController().stopRoute(ROUTE_ID);
+            route.stop();
         }
         catch (Exception failure)
         {

@@ -171,7 +171,7 @@ public class LandingConfiguration
     {
         return new ResubmitPoller(properties.landing().intake(),
                 runtime.intake(), runtime.resubmitter(), fatal,
-                ResubmitPoller.INTERVAL);
+                ResubmitPoller.INTERVAL, runtime::paused);
     }
 
     /**
@@ -290,24 +290,22 @@ public class LandingConfiguration
     }
 
     /**
-     * Recovers from any crash, then starts listing (design §5.3.5). An
-     * HTTP intake takes pushes as soon as its server is up; each push
-     * recovers first if this hasn't yet.
+     * Recovers from any crash, then starts listing (design §5.3.5), unless
+     * the intake is paused: then once resumed. An HTTP intake takes pushes
+     * as soon as its server is up, unless paused; each push recovers first
+     * if this hasn't yet.
      *
      * @param runtime the runtime
-     * @param camel   the Camel context
      * @return the startup step
      */
     @Bean
-    ApplicationRunner startIntake(LandingRuntime runtime, CamelContext camel)
+    ApplicationRunner startIntake(LandingRuntime runtime)
     {
         return arguments ->
         {
             runtime.intake().recoverAtStartup();
-            if (runtime.service() != null || runtime.batchService() != null)
-            {
-                camel.getRouteController().startRoute(IntakeRoute.ROUTE_ID);
-            }
+            // Not while paused (CONTROL-API-DESIGN.md §9): then on resume.
+            runtime.startRoute();
             if (runtime.brokerWatch() != null)
             {
                 runtime.brokerWatch().start();

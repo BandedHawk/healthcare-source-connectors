@@ -1,6 +1,6 @@
 # The pipeline control API: design
 
-Status: **Designed 2026-11-20 with the user; steps C1 (2026-11-20) and C2–C5 (2026-11-21) built, the rest not built** · Puts into effect the intent in
+Status: **Designed 2026-11-20 with the user; steps C1 (2026-11-20) and C2–C6 (2026-11-21) built, the rest not built** · Puts into effect the intent in
 [CONTROL-API.md](CONTROL-API.md), and is the design for [HIPAA.md](HIPAA.md) §11.1 P1–P6. The operator commands
 it serves are those in DESIGN.md §11.4.
 
@@ -292,13 +292,14 @@ for 10 minutes) holds it at `running`, and that is shown. The request may be sen
 ## 9. Pause, resume and drain (P2)
 
 The table `sdh_control_state` holds a row per scope: the stage, or one intake of the landing node. A row gives
-`paused`, by whom, since when, and the reason.
+`paused`, by whom, since when, and the reason. As built (§15.6), a scope is named as the stage's audit chains are
+(`convert/<connector ID>`); a landing node is one intake, so its scope is that intake's.
 
 - **Workers read it** when they start, before starting their routes, and every 5 s after.
 - **Pausing** suspends the input routes: Kafka consumers stop polling, landing intakes stop listing, and the HTTP
   push answers `503` with `Retry-After`. Work already claimed finishes and commits. Nothing is dropped. A paused
   stage keeps renewing its leases, so nothing is taken over.
-- **Resuming** clears the row. Routes restart within 5 s.
+- **Resuming** clears the row's pause. Routes restart within 5 s.
 - **Drain** is a long operation: pause, then wait until `GET /drain` shows nothing claimed or in flight. Then it
   is `done`, and the stage can be stopped or upgraded safely.
 - **It survives restarts**, because the state is in the database, not in a pod.
@@ -425,7 +426,7 @@ depends on neither of the others.
 | C3 | Actions, `Idempotency-Key`, the operation record and its leases (§5, §8). **Built 2026-11-21** (§15.3) | P1 |
 | C4 | Sealing keys and sealed results (§7). **Built 2026-11-21** (§15.4) | P1 |
 | C5 | Four eyes and break-glass (§6). **Built 2026-11-21** (§15.5) | P1 |
-| C6 | Pause, resume and drain (§9) | P2 |
+| C6 | Pause, resume and drain (§9). **Built 2026-11-21** (§15.6) | P2 |
 | C7 | Rotate and re-key (§11) | P3 |
 | C8 | Retention, purge and erase (§11) | P4 |
 | C9 | Health, settings, compliance outcome, support bundle | P5 |
@@ -709,5 +710,58 @@ depends on neither of the others.
   - Stopping a run whose lease another pod has taken.
   - Everything §15.2–§15.4 list as not yet.
 
+### 15.6 C6, as built
+
+- **State** (`ControlState`, in `stage`): `sdh_control_state`, beside the audit journal, a row per scope that was
+  ever paused: `paused`, `paused_by`, `paused_at`, `reason`, `updated_at`. The scope is what the stage's audit
+  chains are of, `<stage>/<connector ID>` (`landing/<connector ID>` for a landing node, which is one intake).
+  - A pause keeps who, when and the reason, which is checked as the API checks an action's reason (1 to 200
+    letters, digits, spaces and `. , : _ # / -`). Pausing a paused scope keeps the first pause.
+  - Resuming clears the pause and keeps the row, for the rows C7 and C8 add to it.
+- **Pods** (`PauseWatch`): each reads its scope's row when it starts, before it takes work, and every 5 s after. A
+  failed read keeps the state last read; a change that fails to apply is applied again at the next read. Each
+  change is audited by the pod as `stage.paused` or `stage.resumed`, with `sdh.control_scope`.
+  - The input route (`PausableRoute`, used by `StageReceiver` and the landing node) is suspended, which Camel does
+    as it stops a route: the batch in hand finishes first, and a consumer that can't be suspended is stopped. A
+    route paused before the pod starts isn't started until resumed. The broker watch doesn't restart a paused
+    route.
+  - The record stages' worker queues no reprocess object and applies no correction. The split stage's
+    corrections loop takes no correction, release or reprocess object, but still sends unsent item ends.
+  - The landing node lists nothing and takes no queue batch, answers pushes `503` with `Retry-After`, and
+    carries out no resubmission.
+  - Claims and leases are still renewed, items still looked at again, and the duties pod's reconciler and
+    maintenance still run: what was taken finishes, and nothing is taken over.
+- **Operations**, on every stage beside the audit commands (`ControlStateCommands`): `pause` (reason on standard
+  input, or the body's `reason`), `resume` and `control-state`. Routes `POST /pause`, `POST /resume`,
+  `GET /control-state`. Audited with `sdh.control_scope` and `sdh.paused` (whether it was paused before); a
+  resume also with `sdh.requested_by`, who had paused it.
+- **Drain** (`DrainCommand`, on the stages with a registry: split, convert, transform): pauses, then is drained
+  once the stage has been paused for 15 s (three reads by every pod) and no pod holds a live claim. Live claims are
+  the registry's records `CLAIMED` with an unexpired claim, or, for the split stage, the item leases
+  (`split/<connector ID>/<item>`) unexpired (`JdbcLeaseStore.live`).
+  - `POST /drain` is followed (`Followed`): answered `202`, and its record is `done` once drained, `failed` if the
+    stage is resumed first. It isn't on the landing node (`404 not-on-this-stage`).
+  - The CLI waits for it, for at most `--wait` minutes (10), and exits 1 if it isn't drained in time. The stage
+    stays paused either way.
+  - `GET /drain` stays the release check, `drain-check`, as C2 built it. §5 had it give what is still claimed;
+    a drain's live claims are in its record's `progress` instead.
+- **Tests:**
+  - `ControlStateTest`: pause, a second pause, resume and scopes apart; a reason refused; the watch reading as it
+    starts, telling each part of each change in order, keeping the state when a read fails, and applying a
+    failed change again.
+  - `PausableRouteTest`: a route paused before it starts, suspended, resumed, not restarted while paused, and
+    left alone once stopped.
+  - `DrainCommandsTest`: a drain waiting for the pause to settle and the claims to end, the CLI giving up after
+    `--wait`, and a resume failing it.
+  - `ControlActionsTest`: pause, the state, a second pause, resume, a viewer refused, and no drain on a stage
+    without one, through the API.
+  - `PushServiceTest`: a resubmission waiting while the intake is paused.
+- **Not yet:**
+  - Drain on the landing node.
+  - A pause tested end to end on a running stage with a broker (the parts are tested: the route switch on a real
+    Camel context, and the watch).
+  - KEDA isn't paused by the API (§9, §13); the runbook does it.
+  - Everything §15.2–§15.5 list as not yet.
+
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
-(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5.
+(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1.

@@ -61,10 +61,14 @@ import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
+import com.sdh.healthcare.connector.stage.ControlState;
+import com.sdh.healthcare.connector.stage.PausableRoute;
+import com.sdh.healthcare.connector.stage.PauseWatch;
 import com.zaxxer.hikari.HikariDataSource;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.apache.camel.CamelContext;
@@ -160,6 +164,15 @@ public final class LandingRuntime implements AutoCloseable
     private final AuditJournals.Opened journal;
 
     /**
+     * Starts, pauses and stops a listing or queue intake's route; null for
+     * an HTTP intake, which has none.
+     */
+    private final PausableRoute route;
+
+    /** Reads whether the intake is paused (CONTROL-API-DESIGN.md §9). */
+    private final PauseWatch pause;
+
+    /**
      * The landing tables and what writes them, for table maintenance.
      *
      * @param committer   fences commits with the lease
@@ -193,15 +206,19 @@ public final class LandingRuntime implements AutoCloseable
      * @param tables       the landing tables
      * @param resubmitter  lands items again for operators' requests
      * @param journal      the audit journal
+     * @param paused       the intake's route and pause
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
             ResultsChannel results, KeyMaterial keys, SourceSettings source,
             IntakeSource intakeSource, IntakeService service,
             PushService pushService, QueueIntake queue, Tables tables,
-            Resubmitter resubmitter, AuditJournals.Opened journal)
+            Resubmitter resubmitter, AuditJournals.Opened journal,
+            Pause paused)
     {
         this.journal = journal;
+        this.route = paused.route();
+        this.pause = paused.watch();
         this.camel = camel;
         this.dataSource = dataSource;
         this.catalog = catalog;
@@ -240,7 +257,18 @@ public final class LandingRuntime implements AutoCloseable
     }
 
     /**
-     * Starts the node's runtime.
+     * An intake's route and pause.
+     *
+     * @param route its route; null for an HTTP intake
+     * @param watch reads whether it is paused, started
+     */
+    private record Pause(PausableRoute route, PauseWatch watch)
+    {
+    }
+
+    /**
+     * Starts the node's runtime, reading whether the intake is paused
+     * before anything is taken in.
      *
      * @param properties the node's settings
      * @param camel      the Camel context, for the publisher
@@ -404,6 +432,8 @@ public final class LandingRuntime implements AutoCloseable
             IntakeService service = null;
             PushService pushService = null;
             QueueIntake queue = null;
+            PausableRoute route = http == null
+                    ? new PausableRoute(camel, IntakeRoute.ROUTE_ID) : null;
             if (http != null)
             {
                 pushService = new PushService(intake, storage, announcer,
@@ -428,7 +458,7 @@ public final class LandingRuntime implements AutoCloseable
                 if (receive.kind() != BrokerKind.ARTEMIS)
                 {
                     watch = new BrokerWatch(IntakeRoute.ROUTE_ID, receive,
-                            health, camel);
+                            health, camel, route::restart);
                     watch.bind(rabbitmq);
                 }
                 queue = new QueueIntake(new BatchService(intake, storage,
@@ -444,6 +474,14 @@ public final class LandingRuntime implements AutoCloseable
                         new IntakeHealth(intake, System::nanoTime),
                         grouping(storageSettings.group()));
             }
+            // Read before anything is taken in: a push is refused while
+            // paused, and the route isn't started.
+            PauseWatch pause = PauseWatch.of(new ControlState(dataSource,
+                    AuditTables.besideLeaseTable(properties.lease().jdbc()
+                            .table()).schema(),
+                    "landing/" + properties.connectorId()),
+                    route == null ? List.of() : List.of(route));
+            pause.start();
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.INTAKE, intake)
                             .with(Attr.EPOCH, lease.epoch()));
@@ -451,7 +489,8 @@ public final class LandingRuntime implements AutoCloseable
                     publisher, results, keys, source, intakeSource, service,
                     pushService, queue,
                     new Tables(committer, items, ledgerTable, lander,
-                            ids), resubmitter, journal);
+                            ids), resubmitter, journal,
+                    new Pause(route, pause));
         }
         catch (Exception | Error failure)
         {
@@ -677,19 +716,46 @@ public final class LandingRuntime implements AutoCloseable
         return source;
     }
 
+    /**
+     * Whether the intake is paused (CONTROL-API-DESIGN.md §9): then it
+     * lists nothing, takes no batch, refuses pushes and lands no
+     * resubmission, while what it has taken finishes.
+     *
+     * @return true if it was when last read
+     */
+    public boolean paused()
+    {
+        return pause.paused();
+    }
+
+    /**
+     * Starts a listing or queue intake's route, unless paused: then once
+     * resumed.
+     *
+     * @throws Exception if it can't be started
+     */
+    public void startRoute() throws Exception
+    {
+        if (route != null)
+        {
+            route.start();
+        }
+    }
+
     /** Stops the route, then closes everything in reverse order. */
     @Override
     public void close()
     {
+        pause.close();
         if (brokerWatch != null)
         {
             brokerWatch.close();
         }
-        if (service != null || batchService != null)
+        if (route != null)
         {
             try
             {
-                camel.getRouteController().stopRoute(IntakeRoute.ROUTE_ID);
+                route.stop();
             }
             catch (Exception failure)
             {

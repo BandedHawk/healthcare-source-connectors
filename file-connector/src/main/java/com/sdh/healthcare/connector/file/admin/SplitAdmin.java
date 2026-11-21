@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditTarget;
 import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
+import com.sdh.healthcare.connector.stage.admin.DrainCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
 import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
 import com.sdh.healthcare.connector.stage.admin.VersionCommand;
@@ -69,6 +70,7 @@ public final class SplitAdmin
                         new ReleaseCommand(),
                         new ReprocessCommand<SplitAdminContext>(),
                         new DrainCheckCommand<SplitAdminContext>(),
+                        new DrainCommand<SplitAdminContext>(),
                         new VersionCommand<SplitAdminContext>()));
         commands.addAll(FailureCommands.<SplitAdminContext>all());
         return List.copyOf(commands);

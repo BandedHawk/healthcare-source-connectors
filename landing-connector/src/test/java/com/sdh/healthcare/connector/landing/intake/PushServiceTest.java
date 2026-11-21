@@ -59,6 +59,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.crypto.KeyGenerator;
 import org.apache.iceberg.CatalogProperties;
@@ -718,7 +719,8 @@ class PushServiceTest
      * A landed push, resubmitted, is landed again under a new ID that
      * replaces it, with the same bytes, and announced with a receipt;
      * the request is marked landed and audited, and a second run finds
-     * nothing to do. Pushes land as before.
+     * nothing to do. Pushes land as before. While the intake is paused,
+     * the request waits.
      *
      * @throws Exception if the test fails
      */
@@ -729,12 +731,17 @@ class PushServiceTest
         UUID first = push(service, "a", null, "0123456789ab").receipt()
                 .itemId();
         ResubmitRequests requests = requests();
+        AtomicBoolean paused = new AtomicBoolean(true);
         ResubmitPoller poller = new ResubmitPoller(INTAKE, service,
                 new Resubmitter(items, keys, requests, Clock.systemUTC()),
-                fatal::add, ResubmitPoller.INTERVAL);
+                fatal::add, ResubmitPoller.INTERVAL, paused::get);
         ResubmitRequests.Request request =
                 requests.add(INTAKE, first, "alice", UUID.randomUUID());
 
+        assertThat(poller.poll()).isZero();
+        assertThat(requests.find(request.requestId()).orElseThrow()
+                .outcome()).isNotEqualTo(ResubmitRequests.Outcome.LANDED);
+        paused.set(false);
         assertThat(poller.poll()).isEqualTo(1);
         ResubmitRequests.Request done =
                 requests.find(request.requestId()).orElseThrow();

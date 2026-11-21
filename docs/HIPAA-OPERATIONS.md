@@ -367,6 +367,42 @@ to get a source document back when the pipeline can't process it.
 
 Iceberg snapshots are not a backup: they expire after `snapshot-retention` (24 h), in the same bucket.
 
+### 7.1 Pausing and draining a stage (§ 164.308(a)(7)(ii)(C))
+
+Pause a stage to keep it from taking new work while something is wrong downstream, during maintenance, or before
+an upgrade. A pause is kept in the database, so pods that restart or are added stay paused until someone resumes.
+What a pod had already taken finishes and is stored, and nothing is dropped. Messages wait on the broker; a landing
+node lists nothing and answers pushes `503` with `Retry-After`, so senders try again later.
+
+Through the control API, with `pipeline.operate`:
+
+```
+POST /api/v1/pause      {"reason": "INC-1234 FHIR server down"}
+GET  /api/v1/control-state
+POST /api/v1/resume     {"reason": "INC-1234 resolved"}
+```
+
+Each action needs an `Idempotency-Key`. The same through the CLI, run in the stage's pod:
+
+```
+pause < reason.txt
+control-state
+resume
+```
+
+Before stopping or upgrading the split, convert or transform stage, drain it: `POST /api/v1/drain` (or `drain`
+in the CLI) pauses it, then its operation record is `done` once no pod holds a claim. The CLI waits up to
+`--wait` minutes (10) and exits 1 if the stage isn't drained by then. The stage stays paused after a drain: resume
+it once the upgrade is done.
+
+KEDA keeps adding pods while a paused stage's backlog grows, and the control API can't stop it. While a stage is
+paused for longer than a few minutes, the platform administrator pauses its autoscaling too
+(`kubectl annotate scaledobject <stage> autoscaling.keda.sh/paused="true"`), and removes the annotation after
+the resume. Otherwise the stage grows to its maximum pods, all idle.
+
+Each pause and resume is audited (`sdh.audit.control.pause`, `.resume`, or `sdh.audit.admin.*` from the CLI),
+with who and the reason, and each pod records when it paused and resumed (`stage.paused`, `stage.resumed`).
+
 ## 8. Retention, disposal and end of contract (§ 164.310(d), § 164.504(e)(2)(ii)(J))
 
 - **Retention** is off by default; each table keeps rows forever until a period is set (DESIGN §8.4, §5.3.13). The

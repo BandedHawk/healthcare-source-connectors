@@ -367,7 +367,19 @@ public enum Attr
     REQUESTED_BY("sdh.requested_by"),
 
     /** The second principal that approved an operation needing four eyes. */
-    APPROVED_BY("sdh.approved_by");
+    APPROVED_BY("sdh.approved_by"),
+
+    /**
+     * What a pause applies to (CONTROL-API-DESIGN.md §9): a stage's
+     * deployment, such as {@code convert/<connector ID>}.
+     */
+    CONTROL_SCOPE("sdh.control_scope"),
+
+    /** Whether a stage is paused, or was before a change. */
+    PAUSED("sdh.paused"),
+
+    /** Records or items a stage's pods hold claims on now, live. */
+    CLAIMS("sdh.claims");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

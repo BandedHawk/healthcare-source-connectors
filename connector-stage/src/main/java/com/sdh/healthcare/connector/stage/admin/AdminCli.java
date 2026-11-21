@@ -42,7 +42,9 @@ import org.springframework.context.ConfigurableApplicationContext;
  * §3.1), as a chain of its own, unsealed, since a command holds no stage
  * key: a command whose run can't be journaled doesn't run. Every stage
  * also has the journal's own commands, {@code audit-verify},
- * {@code audit-export} and {@code audit-prune} ({@link AuditCommands}).
+ * {@code audit-export} and {@code audit-prune} ({@link AuditCommands}), and
+ * {@code pause}, {@code resume} and {@code control-state}
+ * ({@link ControlStateCommands}), which are kept beside the journal.
  *
  * <p>Exit status: 0 done, 1 failed, 2 usage error.
  *
@@ -84,7 +86,7 @@ public final class AdminCli<P, C extends AutoCloseable>
     private final Map<String, AdminCommand<C>> commands =
             new LinkedHashMap<>();
 
-    /** The audit journal's commands, by name. */
+    /** The commands every stage has, on its audit journal: by name. */
     private final Map<String, AdminCommand<AuditTarget>> auditCommands =
             new LinkedHashMap<>();
 
@@ -124,7 +126,10 @@ public final class AdminCli<P, C extends AutoCloseable>
         {
             this.commands.put(command.name(), command);
         }
-        for (AdminCommand<AuditTarget> command : AuditCommands.all())
+        List<AdminCommand<AuditTarget>> common =
+                new ArrayList<>(AuditCommands.all());
+        common.addAll(ControlStateCommands.all());
+        for (AdminCommand<AuditTarget> command : common)
         {
             this.auditCommands.put(command.name(), command);
         }

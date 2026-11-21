@@ -38,8 +38,10 @@ import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
+import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.DrainGate;
 import com.sdh.healthcare.connector.stage.ItemEndResender;
+import com.sdh.healthcare.connector.stage.PauseWatch;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
@@ -131,6 +133,9 @@ public final class RecordStageRuntime implements AutoCloseable
     /** Lets this pod's release in before it takes work (STAGES.md §14.4a). */
     private final DrainGate gate;
 
+    /** Pauses the input and the worker (CONTROL-API-DESIGN.md §9). */
+    private final PauseWatch watch;
+
     /**
      * What a set-up runtime holds.
      *
@@ -143,11 +148,13 @@ public final class RecordStageRuntime implements AutoCloseable
      * @param source    the source table
      * @param sink      the sink table
      * @param gate      the drain check
+     * @param watch     the pause's watch
      */
     private record Parts(String stage, List<AutoCloseable> resources,
             StageWorker<RecordStageProcessor.Prepared> worker,
             StageReceiver receiver, StageHealth health, StageDuties duties,
-            RecordTable source, RecordTable sink, DrainGate gate)
+            RecordTable source, RecordTable sink, DrainGate gate,
+            PauseWatch watch)
     {
     }
 
@@ -167,6 +174,7 @@ public final class RecordStageRuntime implements AutoCloseable
         this.source = parts.source();
         this.sink = parts.sink();
         this.gate = parts.gate();
+        this.watch = parts.watch();
     }
 
     /**
@@ -349,13 +357,19 @@ public final class RecordStageRuntime implements AutoCloseable
                             new ReentrantLock(), dutiesFatal, clock),
                     fatal).placed(stage.duties());
             opened.add(duties);
+            PauseWatch watch = PauseWatch.of(new ControlState(dataSource,
+                    stage.registrySchema(),
+                    stageName + "/" + settings.connectorId()),
+                    List.of(receiver, worker));
+            // Closed before the input, so no resume starts it again.
+            opened.add(watch);
             // Last, so closed first: shutting down stops a held pod's wait.
             opened.add(gate);
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.STAGE, stageName));
             return new RecordStageRuntime(new Parts(stageName,
                     List.copyOf(opened), worker, receiver, health, duties,
-                    source, sink, gate));
+                    source, sink, gate, watch));
         }
         catch (Exception | Error failure)
         {
@@ -440,11 +454,12 @@ public final class RecordStageRuntime implements AutoCloseable
 
     /**
      * Waits until the drain check lets this pod's release in (STAGES.md
-     * §14.4a), then starts the worker's claim renewal, the duties and the
-     * input; a pod for the duties alone ({@code sdh.stage.duties.only})
-     * takes no input, its worker renewing the claims of what the duties
-     * hand in again. Nothing starts if the runtime is closed while it
-     * waits.
+     * §14.4a), then reads whether the stage is paused
+     * (CONTROL-API-DESIGN.md §9), and starts the worker's claim renewal,
+     * the duties and the input, which a pause holds; a pod for the duties
+     * alone ({@code sdh.stage.duties.only}) takes no input, its worker
+     * renewing the claims of what the duties hand in again. Nothing
+     * starts if the runtime is closed while it waits.
      *
      * @throws Exception if the input route can't start
      */
@@ -455,6 +470,8 @@ public final class RecordStageRuntime implements AutoCloseable
             LOG.info("stage.not_started stage={}", stage);
             return;
         }
+        // Before any input: a paused stage takes none.
+        watch.start();
         worker.start();
         duties.start();
         if (duties.placement().only())

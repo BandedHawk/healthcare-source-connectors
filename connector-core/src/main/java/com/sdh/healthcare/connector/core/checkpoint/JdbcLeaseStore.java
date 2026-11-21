@@ -249,6 +249,44 @@ public final class JdbcLeaseStore implements LeaseStore
     }
 
     /**
+     * How many leases whose names start with a prefix are held now, live:
+     * a stage's item leases, for its drain (CONTROL-API-DESIGN.md §9).
+     *
+     * @param prefix the names' start, such as {@code split/<connector>/}
+     * @return how many; 0 if the table isn't there
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public long live(String prefix)
+    {
+        String sql = """
+                SELECT count(*) FROM %s
+                 WHERE name LIKE ? ESCAPE '!'
+                   AND expires_at > clock_timestamp()""".formatted(table);
+        String pattern = prefix.replace("!", "!!").replace("%", "!%")
+                .replace("_", "!_") + "%";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setString(1, pattern);
+            try (ResultSet rows = select.executeQuery())
+            {
+                rows.next();
+                return rows.getLong(1);
+            }
+        }
+        catch (SQLException failure)
+        {
+            if (UNDEFINED_TABLE.equals(failure.getSQLState()))
+            {
+                return 0;
+            }
+            throw new IllegalStateException("Lease store unavailable",
+                    failure);
+        }
+    }
+
+    /**
      * Runs an update of one grant's row.
      *
      * @param sql    the update, with parameters for the milliseconds, then

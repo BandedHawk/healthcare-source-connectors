@@ -85,7 +85,8 @@ import org.slf4j.LoggerFactory;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class StageWorker<O> implements BatchHandler, AutoCloseable
+public final class StageWorker<O> implements BatchHandler,
+        PauseWatch.Pausable, AutoCloseable
 {
 
     /** The most items looked at again in one go. */
@@ -145,6 +146,13 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * attempt back when released.
      */
     private volatile boolean stopping;
+
+    /**
+     * Whether the stage is paused (CONTROL-API-DESIGN.md §9): then no
+     * reprocess object is queued and no correction applied, while what was
+     * taken finishes.
+     */
+    private volatile boolean paused;
 
     /**
      * Held while the processor commits: batches and corrections commit
@@ -329,6 +337,18 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
     }
 
     /**
+     * Stops or starts queueing reprocess objects and applying corrections,
+     * for a pause; items are still looked at again and claims renewed.
+     *
+     * @param paused true to stop, false to start again
+     */
+    @Override
+    public void paused(boolean paused)
+    {
+        this.paused = paused;
+    }
+
+    /**
      * Queues reprocess runs' objects (STAGES.md §15.8.4), if the stage
      * reprocesses: sends again those given their lines but never sent (a
      * pod stopped between the two), under the same lines and message IDs;
@@ -337,12 +357,12 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * a {@code record.reprocess} to the stage's own input, sealed to itself;
      * and ends the runs with nothing left. An object whose input is gone
      * before it is sent is refused. A failure is logged, and tried again at
-     * the next interval. Run each renewal interval once {@link #start}ed;
-     * public for a stage's own tests.
+     * the next interval. Run each renewal interval once {@link #start}ed,
+     * unless paused; public for a stage's own tests.
      */
     public void reprocess()
     {
-        if (reprocessing == null)
+        if (reprocessing == null || paused)
         {
             return;
         }
@@ -453,12 +473,12 @@ public final class StageWorker<O> implements BatchHandler, AutoCloseable
      * correction stored but not sent (a worker stopped between the two) is
      * sent again. The item is then looked at again by {@link #revisit}. A
      * failure is logged, and the correction tried again at the next
-     * interval. Run each renewal interval once {@link #start}ed; public
-     * for a stage's own tests.
+     * interval. Run each renewal interval once {@link #start}ed, unless
+     * paused; public for a stage's own tests.
      */
     public void applyCorrections()
     {
-        if (!processor.corrects())
+        if (!processor.corrects() || paused)
         {
             return;
         }

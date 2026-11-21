@@ -61,7 +61,7 @@ public final class BrokerWatch implements AutoCloseable
     static final String PUBSUB_COMPONENT = "google-pubsub";
 
     /** Restarts the consumer's route. */
-    interface Restarter
+    public interface Restarter
     {
 
         /**
@@ -126,8 +126,8 @@ public final class BrokerWatch implements AutoCloseable
      * @param camel     the node's Camel context
      * @param restarter restarts the route
      */
-    BrokerWatch(String routeId, ReceiveSettings settings, BrokerHealth health,
-            CamelContext camel, Restarter restarter)
+    public BrokerWatch(String routeId, ReceiveSettings settings,
+            BrokerHealth health, CamelContext camel, Restarter restarter)
     {
         if (settings.kind() == BrokerKind.ARTEMIS)
         {

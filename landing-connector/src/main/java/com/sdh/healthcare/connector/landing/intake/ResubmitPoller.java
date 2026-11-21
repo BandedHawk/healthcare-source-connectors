@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,6 +64,12 @@ public final class ResubmitPoller implements AutoCloseable
     /** How often to look. */
     private final Duration interval;
 
+    /**
+     * Whether the intake is paused (CONTROL-API-DESIGN.md §9): then no
+     * request is carried out until it is resumed.
+     */
+    private final BooleanSupplier paused;
+
     /** Runs the polls, once started. */
     private ScheduledExecutorService executor;
 
@@ -78,6 +85,25 @@ public final class ResubmitPoller implements AutoCloseable
     public ResubmitPoller(String intake, LandingIntake service,
             Resubmitter resubmitter, FatalExit fatal, Duration interval)
     {
+        this(intake, service, resubmitter, fatal, interval, () -> false);
+    }
+
+    /**
+     * Creates the poller for an intake that may be paused; nothing runs
+     * until {@link #start}.
+     *
+     * @param intake      the intake's name
+     * @param service     the intake
+     * @param resubmitter lands the items
+     * @param fatal       stops the process
+     * @param interval    how often to look
+     * @param paused      whether the intake is paused now
+     */
+    public ResubmitPoller(String intake, LandingIntake service,
+            Resubmitter resubmitter, FatalExit fatal, Duration interval,
+            BooleanSupplier paused)
+    {
+        this.paused = paused;
         this.intake = intake;
         this.service = service;
         this.resubmitter = resubmitter;
@@ -103,12 +129,17 @@ public final class ResubmitPoller implements AutoCloseable
     }
 
     /**
-     * Carries out the open requests, oldest first, until one has to wait.
+     * Carries out the open requests, oldest first, until one has to wait;
+     * none while the intake is paused.
      *
      * @return how many were finished, landed or refused
      */
     public int poll()
     {
+        if (paused.getAsBoolean())
+        {
+            return 0;
+        }
         ResubmitRequests requests = resubmitter.requests();
         List<ResubmitRequests.Request> open;
         try

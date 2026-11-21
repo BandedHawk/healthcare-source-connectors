@@ -17,15 +17,20 @@ import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
 import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
+import com.sdh.healthcare.connector.stage.admin.DrainCommand;
+import com.sdh.healthcare.connector.stage.admin.Followed;
 import com.sdh.healthcare.connector.stage.admin.VersionCommand;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.sql.Connection;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,6 +56,9 @@ class DrainCommandsTest
 
     /** The items part way, as the test sets them. */
     final List<PartWay.Items> parts = new ArrayList<>();
+
+    /** The live claims, as the test sets them. */
+    long claims;
 
     /** The registry's schema for this test. */
     String schema;
@@ -172,6 +180,19 @@ class DrainCommandsTest
         {
             return first -> List.copyOf(parts);
         }
+
+        @Override
+        public ControlState controlState(boolean change)
+        {
+            return new ControlState(StageTestSupport.database(), schema,
+                    "convert/test");
+        }
+
+        @Override
+        public long liveClaims()
+        {
+            return claims;
+        }
     }
 
     /** Gives each test its own tables. */
@@ -267,5 +288,77 @@ class DrainCommandsTest
         assertThatThrownBy(() -> run(new VersionCommand<>(), "--accept"))
                 .isInstanceOf(AdminArgs.UsageException.class)
                 .hasMessageContaining("current one already");
+    }
+
+    /**
+     * {@code drain} pauses the stage and waits for its pods' live claims
+     * to end, once they have all read the pause; it fails if the stage is
+     * resumed first. The CLI gives up after {@code --wait}, leaving it
+     * paused, and a second drain keeps the first pause.
+     *
+     * @throws Exception if it fails
+     */
+    @Test
+    void drainPausesThenWaitsForTheClaims() throws Exception
+    {
+        DrainCommand<Context> drain = new DrainCommand<>();
+        claims = 2;
+        assertThatThrownBy(() -> drain(drain, "--wait", "0"))
+                .isInstanceOf(DrainCommand.NotDrained.class)
+                .hasMessageContaining("2 live claim(s) left");
+        ControlState state = context.controlState(false);
+        assertThat(state.paused()).get()
+                .extracting(ControlState.Paused::pausedBy)
+                .isEqualTo("alice");
+        assertThat(drain.progress(Map.of(), context).state())
+                .isEqualTo(Followed.State.RUNNING);
+        assertThat(drain.progress(Map.of(), context).details())
+                .containsEntry("claims", 2L)
+                .containsEntry("settled", false);
+
+        try (Connection connection = StageTestSupport.database()
+                .getConnection();
+                Statement statement = connection.createStatement())
+        {
+            statement.execute("UPDATE " + schema + ".sdh_control_state"
+                    + " SET paused_at = now() - interval '1 minute'");
+        }
+        assertThat(drain.progress(Map.of(), context).details())
+                .containsEntry("settled", true);
+        assertThat(drain.progress(Map.of(), context).state())
+                .isEqualTo(Followed.State.RUNNING);
+        claims = 0;
+        assertThat(drain.progress(Map.of(), context).state())
+                .isEqualTo(Followed.State.DONE);
+        assertThat(drain(drain, "--wait", "1")).contains("Drained")
+                .contains("paused, by alice");
+        assertThatThrownBy(() -> drain(drain, "--wait", "soon"))
+                .isInstanceOf(AdminArgs.UsageException.class);
+
+        state.resume();
+        Followed.Progress resumed = drain.progress(Map.of(), context);
+        assertThat(resumed.state()).isEqualTo(Followed.State.FAILED);
+        assertThat(resumed.details()).containsEntry("resumed", true);
+    }
+
+    /**
+     * Runs {@code drain}, with the reason on its input.
+     *
+     * @param drain the command
+     * @param args  its arguments, after its name
+     * @return what it printed
+     * @throws Exception if it fails
+     */
+    String drain(DrainCommand<Context> drain, String... args)
+            throws Exception
+    {
+        List<String> all = new ArrayList<>(List.of(drain.name()));
+        all.addAll(List.of(args));
+        AdminArgs parsed = AdminArgs.parse(all, drain.flags()).withInput(
+                new ByteArrayInputStream("Upgrade window\n".getBytes(UTF_8)));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        drain.run(parsed, context, new AuditRecord("alice"),
+                new PrintStream(out, true, UTF_8));
+        return out.toString(UTF_8);
     }
 }

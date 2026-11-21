@@ -49,9 +49,11 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
+import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.DrainGate;
 import com.sdh.healthcare.connector.stage.ItemEndResender;
 import com.sdh.healthcare.connector.stage.PartWay;
+import com.sdh.healthcare.connector.stage.PauseWatch;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
@@ -173,6 +175,9 @@ public final class ConnectorRuntime implements AutoCloseable
     /** Lets this pod's release in before it takes work (STAGES.md §14.4a). */
     private final DrainGate gate;
 
+    /** Pauses the input and the corrections (CONTROL-API-DESIGN.md §9). */
+    private final PauseWatch watch;
+
     /**
      * The tables the runtime uses.
      *
@@ -208,6 +213,7 @@ public final class ConnectorRuntime implements AutoCloseable
      * @param journal        the audit journal
      * @param ids            makes IDs and MACs
      * @param gate           the drain check
+     * @param watch          the pause's watch
      */
     private record Parts(HikariDataSource dataSource, Catalog catalog,
             Catalog landingCatalog, ClosablePublisher publisher,
@@ -216,7 +222,7 @@ public final class ConnectorRuntime implements AutoCloseable
             SplitCorrections corrections, SplitReprocess reprocess,
             StageReceiver receiver, StageHealth health, StageDuties duties,
             Tables tables, KeyMaterial keys, AuditJournals.Opened journal,
-            RecordIds ids, DrainGate gate)
+            RecordIds ids, DrainGate gate, PauseWatch watch)
     {
     }
 
@@ -238,6 +244,7 @@ public final class ConnectorRuntime implements AutoCloseable
         this.corrections = parts.corrections();
         this.reprocess = parts.reprocess();
         this.receiver = parts.receiver();
+        this.watch = parts.watch();
         this.health = parts.health();
         this.duties = parts.duties();
         this.tables = parts.tables();
@@ -479,6 +486,10 @@ public final class ConnectorRuntime implements AutoCloseable
                                     retention)),
                             new ReentrantLock(), dutiesFatal, clock),
                     fatal).placed(stage.duties());
+            PauseWatch watch = PauseWatch.of(new ControlState(dataSource,
+                    stage.registrySchema(), ItemProcessor.STAGE + "/"
+                            + properties.connectorId()),
+                    List.of(receiver, correcting));
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.FORMAT, format).with(Attr.INTAKE, intake));
             return new ConnectorRuntime(new Parts(dataSource, catalog,
@@ -486,7 +497,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     processor, splitter, correcting, reprocess, receiver,
                     health, duties,
                     new Tables(splitRecords, landedItems, checkpoints), keys,
-                    journal, ids, gate));
+                    journal, ids, gate, watch));
         }
         catch (Exception | Error failure)
         {
@@ -670,8 +681,10 @@ public final class ConnectorRuntime implements AutoCloseable
 
     /**
      * Waits until the drain check lets this pod's release in (STAGES.md
-     * §14.4a), then starts the duties, the corrections and the input
-     * (design §5.3.6); a pod for the duties alone
+     * §14.4a), then reads whether the stage is paused
+     * (CONTROL-API-DESIGN.md §9), and starts the duties, the corrections
+     * and the input (design §5.3.6), which a pause holds; a pod for the
+     * duties alone
      * ({@code sdh.stage.duties.only}) starts only the duties. Nothing
      * starts if the runtime is closed while it waits.
      *
@@ -684,6 +697,8 @@ public final class ConnectorRuntime implements AutoCloseable
             LOG.info("split.not_started");
             return;
         }
+        // Before any input: a paused stage takes none.
+        watch.start();
         duties.start();
         if (duties.placement().only())
         {
@@ -783,6 +798,7 @@ public final class ConnectorRuntime implements AutoCloseable
     public void close()
     {
         gate.close();
+        watch.close();
         receiver.close();
         corrections.close();
         duties.close();

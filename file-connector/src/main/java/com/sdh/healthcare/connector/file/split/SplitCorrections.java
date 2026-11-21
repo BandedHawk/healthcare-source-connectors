@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.file.split;
 import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseHeldException;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
+import com.sdh.healthcare.connector.stage.PauseWatch;
 import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -33,7 +34,8 @@ import org.slf4j.LoggerFactory;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class SplitCorrections implements AutoCloseable
+public final class SplitCorrections implements PauseWatch.Pausable,
+        AutoCloseable
 {
 
     /** The corrections' log. */
@@ -60,6 +62,13 @@ public final class SplitCorrections implements AutoCloseable
 
     /** How long a correction's item end may go unsent before it is sent. */
     private final Duration unsentAfter;
+
+    /**
+     * Whether the stage is paused (CONTROL-API-DESIGN.md §9): then no
+     * correction, release or reprocess object is taken, while corrections'
+     * unsent item ends are still sent.
+     */
+    private volatile boolean paused;
 
     /** Runs the loop; null until started. */
     private ScheduledExecutorService executor;
@@ -131,11 +140,28 @@ public final class SplitCorrections implements AutoCloseable
                 interval.toMillis(), TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * Stops or starts taking corrections, releases and reprocess objects,
+     * for a pause.
+     *
+     * @param paused true to stop, false to start again
+     */
+    @Override
+    public void paused(boolean paused)
+    {
+        this.paused = paused;
+    }
+
     /** One interval's work; a failure waits for the next. */
     private void runOnce()
     {
         try
         {
+            if (paused)
+            {
+                sweep();
+                return;
+            }
             applyPending();
             sweep();
             applyReleases();

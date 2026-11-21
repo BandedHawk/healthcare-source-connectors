@@ -398,6 +398,68 @@ class ControlActionsTest
     }
 
     /**
+     * {@code POST /pause} pauses the stage, kept with who, when and why,
+     * and {@code GET /control-state} says so; pausing again keeps the
+     * first. {@code POST /resume} clears it. A viewer can read the state
+     * but not change it, and a stage without a drain has no
+     * {@code /drain}. Each is audited with the stage's scope.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void pausesAndResumesTheStage() throws Exception
+    {
+        String operator = ControlServerTest.token("olga", "operators");
+        String viewer = ControlServerTest.token("vera", "viewers");
+        String scope = "test/" + StageAdminTest.CONNECTOR;
+        assertThat(send("POST", "/api/v1/pause", key(), viewer,
+                body("reason", REASON)).statusCode()).isEqualTo(403);
+
+        HttpResponse<String> paused = send("POST", "/api/v1/pause", key(),
+                operator, body("reason", REASON));
+        assertThat(paused.statusCode()).as(paused.body()).isEqualTo(200);
+        assertThat(JSONObjectUtils.parse(paused.body()))
+                .containsEntry("scope", scope)
+                .containsEntry("paused", true)
+                .containsEntry("pausedBy", "olga")
+                .containsEntry("reason", REASON)
+                .containsEntry("changed", true);
+        assertThat(audit.all("control.pause")).anySatisfy(event ->
+                assertThat(event).containsEntry("sdh.control_scope", scope)
+                        .containsEntry("sdh.decision", "allowed")
+                        .containsEntry("sdh.paused", "false"));
+
+        assertThat(JSONObjectUtils.parse(send("POST", "/api/v1/pause",
+                key(), ControlServerTest.token("oscar", "operators"),
+                body("reason", "Second pause")).body()))
+                .containsEntry("pausedBy", "olga")
+                .containsEntry("changed", false);
+
+        HttpResponse<String> state = get("/api/v1/control-state", viewer);
+        assertThat(state.statusCode()).as(state.body()).isEqualTo(200);
+        assertThat(JSONObjectUtils.parse(state.body()))
+                .containsEntry("paused", true)
+                .containsEntry("pausedBy", "olga")
+                .containsKey("pausedAt");
+
+        HttpResponse<String> resumed = send("POST", "/api/v1/resume", key(),
+                operator, body("reason", "Window over"));
+        assertThat(resumed.statusCode()).as(resumed.body()).isEqualTo(200);
+        assertThat(JSONObjectUtils.parse(resumed.body()))
+                .containsEntry("paused", false)
+                .containsEntry("changed", true);
+        assertThat(audit.attributes("control.resume"))
+                .containsEntry("sdh.requested_by", "olga");
+        assertThat(JSONObjectUtils.parse(get("/api/v1/control-state",
+                viewer).body())).containsEntry("paused", false);
+
+        HttpResponse<String> drain = send("POST", "/api/v1/drain", key(),
+                operator, body("reason", REASON));
+        assertThat(drain.statusCode()).as(drain.body()).isEqualTo(404);
+        assertThat(drain.body()).contains("not-on-this-stage");
+    }
+
+    /**
      * The stage's records are listed newest first, a page at a time,
      * each page naming the next.
      *
