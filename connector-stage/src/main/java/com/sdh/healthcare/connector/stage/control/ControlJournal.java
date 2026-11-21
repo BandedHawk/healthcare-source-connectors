@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.stage.control;
 
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
+import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
@@ -53,6 +54,28 @@ public final class ControlJournal implements AutoCloseable
         this.target = target;
         this.keys = keys;
         this.journal = journal;
+    }
+
+    /**
+     * The stage's KEK provider, which wraps a break-glass result's data
+     * key (CONTROL-API-DESIGN.md §6).
+     *
+     * @return it; null if the stage has no key settings
+     */
+    KeyProvider wrap()
+    {
+        return keys == null ? null : keys.wrap();
+    }
+
+    /**
+     * The KEK a break-glass result's data key is wrapped with: the stage's
+     * records KEK, which its keys hold.
+     *
+     * @return its reference; null if the stage has no key settings
+     */
+    String resultKek()
+    {
+        return keys == null ? null : target.recordsKek().orElse(null);
     }
 
     /**

@@ -358,7 +358,16 @@ public enum Attr
     KEY_PRINCIPAL("sdh.key_principal"),
 
     /** How many sealed parts a control API answer sent. */
-    PARTS("sdh.parts");
+    PARTS("sdh.parts"),
+
+    /**
+     * The principal that asked for a control API operation needing four
+     * eyes, on its approval, rejection and run.
+     */
+    REQUESTED_BY("sdh.requested_by"),
+
+    /** The second principal that approved an operation needing four eyes. */
+    APPROVED_BY("sdh.approved_by");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

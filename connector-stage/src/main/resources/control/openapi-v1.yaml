@@ -33,9 +33,24 @@ info:
     discard it. A sealed request needs a `reason`, and no
     `Idempotency-Key`: asking again reads again, audited again.
 
+    An action that needs a second person (audit prune, a plaintext
+    break-glass restore) isn't carried out when asked: it is answered
+    `202` with its record in state `awaiting-approval`. Another principal
+    holding the same permissions approves or rejects it
+    (`/operations/{id}/approve`, `/reject`), never its requester; the
+    requester may cancel it (`/cancel`) before it runs. One not decided
+    within `sdh.control.approval.ttl` (24 h; 1 h for break-glass)
+    expires. Once approved, a control pod runs it, audited with both
+    principals. A decision needs a `reason` and no `Idempotency-Key`: it
+    can be made once, and asking again is `409 wrong-state`.
+
+    A break-glass result is held encrypted under the stage's KEK, never
+    in the clear at rest, for its requester to fetch once, within the
+    break-glass TTL, from `/operations/{id}/result`; it is then deleted.
+
     This version serves the queries (build step C2), the actions (C3),
-    and the sealed results and sealing keys (C4). Four-eyes approval
-    follows in a later version of this description.
+    the sealed results and sealing keys (C4), and four eyes and
+    break-glass (C5).
 servers:
   - url: https://{host}:8443/api/v1
     variables:
@@ -338,6 +353,126 @@ paths:
       responses:
         "202": {$ref: "#/components/responses/Accepted"}
         default: {$ref: "#/components/responses/Problem"}
+  /audit/prune:
+    post:
+      operationId: auditPrune
+      summary: Deletes the audit journal's chains last written before a time
+      description: >-
+        Needs four eyes: answered `202` with its record awaiting approval,
+        and run once another audit admin approves it. Export the chains
+        first if they must be kept elsewhere. Permission `audit.admin`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [before]
+                  properties:
+                    before:
+                      type: string
+                      description: >-
+                        A date or instant at least 10 minutes before the
+                        run.
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
+  /items/{itemId}/restore/plaintext:
+    post:
+      operationId: restorePlaintext
+      summary: Restores a landed item in plaintext, break-glass (split stage)
+      description: >-
+        Needs four eyes and a ticket: answered `202` with its record
+        awaiting approval, and run once another principal with
+        `phi.break-glass` approves it. Its result is then held encrypted
+        for the requester to fetch once from `/operations/{id}/result`.
+        Permission `phi.break-glass`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - {$ref: "#/components/parameters/itemIdPath"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [ticket]
+                  properties:
+                    ticket:
+                      type: string
+                      description: The change or incident it is for.
+                      pattern: "^[A-Za-z0-9._:/-]{1,64}$"
+                    fromOffset: {type: integer, minimum: 0}
+                    unprocessed: {type: boolean}
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
+  /operations/{id}/approve:
+    post:
+      operationId: operationApprove
+      summary: Approves an operation awaiting a second person
+      description: >-
+        The caller holds every permission the operation needs, and isn't
+        its requester (`403 own-request`). It then runs. Audited as
+        `sdh.audit.control.operation_approve`.
+      parameters:
+        - {$ref: "#/components/parameters/operationId"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Decided"}
+        default: {$ref: "#/components/responses/Problem"}
+  /operations/{id}/reject:
+    post:
+      operationId: operationReject
+      summary: Rejects an operation awaiting a second person
+      description: >-
+        As for approving: the caller holds its permissions and isn't its
+        requester. It never runs.
+      parameters:
+        - {$ref: "#/components/parameters/operationId"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Decided"}
+        default: {$ref: "#/components/responses/Problem"}
+  /operations/{id}/cancel:
+    post:
+      operationId: operationCancel
+      summary: Cancels one's own request before it runs
+      description: >-
+        Only its requester (`403 not-your-request`), while it awaits
+        approval or is approved and not yet taken by a control pod.
+      parameters:
+        - {$ref: "#/components/parameters/operationId"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Decided"}
+        default: {$ref: "#/components/responses/Problem"}
+  /operations/{id}/result:
+    get:
+      operationId: operationResult
+      summary: A break-glass result, in plaintext, once
+      description: >-
+        Only its requester, with `phi.break-glass`, once the operation is
+        done and within the break-glass TTL. It is deleted once fetched,
+        whether or not the fetch completes: ask for the restore again if
+        it didn't. Otherwise `410 result-gone`.
+      parameters:
+        - {$ref: "#/components/parameters/operationId"}
+      responses:
+        "200":
+          description: The result.
+          headers:
+            X-Request-Id: {$ref: "#/components/headers/RequestId"}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        default: {$ref: "#/components/responses/Problem"}
   /operations:
     get:
       operationId: operations
@@ -567,6 +702,11 @@ components:
       required: true
       description: Of the client's choosing, unique per request.
       schema: {type: string, pattern: "^[A-Za-z0-9._:-]{8,128}$"}
+    operationId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
     seqPath:
       name: seq
       in: path
@@ -648,6 +788,13 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Operation"}
+    Decided:
+      description: The operation's record, as decided.
+      headers:
+        X-Request-Id: {$ref: "#/components/headers/RequestId"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Operation"}
     Answer:
       description: The operation's answer.
       headers:
@@ -659,11 +806,12 @@ components:
       description: >-
         A refusal (RFC 9457). `title` is one of `bad-request` (400),
         `unauthenticated` (401), `permission-required`, `approval-required`,
-        `sealing-key-not-yours`, `not-for-yourself` or `forbidden` (403),
-        `not-on-this-stage`, `operation-not-found` or `key-not-found`
-        (404), `refused` (409, the stage refused it as things stand),
-        `idempotency-key-reused` or `in-progress` (409), `too-large` (413)
-        or `failed` (500). A refusal of an action is kept as its key's
+        `sealing-key-not-yours`, `not-for-yourself`, `own-request`,
+        `not-your-request` or `forbidden` (403), `not-on-this-stage`,
+        `operation-not-found` or `key-not-found` (404), `refused` (409, the
+        stage refused it as things stand), `idempotency-key-reused`,
+        `in-progress` or `wrong-state` (409), `result-gone` (410),
+        `too-large` (413) or `failed` (500). A refusal of an action is kept as its key's
         answer too: retry it with a new key.
       content:
         application/problem+json:
@@ -705,7 +853,7 @@ components:
       type: object
       properties:
         id: {type: string, format: uuid}
-        kind: {type: string, examples: [reprocess, resubmit]}
+        kind: {type: string, examples: [reprocess, resubmit, audit-prune]}
         scope: {type: string, examples: ["stage:file-connector"]}
         state:
           type: string
@@ -715,8 +863,28 @@ components:
         reason: {type: string}
         requestedAt: {type: string, format: date-time}
         updatedAt: {type: string, format: date-time}
-        parameters: {type: object}
+        parameters:
+          type: object
+          description: >-
+            What it acts on: identifiers, times and counts, never PHI. For
+            one awaiting approval, the route it was asked by, its path's
+            variables, its body's fields, the permissions an approver
+            needs, and `approveBy`, when it expires unapproved.
         progress: {type: object}
+        ticket: {type: string}
+        decidedBy:
+          type: string
+          description: Who approved or rejected it.
+        decision:
+          type: string
+          description: Why they did.
+        decidedAt: {type: string, format: date-time}
+        result:
+          type: object
+          description: >-
+            What it did, once finished: counts; for a failure, its class.
+            A break-glass result gives `resultParts`, `resultBytes`,
+            `resultUntil` and `resultAt`, where it is fetched.
         progressUnavailable:
           type: string
           description: Why the stage couldn't be read for it; the class only.

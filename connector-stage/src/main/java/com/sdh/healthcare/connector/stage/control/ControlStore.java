@@ -75,7 +75,7 @@ public final class ControlStore
     public enum State
     {
 
-        /** Waiting for a second person (C5). */
+        /** Waiting for a second person. */
         AWAITING_APPROVAL,
 
         /** Approved, not yet started. */
@@ -93,10 +93,10 @@ public final class ControlStore
         /** Cancelled before it finished. */
         CANCELLED,
 
-        /** Refused by the second person (C5). */
+        /** Refused by the second person. */
         REJECTED,
 
-        /** Not approved in time (C5). */
+        /** Not approved in time. */
         EXPIRED;
 
         /**
@@ -147,11 +147,20 @@ public final class ControlStore
      * @param progress    how far it has got: counts
      * @param updatedAt   when it last changed
      * @param holder      the control pod running it; null for none
+     * @param ticket      the change or incident it is for; null if none
+     *                    was given
+     * @param decidedBy   who approved or rejected it; null until then, and
+     *                    for an operation that needs no approval
+     * @param decision    why they did, as checked; null until then
+     * @param decidedAt   when; null until then
+     * @param result      what it did: counts; empty until it has finished
      */
     public record Operation(UUID id, String kind, String scope,
             Map<String, Object> parameters, String requestedBy, String reason,
             Instant requestedAt, State state, Map<String, Object> progress,
-            Instant updatedAt, String holder)
+            Instant updatedAt, String holder, String ticket,
+            String decidedBy, String decision, Instant decidedAt,
+            Map<String, Object> result)
     {
     }
 
@@ -388,11 +397,32 @@ public final class ControlStore
             Map<String, Object> parameters, String requestedBy, String reason,
             State state, Map<String, Object> progress)
     {
+        return record(kind, scope, parameters, requestedBy, reason, null,
+                state, progress);
+    }
+
+    /**
+     * Records a long operation, with the ticket it is for.
+     *
+     * @param kind        the operation
+     * @param scope       {@code stage:<name>} or {@code pipeline}
+     * @param parameters  what it acts on
+     * @param requestedBy who asked
+     * @param reason      why
+     * @param ticket      the change or incident it is for; null for none
+     * @param state       its first state
+     * @param progress    how far it has got
+     * @return it, as recorded
+     */
+    public Operation record(String kind, String scope,
+            Map<String, Object> parameters, String requestedBy, String reason,
+            String ticket, State state, Map<String, Object> progress)
+    {
         UUID id = UUID.randomUUID();
         update("INSERT INTO " + operations + " (id, kind, scope, parameters,"
-                + " requested_by, reason, requested_at, state, progress,"
-                + " updated_at) VALUES (?, ?, ?, ?, ?, ?, now(), ?, ?,"
-                + " now())", statement ->
+                + " requested_by, reason, ticket, requested_at, state,"
+                + " progress, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?,"
+                + " now(), ?, ?, now())", statement ->
                 {
                     statement.setObject(1, id);
                     statement.setString(2, kind);
@@ -400,8 +430,9 @@ public final class ControlStore
                     statement.setString(4, json(parameters));
                     statement.setString(5, requestedBy);
                     statement.setString(6, reason);
-                    statement.setString(7, state.wire());
-                    statement.setString(8, json(progress));
+                    statement.setString(7, ticket);
+                    statement.setString(8, state.wire());
+                    statement.setString(9, json(progress));
                 });
         return find(id, scope).orElseThrow();
     }
@@ -475,6 +506,109 @@ public final class ControlStore
                     statement.setString(1, state.wire());
                     statement.setString(2, json(progress));
                     statement.setObject(3, id);
+                }) == 1;
+    }
+
+    /**
+     * Decides an operation waiting for a second person: approves or
+     * rejects it, unless it is no longer waiting.
+     *
+     * @param id       its ID
+     * @param approved whether it is approved; false to reject it
+     * @param by       who decides
+     * @param reason   why, as checked
+     * @return true if it was decided now
+     */
+    public boolean decide(UUID id, boolean approved, String by,
+            String reason)
+    {
+        return update("UPDATE " + operations + " SET state = ?,"
+                + " approved_by = ?, approval_reason = ?, approved_at ="
+                + " now(), updated_at = now() WHERE id = ? AND state ="
+                + " 'awaiting-approval'", statement ->
+                {
+                    statement.setString(1, (approved ? State.APPROVED
+                            : State.REJECTED).wire());
+                    statement.setString(2, by);
+                    statement.setString(3, reason);
+                    statement.setObject(4, id);
+                }) == 1;
+    }
+
+    /**
+     * Cancels an operation that hasn't started: one waiting for approval,
+     * or approved and not yet taken by a control pod.
+     *
+     * @param id its ID
+     * @return true if it was cancelled now
+     */
+    public boolean cancel(UUID id)
+    {
+        return update("UPDATE " + operations + " SET state = 'cancelled',"
+                + " updated_at = now() WHERE id = ? AND (state ="
+                + " 'awaiting-approval' OR state = 'approved' AND holder"
+                + " IS NULL)", statement -> statement.setObject(1, id)) == 1;
+    }
+
+    /**
+     * Expires an operation that waited too long for approval.
+     *
+     * @param id its ID
+     * @return true if it was expired now
+     */
+    public boolean expire(UUID id)
+    {
+        return update("UPDATE " + operations + " SET state = 'expired',"
+                + " updated_at = now() WHERE id = ? AND state ="
+                + " 'awaiting-approval'",
+                statement -> statement.setObject(1, id)) == 1;
+    }
+
+    /**
+     * A scope's approved operations that a control pod is to run: those
+     * approved and not yet taken, and those running whose holder's lease
+     * has run out.
+     *
+     * @param scope the scope
+     * @param limit the most to list
+     * @return them, oldest first
+     */
+    public List<Operation> runnable(String scope, int limit)
+    {
+        return select("WHERE scope = ? AND approved_by IS NOT NULL AND"
+                + " state IN ('approved', 'running') AND (holder IS NULL OR"
+                + " holder_until < now()) ORDER BY requested_at, id LIMIT ?",
+                statement ->
+                {
+                    statement.setString(1, scope);
+                    statement.setInt(2, limit);
+                });
+    }
+
+    /**
+     * Finishes an operation this pod holds, with its result, and gives up
+     * its lease.
+     *
+     * @param id       its ID
+     * @param holder   the control pod
+     * @param state    how it finished: done or failed
+     * @param progress how far it got
+     * @param result   what it did: counts, never PHI
+     * @return true if it still held it; false if another took it over
+     */
+    public boolean finish(UUID id, String holder, State state,
+            Map<String, Object> progress, Map<String, Object> result)
+    {
+        return update("UPDATE " + operations + " SET state = ?, progress = ?,"
+                + " result = ?, holder = NULL, holder_until = NULL,"
+                + " updated_at = now() WHERE id = ? AND holder = ? AND state"
+                + " = 'running'", statement ->
+                {
+                    statement.setString(1, state.wire());
+                    statement.setString(2, json(progress));
+                    statement.setString(3, json(result));
+                    statement.setObject(4, id);
+                    statement.setString(5, holder);
                 }) == 1;
     }
 
@@ -614,7 +748,8 @@ public final class ControlStore
     private List<Operation> select(String where, Binder binder)
     {
         String sql = "SELECT id, kind, scope, parameters, requested_by,"
-                + " reason, requested_at, state, progress, updated_at, holder"
+                + " reason, requested_at, state, progress, updated_at, holder,"
+                + " ticket, approved_by, approval_reason, approved_at, result"
                 + " FROM " + operations + " " + where;
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement statement = connection.prepareStatement(sql))
@@ -634,7 +769,10 @@ public final class ControlStore
                             State.of(row.getString(8)),
                             parse(row.getString(9)),
                             row.getTimestamp(10).toInstant(),
-                            row.getString(11)));
+                            row.getString(11), row.getString(12),
+                            row.getString(13), row.getString(14),
+                            instant(row.getTimestamp(15)),
+                            parse(row.getString(16))));
                 }
             }
             return found;
@@ -644,6 +782,17 @@ public final class ControlStore
             throw new IllegalStateException(
                     "Could not read the control API's tables", failure);
         }
+    }
+
+    /**
+     * A time, as read.
+     *
+     * @param time the column's value
+     * @return the instant; null for none
+     */
+    private static Instant instant(Timestamp time)
+    {
+        return time == null ? null : time.toInstant();
     }
 
     /**

@@ -1,6 +1,6 @@
 # The pipeline control API: design
 
-Status: **Designed 2026-11-20 with the user; steps C1 (2026-11-20) and C2 (2026-11-21) built, the rest not built** · Puts into effect the intent in
+Status: **Designed 2026-11-20 with the user; steps C1 (2026-11-20) and C2–C5 (2026-11-21) built, the rest not built** · Puts into effect the intent in
 [CONTROL-API.md](CONTROL-API.md), and is the design for [HIPAA.md](HIPAA.md) §11.1 P1–P6. The operator commands
 it serves are those in DESIGN.md §11.4.
 
@@ -177,7 +177,7 @@ travel only in request bodies.
 | `phi.export` | `POST /failures/export` | failures' content, sealed | sealed | `failures export` |
 | | `POST /patients/lookup` | the patient lookup (body: identifiers or item IDs), sealed | sealed | `patients` |
 | | `POST /items/{itemId}/restore` | a landed item, sealed | sealed | `restore` |
-| `phi.break-glass` | `POST /items/{itemId}/restore` with `plaintext: true` | a plaintext restore, with ticket and reason; **four eyes** | long | `restore --plaintext` |
+| `phi.break-glass` | `POST /items/{itemId}/restore/plaintext` | a plaintext restore, with ticket and reason; **four eyes** | long | `restore --plaintext` |
 | `audit.read` | `GET /audit/verify?from=&to=` | check the journal's chains | query | `audit-verify` |
 | | `GET /audit/events?from=&to=` | the journal's events, as JSON lines | query | `audit-export` |
 | `audit.admin` | `POST /audit/prune` | delete chains last written before a time; **four eyes** | long | `audit-prune` |
@@ -424,7 +424,7 @@ depends on neither of the others.
 | C2 | Control mode: TLS, authentication, permissions, audit (§1, §2, §4, §10); the query operations; the OpenAPI file; the compliance checks. **Built 2026-11-21** (§15.2) | part of P1 |
 | C3 | Actions, `Idempotency-Key`, the operation record and its leases (§5, §8). **Built 2026-11-21** (§15.3) | P1 |
 | C4 | Sealing keys and sealed results (§7). **Built 2026-11-21** (§15.4) | P1 |
-| C5 | Four eyes and break-glass (§6) | P1 |
+| C5 | Four eyes and break-glass (§6). **Built 2026-11-21** (§15.5) | P1 |
 | C6 | Pause, resume and drain (§9) | P2 |
 | C7 | Rotate and re-key (§11) | P3 |
 | C8 | Retention, purge and erase (§11) | P4 |
@@ -644,5 +644,70 @@ depends on neither of the others.
 - **Not yet:** four eyes, approval and plaintext break-glass (C5); a patient lookup tested through the API
   (its command is tested through the CLI); removing expired keys; everything §15.2 and §15.3 list as not yet.
 
+### 15.5 C5, as built
+
+- **Requests:** an action whose operation needs four eyes (`Operation.approval`) isn't carried out when asked.
+  After the permission and idempotency checks it is recorded in `sdh_control_operations` as `awaiting-approval`
+  and answered `202` with `Location`. Its parameters are what is needed to bind it again (the route, the path's
+  variables, the body's fields without the reason), the permissions an approver needs, and `approveBy`. Its
+  ticket, if any, goes in `ticket`. A break-glass request needs a ticket (`[A-Za-z0-9._:/-]{1,64}`). Audited as
+  the operation with `sdh.outcome=awaiting-approval`.
+  - **Routes:** `POST /audit/prune` (`before`), and `POST /items/{itemId}/restore/plaintext` (`ticket`,
+    `fromOffset`, `unprocessed`). §5 had the break-glass restore at `…/restore` with `plaintext: true`; it has
+    a path of its own here, since it answers `202` where the sealed restore streams.
+- **Decisions:** `POST /operations/{id}/approve`, `/reject` and `/cancel` take a body with only a `reason`. They
+  need no `Idempotency-Key`: each can be made once, and asking again is `409 wrong-state` with the state.
+  - An approver or rejecter holds every permission the operation needs (`403 permission-required`) and isn't its
+    requester (`403 own-request`). Principals are compared ignoring case, as for sealing keys.
+  - Only the requester cancels (`403 not-your-request`), while the operation awaits approval or is approved and
+    not yet taken by a pod.
+  - Audited as `sdh.audit.control.operation_approve`, `_reject` and `_cancel`, with `sdh.requested_by`.
+  - The record shows `decidedBy`, `decision` and `decidedAt`.
+- **Expiry:** a request is expired when it is next read or decided after `approveBy`:
+  `sdh.control.approval.ttl` (24 h), or `.break-glass-ttl` (1 h) when it needs `phi.break-glass`.
+- **The runner** (`ControlRunner`, one per control pod) runs approved operations:
+  - It looks every 10 s, and at once after an approval. It takes an operation's lease (2 min, renewed every
+    30 s) through C3's `take` and `renew`, and runs one operation at a time.
+  - It binds the operation again from its record and runs it as its requester, audited as the operation with
+    `sdh.approved_by` and `sdh.operation_id`. It then finishes the record `done` with the operation's answer as
+    its `result`, or `failed` with the failure's class.
+  - If the pod stops, the lease runs out and another pod runs the operation again. A prune bears that, since
+    pruning again prunes what is left. So does a restore, since its held result is replaced.
+  - Only operations a second person approved are run here. The stage's workers still carry out reprocess and
+    resubmit, and their records follow them.
+- **Break-glass result** (`ControlResults`, `sdh_control_results` and `sdh_control_result_parts`):
+  - The restore hands its plaintext to the runner in 1 MiB parts (`Invocation.Sink.plaintext`, which no other
+    sink takes). Each result has its own AES-256 data key, wrapped with the stage's records KEK through the keys
+    the control API's journal holds. Each part is AES-GCM, bound to its operation and place.
+  - It is held for the break-glass TTL from when it finishes, and the record's `result` gives `resultParts`,
+    `resultBytes`, `resultUntil` and `resultAt`. A failed run deletes what it held.
+  - `GET /operations/{id}/result` needs `phi.break-glass` and the requester. It claims the result atomically, so
+    it is fetched once, streams it as `application/octet-stream`, and deletes it whether or not it was sent whole.
+    Otherwise it is `410 result-gone`. Audited as `sdh.audit.control.operation_result`, with `sdh.parts` and
+    `sdh.bytes`.
+  - The runner deletes results fetched, past their time, or left by a run that never finished (after a day).
+  - A stage without key settings can't hold one, and the run fails.
+- **The CLI** refuses an operation that needs four eyes under the `hipaa` profile (exit 1, audited with
+  `sdh.decision=needs-approval`), unless `sdh.compliance.waive.cli-four-eyes` gives a reason.
+  - New compliance check `cli-four-eyes` (`ComplianceRules.cliFourEyesAllowed`). It is found only when waived, so
+    it never refuses a start, but its waiver is shown and audited at startup with every other.
+- **Also:** `audit-prune` answers its counts (`Answering`). `ControlStore` gains `decide`, `cancel`, `expire`,
+  `runnable` and `finish`, and its records carry the ticket, the decision and the result.
+- **Tests:**
+  - `ControlApprovalTest`: a prune approved by a second audit admin only, run by the pod and audited with both,
+    with its replay; a rejection, a cancellation by the requester only, and an expiry; and a break-glass request
+    needing a ticket, failing on a stage without keys, its result fetched by its requester only.
+  - `ControlResultsTest`: a result encrypted at rest, fetched once in order and then gone; one late, unfinished
+    or discarded isn't fetched; no KEK, none held.
+  - `ControlStoreTest`: the decisions and the runnable queue. `ComplianceRulesTest`: the waiver.
+    `StageAdminTest`: the CLI's refusal under the profile.
+  - `AdminCommandsTest`: a plaintext restore handed to the runner in order.
+- **Not yet:**
+  - A break-glass result fetched end to end through the API on a stage with keys (each half is tested: the
+    restore's parts, and the held result).
+  - Pipeline-wide operations approved once (§8.2, with C7 and C8).
+  - Stopping a run whose lease another pod has taken.
+  - Everything §15.2–§15.4 list as not yet.
+
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
-(HIPAA.md §11.2 D13).
+(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5.

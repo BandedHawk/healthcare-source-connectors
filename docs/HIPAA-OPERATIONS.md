@@ -267,6 +267,14 @@ audit-prune --before 2026-01-01
 `audit-prune` removes whole chains last written before the time, so what is left still verifies. It refuses a time
 less than 10 minutes ago.
 
+Pruning needs a second person. Through the control API, an audit admin asks (`POST /audit/prune`, with `before`
+and a `reason`), and the answer is an operation awaiting approval. Another audit admin approves it
+(`POST /operations/{id}/approve`, with a `reason`), and the control pod then runs it. The requester can't approve
+their own request. A request not approved within 24 hours expires. Under the `hipaa` profile the CLI refuses
+`audit-prune`, because it can't prove two people. If the control API can't be reached and a prune can't wait, the
+security official may waive `cli-four-eyes` for that run (`--sdh.compliance.waive.cli-four-eyes="<reason>"`).
+The waiver is audited.
+
 ## 4. Requests from individuals (Privacy Rule)
 
 ### 4.1 Finding a patient's records (§§ 164.524, 164.526, 164.528)
@@ -315,10 +323,20 @@ to get a source document back when the pipeline can't process it.
    writes `/tmp/<id>.jwe`: one JWE a line, each a part of up to 8 MiB in order, its protected header naming the
    item, the part number, its offset and whether it is the last. Copy it out through a debug container
    (`file-connector` README), decrypt each line on the workstation, join them, and delete `/tmp/<id>.jwe`.
-3. **Plaintext, only if needed** (a tool on the cluster must read it):
-   `restore --plaintext --ticket CHG-1234 ...`. The ticket is audited with the run. The file is the operator's to
-   delete when done; the security official checks it was.
-4. **Close the ticket** with the `admin.restore` audit event's time.
+3. **Plaintext, only if needed** (a tool must read it), and only with a second person:
+   - **Through the control API:** the requester, who holds `phi.break-glass`, sends
+     `POST /items/{itemId}/restore/plaintext` with the `ticket` and a `reason`. The answer is an operation awaiting
+     approval. A second person with `phi.break-glass` checks the ticket and approves the operation
+     (`POST /operations/{id}/approve`). The control pod restores the item and holds the plaintext, encrypted under
+     the stage's records KEK. The requester then fetches it once, within an hour, from
+     `GET /operations/{id}/result`, and it is deleted. If the fetch breaks part way, ask again. A request not
+     approved within an hour expires.
+   - **Through the CLI**, only when the API can't be reached: `restore --plaintext --ticket CHG-1234 ...`. Under
+     the `hipaa` profile the CLI refuses this unless the security official waives `cli-four-eyes` for the run,
+     because it can't prove two people. The ticket and the waiver are audited. The file is the operator's to
+     delete when done; the security official checks it was.
+4. **Close the ticket** with the time of the `admin.restore` or `control.restore` audit event. Through the API, use
+   the time of `control.operation_result` too.
 
 `status` and the audit commands work when the KMS can't be reached; `restore` needs it.
 

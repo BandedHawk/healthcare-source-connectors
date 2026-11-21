@@ -196,15 +196,43 @@ public class ControlConfiguration
      * @param journal  the API's journal, open before any request
      * @param store    the idempotency keys and operation records
      * @param keys     the principals' sealing keys
-     * @return the service
+     * @param results  the break-glass results
+     * @return the service, running approved operations until it closes
      */
-    @Bean
+    @Bean(initMethod = "start", destroyMethod = "close")
     ControlService controlService(ControlServer.Commands commands,
             ApplicationContext context, ControlSettings control,
-            ControlJournal journal, ControlStore store, OperatorKeys keys)
+            ControlJournal journal, ControlStore store, OperatorKeys keys,
+            ControlResults results)
     {
         return new ControlService(commands.cli(),
-                stageSettings(commands, context), control, store, keys);
+                stageSettings(commands, context), control, store, keys,
+                results);
+    }
+
+    /**
+     * The break-glass results, held encrypted under the stage's records
+     * KEK beside the stage's audit journal.
+     *
+     * @param controlDatabase the pool
+     * @param commands        the stage's operator commands
+     * @param context         the context, for the stage's settings
+     * @param journal         the API's journal, which holds the stage's
+     *                        keys
+     * @return the results
+     */
+    @Bean
+    ControlResults controlResults(HikariDataSource controlDatabase,
+            ControlServer.Commands commands, ApplicationContext context,
+            ControlJournal journal)
+    {
+        try (AuditTarget target = commands.cli().stage().audit()
+                .apply(stageSettings(commands, context)))
+        {
+            return new ControlResults(controlDatabase,
+                    target.tables().schema(), journal.wrap(),
+                    journal.resultKek());
+        }
     }
 
     /**
@@ -314,6 +342,23 @@ public class ControlConfiguration
                 null, request));
         routes.GET(ControlService.OPERATIONS + "/{id}", request ->
                 operations(service, request.pathVariable("id"), request));
+        for (ControlService.Decision decision
+                : ControlService.Decision.values())
+        {
+            routes.POST(ControlService.OPERATIONS + "/{id}/"
+                    + decision.wire(), request -> decide(service,
+                            request.pathVariable("id"), decision, request));
+        }
+        routes.GET(ControlService.OPERATIONS + "/{id}/result", request ->
+        {
+            Authentication caller = caller(request);
+            String id = request.pathVariable("id");
+            return ServerResponse.ok().build((in, out) ->
+            {
+                service.result(caller, id, out);
+                return null;
+            });
+        });
         return routes.build();
     }
 
@@ -332,6 +377,36 @@ public class ControlConfiguration
         return ServerResponse.ok().build((in, out) ->
         {
             service.operations(caller, id, in.getParameterMap(), out);
+            return null;
+        });
+    }
+
+    /**
+     * Serves a decision on an operation that needs a second person.
+     *
+     * @param service  the service
+     * @param id       the operation's ID, as given
+     * @param decision what is asked
+     * @param request  the request
+     * @return the response, written by the service
+     */
+    private static ServerResponse decide(ControlService service, String id,
+            ControlService.Decision decision, ServerRequest request)
+    {
+        Authentication caller = caller(request);
+        return ServerResponse.ok().build((in, out) ->
+        {
+            byte[] body = in.getInputStream().readNBytes(
+                    ControlService.MAX_DECISION + 1);
+            if (body.length > ControlService.MAX_DECISION)
+            {
+                ControlService.send(out, ControlService.problem(413,
+                        "too-large", "The body is over "
+                                + ControlService.MAX_DECISION + " bytes",
+                        null), null);
+                return null;
+            }
+            service.decide(caller, id, decision, body, out);
             return null;
         });
     }

@@ -36,6 +36,7 @@ import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.Caller;
 import com.sdh.healthcare.connector.stage.admin.CliOperation;
 import com.sdh.healthcare.connector.stage.admin.Invocation;
+import com.sdh.healthcare.connector.stage.admin.Operation;
 import io.opentelemetry.api.common.AttributeKey;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.io.ByteArrayInputStream;
@@ -692,6 +693,64 @@ class AdminCommandsTest
         }
         assertThat(parts).isNotEmpty();
         assertThat(restored.toString()).isEqualTo(BAD.substring(4));
+    }
+
+    /**
+     * An approved break-glass restore through the control API hands its
+     * plaintext, in order, to the runner that holds it encrypted for the
+     * requester; it still takes no file name or directory.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void restoresPlaintextToTheControlApisRunner() throws Exception
+    {
+        CliOperation<SplitAdminContext, Object, Object> restore =
+                (CliOperation<SplitAdminContext, Object, Object>)
+                        (CliOperation<?, ?, ?>) SplitAdmin.commands().stream()
+                                .filter(each -> each.name().equals("restore"))
+                                .findFirst().orElseThrow();
+        StringBuilder held = new StringBuilder();
+        Invocation.Sink runner = new Invocation.Sink()
+        {
+            @Override
+            public void row(Map<String, Object> row)
+            {
+                throw new AssertionError("A restore sends no rows");
+            }
+
+            @Override
+            public void sealed(String jwe)
+            {
+                throw new AssertionError("A plaintext restore seals nothing");
+            }
+
+            @Override
+            public void plaintext(byte[] part)
+            {
+                held.append(new String(part, UTF_8));
+            }
+        };
+        AuditRecord audit = new AuditRecord("alice");
+        try (SplitAdminContext context = new SplitAdminContext(properties))
+        {
+            Object request = restore.bind(AdminArgs.parse(List.of("restore",
+                    "--item-id", badId.toString(), "--from-offset", "4",
+                    PLAIN, TICKET, CHG), restore.flags())
+                    .withOutputToCaller(), context);
+            assertThat(restore.approval(request))
+                    .isEqualTo(Operation.Approval.FOUR_EYES);
+            restore.run(request, context, new Invocation(
+                    Caller.cli("alice"), audit, runner));
+
+            assertThatThrownBy(() -> restore.bind(AdminArgs.parse(List.of(
+                    "restore", "--item-id", badId.toString(), PLAIN, TICKET,
+                    CHG, "--original-name"), restore.flags())
+                    .withOutputToCaller(), context))
+                    .isInstanceOf(AdminArgs.UsageException.class);
+        }
+        assertThat(held.toString()).isEqualTo(BAD.substring(4));
     }
 
     /**

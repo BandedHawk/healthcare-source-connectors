@@ -34,13 +34,16 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param permissions each permission's roles, by the permission's name
  *                    ({@code pipeline.view}); in YAML, a name in brackets
  *                    ({@code "[pipeline.view]"}) keeps its dot
+ * @param approval    how long an operation needing four eyes may wait
+ *                    for its approval
  * @author Jonas Barnett
  * @since 0.1.0
  */
 @ConfigurationProperties("sdh.control")
 public record ControlSettings(@DefaultValue("8443") int port,
         @DefaultValue("8081") int probePort, @DefaultValue Tls tls,
-        @DefaultValue Auth auth, Map<String, List<String>> permissions)
+        @DefaultValue Auth auth, Map<String, List<String>> permissions,
+        @DefaultValue Approval approval)
 {
 
     /** The setting that turns a stage's process into its control mode. */
@@ -128,6 +131,21 @@ public record ControlSettings(@DefaultValue("8443") int port,
     }
 
     /**
+     * How long an operation that needs a second person may wait
+     * (CONTROL-API-DESIGN.md §6).
+     *
+     * @param ttl           how long a request may wait for its approval
+     *                      before it expires
+     * @param breakGlassTtl how long a break-glass request may wait, and
+     *                      how long its result is held for its requester
+     *                      once it has run
+     */
+    public record Approval(@DefaultValue("24h") Duration ttl,
+            @DefaultValue("1h") Duration breakGlassTtl)
+    {
+    }
+
+    /**
      * Checks the settings, as the API starts.
      *
      * @throws IllegalStateException if the API couldn't authenticate its
@@ -182,6 +200,13 @@ public record ControlSettings(@DefaultValue("8443") int port,
                                     .map(Permission::key).toList());
                 }
             }
+        }
+        if (!approval.ttl().isPositive()
+                || !approval.breakGlassTtl().isPositive()
+                || approval.breakGlassTtl().compareTo(approval.ttl()) > 0)
+        {
+            wrong.add("sdh.control.approval.ttl and .break-glass-ttl must"
+                    + " be positive, the break-glass TTL no longer");
         }
         if (port == probePort)
         {

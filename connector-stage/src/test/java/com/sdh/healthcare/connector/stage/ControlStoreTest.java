@@ -150,6 +150,87 @@ class ControlStoreTest
     }
 
     /**
+     * A request waiting for a second person is decided once: approved or
+     * rejected, by whom and why; a decided one can't be decided again or
+     * expired. An approved one is to be run until a pod takes it, and is
+     * finished only by the pod holding it. One not yet taken may be
+     * cancelled; one waiting too long, expired.
+     */
+    @Test
+    void decidesARequestOnceAndRunsWhatWasApproved()
+    {
+        Duration minute = Duration.ofMinutes(1);
+        ControlStore.Operation waiting = waiting();
+        assertThat(waiting.state())
+                .isEqualTo(ControlStore.State.AWAITING_APPROVAL);
+        assertThat(waiting.ticket()).isEqualTo("CHG-9");
+        assertThat(store.runnable(SCOPE, 10)).isEmpty();
+        assertThat(store.decide(waiting.id(), true, "bob", "checked"))
+                .isTrue();
+        assertThat(store.decide(waiting.id(), false, "carol", "no"))
+                .isFalse();
+        assertThat(store.expire(waiting.id())).isFalse();
+        ControlStore.Operation approved = store.find(waiting.id(), SCOPE)
+                .orElseThrow();
+        assertThat(approved.state()).isEqualTo(ControlStore.State.APPROVED);
+        assertThat(approved.decidedBy()).isEqualTo("bob");
+        assertThat(approved.decision()).isEqualTo("checked");
+        assertThat(approved.decidedAt()).isNotNull();
+        assertThat(store.runnable(SCOPE, 10))
+                .extracting(ControlStore.Operation::id)
+                .containsExactly(waiting.id());
+        assertThat(store.runnable("stage:other", 10)).isEmpty();
+
+        assertThat(store.take(waiting.id(), "pod-a", minute)).isTrue();
+        assertThat(store.cancel(waiting.id())).isFalse();
+        assertThat(store.runnable(SCOPE, 10)).isEmpty();
+        store.progress(waiting.id(), ControlStore.State.RUNNING, Map.of());
+        assertThat(store.finish(waiting.id(), "pod-b",
+                ControlStore.State.DONE, Map.of(), Map.of("n", 1)))
+                .isFalse();
+        assertThat(store.finish(waiting.id(), "pod-a",
+                ControlStore.State.DONE, Map.of(), Map.of("n", 1)))
+                .isTrue();
+        ControlStore.Operation done = store.find(waiting.id(), SCOPE)
+                .orElseThrow();
+        assertThat(done.state()).isEqualTo(ControlStore.State.DONE);
+        assertThat(done.result()).containsEntry("n", 1L);
+        assertThat(done.holder()).isNull();
+
+        ControlStore.Operation rejected = waiting();
+        assertThat(store.decide(rejected.id(), false, "bob", "no")).isTrue();
+        assertThat(store.find(rejected.id(), SCOPE).orElseThrow().state())
+                .isEqualTo(ControlStore.State.REJECTED);
+        assertThat(store.cancel(rejected.id())).isFalse();
+
+        ControlStore.Operation cancelled = waiting();
+        assertThat(store.cancel(cancelled.id())).isTrue();
+        assertThat(store.decide(cancelled.id(), true, "bob", "ok"))
+                .isFalse();
+
+        ControlStore.Operation late = waiting();
+        assertThat(store.expire(late.id())).isTrue();
+        assertThat(store.find(late.id(), SCOPE).orElseThrow().state())
+                .isEqualTo(ControlStore.State.EXPIRED);
+
+        UUID followed = record().id();
+        assertThat(store.decide(followed, true, "bob", "ok")).isFalse();
+        assertThat(store.runnable(SCOPE, 10)).isEmpty();
+    }
+
+    /**
+     * Records an audit prune waiting for approval.
+     *
+     * @return its record
+     */
+    ControlStore.Operation waiting()
+    {
+        return store.record("audit-prune", SCOPE, Map.of("route",
+                "POST /api/v1/audit/prune"), "alice", "retention",
+                "CHG-9", ControlStore.State.AWAITING_APPROVAL, Map.of());
+    }
+
+    /**
      * Records a running reprocess.
      *
      * @return its record

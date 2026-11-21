@@ -256,6 +256,36 @@ public final class ComplianceRules
     }
 
     /**
+     * Whether the CLI may run an operation that needs a second person's
+     * approval (CONTROL-API-DESIGN.md §3): only with the profile off, or
+     * with {@link ComplianceCheck#CLI_FOUR_EYES} waived with a reason.
+     *
+     * @param setting a setting's value by its canonical name; null if
+     *                unset
+     * @return true if it may
+     * @throws IllegalArgumentException if the profile is unknown, or the
+     *                                  waiver gives no reason
+     */
+    public static boolean cliFourEyesAllowed(
+            Function<String, String> setting)
+    {
+        ComplianceProfile profile = ComplianceProfile.parse(
+                setting.apply(PROFILE));
+        if (profile == ComplianceProfile.NONE)
+        {
+            return true;
+        }
+        String name = WAIVE + ComplianceCheck.CLI_FOUR_EYES.id();
+        String reason = setting.apply(name);
+        if (reason == null)
+        {
+            return false;
+        }
+        return waivers(Map.of(name, reason))
+                .containsKey(ComplianceCheck.CLI_FOUR_EYES);
+    }
+
+    /**
      * Everything the {@code hipaa} profile's checks find, waived or not.
      *
      * @param settings  the settings
@@ -306,6 +336,12 @@ public final class ComplianceRules
                 settings.getOrDefault(CONTROL_MODE, "false").trim()))
         {
             control(settings, findings);
+        }
+        String cliFourEyes = WAIVE + ComplianceCheck.CLI_FOUR_EYES.id();
+        if (settings.containsKey(cliFourEyes))
+        {
+            findings.add(new Finding(ComplianceCheck.CLI_FOUR_EYES,
+                    cliFourEyes));
         }
         JVM_OPTIONS.forEach((option, wanted) ->
         {

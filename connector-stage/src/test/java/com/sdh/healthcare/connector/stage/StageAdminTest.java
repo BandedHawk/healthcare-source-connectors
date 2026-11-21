@@ -314,7 +314,9 @@ class StageAdminTest
     /**
      * Each command's run is kept in the stage's audit journal, a closed
      * chain of its own, which audit-verify checks and audit-export prints;
-     * audit-prune refuses a time too recent to be safe.
+     * audit-prune needs four eyes, so under the hipaa profile the CLI
+     * refuses it unless that is waived, and then refuses a time too recent
+     * to be safe.
      */
     @Test
     void journalsEachRunAndChecksTheJournal()
@@ -323,8 +325,13 @@ class StageAdminTest
 
         Result verify = admin("audit-verify");
         Result export = admin("audit-export");
+        // The build turns the profile off for tests; these ask for it.
+        Result unapproved = admin("audit-prune", "--before",
+                Instant.now().minus(Duration.ofDays(400)).toString(),
+                "--sdh.compliance.profile=hipaa");
         Result prune = admin("audit-prune", "--before",
-                Instant.now().toString());
+                Instant.now().toString(), "--sdh.compliance.profile=hipaa",
+                "--sdh.compliance.waive.cli-four-eyes=Recovery drill");
 
         assertThat(verify.status()).as(verify.out() + verify.err()).isZero();
         assertThat(verify.out())
@@ -336,7 +343,10 @@ class StageAdminTest
                 .contains("\"event\":\"sdh.audit.admin.status\"")
                 .contains("\"sdh.operator\":\"alice\"")
                 .contains("\"event\":\"sdh.audit.admin.audit_verify\"");
-        assertThat(prune.status()).isEqualTo(2);
+        assertThat(unapproved.status()).as(unapproved.err()).isEqualTo(1);
+        assertThat(unapproved.err()).contains("needs a second person's"
+                + " approval").contains("cli-four-eyes");
+        assertThat(prune.status()).as(prune.err()).isEqualTo(2);
         assertThat(audit.attributes("admin.audit_verify"))
                 .containsEntry("sdh.outcome", "intact");
     }

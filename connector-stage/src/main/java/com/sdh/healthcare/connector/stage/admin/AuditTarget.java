@@ -137,6 +137,18 @@ public final class AuditTarget implements AutoCloseable
     }
 
     /**
+     * The stage's records KEK, which the control API wraps a break-glass
+     * result's data key with (CONTROL-API-DESIGN.md §6).
+     *
+     * @return its reference; empty if no key settings were given
+     */
+    public Optional<String> recordsKek()
+    {
+        return crypto == null ? Optional.empty()
+                : Optional.ofNullable(crypto.keys().recordsKek());
+    }
+
+    /**
      * The stage's keys, whose message signer seals a chain, for the
      * control API's journal (CONTROL-API-DESIGN.md §10), which runs with
      * the stage's own identity.

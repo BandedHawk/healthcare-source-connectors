@@ -403,7 +403,7 @@ final class AuditCommands
 
     /** {@code audit-prune}. */
     static final class Prune implements CliOperation<AuditTarget,
-            Prune.Request, Prune.Result>
+            Prune.Request, Prune.Result>, Answering<Prune.Result>
     {
 
         /**
@@ -504,6 +504,14 @@ final class AuditCommands
             AuditTrail.Pruned pruned = context.trailToChange().prune(before);
             invocation.audit().add(Attr.COUNT, pruned.entries());
             return new Result(before, pruned);
+        }
+
+        @Override
+        public Map<String, Object> answer(Result result)
+        {
+            return Answers.object("before", result.before(), "chains",
+                    result.pruned().chains(), "entries",
+                    result.pruned().entries());
         }
 
         @Override

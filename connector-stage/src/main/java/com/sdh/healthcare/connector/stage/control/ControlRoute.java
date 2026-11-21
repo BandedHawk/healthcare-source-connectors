@@ -23,7 +23,9 @@ import java.util.Set;
  * {@code reason}; what the CLI reads from standard input, the reason or a
  * corrected record, it reads from the body too ({@link Input}). A sealed
  * route (build step C4) names the caller's registered key to seal to,
- * {@code sealTo}, and its answer is a stream of sealed parts.
+ * {@code sealTo}, and its answer is a stream of sealed parts. An action
+ * whose operation needs a second person (C5) is recorded to wait for one,
+ * and a break-glass route's plaintext result is held for its requester.
  *
  * @param method    the HTTP method
  * @param path      the path, with {@code {name}} for a path variable
@@ -63,6 +65,12 @@ public record ControlRoute(String method, String path, String operation,
 
     /** The body field the patient lookup's identifiers are given in. */
     public static final String IDENTIFIERS = "identifiers";
+
+    /** The body field naming the change or incident an operation is for. */
+    public static final String TICKET = "ticket";
+
+    /** The flag set on a break-glass route: its result is plaintext. */
+    static final String PLAINTEXT = "plaintext";
 
     /** What of an action's body the command reads as standard input. */
     public enum Input
@@ -125,6 +133,39 @@ public record ControlRoute(String method, String path, String operation,
     public boolean acts()
     {
         return hasBody() && !seals();
+    }
+
+    /**
+     * Whether the route is a plaintext break-glass request
+     * (CONTROL-API-DESIGN.md §6), whose result is held for its requester
+     * once a second person approves it.
+     *
+     * @return true for a break-glass route
+     */
+    public boolean breakGlass()
+    {
+        return fixed.contains(PLAINTEXT);
+    }
+
+    /**
+     * Whether the command's output goes to the caller, not to a file:
+     * sealed parts, or a break-glass result.
+     *
+     * @return true for a sealed or break-glass route
+     */
+    public boolean toCaller()
+    {
+        return seals() || breakGlass();
+    }
+
+    /**
+     * The route's method and path, which name it in an operation's record.
+     *
+     * @return them, such as {@code POST /api/v1/audit/prune}
+     */
+    public String key()
+    {
+        return method + " " + path;
     }
 
     /**
@@ -216,7 +257,15 @@ public record ControlRoute(String method, String path, String operation,
                         Set.of(), Input.REASON),
                 action("POST", "/items/{itemId}/resubmit", "resubmit",
                         Map.of("itemId", "item-id"),
-                        Map.of("again", "again"), Set.of(), Input.NONE));
+                        Map.of("again", "again"), Set.of(), Input.NONE),
+                action("POST", "/audit/prune", "audit-prune",
+                        Map.of("before", "before"), Map.of(), Set.of(),
+                        Input.NONE),
+                action("POST", "/items/{itemId}/restore/plaintext",
+                        "restore", Map.of("itemId", "item-id", "fromOffset",
+                                "from-offset", TICKET, "ticket"),
+                        Map.of("unprocessed", "unprocessed"),
+                        Set.of(PLAINTEXT), Input.NONE));
     }
 
     /**

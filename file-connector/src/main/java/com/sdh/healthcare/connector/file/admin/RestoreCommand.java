@@ -91,7 +91,9 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
      *
      * @param itemId       the item
      * @param destination  where the output is written; null to send it
-     *                     to the control API's caller as sealed parts
+     *                     to the control API's caller as sealed parts,
+     *                     or in plaintext to the runner that holds an
+     *                     approved break-glass result
      * @param plaintext    whether to write it unsealed, for break-glass
      * @param ticket       the change or incident a plaintext restore is
      *                     for; null otherwise
@@ -222,14 +224,18 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
                 .map(RestoreCommand::parseOffset).orElse(null);
         if (arguments.outputToCaller())
         {
-            if (arguments.flag("plaintext") || arguments.flag("original-name")
+            // A plaintext restore through the control API is a break-glass
+            // operation, run once a second person approves; its result is
+            // held encrypted for its requester (CONTROL-API-DESIGN.md §6).
+            if (arguments.flag("original-name")
                     || arguments.option("to").isPresent())
             {
                 throw new AdminArgs.UsageException("The control API's"
-                        + " restore is sealed to the caller, under the"
-                        + " item's ID");
+                        + " restore goes to the caller, under the item's"
+                        + " ID");
             }
-            return new Request(itemId, null, false, null,
+            return new Request(itemId, null, arguments.flag("plaintext"),
+                    arguments.option("ticket").orElse(null),
                     () -> FailureCommands.input(arguments.input(
                             () -> System.in), ExportSealer.MAX_KEY_BYTES,
                             "public key"), fromOffset,
@@ -337,6 +343,20 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
         }
 
         ExportSealer sealing = sealer;
+        if (request.destination() == null && plaintext)
+        {
+            long restored;
+            try (Parted parted = new Parted(invocation.sink()::plaintext,
+                    CALLER_PART_BYTES))
+            {
+                LandedItems.read(landedItems, itemId, context.keys().wrap(),
+                        context.landingIds(), new Skipping(parted, from));
+                parted.finish();
+                restored = parted.taken();
+            }
+            audit.add(Attr.BYTES, restored);
+            return new Result(restored, from, size, true, "the caller");
+        }
         if (request.destination() == null)
         {
             long restored;
@@ -463,6 +483,122 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
         {
             throw new AdminArgs.UsageException(
                     "--from-offset must be a non-negative number");
+        }
+    }
+
+    /** Where plaintext parts go: the control API's runner. */
+    @FunctionalInterface
+    private interface Plain
+    {
+
+        /**
+         * Takes a part.
+         *
+         * @param part its bytes, the taker's to keep
+         * @throws IOException if it can't be taken
+         */
+        void part(byte[] part) throws IOException;
+    }
+
+    /**
+     * Hands what is written to it on in parts of a fixed size, the last
+     * shorter, for a break-glass result held encrypted by the control
+     * API (CONTROL-API-DESIGN.md §6). Its buffer is cleared once each part
+     * is handed on, and when it is closed.
+     */
+    private static final class Parted extends OutputStream
+    {
+
+        /** Where the parts go. */
+        private final Plain output;
+
+        /** The current part. */
+        private final byte[] part;
+
+        /** How much of the current part is filled. */
+        private int filled;
+
+        /** Bytes taken. */
+        private long taken;
+
+        /**
+         * Starts.
+         *
+         * @param output    where the parts go
+         * @param partBytes how many bytes go in a part
+         */
+        Parted(Plain output, int partBytes)
+        {
+            this.output = output;
+            this.part = new byte[partBytes];
+        }
+
+        @Override
+        public void write(int value) throws IOException
+        {
+            write(new byte[] {(byte) value}, 0, 1);
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int length)
+                throws IOException
+        {
+            int at = offset;
+            int left = length;
+            while (left > 0)
+            {
+                int copied = Math.min(left, part.length - filled);
+                System.arraycopy(bytes, at, part, filled, copied);
+                filled += copied;
+                at += copied;
+                left -= copied;
+                taken += copied;
+                if (filled == part.length)
+                {
+                    handOn();
+                }
+            }
+        }
+
+        /**
+         * Hands on the last part, if anything is left of it.
+         *
+         * @throws IOException if it can't be taken
+         */
+        void finish() throws IOException
+        {
+            if (filled > 0)
+            {
+                handOn();
+            }
+        }
+
+        /**
+         * How many bytes were taken.
+         *
+         * @return the count
+         */
+        long taken()
+        {
+            return taken;
+        }
+
+        /**
+         * Hands on the current part and clears it.
+         *
+         * @throws IOException if it can't be taken
+         */
+        private void handOn() throws IOException
+        {
+            output.part(Arrays.copyOf(part, filled));
+            Arrays.fill(part, 0, filled, (byte) 0);
+            filled = 0;
+        }
+
+        @Override
+        public void close()
+        {
+            Arrays.fill(part, (byte) 0);
         }
     }
 

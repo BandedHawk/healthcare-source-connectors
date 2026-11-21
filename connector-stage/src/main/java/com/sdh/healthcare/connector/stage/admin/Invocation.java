@@ -43,6 +43,23 @@ public record Invocation(Caller caller, AuditRecord audit, Sink sink)
          * @param jwe the part, in compact JWE
          */
         void sealed(String jwe);
+
+        /**
+         * Takes a part of a plaintext result, for a break-glass operation
+         * a second person approved (CONTROL-API-DESIGN.md §6). Only the
+         * control API's runner takes one, and holds it encrypted until
+         * its requester fetches it; no caller is sent one as it comes.
+         *
+         * @param part the part's bytes
+         * @throws UnsupportedOperationException if this sink takes none,
+         *                                       as none but the runner's
+         *                                       does
+         */
+        default void plaintext(byte[] part)
+        {
+            throw new UnsupportedOperationException("Only an approved"
+                    + " break-glass operation's result holds plaintext");
+        }
     }
 
     /**

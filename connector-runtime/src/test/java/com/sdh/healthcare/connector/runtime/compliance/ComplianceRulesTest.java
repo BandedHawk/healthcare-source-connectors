@@ -90,6 +90,35 @@ class ComplianceRulesTest
         assertThat(outcome.waived()).isEmpty();
     }
 
+    /**
+     * The CLI may run an operation needing four eyes only with the profile
+     * off or the check waived; the waiver is found, and shown as waived,
+     * but never refuses a start.
+     */
+    @Test
+    void theCliRunsFourEyesOperationsOnlyIfWaived()
+    {
+        String waiver = ComplianceRules.WAIVE + "cli-four-eyes";
+        assertThat(ComplianceRules.cliFourEyesAllowed(name -> null))
+                .isFalse();
+        assertThat(ComplianceRules.cliFourEyesAllowed(
+                Map.of(ComplianceRules.PROFILE, "none")::get)).isTrue();
+        assertThat(ComplianceRules.cliFourEyesAllowed(
+                Map.of(waiver, "Recovery drill")::get)).isTrue();
+        assertThatThrownBy(() -> ComplianceRules.cliFourEyesAllowed(
+                Map.of(waiver, " ")::get))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        Map<String, String> settings = passing();
+        assertThat(ComplianceRules.evaluate(settings, SAFE_JVM).waived())
+                .isEmpty();
+        settings.put(waiver, "Recovery drill");
+        Outcome outcome = ComplianceRules.evaluate(settings, SAFE_JVM);
+        assertThat(outcome.passed()).isTrue();
+        assertThat(outcome.waived()).containsEntry(new Finding(
+                ComplianceCheck.CLI_FOUR_EYES, waiver), "Recovery drill");
+    }
+
     /** A plaintext endpoint anywhere is refused, by setting name only. */
     @Test
     void plaintextEndpointsAreRefused()

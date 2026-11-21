@@ -98,7 +98,18 @@ public enum ComplianceCheck
      * 45 CFR 164.312(a)(2)(iii), (d)).
      */
     CONTROL_TOKEN_LIFETIME("control-token-lifetime",
-            "a control API that accepts long-lived tokens");
+            "a control API that accepts long-lived tokens"),
+
+    /**
+     * The CLI allowed to run the operations that need a second person's
+     * approval (CONTROL-API-DESIGN.md §3, §6): erasure, plaintext
+     * break-glass, re-keying and audit prune. The CLI can't prove two
+     * people, so under the profile it refuses them unless this is waived.
+     * It is never a reason to refuse a start: it is found only when it is
+     * waived, so the waiver is shown, and audited, with every other.
+     */
+    CLI_FOUR_EYES("cli-four-eyes",
+            "the CLI allowed to run operations that need four eyes");
 
     /** The check's ID, as waivers name it. */
     private final String id;

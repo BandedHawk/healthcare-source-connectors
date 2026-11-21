@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.stage.admin;
 
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import com.sdh.healthcare.connector.runtime.compliance.ComplianceRules;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import java.io.PrintStream;
@@ -245,6 +246,21 @@ public final class AdminCli<P, C extends AutoCloseable>
             }
             try
             {
+                if (needsFourEyes(command, parsed, context, target)
+                        && !ComplianceRules.cliFourEyesAllowed(
+                                spring.getEnvironment()::getProperty))
+                {
+                    Telemetry.get().auditWarn(event, audit.fields()
+                            .with(Attr.DECISION, "needs-approval")
+                            .with(Attr.RESULT, "refused"));
+                    err.println("error: " + command.name() + " needs a"
+                            + " second person's approval, which the CLI"
+                            + " can't prove: ask for it through the control"
+                            + " API, or waive "
+                            + ComplianceRules.WAIVE + "cli-four-eyes with"
+                            + " a reason");
+                    return 1;
+                }
                 run(command, parsed, context, target, audit, out);
                 Telemetry.get().audit(event,
                         audit.fields().with(Attr.RESULT, "ok"));
@@ -341,6 +357,32 @@ public final class AdminCli<P, C extends AutoCloseable>
         {
             ((AdminCommand<C>) command).run(arguments, context, audit, out);
         }
+    }
+
+    /**
+     * Whether a command, as asked, needs a second person's approval
+     * (CONTROL-API-DESIGN.md §6), which the CLI can't prove. Binding reads
+     * nothing but its options, so it is bound again when it runs.
+     *
+     * @param command   the command
+     * @param arguments its options
+     * @param context   the stage's context
+     * @param target    the stage's audit journal
+     * @return true if it needs four eyes
+     */
+    @SuppressWarnings("unchecked")
+    private boolean needsFourEyes(AdminCommand<?> command,
+            AdminArgs arguments, C context, AuditTarget target)
+    {
+        if (!(command instanceof CliOperation<?, ?, ?> any))
+        {
+            return false;
+        }
+        CliOperation<Object, Object, Object> operation =
+                (CliOperation<Object, Object, Object>) any;
+        Object request = operation.bind(arguments,
+                auditCommands.containsValue(command) ? target : context);
+        return operation.approval(request) == Operation.Approval.FOUR_EYES;
     }
 
     /**

@@ -64,6 +64,14 @@ import org.springframework.security.core.GrantedAuthority;
  * with where its record is, and followed from the stage whenever its record
  * is read.
  *
+ * <p>An action whose operation needs a second person
+ * (CONTROL-API-DESIGN.md §6) isn't carried out: it is recorded as
+ * {@code awaiting-approval}, and answered {@code 202}. Another principal
+ * with the same permissions approves or rejects it; its requester may
+ * cancel it. Once approved, a control pod's {@link ControlRunner} runs it.
+ * A break-glass result is held encrypted ({@link ControlResults}) for its
+ * requester to fetch once.
+ *
  * <p>Nothing a caller didn't send is ever put in an answer or an event
  * besides the operation's own answer: a failure is answered and audited by
  * its class alone, never its message, which could quote stored data.
@@ -71,7 +79,7 @@ import org.springframework.security.core.GrantedAuthority;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-public final class ControlService
+public final class ControlService implements AutoCloseable
 {
 
     /** The authorities a caller's roles are given as, before the name. */
@@ -89,6 +97,9 @@ public final class ControlService
     /** The largest body an action takes: a corrected record, base64. */
     public static final int MAX_BODY = 16 * 1024 * 1024;
 
+    /** The largest body a decision takes: a reason. */
+    public static final int MAX_DECISION = 4096;
+
     /** The most operations listed at once. */
     static final int MAX_LIMIT = 1000;
 
@@ -98,11 +109,30 @@ public final class ControlService
     /** The operations' path. */
     static final String OPERATIONS = ControlRoute.PREFIX + "/operations";
 
+    /** A waiting operation's parameter: the route it was asked by. */
+    private static final String ROUTE = "route";
+
+    /** A waiting operation's parameter: its path's variables. */
+    private static final String VARIABLES = "variables";
+
+    /** A waiting operation's parameter: its body's fields, but reason. */
+    private static final String FIELDS = "fields";
+
+    /** A waiting operation's parameter: the permissions it needs. */
+    private static final String PERMISSIONS = "permissions";
+
+    /** A waiting operation's parameter: when it expires unapproved. */
+    private static final String APPROVE_BY = "approveBy";
+
     /** The most identifiers a patient lookup takes. */
     static final int MAX_IDENTIFIERS = 1000;
 
     /** The longest identifier a patient lookup takes. */
     static final int MAX_IDENTIFIER = 512;
+
+    /** A ticket: a reference to a change or incident, never free text. */
+    private static final Pattern TICKET =
+            Pattern.compile("[A-Za-z0-9._:/-]{1,64}");
 
     /** A control character, which no identifier holds. */
     private static final Pattern IDENTIFIER_CONTROL =
@@ -143,6 +173,15 @@ public final class ControlService
     /** The control API's own operations, on the sealing keys, by name. */
     private final Map<String, CliOperation<OperatorKeys, ?, ?>> own;
 
+    /** The break-glass results held for their requesters. */
+    private final ControlResults results;
+
+    /** How long a request may wait for its approval. */
+    private final ControlSettings.Approval approval;
+
+    /** Runs approved operations; null until started. */
+    private volatile ControlRunner runner;
+
     /**
      * A request, as it came.
      *
@@ -179,9 +218,12 @@ public final class ControlService
      * @param settings the stage's settings
      * @param control  the control API's settings
      * @param store    the idempotency keys and operation records
+     * @param keys     the principals' sealing keys
+     * @param results  the break-glass results
      */
     public ControlService(AdminCli<Object, ?> cli, Object settings,
-            ControlSettings control, ControlStore store, OperatorKeys keys)
+            ControlSettings control, ControlStore store, OperatorKeys keys,
+            ControlResults results)
     {
         this.cli = cli;
         this.settings = settings;
@@ -194,6 +236,28 @@ public final class ControlService
         this.own = OperatorKeyCommands.all().stream().collect(
                 Collectors.toUnmodifiableMap(Operation::name,
                         operation -> operation));
+        this.results = results;
+        this.approval = control.approval();
+    }
+
+    /** Starts running approved operations. */
+    public void start()
+    {
+        ControlRunner started = new ControlRunner(store, results, scope,
+                this::execute);
+        runner = started;
+        started.start();
+    }
+
+    /** Stops running approved operations. */
+    @Override
+    public void close()
+    {
+        ControlRunner started = runner;
+        if (started != null)
+        {
+            started.close();
+        }
     }
 
     /**
@@ -302,7 +366,7 @@ public final class ControlService
                 AdminArgs arguments = arguments(route, call.variables(),
                         body.fields()).withInput(new ByteArrayInputStream(
                                 input));
-                request = operation.bind(route.seals()
+                request = operation.bind(route.toCaller()
                         ? arguments.withOutputToCaller() : arguments,
                         target);
             }
@@ -325,7 +389,9 @@ public final class ControlService
                                         " and ")), requestId), requestId);
                 return;
             }
-            if (operation.approval(request) == Operation.Approval.FOUR_EYES)
+            boolean fourEyes = operation.approval(request)
+                    == Operation.Approval.FOUR_EYES;
+            if (fourEyes && !route.acts())
             {
                 refuse(event, audit, "needs-approval");
                 send(response, problem(403, "approval-required", "This"
@@ -380,7 +446,12 @@ public final class ControlService
             audit.add(Attr.DECISION, "allowed");
             Invocation invocation = new Invocation(who, audit, rows);
             Answer answer;
-            if (route.acts() && operation instanceof Followed<?, ?, ?> any)
+            if (fourEyes)
+            {
+                answer = awaiting(route, call, body, needed, who, audit);
+            }
+            else if (route.acts()
+                    && operation instanceof Followed<?, ?, ?> any)
             {
                 Followed<Object, Object, Object> followed =
                         (Followed<Object, Object, Object>) any;
@@ -542,6 +613,521 @@ public final class ControlService
     }
 
     /**
+     * Records an action that needs a second person, to wait for one.
+     *
+     * @param route  its route
+     * @param call   the request
+     * @param body   what its body gave
+     * @param needed the permissions it needs, which its approver needs too
+     * @param who    the requester
+     * @param audit  the audit event
+     * @return the answer: {@code 202}, with where its record is
+     * @throws AdminArgs.UsageException if a break-glass request has no
+     *         ticket, or a ticket isn't a reference
+     */
+    private Answer awaiting(ControlRoute route, Call call, Body body,
+            Set<Permission> needed, Caller who, AuditRecord audit)
+    {
+        Object given = body.fields().get(ControlRoute.TICKET);
+        String ticket = given instanceof String text ? text : null;
+        if (given != null && (ticket == null
+                || !TICKET.matcher(ticket).matches()))
+        {
+            throw new AdminArgs.UsageException("ticket must be a reference:"
+                    + " letters, digits and . _ : / -, up to 64");
+        }
+        boolean breakGlass = needed.contains(Permission.PHI_BREAK_GLASS);
+        if (breakGlass && ticket == null)
+        {
+            throw new AdminArgs.UsageException("A break-glass request needs"
+                    + " a ticket: the change or incident it is for");
+        }
+        Map<String, Object> parameters = new LinkedHashMap<>();
+        parameters.put(ROUTE, route.key());
+        parameters.put(VARIABLES, new LinkedHashMap<>(call.variables()));
+        parameters.put(FIELDS, new LinkedHashMap<>(body.fields()));
+        parameters.put(PERMISSIONS, needed.stream().map(Permission::key)
+                .sorted().toList());
+        parameters.put(APPROVE_BY, Instant.now().plus(breakGlass
+                ? approval.breakGlassTtl() : approval.ttl()).toString());
+        ControlStore.Operation recorded = store.record(route.operation(),
+                scope, parameters, who.principal(), body.reason(), ticket,
+                ControlStore.State.AWAITING_APPROVAL, Map.of());
+        audit.add(Attr.OPERATION_ID, recorded.id());
+        audit.add(Attr.OUTCOME, ControlStore.State.AWAITING_APPROVAL.wire());
+        if (ticket != null)
+        {
+            audit.add(Attr.TICKET, ticket);
+        }
+        return new Answer(202, JSON, json(answer(recorded, null)),
+                OPERATIONS + "/" + recorded.id());
+    }
+
+    /** What a second person, or the requester, does to a request. */
+    public enum Decision
+    {
+
+        /** Approves it, so it runs. */
+        APPROVE,
+
+        /** Rejects it. */
+        REJECT,
+
+        /** Cancels it: its requester, before it runs. */
+        CANCEL;
+
+        /**
+         * Its name in paths and audit events.
+         *
+         * @return the name, such as {@code approve}
+         */
+        public String wire()
+        {
+            return name().toLowerCase(Locale.ROOT);
+        }
+    }
+
+    /**
+     * Serves an approval, a rejection or a cancellation of an operation
+     * that needs a second person. An approver or rejecter holds the
+     * permissions the operation needs and isn't its requester; only the
+     * requester cancels. Each needs a {@code reason}. A decision can be
+     * made once: asking again is {@code 409} with the operation's state,
+     * so it needs no {@code Idempotency-Key}.
+     *
+     * @param caller   the caller, authenticated
+     * @param id       the operation's ID, as given
+     * @param decision what is asked
+     * @param body     the request's body
+     * @param response where the answer goes
+     * @throws IOException if the answer can't be written
+     */
+    public void decide(Authentication caller, String id, Decision decision,
+            byte[] body, HttpServletResponse response) throws IOException
+    {
+        String requestId = UUID.randomUUID().toString();
+        String principal = caller.getName();
+        AuditRecord audit = new AuditRecord(principal);
+        audit.add(Attr.AUTH, auth.name().toLowerCase(Locale.ROOT));
+        audit.add(Attr.REQUEST_ID, requestId);
+        String event = "control.operation_" + decision.wire();
+        try
+        {
+            String reason = reasonOnly(body);
+            audit.add(Attr.ACTION_REASON, reason);
+            UUID operationId = uuid(id);
+            audit.add(Attr.OPERATION_ID, operationId);
+            Optional<ControlStore.Operation> found =
+                    store.find(operationId, scope);
+            if (found.isEmpty())
+            {
+                refuse(event, audit, "not-found");
+                send(response, problem(404, "operation-not-found", "This"
+                        + " stage has no such operation", requestId),
+                        requestId);
+                return;
+            }
+            ControlStore.Operation operation = expired(found.get());
+            audit.add(Attr.REQUESTED_BY, operation.requestedBy());
+            Set<Permission> needed = needed(operation);
+            audit.add(Attr.PERMISSION, needed.stream().map(Permission::key)
+                    .sorted().collect(Collectors.joining(",")));
+            boolean requester = operation.requestedBy()
+                    .equalsIgnoreCase(principal);
+            Answer refused = null;
+            if (needed.isEmpty())
+            {
+                refused = problem(409, "wrong-state", "This operation needs"
+                        + " no approval", requestId);
+            }
+            else if (decision == Decision.CANCEL ? !requester
+                    : requester)
+            {
+                refused = decision == Decision.CANCEL
+                        ? problem(403, "not-your-request", "Only its"
+                                + " requester cancels a request", requestId)
+                        : problem(403, "own-request", "A request is"
+                                + " approved or rejected by someone other"
+                                + " than its requester", requestId);
+            }
+            else if (decision != Decision.CANCEL
+                    && !granted(caller).containsAll(needed))
+            {
+                refused = problem(403, "permission-required", "This needs "
+                        + needed.stream().map(Permission::key).sorted()
+                                .collect(Collectors.joining(" and ")),
+                        requestId);
+            }
+            else if (!(decision == Decision.CANCEL
+                    ? store.cancel(operationId)
+                    : store.decide(operationId,
+                            decision == Decision.APPROVE, principal,
+                            reason)))
+            {
+                ControlStore.Operation now = store.find(operationId, scope)
+                        .orElse(operation);
+                refused = problem(409, "wrong-state", "The operation is "
+                        + now.state().wire(), requestId);
+            }
+            if (refused != null)
+            {
+                refuse(event, audit, title(refused));
+                send(response, refused, requestId);
+                return;
+            }
+            ControlStore.Operation decided = store.find(operationId, scope)
+                    .orElseThrow();
+            Telemetry.get().audit(event, audit.fields()
+                    .with(Attr.DECISION, "allowed")
+                    .with(Attr.RESULT, "ok"));
+            send(response, new Answer(200, JSON, json(answer(decided, null)),
+                    null), requestId);
+            ControlRunner started = runner;
+            if (decision == Decision.APPROVE && started != null)
+            {
+                started.nudge();
+            }
+        }
+        catch (AdminArgs.UsageException wrong)
+        {
+            refuse(event, audit, "bad-request");
+            send(response, problem(400, "bad-request", wrong.getMessage(),
+                    requestId), requestId);
+        }
+        catch (RuntimeException failure)
+        {
+            Telemetry.get().auditWarn(event, audit.fields()
+                    .with(Attr.RESULT, "failed")
+                    .with(Attr.REASON, failure.getClass().getSimpleName()));
+            send(response, problem(500, "failed",
+                    failure.getClass().getSimpleName(), requestId),
+                    requestId);
+        }
+    }
+
+    /**
+     * Serves a break-glass result to its requester, once: decrypted, as
+     * {@code application/octet-stream}, then deleted. A result fetched
+     * already, past its time, or never held is {@code 410}.
+     *
+     * @param caller   the caller, authenticated
+     * @param id       the operation's ID, as given
+     * @param response where the answer goes
+     * @throws IOException if the answer can't be written
+     */
+    public void result(Authentication caller, String id,
+            HttpServletResponse response) throws IOException
+    {
+        String requestId = UUID.randomUUID().toString();
+        String principal = caller.getName();
+        AuditRecord audit = new AuditRecord(principal);
+        audit.add(Attr.AUTH, auth.name().toLowerCase(Locale.ROOT));
+        audit.add(Attr.REQUEST_ID, requestId);
+        audit.add(Attr.PERMISSION, Permission.PHI_BREAK_GLASS.key());
+        String event = "control.operation_result";
+        boolean started = false;
+        try
+        {
+            if (!granted(caller).contains(Permission.PHI_BREAK_GLASS))
+            {
+                refuse(event, audit, "denied");
+                send(response, problem(403, "permission-required", "This"
+                        + " needs " + Permission.PHI_BREAK_GLASS.key(),
+                        requestId), requestId);
+                return;
+            }
+            UUID operationId = uuid(id);
+            audit.add(Attr.OPERATION_ID, operationId);
+            Optional<ControlStore.Operation> found =
+                    store.find(operationId, scope);
+            if (found.isEmpty())
+            {
+                refuse(event, audit, "not-found");
+                send(response, problem(404, "operation-not-found", "This"
+                        + " stage has no such operation", requestId),
+                        requestId);
+                return;
+            }
+            if (!found.get().requestedBy().equalsIgnoreCase(principal))
+            {
+                refuse(event, audit, "not-your-request");
+                send(response, problem(403, "not-your-request", "Only its"
+                        + " requester fetches a result", requestId),
+                        requestId);
+                return;
+            }
+            Optional<ControlResults.Claimed> claimed =
+                    found.get().state() == ControlStore.State.DONE
+                            ? results.claim(operationId) : Optional.empty();
+            if (claimed.isEmpty())
+            {
+                refuse(event, audit, "result-gone");
+                send(response, problem(410, "result-gone", "There is no"
+                        + " result to fetch: it was fetched already, is"
+                        + " past its time, or the operation has none",
+                        requestId), requestId);
+                return;
+            }
+            audit.add(Attr.PARTS, claimed.get().parts());
+            response.setStatus(200);
+            response.setContentType("application/octet-stream");
+            response.setHeader("Cache-Control", "no-store");
+            response.setHeader("X-Request-Id", requestId);
+            response.setContentLengthLong(claimed.get().bytes());
+            started = true;
+            long written = results.write(claimed.get(),
+                    response.getOutputStream());
+            audit.add(Attr.BYTES, written);
+            Telemetry.get().audit(event, audit.fields()
+                    .with(Attr.DECISION, "allowed")
+                    .with(Attr.RESULT, "ok"));
+        }
+        catch (AdminArgs.UsageException wrong)
+        {
+            refuse(event, audit, "bad-request");
+            send(response, problem(400, "bad-request", wrong.getMessage(),
+                    requestId), requestId);
+        }
+        catch (IOException | RuntimeException failure)
+        {
+            Telemetry.get().auditWarn(event, audit.fields()
+                    .with(Attr.DECISION, "allowed")
+                    .with(Attr.RESULT, "failed")
+                    .with(Attr.REASON, failure.getClass().getSimpleName()));
+            if (!started)
+            {
+                send(response, problem(500, "failed",
+                        failure.getClass().getSimpleName(), requestId),
+                        requestId);
+            }
+        }
+    }
+
+    /**
+     * Runs an approved operation, as its runner's lease holder, and
+     * finishes its record. It is audited as the operation, with its
+     * requester as the operator and its approver beside. A plaintext
+     * result is held encrypted for the requester; if the run fails, what
+     * was held of it is deleted.
+     *
+     * @param operation its record
+     * @param holder    the lease's holder
+     */
+    @SuppressWarnings("unchecked")
+    void execute(ControlStore.Operation operation, String holder)
+    {
+        AuditRecord audit = new AuditRecord(operation.requestedBy());
+        audit.add(Attr.AUTH, auth.name().toLowerCase(Locale.ROOT));
+        audit.add(Attr.REQUEST_ID, UUID.randomUUID().toString());
+        audit.add(Attr.OPERATION_ID, operation.id());
+        audit.add(Attr.REQUESTED_BY, operation.requestedBy());
+        audit.add(Attr.APPROVED_BY, operation.decidedBy());
+        audit.add(Attr.ACTION_REASON, operation.reason());
+        if (operation.ticket() != null)
+        {
+            audit.add(Attr.TICKET, operation.ticket());
+        }
+        audit.add(Attr.DECISION, "approved");
+        String event = "control." + operation.kind().replace('-', '_');
+        ControlResults.Holding[] holding = new ControlResults.Holding[1];
+        try
+        {
+            Map<String, Object> parameters = operation.parameters();
+            ControlRoute route = ControlRoute.all().stream()
+                    .filter(each -> each.key().equals(
+                            parameters.get(ROUTE)))
+                    .findFirst().orElseThrow(() -> new IllegalStateException(
+                            "The operation's route is not served"));
+            CliOperation<Object, Object, Object> command =
+                    (CliOperation<Object, Object, Object>) cli.operation(
+                            operation.kind()).orElseThrow(
+                                    () -> new IllegalStateException("The"
+                                            + " stage has no such operation"));
+            Map<String, String> variables = new LinkedHashMap<>();
+            ((Map<String, Object>) parameters.getOrDefault(VARIABLES,
+                    Map.of())).forEach((name, value) ->
+                            variables.put(name, String.valueOf(value)));
+            Map<String, Object> fields = new LinkedHashMap<>(
+                    (Map<String, Object>) parameters.getOrDefault(FIELDS,
+                            Map.of()));
+            Invocation.Sink sink = new Invocation.Sink()
+            {
+                @Override
+                public void row(Map<String, Object> row)
+                {
+                    throw new UnsupportedOperationException("An approved"
+                            + " operation's result is held, not streamed");
+                }
+
+                @Override
+                public void sealed(String jwe)
+                {
+                    throw new UnsupportedOperationException("An approved"
+                            + " operation's result is held, not sealed");
+                }
+
+                @Override
+                public void plaintext(byte[] part)
+                {
+                    if (holding[0] == null)
+                    {
+                        holding[0] = results.hold(operation.id());
+                    }
+                    holding[0].part(part);
+                }
+            };
+            Object result;
+            try (AutoCloseable target = cli.open(operation.kind(), settings))
+            {
+                AdminArgs arguments = arguments(route, variables, fields)
+                        .withInput(new ByteArrayInputStream(new byte[0]));
+                Object request = command.bind(route.toCaller()
+                        ? arguments.withOutputToCaller() : arguments,
+                        target);
+                result = command.run(request, target, new Invocation(
+                        new Caller(operation.requestedBy(), auth), audit,
+                        sink));
+            }
+            Map<String, Object> done = new LinkedHashMap<>(
+                    command instanceof Answering<?> answering
+                            ? ((Answering<Object>) answering).answer(result)
+                            : Map.of());
+            if (holding[0] != null)
+            {
+                Instant until = holding[0].finish(approval.breakGlassTtl());
+                audit.add(Attr.PARTS, holding[0].parts());
+                done.put("resultParts", holding[0].parts());
+                done.put("resultBytes", holding[0].bytes());
+                done.put("resultUntil", until.toString());
+                done.put("resultAt", OPERATIONS + "/" + operation.id()
+                        + "/result");
+            }
+            store.finish(operation.id(), holder, ControlStore.State.DONE,
+                    operation.progress(), done);
+            Telemetry.get().audit(event,
+                    audit.fields().with(Attr.RESULT, "ok"));
+        }
+        catch (Exception failure)
+        {
+            String reason = failure.getClass().getSimpleName();
+            Telemetry.get().auditWarn(event, audit.fields()
+                    .with(Attr.RESULT, "failed")
+                    .with(Attr.REASON, reason));
+            try
+            {
+                if (holding[0] != null)
+                {
+                    holding[0].discard();
+                }
+                store.finish(operation.id(), holder,
+                        ControlStore.State.FAILED, operation.progress(),
+                        Answers.object("failure", reason));
+            }
+            catch (RuntimeException unrecorded)
+            {
+                // Its lease runs out, and another pod runs it again.
+            }
+        }
+    }
+
+    /**
+     * The permissions an operation waiting for a second person needs, as
+     * it was recorded.
+     *
+     * @param operation its record
+     * @return them; empty if it needs no approval
+     */
+    private static Set<Permission> needed(ControlStore.Operation operation)
+    {
+        Object listed = operation.parameters().get(PERMISSIONS);
+        if (!(listed instanceof List<?> names))
+        {
+            return Set.of();
+        }
+        Set<Permission> needed = EnumSet.noneOf(Permission.class);
+        for (Object name : names)
+        {
+            for (Permission each : Permission.values())
+            {
+                if (each.key().equals(name))
+                {
+                    needed.add(each);
+                }
+            }
+        }
+        return needed;
+    }
+
+    /**
+     * An operation's record, expired first if it waited too long for its
+     * approval.
+     *
+     * @param operation its record
+     * @return the record now
+     */
+    private ControlStore.Operation expired(ControlStore.Operation operation)
+    {
+        if (operation.state() != ControlStore.State.AWAITING_APPROVAL
+                || !(operation.parameters().get(APPROVE_BY)
+                        instanceof String by))
+        {
+            return operation;
+        }
+        Instant until;
+        try
+        {
+            until = Instant.parse(by);
+        }
+        catch (RuntimeException unreadable)
+        {
+            return operation;
+        }
+        if (Instant.now().isBefore(until))
+        {
+            return operation;
+        }
+        store.expire(operation.id());
+        return store.find(operation.id(), scope).orElse(operation);
+    }
+
+    /**
+     * A decision's body: a JSON object with a reason and nothing else.
+     *
+     * @param body the body
+     * @return the reason, checked
+     * @throws AdminArgs.UsageException if it isn't one
+     */
+    private static String reasonOnly(byte[] body)
+    {
+        Map<String, Object> fields;
+        try
+        {
+            fields = body.length == 0 ? Map.of()
+                    : JSONObjectUtils.parse(new String(body, UTF_8));
+        }
+        catch (ParseException | RuntimeException notJson)
+        {
+            throw new AdminArgs.UsageException("The body must be a JSON"
+                    + " object");
+        }
+        for (String name : fields.keySet())
+        {
+            if (!name.equals(ControlRoute.REASON))
+            {
+                throw new AdminArgs.UsageException("Unknown field: " + name);
+            }
+        }
+        Object reason = fields.get(ControlRoute.REASON);
+        if (!(reason instanceof String text) || text.isBlank()
+                || !REASON.matcher(text).matches())
+        {
+            throw new AdminArgs.UsageException("A decision needs a reason:"
+                    + " 1 to 200 letters, digits, spaces or . , : _ # / -");
+        }
+        return text;
+    }
+
+    /**
      * One operation's record.
      *
      * @param id         its ID, as given
@@ -644,13 +1230,15 @@ public final class ControlService
      * Brings a running operation the stage's workers carry out up to date
      * from the stage.
      *
-     * @param operation its record
+     * @param recorded its record
      * @return the record now
      */
     @SuppressWarnings("unchecked")
-    private Refreshed refresh(ControlStore.Operation operation)
+    private Refreshed refresh(ControlStore.Operation recorded)
     {
-        if (operation.state() != ControlStore.State.RUNNING)
+        ControlStore.Operation operation = expired(recorded);
+        if (operation.state() != ControlStore.State.RUNNING
+                || operation.decidedBy() != null)
         {
             return new Refreshed(operation, null);
         }
@@ -701,6 +1289,20 @@ public final class ControlService
                 "requestedAt", operation.requestedAt(), "updatedAt",
                 operation.updatedAt(), "parameters", operation.parameters(),
                 "progress", operation.progress());
+        if (operation.ticket() != null)
+        {
+            answer.put("ticket", operation.ticket());
+        }
+        if (operation.decidedBy() != null)
+        {
+            answer.put("decidedBy", operation.decidedBy());
+            answer.put("decision", operation.decision());
+            answer.put("decidedAt", operation.decidedAt().toString());
+        }
+        if (!operation.result().isEmpty())
+        {
+            answer.put("result", operation.result());
+        }
         if (unavailable != null)
         {
             answer.put("progressUnavailable", unavailable);
@@ -736,7 +1338,7 @@ public final class ControlService
             return new ControlStore.Operation(UUID.fromString(parts[1]),
                     null, null, Map.of(), null, null,
                     Instant.parse(parts[0]), ControlStore.State.RUNNING,
-                    Map.of(), null, null);
+                    Map.of(), null, null, null, null, null, null, Map.of());
         }
         catch (RuntimeException wrong)
         {
@@ -1110,6 +1712,25 @@ public final class ControlService
         {
             // The key stays claimed with no answer: a retry with it is
             // answered in-progress, and the caller uses another.
+        }
+    }
+
+    /**
+     * A refusal's code, for its audit event.
+     *
+     * @param refused the refusal
+     * @return its title
+     */
+    private static String title(Answer refused)
+    {
+        try
+        {
+            return String.valueOf(JSONObjectUtils.parse(refused.body())
+                    .get("title"));
+        }
+        catch (ParseException unreadable)
+        {
+            return "refused";
         }
     }
 
