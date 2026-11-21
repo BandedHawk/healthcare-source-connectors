@@ -346,7 +346,19 @@ public enum Attr
      * Whether a control API action was answered from its first answer,
      * a retry with the same idempotency key.
      */
-    IDEMPOTENT_REPLAY("sdh.idempotent_replay");
+    IDEMPOTENT_REPLAY("sdh.idempotent_replay"),
+
+    /**
+     * A principal's sealing key, by its fingerprint (the SHA-256 of the
+     * key): one registered or revoked, or the one a result was sealed to.
+     */
+    SEALING_KEY("sdh.sealing_key"),
+
+    /** The principal a sealing key is registered for. */
+    KEY_PRINCIPAL("sdh.key_principal"),
+
+    /** How many sealed parts a control API answer sent. */
+    PARTS("sdh.parts");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

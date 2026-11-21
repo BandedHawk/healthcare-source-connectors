@@ -33,6 +33,9 @@ import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.Caller;
+import com.sdh.healthcare.connector.stage.admin.CliOperation;
+import com.sdh.healthcare.connector.stage.admin.Invocation;
 import io.opentelemetry.api.common.AttributeKey;
 import io.zonky.test.db.postgres.embedded.EmbeddedPostgres;
 import java.io.ByteArrayInputStream;
@@ -620,6 +623,75 @@ class AdminCommandsTest
         assertThat(log.getAll()).containsPattern("admin.restore operator=alice"
                 + " item_id=" + badId + " recipient_key=\\S+ outcome=sealed")
                 .doesNotContain("never closed");
+    }
+
+    /**
+     * Through the control API, a restore is sealed to the caller in parts
+     * sent to it, not to a file, and takes no directory, original name or
+     * plaintext.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void restoresSealedToTheCallerThroughTheControlApi() throws Exception
+    {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+        generator.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair caller = generator.generateKeyPair();
+        byte[] pem = ("-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder().encodeToString(
+                        caller.getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----\n").getBytes(UTF_8);
+        CliOperation<SplitAdminContext, Object, Object> restore =
+                (CliOperation<SplitAdminContext, Object, Object>)
+                        (CliOperation<?, ?, ?>) SplitAdmin.commands().stream()
+                                .filter(each -> each.name().equals("restore"))
+                                .findFirst().orElseThrow();
+        List<String> parts = new ArrayList<>();
+        Invocation.Sink sink = new Invocation.Sink()
+        {
+            @Override
+            public void row(Map<String, Object> row)
+            {
+                throw new AssertionError("A restore sends no rows");
+            }
+
+            @Override
+            public void sealed(String jwe)
+            {
+                parts.add(jwe);
+            }
+        };
+        try (SplitAdminContext context = new SplitAdminContext(properties))
+        {
+            Object request = restore.bind(AdminArgs.parse(List.of("restore",
+                    "--item-id", badId.toString(), "--from-offset", "4"),
+                    restore.flags()).withInput(new ByteArrayInputStream(pem))
+                    .withOutputToCaller(), context);
+            restore.run(request, context, new Invocation(
+                    Caller.cli("alice"), new AuditRecord("alice"), sink));
+
+            assertThatThrownBy(() -> restore.bind(AdminArgs.parse(List.of(
+                    "restore", "--item-id", badId.toString(), "--to",
+                    newDir().toString()), restore.flags())
+                    .withOutputToCaller(), context))
+                    .isInstanceOf(AdminArgs.UsageException.class);
+        }
+        StringBuilder restored = new StringBuilder();
+        for (int part = 0; part < parts.size(); part++)
+        {
+            JWEObject jwe = JWEObject.parse(parts.get(part));
+            jwe.decrypt(new ECDHDecrypter(
+                    (ECPrivateKey) caller.getPrivate()));
+            assertThat(((Number) jwe.getHeader().getCustomParam("sdh_part"))
+                    .intValue()).isEqualTo(part + 1);
+            assertThat(jwe.getHeader().getCustomParam("sdh_last"))
+                    .isEqualTo(part == parts.size() - 1);
+            restored.append(jwe.getPayload().toString());
+        }
+        assertThat(parts).isNotEmpty();
+        assertThat(restored.toString()).isEqualTo(BAD.substring(4));
     }
 
     /**

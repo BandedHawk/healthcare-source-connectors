@@ -180,7 +180,7 @@ class ControlActionsTest
     @Test
     void refusesAnActionWithoutAKeyOrAReason() throws Exception
     {
-        UUID item = failed();
+        UUID item = failed(schema);
         String path = "/api/v1/failures/" + item + "/2/decline";
         String operator = ControlServerTest.token("olga", "operators");
         HttpResponse<String> noKey = send("POST", path, null, operator,
@@ -235,7 +235,7 @@ class ControlActionsTest
     @Test
     void carriesOutAnActionOncePerKey() throws Exception
     {
-        UUID item = failed();
+        UUID item = failed(schema);
         String path = "/api/v1/failures/" + item + "/2/decline";
         String operator = ControlServerTest.token("olga", "operators");
         String key = key();
@@ -293,7 +293,7 @@ class ControlActionsTest
     @Test
     void takesACorrectedRecordFromTheBody() throws Exception
     {
-        UUID item = failed();
+        UUID item = failed(schema);
         String path = "/api/v1/failures/" + item + "/2/correct";
         String record = Base64.getEncoder().encodeToString(
                 "<synthetic fixed/>".getBytes(UTF_8));
@@ -438,9 +438,10 @@ class ControlActionsTest
     /**
      * An item with one record failed, seq 2.
      *
+     * @param schema the registry's schema
      * @return the item
      */
-    static UUID failed()
+    static UUID failed(String schema)
     {
         UUID item = UUID.randomUUID();
         StageRegistry registry = StageTestSupport.registry(schema, "pod-a");

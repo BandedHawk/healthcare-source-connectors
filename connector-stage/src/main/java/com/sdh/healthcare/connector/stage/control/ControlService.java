@@ -18,6 +18,7 @@ import com.sdh.healthcare.connector.stage.admin.Answers;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.Caller;
 import com.sdh.healthcare.connector.stage.admin.CliOperation;
+import com.sdh.healthcare.connector.stage.admin.ExportSealer;
 import com.sdh.healthcare.connector.stage.admin.Followed;
 import com.sdh.healthcare.connector.stage.admin.Invocation;
 import com.sdh.healthcare.connector.stage.admin.Operation;
@@ -27,6 +28,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.ParseException;
@@ -35,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -95,6 +98,16 @@ public final class ControlService
     /** The operations' path. */
     static final String OPERATIONS = ControlRoute.PREFIX + "/operations";
 
+    /** The most identifiers a patient lookup takes. */
+    static final int MAX_IDENTIFIERS = 1000;
+
+    /** The longest identifier a patient lookup takes. */
+    static final int MAX_IDENTIFIER = 512;
+
+    /** A control character, which no identifier holds. */
+    private static final Pattern IDENTIFIER_CONTROL =
+            Pattern.compile("\\p{Cntrl}");
+
     /** An idempotency key: opaque, of the client's choosing, no content. */
     private static final Pattern KEY =
             Pattern.compile("[A-Za-z0-9._:-]{8,128}");
@@ -123,6 +136,12 @@ public final class ControlService
 
     /** The stage's operations' scope, {@code stage:<service>}. */
     private final String scope;
+
+    /** The principals' sealing keys. */
+    private final OperatorKeys keys;
+
+    /** The control API's own operations, on the sealing keys, by name. */
+    private final Map<String, CliOperation<OperatorKeys, ?, ?>> own;
 
     /**
      * A request, as it came.
@@ -162,7 +181,7 @@ public final class ControlService
      * @param store    the idempotency keys and operation records
      */
     public ControlService(AdminCli<Object, ?> cli, Object settings,
-            ControlSettings control, ControlStore store)
+            ControlSettings control, ControlStore store, OperatorKeys keys)
     {
         this.cli = cli;
         this.settings = settings;
@@ -171,6 +190,10 @@ public final class ControlService
                 ? Caller.Auth.JWT : Caller.Auth.MTLS;
         this.store = store;
         this.scope = "stage:" + cli.stage().service();
+        this.keys = keys;
+        this.own = OperatorKeyCommands.all().stream().collect(
+                Collectors.toUnmodifiableMap(Operation::name,
+                        operation -> operation));
     }
 
     /**
@@ -215,8 +238,9 @@ public final class ControlService
         audit.add(Attr.AUTH, auth.name().toLowerCase(Locale.ROOT));
         audit.add(Attr.REQUEST_ID, requestId);
         String event = "control." + route.operation().replace('-', '_');
-        Optional<CliOperation<?, ?, ?>> found =
-                cli.operation(route.operation());
+        Optional<CliOperation<?, ?, ?>> found = route.own()
+                ? Optional.ofNullable(own.get(route.operation()))
+                : cli.operation(route.operation());
         if (found.isEmpty())
         {
             refuse(event, audit, "not-on-this-stage");
@@ -230,8 +254,9 @@ public final class ControlService
         Body body;
         try
         {
-            body = route.acts() ? body(call, audit) : new Body(
-                    queryFields(call.parameters()), null, new byte[0]);
+            body = route.hasBody() ? body(call, audit) : new Body(
+                    queryFields(call.parameters()), null, new byte[0],
+                    null);
         }
         catch (AdminArgs.UsageException refused)
         {
@@ -240,16 +265,46 @@ public final class ControlService
                     requestId), requestId);
             return;
         }
-        Streamed rows = new Streamed(response, requestId);
+        Optional<byte[]> sealTo = Optional.empty();
+        byte[] input = body.input();
+        if (route.seals())
+        {
+            audit.add(Attr.SEALING_KEY, body.sealTo());
+            try
+            {
+                sealTo = keys.usable(who.principal(), body.sealTo());
+            }
+            catch (RuntimeException unread)
+            {
+                Telemetry.get().auditWarn(event, audit.fields()
+                        .with(Attr.RESULT, "failed")
+                        .with(Attr.REASON, unread.getClass()
+                                .getSimpleName()));
+                send(response, problem(500, "failed",
+                        unread.getClass().getSimpleName(), requestId),
+                        requestId);
+                return;
+            }
+            input = sealTo.map(pem -> join(pem, body.input()))
+                    .orElse(new byte[0]);
+        }
+        Streamed rows = new Streamed(response, requestId, route.seals()
+                ? Answers.object("operation", route.operation(),
+                        "sealedTo", body.sealTo(), "requestId", requestId)
+                : null);
         boolean claimed = false;
-        try (AutoCloseable target = cli.open(route.operation(), settings))
+        try (AutoCloseable target = route.own() ? keys
+                : cli.open(route.operation(), settings))
         {
             Object request;
             try
             {
-                request = operation.bind(arguments(route, call.variables(),
+                AdminArgs arguments = arguments(route, call.variables(),
                         body.fields()).withInput(new ByteArrayInputStream(
-                                body.input())), target);
+                                input));
+                request = operation.bind(route.seals()
+                        ? arguments.withOutputToCaller() : arguments,
+                        target);
             }
             catch (AdminArgs.UsageException failure)
             {
@@ -276,6 +331,14 @@ public final class ControlService
                 send(response, problem(403, "approval-required", "This"
                         + " needs a second person's approval", requestId),
                         requestId);
+                return;
+            }
+            if (route.seals() && sealTo.isEmpty())
+            {
+                refuse(event, audit, "sealing-key-not-yours");
+                send(response, problem(403, "sealing-key-not-yours", "Seal"
+                        + " to one of your own registered keys, unexpired"
+                        + " and not revoked", requestId), requestId);
                 return;
             }
             if (route.acts())
@@ -345,6 +408,10 @@ public final class ControlService
                 if (route.streamed())
                 {
                     rows.finish();
+                    if (route.seals())
+                    {
+                        audit.add(Attr.PARTS, rows.parts());
+                    }
                     answer = null;
                 }
                 else
@@ -357,15 +424,43 @@ public final class ControlService
                 store.answered(who.principal(), call.key(), answer.status(),
                         answer.type(), answer.body(), answer.location());
             }
+            // Audited before the answer is sent, so a caller holding the
+            // answer finds its event.
+            Telemetry.get().audit(event,
+                    audit.fields().with(Attr.RESULT, "ok"));
             if (answer != null)
             {
                 send(response, answer, requestId);
             }
-            Telemetry.get().audit(event,
-                    audit.fields().with(Attr.RESULT, "ok"));
+        }
+        catch (Refusal | AdminArgs.UsageException refusal)
+        {
+            // A command's usage refusal at run time, such as a key too
+            // weak, is the caller's to fix: 400, with the command's own
+            // words, which name no stored data.
+            int status = refusal instanceof Refusal own ? own.status() : 400;
+            String code = refusal instanceof Refusal own ? own.code()
+                    : "bad-request";
+            refuse(event, audit, code);
+            if (rows.started())
+            {
+                rows.broken(refusal);
+                return;
+            }
+            Answer refused = problem(status, code, refusal.getMessage(),
+                    requestId);
+            if (claimed)
+            {
+                keep(who.principal(), call.key(), refused);
+            }
+            send(response, refused, requestId);
         }
         catch (Exception failure)
         {
+            if (route.seals())
+            {
+                audit.add(Attr.PARTS, rows.parts());
+            }
             Telemetry.get().auditWarn(event, audit.fields()
                     .with(Attr.RESULT, "failed")
                     .with(Attr.REASON, failure.getClass().getSimpleName()));
@@ -654,10 +749,13 @@ public final class ControlService
      *
      * @param fields its options and flags, by field
      * @param reason why, checked
-     * @param input  what the command reads in place of standard input
+     * @param input  what the command reads in place of standard input;
+     *               for a sealed route, what follows the key
+     * @param sealTo the fingerprint of the key to seal to; null if the
+     *               route doesn't seal
      */
     private record Body(Map<String, Object> fields, String reason,
-            byte[] input)
+            byte[] input, String sealTo)
     {
     }
 
@@ -674,7 +772,8 @@ public final class ControlService
      */
     private static Body body(Call call, AuditRecord audit)
     {
-        if (call.key() == null || !KEY.matcher(call.key()).matches())
+        if (call.route().acts() && (call.key() == null
+                || !KEY.matcher(call.key()).matches()))
         {
             throw new AdminArgs.UsageException("An action needs an"
                     + " Idempotency-Key header: 8 to 128 letters, digits"
@@ -701,6 +800,7 @@ public final class ControlService
         }
         audit.add(Attr.ACTION_REASON, text);
         byte[] input = new byte[0];
+        String sealTo = null;
         switch (call.route().input())
         {
             case REASON -> input = text.getBytes(UTF_8);
@@ -722,11 +822,100 @@ public final class ControlService
                             + " base64");
                 }
             }
+            case PUBLIC_KEY ->
+            {
+                Object key = fields.remove(ControlRoute.PUBLIC_KEY);
+                if (!(key instanceof String pem)
+                        || pem.length() > ExportSealer.MAX_KEY_BYTES)
+                {
+                    throw new AdminArgs.UsageException("The public key is"
+                            + " required, PEM, as publicKey");
+                }
+                input = pem.getBytes(UTF_8);
+            }
+            case SEAL -> sealTo = sealTo(fields);
+            case SEAL_LOOKUP ->
+            {
+                sealTo = sealTo(fields);
+                input = identifiers(fields.remove(ControlRoute.IDENTIFIERS));
+            }
             case NONE ->
             {
             }
         }
-        return new Body(fields, text, input);
+        return new Body(fields, text, input, sealTo);
+    }
+
+    /**
+     * The fingerprint of the key a sealed route seals to.
+     *
+     * @param fields the body's fields; the fingerprint is taken out
+     * @return it
+     * @throws AdminArgs.UsageException if it isn't given, or isn't one
+     */
+    private static String sealTo(Map<String, Object> fields)
+    {
+        Object fingerprint = fields.remove(ControlRoute.SEAL_TO);
+        if (!(fingerprint instanceof String text)
+                || !OperatorKeys.FINGERPRINT.matcher(text).matches())
+        {
+            throw new AdminArgs.UsageException("A sealed request needs"
+                    + " sealTo: the fingerprint of one of your registered"
+                    + " keys, 64 lower-case hex digits");
+        }
+        return text;
+    }
+
+    /**
+     * The patient lookup's identifiers as the command reads them after
+     * the key: one a line. They are PHI, so a refusal never repeats one.
+     *
+     * @param value the field's value; null for none
+     * @return the lines
+     * @throws AdminArgs.UsageException if it isn't a list of identifiers
+     */
+    private static byte[] identifiers(Object value)
+    {
+        if (value == null)
+        {
+            return new byte[0];
+        }
+        if (!(value instanceof List<?> list) || list.size() > MAX_IDENTIFIERS)
+        {
+            throw new AdminArgs.UsageException("identifiers must be a list"
+                    + " of at most " + MAX_IDENTIFIERS);
+        }
+        StringBuilder lines = new StringBuilder();
+        for (Object each : list)
+        {
+            if (!(each instanceof String identifier) || identifier.isBlank()
+                    || identifier.length() > MAX_IDENTIFIER
+                    || IDENTIFIER_CONTROL.matcher(identifier).find())
+            {
+                throw new AdminArgs.UsageException("Each identifier must be"
+                        + " text of at most " + MAX_IDENTIFIER
+                        + " characters, system|value or a value, with no"
+                        + " control characters");
+            }
+            lines.append(identifier).append('\n');
+        }
+        return lines.toString().getBytes(UTF_8);
+    }
+
+    /**
+     * A sealed route's input: the caller's key, then what follows it.
+     *
+     * @param pem  the key
+     * @param rest what follows
+     * @return them, a line apart
+     */
+    private static byte[] join(byte[] pem, byte[] rest)
+    {
+        byte[] joined = new byte[pem.length + 1 + rest.length];
+        System.arraycopy(pem, 0, joined, 0, pem.length);
+        joined[pem.length] = '\n';
+        System.arraycopy(rest, 0, joined, pem.length + 1, rest.length);
+        return joined;
     }
 
     /**
@@ -1010,6 +1199,12 @@ public final class ControlService
      * an operation that fails before it is refused as any other; one that
      * fails part way ends with a line saying it is incomplete, since the
      * status is already sent.
+     *
+     * <p>A sealed answer (CONTROL-API-DESIGN.md §7) starts with a header
+     * line, then a line per sealed part, {@code {"part": n, "jwe": …}},
+     * and ends with a trailer giving the count of parts and the SHA-256 of
+     * their JWEs, in order, as ASCII and with nothing between them. A
+     * stream without its trailer was cut off, and is to be discarded.
      */
     private static final class Streamed implements Invocation.Sink
     {
@@ -1026,16 +1221,48 @@ public final class ControlService
         /** How many rows were written. */
         private long count;
 
+        /** A sealed answer's header line; null if it isn't sealed. */
+        private final Map<String, Object> header;
+
+        /** The sealed parts' digest; null if the answer isn't sealed. */
+        private final MessageDigest digest;
+
+        /** How many sealed parts were written. */
+        private int parts;
+
         /**
          * Creates the stream; nothing is sent yet.
          *
          * @param response  where the rows go
          * @param requestId the request's ID
+         * @param header    a sealed answer's header; null if it isn't
+         *                  sealed
          */
-        Streamed(HttpServletResponse response, String requestId)
+        Streamed(HttpServletResponse response, String requestId,
+                Map<String, Object> header)
         {
             this.response = response;
             this.requestId = requestId;
+            this.header = header;
+            try
+            {
+                this.digest = header == null ? null
+                        : MessageDigest.getInstance("SHA-256");
+            }
+            catch (NoSuchAlgorithmException missing)
+            {
+                throw new IllegalStateException(missing);
+            }
+        }
+
+        /**
+         * How many sealed parts were sent.
+         *
+         * @return the count
+         */
+        int parts()
+        {
+            return parts;
         }
 
         /**
@@ -1058,15 +1285,35 @@ public final class ControlService
         @Override
         public void sealed(String jwe)
         {
-            // Sealed results come with build step C4; no route streams
-            // one yet.
-            throw new UnsupportedOperationException("Sealed results aren't"
-                    + " served yet");
+            if (header == null)
+            {
+                throw new IllegalStateException("Only a sealed route's"
+                        + " answer holds sealed parts");
+            }
+            begin();
+            parts++;
+            digest.update(jwe.getBytes(StandardCharsets.US_ASCII));
+            Map<String, Object> part = new LinkedHashMap<>();
+            part.put("part", parts);
+            part.put("jwe", jwe);
+            line(part);
         }
 
         /** Ends the stream with its count, or answers no rows. */
         void finish()
         {
+            if (header != null)
+            {
+                begin();
+                Map<String, Object> trailer = new LinkedHashMap<>();
+                trailer.put("end", true);
+                trailer.put("parts", parts);
+                trailer.put("sha256", HexFormat.of().formatHex(
+                        digest.digest()));
+                trailer.put("requestId", requestId);
+                line(trailer);
+                return;
+            }
             Map<String, Object> end = new LinkedHashMap<>();
             end.put("end", true);
             end.put("rows", count);
@@ -1084,7 +1331,8 @@ public final class ControlService
             Map<String, Object> end = new LinkedHashMap<>();
             end.put("end", false);
             end.put("incomplete", true);
-            end.put("rows", count);
+            end.put(header == null ? "rows" : "parts",
+                    header == null ? count : parts);
             end.put("reason", failure.getClass().getSimpleName());
             end.put("requestId", requestId);
             try
@@ -1094,6 +1342,15 @@ public final class ControlService
             catch (UncheckedIOException gone)
             {
                 // The caller has gone; the audit event says what happened.
+            }
+        }
+
+        /** Sends a sealed answer's header, unless it has been sent. */
+        private void begin()
+        {
+            if (out == null)
+            {
+                line(header);
             }
         }
 

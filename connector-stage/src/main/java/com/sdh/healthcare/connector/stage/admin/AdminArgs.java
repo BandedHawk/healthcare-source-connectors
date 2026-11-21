@@ -47,6 +47,12 @@ public final class AdminArgs
     private final InputStream input;
 
     /**
+     * Whether the command's output goes to the control API's caller, as
+     * sealed parts, rather than to a file the CLI writes.
+     */
+    private final boolean toCaller;
+
+    /**
      * Holds parsed arguments.
      *
      * @param command the command name
@@ -57,7 +63,7 @@ public final class AdminArgs
     private AdminArgs(String command, Map<String, String> options,
             Set<String> flags, List<String> configArgs)
     {
-        this(command, options, flags, configArgs, null);
+        this(command, options, flags, configArgs, null, false);
     }
 
     /**
@@ -70,15 +76,19 @@ public final class AdminArgs
      * @param configArgs the configuration overrides
      * @param input      what is read in place of standard input; null for
      *                   standard input
+     * @param toCaller   whether the output goes to the control API's
+     *                   caller
      */
     private AdminArgs(String command, Map<String, String> options,
-            Set<String> flags, List<String> configArgs, InputStream input)
+            Set<String> flags, List<String> configArgs, InputStream input,
+            boolean toCaller)
     {
         this.command = command;
         this.options = options;
         this.flags = flags;
         this.configArgs = configArgs;
         this.input = input;
+        this.toCaller = toCaller;
     }
 
     /**
@@ -91,7 +101,31 @@ public final class AdminArgs
      */
     public AdminArgs withInput(InputStream given)
     {
-        return new AdminArgs(command, options, flags, configArgs, given);
+        return new AdminArgs(command, options, flags, configArgs, given,
+                toCaller);
+    }
+
+    /**
+     * The same arguments, for a command whose output goes to the control
+     * API's caller as sealed parts (CONTROL-API-DESIGN.md §7), rather than
+     * to a file: {@code restore} then takes no {@code --to}.
+     *
+     * @return the arguments
+     */
+    public AdminArgs withOutputToCaller()
+    {
+        return new AdminArgs(command, options, flags, configArgs, input,
+                true);
+    }
+
+    /**
+     * Whether the command's output goes to the control API's caller.
+     *
+     * @return true through the control API's sealed routes
+     */
+    public boolean outputToCaller()
+    {
+        return toCaller;
     }
 
     /**

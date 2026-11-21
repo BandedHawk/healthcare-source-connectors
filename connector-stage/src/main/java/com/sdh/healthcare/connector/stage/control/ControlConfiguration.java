@@ -194,15 +194,38 @@ public class ControlConfiguration
      * @param context  the context, for the stage's settings
      * @param control  the control API's settings
      * @param journal  the API's journal, open before any request
+     * @param store    the idempotency keys and operation records
+     * @param keys     the principals' sealing keys
      * @return the service
      */
     @Bean
     ControlService controlService(ControlServer.Commands commands,
             ApplicationContext context, ControlSettings control,
-            ControlJournal journal, ControlStore store)
+            ControlJournal journal, ControlStore store, OperatorKeys keys)
     {
         return new ControlService(commands.cli(),
-                stageSettings(commands, context), control, store);
+                stageSettings(commands, context), control, store, keys);
+    }
+
+    /**
+     * The principals' sealing keys, in the pipeline's database beside the
+     * stage's audit journal, which every stage of the pipeline shares.
+     *
+     * @param controlDatabase the pool
+     * @param commands        the stage's operator commands
+     * @param context         the context, for the stage's settings
+     * @return the keys
+     */
+    @Bean
+    OperatorKeys operatorKeys(HikariDataSource controlDatabase,
+            ControlServer.Commands commands, ApplicationContext context)
+    {
+        try (AuditTarget target = commands.cli().stage().audit()
+                .apply(stageSettings(commands, context)))
+        {
+            return new OperatorKeys(controlDatabase,
+                    target.tables().schema());
+        }
     }
 
     /**

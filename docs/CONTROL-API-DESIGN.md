@@ -423,7 +423,7 @@ depends on neither of the others.
 | C1 | The operation layer (§3), with the CLI on it. No change in behaviour: the CLI's tests pass unchanged. **Built 2026-11-20** (§15.1) | |
 | C2 | Control mode: TLS, authentication, permissions, audit (§1, §2, §4, §10); the query operations; the OpenAPI file; the compliance checks. **Built 2026-11-21** (§15.2) | part of P1 |
 | C3 | Actions, `Idempotency-Key`, the operation record and its leases (§5, §8). **Built 2026-11-21** (§15.3) | P1 |
-| C4 | Sealing keys and sealed results (§7) | P1 |
+| C4 | Sealing keys and sealed results (§7). **Built 2026-11-21** (§15.4) | P1 |
 | C5 | Four eyes and break-glass (§6) | P1 |
 | C6 | Pause, resume and drain (§9) | P2 |
 | C7 | Rotate and re-key (§11) | P3 |
@@ -587,6 +587,62 @@ depends on neither of the others.
 - **Not yet:** four eyes (C5: approve, reject and the `awaiting-approval` state); a runner for operations a
   control pod carries out; removing old operation records (the keys go after 24 hours; the records stay, like the
   audit journal, until C8's retention); everything §15.2 lists as not yet.
+
+### 15.4 C4, as built
+
+- **Sealing keys** (`OperatorKeys`, `sdh_operator_keys` in the pipeline's database beside the audit journal's
+  tables, shared by every stage): fingerprint (the key's), principal, the PEM key, registered by and at, expiry,
+  revoked by and at. A fingerprint names one key, and so one principal. A revoked key stays listed.
+  - `GET /operator-keys[?principal=]` lists them without the keys; `POST /operator-keys` registers one
+    (`principal`, `publicKey` PEM, `expiresAt`, `reason`, with an `Idempotency-Key`); `DELETE
+    /operator-keys/{fingerprint}` revokes one. All need `keys.admin`, and are audited with `sdh.sealing_key` and
+    `sdh.key_principal`.
+  - A key is EC P-256 or P-384, or RSA of at least 3072 bits, and expires in the future within a year (366 days).
+    A key registered already is `409 refused`.
+  - **Never for oneself:** registering a key for the caller's own principal is `403 not-for-yourself`. Revoking
+    one's own is allowed.
+  - These are the control API's own operations (`OperatorKeyCommands`), not the CLI's: the CLI keeps reading a key
+    from standard input.
+- **Sealed routes**, each needing `phi.export`, a `reason` and `sealTo` (no `Idempotency-Key`: the parts aren't
+  kept, and asking again reads again, audited again):
+
+  | Path (`POST /api/v1/…`) | Operation | Body fields |
+  |---|---|---|
+  | `failures/{itemId}/{seq}/export` | `export` | |
+  | `patients/lookup` | `patients` | `itemIds`, or `from` and `to`; `identifiers` (up to 1000, each up to 512 characters) |
+  | `items/{itemId}/restore` | `restore` (split stage) | `fromOffset`, `unprocessed` |
+
+  §5's `POST /failures/export` is per failure here, as the CLI's `export` is. A plaintext restore isn't served:
+  it needs four eyes (C5).
+- **`sealTo`** must name one of the caller's own keys, unexpired and not revoked, or it is `403
+  sealing-key-not-yours`. The check comes after the permissions, so a caller without `phi.export` learns nothing
+  of the keys. The server gives the registered key to the command in place of standard input; the command seals
+  to it as the CLI does, and audits its fingerprint as `sdh.recipient_key`.
+- **The stream** is `application/x-ndjson`: a header (`operation`, `sealedTo`, `requestId`), a line per part
+  (`part`, `jwe`), and a trailer (`end: true`, `parts`, `sha256` over the parts' JWEs in order, as ASCII with
+  nothing between them). A failure part way ends it with `end: false, incomplete: true` and no trailer, and the
+  client discards it. The audit event carries `sdh.parts`. A failure before the first part is answered as any
+  other refusal.
+- **Part sizes:** `export` seals the failure's content as one part, the patient lookup a page of rows, and
+  `restore` up to 1 MiB of the item per part (8 MiB in the CLI's file). The digest of a restored item is checked
+  over the whole item. On a mismatch the stream ends without its trailer. The CLI's restore still leaves nothing
+  behind.
+- **Also changed:**
+  - A command's own usage refusal at run time (a key too weak, a span too long) is `400` with its words, not
+    `500`.
+  - A request is audited before its answer is sent, so a caller holding an answer finds its event.
+  - `AdminArgs.withOutputToCaller` tells a command its output goes to the caller. `restore` then takes no `--to`,
+    `--original-name` or `--plaintext`.
+- **Tests:** `ControlSealedTest` covers:
+  - registering for someone else only, keys refused for being weak, expiring too late or already, or registered
+    already;
+  - listing, and revoking;
+  - an export sealed to the caller's own key and opened with its private key, with its trailer's digest checked;
+  - another's key, a revoked key and no key refused, and a caller without `phi.export` refused.
+
+  `AdminCommandsTest` checks a restore streamed to the caller in parts.
+- **Not yet:** four eyes, approval and plaintext break-glass (C5); a patient lookup tested through the API
+  (its command is tested through the CLI); removing expired keys; everything §15.2 and §15.3 list as not yet.
 
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
 (HIPAA.md §11.2 D13).

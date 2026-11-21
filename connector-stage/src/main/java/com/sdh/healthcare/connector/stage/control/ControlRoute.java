@@ -21,7 +21,9 @@ import java.util.Set;
  * <p>A query takes its options from the path and the query string. An
  * action takes them from the path and its JSON body, which always holds a
  * {@code reason}; what the CLI reads from standard input, the reason or a
- * corrected record, it reads from the body too ({@link Input}).
+ * corrected record, it reads from the body too ({@link Input}). A sealed
+ * route (build step C4) names the caller's registered key to seal to,
+ * {@code sealTo}, and its answer is a stream of sealed parts.
  *
  * @param method    the HTTP method
  * @param path      the path, with {@code {name}} for a path variable
@@ -53,6 +55,15 @@ public record ControlRoute(String method, String path, String operation,
     /** The body field a corrected record is given in, base64. */
     public static final String RECORD = "record";
 
+    /** The body field naming the caller's key to seal a result to. */
+    public static final String SEAL_TO = "sealTo";
+
+    /** The body field a public key is given in, PEM. */
+    public static final String PUBLIC_KEY = "publicKey";
+
+    /** The body field the patient lookup's identifiers are given in. */
+    public static final String IDENTIFIERS = "identifiers";
+
     /** What of an action's body the command reads as standard input. */
     public enum Input
     {
@@ -64,22 +75,72 @@ public record ControlRoute(String method, String path, String operation,
         REASON,
 
         /** The corrected record, {@value ControlRoute#RECORD}, base64. */
-        RECORD
+        RECORD,
+
+        /** A public key, {@value ControlRoute#PUBLIC_KEY}, PEM. */
+        PUBLIC_KEY,
+
+        /**
+         * The caller's key named by {@value ControlRoute#SEAL_TO}: the
+         * result is sealed to it.
+         */
+        SEAL,
+
+        /**
+         * The caller's key named by {@value ControlRoute#SEAL_TO}, then
+         * the identifiers looked for, {@value ControlRoute#IDENTIFIERS},
+         * one a line.
+         */
+        SEAL_LOOKUP
     }
 
     /**
-     * Whether the route acts, rather than reads: it needs an idempotency
-     * key and a reason, and is answered once per key.
+     * Whether the route takes a JSON body, with a reason: an action or a
+     * sealed route.
      *
      * @return true for {@code POST} and {@code DELETE}
      */
-    public boolean acts()
+    public boolean hasBody()
     {
         return !"GET".equals(method);
     }
 
     /**
-     * Every route: the queries (build step C2) and the actions (C3).
+     * Whether the route's answer is a result sealed to the caller's key.
+     *
+     * @return true for a sealed route
+     */
+    public boolean seals()
+    {
+        return input == Input.SEAL || input == Input.SEAL_LOOKUP;
+    }
+
+    /**
+     * Whether the route acts: it needs an idempotency key, and is answered
+     * once per key. A sealed route isn't: its answer, sealed parts, isn't
+     * kept, and asking again reads again, audited again.
+     *
+     * @return true for an action
+     */
+    public boolean acts()
+    {
+        return hasBody() && !seals();
+    }
+
+    /**
+     * Whether the route is one of the control API's own operations, on
+     * the sealing keys, rather than one of the stage's commands.
+     *
+     * @return true for the operator keys' routes
+     */
+    public boolean own()
+    {
+        return operation.startsWith("operator-key");
+    }
+
+    /**
+     * Every route: the queries (build step C2), the actions (C3), and the
+     * sealed routes and the sealing keys' (C4).
      *
      * @return them
      */
@@ -87,6 +148,8 @@ public record ControlRoute(String method, String path, String operation,
     {
         List<ControlRoute> all = new ArrayList<>(queries());
         all.addAll(actions());
+        all.addAll(sealed());
+        all.addAll(keys());
         return all;
     }
 
@@ -154,6 +217,49 @@ public record ControlRoute(String method, String path, String operation,
                 action("POST", "/items/{itemId}/resubmit", "resubmit",
                         Map.of("itemId", "item-id"),
                         Map.of("again", "again"), Set.of(), Input.NONE));
+    }
+
+    /**
+     * The sealed routes (build step C4), each streamed as sealed parts.
+     *
+     * @return them
+     */
+    public static List<ControlRoute> sealed()
+    {
+        return List.of(
+                new ControlRoute("POST", PREFIX
+                        + "/failures/{itemId}/{seq}/export", "export",
+                        Map.of("itemId", "item-id", "seq", "seq"), Map.of(),
+                        Set.of(), true, Input.SEAL),
+                new ControlRoute("POST", PREFIX + "/patients/lookup",
+                        "patients", Map.of("itemIds", "item-id", "from",
+                                "from", "to", "to"), Map.of(), Set.of(),
+                        true, Input.SEAL_LOOKUP),
+                new ControlRoute("POST", PREFIX + "/items/{itemId}/restore",
+                        "restore", Map.of("itemId", "item-id", "fromOffset",
+                                "from-offset"),
+                        Map.of("unprocessed", "unprocessed"), Set.of(), true,
+                        Input.SEAL));
+    }
+
+    /**
+     * The sealing keys' routes (build step C4): the control API's own.
+     *
+     * @return them
+     */
+    public static List<ControlRoute> keys()
+    {
+        return List.of(
+                query("/operator-keys", "operator-keys",
+                        Map.of("principal", "principal"), Map.of()),
+                action("POST", "/operator-keys", "operator-key-register",
+                        Map.of("principal", "principal", "expiresAt",
+                                "expires"), Map.of(), Set.of(),
+                        Input.PUBLIC_KEY),
+                action("DELETE", "/operator-keys/{fingerprint}",
+                        "operator-key-revoke",
+                        Map.of("fingerprint", "fingerprint"), Map.of(),
+                        Set.of(), Input.NONE));
     }
 
     /**

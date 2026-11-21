@@ -105,7 +105,18 @@ public final class ExportSealer
     }
 
     /**
-     * The key's SHA-256, hex, for the audit log.
+     * The key sealed to.
+     *
+     * @return the public key
+     */
+    public PublicKey recipient()
+    {
+        return recipient;
+    }
+
+    /**
+     * The key's fingerprint: the SHA-256 of its SubjectPublicKeyInfo, in
+     * lower-case hex.
      *
      * @return the fingerprint
      */

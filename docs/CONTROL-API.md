@@ -1,6 +1,6 @@
 # The pipeline control API and its test harness: intent
 
-Status: **Intent, decided 2026-11-20 with the user; designed in [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md); its query operations and actions built (C2, C3, 2026-11-21), the rest not** · Companion to [HIPAA.md](HIPAA.md) §11,
+Status: **Intent, decided 2026-11-20 with the user; designed in [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md); its query operations, actions and sealed results built (C2–C4, 2026-11-21), the rest not** · Companion to [HIPAA.md](HIPAA.md) §11,
 which lists this as outstanding work, and to DESIGN.md §11.4, the operator tools it replaces as the supported
 interface.
 

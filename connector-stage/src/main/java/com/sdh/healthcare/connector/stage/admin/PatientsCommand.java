@@ -10,6 +10,7 @@ import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -181,23 +182,23 @@ public final class PatientsCommand<C extends PatientAdmin>
                 arguments.option("to")
                         .map(text -> AuditCommands.time("to", text))
                         .orElse(null),
-                () -> lookup(context));
+                () -> lookup(arguments.input(context::patientInput)));
     }
 
     /**
      * Reads the key and the identifiers looked for from standard input:
      * the key, PEM, then one identifier a line.
      *
-     * @param context the stage
+     * @param in standard input, or what the control API gives in its
+     *           place
      * @return them
      * @throws IOException if standard input can't be read
      * @throws AdminArgs.UsageException if no key is given
      */
-    private static Lookup lookup(PatientAdmin context)
-            throws IOException
+    private static Lookup lookup(InputStream in) throws IOException
     {
-        byte[] input = FailureCommands.input(context.patientInput(),
-                MAX_INPUT, "key and identifiers");
+        byte[] input = FailureCommands.input(in, MAX_INPUT,
+                "key and identifiers");
         String text = new String(input, StandardCharsets.US_ASCII);
         Arrays.fill(input, (byte) 0);
         int end = text.indexOf(PEM_END);

@@ -22,9 +22,20 @@ info:
     carry out is answered `202`, with `Location` giving its record under
     `/operations`, which follows it to the end.
 
-    This version serves the queries (build step C2) and the actions (C3).
-    Sealed results and four-eyes approval follow in later versions of
-    this description.
+    A PHI result (`export`, the patient lookup, `restore`) is sealed to
+    one of the caller's own sealing keys, registered in advance by someone
+    else with `keys.admin` (`/operator-keys`), and named by its
+    fingerprint in `sealTo`. Its answer is `application/x-ndjson`: a
+    header line, a line per sealed part (a compact JWE,
+    `ECDH-ES+A256KW` or `RSA-OAEP-256` with `A256GCM`), and a trailer with
+    the count of parts and the SHA-256 of their JWEs, in order, as ASCII,
+    with nothing between them. A stream without its trailer was cut off:
+    discard it. A sealed request needs a `reason`, and no
+    `Idempotency-Key`: asking again reads again, audited again.
+
+    This version serves the queries (build step C2), the actions (C3),
+    and the sealed results and sealing keys (C4). Four-eyes approval
+    follows in a later version of this description.
 servers:
   - url: https://{host}:8443/api/v1
     variables:
@@ -372,6 +383,155 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/Operation"}
         default: {$ref: "#/components/responses/Problem"}
+  /failures/{itemId}/{seq}/export:
+    post:
+      operationId: failureExport
+      summary: What a failure failed on, sealed to the caller
+      description: Permission `phi.export`. One sealed part.
+      parameters:
+        - {$ref: "#/components/parameters/itemIdPath"}
+        - {$ref: "#/components/parameters/seqPath"}
+      requestBody: {$ref: "#/components/requestBodies/Sealed"}
+      responses:
+        "200": {$ref: "#/components/responses/SealedParts"}
+        default: {$ref: "#/components/responses/Problem"}
+  /patients/lookup:
+    post:
+      operationId: patientsLookup
+      summary: The patients the stage's FHIR records name, sealed
+      description: >-
+        Records-holding stages. Give `itemIds`, or `from` and `to` (at most
+        31 days apart). With `identifiers`, lists only the records naming
+        one of them (a patient's records); without, lists every record with
+        its patients' identifiers (who an incident touched). Each part is a
+        page of JSON lines: item, seq, record, patients. The identifiers
+        are never audited or answered. Permission `phi.export`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Sealed"}
+                - type: object
+                  properties:
+                    itemIds:
+                      type: array
+                      items: {type: string, format: uuid}
+                    from: {type: string, description: A date or instant.}
+                    to: {type: string, description: A date or instant.}
+                    identifiers:
+                      type: array
+                      maxItems: 1000
+                      items:
+                        type: string
+                        maxLength: 512
+                        description: "system|value, or a value for any system"
+      responses:
+        "200": {$ref: "#/components/responses/SealedParts"}
+        default: {$ref: "#/components/responses/Problem"}
+  /items/{itemId}/restore:
+    post:
+      operationId: itemRestore
+      summary: A landed item, decrypted, digest checked, sealed to the caller
+      description: >-
+        The split stage. Each part holds up to 1 MiB of the item, in
+        order, numbered in its protected header (`sdh_item`, `sdh_part`,
+        `sdh_offset`, `sdh_last`). The digest is checked over the whole
+        item; on a mismatch the stream ends without its trailer. Permission
+        `phi.export`.
+      parameters:
+        - {$ref: "#/components/parameters/itemIdPath"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Sealed"}
+                - type: object
+                  properties:
+                    fromOffset: {type: integer, minimum: 0}
+                    unprocessed:
+                      type: boolean
+                      description: Start after the item's last split record.
+      responses:
+        "200": {$ref: "#/components/responses/SealedParts"}
+        default: {$ref: "#/components/responses/Problem"}
+  /operator-keys:
+    get:
+      operationId: operatorKeys
+      summary: The principals' sealing keys, without the keys
+      description: Permission `keys.admin`.
+      parameters:
+        - name: principal
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: The keys, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: {$ref: "#/components/schemas/OperatorKey"}
+        default: {$ref: "#/components/responses/Problem"}
+    post:
+      operationId: operatorKeyRegister
+      summary: Registers a sealing key for a principal
+      description: >-
+        EC P-256 or P-384, or RSA of at least 3072 bits, expiring within a
+        year. Permission `keys.admin`, and never for the caller itself
+        (`403 not-for-yourself`), so registering a key and sealing to it are
+        two people. A key registered already is `409 refused`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [principal, publicKey, expiresAt]
+                  properties:
+                    principal: {type: string, maxLength: 256}
+                    publicKey:
+                      type: string
+                      description: PEM, BEGIN PUBLIC KEY.
+                    expiresAt: {type: string, format: date-time}
+      responses:
+        "200":
+          description: The key, as registered.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OperatorKey"}
+        default: {$ref: "#/components/responses/Problem"}
+  /operator-keys/{fingerprint}:
+    delete:
+      operationId: operatorKeyRevoke
+      summary: Revokes a sealing key
+      description: >-
+        It stays listed, revoked. Permission `keys.admin`; a principal may
+        revoke its own.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - name: fingerprint
+          in: path
+          required: true
+          schema: {type: string, pattern: "^[0-9a-f]{64}$"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200":
+          description: The key, revoked.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OperatorKey"}
+        default: {$ref: "#/components/responses/Problem"}
   /openapi.yaml:
     get:
       operationId: openapi
@@ -438,7 +598,46 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Reasoned"}
+    Sealed:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Sealed"}
   responses:
+    SealedParts:
+      description: The result, sealed, as JSON lines.
+      headers:
+        X-Request-Id: {$ref: "#/components/headers/RequestId"}
+      content:
+        application/x-ndjson:
+          schema:
+            oneOf:
+              - title: Header
+                type: object
+                properties:
+                  operation: {type: string}
+                  sealedTo: {type: string}
+                  requestId: {type: string, format: uuid}
+              - title: Part
+                type: object
+                properties:
+                  part: {type: integer, minimum: 1}
+                  jwe: {type: string}
+              - title: Trailer
+                type: object
+                properties:
+                  end: {const: true}
+                  parts: {type: integer}
+                  sha256: {type: string}
+                  requestId: {type: string, format: uuid}
+              - title: Incomplete
+                type: object
+                description: The stream broke part way; discard it.
+                properties:
+                  end: {const: false}
+                  incomplete: {const: true}
+                  parts: {type: integer}
+                  reason: {type: string}
     Accepted:
       description: A long operation started; poll its record.
       headers:
@@ -459,8 +658,9 @@ components:
     Problem:
       description: >-
         A refusal (RFC 9457). `title` is one of `bad-request` (400),
-        `unauthenticated` (401), `permission-required`, `approval-required`
-        or `forbidden` (403), `not-on-this-stage` or `operation-not-found`
+        `unauthenticated` (401), `permission-required`, `approval-required`,
+        `sealing-key-not-yours`, `not-for-yourself` or `forbidden` (403),
+        `not-on-this-stage`, `operation-not-found` or `key-not-found`
         (404), `refused` (409, the stage refused it as things stand),
         `idempotency-key-reused` or `in-progress` (409), `too-large` (413)
         or `failed` (500). A refusal of an action is kept as its key's
@@ -478,6 +678,29 @@ components:
           description: >-
             Why; audited. Letters, digits, spaces and . , : _ # / -
           pattern: "^[A-Za-z0-9 .,:_#/-]{1,200}$"
+    Sealed:
+      allOf:
+        - {$ref: "#/components/schemas/Reasoned"}
+        - type: object
+          required: [sealTo]
+          properties:
+            sealTo:
+              type: string
+              pattern: "^[0-9a-f]{64}$"
+              description: >-
+                The fingerprint (SHA-256 of the SubjectPublicKeyInfo) of one
+                of the caller's own registered keys, unexpired and not
+                revoked; otherwise `403 sealing-key-not-yours`.
+    OperatorKey:
+      type: object
+      properties:
+        fingerprint: {type: string}
+        principal: {type: string}
+        registeredBy: {type: string}
+        registeredAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        revokedBy: {type: [string, "null"]}
+        revokedAt: {type: [string, "null"], format: date-time}
     Operation:
       type: object
       properties:

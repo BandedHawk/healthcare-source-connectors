@@ -77,14 +77,21 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
     private static final Pattern TICKET =
             Pattern.compile("[A-Za-z0-9._:/-]{1,64}");
 
-    /** How much plaintext goes in one sealed part. */
+    /** How much plaintext goes in one sealed part of a file. */
     static final int PART_BYTES = 8 << 20;
+
+    /**
+     * How much plaintext goes in one sealed part sent to the control API's
+     * caller (CONTROL-API-DESIGN.md §7): the most the API holds at once.
+     */
+    static final int CALLER_PART_BYTES = 1 << 20;
 
     /**
      * What is asked.
      *
      * @param itemId       the item
-     * @param destination  where the output is written
+     * @param destination  where the output is written; null to send it
+     *                     to the control API's caller as sealed parts
      * @param plaintext    whether to write it unsealed, for break-glass
      * @param ticket       the change or incident a plaintext restore is
      *                     for; null otherwise
@@ -211,6 +218,23 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
     public Request bind(AdminArgs arguments, SplitAdminContext context)
     {
         UUID itemId = parseId(arguments.required("item-id"));
+        Long fromOffset = arguments.option("from-offset")
+                .map(RestoreCommand::parseOffset).orElse(null);
+        if (arguments.outputToCaller())
+        {
+            if (arguments.flag("plaintext") || arguments.flag("original-name")
+                    || arguments.option("to").isPresent())
+            {
+                throw new AdminArgs.UsageException("The control API's"
+                        + " restore is sealed to the caller, under the"
+                        + " item's ID");
+            }
+            return new Request(itemId, null, false, null,
+                    () -> FailureCommands.input(arguments.input(
+                            () -> System.in), ExportSealer.MAX_KEY_BYTES,
+                            "public key"), fromOffset,
+                    arguments.flag("unprocessed"), false);
+        }
         Path directory = OutputFiles.directory(arguments.required("to"));
         return new Request(itemId, new Destination()
         {
@@ -228,10 +252,9 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
                         : directory.resolve(name).toString();
             }
         }, arguments.flag("plaintext"), arguments.option("ticket")
-                .orElse(null), () -> FailureCommands.input(System.in,
-                        ExportSealer.MAX_KEY_BYTES, "public key"),
-                arguments.option("from-offset")
-                        .map(RestoreCommand::parseOffset).orElse(null),
+                .orElse(null), () -> FailureCommands.input(arguments.input(
+                        () -> System.in), ExportSealer.MAX_KEY_BYTES,
+                        "public key"), fromOffset,
                 arguments.flag("unprocessed"),
                 arguments.flag("original-name"));
     }
@@ -314,6 +337,20 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
         }
 
         ExportSealer sealing = sealer;
+        if (request.destination() == null)
+        {
+            long restored;
+            try (Sealing sealed = new Sealing(invocation.sink()::sealed,
+                    sealing, itemId, from, CALLER_PART_BYTES))
+            {
+                LandedItems.read(landedItems, itemId, context.keys().wrap(),
+                        context.landingIds(), new Skipping(sealed, from));
+                sealed.finish();
+                restored = sealed.plaintext();
+            }
+            audit.add(Attr.BYTES, restored);
+            return new Result(restored, from, size, false, "the caller");
+        }
         long[] plain = new long[1];
         long written = request.destination().write(outputName, output ->
         {
@@ -323,8 +360,9 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
                         context.landingIds(), new Skipping(output, from));
                 return;
             }
-            try (Sealing sealed = new Sealing(output, sealing, itemId,
-                    from))
+            try (Sealing sealed = new Sealing(jwe -> output.write((jwe + "\n")
+                    .getBytes(StandardCharsets.US_ASCII)), sealing, itemId,
+                    from, PART_BYTES))
             {
                 LandedItems.read(landedItems, itemId, context.keys().wrap(),
                         context.landingIds(), new Skipping(sealed, from));
@@ -428,18 +466,32 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
         }
     }
 
+    /** Where sealed parts go: lines of a file, or the API's caller. */
+    @FunctionalInterface
+    private interface Parts
+    {
+
+        /**
+         * Takes a sealed part.
+         *
+         * @param jwe the part, a compact JWE
+         * @throws IOException if it can't be written
+         */
+        void part(String jwe) throws IOException;
+    }
+
     /**
-     * Seals what is written to it in parts of {@link #PART_BYTES}, each a
-     * JWE on a line of its own, numbered in its protected header with the
-     * item and where the part starts, so parts can't be reordered, dropped
-     * or moved to another item unseen. Each part's plaintext is cleared
-     * once sealed. Closing it leaves the stream beneath open.
+     * Seals what is written to it in parts, each a JWE of its own,
+     * numbered in its protected header with the item and where the part
+     * starts, so parts can't be reordered, dropped or moved to another
+     * item unseen. Each part's plaintext is cleared once sealed. Closing
+     * it leaves what takes the parts open.
      */
     private static final class Sealing extends OutputStream
     {
 
-        /** Where the sealed lines go. */
-        private final OutputStream output;
+        /** Where the sealed parts go. */
+        private final Parts output;
 
         /** Seals the parts. */
         private final ExportSealer sealer;
@@ -448,7 +500,7 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
         private final UUID itemId;
 
         /** The current part. */
-        private final byte[] part = new byte[PART_BYTES];
+        private final byte[] part;
 
         /** How much of the current part is filled. */
         private int filled;
@@ -468,15 +520,17 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
         /**
          * Starts sealing.
          *
-         * @param output where the sealed lines go
-         * @param sealer seals the parts
-         * @param itemId the item
-         * @param from   where in the item the output starts
+         * @param output    where the sealed parts go
+         * @param sealer    seals the parts
+         * @param itemId    the item
+         * @param from      where in the item the output starts
+         * @param partBytes how much plaintext goes in a part
          */
-        Sealing(OutputStream output, ExportSealer sealer, UUID itemId,
-                long from)
+        Sealing(Parts output, ExportSealer sealer, UUID itemId, long from,
+                int partBytes)
         {
             this.output = output;
+            this.part = new byte[partBytes];
             this.sealer = sealer;
             this.itemId = itemId;
             this.partStart = from;
@@ -534,7 +588,7 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
         }
 
         /**
-         * Seals the current part and writes its line.
+         * Seals the current part and sends it on.
          *
          * @param last whether it is the last
          * @throws IOException if it can't be written
@@ -555,7 +609,7 @@ final class RestoreCommand implements CliOperation<SplitAdminContext,
             {
                 Arrays.fill(content, (byte) 0);
             }
-            output.write((line + "\n").getBytes(StandardCharsets.US_ASCII));
+            output.part(line);
             partStart += filled;
             filled = 0;
         }
