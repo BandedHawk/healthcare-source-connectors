@@ -105,7 +105,8 @@ Decided 2026-11-09 ([STAGES.md](STAGES.md) §15.8.9, §15.8.10 step 5). Give eac
 |---|---|---|
 | Landing node | (nothing) | its output (`<pipeline>.landed` in the sandbox) |
 | Split stage | `<pipeline>.landed` | `<pipeline>.split`, and `<pipeline>.landed` (`sdh.stage.reprocess`) |
-| Convert stage | `<pipeline>.split` | `<pipeline>.records`, `<pipeline>.split` (`sdh.stage.reprocess`), and the producer's results queue when `sdh.results.enabled` |
+| Convert stage | `<pipeline>.split` | `<pipeline>.records`, `<pipeline>.convert.dlq` (`sdh.stage.dlq`), `<pipeline>.split` (`sdh.stage.reprocess`), and the producer's results queue when `sdh.results.enabled` |
+| Transform stage | `<pipeline>.records` | `<pipeline>.fhir`, `<pipeline>.fhir.dlq` (`sdh.stage.dlq`), `<pipeline>.records` (`sdh.stage.reprocess`), and the producer's results queue when `sdh.results.enabled` |
 | The admin CLIs (`sdh-admin`) | (nothing) | (nothing) |
 
 The admin CLIs send nothing: what follows from an operator's command (a reprocess, a decline's new item end) is sent by the stage's pods. Give operators no broker credentials.
@@ -119,7 +120,17 @@ What each broker calls these rights:
 - **ActiveMQ Artemis:** a role with `consume` on the input address's queue and `send` on each address it sends to, in `security-settings`.
 - **RabbitMQ:** a user with `read` on the input queue and `write` on each exchange it publishes to.
 
-Not tried in the sandbox, whose Kafka has no TLS, SASL or ACLs ([SANDBOX.md](SANDBOX.md), "Not yet as in production").
+On Kafka these rights are tried by connector-broker's `KafkaSecurityIT` (since 2026-11-20): a broker taking only
+`SASL_SSL` clients, with the landing node's and the split stage's ACLs exactly as above. Each sends and receives
+with them, and is refused a topic it only sends to, and another pipeline's topics and consumer group.
+`deploy/reference/kafka-acls.sh` applies them for a pipeline. They aren't tried in the sandbox, whose Kafka has no
+TLS, SASL or ACLs ([SANDBOX.md](SANDBOX.md), "Not yet as in production").
+
+**Kafka over TLS:** put `securityProtocol=SASL_SSL`, `saslMechanism`, `saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})`,
+`sslTruststoreType=PEM` and `sslTruststoreLocation` on every Kafka URI, as `deploy/reference/` does. `RAW(...)`
+keeps the login's quotes and semicolon intact, and the placeholder keeps it out of the settings. On an input URI a
+written value is refused (DESIGN.md §5.3.16). Output, reprocess and dead-letter URIs aren't checked yet, so keep
+to the placeholder there too.
 
 ## Settings
 

@@ -1,0 +1,68 @@
+# Reference settings for a pipeline's split stage, with the HIPAA profile on and nothing waived (HIPAA.md §8.1
+# item 13; README.md here). As deploy/aws/k8s/pipeline/splitter-application.yml, with Kafka over SASL_SSL, Postgres
+# with verify-full in the pipeline's own database, AWS KMS, and the audit export, as landing-application.yml says.
+# ${...} in capitals are the deployment's: fill them in, or set them as environment variables, which Spring reads.
+# ${SDH_LEASE_JDBC_PASSWORD} comes from the stage's secret. Checked by ReferenceConfigurationTest
+# (connector-runtime): the profile, as the node applies it at startup, refuses nothing.
+sdh:
+  compliance: { profile: hipaa }
+  connector-id: split-${PIPELINE}
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+  landing:
+    intake: ${PIPELINE}
+    storage:
+      catalog-name: sdh
+      namespace: ${PIPELINE}_landing
+      catalog:
+        type: jdbc
+        uri: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+        jdbc.user: splitter_${PIPELINE}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://${BRONZE_BUCKET}/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        client: { region: "${AWS_REGION}" }
+        clients: 1
+  stage:
+    input:
+      type: kafka
+      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&groupId=splitter-${PIPELINE}&groupProtocol=consumer&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    output:
+      type: kafka
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    reprocess:
+      type: kafka
+      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    registry-schema: split_${PIPELINE}
+    next-registry-schema: convert_${PIPELINE}
+  split:
+    format: ccda
+  storage:
+    catalog-name: sdh
+    namespace: ${PIPELINE}
+    catalog:
+      type: jdbc
+      uri: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+      jdbc.user: splitter_${PIPELINE}
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://${SILVER_BUCKET}/warehouse
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      client: { region: "${AWS_REGION}" }
+  lease:
+    jdbc:
+      url: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+      username: splitter_${PIPELINE}
+  crypto:
+    wrap-provider: aws-kms
+    sign-provider: aws-kms
+    aws: { region: "${AWS_REGION}" }
+    keys:
+      records-kek: alias/sdh-${PIPELINE}-records
+      landed-items-kek: alias/sdh-${PIPELINE}-landed-items
+      signing: { kid: "splitter-${PIPELINE}", key-ref: "alias/sdh-${PIPELINE}-splitter-signing" }
+      recipient: { kid: "convert-${PIPELINE}-inbox", pem: /run/secrets/recipient.pem, sha256: "${CONVERT_INBOX_SHA256}" }
+      inbox: { kid: "splitter-${PIPELINE}-inbox", pem: /run/secrets/inbox.pem, public-pem: /run/secrets/inbox-public.pem,
+               sha256: "${INBOX_SHA256}" }
+      landing-signer: { kid: "landing-${PIPELINE}", pem: /run/secrets/landing-signer.pem }

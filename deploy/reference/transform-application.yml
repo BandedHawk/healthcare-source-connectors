@@ -1,0 +1,72 @@
+# Reference settings for a pipeline's transform stage (healthcare-data-transformer), with the HIPAA profile on and
+# nothing waived (HIPAA.md §8.1 item 13; README.md here). As deploy/aws/k8s/pipeline/transform-application.yml,
+# with Kafka over SASL_SSL, Postgres with verify-full in the pipeline's own database, AWS KMS, and the audit
+# export, as landing-application.yml says.
+# ${...} in capitals are the deployment's: fill them in, or set them as environment variables, which Spring reads.
+# ${SDH_LEASE_JDBC_PASSWORD} comes from the stage's secret. Checked by ReferenceConfigurationTest
+# (connector-runtime): the profile, as the node applies it at startup, refuses nothing.
+sdh:
+  compliance: { profile: hipaa }
+  connector-id: transform-${PIPELINE}
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+  results: { enabled: false }
+  transform:
+    wstl: /etc/sdh/wstl/set.tar.gz
+  stage:
+    input:
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&groupId=transform-${PIPELINE}&groupProtocol=consumer&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    output:
+      type: kafka
+      uri: "kafka:${PIPELINE}.fhir?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    dlq:
+      type: kafka
+      uri: "kafka:${PIPELINE}.fhir.dlq?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    reprocess:
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    registry-schema: transform_${PIPELINE}
+    source:
+      catalog-name: sdh
+      namespace: ${PIPELINE}
+      table: records
+      catalog:
+        type: jdbc
+        uri: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+        jdbc.user: fhir_${PIPELINE}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://${SILVER_BUCKET}/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        client: { region: "${AWS_REGION}" }
+        clients: 1
+    sink:
+      catalog-name: sdh-gold
+      namespace: ${PIPELINE}_fhir
+      table: fhir
+      kek: alias/sdh-${PIPELINE}-fhir
+      catalog:
+        type: jdbc
+        uri: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+        jdbc.user: fhir_${PIPELINE}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://${GOLD_BUCKET}/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        client: { region: "${AWS_REGION}" }
+  lease:
+    jdbc:
+      url: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+      username: fhir_${PIPELINE}
+  crypto:
+    wrap-provider: aws-kms
+    sign-provider: aws-kms
+    aws: { region: "${AWS_REGION}" }
+    keys:
+      records-kek: alias/sdh-${PIPELINE}-records
+      signing: { kid: "transform-${PIPELINE}", key-ref: "alias/sdh-${PIPELINE}-transform-signing" }
+      recipient: { kid: "consumer-${PIPELINE}", pem: /run/secrets/recipient.pem, sha256: "${CONSUMER_SHA256}" }
+      inbox: { kid: "fhir-${PIPELINE}", pem: /run/secrets/inbox.pem, public-pem: /run/secrets/inbox-public.pem,
+               sha256: "${RECIPIENT_SHA256}" }
+      landing-signer: { kid: "convert-${PIPELINE}", pem: /run/secrets/convert-signer.pem }

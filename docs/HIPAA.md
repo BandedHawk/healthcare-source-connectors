@@ -54,6 +54,12 @@ features built (DESIGN.md revision (eg)); and a customer mapping added (§10), w
   - `patients`, a patient lookup on the record stages, sealed to the operator's key and audited;
   - `restore` sealed to the operator's key by default; plaintext only with `--plaintext --ticket`, audited.
 
+Revision 2026-11-20 (e): §8.1 items 7, 9 and 13 built (DESIGN.md revision (eh)). Kafka over `SASL_SSL` with ACLs
+per stage, and Postgres with `verify-full`, are tested through the stages' own clients. Two pipelines on shared
+services are tested to be kept apart. Reference settings with the profile on and nothing waived are in
+`deploy/reference/`, with the isolation layout in [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §2.8. Found: pipelines
+need a database each, since a JDBC catalog can't keep them apart within one (§8.1 item 9).
+
 **This is an engineering mapping, not legal advice.** It sets out which parts of HIPAA bear on the pipeline, which
 controls the code and deployments provide toward each one, and what the code leaves to the organisation that runs
 it. Privacy and compliance counsel must review it before any real PHI is processed. The current AWS proof of
@@ -162,8 +168,8 @@ The tables below record what the code already does toward each specification.
 | Encryption and decryption (a)(2)(iv) (A) | **Implemented**, though only addressable. Envelope encryption of every stored record (DESIGN §7.2): AES-256-GCM per 8 MiB chunk, a batch data key wrapped by a KMS key-encryption key, and an HKDF-derived key per record. A separate KEK per table means a reader can be given `records` only (DESIGN §7.1). Storage-side SSE-KMS sits beneath as a second layer (DESIGN §8.1; AWS-POC §4). Decryption needs both the KMS grant and the data. In the AWS PoC, even the deployer is denied decrypt on bronze's key. | KMS key rotation is off in the PoC, to save cost (AWS-POC §4). Re-keying existing data after a KEK compromise is out of scope (DESIGN §17). |
 | **Audit controls (b)** (standard; no specifications) | Audit events `sdh.audit.*` for each item's lifecycle, the lease, admin commands, failure state changes and PHI purges (DESIGN §12; STAGES §15.3). Exports are allow-listed, so no PHI can be in them (DESIGN §12). One trace per item, with 100% sampling. **Every event is also written to a durable journal** in the stage's Postgres schema: a hash chain per process, its head sealed with the stage's signing key every minute and at close; never dropped; checked by `audit-verify`, exported by `audit-export`, pruned by `audit-prune` (DESIGN §12.3). Every record `connector-queue-reader` opens is audited with the reader's name and purpose (`reader.record_read`, DESIGN §10.2). | NIST SP 800-66r2 (Table 22) asks "where will audit information reside (e.g., separate server)?". The journal is durable but sits beside the data: the separate copy is the operator's SIEM, fed by the OTLP export and by `audit-export`. **On AWS the collector still drops logs** (`nop`, §8.5). CloudTrail data events on S3 and KMS (AWS-POC §9). A whole chain deleted shows only against the SIEM copy. HIPAA sets no retention period for logs. The 6 years of § 164.316(b)(2)(i) apply to the documentation of required actions and reviews (§3.4). Counsel sets the log retention. |
 | **Integrity (c)(1).** Mechanism to authenticate ePHI (c)(2) (A) | **Implemented.** GCM's tag and AAD (item, seq, chunk index, chunk count) detect any change, reordering or truncation (DESIGN §7.2). The record ID is keyed and computed over the content (DESIGN §7.3). Item digests are checked at restore, and no unverified plaintext is left behind (DESIGN §11.4). Checkpoints and the given-up record are MAC'd (DESIGN §5.3.13, §9.1). Commits are fenced, so a stale instance can't write (DESIGN §9.3). Every message is digitally signed (ES256), one of the mechanisms NIST SP 800-66r2 names (Table 23, activity 5). Nothing is dropped or silently replaced: corrections, retries and reprocesses are new, linked objects, and what they supersede is kept (STAGES §15.1, §15.8). A record that arrives again with different output raises `record.conflict` rather than overwriting the first (STAGES §6). | — |
-| **Person or entity authentication (d)** (standard; no specifications) | HTTP push uses OAuth2 (a bearer JWT checked for issuer, audience and scope) or mTLS (CA and subject allow-list), with one sender per intake when results are on (DESIGN §5.3.15, §5.3.8). Each message is signed and checked against pinned keys (DESIGN §10.1, §10.2). Cloud services are reached through workload identity. Recipient keys are pinned by fingerprint (DESIGN §7.4). | **Kafka has no authentication or ACLs in the PoC** (AWS-POC §9). Messages are still signed and sealed, so nobody on the broker can read or forge them, but they can be deleted or replayed. Postgres uses passwords from Kubernetes Secrets. MFA for human access is the operator's: NIST SP 800-66r2 (Table 24) advises it where risk is high, for example remote access and privileged functions. |
-| **Transmission security (e)(1).** Integrity controls (e)(2)(i) (A); encryption (e)(2)(ii) (A) | Every message between stages is a JWS nested in a JWE (`ECDH-ES+A256KW` or `RSA-OAEP-256`, `A256GCM`), addressed to the next stage's key. Only `messageId`, `type`, `itemId` and the content type are visible on the broker (DESIGN §10.1). TLS is used to the object store, KMS and catalog. The S3 buckets refuse non-TLS requests (AWS-POC §4). HTTP push is TLS only. | Kafka TLS (AWS-POC §9). Postgres TLS: the PoC manifests configure none. Postgres holds the catalog, leases and registries, not record content. Private subnets, in place of public subnets with inbound closed (AWS-POC §9). |
+| **Person or entity authentication (d)** (standard; no specifications) | HTTP push uses OAuth2 (a bearer JWT checked for issuer, audience and scope) or mTLS (CA and subject allow-list), with one sender per intake when results are on (DESIGN §5.3.15, §5.3.8). Each message is signed and checked against pinned keys (DESIGN §10.1, §10.2). Cloud services are reached through workload identity. Recipient keys are pinned by fingerprint (DESIGN §7.4). | **Kafka has no authentication or ACLs in the PoC** (AWS-POC §9); SASL_SSL with ACLs per stage is tested (§8.1 item 7) and in the reference settings (§8.1 item 13). Messages are still signed and sealed, so nobody on the broker can read or forge them, but they can be deleted or replayed. Postgres uses passwords from Kubernetes Secrets. MFA for human access is the operator's: NIST SP 800-66r2 (Table 24) advises it where risk is high, for example remote access and privileged functions. |
+| **Transmission security (e)(1).** Integrity controls (e)(2)(i) (A); encryption (e)(2)(ii) (A) | Every message between stages is a JWS nested in a JWE (`ECDH-ES+A256KW` or `RSA-OAEP-256`, `A256GCM`), addressed to the next stage's key. Only `messageId`, `type`, `itemId` and the content type are visible on the broker (DESIGN §10.1). TLS is used to the object store, KMS and catalog. The S3 buckets refuse non-TLS requests (AWS-POC §4). HTTP push is TLS only. | Kafka TLS (AWS-POC §9). Postgres TLS: the PoC manifests configure none. Both are tested, and set in the reference settings (§8.1 items 7, 13). Postgres holds the catalog, leases and registries, not record content. Private subnets, in place of public subnets with inbound closed (AWS-POC §9). |
 
 ### 3.2 Administrative safeguards (§ 164.308)
 
@@ -466,11 +472,19 @@ or the **operator's** own duty that the product can only support.
    - **Off:** `none` turns the profile off, and that is audited too.
    - **Not covered:** the profile checks the settings, not the far end. A server's certificate is checked by TLS
      itself, and a broker's ACLs aren't visible from the node.
-7. **Broker and catalog TLS are configurable but untested.**
-   - Kafka's `securityProtocol`, SSL and SASL options pass through the queue URI (DESIGN §14), and Postgres TLS
-     through the JDBC URL. The integration suites and the sandbox run Kafka without TLS, SASL or ACLs
-     (DEPLOYMENT.md).
-   - § 164.312(d) and (e) depend on them, so they need tests, as each other broker and the KMS providers have.
+7. **Broker and catalog TLS: tested 2026-11-20** (DESIGN revision (eh)).
+   - **Kafka** (connector-broker `KafkaSecurityIT`): a broker that takes clients only over `SASL_SSL` (TLS,
+     SCRAM-SHA-512) with the standard authorizer, and each stage's identity given only the ACLs DEPLOYMENT.md
+     lists. Through the stages' own publisher, receive route and broker check:
+     - a landing node sends and a split stage receives in its group and sends onward;
+     - the split stage is refused a topic it only sends to, and another pipeline's topics and group;
+     - a broker certificate from an untrusted CA, and a wrong password, are each refused and reported as `AUTH`.
+   - **Postgres** (file-connector `PostgresTlsIT`): a server that takes TLS connections only. The lease pool (which
+     the registries and the audit journal share) and the Iceberg JDBC catalog (with `jdbc.sslmode` and
+     `jdbc.sslrootcert`) connect with `verify-full`. A certificate from another CA, and a connection without
+     TLS, are refused.
+   - **Still untested:** mTLS to Kafka (a client certificate in place of SCRAM), AWS MSK's IAM login, and TLS
+     through PgBouncer. The sandbox and the AWS PoC still run both in plaintext (§8.5).
 8. **No re-keying of existing data** (DESIGN §17).
    - KEK rotation applies to new data (`kek_ref`), and a KMS's own rotation keeps old versions.
    - After a KEK is compromised, an operator can't re-wrap what is stored. That bears on the security incident
@@ -484,7 +498,17 @@ or the **operator's** own duty that the product can only support.
      - Part 2 records (§4.5).
    - Destroying a pipeline's KEKs is a cryptographic erase of that customer's data: return or destruction at the
      end of a contract (§ 164.504(e)(2)(ii)(J)).
-   - **Still to do:** a test that one pipeline's roles and keys can't read another's.
+   - **Tested 2026-11-20** (DESIGN revision (eh)): file-connector `PipelineIsolationIT` lays out two pipelines on
+     one Postgres, one object store and one Vault, as [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §2.8 describes.
+     Each split stage reaches its own database, buckets and keys, through the stages' own clients. It is refused
+     the other pipeline's database, buckets, KEK and signing key, and writing its own input bucket. A data key
+     wrapped under the other pipeline's KEK can't be unwrapped under its own. `KafkaSecurityIT` covers topics and
+     groups.
+   - **Found:** isolation needs a database per pipeline. A JDBC catalog keeps every namespace in the same tables,
+     and the sandbox and the AWS PoC put every pipeline in one database, as one catalog role, so there one
+     pipeline's stages could change another's catalog entries. They can't read its data, which is under other
+     keys and in other buckets. The reference layout (`deploy/reference/postgres.sql`) gives each pipeline a
+     database. A REST catalog with grants per principal is the other way.
 10. **No security labels on sensitive data.**
     - The mapping doesn't mark Part 2, behavioural health or similar data (for example FHIR `meta.security`), so
       separating it rests on the pipeline alone.
@@ -502,11 +526,18 @@ or the **operator's** own duty that the product can only support.
     - § 164.308(a)(7)(ii)(A)–(B) are the operator's, but only the product can say how to back up and restore
       consistently.
     - **To consider:** a documented, tested procedure, and a check after a restore.
-13. **No reference configuration with the profile on.**
-    - Every shipped manifest (sandbox and AWS, all four stages) sets `sdh.compliance.profile: none`, which is right
-      for synthetic data. A customer has nothing to start from that passes the profile.
-    - **To consider:** reference manifests with the profile on, TLS everywhere and the KMS, as the starting point
-      for [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §2.
+13. **Reference configuration with the profile on: built 2026-11-20** (`deploy/reference/`, DESIGN revision (eh)).
+    - Each stage's settings (landing, split, convert, transform), under `hipaa` with nothing waived:
+      - Kafka over `SASL_SSL`, with the login from the environment;
+      - Postgres with `verify-full`, in the pipeline's own database;
+      - AWS KMS;
+      - the audit export.
+    - Beside them, the pipeline's database layout (`postgres.sql`) and each stage's ACLs (`kafka-acls.sh`).
+    - `ReferenceConfigurationTest` runs each file through the profile as the node does at startup, with its
+      image's JVM options: nothing refused, nothing waived. The AWS PoC's settings, with the profile on, are
+      refused.
+    - **Not yet run:** no deployment has been made from these files. The sandbox and the AWS PoC still run
+      `profile: none` on synthetic data.
 14. **Restore output: sealed by default since 2026-11-20** (DESIGN §11.4). `restore` writes `<id>.jwe`, one JWE a
     line, each a part of up to 8 MiB, its protected header naming the item, part, offset and whether it is the
     last, so parts can't be dropped, reordered or moved unseen. Plaintext needs `--plaintext --ticket <ref>`, with

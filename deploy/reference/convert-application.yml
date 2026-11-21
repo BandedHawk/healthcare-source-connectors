@@ -1,0 +1,57 @@
+# Reference settings for a pipeline's convert stage, with the HIPAA profile on and nothing waived (HIPAA.md §8.1
+# item 13; README.md here). As deploy/aws/k8s/pipeline/convert-application.yml, with Kafka over SASL_SSL, Postgres
+# with verify-full in the pipeline's own database, AWS KMS, and the audit export, as landing-application.yml says.
+# ${...} in capitals are the deployment's: fill them in, or set them as environment variables, which Spring reads.
+# ${SDH_LEASE_JDBC_PASSWORD} comes from the stage's secret. Checked by ReferenceConfigurationTest
+# (connector-runtime): the profile, as the node applies it at startup, refuses nothing.
+sdh:
+  compliance: { profile: hipaa }
+  connector-id: convert-${PIPELINE}
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+  results: { enabled: false }
+  stage:
+    input:
+      type: kafka
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}&groupId=convert-${PIPELINE}&groupProtocol=consumer&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    output:
+      type: kafka
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    dlq:
+      type: kafka
+      uri: "kafka:${PIPELINE}.convert.dlq?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    reprocess:
+      type: kafka
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
+    registry-schema: convert_${PIPELINE}
+    next-registry-schema: transform_${PIPELINE}
+    source:
+      catalog-name: sdh
+      namespace: ${PIPELINE}
+      catalog:
+        type: jdbc
+        uri: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+        jdbc.user: convert_${PIPELINE}
+        jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+        jdbc.schema-version: V1
+        warehouse: s3://${SILVER_BUCKET}/warehouse
+        io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        client: { region: "${AWS_REGION}" }
+    sink:
+      catalog-name: sdh
+      namespace: ${PIPELINE}
+  lease:
+    jdbc:
+      url: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+      username: convert_${PIPELINE}
+  crypto:
+    wrap-provider: aws-kms
+    sign-provider: aws-kms
+    aws: { region: "${AWS_REGION}" }
+    keys:
+      records-kek: alias/sdh-${PIPELINE}-records
+      signing: { kid: "convert-${PIPELINE}", key-ref: "alias/sdh-${PIPELINE}-convert-signing" }
+      recipient: { kid: "fhir-${PIPELINE}", pem: /run/secrets/recipient.pem, sha256: "${RECIPIENT_SHA256}" }
+      inbox: { kid: "convert-${PIPELINE}-inbox", pem: /run/secrets/inbox.pem, public-pem: /run/secrets/inbox-public.pem,
+               sha256: "${CONVERT_INBOX_SHA256}" }
+      landing-signer: { kid: "splitter-${PIPELINE}", pem: /run/secrets/split-signer.pem }

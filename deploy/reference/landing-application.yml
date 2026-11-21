@@ -1,0 +1,55 @@
+# Reference settings for a pipeline's landing node, with the HIPAA profile on and nothing waived (HIPAA.md §8.1
+# item 13; README.md here). A bucket intake on S3, landing into the pipeline's bronze bucket, as
+# deploy/aws/k8s/pipeline/landing-application.yml, with:
+#   - Kafka over TLS with a SCRAM login (SASL_SSL), the broker's CA in /run/secrets/kafka-ca.crt, and the login
+#     from the environment variable SDH_KAFKA_JAAS; never written here (DEPLOYMENT.md, "Broker rights");
+#   - Postgres with sslmode=verify-full, the server's CA in /run/secrets/postgres-ca.crt, in the pipeline's own
+#     database (postgres.sql);
+#   - AWS KMS for every key;
+#   - the audit export to the operator's collector (HIPAA-OPERATIONS.md §2.7).
+# ${...} in capitals are the deployment's: fill them in, or set them as environment variables, which Spring reads.
+# ${SDH_LEASE_JDBC_PASSWORD} comes from the stage's secret. Checked by ReferenceConfigurationTest
+# (connector-runtime): the profile, as the node applies it at startup, refuses nothing.
+sdh:
+  compliance: { profile: hipaa }
+  connector-id: landing-${PIPELINE}
+  telemetry:
+    # Inside the cluster: the export holds no PHI, so the profile allows plain HTTP to a collector beside the
+    # node. From the collector on, TLS (HIPAA-OPERATIONS.md §2.7).
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+  landing:
+    intake: ${PIPELINE}
+    source:
+      type: s3
+      path: /${PIPELINE}
+      bucket: { name: "${INTAKE_BUCKET}", region: "${AWS_REGION}" }
+      access: read-write
+      after: delete
+      ready: settled
+  storage:
+    catalog-name: sdh
+    namespace: ${PIPELINE}_landing
+    catalog:
+      type: jdbc
+      uri: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+      jdbc.user: landing_${PIPELINE}
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://${BRONZE_BUCKET}/warehouse
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      client: { region: "${AWS_REGION}" }
+  lease:
+    jdbc:
+      url: "jdbc:postgresql://${POSTGRES_HOST}:5432/sdh_${PIPELINE}?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
+      username: landing_${PIPELINE}
+  crypto:
+    wrap-provider: aws-kms
+    sign-provider: aws-kms
+    aws: { region: "${AWS_REGION}" }
+    keys:
+      landed-items-kek: alias/sdh-${PIPELINE}-landed-items
+      signing: { kid: "landing-${PIPELINE}", key-ref: "alias/sdh-${PIPELINE}-landing-signing" }
+      recipient: { kid: "splitter-${PIPELINE}-inbox", pem: /run/secrets/splitter-inbox.pem, sha256: "${INBOX_SHA256}" }
+  queue:
+    type: kafka
+    uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"

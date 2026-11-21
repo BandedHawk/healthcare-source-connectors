@@ -100,7 +100,9 @@ QueueReader.builder()
 
 ### 2.6 Transport and storage settings
 
-See DEPLOYMENT.md for each transport. The profile checks the settings; the platform administrator also confirms:
+See DEPLOYMENT.md for each transport. Start from `deploy/reference/`: each stage's settings with the profile on
+and nothing waived, Kafka over `SASL_SSL` and Postgres with `verify-full`, as the product's tests run them. The
+profile checks the settings; the platform administrator also confirms:
 
 - Kafka with TLS and SASL, and ACLs giving each stage only its topics;
 - Postgres with `sslmode=verify-full`;
@@ -184,6 +186,32 @@ Run once after setup, and again after each collector or store change:
 (`deploy/sandbox/infra/telemetry.yaml`), which shows the path but is not a separate store. The AWS PoC's collector
 still exports logs to `nop` (`deploy/aws/k8s/infra/telemetry.yaml`), so its audit events are only in the journal.
 Fixing that is the CloudWatch row above, which needs the new IAM role (HIPAA.md §8.5).
+
+### 2.8 Isolating pipelines
+
+Run a pipeline of its own for each covered entity an agent serves, each component of a hybrid entity
+(§ 164.105), a clearinghouse function (§ 164.308(a)(4)(ii)(A)), and Part 2 records (HIPAA.md §4.5). Give each
+pipeline its own:
+
+| Resource | Its own | Shared server, kept apart by |
+|---|---|---|
+| Database | `sdh_<pipeline>`: the Iceberg JDBC catalog, the leases, the registries, the audit journal | Only the pipeline's stage roles have `CONNECT` (`deploy/reference/postgres.sql`). Not schemas alone: a JDBC catalog keeps every namespace in the same tables, so any stage of any pipeline in one database could change another's catalog entries. A REST catalog with grants per principal (Polaris) is the other way. |
+| Buckets | bronze, silver and gold for the pipeline | Each stage's role may use only the buckets it needs (SANDBOX.md, "Medallion layers"), and only its own pipeline's |
+| Keys | the KEKs (landed items, records, gold) and each stage's signing key | KMS key policies, or Vault policies, naming each stage's identity (scripts/sandbox.sh shows the Vault form) |
+| Broker | the topics `<pipeline>.*`, and an identity per stage | ACLs per stage (`deploy/reference/kafka-acls.sh`; DEPLOYMENT.md, "Broker rights") |
+| Kubernetes | a namespace, with its quota and default-deny network policies | RBAC: the platform administrator grants `exec` per namespace (§2.4) |
+
+Then:
+- **Ending a contract** destroys the pipeline's KEKs, which erases its data cryptographically (§8).
+- **A reader of gold** is given that pipeline's consumer key only (§2.5).
+- **Checked by the product's tests:**
+  - `PipelineIsolationIT` lays out two pipelines this way on one Postgres, one object store and one Vault. Each
+    pipeline's split stage reaches its own data and is refused the other's database, buckets and keys. A data key
+    wrapped under the other's KEK can't be opened with its own.
+  - `KafkaSecurityIT` does the same for topics and consumer groups.
+- **Checked by the platform administrator,** after setting up each new pipeline: as one of its stages,
+  try to read another pipeline's bucket and connect to its database, and record the refusals with the risk
+  analysis.
 
 ## 3. Audit controls and activity review (§ 164.312(b), § 164.308(a)(1)(ii)(D))
 
