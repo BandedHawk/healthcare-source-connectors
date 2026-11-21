@@ -201,6 +201,12 @@ public final class FailureCommands
         }
 
         @Override
+        public boolean readsOnly()
+        {
+            return true;
+        }
+
+        @Override
         public void run(AdminArgs arguments, C context, AuditRecord audit,
                 PrintStream out) throws Exception
         {
@@ -442,7 +448,7 @@ public final class FailureCommands
      * @throws IOException              if it can't be read
      * @throws AdminArgs.UsageException if it is empty or too long
      */
-    static byte[] input(InputStream input, long max, String what)
+    public static byte[] input(InputStream input, long max, String what)
             throws IOException
     {
         byte[] bytes = input.readNBytes((int) Math.min(Integer.MAX_VALUE - 8,

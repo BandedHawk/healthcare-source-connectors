@@ -7,6 +7,9 @@
 package com.sdh.healthcare.connector.file.admin;
 
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
+import com.sdh.healthcare.connector.contract.message.Lineage;
+import com.sdh.healthcare.connector.core.audit.TelemetryReadAudit;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
@@ -14,30 +17,29 @@ import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.SplitItemReport;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
-import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
-import com.sdh.healthcare.connector.contract.message.Lineage;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
-import com.sdh.healthcare.connector.core.split.SplitterRegistry;
 import com.sdh.healthcare.connector.core.landing.LandedRefs;
-import com.sdh.healthcare.connector.core.pipeline.SplitMessages;
-import com.sdh.healthcare.connector.core.storage.CommittedRecords;
-import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
-import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
+import com.sdh.healthcare.connector.core.pipeline.SplitMessages;
+import com.sdh.healthcare.connector.core.split.SplitterRegistry;
+import com.sdh.healthcare.connector.core.storage.CommittedRecords;
 import com.sdh.healthcare.connector.core.storage.IngestTables;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
+import com.sdh.healthcare.connector.file.runtime.ConnectorRuntime;
+import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
-import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
-import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageReleases;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
+import com.sdh.healthcare.connector.stage.admin.AdminCli;
+import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
+import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
 import java.io.PrintStream;
 import java.time.Duration;
@@ -45,8 +47,8 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
@@ -375,7 +377,10 @@ final class SplitAdminContext implements DrainAdmin, AutoCloseable
                 properties.storage().namespace(), IngestTables.SPLIT_RECORDS,
                 row.ingestedDate(), snapshot, row.kekRef());
         try (QueueReader reader = QueueReader.builder().catalog(catalog())
-                .keyProvider(keys().wrap()).build())
+                .keyProvider(keys().wrap())
+                // An operator's read of PHI, in the command's journal.
+                .auditAs(AdminCli.ADMIN_READER).purpose("HOPERAT")
+                .audit(new TelemetryReadAudit()).build())
         {
             return reader.readRecord(SplitMessages.recordSplit(itemId, row,
                     ref, LandedRefs.NONE), max);

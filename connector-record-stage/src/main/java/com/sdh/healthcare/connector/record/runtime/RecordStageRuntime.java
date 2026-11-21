@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.broker.send.Publishers;
 import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
@@ -36,6 +37,7 @@ import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
+import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import com.sdh.healthcare.connector.stage.DrainGate;
 import com.sdh.healthcare.connector.stage.ItemEndResender;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
@@ -209,6 +211,12 @@ public final class RecordStageRuntime implements AutoCloseable
             HikariDataSource dataSource =
                     LeaseDatabase.dataSource(settings.lease().jdbc());
             opened.add(dataSource);
+            // Every audit event, chained and sealed (HIPAA.md §3.1); closed
+            // after everything that emits them.
+            opened.add(AuditJournals.start(settings.lease(),
+                    settings.telemetry(),
+                    new AuditTables(stage.registrySchema()),
+                    stageName + "/" + settings.connectorId(), keys));
             JdbcLeaseStore leases = new JdbcLeaseStore(dataSource,
                     settings.lease().jdbc().table(), DATABASE_WAIT);
             leases.createTableIfMissing();
@@ -232,6 +240,8 @@ public final class RecordStageRuntime implements AutoCloseable
                     .catalog(tables.sourceCatalog())
                     .expectedCatalogName(source.catalogName())
                     .keyProvider(keys.wrap())
+                    // The stage's processing of what it reads is audited.
+                    .withinStage()
                     .build();
             opened.add(reader);
 

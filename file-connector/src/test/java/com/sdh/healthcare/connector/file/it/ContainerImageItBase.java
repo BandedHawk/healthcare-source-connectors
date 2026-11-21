@@ -1090,8 +1090,9 @@ abstract class ContainerImageItBase
                         + " epoch 1,")
                 .containsPattern("items: +1 COMPLETED, 1 FAILED")
                 .contains("admin.status operator=it-operator");
-        assertThat(admin(app, "restore", "--item-id", badId.toString(),
-                "--to", "/tmp")).startsWith("0:").contains("digest verified");
+        assertThat(admin(app, "restore", "--plaintext", "--ticket", "IT-1",
+                "--item-id", badId.toString(), "--to", "/tmp"))
+                .startsWith("0:").contains("digest verified");
         assertThat(debugRead("/tmp/" + badId)).isEqualTo(bad);
         assertThat(admin(convert, "status")).startsWith("0:")
                 .containsPattern("duties: +convert/convert-stage/duties held"

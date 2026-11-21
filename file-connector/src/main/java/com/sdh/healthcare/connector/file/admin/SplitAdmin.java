@@ -6,9 +6,12 @@
  */
 package com.sdh.healthcare.connector.file.admin;
 
+import com.sdh.healthcare.connector.core.audit.AuditTables;
+import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
+import com.sdh.healthcare.connector.stage.admin.AuditTarget;
 import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
 import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
@@ -43,7 +46,13 @@ public final class SplitAdmin
                 new AdminCli.Stage<>("file-connector.jar", "file-connector",
                         Configuration.class, ConnectorProperties.class,
                         ConnectorProperties::telemetry,
-                        SplitAdminContext::new),
+                        SplitAdminContext::new,
+                        properties -> new AuditTarget(properties.lease(),
+                                properties.crypto(),
+                                new AuditTables(properties.stage()
+                                        .registrySchema()),
+                                ItemProcessor.STAGE + "/"
+                                        + properties.connectorId())),
                 commands());
     }
 

@@ -136,7 +136,7 @@ class StuckCommandTest
                 "test-stage", StageAdminTest.Configuration.class,
                 StageAdminTest.TestSettings.class,
                 StageAdminTest.TestSettings::telemetry,
-                StageAdminTest.Context::new),
+                StageAdminTest.Context::new, StageAdminTest::audit),
                 List.of(new StuckCommand<StageAdminTest.Context>()))
                 .run(all, new PrintStream(out, true, UTF_8),
                         new PrintStream(err, true, UTF_8),

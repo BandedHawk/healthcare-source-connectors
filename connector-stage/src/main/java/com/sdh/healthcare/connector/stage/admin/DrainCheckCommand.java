@@ -72,6 +72,12 @@ public final class DrainCheckCommand<C extends DrainAdmin>
     }
 
     @Override
+    public boolean readsOnly()
+    {
+        return true;
+    }
+
+    @Override
     public void run(AdminArgs arguments, C context, AuditRecord audit,
             PrintStream out) throws Exception
     {

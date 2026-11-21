@@ -25,6 +25,7 @@ import java.security.interfaces.RSAPublicKey;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.Map;
 
 /**
  * Encrypts what an operator exports to the operator's own public key
@@ -36,11 +37,14 @@ import java.util.HexFormat;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class ExportSealer
+public final class ExportSealer
 {
 
+    /** What each line of sealed output starts with. */
+    public static final String LINE_PREFIX = "sdh-export: ";
+
     /** The longest public key read, in bytes. */
-    static final int MAX_KEY_BYTES = 16 * 1024;
+    public static final int MAX_KEY_BYTES = 16 * 1024;
 
     /** The recipient's key. */
     private final PublicKey recipient;
@@ -51,7 +55,7 @@ final class ExportSealer
      * @param pem the public key, PEM ({@code BEGIN PUBLIC KEY})
      * @throws AdminArgs.UsageException if it isn't an EC or RSA public key
      */
-    ExportSealer(byte[] pem)
+    public ExportSealer(byte[] pem)
     {
         this.recipient = parse(new String(pem, StandardCharsets.US_ASCII));
     }
@@ -105,7 +109,7 @@ final class ExportSealer
      *
      * @return the fingerprint
      */
-    String fingerprint()
+    public String fingerprint()
     {
         try
         {
@@ -124,7 +128,22 @@ final class ExportSealer
      * @param content the content; not kept
      * @return the JWE compact serialisation
      */
-    String seal(byte[] content)
+    public String seal(byte[] content)
+    {
+        return seal(content, Map.of());
+    }
+
+    /**
+     * Encrypts content to the key, with parameters in the protected
+     * header, which the encryption authenticates: such as which part of an
+     * export this is, so parts can't be reordered or dropped unseen.
+     *
+     * @param content    the content; not kept
+     * @param parameters the header's extra parameters, by name; values are
+     *                   strings or numbers, and hold no PHI
+     * @return the JWE compact serialisation
+     */
+    public String seal(byte[] content, Map<String, Object> parameters)
     {
         try
         {
@@ -145,8 +164,10 @@ final class ExportSealer
                 default -> throw new IllegalStateException(
                         "Not an EC or RSA key");
             }
-            JWEObject jwe = new JWEObject(new JWEHeader.Builder(algorithm,
-                    EncryptionMethod.A256GCM).keyID(fingerprint()).build(),
+            JWEHeader.Builder header = new JWEHeader.Builder(algorithm,
+                    EncryptionMethod.A256GCM).keyID(fingerprint());
+            parameters.forEach(header::customParam);
+            JWEObject jwe = new JWEObject(header.build(),
                     new Payload(content));
             jwe.encrypt(encrypter);
             return jwe.serialize();

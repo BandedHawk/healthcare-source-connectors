@@ -277,7 +277,7 @@ else
 fi
 bad_id="$(k logs "$POD" | sed -n 's/.*item\.failed item_id=\([0-9a-f-]*\).*/\1/p' | head -n 1)"
 [[ -n "$bad_id" ]] || bad_id="none"
-restore="$(k exec "$POD" -- "${ADMIN[@]}" restore --operator k8s-operator --item-id "$bad_id" --to /tmp 2>&1)"
+restore="$(k exec "$POD" -- "${ADMIN[@]}" restore --operator k8s-operator --plaintext --ticket K8S-1 --item-id "$bad_id" --to /tmp 2>&1)"
 if grep -q "digest verified" <<<"$restore"; then pass "admin restore from landing"; else
   fail "admin restore from landing"; echo "$restore" | tail -20; fi
 k logs "$POD" | grep "admin.status operator=k8s-operator" >/dev/null \

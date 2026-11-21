@@ -11,8 +11,12 @@ import com.sdh.healthcare.connector.broker.receive.BrokerWatch;
 import com.sdh.healthcare.connector.broker.receive.EventHubsSupport;
 import com.sdh.healthcare.connector.broker.receive.RabbitmqConnections;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
+import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
+import com.sdh.healthcare.connector.broker.send.Publishers;
+import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
+import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
@@ -35,13 +39,13 @@ import com.sdh.healthcare.connector.landing.intake.AzureBlobSource;
 import com.sdh.healthcare.connector.landing.intake.BatchService;
 import com.sdh.healthcare.connector.landing.intake.GcsSource;
 import com.sdh.healthcare.connector.landing.intake.IcebergTableSource;
-import com.sdh.healthcare.connector.landing.intake.IntakeNotWritableException;
 import com.sdh.healthcare.connector.landing.intake.IntakeHealth;
+import com.sdh.healthcare.connector.landing.intake.IntakeNotWritableException;
 import com.sdh.healthcare.connector.landing.intake.IntakeService;
-import com.sdh.healthcare.connector.landing.intake.LandingIntake;
-import com.sdh.healthcare.connector.landing.intake.PushService;
 import com.sdh.healthcare.connector.landing.intake.IntakeSource;
+import com.sdh.healthcare.connector.landing.intake.LandingIntake;
 import com.sdh.healthcare.connector.landing.intake.LocalDirectorySource;
+import com.sdh.healthcare.connector.landing.intake.PushService;
 import com.sdh.healthcare.connector.landing.intake.Readiness;
 import com.sdh.healthcare.connector.landing.intake.ResubmitRequests;
 import com.sdh.healthcare.connector.landing.intake.Resubmitter;
@@ -55,10 +59,8 @@ import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.InboundDirectoryClaim;
 import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
-import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
-import com.sdh.healthcare.connector.broker.send.Publishers;
-import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
+import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import com.zaxxer.hikari.HikariDataSource;
 import java.io.IOException;
 import java.time.Clock;
@@ -154,6 +156,9 @@ public final class LandingRuntime implements AutoCloseable
     /** Lands items again for operators' requests. */
     private final Resubmitter resubmitter;
 
+    /** The audit journal (HIPAA.md §3.1), closed before the keys. */
+    private final AuditJournals.Opened journal;
+
     /**
      * The landing tables and what writes them, for table maintenance.
      *
@@ -187,14 +192,16 @@ public final class LandingRuntime implements AutoCloseable
      *                     null otherwise
      * @param tables       the landing tables
      * @param resubmitter  lands items again for operators' requests
+     * @param journal      the audit journal
      */
     private LandingRuntime(CamelContext camel, HikariDataSource dataSource,
             Catalog catalog, LeaseKeeper lease, ClosablePublisher publisher,
             ResultsChannel results, KeyMaterial keys, SourceSettings source,
             IntakeSource intakeSource, IntakeService service,
             PushService pushService, QueueIntake queue, Tables tables,
-            Resubmitter resubmitter)
+            Resubmitter resubmitter, AuditJournals.Opened journal)
     {
+        this.journal = journal;
         this.camel = camel;
         this.dataSource = dataSource;
         this.catalog = catalog;
@@ -277,6 +284,7 @@ public final class LandingRuntime implements AutoCloseable
                 KeyMaterial.Providers.DEFAULT);
 
         HikariDataSource dataSource = null;
+        AuditJournals.Opened journal = null;
         LeaseKeeper lease = null;
         Catalog catalog = null;
         ClosablePublisher publisher = null;
@@ -286,6 +294,13 @@ public final class LandingRuntime implements AutoCloseable
         try
         {
             dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
+            // Every audit event, chained and sealed (HIPAA.md §3.1), beside
+            // the lease table: the landing node has no schema of its own.
+            journal = AuditJournals.start(properties.lease(),
+                    properties.telemetry(),
+                    AuditTables.besideLeaseTable(
+                            properties.lease().jdbc().table()),
+                    "landing/" + properties.connectorId(), keys);
             lease = acquire(properties, dataSource, fatal);
             intakeSource = switch (source.type())
             {
@@ -436,7 +451,7 @@ public final class LandingRuntime implements AutoCloseable
                     publisher, results, keys, source, intakeSource, service,
                     pushService, queue,
                     new Tables(committer, items, ledgerTable, lander,
-                            ids), resubmitter);
+                            ids), resubmitter, journal);
         }
         catch (Exception | Error failure)
         {
@@ -449,6 +464,7 @@ public final class LandingRuntime implements AutoCloseable
             closeQuietly(results);
             closeQuietly(catalog);
             closeQuietly(lease);
+            closeQuietly(journal);
             closeQuietly(dataSource);
             keys.close();
             throw failure;
@@ -688,11 +704,14 @@ public final class LandingRuntime implements AutoCloseable
         }
         closeQuietly(publisher);
         closeQuietly(results);
-        keys.close();
         closeQuietly(lease);
+        LOG.info("connector.stopped");
+        // After the lease's release, the last event, and before the keys
+        // that seal the chain.
+        journal.close();
+        keys.close();
         closeQuietly(catalog);
         closeQuietly(dataSource);
-        LOG.info("connector.stopped");
     }
 
     /**

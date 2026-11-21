@@ -282,7 +282,36 @@ public enum Attr
      * Why an operator waived a compliance check, as configured: text about
      * the deployment, never about documents.
      */
-    WAIVER_REASON("sdh.waiver_reason");
+    WAIVER_REASON("sdh.waiver_reason"),
+
+    /**
+     * A record's ID (design §7.3): keyed over its content, so it names the
+     * record without revealing it.
+     */
+    RECORD_ID("sdh.record_id"),
+
+    /**
+     * Who read a stored record outside the stages (HIPAA.md §4.3): the
+     * name a reader is built with, such as a service account, never a
+     * person's details.
+     */
+    READER("sdh.reader"),
+
+    /**
+     * Why a reader reads, as it is configured (HIPAA.md §4.3): a code such
+     * as {@code TREAT}, {@code HPAYMT} or {@code PUBHLTH}, never free text
+     * about a patient.
+     */
+    PURPOSE("sdh.purpose"),
+
+    /**
+     * The ticket an operator names for a step that needs one, such as
+     * restoring an item in plaintext: a reference, never free text.
+     */
+    TICKET("sdh.ticket"),
+
+    /** An audit chain's ID (HIPAA.md §3.1, audit controls). */
+    CHAIN_ID("sdh.chain_id");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

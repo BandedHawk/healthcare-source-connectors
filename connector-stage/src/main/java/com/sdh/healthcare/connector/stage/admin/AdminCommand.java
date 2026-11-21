@@ -48,6 +48,20 @@ public interface AdminCommand<C>
     Set<String> flags();
 
     /**
+     * Whether the command only reads, and reads no PHI: a viewer's
+     * permission, as a web console would grant it (design §11.4). Such a
+     * command still runs when the audit journal can't be written, as in an
+     * outage, audited in the console log and export only; any other is
+     * refused then.
+     *
+     * @return true if it only reads, and no PHI; false by default
+     */
+    default boolean readsOnly()
+    {
+        return false;
+    }
+
+    /**
      * Runs the command.
      *
      * @param arguments its options

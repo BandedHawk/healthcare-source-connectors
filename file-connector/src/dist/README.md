@@ -252,9 +252,14 @@ kubectl exec <pod> -- java @/app/jvm.options @/app/container.options @/app/admin
 
 `--operator` names who is running the command, for the audit log; on a host, `$SDH_OPERATOR` does the same.
 `status` shows the duties lease and the items by state; `status --item <id>` shows one item's checkpoint.
-`restore --item-id <id> --to /tmp` decrypts a landed item into the pod's `/tmp`. `kubectl cp` can't copy out of this
-image, because it needs `tar`; read it through a debug container instead (below), from `/proc/1/root/tmp/<id>`,
-and delete it when you're done.
+`restore --item-id <id> --to /tmp < operator-public.pem` decrypts a landed item, checks its digest, and writes it into
+the pod's `/tmp` sealed to your public key (EC P-256 or RSA, PEM, given on standard input, so use `kubectl exec -i`):
+`/tmp/<id>.jwe`, one JWE a line, each a part of up to 8 MiB in order. Only the private key's holder can read it;
+decrypt each line in turn with a JOSE tool (for example `step crypto jwe decrypt --key operator-private.pem`) and
+join the parts. `--plaintext --ticket <ref>` writes it unsealed instead, for a break-glass case that needs it; the
+ticket, the change or incident it is for, is audited. `kubectl cp` can't copy
+out of this image, because it needs `tar`; read it through a debug container instead (below), from
+`/proc/1/root/tmp/<id>.jwe`, and delete it when you're done.
 No admin command sends to a broker, so the admin needs no broker settings: what the stage sends after an operator's
 command, its pods send. An item lost between this stage and the convert stage is found by the convert stage's
 reconciler, or reprocessed there (`reprocess --item-id` on the convert stage), which reads its records from

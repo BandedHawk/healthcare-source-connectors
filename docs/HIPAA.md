@@ -1,6 +1,6 @@
 # HIPAA: the rules that apply, and how the system meets them
 
-Status: **Draft for review** · Date: 2026-11-17 · Scope: the connectors (landing, split, convert), the transform
+Status: **Draft for review** · Date: 2026-11-20 · Scope: the connectors (landing, split, convert), the transform
 stage, and their deployments (`deploy/sandbox`, `deploy/aws`)
 
 Revision 2026-11-17 (b): checked against the official texts (§9). Corrections:
@@ -32,6 +32,27 @@ Revision 2026-11-17 (c): reframed for the product as sold.
     (§8).
   - A section on requirements next to HIPAA for government buyers is added (§8.4).
 - **What the AWS PoC is now:** our own test deployment. Its gaps are listed apart (§8.5).
+
+Revision 2026-11-20 (d): checked against the code and both deployments, requirement by requirement; the priority-1
+features built (DESIGN.md revision (eg)); and a customer mapping added (§10), with the procedures in
+[HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md).
+- **Corrections:**
+  - On AWS the collector's logs pipeline exports to `nop`: audit events reached the collector and were dropped
+    there, not merely kept on the console (§3.1, §8.5). The sandbox sends them to its in-cluster Loki, which is
+    neither separate nor durable.
+  - Iceberg snapshots are not a backup: they expire after 24 hours, in the same bucket under the same keys (§3.2).
+  - `admin restore` wrote plaintext; it now seals by default (§3.1).
+  - Every shipped manifest runs `compliance.profile: none`, which is right for synthetic data but no starting point
+    for a customer (§8.1 item 13).
+  - The mapping does carry C-CDA `confidentialityCode` into `Composition.confidentiality`, but sets no
+    `meta.security`, so readers can't filter on it (§8.1 item 10).
+- **Built** (§8.1 items 1, 2 and 4, and restore):
+  - a durable, tamper-evident audit journal in each stage's Postgres schema, hash-chained per process and sealed
+    with the stage's signing key, with `audit-verify`, `audit-export` and `audit-prune` on every stage, and a
+    compliance check that refuses to start without it;
+  - an audit of every record `connector-queue-reader` opens, with the reader's name and purpose of use;
+  - `patients`, a patient lookup on the record stages, sealed to the operator's key and audited;
+  - `restore` sealed to the operator's key by default; plaintext only with `--plaintext --ticket`, audited.
 
 **This is an engineering mapping, not legal advice.** It sets out which parts of HIPAA bear on the pipeline, which
 controls the code and deployments provide toward each one, and what the code leaves to the organisation that runs
@@ -136,10 +157,10 @@ The tables below record what the code already does toward each specification.
 | Standard / specification | How the system addresses it | Left to the operator, or open |
 |---|---|---|
 | **Access control (a)(1).** Unique user identification (a)(2)(i) (R) | Each stage runs as its own identity: an IAM role per stage through EKS Pod Identity, with no shared or static keys (AWS-POC §7). Postgres has a role per stage (`landing_<prefix>`, …). Each stage has its own signing key, so every message names the stage that sent it (DESIGN §10.1). Operator commands require an operator name, which is audited (DESIGN §11.4). | The operator name is self-asserted. NIST SP 800-66r2 (Table 21, activity 3) asks that "system activity can be traced to a specific user", so for now unique human identity must come from the platform (§8.1, item 3): Kubernetes RBAC and cloud IAM tied to a named person, with `kubectl exec` audited. |
-| Emergency access procedure (a)(2)(ii) (R) | `admin restore` decrypts a landed item from bronze and verifies its digest (DESIGN §11.4). `status` works even when the KMS can't be reached. | A written break-glass procedure: who may be granted KEK decrypt in an emergency, who decides, and how. |
+| Emergency access procedure (a)(2)(ii) (R) | `admin restore` decrypts a landed item from bronze and verifies its digest (DESIGN §11.4). Its output is sealed to the operator's public key by default; plaintext needs `--plaintext --ticket <ref>`, and the ticket is audited. `status` and the audit commands work even when the KMS can't be reached. | The break-glass procedure: who approves, who holds operator keys ([HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §5). |
 | Automatic logoff (a)(2)(iii) (A) | The pipeline has no interactive sessions or UI. Assessed as not applicable to it (§ 164.306(d)(3)). | Session timeouts for the console, `kubectl` and SSO. |
 | Encryption and decryption (a)(2)(iv) (A) | **Implemented**, though only addressable. Envelope encryption of every stored record (DESIGN §7.2): AES-256-GCM per 8 MiB chunk, a batch data key wrapped by a KMS key-encryption key, and an HKDF-derived key per record. A separate KEK per table means a reader can be given `records` only (DESIGN §7.1). Storage-side SSE-KMS sits beneath as a second layer (DESIGN §8.1; AWS-POC §4). Decryption needs both the KMS grant and the data. In the AWS PoC, even the deployer is denied decrypt on bronze's key. | KMS key rotation is off in the PoC, to save cost (AWS-POC §4). Re-keying existing data after a KEK compromise is out of scope (DESIGN §17). |
-| **Audit controls (b)** (standard; no specifications) | Audit events `sdh.audit.*` for each item's lifecycle, the lease, admin commands, failure state changes and PHI purges (DESIGN §12; STAGES §15.3). Exports are allow-listed, so no PHI can be in them (DESIGN §12). One trace per item, with 100% sampling. | **On AWS, audit events go only to the console log, which is lost at `down`** (`landing-application.yml`). NIST SP 800-66r2 (Table 22) asks "where will audit information reside (e.g., separate server)?". Real PHI needs a durable, separate audit sink, plus CloudTrail data events on S3 and KMS (AWS-POC §9). The product exports over OTLP, but on a best-effort basis, without tamper evidence, and not from readers (§8.1, items 1–2). HIPAA sets no retention period for logs. The 6 years of § 164.316(b)(2)(i) apply to the documentation of required actions and reviews (§3.4). Counsel sets the log retention. |
+| **Audit controls (b)** (standard; no specifications) | Audit events `sdh.audit.*` for each item's lifecycle, the lease, admin commands, failure state changes and PHI purges (DESIGN §12; STAGES §15.3). Exports are allow-listed, so no PHI can be in them (DESIGN §12). One trace per item, with 100% sampling. **Every event is also written to a durable journal** in the stage's Postgres schema: a hash chain per process, its head sealed with the stage's signing key every minute and at close; never dropped; checked by `audit-verify`, exported by `audit-export`, pruned by `audit-prune` (DESIGN §12.3). Every record `connector-queue-reader` opens is audited with the reader's name and purpose (`reader.record_read`, DESIGN §10.2). | NIST SP 800-66r2 (Table 22) asks "where will audit information reside (e.g., separate server)?". The journal is durable but sits beside the data: the separate copy is the operator's SIEM, fed by the OTLP export and by `audit-export`. **On AWS the collector still drops logs** (`nop`, §8.5). CloudTrail data events on S3 and KMS (AWS-POC §9). A whole chain deleted shows only against the SIEM copy. HIPAA sets no retention period for logs. The 6 years of § 164.316(b)(2)(i) apply to the documentation of required actions and reviews (§3.4). Counsel sets the log retention. |
 | **Integrity (c)(1).** Mechanism to authenticate ePHI (c)(2) (A) | **Implemented.** GCM's tag and AAD (item, seq, chunk index, chunk count) detect any change, reordering or truncation (DESIGN §7.2). The record ID is keyed and computed over the content (DESIGN §7.3). Item digests are checked at restore, and no unverified plaintext is left behind (DESIGN §11.4). Checkpoints and the given-up record are MAC'd (DESIGN §5.3.13, §9.1). Commits are fenced, so a stale instance can't write (DESIGN §9.3). Every message is digitally signed (ES256), one of the mechanisms NIST SP 800-66r2 names (Table 23, activity 5). Nothing is dropped or silently replaced: corrections, retries and reprocesses are new, linked objects, and what they supersede is kept (STAGES §15.1, §15.8). A record that arrives again with different output raises `record.conflict` rather than overwriting the first (STAGES §6). | — |
 | **Person or entity authentication (d)** (standard; no specifications) | HTTP push uses OAuth2 (a bearer JWT checked for issuer, audience and scope) or mTLS (CA and subject allow-list), with one sender per intake when results are on (DESIGN §5.3.15, §5.3.8). Each message is signed and checked against pinned keys (DESIGN §10.1, §10.2). Cloud services are reached through workload identity. Recipient keys are pinned by fingerprint (DESIGN §7.4). | **Kafka has no authentication or ACLs in the PoC** (AWS-POC §9). Messages are still signed and sealed, so nobody on the broker can read or forge them, but they can be deleted or replayed. Postgres uses passwords from Kubernetes Secrets. MFA for human access is the operator's: NIST SP 800-66r2 (Table 24) advises it where risk is high, for example remote access and privileged functions. |
 | **Transmission security (e)(1).** Integrity controls (e)(2)(i) (A); encryption (e)(2)(ii) (A) | Every message between stages is a JWS nested in a JWE (`ECDH-ES+A256KW` or `RSA-OAEP-256`, `A256GCM`), addressed to the next stage's key. Only `messageId`, `type`, `itemId` and the content type are visible on the broker (DESIGN §10.1). TLS is used to the object store, KMS and catalog. The S3 buckets refuse non-TLS requests (AWS-POC §4). HTTP push is TLS only. | Kafka TLS (AWS-POC §9). Postgres TLS: the PoC manifests configure none. Postgres holds the catalog, leases and registries, not record content. Private subnets, in place of public subnets with inbound closed (AWS-POC §9). |
@@ -150,14 +171,14 @@ The tables below record what the code already does toward each specification.
 |---|---|---|
 | Risk analysis (a)(1)(ii)(A) (R); risk management (B) (R) | This document, DESIGN §16 (risks) and §17 (out of scope), and §8 below are inputs to the analysis. | The risk analysis itself, covering the whole environment and kept current. NIST SP 800-66r2 §3–§4 gives a method. |
 | Sanction policy (C) (R) | — | Workforce policy. |
-| Information system activity review (D) (R) | Audit events, metrics (`sdh.items.failed`, ages, backlogs) and `admin status` for each stage (DESIGN §11.4, §12). | Regular review, with alerting, and records of the reviews (§ 164.316(b)(1)(ii)). |
+| Information system activity review (D) (R) | Audit events, metrics (`sdh.items.failed`, ages, backlogs) and `admin status` for each stage (DESIGN §11.4, §12). `audit-verify` checks the journal for changes and gaps. | Regular review, with alerting, and records of the reviews (§ 164.316(b)(1)(ii)); [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §3 suggests what to review. |
 | Assigned security responsibility (a)(2) (standard) | — | A named security official. |
 | Workforce security (a)(3); information access management (a)(4): access authorization (a)(4)(ii)(B) (A), establishment and modification (C) (A) | Least privilege by design. Each stage's role reaches only its own buckets and KEKs (AWS-POC §7). A separate KEK per table means a reader can be granted `records` alone (DESIGN §7.1). Gold is read by a read-only role (`gold-reader`). The deployer can't decrypt bronze. A permissions boundary covers every role (`deploy/aws/iam`). | Granting, reviewing and revoking human access. IAM and quotas are the account administrator's. |
 | Isolating health care clearinghouse functions (a)(4)(ii)(A) (R) | — | Only if the operator is a clearinghouse (§1). It would then need a pipeline, keys and readers of its own, kept apart from any other business. |
 | Protection from malicious software (a)(5)(ii)(B) (A) | Distroless customer images pinned by digest, a vulnerability scan that passes, signed SBOMs, and base-image updates (DESIGN §14.4, §14.5). Containers run as non-root on a read-only root filesystem, under the restricted Pod Security Standard (DESIGN §14.1, §16 item 9). | Scanning and patching on a schedule. |
 | Security reminders (A) (A); log-in monitoring (C) (A); password management (D) (A) | Private keys are encrypted PKCS#8, with passphrases from secrets. The service refuses key files that others can read (DESIGN §7.4). | Training, monitoring of human logins, and password and MFA policy. |
 | Security incident procedures (a)(6); response and reporting (a)(6)(ii) (R) | Fatal conditions exit with status 70 and are audited (`connector.fatal`, `lease.lost`). Messages that can't be opened are counted and rejected (`stage.message_rejected`). Audit events let an incident be scoped by item ID without reading PHI. | The incident response plan, and its link to breach assessment (§5). |
-| **Contingency plan (a)(7).** Data backup plan (A) (R) | Iceberg snapshots of every table. On AWS, EBS snapshots of Postgres and Kafka at each `down`, keeping the last 3 (AWS-POC §3.1). Keys, buckets and volumes have `prevent_destroy`. | **Backups of bronze, silver and gold.** The rule asks for "retrievable exact copies" of ePHI, and the PoC has S3 versioning off. Bronze is the only copy once an object has landed, because landing deletes it from the intake. Real PHI needs versioning, replication or AWS Backup, on bronze at least. |
+| **Contingency plan (a)(7).** Data backup plan (A) (R) | Iceberg snapshots of every table, which are **not a backup**: they expire after 24 hours, in the same bucket under the same keys. On AWS, EBS snapshots of Postgres and Kafka at each `down`, keeping the last 3 (AWS-POC §3.1). Keys, buckets and volumes have `prevent_destroy`. | **Backups of bronze, silver and gold.** The rule asks for "retrievable exact copies" of ePHI, and the PoC has S3 versioning off. Bronze is the only copy once an object has landed, because landing deletes it from the intake. Real PHI needs versioning, replication or AWS Backup, on bronze at least. |
 | Disaster recovery plan (B) (R); emergency mode operation plan (C) (R) | Recovery after a crash or outage is built in: resume from checkpoint, fenced leases, standby takeover in about 2 s, and lost item ends resent (DESIGN §9; STAGES §13). The automatic shutdown guard stops the stack without touching the data (AWS-POC §3.1). | Written plans, and a recovery time objective. |
 | Testing and revision procedures (D) (A) | Outage and failover tests have been run on AWS, with every item arriving exactly once afterwards (AWS-POC, "Outage test"; PERFORMANCE.md §3.6, §10). Integration suites cover brokers, stores and KMS providers (DESIGN §15). | Loss of a region, and restoring from backup, are untested. |
 | Applications and data criticality analysis (E) (A) | — | The operator's analysis. |
@@ -216,7 +237,8 @@ provider's, under its BAA, or the customer's. Device and media controls (§ 164.
   - **Free text an operator writes:** a reason for declining a failure is encrypted, since it may describe the
     data (STAGES §15.3).
 - **Ops commands avoid exposure:**
-  - `admin restore` prints no original filename (DESIGN §11.4).
+  - `admin restore` prints no original filename, and seals what it writes to the operator's key (DESIGN §11.4).
+  - The patient lookup shows counts only; what it finds is sealed (§4.2).
   - Smoke tests check that no log holds document content or an object key (AWS-POC, the 2026-11-12 run).
 - **Whole documents:** each record in the pipeline is a whole document, by design. § 164.514(d)(5) allows using or
   disclosing an entire medical record only when it is "specifically justified". The justification is the
@@ -229,6 +251,9 @@ provider's, under its BAA, or the customer's. Device and media controls (§ 164.
   (§ 164.504(e)(2)(ii)(E)–(F)).
   - The pipeline keeps the source document and every stage's output, linked by item and record IDs.
   - Gold is readable with a read-only grant (AWS-POC §7, `gold-reader`).
+  - **Finding one individual's records:** `patients` on a record stage takes patient identifiers on standard input
+    and lists the records whose FHIR `Patient` resources carry them, sealed to the operator's public key; every
+    record read and the run are audited, with no identifier in the audit (DESIGN §11.4).
 - **Amendment:** an accepted amendment is made by identifying the records affected and appending or linking the
   amendment (§ 164.526(c)(1)). The original is not erased. A denial's disagreement and rebuttal are appended or
   linked the same way (§ 164.526(d)).
@@ -248,8 +273,12 @@ provider's, under its BAA, or the customer's. Device and media controls (§ 164.
   - An accounting is needed only for gold reads made for other purposes, such as public health or research
     disclosures under § 164.512.
 - **The business associate's part** is to make the information available (§ 164.504(e)(2)(ii)(G)). The audit
-  events record what the pipeline did to each item, by ID, but not who read gold. To record that, use gold's
-  readers' own logging, or CloudTrail data events on the gold bucket and its KMS key (AWS-POC §9).
+  events record what the pipeline did to each item, by ID. **Who read gold is recorded too:** every record
+  `connector-queue-reader` opens emits `reader.record_read`, with the reader's name, its purpose of use (an HL7
+  code such as `TREAT`, `HPAYMT`, `HOPERAT` or `PUBHLTH`), and the record's IDs and table. A reader names itself
+  and its purpose when it is built; one that doesn't reads as `unnamed`. The events go to the reader's `sdh.audit`
+  log by default, or to its journal. CloudTrail data events on the gold bucket and its KMS key show reads that
+  bypass the library (AWS-POC §9).
 
 ### 4.4 Business associate contract terms (§ 164.504(e)(2)(ii))
 
@@ -317,8 +346,10 @@ guidance is at 74 FR 42741–42743, 2009-08-24, re-issuing the version at 74 FR 
 - **What the system gives:**
   - The audit events and storage refs name the items and tables an incident touched, by ID, with no PHI.
   - KMS logs show whether a KEK was used to decrypt.
-  - To name the individuals, authorised staff decrypt the affected items under the emergency access procedure
-    (§3.1).
+  - To name the individuals, `patients --item-id <items>` (or a span) lists every record with its patients'
+    identifiers, sealed to the privacy official's key and audited (DESIGN §11.4).
+  - `reader.record_read` names who read the records, and for what purpose.
+  - `audit-verify` shows the trail wasn't changed, for the burden of proof below.
 - **The covered entity's notices:**
   - individuals within 60 days (§ 164.404(b));
   - the media, for more than 500 residents of a state or jurisdiction (§ 164.406);
@@ -373,33 +404,43 @@ or the **operator's** own duty that the product can only support.
 
 ### 8.1 Product gaps
 
-1. **Audit delivery is not guaranteed, and the trail isn't tamper-evident.** § 164.312(b) requires audit
-   controls; § 164.414(b) puts the burden of proof on the operator.
-   - **What exists:** audit events are exported over OTLP, through a filter that lets only audit events out
-     (DESIGN §12), and written to the console.
-   - **What's missing:** the export is best effort. The compliance profile does ensure that one is configured
-     (item 6). Events are lost if the collector is down long enough, and
-     nothing chains or signs them.
-   - **To consider:**
-     - a durable local buffer, or acknowledged delivery;
-     - a sequence number per process, so gaps are visible;
-     - a hash chain or signatures over the events, signed with the stage's own signing key.
-   - Federal buyers will also map this to NIST SP 800-53 AU-9 and AU-10.
-2. **Reads of PHI outside the stages are not audited.**
-   - `connector-queue-reader`, the library that gold's readers use to decrypt, emits no audit events.
-   - So the product can't show who decrypted which record. That matters for audit controls, and for the
-     accounting of non-exempt disclosures (§ 164.528, § 164.504(e)(2)(ii)(G)).
-   - **To consider:** a reader audit event with the reader's identity, the record ID and, optionally, a purpose.
+1. **Audit delivery and tamper evidence: built 2026-11-20** (DESIGN §12.3, revision (eg)).
+   - **What it does:** every audit event is also written to a journal in the stage's own Postgres schema
+     (`sdh_audit_chain`, `sdh_audit_event`, `sdh_audit_seal`). Each process writes its own chain: every entry is
+     numbered and hashed (SHA-256) over the one before. The pods seal the chain's head with the stage's signing key
+     (ES256, through the pod's key and its statement) every `sdh.telemetry.journal.seal-interval` (1 minute) and
+     when they stop. Events emitted before the journal opens are held and written first.
+   - **Never dropped:** a write that fails is retried with backoff; when the queue (50,000 events) is full, the
+     stage waits rather than drop one. The compliance check `audit-journal` refuses to start a stage with the
+     journal off.
+   - **Commands, on every stage:** `audit-verify` checks a span's chains from their start, and reports gaps,
+     changed or rewritten entries, a missing or wrong head and bad seals as changes (exit 1), and entries after the
+     last seal or chains never closed as warnings. `audit-export` prints the events as JSON lines, with their
+     hashes, for a SIEM. `audit-prune` removes whole chains older than the operator's retention.
+   - **Limits:** a whole chain deleted shows only against the SIEM's copy. The admin's own chains are unsealed,
+     because the admin holds no stage signing key. The OTLP export is still best effort; the journal is the record.
+   - Federal buyers will map this to NIST SP 800-53 AU-9 and AU-10.
+2. **Reads of PHI outside the stages: built 2026-11-20** (DESIGN §10.2).
+   - `connector-queue-reader` audits every record it opens, before decrypting it: `reader.record_read`, with the
+     reader's name (`auditAs`), a purpose of use code (`purpose`), and the record's item, seq, record ID and
+     table. To the `sdh.audit` log by default, or to a journal (`audit`, such as `TelemetryReadAudit`).
+   - The admin commands that read records (`patients`, `failures export`) read as `sdh-admin`, purpose `HOPERAT`.
+     A stage reading its own input says so (`withinStage`) and isn't audited twice.
+   - **Limit:** an application that reads the tables without the library isn't seen; CloudTrail data events are the
+     check.
 3. **The operator's identity on admin commands is self-asserted** (`--operator` or `$SDH_OPERATOR`).
    - § 164.312(a)(2)(i) and NIST SP 800-66r2 ask that activity be traceable to a person.
    - **For now:** documentation ties it to the platform's audit of `kubectl exec`.
    - **Later:** an authenticated admin interface, as DESIGN §17 already plans for operator-defined pipelines.
-4. **No tool scopes a breach to individuals.**
-   - § 164.410(c)(1) asks the business associate to identify each affected individual "to the extent possible".
-   - The product can name the items and tables an incident touched. Turning them into people means decrypting
-     each one by hand with `admin restore`.
-   - **To consider:** an admin command that takes item IDs, or a table and time range, and writes the patient
-     identifiers found to a protected file, with the same output safety and audit as `restore`.
+4. **Scoping a breach to individuals: built 2026-11-20** (DESIGN §11.4).
+   - `patients` on a record stage (convert, transform) reads the stage's FHIR records, by item IDs or a span of at
+     most 31 days, and finds the identifiers of every `Patient` in each: as a Bundle entry, contained, or at any
+     depth.
+   - With no identifiers on standard input, it lists every record with its patients (§ 164.410(c)(1)); with some,
+     only the records naming them (§§ 164.524, 164.526, 164.528).
+   - The result is sealed to the public key given on standard input; the output and the audit show counts only.
+   - **Limit:** it finds patients by identifier, as the source gave them. Matching those to the covered entity's
+     master patient index is the operator's.
 5. **FIPS 140-validated cryptography: test and document a FIPS mode.**
    - HIPAA's breach guidance doesn't require it for data at rest (§5). Federal buyers, however, are bound to
      validated modules (FIPS 140-3, under FISMA), and many state buyers follow them.
@@ -461,8 +502,20 @@ or the **operator's** own duty that the product can only support.
     - § 164.308(a)(7)(ii)(A)–(B) are the operator's, but only the product can say how to back up and restore
       consistently.
     - **To consider:** a documented, tested procedure, and a check after a restore.
+13. **No reference configuration with the profile on.**
+    - Every shipped manifest (sandbox and AWS, all four stages) sets `sdh.compliance.profile: none`, which is right
+      for synthetic data. A customer has nothing to start from that passes the profile.
+    - **To consider:** reference manifests with the profile on, TLS everywhere and the KMS, as the starting point
+      for [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §2.
+14. **Restore output: sealed by default since 2026-11-20** (DESIGN §11.4). `restore` writes `<id>.jwe`, one JWE a
+    line, each a part of up to 8 MiB, its protected header naming the item, part, offset and whether it is the
+    last, so parts can't be dropped, reordered or moved unseen. Plaintext needs `--plaintext --ticket <ref>`, with
+    the ticket audited.
 
 ### 8.2 Documentation we owe customers
+
+Items 1, 3 (in part), 4 (the break-glass part) and 6 are now in §10 and
+[HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md); the others are still owed.
 
 1. **A HIPAA shared-responsibility matrix.** This is §3–§5 restated per specification: met by the product,
    capability the operator configures, or the operator's alone.
@@ -531,7 +584,9 @@ the product must prove its capabilities:
 - private subnets;
 - Kafka TLS and ACLs, and Postgres TLS;
 - CloudTrail data events;
-- a durable audit sink: today, events go only to the console, which is lost at `down`;
+- a durable audit sink: the journal now keeps every event in Postgres, which survives `down` on its EBS volume, but
+  the collector's logs pipeline still exports to `nop` (`deploy/aws/k8s/infra/telemetry.yaml`), so nothing
+  reaches a separate store; sending it to CloudWatch Logs needs an IAM change;
 - bucket backups: versioning is off, and bronze is the only copy once an object has landed;
 - KMS rotation, which is off.
 
@@ -553,3 +608,70 @@ Still to be checked against primary sources:
 - **The 2024 Part 2 rule:** its citation and its 2026-02-16 compliance date.
 - **The 2026-03-24 amendment to § 160.103.**
 - **HHS's cloud computing guidance** on providers that hold only ciphertext.
+
+## 10. Requirement by requirement: what the product does, and what the customer does
+
+Each row is one requirement. **Product** is what the code does, or the capability it gives. **Customer** is who on
+the customer's staff does what, with which commands and settings; the roles and procedures are in
+[HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) (§ numbers in this column are to it). A dash means nothing on that side.
+
+### 10.1 Security Rule: technical safeguards (§ 164.312)
+
+| Requirement | Product | Customer |
+|---|---|---|
+| Unique user identification (a)(2)(i) R | A workload identity per stage; admin commands audited with an operator name | Platform administrator: SSO-backed RBAC for `kubectl exec`, API server audit of `pods/exec` (§2.4). The name is self-asserted until the product authenticates operators (§8.1 item 3) |
+| Emergency access (a)(2)(ii) R | `restore`, sealed by default; `status` and the audit commands without the KMS | Security official approves; pipeline operator runs it under a ticket (§5) |
+| Automatic logoff (a)(2)(iii) A | No sessions in the product | Platform administrator: console, `kubectl` and SSO timeouts (§2.4) |
+| Encryption (a)(2)(iv) A | Envelope encryption, a KEK per table, SSE-KMS beneath; the profile refuses local keys | Key custodian: KMS keys, rotation on (§2.6) |
+| Audit controls (b) | Audit events, the durable journal, `audit-verify`/`-export`/`-prune`, reader audit | Security analyst: SIEM, weekly verify (§3); counsel: log retention |
+| Integrity (c) | GCM, signed messages, fencing, nothing replaced | — |
+| Authentication (d) | OAuth2 or mTLS push, signed messages, workload identity | Platform administrator: Kafka SASL and ACLs, Postgres TLS, MFA for people (§2.6) |
+| Transmission security (e) | JWE between stages, TLS elsewhere; the profile refuses plaintext | Platform administrator: TLS on every transport (§2.6) |
+
+### 10.2 Security Rule: administrative safeguards (§ 164.308)
+
+| Requirement | Product | Customer |
+|---|---|---|
+| Risk analysis and management (a)(1)(ii)(A)–(B) R | This document, DESIGN §16–§17 | Security official: the analysis, kept current |
+| Sanctions (C) R; security official (a)(2) | — | The customer's policies and appointment |
+| Activity review (D) R | Audit events, metrics, `status`, `audit-verify` | Security analyst: daily SIEM review, weekly verify, recorded (§3.1–§3.2) |
+| Workforce security, access management (a)(3)–(4) | Least-privilege roles, a KEK per table, `gold-reader` | Platform administrator grants; security official reviews (§1) |
+| Clearinghouse isolation (a)(4)(ii)(A) R | A pipeline per function, with its own keys | Counsel decides whether it applies (§1 above) |
+| Awareness, malware, log-in monitoring, passwords (a)(5) | Signed images, SBOMs, scans, restricted pods | Training, patching, login monitoring |
+| Incident procedures (a)(6) R | Fatal, rejected and fenced events; `audit-verify`; `patients` by item | Security analyst detects; privacy official assesses (§6) |
+| Contingency plan (a)(7) R | Crash recovery, failover. No backup feature yet (§8.1 item 12) | Platform administrator: versioning, Postgres PITR, restore to one point, tested yearly (§7) |
+| Evaluation (a)(8) | — | Security official, periodically |
+| Business associate contracts (b) R | — | Counsel: BAAs or MOUs with every provider |
+
+### 10.3 Security Rule: physical safeguards (§ 164.310)
+
+| Requirement | Product | Customer |
+|---|---|---|
+| Facility and workstations (a)–(c) | — | The cloud provider, under its BAA; the customer's own workstations, which hold the operator private keys (§2.3) |
+| Disposal, media re-use (d)(2)(i)–(ii) R | No plaintext on disk; retention, purges, cryptographic erase; restore and lookups sealed | Key custodians destroy KEKs; platform administrator records media destruction (§8) |
+| Accountability, backup copy (d)(2)(iii)–(iv) A | `kek_ref` and storage refs per record | Platform administrator: the inventory of storage and backups |
+
+### 10.4 Policies and documentation (§ 164.316)
+
+Product: versioned design documents, and compliance waivers audited at every start. Customer: the security
+official's policies, the waivers' approvals, the review records of §3, and this documentation, kept 6 years.
+
+### 10.5 Privacy Rule
+
+| Requirement | Product | Customer |
+|---|---|---|
+| Minimum necessary § 164.502(b), § 164.514(d) | Per-stage keys, PHI-free logs and issues, sealed exports, per-pipeline isolation | Data consumer owners: grants per pipeline, reading only what the purpose needs (§4.2) |
+| Access § 164.524; amendment § 164.526 | Everything kept and linked; `patients` finds a person's records | Privacy official logs the request; pipeline operator runs the lookup (§4.1) |
+| Accounting § 164.528 | `reader.record_read` with reader and purpose | Data consumer owners name their readers and purposes (§2.5); privacy official produces the accounting (§4.1) |
+| Return or destruction § 164.504(e)(2)(ii)(J) | Retention, purges, cryptographic erase, `audit-export` | The end-of-contract procedure (§8) |
+| Part 2 (§4.5); labels | A pipeline per intake; no `meta.security` yet (§8.1 item 10) | Counsel decides; an intake of its own for Part 2 records |
+
+### 10.6 Breach Notification Rule
+
+| Requirement | Product | Customer |
+|---|---|---|
+| Secured PHI (74 FR 42742) | AES-256-GCM under KMS keys; JWE plus TLS in motion | Security official: the judgement against SP 800-111; TLS on every link |
+| Discovery and risk assessment § 164.402 | Audit events by ID, the journal, `audit-verify` | Security analyst detects; privacy official assesses with counsel (§6) |
+| Identifying individuals § 164.410(c)(1) | `patients --item-id`, sealed and audited | Pipeline operator runs it for the privacy official (§6) |
+| Notices §§ 164.404–410; burden of proof § 164.414 | The audit export and verify results as evidence | Privacy official and counsel give the notices and keep the evidence |
+

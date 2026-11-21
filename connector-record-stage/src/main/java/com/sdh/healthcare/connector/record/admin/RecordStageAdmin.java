@@ -9,6 +9,8 @@ package com.sdh.healthcare.connector.record.admin;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.RecordLocation;
 import com.sdh.healthcare.connector.contract.message.StageMessages;
+import com.sdh.healthcare.connector.core.audit.AuditTables;
+import com.sdh.healthcare.connector.core.audit.TelemetryReadAudit;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
@@ -31,9 +33,12 @@ import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.AuditTarget;
 import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
 import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
+import com.sdh.healthcare.connector.stage.admin.PatientAdmin;
+import com.sdh.healthcare.connector.stage.admin.PatientsCommand;
 import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
 import com.sdh.healthcare.connector.stage.admin.StageAdmin;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
@@ -41,11 +46,16 @@ import com.sdh.healthcare.connector.stage.admin.StuckCommand;
 import com.sdh.healthcare.connector.stage.admin.VersionCommand;
 import java.io.PrintStream;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * A record stage's operator commands (design §11.4, STAGES.md §17.3):
@@ -62,7 +72,7 @@ import java.util.function.Function;
  * @since 0.1.0
  */
 public final class RecordStageAdmin<P extends RecordStageSettings>
-        implements StageAdmin, DrainAdmin, AutoCloseable
+        implements StageAdmin, DrainAdmin, PatientAdmin, AutoCloseable
 {
 
     /** How long a database call may wait for a connection. */
@@ -132,7 +142,11 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
                 jar, service, configuration, type,
                 RecordStageSettings::telemetry,
                 settings -> new RecordStageAdmin<>(settings, messages,
-                        transforms)),
+                        transforms),
+                settings -> new AuditTarget(settings.lease(),
+                        settings.crypto(),
+                        new AuditTables(settings.stage().registrySchema()),
+                        messages.stage() + "/" + settings.connectorId())),
                 commands());
     }
 
@@ -149,7 +163,7 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
                 new ArrayList<>(List.of(new StageStatusCommand<>(),
                         new StuckCommand<>(),
                         new ReprocessCommand<>(), new DrainCheckCommand<>(),
-                        new VersionCommand<>()));
+                        new VersionCommand<>(), new PatientsCommand<>()));
         commands.addAll(FailureCommands.<RecordStageAdmin<P>>all());
         return List.copyOf(commands);
     }
@@ -369,11 +383,79 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
                 sink.table().currentSnapshot().snapshotId());
         try (QueueReader reader = QueueReader.builder()
                 .catalog(tables().sinkCatalog())
-                .keyProvider(keys().wrap()).build())
+                .keyProvider(keys().wrap())
+                // An operator's read of PHI, in the command's journal.
+                .auditAs(AdminCli.ADMIN_READER).purpose("HOPERAT")
+                .audit(new TelemetryReadAudit()).build())
         {
             return reader.readRecord(location,
                     (int) Math.min(Integer.MAX_VALUE - 8,
                             maxCorrectionBytes()));
+        }
+    }
+
+    @Override
+    public void records(List<UUID> itemIds, Visitor visitor) throws Exception
+    {
+        visit(itemIds.stream().collect(Collectors.toMap(item -> item,
+                item -> Set.<String>of(), (one, other) -> one,
+                LinkedHashMap::new)), visitor);
+    }
+
+    @Override
+    public void records(Instant from, Instant to, Visitor visitor)
+            throws Exception
+    {
+        RecordTable sink = tables().existingSink();
+        sink.table().refresh();
+        visit(CommittedRecords.committedBetween(sink.table(), from, to),
+                visitor);
+    }
+
+    /**
+     * Visits the sink's records of items, each read through an audited
+     * reader ({@link AdminCli#ADMIN_READER}).
+     *
+     * @param wanted  the record IDs wanted of each item; empty for all of
+     *                its records
+     * @param visitor given each record
+     * @throws Exception if the sink can't be read
+     */
+    private void visit(Map<UUID, Set<String>> wanted, Visitor visitor)
+            throws Exception
+    {
+        RecordTable sink = tables().existingSink();
+        sink.table().refresh();
+        if (sink.table().currentSnapshot() == null)
+        {
+            return;
+        }
+        long snapshot = sink.table().currentSnapshot().snapshotId();
+        try (QueueReader reader = QueueReader.builder()
+                .catalog(tables().sinkCatalog())
+                .keyProvider(keys().wrap())
+                // An operator's read of PHI, in the command's journal.
+                .auditAs(AdminCli.ADMIN_READER).purpose("HOPERAT")
+                .audit(new TelemetryReadAudit()).build())
+        {
+            for (Map.Entry<UUID, Set<String>> item : wanted.entrySet())
+            {
+                for (CommittedRecords.Row row
+                        : CommittedRecords.all(sink.table(), item.getKey()))
+                {
+                    if (!item.getValue().isEmpty()
+                            && !item.getValue().contains(row.recordId()))
+                    {
+                        continue;
+                    }
+                    RecordLocation location = sink.location(item.getKey(),
+                            row, snapshot);
+                    visitor.visit(new StoredRecord(item.getKey(), row.seq(),
+                            row.recordId(), row.contentType()),
+                            () -> reader.readRecord(location,
+                                    Integer.MAX_VALUE - 8));
+                }
+            }
         }
     }
 

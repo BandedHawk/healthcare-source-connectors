@@ -77,6 +77,12 @@ final class SplitStatusCommand implements AdminCommand<SplitAdminContext>
     }
 
     @Override
+    public boolean readsOnly()
+    {
+        return true;
+    }
+
+    @Override
     public void run(AdminArgs arguments, SplitAdminContext context,
             AuditRecord audit, PrintStream out) throws Exception
     {

@@ -287,11 +287,44 @@ public final class CommonSettings
      * @param metricInterval how often metrics are exported
      * @param jvmMetrics     whether the JVM's metrics are exported too,
      *                       with an endpoint (design §12.2)
+     * @param journal        the durable audit journal (HIPAA.md §3.1)
      */
     public record Telemetry(@DefaultValue Otlp otlp,
             @DefaultValue("60s") Duration metricInterval,
-            @DefaultValue("true") boolean jvmMetrics)
+            @DefaultValue("true") boolean jvmMetrics,
+            @DefaultValue Journal journal)
     {
+
+        /**
+         * Reads no journal settings as the defaults.
+         */
+        public Telemetry
+        {
+            journal = journal == null ? Journal.DEFAULT : journal;
+        }
+    }
+
+    /**
+     * The durable audit journal (HIPAA.md §3.1, audit controls): every
+     * audit event, hash-chained and sealed by the stage's key, in the lease
+     * database beside the stage's own tables. On by default; the HIPAA
+     * compliance profile refuses to start with it off.
+     *
+     * @param enabled      whether events are journaled
+     * @param capacity     the most events waiting to be written before the
+     *                     stage waits for the journal
+     * @param batchSize    the most entries written in one transaction
+     * @param sealInterval how often the chain's head is sealed
+     */
+    public record Journal(@DefaultValue("true") boolean enabled,
+            @DefaultValue("50000") int capacity,
+            @DefaultValue("500") int batchSize,
+            @DefaultValue("60s") Duration sealInterval)
+    {
+
+        /** The defaults: on, 50,000 events, batches of 500, each minute. */
+        public static final Journal DEFAULT =
+                new Journal(true, 50_000, 500, Duration.ofSeconds(60));
     }
 
     /**

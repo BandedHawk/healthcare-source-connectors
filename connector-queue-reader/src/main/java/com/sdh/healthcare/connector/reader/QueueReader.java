@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.reader;
 
+import com.sdh.healthcare.connector.contract.audit.ReadAudit;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException;
@@ -19,6 +20,7 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.security.PrivateKey;
 import java.security.interfaces.ECPublicKey;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -27,9 +29,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The one entry point for systems that consume connector messages.
@@ -57,6 +62,15 @@ import org.apache.iceberg.catalog.TableIdentifier;
  * }
  * }</pre>
  * <p>
+ * <b>Every record opened is audited</b> (HIPAA.md §4.3): who read it,
+ * by the name given to {@link Builder#auditAs}, why, by the purpose code
+ * given to {@link Builder#purpose}, and which record, by its IDs and
+ * table, never its content. By default the read is written to the
+ * {@code sdh.audit} log; {@link Builder#audit} sends it to a durable
+ * journal instead, such as connector-core's {@code TelemetryReadAudit}. A
+ * stage reading its own input, whose processing is audited already, says
+ * so with {@link Builder#withinStage}.
+ * <p>
  * The message envelope, encryption, chunk layout and table layout are all
  * handled here. Consumers see only the message records and the record
  * bytes. Thread-safe.
@@ -80,6 +94,28 @@ public final class QueueReader implements AutoCloseable
     /** How many expired snapshots are remembered. */
     private static final int EXPIRED_KEPT = 4096;
 
+    /** The name a reader built without {@link Builder#auditAs} reads as. */
+    public static final String UNNAMED = "unnamed";
+
+    /** A reader's name: a service account or similar, never a person's. */
+    private static final Pattern READER_NAME =
+            Pattern.compile("[A-Za-z0-9._@+:/-]{1,128}");
+
+    /** A purpose of use: a code, never free text. */
+    private static final Pattern PURPOSE_CODE =
+            Pattern.compile("[A-Za-z0-9._-]{1,64}");
+
+    /** The log reads go to when no journal is given. */
+    private static final Logger AUDIT_LOG = LoggerFactory.getLogger(
+            "sdh.audit");
+
+    /** Writes a read to the {@code sdh.audit} log. */
+    static final ReadAudit LOG_AUDIT = read -> AUDIT_LOG.info(
+            "reader.record_read reader={} purpose={} item_id={} seq={}"
+                    + " record_id={} table={}.{}", read.reader(),
+            read.purpose(), read.itemId(), read.seq(), read.recordId(),
+            read.namespace(), read.table());
+
     /**
      * Decrypts messages and checks their signatures; null for a reader
      * built without message keys, which only reads records.
@@ -94,6 +130,15 @@ public final class QueueReader implements AutoCloseable
 
     /** The batch data keys unwrapped so far. */
     private final BatchKeyCache keys;
+
+    /** Where reads are recorded; null for a stage's own reads. */
+    private final ReadAudit audit;
+
+    /** Who reads, for the audit. */
+    private final String reader;
+
+    /** Why, for the audit; null if not given. */
+    private final String purpose;
 
     /**
      * The message IDs decoded most recently by {@link #decodeNew}, oldest
@@ -141,6 +186,9 @@ public final class QueueReader implements AutoCloseable
         this.keys = new BatchKeyCache(
                 Objects.requireNonNull(builder.keyProvider, "keyProvider"),
                 builder.keyCacheSize);
+        this.audit = builder.withinStage ? null : builder.audit;
+        this.reader = builder.reader;
+        this.purpose = builder.purpose;
         int memory = builder.repeatMemory;
         this.seen = new LinkedHashMap<>(16, 0.75f, true)
         {
@@ -238,6 +286,9 @@ public final class QueueReader implements AutoCloseable
      * decrypted chunk (8 MiB) in memory, plus any chunks the scan returns
      * ahead of order.
      *
+     * The read is audited once the record is found, before any of it is
+     * decrypted.
+     *
      * @param location where the record is: from its message, or made from
      *                 a stored row by a stage
      * @return a stream of the record's plaintext
@@ -247,6 +298,13 @@ public final class QueueReader implements AutoCloseable
     public InputStream openRecord(RecordLocation location)
     {
         Table table = table(location.storage());
+        if (audit != null)
+        {
+            audit.recorded(new ReadAudit.RecordRead(Instant.now(), reader,
+                    purpose, location.itemId(), location.seq(),
+                    location.recordId(), location.storage().namespace(),
+                    location.storage().table()));
+        }
         return RecordInputStream.open(table, location, keys);
     }
 
@@ -379,6 +437,18 @@ public final class QueueReader implements AutoCloseable
         /** How many message IDs {@link QueueReader#decodeNew} remembers. */
         private int repeatMemory = 100_000;
 
+        /** Where reads are recorded. */
+        private ReadAudit audit = LOG_AUDIT;
+
+        /** Who reads. */
+        private String reader = UNNAMED;
+
+        /** Why; null if not given. */
+        private String purpose;
+
+        /** Whether this is a stage reading its own input, unaudited. */
+        private boolean withinStage;
+
         /**
          * Creates a builder with no keys and the default cache size.
          * {@link QueueReader#builder()} does the same.
@@ -498,6 +568,76 @@ public final class QueueReader implements AutoCloseable
                         "repeatMemory must be at least 1");
             }
             this.repeatMemory = size;
+            return this;
+        }
+
+        /**
+         * Names who reads, for the audit of every record opened (HIPAA.md
+         * §4.3): a service account or similar, never a person's details.
+         * Records are read as {@value QueueReader#UNNAMED} without it.
+         *
+         * @param name letters, digits and {@code . _ @ + : / -}, up to 128
+         * @return this builder
+         * @throws IllegalArgumentException if the name has anything else
+         */
+        public Builder auditAs(String name)
+        {
+            if (name == null || !READER_NAME.matcher(name).matches())
+            {
+                throw new IllegalArgumentException("The reader's name must"
+                        + " be letters, digits and . _ @ + : / - (up to"
+                        + " 128)");
+            }
+            this.reader = name;
+            return this;
+        }
+
+        /**
+         * Says why the records are read, for the audit: a purpose of use
+         * code, such as HL7's {@code TREAT}, {@code HPAYMT}, {@code HOPERAT}
+         * or {@code PUBHLTH}. Reads for other than treatment, payment and
+         * operations may need accounting to the individual
+         * (45 CFR 164.528), so readers for those purposes should say so.
+         *
+         * @param code letters, digits and {@code . _ -}, up to 64
+         * @return this builder
+         * @throws IllegalArgumentException if the code has anything else
+         */
+        public Builder purpose(String code)
+        {
+            if (code == null || !PURPOSE_CODE.matcher(code).matches())
+            {
+                throw new IllegalArgumentException("The purpose must be a"
+                        + " code: letters, digits and . _ - (up to 64)");
+            }
+            this.purpose = code;
+            return this;
+        }
+
+        /**
+         * Sends the audit of each record opened to a journal, such as
+         * connector-core's {@code TelemetryReadAudit}, in place of the
+         * {@code sdh.audit} log.
+         *
+         * @param journal where reads are recorded
+         * @return this builder
+         */
+        public Builder audit(ReadAudit journal)
+        {
+            this.audit = Objects.requireNonNull(journal, "journal");
+            return this;
+        }
+
+        /**
+         * Marks the reader as a stage's own, reading its input as part of
+         * processing it, which the stage's own audit events record: its
+         * reads aren't audited again. Not for anything outside the stages.
+         *
+         * @return this builder
+         */
+        public Builder withinStage()
+        {
+            this.withinStage = true;
             return this;
         }
 

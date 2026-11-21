@@ -6,8 +6,10 @@
  */
 package com.sdh.healthcare.connector.landing.admin;
 
+import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
+import com.sdh.healthcare.connector.stage.admin.AuditTarget;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
@@ -39,7 +41,12 @@ public final class LandingAdmin
                 new AdminCli.Stage<>("landing-connector.jar",
                         "landing-connector", Configuration.class,
                         LandingProperties.class, LandingProperties::telemetry,
-                        LandingAdminContext::new),
+                        LandingAdminContext::new,
+                        properties -> new AuditTarget(properties.lease(),
+                                properties.crypto(),
+                                AuditTables.besideLeaseTable(
+                                        properties.lease().jdbc().table()),
+                                "landing/" + properties.connectorId())),
                 List.of(new ResubmitCommand()));
     }
 

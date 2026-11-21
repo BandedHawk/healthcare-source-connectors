@@ -10,11 +10,13 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.sdh.healthcare.connector.contract.message.MessageType;
+import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.publish.OutboundMessage;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
+import com.sdh.healthcare.connector.stage.admin.AuditTarget;
 import com.sdh.healthcare.connector.stage.admin.StageAdmin;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
 import java.io.ByteArrayOutputStream;
@@ -244,6 +246,33 @@ class StageAdminTest
     }
 
     /**
+     * The test stage's audit journal, in its registry schema, with no
+     * stage key.
+     *
+     * @param settings the settings, with the schema
+     * @return the journal's place
+     */
+    static AuditTarget audit(Object settings)
+    {
+        CommonSettings.Lease lease;
+        String schema;
+        if (settings instanceof TestSettings test)
+        {
+            lease = test.lease();
+            schema = test.registrySchema();
+        }
+        else
+        {
+            FailureCommandsTest.TestSettings test =
+                    (FailureCommandsTest.TestSettings) settings;
+            lease = test.lease();
+            schema = test.registrySchema();
+        }
+        return new AuditTarget(lease, null, new AuditTables(schema),
+                "test/" + CONNECTOR);
+    }
+
+    /**
      * The test stage's CLI.
      *
      * @return the CLI
@@ -252,7 +281,7 @@ class StageAdminTest
     {
         return new AdminCli<>(new AdminCli.Stage<>("test-stage.jar",
                 "test-stage", Configuration.class, TestSettings.class,
-                TestSettings::telemetry, Context::new),
+                TestSettings::telemetry, Context::new, StageAdminTest::audit),
                 List.of(new StageStatusCommand<>()));
     }
 
@@ -280,6 +309,36 @@ class StageAdminTest
                 .containsEntry("sdh.stage", "convert")
                 .containsEntry("sdh.count", 2L)
                 .containsEntry("sdh.result", "ok");
+    }
+
+    /**
+     * Each command's run is kept in the stage's audit journal, a closed
+     * chain of its own, which audit-verify checks and audit-export prints;
+     * audit-prune refuses a time too recent to be safe.
+     */
+    @Test
+    void journalsEachRunAndChecksTheJournal()
+    {
+        assertThat(admin("status").status()).isZero();
+
+        Result verify = admin("audit-verify");
+        Result export = admin("audit-export");
+        Result prune = admin("audit-prune", "--before",
+                Instant.now().toString());
+
+        assertThat(verify.status()).as(verify.out() + verify.err()).isZero();
+        assertThat(verify.out())
+                .containsPattern("test/test-stage/admin pod=.+ closed=")
+                .contains("no changes found")
+                .contains("seals not checked");
+        assertThat(export.status()).as(export.err()).isZero();
+        assertThat(export.out())
+                .contains("\"event\":\"sdh.audit.admin.status\"")
+                .contains("\"sdh.operator\":\"alice\"")
+                .contains("\"event\":\"sdh.audit.admin.audit_verify\"");
+        assertThat(prune.status()).isEqualTo(2);
+        assertThat(audit.attributes("admin.audit_verify"))
+                .containsEntry("sdh.outcome", "intact");
     }
 
     /**
@@ -355,7 +414,8 @@ class StageAdminTest
                 .containsPattern("items: +unavailable \\(")
                 .containsPattern("records: +unavailable \\(")
                 .containsPattern("reconciler: +unavailable \\(");
-        assertThat(status.err()).isEmpty();
+        assertThat(status.err()).startsWith("warning: the audit journal"
+                + " can't be written");
         assertThat(audit.attributes("admin.status"))
                 .containsEntry("sdh.result", "failed")
                 .containsEntry("sdh.reason", "Unavailable");

@@ -13,14 +13,20 @@ import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.ExportSealer;
+import com.sdh.healthcare.connector.stage.admin.FailureCommands;
 import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
@@ -44,13 +50,30 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
     static final String USAGE = """
             restore --item-id <id> --to <dir>
                     [--from-offset <n> | --unprocessed] [--original-name]
-                Decrypts a landed item into <dir>, checking its digest.
+                    (< operator-public.pem | --plaintext --ticket <ref>)
+                Decrypts a landed item, checks its digest, and writes it
+                into <dir> sealed (JWE) to the public key read from
+                standard input (EC P-256 or RSA, PEM): <id>.jwe, one JWE
+                a line, each a part of up to 8 MiB in order, numbered in
+                its protected header. Only the key's holder can read it.
                 --from-offset   start at this byte offset instead of 0
                 --unprocessed   start after the item's last split record:
                                 only its unprocessed tail (headers and
                                 envelopes before that point aren't repeated)
                 --original-name name the output after the original file
-                                instead of <id>""";
+                                instead of <id>
+                --plaintext     write it unsealed, as plaintext, for a
+                                break-glass case that needs it: requires
+                                --ticket, the change or incident it is for
+                                (letters, digits, . _ : / - up to 64),
+                                which is audited""";
+
+    /** A ticket reference: a reference, never free text. */
+    private static final Pattern TICKET =
+            Pattern.compile("[A-Za-z0-9._:/-]{1,64}");
+
+    /** How much plaintext goes in one sealed part. */
+    static final int PART_BYTES = 8 << 20;
 
     /** Creates the command. */
     RestoreCommand()
@@ -72,13 +95,13 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
     @Override
     public Set<String> flags()
     {
-        return Set.of("unprocessed", "original-name");
+        return Set.of("unprocessed", "original-name", "plaintext");
     }
 
     @Override
     public Set<String> options()
     {
-        return Set.of("item-id", "to", "from-offset");
+        return Set.of("item-id", "to", "from-offset", "ticket");
     }
 
     @Override
@@ -88,6 +111,36 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
         UUID itemId = parseId(arguments.required("item-id"));
         audit.add(Attr.ITEM_ID, itemId);
         Path directory = OutputFiles.directory(arguments.required("to"));
+        boolean plaintext = arguments.flag("plaintext");
+        ExportSealer sealer = null;
+        if (plaintext)
+        {
+            String ticket = arguments.option("ticket").orElseThrow(() ->
+                    new AdminArgs.UsageException("--plaintext requires"
+                            + " --ticket <ref>, the change or incident it"
+                            + " is for"));
+            if (!TICKET.matcher(ticket).matches())
+            {
+                throw new AdminArgs.UsageException("--ticket must be a"
+                        + " reference: letters, digits and . _ : / -, up"
+                        + " to 64");
+            }
+            audit.add(Attr.TICKET, ticket);
+            audit.add(Attr.OUTCOME, "plaintext");
+        }
+        else
+        {
+            if (arguments.option("ticket").isPresent())
+            {
+                throw new AdminArgs.UsageException(
+                        "--ticket goes with --plaintext");
+            }
+            sealer = new ExportSealer(FailureCommands.input(
+                    System.in, ExportSealer.MAX_KEY_BYTES,
+                    "public key"));
+            audit.add(Attr.RECIPIENT_KEY, sealer.fingerprint());
+            audit.add(Attr.OUTCOME, "sealed");
+        }
         if (arguments.option("from-offset").isPresent()
                 && arguments.flag("unprocessed"))
         {
@@ -113,7 +166,8 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
         }
         audit.add(Attr.OFFSET, from);
 
-        String suffix = from > 0 ? ".from-" + from : "";
+        String suffix = (from > 0 ? ".from-" + from : "")
+                + (plaintext ? "" : ".jwe");
         String outputName = itemId + suffix;
         Optional<String> original = Optional.empty();
         if (arguments.flag("original-name"))
@@ -128,15 +182,32 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
             outputName = OutputFiles.safeName(original.get()) + suffix;
         }
 
-        long written = OutputFiles.writeNew(directory, outputName,
-                output -> LandedItems.read(landedItems, itemId,
-                        context.keys().wrap(), context.landingIds(),
-                        new Skipping(output, from)));
-        audit.add(Attr.BYTES, written);
+        ExportSealer sealing = sealer;
+        long[] plain = new long[1];
+        long written = OutputFiles.writeNew(directory, outputName, output ->
+        {
+            if (sealing == null)
+            {
+                LandedItems.read(landedItems, itemId, context.keys().wrap(),
+                        context.landingIds(), new Skipping(output, from));
+                return;
+            }
+            try (Sealing sealed = new Sealing(output, sealing, itemId,
+                    from))
+            {
+                LandedItems.read(landedItems, itemId, context.keys().wrap(),
+                        context.landingIds(), new Skipping(sealed, from));
+                sealed.finish();
+                plain[0] = sealed.plaintext();
+            }
+        });
+        long restored = sealer == null ? written : plain[0];
+        audit.add(Attr.BYTES, restored);
         // The original name is PHI, and stays out of output that may end
         // up in logs.
         out.printf("restored %d bytes (offset %d of %d) from landing,"
-                + " digest verified, to %s%n", written, from, size,
+                + " digest verified, %s to %s%n", restored, from, size,
+                plaintext ? "IN PLAINTEXT" : "sealed",
                 original.isPresent()
                         ? directory + " under its original name"
                         : directory.resolve(outputName));
@@ -215,6 +286,146 @@ final class RestoreCommand implements AdminCommand<SplitAdminContext>
         {
             throw new AdminArgs.UsageException(
                     "--from-offset must be a non-negative number");
+        }
+    }
+
+    /**
+     * Seals what is written to it in parts of {@link #PART_BYTES}, each a
+     * JWE on a line of its own, numbered in its protected header with the
+     * item and where the part starts, so parts can't be reordered, dropped
+     * or moved to another item unseen. Each part's plaintext is cleared
+     * once sealed. Closing it leaves the stream beneath open.
+     */
+    private static final class Sealing extends OutputStream
+    {
+
+        /** Where the sealed lines go. */
+        private final OutputStream output;
+
+        /** Seals the parts. */
+        private final ExportSealer sealer;
+
+        /** The item. */
+        private final UUID itemId;
+
+        /** The current part. */
+        private final byte[] part = new byte[PART_BYTES];
+
+        /** How much of the current part is filled. */
+        private int filled;
+
+        /** Where the current part starts, in the item. */
+        private long partStart;
+
+        /** Parts sealed so far. */
+        private int parts;
+
+        /** Plaintext bytes taken. */
+        private long plaintext;
+
+        /** Whether the last part has been sealed. */
+        private boolean finished;
+
+        /**
+         * Starts sealing.
+         *
+         * @param output where the sealed lines go
+         * @param sealer seals the parts
+         * @param itemId the item
+         * @param from   where in the item the output starts
+         */
+        Sealing(OutputStream output, ExportSealer sealer, UUID itemId,
+                long from)
+        {
+            this.output = output;
+            this.sealer = sealer;
+            this.itemId = itemId;
+            this.partStart = from;
+        }
+
+        @Override
+        public void write(int value) throws IOException
+        {
+            write(new byte[] {(byte) value}, 0, 1);
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int length)
+                throws IOException
+        {
+            int at = offset;
+            int left = length;
+            while (left > 0)
+            {
+                int taken = Math.min(left, part.length - filled);
+                System.arraycopy(bytes, at, part, filled, taken);
+                filled += taken;
+                at += taken;
+                left -= taken;
+                plaintext += taken;
+                if (filled == part.length)
+                {
+                    seal(false);
+                }
+            }
+        }
+
+        /**
+         * Seals what is left as the last part, which may be empty.
+         *
+         * @throws IOException if it can't be written
+         */
+        void finish() throws IOException
+        {
+            if (!finished)
+            {
+                seal(true);
+                finished = true;
+            }
+        }
+
+        /**
+         * How much plaintext was sealed.
+         *
+         * @return the bytes
+         */
+        long plaintext()
+        {
+            return plaintext;
+        }
+
+        /**
+         * Seals the current part and writes its line.
+         *
+         * @param last whether it is the last
+         * @throws IOException if it can't be written
+         */
+        private void seal(boolean last) throws IOException
+        {
+            byte[] content = Arrays.copyOf(part, filled);
+            Arrays.fill(part, 0, filled, (byte) 0);
+            parts++;
+            String line;
+            try
+            {
+                line = sealer.seal(content, Map.of("sdh_item",
+                        itemId.toString(), "sdh_part", parts, "sdh_offset",
+                        partStart, "sdh_last", last));
+            }
+            finally
+            {
+                Arrays.fill(content, (byte) 0);
+            }
+            output.write((line + "\n").getBytes(StandardCharsets.US_ASCII));
+            partStart += filled;
+            filled = 0;
+        }
+
+        /** Clears what is unsealed; leaves the stream beneath open. */
+        @Override
+        public void close()
+        {
+            Arrays.fill(part, (byte) 0);
         }
     }
 

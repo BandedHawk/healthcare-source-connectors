@@ -6,10 +6,13 @@
  */
 package com.sdh.healthcare.connector.file.admin;
 
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.nimbusds.jose.JWEObject;
+import com.nimbusds.jose.crypto.ECDHDecrypter;
 import com.sdh.healthcare.connector.broker.receive.BatchHandler.Outcome;
 import com.sdh.healthcare.connector.broker.receive.BrokerMessage;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
@@ -39,8 +42,13 @@ import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
+import java.security.spec.ECGenParameterSpec;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -116,6 +124,15 @@ class AdminCommandsTest
      */
     static final String BAD =
             "1,a\n2,b\n3,c\n4,d\n5,e\n6,f\n7,g\n8,\"never closed\n9,h\n";
+
+    /** Restores in plaintext, the break-glass way. */
+    static final String PLAIN = "--plaintext";
+
+    /** Names the ticket a plaintext restore is for. */
+    static final String TICKET = "--ticket";
+
+    /** The ticket. */
+    static final String CHG = "CHG-1";
 
     static
     {
@@ -484,7 +501,8 @@ class AdminCommandsTest
             throws Exception
     {
         Path dir = newDir();
-        Result whole = admin("restore", "--item-id", badId.toString(), "--to",
+        Result whole = admin("restore", PLAIN, TICKET, CHG,
+                "--item-id", badId.toString(), "--to",
                 dir.toString());
         assertThat(whole.status()).as(whole.err()).isZero();
         assertThat(whole.out()).contains("from landing, digest verified");
@@ -501,14 +519,16 @@ class AdminCommandsTest
         assertThat(BAD.substring(0, from).chars()
                 .filter(character -> character == '\n').count())
                 .isGreaterThanOrEqualTo(5);
-        Result tail = admin("restore", "--item-id", badId.toString(), "--to",
+        Result tail = admin("restore", PLAIN, TICKET, CHG,
+                "--item-id", badId.toString(), "--to",
                 dir.toString(), "--unprocessed");
         assertThat(tail.status()).as(tail.err()).isZero();
         assertThat(Files.readString(dir.resolve(badId + ".from-" + from)))
                 .isEqualTo(BAD.substring(from));
 
         // Never overwrites, and leaves no partial file behind.
-        Result again = admin("restore", "--item-id", badId.toString(), "--to",
+        Result again = admin("restore", PLAIN, TICKET, CHG,
+                "--item-id", badId.toString(), "--to",
                 dir.toString());
         assertThat(again.status()).isEqualTo(1);
         assertThat(again.err()).contains("already exists");
@@ -519,8 +539,87 @@ class AdminCommandsTest
                 .contains("admin.restore operator=alice item_id=" + badId)
                 .contains("result=ok")
                 .contains("admin.restore operator=alice item_id=" + badId
+                        + " ticket=CHG-1 outcome=plaintext"
                         + " table=landed_items offset=0 result=failed"
                         + " reason=FileAlreadyExistsException");
+    }
+
+    /**
+     * By default an item restores sealed to the operator's key, a JWE a
+     * line, each part numbered with the item and its offset; plaintext
+     * needs a ticket, which is a reference, and is audited.
+     *
+     * @param log the captured log
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void restoresSealedToTheOperatorsKeyByDefault(CapturedOutput log)
+            throws Exception
+    {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+        generator.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair operator = generator.generateKeyPair();
+        String pem = "-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder().encodeToString(
+                        operator.getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----\n";
+        Path dir = newDir();
+        InputStream stdin = System.in;
+        Result sealed;
+        Result noKey;
+        try
+        {
+            System.setIn(new ByteArrayInputStream(pem.getBytes(UTF_8)));
+            sealed = admin("restore", "--item-id", badId.toString(), "--to",
+                    dir.toString(), "--from-offset", "4");
+            System.setIn(new ByteArrayInputStream(new byte[0]));
+            noKey = admin("restore", "--item-id", badId.toString(), "--to",
+                    dir.toString());
+        }
+        finally
+        {
+            System.setIn(stdin);
+        }
+        assertThat(sealed.status()).as(sealed.err()).isZero();
+        assertThat(sealed.out()).contains("digest verified, sealed to");
+        assertThat(noKey.status()).isEqualTo(2);
+
+        Path file = dir.resolve(badId + ".from-4.jwe");
+        assertThat(PosixFilePermissions.toString(
+                Files.getPosixFilePermissions(file))).isEqualTo("rw-------");
+        assertThat(Files.readString(file)).doesNotContain("never closed");
+        List<String> lines = Files.readAllLines(file, US_ASCII);
+        StringBuilder restored = new StringBuilder();
+        for (int part = 0; part < lines.size(); part++)
+        {
+            JWEObject jwe = JWEObject.parse(lines.get(part));
+            jwe.decrypt(new ECDHDecrypter(
+                    (ECPrivateKey) operator.getPrivate()));
+            assertThat(jwe.getHeader().getCustomParam("sdh_item"))
+                    .isEqualTo(badId.toString());
+            assertThat(((Number) jwe.getHeader().getCustomParam("sdh_part"))
+                    .intValue()).isEqualTo(part + 1);
+            assertThat(((Number) jwe.getHeader()
+                    .getCustomParam("sdh_offset")).longValue())
+                    .isEqualTo(4L + restored.length());
+            assertThat(jwe.getHeader().getCustomParam("sdh_last"))
+                    .isEqualTo(part == lines.size() - 1);
+            restored.append(jwe.getPayload().toString());
+        }
+        assertThat(restored.toString()).isEqualTo(BAD.substring(4));
+
+        assertThat(admin("restore", PLAIN, "--item-id", badId.toString(),
+                "--to", dir.toString()).err()).contains("requires --ticket");
+        assertThat(admin("restore", PLAIN, TICKET, "see the incident notes",
+                "--item-id", badId.toString(), "--to", dir.toString()).err())
+                .contains("must be a reference");
+        assertThat(admin("restore", TICKET, CHG, "--item-id",
+                badId.toString(), "--to", dir.toString()).err())
+                .contains("goes with --plaintext");
+        assertThat(names(dir)).containsExactly(badId + ".from-4.jwe");
+        assertThat(log.getAll()).containsPattern("admin.restore operator=alice"
+                + " item_id=" + badId + " recipient_key=\\S+ outcome=sealed")
+                .doesNotContain("never closed");
     }
 
     /**
@@ -534,7 +633,8 @@ class AdminCommandsTest
             throws Exception
     {
         Path dir = newDir();
-        Result named = admin("restore", "--item-id", goodId.toString(),
+        Result named = admin("restore", PLAIN, TICKET, CHG,
+                "--item-id", goodId.toString(),
                 "--to", dir.toString(), "--original-name");
         assertThat(named.status()).as(named.err()).isZero();
         assertThat(named.out()).contains("from landing")
@@ -543,14 +643,16 @@ class AdminCommandsTest
         assertThat(Files.readString(dir.resolve("good-smith.csv")))
                 .isEqualTo(GOOD);
 
-        Result partial = admin("restore", "--item-id", goodId.toString(),
+        Result partial = admin("restore", PLAIN, TICKET, CHG,
+                "--item-id", goodId.toString(),
                 "--to", dir.toString(), "--from-offset", "8");
         assertThat(partial.status()).as(partial.err()).isZero();
         assertThat(Files.readString(dir.resolve(goodId + ".from-8")))
                 .isEqualTo(GOOD.substring(8));
 
         // A completed item has no unprocessed tail.
-        Result unprocessed = admin("restore", "--item-id", goodId.toString(),
+        Result unprocessed = admin("restore", PLAIN, TICKET, CHG,
+                "--item-id", goodId.toString(),
                 "--to", dir.toString(), "--unprocessed");
         assertThat(unprocessed.status()).as(unprocessed.err()).isZero();
         assertThat(Files.size(dir.resolve(goodId + ".from-" + GOOD.length())))
@@ -634,9 +736,11 @@ class AdminCommandsTest
         assertThat(typo.err()).contains("Unknown option --form-offset");
 
         assertThat(admin("frobnicate").status()).isEqualTo(2);
-        assertThat(admin("restore", "--item-id", "not-a-uuid", "--to",
+        assertThat(admin("restore", PLAIN, TICKET, CHG,
+                "--item-id", "not-a-uuid", "--to",
                 ROOT.toString()).err()).contains("must be a UUID");
-        assertThat(admin("restore", "--item-id", UUID.randomUUID().toString(),
+        assertThat(admin("restore", PLAIN, TICKET, CHG,
+                "--item-id", UUID.randomUUID().toString(),
                 "--to", ROOT.toString()).err())
                 .contains("No fully landed item");
     }

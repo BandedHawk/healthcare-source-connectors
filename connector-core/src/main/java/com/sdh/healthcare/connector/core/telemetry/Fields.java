@@ -16,7 +16,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.StringJoiner;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 /**
@@ -241,6 +243,20 @@ public final class Fields
             }
         });
         return builder.build();
+    }
+
+    /**
+     * The attributes as text, by key, in key order: as the audit journal
+     * records them (HIPAA.md §3.1, audit controls).
+     *
+     * @return the values, a whole number as its decimal form
+     */
+    public SortedMap<String, String> toStrings()
+    {
+        SortedMap<String, String> strings = new TreeMap<>();
+        values.forEach((attribute, value) ->
+                strings.put(attribute.key(), value.toString()));
+        return strings;
     }
 
     /**

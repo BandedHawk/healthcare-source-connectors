@@ -56,7 +56,8 @@ class JvmMetricsExportTest
     {
         return new CommonSettings.Telemetry(new CommonSettings.Otlp(endpoint,
                 Map.of("Authorization", "Bearer test"), Duration.ofSeconds(10)),
-                Duration.ofSeconds(30), jvmMetrics);
+                Duration.ofSeconds(30), jvmMetrics,
+                CommonSettings.Journal.DEFAULT);
     }
 
     /**

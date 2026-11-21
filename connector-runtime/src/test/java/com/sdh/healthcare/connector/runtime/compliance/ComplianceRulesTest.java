@@ -138,6 +138,19 @@ class ComplianceRulesTest
                         "sdh.telemetry.otlp.endpoint"));
     }
 
+    /** The durable audit journal is on unless turned off, which is refused. */
+    @Test
+    void theAuditJournalMustBeOn()
+    {
+        Map<String, String> settings = passing();
+        settings.put("sdh.telemetry.journal.enabled", "false");
+
+        assertThat(refused(passing())).isEmpty();
+        assertThat(refused(settings)).containsExactly(
+                new Finding(ComplianceCheck.AUDIT_JOURNAL,
+                        "sdh.telemetry.journal.enabled"));
+    }
+
     /** Postgres must verify the server, in the URL or the catalog's map. */
     @Test
     void postgresMustVerifyTheServer()

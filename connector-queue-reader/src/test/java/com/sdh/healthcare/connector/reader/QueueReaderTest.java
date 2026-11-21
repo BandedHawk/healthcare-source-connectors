@@ -20,6 +20,7 @@ import com.nimbusds.jose.Payload;
 import com.nimbusds.jose.crypto.ECDHEncrypter;
 import com.nimbusds.jose.crypto.ECDSASigner;
 import com.sdh.healthcare.connector.contract.ContractVersion;
+import com.sdh.healthcare.connector.contract.audit.ReadAudit;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.crypto.ChunkIntegrityException;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
@@ -45,6 +46,7 @@ import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -352,6 +354,54 @@ class QueueReaderTest
             assertThatThrownBy(() -> recordsOnly.decode(first.get(0)))
                     .isInstanceOf(IllegalStateException.class);
         }
+    }
+
+    /**
+     * Each record opened is audited with the reader's name and purpose and
+     * the record's IDs and table, before it is read; a stage's own reader
+     * audits nothing; names and purposes are codes, not text.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void auditsEachRecordOpened() throws Exception
+    {
+        byte[] small = "abc".getBytes(StandardCharsets.UTF_8);
+        UUID itemId = UUID.randomUUID();
+        List<byte[]> bodies = ingest(itemId, small);
+        List<ReadAudit.RecordRead> reads = new ArrayList<>();
+        RecordStored message;
+        try (QueueReader reader = reader())
+        {
+            message = (RecordStored) reader.decode(bodies.getFirst());
+        }
+        try (QueueReader named = QueueReader.builder().catalog(catalog)
+                .keyProvider(kms).auditAs("svc-fhir-loader")
+                .purpose("TREAT").audit(reads::add).build();
+                QueueReader stage = QueueReader.builder().catalog(catalog)
+                        .keyProvider(kms).audit(reads::add).withinStage()
+                        .build())
+        {
+            assertThat(named.readRecord(message, 1 << 20)).isEqualTo(small);
+            assertThat(stage.readRecord(message, 1 << 20)).isEqualTo(small);
+        }
+
+        assertThat(reads).singleElement().satisfies(read ->
+        {
+            assertThat(read.reader()).isEqualTo("svc-fhir-loader");
+            assertThat(read.purpose()).isEqualTo("TREAT");
+            assertThat(read.itemId()).isEqualTo(itemId);
+            assertThat(read.seq()).isEqualTo(message.location().seq());
+            assertThat(read.recordId())
+                    .isEqualTo(message.location().recordId());
+            assertThat(read.table())
+                    .isEqualTo(message.location().storage().table());
+        });
+        assertThatThrownBy(() -> QueueReader.builder().auditAs("Jane Doe"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> QueueReader.builder()
+                .purpose("for the patient's appeal"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     /**

@@ -16,6 +16,9 @@ import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
+import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
@@ -33,8 +36,9 @@ import org.slf4j.LoggerFactory;
  * hold PHI: use {@link #fail} with an error code.
  * <p>
  * Audit events are OpenTelemetry log records named
- * {@code sdh.audit.<event>}, and are also written to the console log.
- * Thread-safe.
+ * {@code sdh.audit.<event>}, and are also written to the console log and,
+ * once one is installed with {@link #journal(AuditJournal)}, to the
+ * durable audit journal. Thread-safe.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -66,6 +70,28 @@ public final class Telemetry
     /** Bucket boundaries for messages per batch, up to the 1,000 limit. */
     private static final List<Long> BATCH_BUCKETS = List.of(1L, 2L, 5L, 10L,
             25L, 50L, 100L, 250L, 500L, 750L, 1000L);
+
+    /**
+     * The most audit events kept for a journal not yet installed: those a
+     * process emits while it starts, before its database is open.
+     */
+    static final int EARLY_EVENTS = 1000;
+
+    /**
+     * The durable audit journal (HIPAA.md §3.1, audit controls), or null
+     * until one is installed; guarded by {@link #EARLY}.
+     */
+    private static AuditJournal journal;
+
+    /**
+     * Audit events emitted before a journal was installed, oldest first,
+     * to be handed to it when it is; null once one has been. Guards
+     * {@link #journal}.
+     */
+    private static final Object EARLY = new Object();
+
+    /** The events {@link #EARLY} guards; null once a journal is installed. */
+    private static Deque<AuditJournal.Event> early = new ArrayDeque<>();
 
     /** The installed instance; one that does nothing until then. */
     private static volatile Telemetry current =
@@ -337,11 +363,50 @@ public final class Telemetry
      * something that may stop the process (STAGES.md §6). They are
      * otherwise exported in batches, and those of the last few seconds are
      * lost with a process that dies. The console log is written at once,
-     * and needs no flush.
+     * and needs no flush. The audit journal is flushed too, waiting a short
+     * while at most.
      */
     public void flush()
     {
         flush.run();
+        journal().flush();
+    }
+
+    /**
+     * Installs the durable audit journal, and hands it the audit events
+     * emitted since the process started, up to {@value #EARLY_EVENTS}.
+     * Every audit event from then on is appended to it as well as exported.
+     * A process that keeps no journal installs {@link AuditJournal#NONE},
+     * so early events aren't kept for one.
+     *
+     * @param installed the journal; replaces any installed before
+     */
+    public static void journal(AuditJournal installed)
+    {
+        Deque<AuditJournal.Event> pending;
+        synchronized (EARLY)
+        {
+            journal = installed;
+            pending = early;
+            early = null;
+        }
+        if (pending != null)
+        {
+            pending.forEach(installed::append);
+        }
+    }
+
+    /**
+     * The installed audit journal.
+     *
+     * @return the journal; {@link AuditJournal#NONE} if none is installed
+     */
+    public static AuditJournal journal()
+    {
+        synchronized (EARLY)
+        {
+            return journal == null ? AuditJournal.NONE : journal;
+        }
     }
 
     /**
@@ -461,6 +526,25 @@ public final class Telemetry
                 .setBody(event)
                 .setAllAttributes(fields.toAttributes())
                 .emit();
+        AuditJournal.Event entry = new AuditJournal.Event(Instant.now(),
+                "sdh.audit." + event, severity.name(), fields.toStrings());
+        AuditJournal target;
+        synchronized (EARLY)
+        {
+            target = journal;
+            if (target == null)
+            {
+                if (early.size() == EARLY_EVENTS)
+                {
+                    early.removeFirst();
+                }
+                early.addLast(entry);
+            }
+        }
+        if (target != null)
+        {
+            target.append(entry);
+        }
         String line = event + fields.toLogString();
         switch (severity)
         {

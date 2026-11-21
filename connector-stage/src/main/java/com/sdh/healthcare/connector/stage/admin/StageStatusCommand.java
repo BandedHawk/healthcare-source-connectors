@@ -76,6 +76,12 @@ public final class StageStatusCommand<C extends StageAdmin>
     }
 
     @Override
+    public boolean readsOnly()
+    {
+        return true;
+    }
+
+    @Override
     public void run(AdminArgs arguments, C context, AuditRecord audit,
             PrintStream out) throws Exception
     {

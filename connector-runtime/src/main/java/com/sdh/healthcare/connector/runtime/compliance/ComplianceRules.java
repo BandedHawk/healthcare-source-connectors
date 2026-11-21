@@ -47,6 +47,9 @@ public final class ComplianceRules
     /** The audit export's endpoint, which may be plain HTTP. */
     static final String OTLP_ENDPOINT = "sdh.telemetry.otlp.endpoint";
 
+    /** Whether the durable audit journal is on; {@code true} if unset. */
+    static final String JOURNAL_ENABLED = "sdh.telemetry.journal.enabled";
+
     /** The settings naming who holds the keys; {@code local} if unset. */
     private static final List<String> KEY_PROVIDERS = List.of(
             "sdh.crypto.wrap-provider", "sdh.crypto.sign-provider");
@@ -61,7 +64,7 @@ public final class ComplianceRules
     public static List<String> namedSettings()
     {
         List<String> names = new ArrayList<>(List.of(PROFILE, OTLP_ENDPOINT,
-                KAFKA_COMPONENT_PROTOCOL, RABBIT_SSL));
+                JOURNAL_ENABLED, KAFKA_COMPONENT_PROTOCOL, RABBIT_SSL));
         names.addAll(KEY_PROVIDERS);
         for (ComplianceCheck check : ComplianceCheck.values())
         {
@@ -276,6 +279,12 @@ public final class ComplianceRules
         {
             findings.add(new Finding(ComplianceCheck.AUDIT_EXPORT,
                     OTLP_ENDPOINT));
+        }
+        if (!Boolean.parseBoolean(
+                settings.getOrDefault(JOURNAL_ENABLED, "true").trim()))
+        {
+            findings.add(new Finding(ComplianceCheck.AUDIT_JOURNAL,
+                    JOURNAL_ENABLED));
         }
         JVM_OPTIONS.forEach((option, wanted) ->
         {

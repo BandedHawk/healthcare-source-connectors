@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.broker.send.QueueType;
 import com.sdh.healthcare.connector.contract.crypto.UnwrapCache;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.contract.table.RecordsTable;
+import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
 import com.sdh.healthcare.connector.core.checkpoint.ItemCheckpoints;
@@ -37,8 +38,8 @@ import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.file.split.ItemSplitter;
-import com.sdh.healthcare.connector.file.split.SplitCorrections;
 import com.sdh.healthcare.connector.file.split.LandedItemsTable;
+import com.sdh.healthcare.connector.file.split.SplitCorrections;
 import com.sdh.healthcare.connector.file.split.SplitHandler;
 import com.sdh.healthcare.connector.file.split.SplitReconciler;
 import com.sdh.healthcare.connector.file.split.SplitReprocess;
@@ -47,14 +48,15 @@ import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
-import com.sdh.healthcare.connector.stage.StageBuild;
-import com.sdh.healthcare.connector.stage.StageDuties;
-import com.sdh.healthcare.connector.stage.StageHealth;
+import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import com.sdh.healthcare.connector.stage.DrainGate;
 import com.sdh.healthcare.connector.stage.ItemEndResender;
 import com.sdh.healthcare.connector.stage.PartWay;
-import com.sdh.healthcare.connector.stage.StageProperties;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.StageBuild;
+import com.sdh.healthcare.connector.stage.StageDuties;
+import com.sdh.healthcare.connector.stage.StageHealth;
+import com.sdh.healthcare.connector.stage.StageProperties;
 import com.sdh.healthcare.connector.stage.StageReceiver;
 import com.zaxxer.hikari.HikariDataSource;
 import java.time.Clock;
@@ -162,6 +164,9 @@ public final class ConnectorRuntime implements AutoCloseable
     /** The keys, closed with the runtime. */
     private final KeyMaterial keys;
 
+    /** The audit journal (HIPAA.md §3.1), closed before the keys. */
+    private final AuditJournals.Opened journal;
+
     /** Makes IDs and MACs with the stage's ID key. */
     private final RecordIds ids;
 
@@ -200,6 +205,7 @@ public final class ConnectorRuntime implements AutoCloseable
      * @param duties         the reconciler and maintenance
      * @param tables         the tables
      * @param keys           the keys
+     * @param journal        the audit journal
      * @param ids            makes IDs and MACs
      * @param gate           the drain check
      */
@@ -209,7 +215,8 @@ public final class ConnectorRuntime implements AutoCloseable
             ItemProcessor processor, ItemSplitter splitter,
             SplitCorrections corrections, SplitReprocess reprocess,
             StageReceiver receiver, StageHealth health, StageDuties duties,
-            Tables tables, KeyMaterial keys, RecordIds ids, DrainGate gate)
+            Tables tables, KeyMaterial keys, AuditJournals.Opened journal,
+            RecordIds ids, DrainGate gate)
     {
     }
 
@@ -235,6 +242,7 @@ public final class ConnectorRuntime implements AutoCloseable
         this.duties = parts.duties();
         this.tables = parts.tables();
         this.keys = parts.keys();
+        this.journal = parts.journal();
         this.ids = parts.ids();
         this.gate = parts.gate();
     }
@@ -295,6 +303,7 @@ public final class ConnectorRuntime implements AutoCloseable
         KeyMaterial keys = KeyMaterial.load(properties.crypto());
 
         HikariDataSource dataSource = null;
+        AuditJournals.Opened journal = null;
         HikariDataSource commitPool = null;
         Catalog catalog = null;
         Catalog landingCatalog = null;
@@ -305,6 +314,12 @@ public final class ConnectorRuntime implements AutoCloseable
         try
         {
             dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
+            // Every audit event, chained and sealed (HIPAA.md §3.1).
+            journal = AuditJournals.start(properties.lease(),
+                    properties.telemetry(),
+                    new AuditTables(stage.registrySchema()),
+                    ItemProcessor.STAGE + "/" + properties.connectorId(),
+                    keys);
             JdbcLeaseStore leases = new JdbcLeaseStore(dataSource,
                     properties.lease().jdbc().table(),
                     Duration.ofSeconds(10));
@@ -471,7 +486,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     processor, splitter, correcting, reprocess, receiver,
                     health, duties,
                     new Tables(splitRecords, landedItems, checkpoints), keys,
-                    ids, gate));
+                    journal, ids, gate));
         }
         catch (Exception | Error failure)
         {
@@ -488,6 +503,7 @@ public final class ConnectorRuntime implements AutoCloseable
             }
             closeQuietly(catalog);
             closeQuietly(commitPool);
+            closeQuietly(journal);
             closeQuietly(dataSource);
             keys.close();
             throw failure;
@@ -773,6 +789,8 @@ public final class ConnectorRuntime implements AutoCloseable
         pipeline.close();
         closeQuietly(reprocessPublisher);
         closeQuietly(publisher);
+        LOG.info("connector.stopped");
+        journal.close();
         keys.close();
         if (landingCatalog != catalog)
         {
@@ -780,7 +798,6 @@ public final class ConnectorRuntime implements AutoCloseable
         }
         closeQuietly(catalog);
         closeQuietly(dataSource);
-        LOG.info("connector.stopped");
     }
 
     /**

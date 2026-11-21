@@ -287,7 +287,8 @@ class FailureCommandsTest
         int status = new AdminCli<TestSettings, Context>(
                 new AdminCli.Stage<>("test-stage.jar", "test-stage",
                         Configuration.class, TestSettings.class,
-                        TestSettings::telemetry, Context::new),
+                        TestSettings::telemetry, Context::new,
+                        StageAdminTest::audit),
                 FailureCommands.<Context>all()).run(all,
                         new PrintStream(out, true, UTF_8),
                         new PrintStream(err, true, UTF_8),

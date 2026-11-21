@@ -66,6 +66,13 @@ public enum ComplianceCheck
     AUDIT_EXPORT("audit-export", "no audit export"),
 
     /**
+     * No durable audit journal: audit events would be kept only as long
+     * as the export and console log keep them (45 CFR 164.312(b),
+     * 164.414(b)).
+     */
+    AUDIT_JOURNAL("audit-journal", "no durable audit journal"),
+
+    /**
      * Object storage reached without authentication.
      */
     STORAGE_NO_AUTH("storage-no-auth",

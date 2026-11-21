@@ -521,6 +521,50 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
     }
 
     /**
+     * The public half of the stage's signing key alone, without loading
+     * the KEKs or the private key: to check the stage's audit seals
+     * (HIPAA.md §3.1). From the KMS, or for a local key from its pinned
+     * public PEM ({@code sdh.crypto.keys.signing.public-pem} and
+     * {@code sha256}).
+     *
+     * @param crypto    the key settings
+     * @param providers makes the KMS providers
+     * @return the key; empty if a local key's public half isn't configured
+     * @throws Exception if it can't be read, or isn't EC P-256
+     */
+    public static Optional<ECPublicKey> signingPublicKey(
+            CommonSettings.Crypto crypto, Providers providers)
+            throws Exception
+    {
+        CommonSettings.Signing signing = crypto.keys().signing();
+        if ("local".equals(crypto.signProvider()))
+        {
+            if (signing.publicPem() == null)
+            {
+                return Optional.empty();
+            }
+            return Optional.of(ecPublic(pinnedKey(
+                    new CommonSettings.Recipient(signing.kid(),
+                            signing.publicPem(), signing.sha256()),
+                    "sdh.crypto.keys.signing.public"), "Signing"));
+        }
+        KeyProvider kms = providers.create(crypto.signProvider(), crypto);
+        try
+        {
+            return Optional.of(ecPublic(kms.publicKey(require(
+                    signing.keyRef(), "sdh.crypto.keys.signing.key-ref")),
+                    "Signing"));
+        }
+        finally
+        {
+            if (kms instanceof AutoCloseable closeable)
+            {
+                closeable.close();
+            }
+        }
+    }
+
+    /**
      * Loads a recipient's public key and checks it against its pinned
      * fingerprint.
      *

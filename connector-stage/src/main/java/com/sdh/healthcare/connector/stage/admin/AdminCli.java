@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.stage.admin;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
+import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -35,6 +36,12 @@ import org.springframework.context.ConfigurableApplicationContext;
  * is for {@code kubectl exec}, which can't set an environment variable,
  * into an image with no shell or {@code env} (design §14.3).
  *
+ * <p>Each run is journaled in the stage's durable audit journal (HIPAA.md
+ * §3.1), as a chain of its own, unsealed, since a command holds no stage
+ * key: a command whose run can't be journaled doesn't run. Every stage
+ * also has the journal's own commands, {@code audit-verify},
+ * {@code audit-export} and {@code audit-prune} ({@link AuditCommands}).
+ *
  * <p>Exit status: 0 done, 1 failed, 2 usage error.
  *
  * @param <P> the stage's settings
@@ -44,6 +51,13 @@ import org.springframework.context.ConfigurableApplicationContext;
  */
 public final class AdminCli<P, C extends AutoCloseable>
 {
+
+    /**
+     * The name an operator command's reads of stored records are audited
+     * under (HIPAA.md §4.3); the run's own event, in the same chain, names
+     * the operator.
+     */
+    public static final String ADMIN_READER = "sdh-admin";
 
     /** The environment variable naming the operator. */
     public static final String OPERATOR_ENV = "SDH_OPERATOR";
@@ -68,6 +82,10 @@ public final class AdminCli<P, C extends AutoCloseable>
     private final Map<String, AdminCommand<C>> commands =
             new LinkedHashMap<>();
 
+    /** The audit journal's commands, by name. */
+    private final Map<String, AdminCommand<AuditTarget>> auditCommands =
+            new LinkedHashMap<>();
+
     /**
      * What a stage gives its CLI.
      *
@@ -80,13 +98,14 @@ public final class AdminCli<P, C extends AutoCloseable>
      * @param settings      the settings' class
      * @param telemetry     the telemetry settings within them
      * @param context       opens what the commands read from
+     * @param audit         where the stage's audit journal is
      * @param <P>           the stage's settings
      * @param <C>           what its commands read from
      */
     public record Stage<P, C>(String jar, String service,
             Class<?> configuration, Class<P> settings,
             Function<P, CommonSettings.Telemetry> telemetry,
-            Function<P, C> context)
+            Function<P, C> context, Function<P, AuditTarget> audit)
     {
     }
 
@@ -103,6 +122,10 @@ public final class AdminCli<P, C extends AutoCloseable>
         {
             this.commands.put(command.name(), command);
         }
+        for (AdminCommand<AuditTarget> command : AuditCommands.all())
+        {
+            this.auditCommands.put(command.name(), command);
+        }
     }
 
     /**
@@ -118,7 +141,7 @@ public final class AdminCli<P, C extends AutoCloseable>
             Map<String, String> env)
     {
         AdminArgs parsed;
-        AdminCommand<C> command;
+        AdminCommand<?> command;
         String operator;
         try
         {
@@ -128,7 +151,9 @@ public final class AdminCli<P, C extends AutoCloseable>
                 out.println(usage());
                 return args.isEmpty() ? 2 : 0;
             }
-            command = commands.get(args.getFirst());
+            command = commands.containsKey(args.getFirst())
+                    ? commands.get(args.getFirst())
+                    : auditCommands.get(args.getFirst());
             if (command == null)
             {
                 throw new AdminArgs.UsageException(
@@ -164,11 +189,18 @@ public final class AdminCli<P, C extends AutoCloseable>
                 AdminTelemetry telemetry = AdminTelemetry.install(
                         stage.telemetry().apply(settings(spring)),
                         stage.service());
+                AuditTarget target = stage.audit().apply(settings(spring));
+                AuditJournals.Opened journal = journal(command, target,
+                        stage.telemetry().apply(settings(spring)), err);
                 C context = stage.context().apply(settings(spring)))
         {
+            if (journal == null)
+            {
+                return 1;
+            }
             try
             {
-                command.run(parsed, context, audit, out);
+                run(command, parsed, context, target, audit, out);
                 Telemetry.get().audit(event,
                         audit.fields().with(Attr.RESULT, "ok"));
                 return 0;
@@ -198,6 +230,71 @@ public final class AdminCli<P, C extends AutoCloseable>
                     + failure.getClass().getSimpleName() + ": "
                     + failure.getMessage());
             return 1;
+        }
+    }
+
+    /**
+     * Opens the audit journal for a command's run. If it can't be opened,
+     * as when the database is down, a command that only reads runs all
+     * the same, audited in the console log and export only, with a
+     * warning; any other is refused.
+     *
+     * @param command   the command
+     * @param target    where the stage's journal is
+     * @param telemetry the stage's telemetry settings
+     * @param err       where the warning or error goes
+     * @return the journal, or one that keeps nothing; null to refuse
+     */
+    private static AuditJournals.Opened journal(AdminCommand<?> command,
+            AuditTarget target, CommonSettings.Telemetry telemetry,
+            PrintStream err)
+    {
+        try
+        {
+            return AuditJournals.start(target.lease(), telemetry,
+                    target.tables(), target.source() + "/admin", null);
+        }
+        catch (RuntimeException failure)
+        {
+            if (command.readsOnly())
+            {
+                err.println("warning: the audit journal can't be written ("
+                        + failure.getClass().getSimpleName() + "); this run"
+                        + " is audited in the console log and export only");
+                return AuditJournals.none();
+            }
+            err.println("error: the audit journal can't be written ("
+                    + failure.getClass().getSimpleName() + "), so this"
+                    + " command, which acts or reads PHI, doesn't run");
+            return null;
+        }
+    }
+
+    /**
+     * Runs a command with what it reads from: the stage's context, or for
+     * the audit journal's commands, the journal.
+     *
+     * @param command   the command
+     * @param arguments its options
+     * @param context   the stage's context
+     * @param target    the stage's audit journal
+     * @param audit     the audit event
+     * @param out       where results go
+     * @throws Exception if the command fails
+     */
+    @SuppressWarnings("unchecked")
+    private void run(AdminCommand<?> command, AdminArgs arguments, C context,
+            AuditTarget target, AuditRecord audit, PrintStream out)
+            throws Exception
+    {
+        if (auditCommands.containsValue(command))
+        {
+            ((AdminCommand<AuditTarget>) command).run(arguments, target,
+                    audit, out);
+        }
+        else
+        {
+            ((AdminCommand<C>) command).run(arguments, context, audit, out);
         }
     }
 
@@ -254,6 +351,8 @@ public final class AdminCli<P, C extends AutoCloseable>
                 + "Uses the stage's configuration; --a.b=c arguments"
                 + " override it.");
         commands.values().forEach(command -> parts.add(command.usage()));
+        auditCommands.values()
+                .forEach(command -> parts.add(command.usage()));
         return String.join("\n\n", parts);
     }
 }
