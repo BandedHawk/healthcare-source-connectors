@@ -422,7 +422,7 @@ depends on neither of the others.
 |---|---|---|
 | C1 | The operation layer (§3), with the CLI on it. No change in behaviour: the CLI's tests pass unchanged. **Built 2026-11-20** (§15.1) | |
 | C2 | Control mode: TLS, authentication, permissions, audit (§1, §2, §4, §10); the query operations; the OpenAPI file; the compliance checks. **Built 2026-11-21** (§15.2) | part of P1 |
-| C3 | Actions, `Idempotency-Key`, the operation record and its leases (§5, §8) | P1 |
+| C3 | Actions, `Idempotency-Key`, the operation record and its leases (§5, §8). **Built 2026-11-21** (§15.3) | P1 |
 | C4 | Sealing keys and sealed results (§7) | P1 |
 | C5 | Four eyes and break-glass (§6) | P1 |
 | C6 | Pause, resume and drain (§9) | P2 |
@@ -528,6 +528,65 @@ depends on neither of the others.
 - **Not yet:** the control Deployments, their Service, network policy and sandbox budget (§1); an `sdh-control`
   entry in the images; the customer documentation (HIPAA-OPERATIONS); actions, sealed results and four eyes (C3–C5);
   the harness (H1).
+
+### 15.3 C3, as built
+
+- **Actions** (`ControlRoute.actions()`), each the CLI command of the same name, bound through its own `bind`:
+
+  | Path (`/api/v1/…`) | Operation | Body fields (besides `reason`) |
+  |---|---|---|
+  | `POST reprocess-runs` | `reprocess` | `itemIds` (a list), `seq`, `madeBy`, `landedFrom`, `landedTo`, `intake`, `dryRun` |
+  | `DELETE reprocess-runs/{runId}` | `reprocess --cancel` | |
+  | `POST failures/{itemId}/{seq}/retry` | `retry` | |
+  | `POST failures/{itemId}/{seq}/decline`, `…/reopen` | `decline`, `reopen` | |
+  | `POST failures/{itemId}/{seq}/correct` | `correct` | `record`, base64 |
+  | `POST version/accept` | `version --accept` | |
+  | `POST items/{itemId}/release` | `release` (file connector) | `resume`, `close` |
+  | `POST items/{itemId}/resubmit` | `resubmit` (landing node) | `again` |
+
+  §5's failure `release` is `reopen` here, the CLI's name for it.
+- **The body** is a JSON object of at most 16 MiB (`413` over that). A field the route doesn't take, or one that
+  repeats a path variable, is `400`. What the CLI reads from standard input, the reason or the corrected record,
+  is read from the body instead (`AdminArgs.withInput`): the control process's own standard input is never read.
+- **Every action needs a `reason`** of 1 to 200 letters, digits, spaces and `. , : _ # / -`. It is audited as
+  `sdh.action_reason`, and kept on the operation's record. The commands that kept a reason before (decline,
+  reopen, version accept, release) still keep it encrypted.
+- **`Idempotency-Key`** (8 to 128 letters, digits and `. _ : -`) is required on every action, and checked after
+  the permissions, so a refused caller claims nothing. `ControlStore` keeps each principal's key with the hash of
+  the method, path and body, for 24 hours:
+  - a retry with the same request gets the first answer back, status, body and `Location`, audited with
+    `sdh.idempotent_replay` and result `replayed`, and isn't carried out again;
+  - the key with another request is `409` `idempotency-key-reused`; while its first request is still running, `409`
+    `in-progress`;
+  - every answer is kept, a refusal by the stage (`409` `refused`) or a failure (`500` `failed`) too, each by its
+    class alone.
+- **Long operations** (`Followed`): `reprocess` (when it records a run) and `resubmit` are answered `202` with
+  their record and `Location: /api/v1/operations/{id}`. `resubmit` asks the landing node and returns without
+  waiting, as the CLI's waits.
+  - **The record** (`sdh_control_operations`, beside the audit journal's tables, §8.1's columns) has the
+    operation's identifiers (`runId`, `requestId`) as its parameters, never a value.
+  - **It is brought up to date as it is read:** a record still `running` asks the stage where the run or request
+    stands (`Followed.progress`). A reprocess run is `done` when its run is; a resubmission is `done` when the new
+    item has landed, `failed` when the node refused it. If the stage can't be read, the record is answered as it
+    stands, with `progressUnavailable` naming the failure's class. A finished record doesn't change.
+  - `GET /api/v1/operations` lists the stage's records newest first, `limit` (1 to 1000, default 100) at a time,
+    with an opaque `next` cursor; `GET /api/v1/operations/{id}` reads one. Both need `pipeline.view`, and are
+    audited as `sdh.audit.control.operations`.
+- **Leases:** `ControlStore.take`, `renew` and `release` let one control pod at a time run an approved or running
+  operation, and another take it over once its lease runs out. Nothing uses them yet: every long operation here is
+  carried out by the stage's own workers, and the record only follows it. The operations a control pod runs itself
+  (C4's sealed exports, C7, C8) will.
+- **Contract:** the actions, the operations paths, the `Idempotency-Key` header, the `Reasoned` body, the
+  `Accepted` answer and the `Operation` schema are in `openapi-v1.yaml`.
+- **Tests:** `ControlActionsTest` serves the fail store's commands and a followed test operation over TLS. It
+  checks the refusals (no key, no reason, a reason outside its characters, a field the route doesn't take, no
+  permission, an operation the stage hasn't), one decline per key with its replay and audit, a reused key, a
+  correction from the body (needing `phi.export`), a `202` with its record brought up to date, the record when the
+  stage can't be read, and the pages. `ControlStoreTest` checks the keys, the records and their pages, and the
+  leases.
+- **Not yet:** four eyes (C5: approve, reject and the `awaiting-approval` state); a runner for operations a
+  control pod carries out; removing old operation records (the keys go after 24 hours; the records stay, like the
+  audit journal, until C8's retention); everything §15.2 lists as not yet.
 
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
 (HIPAA.md §11.2 D13).

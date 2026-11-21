@@ -136,7 +136,8 @@ public final class VersionCommand<C extends DrainAdmin>
     public Request bind(AdminArgs arguments, C context)
     {
         return new Request(arguments.flag("accept"),
-                () -> FailureCommands.reason(context.reasonInput()));
+                () -> FailureCommands.reason(
+                        arguments.input(context::reasonInput)));
     }
 
     @Override

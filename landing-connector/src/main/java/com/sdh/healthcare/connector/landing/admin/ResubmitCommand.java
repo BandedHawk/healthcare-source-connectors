@@ -12,14 +12,18 @@ import com.sdh.healthcare.connector.core.pipeline.UuidV7;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.landing.intake.ResubmitRequests;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
+import com.sdh.healthcare.connector.stage.admin.Answering;
+import com.sdh.healthcare.connector.stage.admin.Answers;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.CliOperation;
+import com.sdh.healthcare.connector.stage.admin.Followed;
 import com.sdh.healthcare.connector.stage.admin.Invocation;
 import com.sdh.healthcare.connector.stage.admin.Permission;
 import java.io.PrintStream;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -47,7 +51,10 @@ import org.apache.iceberg.data.Record;
  * @since 0.1.0
  */
 final class ResubmitCommand implements CliOperation<LandingAdminContext,
-        ResubmitCommand.Request, ResubmitCommand.Result>
+        ResubmitCommand.Request, ResubmitCommand.Result>,
+        Answering<ResubmitCommand.Result>,
+        Followed<LandingAdminContext, ResubmitCommand.Request,
+                ResubmitCommand.Result>
 {
 
     /** The command's help. */
@@ -189,6 +196,82 @@ final class ResubmitCommand implements CliOperation<LandingAdminContext,
     {
         Asked asked = ask(request, context, invocation.audit());
         return finish(asked, context, invocation.audit());
+    }
+
+    /**
+     * Leaves the request, or finds the open one, without waiting: the
+     * control API follows it as an operation.
+     *
+     * @param request    what is asked
+     * @param context    the landing node's admin context
+     * @param invocation who asks, and the audit event
+     * @return the request, as it stands
+     * @throws Exception if the item can't be resubmitted, or the tables
+     *                   can't be read
+     */
+    @Override
+    public Result start(Request request, LandingAdminContext context,
+            Invocation invocation) throws Exception
+    {
+        Asked asked = ask(request, context, invocation.audit());
+        return new Result(asked, asked.request());
+    }
+
+    @Override
+    public Optional<Map<String, Object>> started(Result result)
+    {
+        return Optional.of(Answers.object("itemId", result.asked().itemId(),
+                "requestId", result.asked().request().requestId(),
+                "earlier", result.asked().earlier()));
+    }
+
+    /**
+     * Where a request stands: done once the node has landed the item
+     * again, failed if it refused it. The node's reason for refusing
+     * isn't answered: it is the node's own text.
+     *
+     * @param parameters the request, as {@link #started} gave it
+     * @param context    the landing node's admin context
+     * @return where it stands
+     * @throws Exception if it can't be read
+     */
+    @Override
+    public Progress progress(Map<String, Object> parameters,
+            LandingAdminContext context) throws Exception
+    {
+        UUID requestId = UUID.fromString(String.valueOf(
+                parameters.get("requestId")));
+        ResubmitRequests.Request found = context.resubmitRequests()
+                .find(requestId).orElseThrow(() ->
+                        new IllegalStateException("No such request"));
+        State state = !found.finished() ? State.RUNNING
+                : found.outcome() == ResubmitRequests.Outcome.LANDED
+                        ? State.DONE : State.FAILED;
+        return new Progress(state, answer(found));
+    }
+
+    @Override
+    public Map<String, Object> answer(Result result)
+    {
+        Map<String, Object> answer = answer(result.done());
+        answer.put("earlier", result.asked().earlier());
+        return answer;
+    }
+
+    /**
+     * A request, as the control API answers it.
+     *
+     * @param request the request
+     * @return its fields, without the node's reason
+     */
+    private static Map<String, Object> answer(
+            ResubmitRequests.Request request)
+    {
+        return Answers.object("requestId", request.requestId(), "itemId",
+                request.itemId(), "by", request.operator(), "requestedAt",
+                request.requestedAt(), "finishedAt", request.finishedAt(),
+                "outcome", request.outcome(), "newItemId",
+                request.newItemId());
     }
 
     /**

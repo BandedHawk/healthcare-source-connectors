@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -41,7 +42,8 @@ import java.util.regex.Pattern;
  */
 public final class ReprocessCommand<C extends ReprocessAdmin>
         implements CliOperation<C, ReprocessCommand.Request,
-                ReprocessCommand.Result>, Answering<ReprocessCommand.Result>
+                ReprocessCommand.Result>, Answering<ReprocessCommand.Result>,
+                Followed<C, ReprocessCommand.Request, ReprocessCommand.Result>
 {
 
     /** The most objects one run chooses. */
@@ -228,7 +230,8 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
                         .orElse(null),
                 arguments.option("intake").orElse(null),
                 arguments.flag("dry-run"),
-                () -> FailureCommands.reason(context.reasonInput()));
+                () -> FailureCommands.reason(
+                        arguments.input(context::reasonInput)));
     }
 
     @Override
@@ -307,6 +310,47 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
                     chosen.chosen().size(), "pendingCorrections",
                     chosen.pending(), "runId", chosen.runId());
         };
+    }
+
+    /**
+     * A run recorded is followed as an operation; a run's status, a
+     * cancelling, a dry run, and a choice of nothing are answered as they
+     * are.
+     *
+     * @param result the result
+     * @return the run, its selector and how many objects it chose
+     */
+    @Override
+    public Optional<Map<String, Object>> started(Result result)
+    {
+        if (result instanceof Chosen chosen && chosen.runId() != null)
+        {
+            return Optional.of(Answers.object("stage", chosen.stage(),
+                    "runId", chosen.runId(), "selector", chosen.selector(),
+                    "chosen", chosen.chosen().size()));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Where a run stands: done once the stage has processed or refused
+     * every object it hasn't cancelled.
+     *
+     * @param parameters the run, as {@link #started} gave it
+     * @param context    the stage
+     * @return where it stands, with its objects counted
+     * @throws Exception if the run can't be read
+     */
+    @Override
+    public Progress progress(Map<String, Object> parameters, C context)
+            throws Exception
+    {
+        UUID runId = UUID.fromString(String.valueOf(parameters.get("runId")));
+        Status status = status(context.reprocessRuns(), runId);
+        return new Progress(status.run().state() == ReprocessStore.RunState.DONE
+                ? State.DONE : State.RUNNING, Answers.object("runId", runId,
+                        "runState", status.run().state(), "doneAt",
+                        status.run().doneAt(), "counts", status.counts()));
     }
 
     /**

@@ -509,7 +509,7 @@ public final class FailureCommands
      */
     static final class ChangeCommand<C extends FailureAdmin>
             implements CliOperation<C, ChangeCommand.Request,
-                    ChangeCommand.Result>
+                    ChangeCommand.Result>, Answering<ChangeCommand.Result>
     {
 
         /**
@@ -614,7 +614,7 @@ public final class FailureCommands
         {
             return new Request(itemId(arguments.required("item-id")),
                     seq(arguments.required("seq")),
-                    () -> reason(context.reasonInput()));
+                    () -> reason(arguments.input(context::reasonInput)));
         }
 
         @Override
@@ -647,6 +647,15 @@ public final class FailureCommands
             return new Result(context.stage(), itemId, seq,
                     changed.before().state(),
                     Partial.of(() -> context.changed(itemId, audit)));
+        }
+
+        @Override
+        public Map<String, Object> answer(Result result)
+        {
+            return Answers.object("stage", result.stage(), "itemId",
+                    result.itemId(), "seq", result.seq(), "before",
+                    result.before(), "state", to, "next",
+                    Answers.part(result.next(), next -> next));
         }
 
         @Override
@@ -702,7 +711,8 @@ public final class FailureCommands
      * @param <C> the stage's context
      */
     static final class CorrectCommand<C extends FailureAdmin>
-            implements CliOperation<C, CorrectCommand.Request, Submitted>
+            implements CliOperation<C, CorrectCommand.Request, Submitted>,
+                    Answering<Submitted>
     {
 
         /**
@@ -787,7 +797,7 @@ public final class FailureCommands
         {
             return new Request(itemId(arguments.required("item-id")),
                     seq(arguments.required("seq")),
-                    () -> input(context.reasonInput(),
+                    () -> input(arguments.input(context::reasonInput),
                             context.maxCorrectionBytes(),
                             "corrected record"));
         }
@@ -833,6 +843,12 @@ public final class FailureCommands
         }
 
         @Override
+        public Map<String, Object> answer(Submitted result)
+        {
+            return FailureCommands.answer(result);
+        }
+
+        @Override
         public void print(Submitted result, PrintStream out)
         {
             out.println("submitted correction " + result.number()
@@ -859,6 +875,20 @@ public final class FailureCommands
     }
 
     /**
+     * A submission, as the control API answers it: its numbers, never the
+     * record.
+     *
+     * @param submitted the submission
+     * @return its fields
+     */
+    static Map<String, Object> answer(Submitted submitted)
+    {
+        return Answers.object("stage", submitted.stage(), "itemId",
+                submitted.itemId(), "seq", submitted.seq(), "correction",
+                submitted.number(), "bytes", submitted.length());
+    }
+
+    /**
      * Submits a retry of a failure (STAGES.md §15.6e): what it failed on,
      * read by the stage as {@code export} reads it, unchanged, as a
      * correction of kind {@code RETRY}. The stage's workers process it with
@@ -868,7 +898,8 @@ public final class FailureCommands
      * @param <C> the stage's context
      */
     static final class RetryCommand<C extends FailureAdmin>
-            implements CliOperation<C, Failure, Submitted>
+            implements CliOperation<C, Failure, Submitted>,
+                    Answering<Submitted>
     {
 
         /** Creates the command. */
@@ -979,6 +1010,12 @@ public final class FailureCommands
                     FailureStore.State.REVISION_PENDING.name());
             return new Submitted(context.stage(), itemId, seq, number,
                     length);
+        }
+
+        @Override
+        public Map<String, Object> answer(Submitted result)
+        {
+            return FailureCommands.answer(result);
         }
 
         @Override
@@ -1094,7 +1131,7 @@ public final class FailureCommands
         {
             return new Request(itemId(arguments.required("item-id")),
                     seq(arguments.required("seq")),
-                    () -> input(context.reasonInput(),
+                    () -> input(arguments.input(context::reasonInput),
                             ExportSealer.MAX_KEY_BYTES, "public key"));
         }
 

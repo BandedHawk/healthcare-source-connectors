@@ -9,9 +9,11 @@ package com.sdh.healthcare.connector.stage.control;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import com.sdh.healthcare.connector.runtime.LeaseDatabase;
 import com.sdh.healthcare.connector.runtime.compliance.ComplianceConfiguration;
+import com.sdh.healthcare.connector.stage.admin.AuditTarget;
+import com.zaxxer.hikari.HikariDataSource;
 import jakarta.servlet.DispatcherType;
-import jakarta.servlet.http.HttpServletRequest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
@@ -49,6 +51,7 @@ import org.springframework.security.authentication.AbstractAuthenticationToken;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -72,6 +75,7 @@ import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.util.matcher.RequestMatcher;
+import org.springframework.web.servlet.function.RequestPredicates;
 import org.springframework.web.servlet.function.RouterFunction;
 import org.springframework.web.servlet.function.RouterFunctions;
 import org.springframework.web.servlet.function.ServerRequest;
@@ -81,7 +85,8 @@ import org.springframework.web.servlet.function.ServerResponse;
  * A stage's control API (CONTROL-API-DESIGN.md §1, §2, §4): Tomcat on the
  * API's port with TLS, and on a plain probe port that serves only liveness
  * and readiness; Spring Security, which lets through only an authenticated
- * {@code GET} of the API's paths, by OIDC bearer token or by client
+ * {@code GET}, {@code POST} or {@code DELETE} of the API's paths, by
+ * OIDC bearer token or by client
  * certificate; the routes; and the API's audit journal. Every request is
  * stateless: no session, no cookie, no saved request.
  *
@@ -121,6 +126,12 @@ public class ControlConfiguration
 
     /** Where the OpenAPI description is, on the class path. */
     static final String OPENAPI_RESOURCE = "control/openapi-v1.yaml";
+
+    /** The methods the API serves. */
+    static final Set<String> API_METHODS = Set.of("GET", "POST", "DELETE");
+
+    /** The control API's connections to the database. */
+    static final int POOL = 4;
 
     /** The longest a principal's name may be. */
     static final int PRINCIPAL_LIMIT = 256;
@@ -188,10 +199,51 @@ public class ControlConfiguration
     @Bean
     ControlService controlService(ControlServer.Commands commands,
             ApplicationContext context, ControlSettings control,
-            ControlJournal journal)
+            ControlJournal journal, ControlStore store)
     {
         return new ControlService(commands.cli(),
-                stageSettings(commands, context), control);
+                stageSettings(commands, context), control, store);
+    }
+
+    /**
+     * The control API's connections to the pipeline's database, for its
+     * idempotency keys and operation records.
+     *
+     * @param commands the stage's operator commands
+     * @param context  the context, for the stage's settings
+     * @return the pool
+     */
+    @Bean(destroyMethod = "close")
+    HikariDataSource controlDatabase(ControlServer.Commands commands,
+            ApplicationContext context)
+    {
+        try (AuditTarget target = commands.cli().stage().audit()
+                .apply(stageSettings(commands, context)))
+        {
+            return LeaseDatabase.dataSource(target.lease().jdbc(),
+                    "sdh-control", POOL);
+        }
+    }
+
+    /**
+     * The idempotency keys and operation records, beside the stage's audit
+     * journal.
+     *
+     * @param controlDatabase the pool
+     * @param commands        the stage's operator commands
+     * @param context         the context, for the stage's settings
+     * @return the store
+     */
+    @Bean
+    ControlStore controlStore(HikariDataSource controlDatabase,
+            ControlServer.Commands commands, ApplicationContext context)
+    {
+        try (AuditTarget target = commands.cli().stage().audit()
+                .apply(stageSettings(commands, context)))
+        {
+            return new ControlStore(controlDatabase,
+                    target.tables().schema());
+        }
     }
 
     /**
@@ -208,7 +260,8 @@ public class ControlConfiguration
     }
 
     /**
-     * The routes: the probes, the OpenAPI description, and each query.
+     * The routes: the probes, the OpenAPI description, each query and
+     * action, and the operation records.
      *
      * @param service the service
      * @return the routes
@@ -227,12 +280,48 @@ public class ControlConfiguration
                         .contentType(org.springframework.http.MediaType
                                 .parseMediaType("application/yaml"))
                         .body(new ClassPathResource(OPENAPI_RESOURCE)));
-        for (ControlRoute route : ControlRoute.queries())
+        for (ControlRoute route : ControlRoute.all())
         {
-            routes.GET(route.path(), request -> serve(service, route,
-                    request));
+            routes.route(RequestPredicates.method(HttpMethod.valueOf(
+                    route.method())).and(RequestPredicates.path(
+                            route.path())),
+                    request -> serve(service, route, request));
         }
+        routes.GET(ControlService.OPERATIONS, request -> operations(service,
+                null, request));
+        routes.GET(ControlService.OPERATIONS + "/{id}", request ->
+                operations(service, request.pathVariable("id"), request));
         return routes.build();
+    }
+
+    /**
+     * Serves a request for the operation records.
+     *
+     * @param service the service
+     * @param id      the operation's ID, as given; null to list
+     * @param request the request
+     * @return the response, written by the service
+     */
+    private static ServerResponse operations(ControlService service,
+            String id, ServerRequest request)
+    {
+        Authentication caller = caller(request);
+        return ServerResponse.ok().build((in, out) ->
+        {
+            service.operations(caller, id, in.getParameterMap(), out);
+            return null;
+        });
+    }
+
+    /**
+     * The authenticated caller of a request.
+     *
+     * @param request the request
+     * @return the caller
+     */
+    private static Authentication caller(ServerRequest request)
+    {
+        return (Authentication) request.servletRequest().getUserPrincipal();
     }
 
     /**
@@ -246,14 +335,23 @@ public class ControlConfiguration
     private static ServerResponse serve(ControlService service,
             ControlRoute route, ServerRequest request)
     {
-        HttpServletRequest servlet = request.servletRequest();
-        org.springframework.security.core.Authentication caller =
-                (org.springframework.security.core.Authentication)
-                        servlet.getUserPrincipal();
+        Authentication caller = caller(request);
         return ServerResponse.ok().build((in, out) ->
         {
-            service.serve(route, caller, request.pathVariables(),
-                    in.getParameterMap(), out);
+            byte[] body = in.getInputStream().readNBytes(
+                    ControlService.MAX_BODY + 1);
+            if (body.length > ControlService.MAX_BODY)
+            {
+                ControlService.send(out, ControlService.problem(413,
+                        "too-large", "The body is over "
+                                + ControlService.MAX_BODY + " bytes",
+                        null), null);
+                return null;
+            }
+            service.serve(new ControlService.Call(route, caller,
+                    request.pathVariables(), in.getParameterMap(),
+                    in.getHeader("Idempotency-Key"), in.getRequestURI(),
+                    body), out);
             return null;
         });
     }
@@ -427,7 +525,7 @@ public class ControlConfiguration
     }
 
     /**
-     * Lets through only an authenticated {@code GET} of the API's paths on
+     * Lets through only an authenticated request of the API's paths on
      * its port, and only the probes on the probe port. A request refused
      * for want of a credential is audited.
      *
@@ -448,14 +546,14 @@ public class ControlConfiguration
                 && (LIVE.equals(request.getRequestURI())
                         || READY.equals(request.getRequestURI()));
         RequestMatcher api = request -> !onProbePort.matches(request)
-                && HttpMethod.GET.matches(request.getMethod())
+                && API_METHODS.contains(request.getMethod())
                 && request.getRequestURI().startsWith(
                         ControlRoute.PREFIX + "/");
         AuthenticationEntryPoint unauthenticated = (request, response,
                 failure) -> unauthenticated(settings, failure, response);
         AccessDeniedHandler denied = (request, response, failure) ->
-                ControlService.problem(response, 403, "forbidden", null,
-                        null);
+                ControlService.send(response, ControlService.problem(403,
+                        "forbidden", null, null), null);
         http.csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(
                         SessionCreationPolicy.STATELESS))
@@ -515,7 +613,8 @@ public class ControlConfiguration
         {
             response.setHeader("WWW-Authenticate", "Bearer");
         }
-        ControlService.problem(response, 401, "unauthenticated", null, null);
+        ControlService.send(response, ControlService.problem(401,
+                "unauthenticated", null, null), null);
     }
 
     /** Sets up Tomcat for the control API. */

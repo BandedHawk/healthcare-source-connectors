@@ -330,7 +330,23 @@ public enum Attr
     DECISION("sdh.decision"),
 
     /** A control API request's own ID, which its answer names too. */
-    REQUEST_ID("sdh.request_id");
+    REQUEST_ID("sdh.request_id"),
+
+    /**
+     * Why a control API action was asked for, as its caller gave it:
+     * checked to be letters, digits and a few marks, so it can't hold a
+     * document's text.
+     */
+    ACTION_REASON("sdh.action_reason"),
+
+    /** A long operation's ID in the control API's record. */
+    OPERATION_ID("sdh.operation_id"),
+
+    /**
+     * Whether a control API action was answered from its first answer,
+     * a retry with the same idempotency key.
+     */
+    IDEMPOTENT_REPLAY("sdh.idempotent_replay");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

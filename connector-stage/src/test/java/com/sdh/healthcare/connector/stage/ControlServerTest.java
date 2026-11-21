@@ -348,8 +348,9 @@ class ControlServerTest
     }
 
     /**
-     * A parameter the route doesn't take, a malformed value, or an
-     * operation the stage doesn't have is refused, and nothing runs.
+     * A parameter the route doesn't take, a malformed value, an operation
+     * the stage doesn't have, or a method a query's path doesn't take is
+     * refused, and nothing runs.
      *
      * @throws Exception if the test fails to run
      */
@@ -376,7 +377,7 @@ class ControlServerTest
                 .header("Authorization", "Bearer " + token)
                 .POST(HttpRequest.BodyPublishers.noBody()).build(),
                 HttpResponse.BodyHandlers.ofString());
-        assertThat(post.statusCode()).isEqualTo(403);
+        assertThat(post.statusCode()).isEqualTo(404);
     }
 
     /**

@@ -13,11 +13,14 @@ import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.CliOperation;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
+import com.sdh.healthcare.connector.stage.admin.Answering;
+import com.sdh.healthcare.connector.stage.admin.Answers;
 import com.sdh.healthcare.connector.stage.admin.Given;
 import com.sdh.healthcare.connector.stage.admin.Invocation;
 import com.sdh.healthcare.connector.stage.admin.Permission;
 import java.io.PrintStream;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -34,7 +37,8 @@ import java.util.UUID;
  * @since 0.1.0
  */
 final class ReleaseCommand implements CliOperation<SplitAdminContext,
-        ReleaseCommand.Request, ReleaseCommand.Result>
+        ReleaseCommand.Request, ReleaseCommand.Result>,
+        Answering<ReleaseCommand.Result>
 {
 
     /**
@@ -124,7 +128,8 @@ final class ReleaseCommand implements CliOperation<SplitAdminContext,
         return new Request(FailureCommands.itemId(
                 arguments.required("item-id")), arguments.flag("resume"),
                 arguments.flag("close"),
-                () -> FailureCommands.reason(context.reasonInput()));
+                () -> FailureCommands.reason(
+                        arguments.input(context::reasonInput)));
     }
 
     @Override
@@ -168,6 +173,14 @@ final class ReleaseCommand implements CliOperation<SplitAdminContext,
         audit.add(Attr.CORRECTION, number);
         return new Result(itemId, action, checkpoint.version(), number,
                 reason != null);
+    }
+
+    @Override
+    public Map<String, Object> answer(Result result)
+    {
+        return Answers.object("itemId", result.itemId(), "action",
+                result.action(), "version", result.version(), "request",
+                result.number(), "reasonKept", result.reasoned());
     }
 
     @Override

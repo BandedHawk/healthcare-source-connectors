@@ -14,8 +14,16 @@ info:
     request's ID, which every answer carries in `X-Request-Id`. Answers
     hold no PHI: a failure is named by its class alone.
 
-    This version serves the query operations (build step C2). Actions,
-    sealed results and four-eyes approval follow in later versions of
+    Actions (`POST`, `DELETE`) need an `Idempotency-Key` header and a JSON
+    body with a `reason`, which is audited. A retry with the same key, path
+    and body, from the same principal, within 24 hours, gets the first
+    answer back and does nothing again; the same key with another request
+    is `409 idempotency-key-reused`. A long operation the stage's workers
+    carry out is answered `202`, with `Location` giving its record under
+    `/operations`, which follows it to the end.
+
+    This version serves the queries (build step C2) and the actions (C3).
+    Sealed results and four-eyes approval follow in later versions of
     this description.
 servers:
   - url: https://{host}:8443/api/v1
@@ -95,7 +103,53 @@ paths:
       responses:
         "200": {$ref: "#/components/responses/Answer"}
         default: {$ref: "#/components/responses/Problem"}
+  /reprocess-runs:
+    post:
+      operationId: reprocess
+      summary: Starts a reprocess run, or shows what it would choose
+      description: >-
+        Chooses by `itemIds` (with `seq` for one record), by `madeBy`, or by
+        `landedFrom` and `landedTo` (the split stage, with `intake`). The
+        reason is kept encrypted with the run, as the CLI keeps it. A run
+        recorded is answered `202` and followed as an operation; a dry run,
+        or nothing chosen, `200`. Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  properties:
+                    itemIds: {type: array, items: {type: string, format: uuid}}
+                    seq: {type: integer}
+                    madeBy: {type: string}
+                    landedFrom: {type: string, format: date-time}
+                    landedTo: {type: string, format: date-time}
+                    intake: {type: string}
+                    dryRun: {type: boolean}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
   /reprocess-runs/{runId}:
+    delete:
+      operationId: reprocessCancel
+      summary: Cancels what of a run isn't yet queued
+      description: Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - name: runId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
     get:
       operationId: reprocessStatus
       summary: A reprocess run's status
@@ -145,6 +199,179 @@ paths:
             application/x-ndjson:
               schema: {type: object}
         default: {$ref: "#/components/responses/Problem"}
+  /failures/{itemId}/{seq}/retry:
+    post:
+      operationId: failureRetry
+      summary: Has the stage process a failure again, as it was
+      description: Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - {$ref: "#/components/parameters/itemIdPath"}
+        - {$ref: "#/components/parameters/seqPath"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /failures/{itemId}/{seq}/decline:
+    post:
+      operationId: failureDecline
+      summary: "Declines a failure: nothing more is done with it"
+      description: >-
+        The reason is kept encrypted. Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - {$ref: "#/components/parameters/itemIdPath"}
+        - {$ref: "#/components/parameters/seqPath"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /failures/{itemId}/{seq}/reopen:
+    post:
+      operationId: failureReopen
+      summary: Reopens a declined failure
+      description: >-
+        The reason is kept encrypted. Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - {$ref: "#/components/parameters/itemIdPath"}
+        - {$ref: "#/components/parameters/seqPath"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /failures/{itemId}/{seq}/correct:
+    post:
+      operationId: failureCorrect
+      summary: Submits a corrected record for a failure
+      description: >-
+        The record, base64 in `record`, is stored encrypted and processed
+        by the stage's workers as any input; it is never answered or
+        audited. Permissions `pipeline.operate` and `phi.export`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - {$ref: "#/components/parameters/itemIdPath"}
+        - {$ref: "#/components/parameters/seqPath"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [record]
+                  properties:
+                    record: {type: string, contentEncoding: base64}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /version/accept:
+    post:
+      operationId: versionAccept
+      summary: Accepts the running version early
+      description: >-
+        The reason is kept encrypted. Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody: {$ref: "#/components/requestBodies/Reasoned"}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /items/{itemId}/release:
+    post:
+      operationId: release
+      summary: Ends the hold on an item held across versions (split stage)
+      description: >-
+        `resume` splits it on from its checkpoint; `close` ends it, the
+        reason kept encrypted. Permission `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - {$ref: "#/components/parameters/itemIdPath"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  properties:
+                    resume: {type: boolean}
+                    close: {type: boolean}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /items/{itemId}/resubmit:
+    post:
+      operationId: resubmit
+      summary: Lands an item again, as a new item linked to it (landing)
+      description: >-
+        Answered `202` and followed as an operation, done once the landing
+        node has landed it again, failed if it refused. `again` lands
+        another copy of an item landed again before. Permission
+        `pipeline.operate`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - {$ref: "#/components/parameters/itemIdPath"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  properties:
+                    again: {type: boolean}
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
+  /operations:
+    get:
+      operationId: operations
+      summary: The stage's long operations, newest first
+      description: >-
+        Each not finished is brought up to date from the stage as it is
+        read. Permission `pipeline.view`.
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 100}
+        - name: cursor
+          in: query
+          description: The `next` of the page before.
+          schema: {type: string}
+      responses:
+        "200":
+          description: A page of operations.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operations:
+                    type: array
+                    items: {$ref: "#/components/schemas/Operation"}
+                  next: {type: [string, "null"]}
+        default: {$ref: "#/components/responses/Problem"}
+  /operations/{id}:
+    get:
+      operationId: operation
+      summary: One long operation
+      description: Permission `pipeline.view`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: The operation.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Operation"}
+        default: {$ref: "#/components/responses/Problem"}
   /openapi.yaml:
     get:
       operationId: openapi
@@ -174,6 +401,18 @@ components:
         From a CA in `sdh.control.auth.mtls.trusted-ca`, with a subject
         listed in `sdh.control.auth.mtls.roles`.
   parameters:
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Of the client's choosing, unique per request.
+      schema: {type: string, pattern: "^[A-Za-z0-9._:-]{8,128}$"}
+    seqPath:
+      name: seq
+      in: path
+      required: true
+      description: The failure's record number; -1 for the item as a whole.
+      schema: {type: integer}
     itemIdPath:
       name: itemId
       in: path
@@ -193,7 +432,23 @@ components:
     RequestId:
       description: The request's ID, as its audit event names it.
       schema: {type: string, format: uuid}
+  requestBodies:
+    Reasoned:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Reasoned"}
   responses:
+    Accepted:
+      description: A long operation started; poll its record.
+      headers:
+        X-Request-Id: {$ref: "#/components/headers/RequestId"}
+        Location:
+          description: The operation's record.
+          schema: {type: string}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Operation"}
     Answer:
       description: The operation's answer.
       headers:
@@ -205,12 +460,43 @@ components:
       description: >-
         A refusal (RFC 9457). `title` is one of `bad-request` (400),
         `unauthenticated` (401), `permission-required`, `approval-required`
-        or `forbidden` (403), `not-on-this-stage` (404), `refused` (409, the
-        stage refused it as things stand) or `failed` (500).
+        or `forbidden` (403), `not-on-this-stage` or `operation-not-found`
+        (404), `refused` (409, the stage refused it as things stand),
+        `idempotency-key-reused` or `in-progress` (409), `too-large` (413)
+        or `failed` (500). A refusal of an action is kept as its key's
+        answer too: retry it with a new key.
       content:
         application/problem+json:
           schema: {$ref: "#/components/schemas/Problem"}
   schemas:
+    Reasoned:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: >-
+            Why; audited. Letters, digits, spaces and . , : _ # / -
+          pattern: "^[A-Za-z0-9 .,:_#/-]{1,200}$"
+    Operation:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        kind: {type: string, examples: [reprocess, resubmit]}
+        scope: {type: string, examples: ["stage:file-connector"]}
+        state:
+          type: string
+          enum: [awaiting-approval, approved, running, done, failed,
+                 cancelled, rejected, expired]
+        requestedBy: {type: string}
+        reason: {type: string}
+        requestedAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        parameters: {type: object}
+        progress: {type: object}
+        progressUnavailable:
+          type: string
+          description: Why the stage couldn't be read for it; the class only.
     Problem:
       type: object
       required: [type, title, status]

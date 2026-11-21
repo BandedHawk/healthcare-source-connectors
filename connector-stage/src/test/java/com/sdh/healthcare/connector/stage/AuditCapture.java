@@ -111,14 +111,28 @@ final class AuditCapture implements BeforeEachCallback, AfterEachCallback
      */
     Map<String, Object> attributes(String name)
     {
-        LogRecordData event = events.getFinishedLogRecordItems().stream()
+        return all(name).stream().findFirst()
+                .orElseThrow(() -> new AssertionError("No " + name));
+    }
+
+    /**
+     * The attributes of each audit event of a name, in order.
+     *
+     * @param name the event's name, without the prefix
+     * @return their attributes, by key
+     */
+    List<Map<String, Object>> all(String name)
+    {
+        return events.getFinishedLogRecordItems().stream()
                 .filter(record -> (PREFIX + name).equals(
                         record.getEventName()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("No " + name));
-        Map<String, Object> attributes = new LinkedHashMap<>();
-        event.getAttributes().forEach((key, value) ->
-                attributes.put(key.getKey(), value));
-        return attributes;
+                .map(record ->
+                {
+                    Map<String, Object> attributes = new LinkedHashMap<>();
+                    record.getAttributes().forEach((key, value) ->
+                            attributes.put(key.getKey(), value));
+                    return attributes;
+                })
+                .toList();
     }
 }
