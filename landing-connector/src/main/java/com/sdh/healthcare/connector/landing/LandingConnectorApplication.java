@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.landing;
 
 import com.sdh.healthcare.connector.landing.admin.LandingAdmin;
+import com.sdh.healthcare.connector.stage.control.ControlServer;
 import java.util.Arrays;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -30,7 +31,8 @@ public class LandingConnectorApplication
 
     /**
      * Starts the node, or with {@code admin <command> …} an operator
-     * command instead (design §11.4).
+     * command instead (design §11.4), or with {@code control} the stage's
+     * control API (CONTROL-API-DESIGN.md §1).
      *
      * @param arguments Spring Boot's command-line arguments
      */
@@ -41,6 +43,12 @@ public class LandingConnectorApplication
             System.exit(LandingAdmin.cli().run(
                     Arrays.asList(arguments).subList(1, arguments.length),
                     System.out, System.err, System.getenv()));
+        }
+        if (arguments.length > 0 && arguments[0].equals(ControlServer.COMMAND))
+        {
+            ControlServer.serve(LandingAdmin.cli(),
+                    Arrays.asList(arguments).subList(1, arguments.length));
+            return;
         }
         SpringApplication.run(LandingConnectorApplication.class, arguments);
     }

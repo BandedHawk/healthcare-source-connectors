@@ -1,6 +1,6 @@
 # The pipeline control API: design
 
-Status: **Designed 2026-11-20 with the user; step C1 built 2026-11-20, the rest not built** · Puts into effect the intent in
+Status: **Designed 2026-11-20 with the user; steps C1 (2026-11-20) and C2 (2026-11-21) built, the rest not built** · Puts into effect the intent in
 [CONTROL-API.md](CONTROL-API.md), and is the design for [HIPAA.md](HIPAA.md) §11.1 P1–P6. The operator commands
 it serves are those in DESIGN.md §11.4.
 
@@ -421,7 +421,7 @@ depends on neither of the others.
 | Step | Builds | Closes |
 |---|---|---|
 | C1 | The operation layer (§3), with the CLI on it. No change in behaviour: the CLI's tests pass unchanged. **Built 2026-11-20** (§15.1) | |
-| C2 | Control mode: TLS, authentication, permissions, audit (§1, §2, §4, §10); the query operations; the OpenAPI file; the compliance checks | part of P1 |
+| C2 | Control mode: TLS, authentication, permissions, audit (§1, §2, §4, §10); the query operations; the OpenAPI file; the compliance checks. **Built 2026-11-21** (§15.2) | part of P1 |
 | C3 | Actions, `Idempotency-Key`, the operation record and its leases (§5, §8) | P1 |
 | C4 | Sealing keys and sealed results (§7) | P1 |
 | C5 | Four eyes and break-glass (§6) | P1 |
@@ -458,6 +458,76 @@ depends on neither of the others.
 - **Not yet:** nothing checks permissions or approvals; that is C2 and C5. `restore` writes to the CLI's directory
   through a `Destination` in its request; C4 adds a destination that streams. `OperationsTest` checks each
   command's permission, kind and approval against §5.
+
+### 15.2 C2, as built
+
+- **Control mode** (`connector-stage`, `stage.control`): `java -jar <stage>.jar control [--a.b=c …]` on the landing
+  node, the split, convert and transform stages. `ControlServer` starts a servlet application of its own from the
+  stage's settings class and `ControlConfiguration`, which imports only the web, Jackson and security
+  auto-configurations it needs, and `ComplianceConfiguration`. It starts no Camel, lease or consumer.
+  - **Workers stay off the network:** every stage now carries Spring MVC and Security. `ControlWebSwitch` sets a
+    worker's web type to `none` unless its settings say otherwise, and the control process's to `servlet`. The
+    landing node's `WebServerSwitch` leaves the control process alone.
+  - **Each request opens what its operation reads** (the stage's admin context, or the audit journal) and closes
+    it after, as a CLI run does.
+- **Settings** (`ControlSettings`, `sdh.control.*`), as §2 shows them, with these differences:
+  - `tls.enabled` (default `true`) and `tls.key-password`; `probe-port` (default 8081), plain HTTP, serving only
+    `/livez` and `/readyz`; `auth.jwt.jwk-set-uri`, when the keys aren't found from the issuer;
+  - mTLS takes the subject's name as principal, canonical (RFC 2253, lower case), as the landing node's push does.
+    `auth.mtls.principal` (SAN e-mail or URI) isn't built.
+  - In YAML, a permission's name and a certificate subject are map keys in brackets: `"[pipeline.view]"`,
+    `"[CN=noc,O=Example]"`.
+  - **Checked at startup:** the API doesn't start without an issuer and audience (JWT) or a trusted CA and TLS
+    (mTLS), without a certificate and key when TLS is on, or with a permission name it doesn't know.
+- **Authentication** (Spring Security, stateless): only an authenticated `GET` under `/api/v1/` is let through on
+  the API's port.
+  - **JWT:** signed with an RSA or EC algorithm by the issuer's keys (fetched on the first request), from the
+    issuer, for the audience, in date, with issue and expiry times no more than `max-lifetime` apart, and a
+    principal claim of at most 256 characters with no control characters. Roles come from the roles claim, a list
+    or names separated by spaces.
+  - **A refusal** is answered `401` with a problem body that names no detail, and audited as
+    `sdh.audit.control.unauthenticated`, with `sdh.auth`, `sdh.decision` and the failure's class as `sdh.reason`.
+- **Authorization and audit** (`ControlService`): a request is bound into the operation's request through the
+  command's own `bind`, from the path variables and query parameters its route names. A parameter the route doesn't
+  name is refused, so a reading path can't be given an option that acts. Then:
+  - the permissions `permissions(request)` names must all be granted to one of the caller's roles, or it is `403`
+    `permission-required`;
+  - an operation needing four eyes is `403` `approval-required` until C5;
+  - every request, allowed or refused, is audited as `sdh.audit.control.<operation>` with `sdh.operator`,
+    `sdh.auth`, `sdh.permission`, `sdh.decision`, `sdh.request_id` (also the `X-Request-Id` header) and
+    `sdh.result`; a failure by its class alone, in the event and the answer.
+- **Audit journal** (`ControlJournal`): one chain for the server's life, of `<stage source>/control`, sealed with
+  the stage's keys. The API doesn't start if it can't be opened: unlike a CLI query, a request is never served
+  unjournaled.
+- **Routes** (`ControlRoute`; the ingress strips `/pipelines/{pipeline}/stages/{stage}`):
+
+  | Path (`GET /api/v1/…`) | Operation | Parameters |
+  |---|---|---|
+  | `status`, `items/{itemId}/status` | `status` | |
+  | `stuck` | `stuck` | `idle` |
+  | `drain` | `drain-check` | |
+  | `version` | `version` (the listing only) | |
+  | `failures` | `failures` | `itemId`, `all` |
+  | `reprocess-runs/{runId}` | `reprocess --status` | |
+  | `audit/verify` | `audit-verify` | `from`, `to`, `stale` |
+  | `audit/events` | `audit-export`, as JSON lines ending `{"end": true, "rows": n}` | `from`, `to` |
+  | `openapi.yaml` | the contract, to any authenticated caller | |
+
+  Each answer is the operation's `Answering.answer`, written field by field (never by reflection), so a sealed
+  reason or a record's content can't reach a caller by being added to a result.
+- **Contract:** `connector-stage/src/main/resources/control/openapi-v1.yaml`, OpenAPI 3.1, for these routes.
+- **Compliance checks** (connector-runtime), applied only with `sdh.control.mode` on: `control-tls` and
+  `control-token-lifetime` (DESIGN.md §7.6). `CONTROL_AUTHENTICATION` isn't a check: the API never starts without a
+  way to authenticate (above), so there is nothing to waive. `CLI_FOUR_EYES` comes with C5.
+- **Tests:** `ControlServerTest` starts a test stage's API over TLS against a local JWKS and embedded Postgres, and
+  checks the refusals (no token, another audience, expired, issued for two hours, another key), `403` without the
+  permission, `400` for a parameter the route doesn't take or a malformed one, `404` for an operation the stage
+  hasn't, the probes on their port only, client certificates (listed and not), the startup checks, each audit
+  event's fields, and the API's chain in the journal. `ControlWebSwitchTest`; `ComplianceRulesTest` for the new
+  checks.
+- **Not yet:** the control Deployments, their Service, network policy and sandbox budget (§1); an `sdh-control`
+  entry in the images; the customer documentation (HIPAA-OPERATIONS); actions, sealed results and four eyes (C3–C5);
+  the harness (H1).
 
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
 (HIPAA.md §11.2 D13).

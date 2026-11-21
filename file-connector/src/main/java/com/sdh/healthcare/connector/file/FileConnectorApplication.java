@@ -7,6 +7,7 @@
 package com.sdh.healthcare.connector.file;
 
 import com.sdh.healthcare.connector.file.admin.SplitAdmin;
+import com.sdh.healthcare.connector.stage.control.ControlServer;
 import java.util.Arrays;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -30,7 +31,8 @@ public class FileConnectorApplication
 
     /**
      * Runs the stage, or with {@code admin <command> …} an operator
-     * command instead (design §11.4).
+     * command instead (design §11.4), or with {@code control} the stage's
+     * control API (CONTROL-API-DESIGN.md §1).
      *
      * @param args the command line
      */
@@ -41,6 +43,12 @@ public class FileConnectorApplication
             System.exit(SplitAdmin.cli().run(
                     Arrays.asList(args).subList(1, args.length), System.out,
                     System.err, System.getenv()));
+        }
+        if (args.length > 0 && args[0].equals(ControlServer.COMMAND))
+        {
+            ControlServer.serve(SplitAdmin.cli(),
+                    Arrays.asList(args).subList(1, args.length));
+            return;
         }
         SpringApplication.run(FileConnectorApplication.class, args);
     }

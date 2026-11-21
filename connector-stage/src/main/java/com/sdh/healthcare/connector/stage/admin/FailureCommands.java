@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -162,7 +163,7 @@ public final class FailureCommands
      */
     static final class ListCommand<C extends FailureAdmin>
             implements CliOperation<C, ListCommand.Request,
-                    ListCommand.Result>
+                    ListCommand.Result>, Answering<ListCommand.Result>
     {
 
         /**
@@ -367,6 +368,91 @@ public final class FailureCommands
                                     : ", made " + correction.recordId()));
                 }
             }
+        }
+
+        /**
+         * The failures, as the API answers them: by item, number, state,
+         * code and place; for one item, each change and correction too,
+         * whether a reason was kept but never the reason.
+         *
+         * @param result the failures
+         * @return the answer
+         */
+        @Override
+        public Map<String, Object> answer(Result result)
+        {
+            if (result.itemId() == null)
+            {
+                return Answers.object("stage", result.stage(), "open",
+                        result.open().count(), "oldest",
+                        result.open().oldest(), "failures",
+                        Answers.list(result.listed(), ListCommand::answer));
+            }
+            return Answers.object("stage", result.stage(), "itemId",
+                    result.itemId(), "failures", Answers.list(result.item(),
+                            each ->
+                            {
+                                Map<String, Object> row =
+                                        answer(each.failure());
+                                row.put("events", Answers.list(
+                                        each.events(), event ->
+                                        Answers.object("at", event.at(),
+                                                "from", event.from(), "to",
+                                                event.to(), "resentAs",
+                                                event.resentBy(), "by",
+                                                event.operator(),
+                                                "reasonKept",
+                                                event.reason() != null)));
+                                row.put("corrections", Answers.list(
+                                        each.corrections(), correction ->
+                                        Answers.object("correction",
+                                                correction.correction(),
+                                                "kind", correction.kind(),
+                                                "state", correction.state(),
+                                                "by",
+                                                correction.submittedBy(),
+                                                "at",
+                                                correction.submittedAt(),
+                                                "bytes", correction.length(),
+                                                "errorCode",
+                                                correction.errorCode(),
+                                                "lineage",
+                                                text(correction.lineage()),
+                                                "recordId",
+                                                correction.recordId())));
+                                return row;
+                            }));
+        }
+
+        /**
+         * A failure, as the API answers it: the CLI's line, as fields.
+         *
+         * @param failure the failure
+         * @return its fields
+         */
+        private static Map<String, Object> answer(
+                FailureStore.Listed failure)
+        {
+            FailureStore.Failure what = failure.stored().failure();
+            return Answers.object("itemId", what.itemId(), "seq",
+                    what.seq(), "lineage", text(what.lineage()), "state",
+                    failure.stored().state(), "errorCode", what.errorCode(),
+                    "offset", what.sourceOffset(), "failedAt",
+                    failure.failedAt(), "changedAt", failure.changedAt(),
+                    "changedBy", failure.changedBy(), "version",
+                    what.version(), "resent", failure.resentCount(),
+                    "resentAt", failure.resentAt());
+        }
+
+        /**
+         * A lineage's text, as the CLI shows it.
+         *
+         * @param lineage the lineage; may be null
+         * @return its text; null for none
+         */
+        private static String text(Lineage lineage)
+        {
+            return lineage == null ? null : lineage.toString();
         }
 
         /**

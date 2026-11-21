@@ -136,6 +136,21 @@ public final class AuditTarget implements AutoCloseable
                         crypto.keys().signing().kid(), key));
     }
 
+    /**
+     * The stage's keys, whose message signer seals a chain, for the
+     * control API's journal (CONTROL-API-DESIGN.md §10), which runs with
+     * the stage's own identity.
+     *
+     * @return the keys, to close after the journal; null if no key
+     *         settings were given, when the chain is left unsealed
+     * @throws Exception if they can't be loaded
+     */
+    public KeyMaterial keys() throws Exception
+    {
+        return crypto == null ? null
+                : KeyMaterial.forStage(crypto, KeyMaterial.Providers.DEFAULT);
+    }
+
     @Override
     public void close()
     {

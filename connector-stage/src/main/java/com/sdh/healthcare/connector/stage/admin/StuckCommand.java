@@ -10,6 +10,7 @@ import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.RegistryReport;
 import java.io.PrintStream;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -32,7 +33,8 @@ import java.util.Set;
  * @since 0.1.0
  */
 public final class StuckCommand<C extends StageAdmin>
-        implements CliOperation<C, StuckCommand.Request, StuckCommand.Result>
+        implements CliOperation<C, StuckCommand.Request, StuckCommand.Result>,
+        Answering<StuckCommand.Result>
 {
 
     /** The most items, and item and pod pairs, listed. */
@@ -149,6 +151,36 @@ public final class StuckCommand<C extends StageAdmin>
                 () -> items(result.items().get(), result.idle()));
         status.show("claims", () -> claims(result.claims().get()));
         status.end();
+    }
+
+    @Override
+    public Map<String, Object> answer(Result result)
+    {
+        return Answers.object("idle", result.idle(),
+                "items", Answers.part(result.items(), items ->
+                        Answers.object("total", items.total(), "rows",
+                                Answers.list(items.rows(), item ->
+                                        Answers.object("itemId",
+                                                item.itemId(), "expected",
+                                                item.expected(), "done",
+                                                item.done(), "failed",
+                                                item.failed(),
+                                                "upstreamOpen",
+                                                item.upstreamOpen(),
+                                                "totalWanted",
+                                                item.totalWanted(), "idle",
+                                                item.idle(), "expired",
+                                                item.expired(), "why",
+                                                why(item))))),
+                "claims", Answers.part(result.claims(), claims ->
+                        Answers.object("total", claims.total(), "rows",
+                                Answers.list(claims.rows(), claim ->
+                                        Answers.object("itemId",
+                                                claim.itemId(), "pod",
+                                                claim.pod(), "records",
+                                                claim.records(), "attempts",
+                                                claim.attempts(), "expiry",
+                                                claim.expiry())))));
     }
 
     /**

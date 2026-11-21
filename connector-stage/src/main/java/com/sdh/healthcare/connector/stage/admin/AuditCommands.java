@@ -93,7 +93,7 @@ final class AuditCommands
 
     /** {@code audit-verify}. */
     static final class Verify implements CliOperation<AuditTarget,
-            Verify.Request, Verify.Result>
+            Verify.Request, Verify.Result>, Answering<Verify.Result>
     {
 
         /**
@@ -170,6 +170,29 @@ final class AuditCommands
         public Kind kind()
         {
             return Kind.QUERY;
+        }
+
+        @Override
+        public Map<String, Object> answer(Result result)
+        {
+            AuditTrail.Verification found = result.found();
+            return Answers.object("chains", Answers.list(found.chains(),
+                    chain -> Answers.object("chainId", chain.chainId(),
+                            "source", chain.source(), "pod", chain.pod(),
+                            "startedAt", chain.startedAt(), "closedAt",
+                            chain.closedAt(), "entries", chain.entries(),
+                            "seals", chain.seals(), "sealedUpTo",
+                            chain.sealedUpTo(), "changed", chain.tampered(),
+                            "problems", Answers.list(chain.problems(),
+                                    problem -> Answers.object("kind",
+                                            problem.kind(), "changed",
+                                            problem.kind().tampering(),
+                                            "seq", problem.seq(), "count",
+                                            problem.count())))),
+                    "entries", found.entries(), "sealsChecked",
+                    result.sealed(), "changed", found.chains().stream()
+                            .filter(AuditTrail.ChainReport::tampered)
+                            .count());
         }
 
         @Override

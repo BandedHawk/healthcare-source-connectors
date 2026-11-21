@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
  */
 public final class ReprocessCommand<C extends ReprocessAdmin>
         implements CliOperation<C, ReprocessCommand.Request,
-                ReprocessCommand.Result>
+                ReprocessCommand.Result>, Answering<ReprocessCommand.Result>
 {
 
     /** The most objects one run chooses. */
@@ -278,6 +278,46 @@ public final class ReprocessCommand<C extends ReprocessAdmin>
                     + " processed");
             case Chosen chosen -> print(chosen, out);
         }
+    }
+
+    @Override
+    public Map<String, Object> answer(Result result)
+    {
+        return switch (result)
+        {
+            case Status status -> Answers.object("runId",
+                    status.run().runId(), "state", status.run().state(),
+                    "selector", status.run().selector(), "by",
+                    status.run().operator(), "askedAt",
+                    status.run().askedAt(), "version",
+                    status.run().version(), "doneAt", status.run().doneAt(),
+                    "counts", status.counts(), "objects",
+                    Answers.list(status.objects(), each -> Answers.object(
+                            "itemId", each.chosen().itemId(), "seq",
+                            each.chosen().seq(), "input",
+                            text(each.chosen().input()), "state",
+                            each.state(), "as", text(each.line()),
+                            "reason", each.reason(), "outcome",
+                            each.outcome(), "sameOutput",
+                            each.sameOutput())));
+            case Cancelled cancelled -> Answers.object("runId",
+                    cancelled.runId(), "cancelled", cancelled.cancelled());
+            case Chosen chosen -> Answers.object("stage", chosen.stage(),
+                    "selector", chosen.selector(), "chosen",
+                    chosen.chosen().size(), "pendingCorrections",
+                    chosen.pending(), "runId", chosen.runId());
+        };
+    }
+
+    /**
+     * A lineage's text, as the CLI shows it.
+     *
+     * @param lineage the lineage; may be null
+     * @return its text; null for none
+     */
+    private static String text(Object lineage)
+    {
+        return lineage == null ? null : lineage.toString();
     }
 
     /**

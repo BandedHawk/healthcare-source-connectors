@@ -311,7 +311,26 @@ public enum Attr
     TICKET("sdh.ticket"),
 
     /** An audit chain's ID (HIPAA.md §3.1, audit controls). */
-    CHAIN_ID("sdh.chain_id");
+    CHAIN_ID("sdh.chain_id"),
+
+    /**
+     * How an operator's name was proved (CONTROL-API-DESIGN.md §10):
+     * {@code jwt} or {@code mtls} through the control API, {@code cli}
+     * when it was given to the CLI.
+     */
+    AUTH("sdh.auth"),
+
+    /** The permission a control API call needed, such as pipeline.view. */
+    PERMISSION("sdh.permission"),
+
+    /**
+     * Whether a control API call was let through: {@code allowed},
+     * {@code denied} or {@code unauthenticated}.
+     */
+    DECISION("sdh.decision"),
+
+    /** A control API request's own ID, which its answer names too. */
+    REQUEST_ID("sdh.request_id");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

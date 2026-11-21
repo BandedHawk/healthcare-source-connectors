@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.runtime.compliance;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -17,6 +18,7 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.springframework.boot.convert.DurationStyle;
 
 /**
  * The rules of the compliance profiles (design §7.6), applied to a node's
@@ -50,6 +52,19 @@ public final class ComplianceRules
     /** Whether the durable audit journal is on; {@code true} if unset. */
     static final String JOURNAL_ENABLED = "sdh.telemetry.journal.enabled";
 
+    /** Whether the process serves a stage's control API. */
+    static final String CONTROL_MODE = "sdh.control.mode";
+
+    /** Whether the control API serves TLS. */
+    static final String CONTROL_TLS = "sdh.control.tls.enabled";
+
+    /** The longest a token the control API accepts may be issued for. */
+    static final String CONTROL_TOKEN_LIFETIME =
+            "sdh.control.auth.jwt.max-lifetime";
+
+    /** The longest the profile lets a control API's token be issued for. */
+    static final Duration CONTROL_TOKEN_LIMIT = Duration.ofHours(1);
+
     /** The settings naming who holds the keys; {@code local} if unset. */
     private static final List<String> KEY_PROVIDERS = List.of(
             "sdh.crypto.wrap-provider", "sdh.crypto.sign-provider");
@@ -64,7 +79,8 @@ public final class ComplianceRules
     public static List<String> namedSettings()
     {
         List<String> names = new ArrayList<>(List.of(PROFILE, OTLP_ENDPOINT,
-                JOURNAL_ENABLED, KAFKA_COMPONENT_PROTOCOL, RABBIT_SSL));
+                JOURNAL_ENABLED, KAFKA_COMPONENT_PROTOCOL, RABBIT_SSL,
+                CONTROL_MODE, CONTROL_TLS, CONTROL_TOKEN_LIFETIME));
         names.addAll(KEY_PROVIDERS);
         for (ComplianceCheck check : ComplianceCheck.values())
         {
@@ -286,6 +302,11 @@ public final class ComplianceRules
             findings.add(new Finding(ComplianceCheck.AUDIT_JOURNAL,
                     JOURNAL_ENABLED));
         }
+        if (Boolean.parseBoolean(
+                settings.getOrDefault(CONTROL_MODE, "false").trim()))
+        {
+            control(settings, findings);
+        }
         JVM_OPTIONS.forEach((option, wanted) ->
         {
             Optional<String> value = jvmOption.apply(option);
@@ -296,6 +317,45 @@ public final class ComplianceRules
             }
         });
         return findings;
+    }
+
+    /**
+     * The control API's own findings (CONTROL-API-DESIGN.md §12): TLS off,
+     * or tokens accepted for longer than an hour. A lifetime that can't be
+     * read is a finding, since the API wouldn't start with it either.
+     * Authentication isn't a check: the API never starts without it.
+     *
+     * @param settings the settings
+     * @param findings where findings are added
+     */
+    private static void control(Map<String, String> settings,
+            List<Finding> findings)
+    {
+        if (!Boolean.parseBoolean(
+                settings.getOrDefault(CONTROL_TLS, "true").trim()))
+        {
+            findings.add(new Finding(ComplianceCheck.CONTROL_TLS,
+                    CONTROL_TLS));
+        }
+        String lifetime = settings.get(CONTROL_TOKEN_LIFETIME);
+        if (lifetime != null && !lifetime.isBlank())
+        {
+            Duration parsed;
+            try
+            {
+                parsed = DurationStyle.detectAndParse(lifetime.strip());
+            }
+            catch (IllegalArgumentException unreadable)
+            {
+                parsed = null;
+            }
+            if (parsed == null || parsed.compareTo(CONTROL_TOKEN_LIMIT) > 0)
+            {
+                findings.add(new Finding(
+                        ComplianceCheck.CONTROL_TOKEN_LIFETIME,
+                        CONTROL_TOKEN_LIFETIME));
+            }
+        }
     }
 
     /**

@@ -30,7 +30,8 @@ import java.util.stream.Collectors;
  */
 public final class StageStatusCommand<C extends StageAdmin>
         implements CliOperation<C, StageStatusCommand.Request,
-                StageStatusCommand.Result>
+                StageStatusCommand.Result>,
+        Answering<StageStatusCommand.Result>
 {
 
     /** How many incomplete items are listed. */
@@ -182,6 +183,54 @@ public final class StageStatusCommand<C extends StageAdmin>
                     () -> reconciled(result.reconciled().get()));
         }
         status.end();
+    }
+
+    @Override
+    public Map<String, Object> answer(Result result)
+    {
+        return Answers.object(
+                "duties", Answers.part(result.duties(), Answers::lease),
+                "item", Answers.part(result.item(),
+                        StageStatusCommand::answer),
+                "items", Answers.part(result.items(), items ->
+                        Answers.object("incomplete", items.incomplete(),
+                                "complete", items.complete(),
+                                "listed", Answers.list(items.listed(),
+                                        StageStatusCommand::answer))),
+                "claims", Answers.part(result.claims(), claims ->
+                        Answers.object("claimed", claims.claimed(),
+                                "expired", claims.expired())),
+                "reconciler", Answers.part(result.reconciled(),
+                        reconciled -> reconciled.map(checked ->
+                                (Object) Answers.object("checkedTo",
+                                        checked.checkedTo(), "behind",
+                                        checked.behind())).orElse(null)));
+    }
+
+    /**
+     * An item's progress, as the API answers it.
+     *
+     * @param item the item
+     * @return its counts
+     */
+    private static Object answer(RegistryReport.Item item)
+    {
+        return Answers.object("itemId", item.itemId(), "expected",
+                item.expected(), "done", item.done(), "failed",
+                item.failed(), "completedAt", item.completedAt());
+    }
+
+    /**
+     * One item, as the API answers it.
+     *
+     * @param detail the item
+     * @return its progress and its records by state
+     */
+    private static Object answer(ItemDetail detail)
+    {
+        return Answers.object("itemId", detail.itemId(), "progress",
+                detail.item() == null ? null : answer(detail.item()),
+                "records", detail.states(), "attempts", detail.attempts());
     }
 
     /**

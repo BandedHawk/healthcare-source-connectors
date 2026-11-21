@@ -14,6 +14,7 @@ import com.sdh.healthcare.connector.stage.StageReleases;
 import java.io.PrintStream;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -30,7 +31,7 @@ import java.util.Set;
  */
 public final class VersionCommand<C extends DrainAdmin>
         implements CliOperation<C, VersionCommand.Request,
-                VersionCommand.Result>
+                VersionCommand.Result>, Answering<VersionCommand.Result>
 {
 
     /** How many releases are listed. */
@@ -188,6 +189,21 @@ public final class VersionCommand<C extends DrainAdmin>
         result.acceptedEarly().ifPresent(accepted ->
                 out.println("This release was accepted by "
                         + accepted.operator() + " at " + accepted.at()));
+    }
+
+    @Override
+    public Map<String, Object> answer(Result result)
+    {
+        return Answers.object("release", Answers.release(result.mine()),
+                "history", Answers.list(result.history(), Answers::letIn),
+                "accepted", result.acceptedEarly().map(accepted ->
+                        (Object) Answers.object("acceptId",
+                                accepted.acceptId(), "operator",
+                                accepted.operator(), "at", accepted.at()))
+                        .orElse(null),
+                "acceptedNow", result.accepted() == null ? null
+                        : Answers.object("acceptId",
+                                result.accepted().acceptId()));
     }
 
     /**

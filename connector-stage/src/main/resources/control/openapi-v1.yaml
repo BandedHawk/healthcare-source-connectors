@@ -1,0 +1,224 @@
+openapi: 3.1.0
+info:
+  title: Pipeline stage control API
+  version: "1"
+  description: |
+    A stage's control API (CONTROL-API-DESIGN.md). Each stage serves its
+    own, from its control Deployment; an operation a stage doesn't have is
+    answered 404 `not-on-this-stage`.
+
+    Every call is authenticated (an OIDC bearer token, or a client
+    certificate, as the stage's settings choose), checked against the
+    permission its operation needs, and audited as
+    `sdh.audit.control.<operation>` with the caller's principal and the
+    request's ID, which every answer carries in `X-Request-Id`. Answers
+    hold no PHI: a failure is named by its class alone.
+
+    This version serves the query operations (build step C2). Actions,
+    sealed results and four-eyes approval follow in later versions of
+    this description.
+servers:
+  - url: https://{host}:8443/api/v1
+    variables:
+      host:
+        default: sdh-control
+security:
+  - bearer: []
+  - clientCertificate: []
+paths:
+  /status:
+    get:
+      operationId: status
+      summary: The stage's status
+      description: >-
+        Its duties' leases, its items, claims and reconciler. Each part is
+        read on its own; a part that can't be read is answered as
+        `{"unavailable": "<class>"}`. Permission `pipeline.view`.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /items/{itemId}/status:
+    get:
+      operationId: itemStatus
+      summary: One item's status
+      description: Permission `pipeline.view`.
+      parameters:
+        - {$ref: "#/components/parameters/itemIdPath"}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /stuck:
+    get:
+      operationId: stuck
+      summary: Items idle for longer than a time, and their claims
+      description: Permission `pipeline.view`.
+      parameters:
+        - name: idle
+          in: query
+          description: How long idle, such as `30m` (the CLI's default if
+            not given).
+          schema: {type: string}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /drain:
+    get:
+      operationId: drainCheck
+      summary: Whether this release may be let in, and what blocks it
+      description: Permission `pipeline.view`.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /version:
+    get:
+      operationId: version
+      summary: This release and the releases let in before it
+      description: Permission `pipeline.view`.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /failures:
+    get:
+      operationId: failures
+      summary: The fail store's open failures, or one item's
+      description: >-
+        Counts, codes, states and events only: never a record's content or
+        a failure's sealed reason. Permission `pipeline.view`.
+      parameters:
+        - name: itemId
+          in: query
+          schema: {type: string, format: uuid}
+        - name: all
+          in: query
+          description: Every failure, not only open ones.
+          schema: {type: boolean, default: false}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /reprocess-runs/{runId}:
+    get:
+      operationId: reprocessStatus
+      summary: A reprocess run's status
+      description: Permission `pipeline.view`.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /audit/verify:
+    get:
+      operationId: auditVerify
+      summary: Checks the audit journal's chains and seals
+      description: Permission `audit.read`.
+      parameters:
+        - {$ref: "#/components/parameters/from"}
+        - {$ref: "#/components/parameters/to"}
+        - name: stale
+          in: query
+          description: How long a chain may stay open before it is
+            reported, such as `2h`.
+          schema: {type: string}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /audit/events:
+    get:
+      operationId: auditExport
+      summary: The audit journal's events, as JSON lines
+      description: >-
+        One event a line, then a last line `{"end": true, "rows": n}`. A
+        read that fails part way ends with
+        `{"end": false, "incomplete": true, "rows": n, "reason": "<class>"}`
+        instead, since the status is already sent. Permission `audit.read`.
+      parameters:
+        - {$ref: "#/components/parameters/from"}
+        - {$ref: "#/components/parameters/to"}
+      responses:
+        "200":
+          description: The events.
+          headers:
+            X-Request-Id: {$ref: "#/components/headers/RequestId"}
+          content:
+            application/x-ndjson:
+              schema: {type: object}
+        default: {$ref: "#/components/responses/Problem"}
+  /openapi.yaml:
+    get:
+      operationId: openapi
+      summary: This description
+      description: Any authenticated caller.
+      responses:
+        "200":
+          description: This file.
+          content:
+            application/yaml: {}
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        From the customer's identity provider: signed (RS*, PS* or ES*),
+        from `sdh.control.auth.jwt.issuer-uri`, for
+        `sdh.control.auth.jwt.audience`, with issue and expiry times no
+        more than `max-lifetime` apart (one hour at most under the hipaa
+        profile), naming the caller in the principal claim. Its roles claim
+        is mapped to permissions by `sdh.control.permissions`.
+    clientCertificate:
+      type: mutualTLS
+      description: >-
+        From a CA in `sdh.control.auth.mtls.trusted-ca`, with a subject
+        listed in `sdh.control.auth.mtls.roles`.
+  parameters:
+    itemIdPath:
+      name: itemId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    from:
+      name: from
+      in: query
+      description: A date or instant.
+      schema: {type: string}
+    to:
+      name: to
+      in: query
+      description: A date or instant.
+      schema: {type: string}
+  headers:
+    RequestId:
+      description: The request's ID, as its audit event names it.
+      schema: {type: string, format: uuid}
+  responses:
+    Answer:
+      description: The operation's answer.
+      headers:
+        X-Request-Id: {$ref: "#/components/headers/RequestId"}
+      content:
+        application/json:
+          schema: {type: object}
+    Problem:
+      description: >-
+        A refusal (RFC 9457). `title` is one of `bad-request` (400),
+        `unauthenticated` (401), `permission-required`, `approval-required`
+        or `forbidden` (403), `not-on-this-stage` (404), `refused` (409, the
+        stage refused it as things stand) or `failed` (500).
+      content:
+        application/problem+json:
+          schema: {$ref: "#/components/schemas/Problem"}
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: {type: string, examples: ["urn:sdh:control:permission-required"]}
+        title: {type: string}
+        status: {type: integer}
+        detail:
+          type: string
+          description: What to do about it; for a failure, its class only.
+        requestId: {type: string, format: uuid}

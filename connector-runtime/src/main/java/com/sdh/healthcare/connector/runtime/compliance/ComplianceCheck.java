@@ -83,7 +83,22 @@ public enum ComplianceCheck
      * it: heap dumps, core dumps, an {@code hs_err} file, or the attach
      * mechanism (design §7.5, §14.1).
      */
-    JVM_DUMPS("jvm-dumps", "a JVM that may dump memory");
+    JVM_DUMPS("jvm-dumps", "a JVM that may dump memory"),
+
+    /**
+     * A control API served without TLS: callers' tokens, and the results
+     * they read, would cross the network in the clear
+     * (CONTROL-API-DESIGN.md §12; 45 CFR 164.312(e)).
+     */
+    CONTROL_TLS("control-tls", "a control API without TLS"),
+
+    /**
+     * A control API that accepts tokens issued for longer than an hour, so
+     * a stolen token stays useful for longer (CONTROL-API-DESIGN.md §12;
+     * 45 CFR 164.312(a)(2)(iii), (d)).
+     */
+    CONTROL_TOKEN_LIFETIME("control-token-lifetime",
+            "a control API that accepts long-lived tokens");
 
     /** The check's ID, as waivers name it. */
     private final String id;

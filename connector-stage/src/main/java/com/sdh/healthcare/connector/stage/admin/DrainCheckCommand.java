@@ -15,6 +15,7 @@ import java.io.PrintStream;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -31,7 +32,8 @@ import java.util.stream.Collectors;
  */
 public final class DrainCheckCommand<C extends DrainAdmin>
         implements CliOperation<C, DrainCheckCommand.Request,
-                DrainCheckCommand.Result>
+                DrainCheckCommand.Result>,
+        Answering<DrainCheckCommand.Result>
 {
 
     /** What is asked: nothing but the check. */
@@ -184,6 +186,38 @@ public final class DrainCheckCommand<C extends DrainAdmin>
             print(result.held(), out);
         }
         out.println("  " + result.waiting() + " reprocess object(s) waiting");
+    }
+
+    @Override
+    public Map<String, Object> answer(Result result)
+    {
+        DrainGate.Decision decision = result.decision();
+        return Answers.object("stage", result.stage(), "release",
+                Answers.release(result.mine()), "letIn", decision.letIn(),
+                "how", decision.letIn() ? decision.how().wireName() : null,
+                "blockingCount", decision.blockingCount(), "blocking",
+                Answers.list(decision.blocking(), DrainCheckCommand::answer),
+                "current", Answers.letIn(result.current()), "previous",
+                Answers.letIn(result.previous()), "partWay",
+                Answers.list(result.partWay(), DrainCheckCommand::answer),
+                "openFailures", Answers.list(result.open(), each ->
+                        Answers.object("state", each.state(), "version",
+                                each.version(), "count", each.count())),
+                "held", Answers.list(result.held(),
+                        DrainCheckCommand::answer),
+                "reprocessWaiting", result.waiting());
+    }
+
+    /**
+     * Items by version, as the API answers them.
+     *
+     * @param items the items under one version
+     * @return how many, and the first
+     */
+    private static Object answer(PartWay.Items items)
+    {
+        return Answers.object("version", items.version(), "count",
+                items.count(), "first", items.first());
     }
 
     /**

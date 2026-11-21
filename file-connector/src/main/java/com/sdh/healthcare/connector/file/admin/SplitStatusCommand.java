@@ -14,6 +14,8 @@ import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
+import com.sdh.healthcare.connector.stage.admin.Answering;
+import com.sdh.healthcare.connector.stage.admin.Answers;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.CliOperation;
 import com.sdh.healthcare.connector.stage.admin.Invocation;
@@ -41,7 +43,8 @@ import java.util.stream.Collectors;
  * @since 0.1.0
  */
 final class SplitStatusCommand implements CliOperation<SplitAdminContext,
-        StageStatusCommand.Request, SplitStatusCommand.Result>
+        StageStatusCommand.Request, SplitStatusCommand.Result>,
+        Answering<SplitStatusCommand.Result>
 {
 
     /** The most unfinished items listed. */
@@ -205,6 +208,67 @@ final class SplitStatusCommand implements CliOperation<SplitAdminContext,
     {
         return ItemProcessor.STAGE + "/" + context.properties().connectorId()
                 + "/" + itemId;
+    }
+
+    @Override
+    public Map<String, Object> answer(Result result)
+    {
+        return Answers.object(
+                "duties", Answers.part(result.duties(), Answers::lease),
+                "itemId", result.itemId(),
+                "lease", Answers.part(result.lease(), Answers::lease),
+                "checkpoint", Answers.part(result.checkpoint(), stored ->
+                        stored.map(SplitStatusCommand::answer).orElse(null)),
+                "releases", Answers.part(result.releases(), listed ->
+                        Answers.list(listed, each -> Answers.object(
+                                "request", each.request().request(),
+                                "action", each.request().action(),
+                                "by", each.request().requestedBy(),
+                                "at", each.request().requestedAt(),
+                                "state", each.state(), "doneAt",
+                                each.doneAt(), "heldUnder",
+                                each.fromVersion(), "resumedUnder",
+                                each.toVersion(), "refusal",
+                                each.refusal(), "reasonKept",
+                                each.reasoned()))),
+                "items", Answers.part(result.items(), items ->
+                        Answers.object("counts", items.counts(),
+                                "unfinished", Answers.list(items.listed(),
+                                        each -> Answers.object("itemId",
+                                                each.item().itemId(),
+                                                "state",
+                                                each.item().state(),
+                                                "epoch",
+                                                each.item().epoch(),
+                                                "updatedAt",
+                                                each.item().updatedAt(),
+                                                "lease", Answers.lease(
+                                                        each.lease()))))));
+    }
+
+    /**
+     * An item's checkpoint, as the API answers it: how far it got, and
+     * how it ended; never what the item holds.
+     *
+     * @param stored the checkpoint
+     * @return its fields
+     */
+    private static Object answer(ItemCheckpoints.Stored stored)
+    {
+        Checkpoint checkpoint = stored.checkpoint();
+        Checkpoint.Failure failure = checkpoint.failure();
+        return Answers.object("state", checkpoint.state(), "format",
+                checkpoint.format(), "bytes", checkpoint.itemSize(),
+                "resumeAt", checkpoint.resumeAt() == null ? null
+                        : checkpoint.resumeAt().offset(),
+                "records", checkpoint.recordCount(), "sent",
+                checkpoint.publishedSeq() + 1, "startedAt",
+                checkpoint.startedAt(), "endedAt", stored.endedAt(),
+                "restarts", checkpoint.restarts(), "batchPending",
+                stored.pending() != null, "failure", failure == null ? null
+                        : Answers.object("stage", failure.stage(), "code",
+                                failure.code(), "offset", failure.offset(),
+                                "at", failure.failedAt()));
     }
 
     /**

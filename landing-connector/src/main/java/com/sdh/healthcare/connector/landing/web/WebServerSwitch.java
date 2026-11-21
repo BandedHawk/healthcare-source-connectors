@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.landing.web;
 
+import com.sdh.healthcare.connector.stage.control.ControlWebSwitch;
 import java.util.Locale;
 import java.util.Map;
 import org.springframework.boot.EnvironmentPostProcessor;
@@ -21,7 +22,9 @@ import org.springframework.core.env.MapPropertySource;
  * node can't be reached over the network. An application that has already
  * been set to run none, an operator command ({@code AdminCli}), gets none
  * on an HTTP intake too: it runs beside the node, and would otherwise try to
- * start a second web server.
+ * start a second web server. The stage's control process
+ * ({@code ControlWebSwitch}, {@code sdh.control.mode}) is left alone: it
+ * serves the control API, never the intake.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -50,6 +53,10 @@ public final class WebServerSwitch implements EnvironmentPostProcessor
     public void postProcessEnvironment(ConfigurableEnvironment environment,
             SpringApplication application)
     {
+        if (ControlWebSwitch.controlMode(environment))
+        {
+            return;
+        }
         String type = environment.getProperty(TYPE, "directory");
         boolean http = "http".equals(type.trim().toLowerCase(Locale.ROOT))
                 && application.getWebApplicationType()

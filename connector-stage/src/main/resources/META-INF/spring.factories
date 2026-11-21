@@ -1,0 +1,4 @@
+# A worker runs no web server unless its settings ask; the control process
+# always runs one (CONTROL-API-DESIGN.md §1).
+org.springframework.boot.EnvironmentPostProcessor=\
+com.sdh.healthcare.connector.stage.control.ControlWebSwitch

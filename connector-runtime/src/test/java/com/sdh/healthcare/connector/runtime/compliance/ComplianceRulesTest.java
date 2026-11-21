@@ -138,6 +138,37 @@ class ComplianceRulesTest
                         "sdh.telemetry.otlp.endpoint"));
     }
 
+    /**
+     * A control API (CONTROL-API-DESIGN.md §12) without TLS, or accepting
+     * tokens issued for longer than an hour, is refused; a worker's
+     * settings aren't judged as a control API's, and an hour passes.
+     */
+    @Test
+    void aControlApiNeedsTlsAndShortTokens()
+    {
+        Map<String, String> settings = passing();
+        settings.put("sdh.control.tls.enabled", "false");
+        settings.put("sdh.control.auth.jwt.max-lifetime", "2h");
+        assertThat(refused(settings)).isEmpty();
+
+        settings.put("sdh.control.mode", "true");
+        assertThat(refused(settings)).containsExactlyInAnyOrder(
+                new Finding(ComplianceCheck.CONTROL_TLS,
+                        "sdh.control.tls.enabled"),
+                new Finding(ComplianceCheck.CONTROL_TOKEN_LIFETIME,
+                        "sdh.control.auth.jwt.max-lifetime"));
+
+        settings.put("sdh.control.tls.enabled", "true");
+        settings.put("sdh.control.auth.jwt.max-lifetime", "60m");
+        assertThat(refused(settings)).isEmpty();
+        settings.remove("sdh.control.auth.jwt.max-lifetime");
+        assertThat(refused(settings)).isEmpty();
+        settings.put("sdh.control.auth.jwt.max-lifetime", "a while");
+        assertThat(refused(settings)).containsExactly(new Finding(
+                ComplianceCheck.CONTROL_TOKEN_LIFETIME,
+                "sdh.control.auth.jwt.max-lifetime"));
+    }
+
     /** The durable audit journal is on unless turned off, which is refused. */
     @Test
     void theAuditJournalMustBeOn()

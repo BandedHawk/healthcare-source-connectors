@@ -16,6 +16,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -126,6 +127,50 @@ public final class AdminCli<P, C extends AutoCloseable>
         {
             this.auditCommands.put(command.name(), command);
         }
+    }
+
+    /**
+     * What the stage is.
+     *
+     * @return it
+     */
+    public Stage<P, C> stage()
+    {
+        return stage;
+    }
+
+    /**
+     * One of the stage's commands, as an operation the control API can
+     * serve (CONTROL-API-DESIGN.md §3).
+     *
+     * @param name the command's name, such as {@code stuck}
+     * @return it; empty if the stage has no such command, or it isn't an
+     *         operation yet
+     */
+    public Optional<CliOperation<?, ?, ?>> operation(String name)
+    {
+        AdminCommand<?> command = commands.containsKey(name)
+                ? commands.get(name) : auditCommands.get(name);
+        return command instanceof CliOperation<?, ?, ?> operation
+                ? Optional.of(operation) : Optional.empty();
+    }
+
+    /**
+     * Opens what a command reads from: the stage's context, or for the
+     * audit journal's commands, the journal. Nothing is connected until
+     * the command reads.
+     *
+     * @param name     the command's name
+     * @param settings the stage's settings
+     * @return what it reads from, to close after the command
+     */
+    public AutoCloseable open(String name, P settings)
+    {
+        if (auditCommands.containsKey(name))
+        {
+            return stage.audit().apply(settings);
+        }
+        return stage.context().apply(settings);
     }
 
     /**
