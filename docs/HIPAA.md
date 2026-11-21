@@ -745,7 +745,7 @@ The work still owed before a customer can run the product on real PHI, after the
 
 | # | Work | Closes | Notes |
 |---|---|---|---|
-| P1 | **The control API:** authentication (OIDC or mTLS), a permission per operation, the caller audited as principal, sealed PHI results, an OpenAPI contract; every operator command on every stage, the transform stage included | §8.1 item 3; § 164.312(a)(1), (b), (d) | The CLI's commands are already shaped for it (DESIGN §11.4). |
+| P1 | **The control API:** authentication (OIDC or mTLS), a permission per operation, the caller audited as principal, sealed PHI results, an OpenAPI contract; every operator command on every stage, the transform stage included | §8.1 item 3; § 164.312(a)(1), (b), (d) | The CLI's commands are already shaped for it (DESIGN §11.4). Designed: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md), build steps C1–C5. |
 | P2 | **Pause, resume and drain** of a stage or an intake, through P1 | Contingency operations § 164.308(a)(7)(ii)(C) | Today only by scaling Deployments and `drain-check`. |
 | P3 | **Key rotation and re-keying,** through P1 | §8.1 item 8; incident response, the breach safe harbour | Rotation for new data exists (`kek_ref`); re-wrapping stored data doesn't. |
 | P4 | **Retention and erasure,** through P1: set and run retention, purge an item, erase a pipeline's data at the end of a contract | § 164.310(d)(2)(i); § 164.504(e)(2)(ii)(J) | Today retention is a setting and destruction is the KMS's (HIPAA-OPERATIONS §8). |

@@ -1,6 +1,6 @@
 # The pipeline control API and its test harness: intent
 
-Status: **Intent, decided 2026-11-20 with the user; not designed or built** · Companion to [HIPAA.md](HIPAA.md) §11,
+Status: **Intent, decided 2026-11-20 with the user; designed in [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md), not built** · Companion to [HIPAA.md](HIPAA.md) §11,
 which lists this as outstanding work, and to DESIGN.md §11.4, the operator tools it replaces as the supported
 interface.
 
@@ -59,11 +59,11 @@ the caller's identity the product's own record.
 - **Exposure:** inside the customer's network only, behind its own ingress with TLS. The customer's network
   architecture (HIPAA.md §11.2) says where.
 
-**To decide in its design:**
-- where the API runs: a service per pipeline, or an endpoint on each stage;
-- how a sealed result is streamed;
-- whether erasure and break-glass need a second person's approval;
-- how the CLI relates to the API: a client of it, or kept beside it for a cluster with no API reachable.
+**Decided in its design** (2026-11-20, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md)):
+- the API runs as a control Deployment per stage, from the stage's own image and identity;
+- a sealed result is streamed as JSON lines of JWE parts, to a key registered for the caller in advance;
+- erasure, plaintext break-glass, re-keying and audit prune need a second person's approval;
+- the CLI is kept beside the API, on the same operations, for when the API can't be reached.
 
 ## The test harness, as decided
 
