@@ -60,6 +60,10 @@ services are tested to be kept apart. Reference settings with the profile on and
 `deploy/reference/`, with the isolation layout in [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §2.8. Found: pipelines
 need a database each, since a JDBC catalog can't keep them apart within one (§8.1 item 9).
 
+Revision 2026-11-20 (f): the outstanding work restated (§11), with the decision to build a supported HTTPS control
+API, with a permission per operation, and a test harness, before the console ([CONTROL-API.md](CONTROL-API.md)).
+The documents customers need in order to secure a deployment, network architecture first, are listed in §11.2.
+
 **This is an engineering mapping, not legal advice.** It sets out which parts of HIPAA bear on the pipeline, which
 controls the code and deployments provide toward each one, and what the code leaves to the organisation that runs
 it. Privacy and compliance counsel must review it before any real PHI is processed. The current AWS proof of
@@ -394,7 +398,7 @@ sources. They are **not verified against the NPRM text** (§9).
 
 | Proposal | Where the system stands |
 |---|---|
-| Addressable specifications become required; encryption of ePHI at rest and in transit is mandatory, with narrow exceptions | Met at rest. In transit, met except Kafka and Postgres TLS (§3.1). |
+| Addressable specifications become required; encryption of ePHI at rest and in transit is mandatory, with narrow exceptions | Met at rest. In transit: Kafka and Postgres TLS are tested and in the reference settings (§8.1 items 7, 13); the PoC still runs them in plaintext (§8.5). |
 | MFA for access to systems holding ePHI | Human access is the operator's. Workloads already use short-lived workload identity, with no passwords for AWS. |
 | A technology asset inventory and network map, reviewed every 12 months | Terraform and the manifests describe the whole stack, and SBOMs list the software (DESIGN §14.4). Network policies allow each stage egress only to DNS, Postgres, Kafka, AWS endpoints and the Pod Identity agent (AWS-POC §10). |
 | Vulnerability scans every 6 months, and a penetration test every 12 months | Scanning is built (DESIGN §14.5). No penetration test has been done. |
@@ -407,6 +411,8 @@ sources. They are **not verified against the NPRM text** (§9).
 
 Each item says whether it is a **product gap** (code or features), something we owe customers in **documentation**,
 or the **operator's** own duty that the product can only support.
+
+The outstanding work is restated, with what's decided since, in §11.
 
 ### 8.1 Product gaps
 
@@ -435,9 +441,11 @@ or the **operator's** own duty that the product can only support.
    - **Limit:** an application that reads the tables without the library isn't seen; CloudTrail data events are the
      check.
 3. **The operator's identity on admin commands is self-asserted** (`--operator` or `$SDH_OPERATOR`).
+   - **Decided 2026-11-20:** closed by the control API, whose callers are authenticated (§11.1 P1,
+     [CONTROL-API.md](CONTROL-API.md)).
    - § 164.312(a)(2)(i) and NIST SP 800-66r2 ask that activity be traceable to a person.
    - **For now:** documentation ties it to the platform's audit of `kubectl exec`.
-   - **Later:** an authenticated admin interface, as DESIGN §17 already plans for operator-defined pipelines.
+   - **Later:** the console, as a client of that API.
 4. **Scoping a breach to individuals: built 2026-11-20** (DESIGN §11.4).
    - `patients` on a record stage (convert, transform) reads the stage's FHIR records, by item IDs or a span of at
      most 31 days, and finds the identifiers of every `Patient` in each: as a Bundle entry, contained, or at any
@@ -717,3 +725,67 @@ official's policies, the waivers' approvals, the review records of §3, and this
 | Identifying individuals § 164.410(c)(1) | `patients --item-id`, sealed and audited | Pipeline operator runs it for the privacy official (§6) |
 | Notices §§ 164.404–410; burden of proof § 164.414 | The audit export and verify results as evidence | Privacy official and counsel give the notices and keep the evidence |
 
+
+## 11. Outstanding work (restated 2026-11-20)
+
+The work still owed before a customer can run the product on real PHI, after the builds of revisions (d) and (e).
+**Left out, as later phases already noted:**
+- the web console and its role management, a separate project ([CONTROL-API.md](CONTROL-API.md));
+- example collector configurations for each audit store (§8.1 item 15, before the product is final).
+
+**Decided 2026-11-20 with the user:**
+- the product needs, now, a supported HTTPS control API with a permission per operation, giving full control of a
+  pipeline and of error remediation;
+- the product needs a test harness that drives that API and the pipeline's operation at three levels:
+  Testcontainers, the sandbox, and AWS.
+
+[CONTROL-API.md](CONTROL-API.md) sets out that intent.
+
+### 11.1 Product work
+
+| # | Work | Closes | Notes |
+|---|---|---|---|
+| P1 | **The control API:** authentication (OIDC or mTLS), a permission per operation, the caller audited as principal, sealed PHI results, an OpenAPI contract; every operator command on every stage, the transform stage included | §8.1 item 3; § 164.312(a)(1), (b), (d) | The CLI's commands are already shaped for it (DESIGN §11.4). |
+| P2 | **Pause, resume and drain** of a stage or an intake, through P1 | Contingency operations § 164.308(a)(7)(ii)(C) | Today only by scaling Deployments and `drain-check`. |
+| P3 | **Key rotation and re-keying,** through P1 | §8.1 item 8; incident response, the breach safe harbour | Rotation for new data exists (`kek_ref`); re-wrapping stored data doesn't. |
+| P4 | **Retention and erasure,** through P1: set and run retention, purge an item, erase a pipeline's data at the end of a contract | § 164.310(d)(2)(i); § 164.504(e)(2)(ii)(J) | Today retention is a setting and destruction is the KMS's (HIPAA-OPERATIONS §8). |
+| P5 | **Config and health view, and the support bundle,** through P1: settings with secrets removed, health, versions, the compliance outcome | §8.1 item 11; keeps support out of PHI (§1) | |
+| P6 | **The test harness:** one set of scenarios at three levels (CONTROL-API.md) | Testing and revision § 164.308(a)(7)(ii)(D); evidence for § 164.308(a)(8) | Synthetic data only. |
+| P7 | **Backup and restore as a whole:** a consistent backup of buckets, catalog, registries and keys, a tested restore, and a check after it | §8.1 item 12; § 164.308(a)(7)(ii)(A)–(B) | Needed for the 72-hour restore the proposed rule asks for (§7). |
+| P8 | **FIPS mode:** tested under a FIPS 140-3 validated provider | §8.1 item 5; federal buyers (§8.4) | The JOSE library, HKDF, the AWS SDK and the Iceberg clients are untested under it. |
+| P9 | **Security labels** from the source's confidentiality codes (`meta.security`) | §8.1 item 10; minimum necessary § 164.514(d); Part 2 | |
+| P10 | **Secrets in output URIs refused,** as they are on input URIs | § 164.312(a)(1) | Output, reprocess and dead-letter URIs aren't checked (DEPLOYMENT.md, "Broker rights"). |
+| P11 | **Transports still untested:** Kafka with client certificates (mTLS) and with AWS MSK's IAM login; Postgres TLS through PgBouncer; GCP Cloud KMS against the real service; AWS GovCloud and Azure Government endpoints | § 164.312(d), (e); §8.4 | Kafka SASL_SSL and Postgres TLS are tested (§8.1 item 7). |
+| P12 | **A deployment run from `deploy/reference/`,** with TLS everywhere and a database per pipeline, on the sandbox or AWS | §8.1 items 7, 9 and 13, proved end to end | The sandbox and the AWS PoC share one database across pipelines (§8.1 item 9). |
+| P13 | **A penetration test** of a reference deployment and of the control API, by a third party, and its fixes | The proposed rule (§7); buyers' due diligence | After P1 and P12. |
+
+### 11.2 Documents customers need to secure and operate a pipeline
+
+Done: the shared-responsibility mapping (§10), the operating procedures ([HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md)),
+the audit store wiring (§2.7 there), pipeline isolation (§2.8 there), and the reference settings
+(`deploy/reference/`). Still owed:
+
+| # | Document | What it tells the customer to secure |
+|---|---|---|
+| D1 | **Reference network architecture** | The zones: private subnets, no public endpoints. The one ingress: HTTP push behind TLS or mTLS. The control API inside the network only. Egress allowed only to the KMS, object store, broker, database and collector, over private endpoints. Default-deny network policies per namespace (`deploy/` has examples). DNS. The operator's path in (VPN, bastion or zero-trust access). A network map to keep and review. |
+| D2 | **Identity and access architecture** | A workload identity per stage, with no static keys. Human access through SSO with MFA. The API's permissions mapped to the customer's roles (P1). Break-glass accounts. Access reviews, and leavers. |
+| D3 | **Key management architecture** | The key hierarchy: KEKs per pipeline and layer, signing keys, inbox keys, the ID key, consumer keys, operator keys. Who holds each. Key policies. Rotation, re-keying (P3) and destruction. |
+| D4 | **Platform hardening baseline** | Kubernetes: the restricted Pod Security Standard, Secrets encrypted at rest (or an external secret store), the API server's audit log, signed-image admission, a CIS benchmark for the nodes. Encryption at rest and logging for Postgres, Kafka and the object store, and bucket versioning or object lock. |
+| D5 | **Data flows and where PHI is** | §8.2 item 5: each stage, what it holds and in what form, for the risk analysis and the asset inventory. |
+| D6 | **Security configuration guide** | §8.2 item 2: every setting that bears on HIPAA, its safe value and what it does, starting from `deploy/reference/`. |
+| D7 | **Audit event catalogue** | §8.2 item 3: every event and field, for the SIEM and the activity reviews. |
+| D8 | **Backup, restore and disaster recovery** | §8.2 item 4, from P7: what to back up, how often, how to restore, the RTO and RPO it gives. |
+| D9 | **Retention and destruction** | §8.2 item 6, completed with P4: what each removal deletes and what it leaves (backups, logs). |
+| D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). |
+| D11 | **The vendor's security commitments** | §8.2 item 8: vulnerability scanning, how quickly fixes are released, signed images and SBOMs, how to report a vulnerability. |
+| D12 | **Upgrades and patching** | How to take a release and its fixes without losing data (DEPLOYMENT.md, "Upgrading"), and how quickly. |
+| D13 | **Control API deployment and use** | With P1: how to expose it, connect it to the identity provider, map the permissions, and register operators' sealing keys. |
+
+### 11.3 Not product work
+
+These aren't the product's, but no deployment holds real PHI until they are done:
+- **Buyers' requirements beside HIPAA (§8.4):** none was checked against its source. Check them when a buyer names
+  them: NIST SP 800-53 mapping, MARS-E, IRS Publication 1075, the CISA secure-development attestation.
+- **Our AWS PoC (§8.5):** a BAA, private subnets, TLS, CloudTrail data events, bucket versioning, KMS rotation, and
+  the collector's IAM role. All are only needed if we put real PHI on it.
+- **The operator's own duties (§8.3):** these stay the customer's.
