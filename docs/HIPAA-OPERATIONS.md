@@ -50,8 +50,8 @@ Each stage writes every audit event to two places:
    events queue, and when the queue is full the stage waits rather than loses one. Settings, under
    `sdh.telemetry.journal`: `enabled` (true; the profile refuses `false`), `capacity` (50000 events), `batch-size`
    (500), `seal-interval` (1m).
-2. **The OTLP export** to the operator's collector, for the SIEM (DESIGN §12.1). It is best effort; the journal is
-   the record of truth, and `audit-export` fills any gap (§3.2).
+2. **The OTLP export** to the operator's collector, for the SIEM (DESIGN §12.1), and from there to a separate
+   store (§2.7). It is best effort; the journal is the record of truth, and `audit-export` fills any gap (§3.2).
 
 The events hold no PHI: IDs, codes, counts and positions only (HIPAA.md §4.1). The journal needs no PHI key to read.
 
@@ -107,6 +107,83 @@ See DEPLOYMENT.md for each transport. The profile checks the settings; the platf
 - KMS keys, never a local keystore, with rotation on;
 - object store versioning on bronze at least, and the buckets refusing plaintext requests;
 - CloudTrail (or the provider's equivalent) data events on the buckets and KMS keys, to the SIEM.
+
+### 2.7 A separate store for audit events
+
+The journal (§2.2) is durable, but it sits in the same Postgres as the pipeline's own state. NIST SP 800-66r2
+asks where audit information resides (HIPAA.md §3.1), and a whole deleted chain shows only against a copy
+held elsewhere (§3.2). The product's part ends at the OTLP export: the profile refuses to start a stage with no
+`sdh.telemetry.otlp.endpoint` (check `audit-export`). From there on, the **operator's collector** carries the
+events to a store the pipeline's own staff can't change. Any OTLP/HTTP receiver will do. The examples below use
+the OpenTelemetry Collector (the contrib build, or a provider's distribution of it such as ADOT on AWS).
+
+**What arrives.** Audit events come as OTLP log records, each with `event.name = sdh.audit.<event>` (for
+example `sdh.audit.item.landed`, `sdh.audit.reader.record_read`, `sdh.audit.admin.restore`). They carry only
+allow-listed attributes, and their body is the event name (DESIGN §12). Traces and metrics come on the same
+endpoint. None of it holds PHI, so the profile allows plain HTTP from a stage to a collector inside the cluster.
+The collector's onward link to the store must use TLS.
+
+#### Collector settings for every store
+
+1. **A logs pipeline that keeps everything.** `otlp` receiver → `memory_limiter` and `batch` → the store's
+   exporter. Never use `nop` there. Never put a sampling or `filter` processor on the logs pipeline, because one
+   that drops `sdh.audit.*` records is an audit gap.
+2. **Ride out an outage of the store.** On the exporter, give `sending_queue` a `storage: file_storage` extension
+   on a persistent volume, so a queue survives a collector restart. Set `retry_on_failure.max_elapsed_time: 0`,
+   which means retry without a limit. Size the volume for the longest outage you plan to ride out; at the PoC's
+   rates, audit events are a few hundred bytes each. Past that point, `audit-export` fills the gap (§3.3).
+3. **More than one collector.** Run two replicas behind the Service, on different nodes. A stage's export is
+   best effort: what was in flight when a collector stopped is still in the journal, and the comparison in §3.2
+   finds it.
+4. **Network.** A NetworkPolicy lets the pipeline namespaces reach the collector on 4318. The collector's egress
+   goes only to the store's endpoint (and to DNS).
+5. **A collector outside the cluster.** Use `https://` in `sdh.telemetry.otlp.endpoint`, and put a token in
+   `sdh.telemetry.otlp.headers` (for example `Authorization`), taken from a Secret. The collector's receiver
+   requires the token (the `bearertokenauth` or `basicauth` extension).
+6. **At the store:**
+   - Retention set to counsel's period (§3.3).
+   - Immutability where the store offers it: a retention lock, or object lock.
+   - Encryption with the customer's key.
+   - Read access for security analysts. Delete rights for nobody who runs the pipeline: the platform
+     administrator and the pipeline operators can't remove what records their own actions.
+7. **The same store for the platform's own logs:** the Kubernetes API server audit log (§2.4) and the cloud
+   provider's audit trail (§2.6). The analyst needs all three side by side.
+
+#### By provider
+
+| Store | Collector exporter | Identity and rights | Network | Retention, key, lock |
+|---|---|---|---|---|
+| **AWS CloudWatch Logs** | `awscloudwatchlogs` (`log_group_name`, `log_stream_name`) | An IAM role for the collector's service account (IRSA or EKS Pod Identity), limited to `logs:CreateLogStream` and `logs:PutLogEvents` on the group's ARN (`arn:aws:logs:<region>:<account>:log-group:<group>:*`). Create the group in advance, so the role needs no `logs:CreateLogGroup`. | In private subnets, an interface VPC endpoint `com.amazonaws.<region>.logs`; egress on 443 | The group's retention in days; a KMS key whose policy lets `logs.<region>.amazonaws.com` use it; no `logs:DeleteLogGroup` or `logs:PutRetentionPolicy` for pipeline roles. For a locked archive, add a subscription to Firehose and then to an S3 bucket with Object Lock. |
+| **Google Cloud Logging** | `googlecloud` | Workload Identity: the collector's Kubernetes service account acts as a Google service account with `roles/logging.logWriter` | Private Google Access on the nodes' subnet | A log bucket of its own, with a sink routing these logs to it; the bucket's retention; a locked bucket; CMEK |
+| **Azure Monitor** | `azuremonitor`, to Application Insights on a workspace-based Log Analytics workspace | The connection string, held in a Kubernetes Secret. Use Microsoft Entra authentication instead, where the exporter version supports it. | Azure Monitor Private Link Scope (AMPLS) | The workspace table's retention, and its archive; a customer-managed key through a dedicated cluster |
+| **Splunk** | `splunk_hec` | A HEC token in a Secret, for an index of its own | TLS to HEC, with the customer's CA | The index's retention; frozen buckets archived |
+| **Elastic** | `elasticsearch`, or `otlphttp` to Elastic's OTLP intake | An API key in a Secret, allowed to write one data stream | TLS, with the customer's CA | An ILM policy; snapshots to a locked repository |
+| **Grafana Loki** (as the sandbox does) | `otlphttp` to Loki's OTLP endpoint | A tenant ID and token through `headers` | TLS | Loki's retention; object storage with a lock |
+| **Any other SIEM** | `otlphttp` if it accepts OTLP; otherwise `syslog` (RFC 5424 over TLS) | Whatever the SIEM issues, in a Secret | TLS | The SIEM's own |
+
+**Without Kubernetes** (the distribution kit on hosts), run the collector on each host, or on one host nearby,
+and point `sdh.telemetry.otlp.endpoint` at it. The settings above apply unchanged, with a file-storage directory
+on local disk.
+
+The exporters and their options belong to the collector, not to the product. Check them against the documentation
+for the collector version you deploy. **Only the Loki path has been run** (the sandbox); the others have not been
+tried in our environments.
+
+#### Checking it works
+
+Run once after setup, and again after each collector or store change:
+
+1. Run a read-only command on each stage (`status`). Within a minute, find its `sdh.audit.admin.status` event in
+   the store.
+2. For one day, count each chain's events in the store, and compare with `audit-export --from <day> --to
+   <next day>` (§3.2). They should match.
+3. Block the collector's egress to the store for ten minutes, then restore it. The events from the outage arrive
+   late, with none missing (the comparison of step 2 again). Record the result with the risk analysis.
+
+**Where our own deployments stand.** The sandbox sends audit events to its in-cluster Loki
+(`deploy/sandbox/infra/telemetry.yaml`), which shows the path but is not a separate store. The AWS PoC's collector
+still exports logs to `nop` (`deploy/aws/k8s/infra/telemetry.yaml`), so its audit events are only in the journal.
+Fixing that is the CloudWatch row above, which needs the new IAM role (HIPAA.md §8.5).
 
 ## 3. Audit controls and activity review (§ 164.312(b), § 164.308(a)(1)(ii)(D))
 

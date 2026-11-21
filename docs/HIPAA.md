@@ -586,7 +586,8 @@ the product must prove its capabilities:
 - CloudTrail data events;
 - a durable audit sink: the journal now keeps every event in Postgres, which survives `down` on its EBS volume, but
   the collector's logs pipeline still exports to `nop` (`deploy/aws/k8s/infra/telemetry.yaml`), so nothing
-  reaches a separate store; sending it to CloudWatch Logs needs an IAM change;
+  reaches a separate store; sending it to CloudWatch Logs needs an IAM role for the collector (the steps, and
+  those for other clouds and self-hosted stores, are in HIPAA-OPERATIONS.md §2.7);
 - bucket backups: versioning is off, and bronze is the only copy once an object has landed;
 - KMS rotation, which is off.
 

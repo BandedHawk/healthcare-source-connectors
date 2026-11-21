@@ -89,6 +89,14 @@ Decided 2026-11-07 ([STAGES.md](STAGES.md) §10).
 - **The split and convert stages: at least one pod, scaled with KEDA** on their input's backlog (each stage's README, "Autoscaling"). Never scale a stage to zero: the pod holding its duties lease reconciles, finding work whose messages were lost, and a lost message adds nothing to the backlog that would start a pod. On Kafka, give each stage's input topic at least as many partitions as its most pods; on Kafka 4.0 or later, use its group protocol (`groupProtocol=consumer` in the input's URI), so a rebalance doesn't wait for a busy pod; and set the split stage's `maxPollIntervalMs` (30 minutes by default) above the longest item's split time (revision (bz)). Tried in the sandbox with `scripts/sandbox.sh scale-demo` ([SANDBOX.md](SANDBOX.md)).
 - **Keep the convert stage's backlog under its reconciler's grace** (10 minutes) on a normal day: a backlog older than that holds its reconciler back, and `stage.reconcile_deferral_capped` is the sign that it needs more pods (STAGES.md §13.4).
 
+## Audit events: the collector
+
+Every stage exports its audit events over OTLP (`sdh.telemetry.otlp.endpoint`; under the compliance profile, a
+stage won't start without it). The operator runs the collector that receives them, and sends them on to a store
+the pipeline's staff can't change: CloudWatch Logs, Cloud Logging, Azure Monitor, Splunk, Elastic, Loki or any
+SIEM. The collector settings that keep every event, the identity and rights each store needs, and how to check it
+works are in [HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §2.7.
+
 ## Broker rights
 
 Decided 2026-11-09 ([STAGES.md](STAGES.md) §15.8.9, §15.8.10 step 5). Give each stage an identity of its own on the broker, allowed only what it does. Each stage after landing **sends to its own input** as well as onward: an operator's reprocess is queued by the stage's pods as a message to the stage itself, sealed to it and signed by it, and the stage takes a reprocess message only when signed by its own key.
