@@ -248,6 +248,14 @@ Revision 2026-11-21 (em), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) 
 - A break-glass restore's plaintext is held encrypted (`ControlResults`: a data key per result, wrapped with the stage's records KEK; AES-GCM parts). The requester fetches it once within an hour from `/operations/{id}/result`, and it is then deleted.
 - Under the `hipaa` profile, the CLI refuses both unless the new check `cli-four-eyes` is waived; the waiver is shown and audited at startup.
 
+Revision 2026-11-22 (es), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.11, step H2 of the control API, asked for by the user ("Build H2"). **The control API's scenarios run against the customer images in the sandbox, and pass.**
+- Each stage README (landing node, split and convert stages) now has a "Control API" section: the control Deployment, its Service and network policy, and its settings, as customers deploy them.
+- `scripts/sandbox.sh harness-up` stops the demo pipeline and deploys a throwaway pipeline, `harness`, from the READMEs: one pod a stage, each with its control API, and a pod serving the harness issuer's key set. `harness-down` removes it and everything it stored, and starts the demo pipeline again. `scripts/harness.sh sandbox [scenario,…]` does both around the run.
+- `SandboxTarget` reaches the control APIs and the store through port-forwards, pushes from the producer pod, cuts a service off by pausing its containers on their node, and restarts or kills a stage by deleting its pods.
+- New on both levels: the `failover` scenario (each stage's workers killed with items on their way; every item completes, once), and erasure first checks there is something to erase.
+
+Tested by `TestIssuerTest`, `SandboxTargetTest`, and the sandbox's first run: all ten scenarios pass, with no product change needed. The control pods used 250–340 MiB of their 768. Not done: the AWS target (H3), the transform stage, the `hipaa` profile and per-stage Kafka rights in the sandbox.
+
 Revision 2026-11-22 (er), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.10, step H1 of the control API, asked for by the user ("Build H1"). **The control API's scenarios run against a real pipeline on Testcontainers, and pass.**
 - New module `control-harness`: a client of the contract that checks every answer against the stage's own OpenAPI, a test token issuer, test operators with sealing keys, an unsealer, synthetic C-CDA samples, and nine scenarios (support, access, load, failures, break-glass, pause and drain, keys, outages, retention and erasure).
 - After each scenario the harness checks that every authenticated call is in the stage's audit journal with its principal, refusals as denied, and that `audit-verify` finds nothing changed.

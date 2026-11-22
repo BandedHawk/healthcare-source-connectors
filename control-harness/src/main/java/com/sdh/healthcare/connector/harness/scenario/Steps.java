@@ -102,8 +102,10 @@ final class Steps
     }
 
     /**
-     * Pushes an item once the intake takes pushes, as after a resume or an
-     * outage: a {@code 503} is tried again, anything else refused.
+     * Pushes an item once the intake takes pushes, as after a resume, an
+     * outage or a restart: a {@code 503}, or no answer (status 0, as a
+     * target reports a push it couldn't connect for), is tried again,
+     * anything else refused.
      *
      * @param harness the harness
      * @param body    the item
@@ -121,7 +123,8 @@ final class Steps
                 itemId[0] = reply.field("itemId");
                 return true;
             }
-            HarnessFailure.check(reply.status() == 503,
+            HarnessFailure.check(reply.status() == 503
+                    || reply.status() == 0,
                     "The intake refused a push: " + reply);
             return false;
         });

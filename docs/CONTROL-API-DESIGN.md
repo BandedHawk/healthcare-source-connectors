@@ -26,7 +26,7 @@ as a small Deployment beside the stage's workers, named `sdh-control-<stage>`.
 | Input routes, duties lease, claims | yes | none |
 | Inbound port | none (the landing node's push only) | 8443, TLS |
 | Replicas | as tuned | 2, for availability; it keeps no state of its own (§8) |
-| Memory | as tuned | 384 MiB, heap 256 MiB |
+| Memory | as tuned | 768 MiB, half of it heap (the image's setting); 250–340 MiB used in the sandbox (§15.11) |
 
 Why a Deployment of its own:
 - **It stays up when the workers don't.** Recovery is needed most when workers crash-loop, are paused or are
@@ -46,8 +46,11 @@ span the pipeline are recorded once and carried out by each stage (§8.2).
 **Network policy:** the control pods accept traffic only from the ingress controller's namespace, on 8443. The
 workers' policy is unchanged.
 
-**Sandbox budget:** four control Deployments of two pods add about 3 GiB of limits. The sandbox runs one replica
-each, and its per-node sums, which `scripts/sandbox.sh` enforces, are redone before they are added.
+**Sandbox budget:** four control Deployments of two pods add about 6 GiB of limits. The sandbox runs one replica
+each, in its harness pipeline only, with the demo pipeline stopped meanwhile (SANDBOX.md "Memory", §15.11).
+
+**As shipped:** each stage README's "Control API" has the Deployment, Service and network policy, and the
+settings (since H2, §15.11).
 
 ## 2. Authentication
 
@@ -396,16 +399,16 @@ depends on neither of the others.
 **Parts:**
 - **`ControlClient`:** a typed client of the contract, on `java.net.http`, with its own contract check of each
   answer. It is also what the console and the customer's tools can use as a reference.
-- **`TestIssuer`:** signs short-lived JWTs for test principals with chosen roles, and serves their JWKS. Its image,
-  `sdh-test-issuer`, is for the sandbox and AWS. It is never part of a customer deployment, and the reference
-  settings don't name it.
+- **`TestIssuer`:** signs short-lived JWTs for test principals with chosen roles, and serves their JWKS. In the
+  sandbox it signs with a key kept in the sandbox's state, whose JWKS a pod serves (§15.11), rather than an
+  `sdh-test-issuer` image. It is never part of a customer deployment, and the reference settings don't name it.
 - **`Unsealer`:** decrypts sealed results with a test principal's private key.
 - **`Target`:** what a scenario runs against:
 
   | Target | Starts or reaches | Injects faults by |
   |---|---|---|
   | `TestcontainersTarget` | Kafka (SASL_SSL), Postgres (TLS), SeaweedFS, Vault, the test issuer, and each stage in worker and control modes (from its jar, as built: §15.10) | pausing containers |
-  | `SandboxTarget` | the sandbox's Deployments, through its ingress | scaling to zero, deleting pods, a deny-all network policy, stopping a node's VM |
+  | `SandboxTarget` | the sandbox's harness pipeline: the customer images, each stage's Deployment and control Deployment from its README, through port-forwards (§15.11) | pausing a service's containers on their node, deleting a stage's pods gracefully or by force |
   | `AwsTarget` | the PoC stack's Deployments, through its internal ingress | the same, and Spot interruption |
 
 - **Scenarios:** those listed in CONTROL-API.md, each one class, run by any target. Each checks the operation's
@@ -431,7 +434,7 @@ depends on neither of the others.
 | C8 | Retention, purge and erase (§11). **Built 2026-11-21** (§15.8) | P4 |
 | C9 | Health, settings, compliance outcome, support bundle. **Built 2026-11-21** (§15.9) | P5 |
 | H1 | The harness with its Testcontainers target, growing with C2–C9. **Built 2026-11-22** (§15.10) | part of P6 |
-| H2 | The sandbox target | P6 |
+| H2 | The sandbox target. **Built 2026-11-22** (§15.11) | P6 |
 | H3 | The AWS target | P6 |
 
 ### 15.1 C1, as built
@@ -1009,6 +1012,66 @@ depends on neither of the others.
   - The transform stage isn't in it; `healthcare-data-transformer` adds it.
   - Pipeline-wide approval of an erasure doesn't exist yet (§15.8), so the scenario erases stage by stage.
 
+### 15.11 H2, as built
+
+- **The customer's control Deployment** is in each stage README ("Control API", landing node, split and convert
+  stages): the stage's image with `control` as its argument, the workers' Secret, keys and ConfigMap, a ConfigMap
+  of control settings mounted at `/control` and read after the workers' (`SPRING_CONFIG_ADDITIONAL_LOCATION`), a
+  TLS Secret, probes on 8081 (`/livez`, `/readyz`), two replicas of 768 MiB; a Service on 8443; a network policy
+  letting in only the ingress controller's namespace. The settings block names the permissions in brackets
+  (`"[pipeline.view]"`), which keeps each name whole when Spring binds the map. The fence is ```` ```yaml control
+  ````, which the sandbox picks up, apart from the workers' ```` ```yaml ````.
+- **The sandbox's harness pipeline** (`scripts/sandbox.sh harness-up`, `harness-down`; SANDBOX.md): a pipeline
+  named `harness`, deployed as the demo pipeline is, by digest from each README, with one pod a stage, no KEDA
+  and no transform stage, plus the three control Deployments from the READMEs (one replica), the control settings
+  (`deploy/sandbox/harness/control-application.yml`), one TLS certificate for the three Services and localhost
+  from the sandbox CA, and a `busybox httpd` pod serving the harness issuer's JWKS, which only the control pods may
+  reach. It has its own roles, S3 keys, Vault tokens and two KEKs a stage (the second for `keys`), made by `up`
+  with the demo pipeline's; maintenance every 20 s; and the landing node's tables in a schema of its own
+  (`SDH_LEASE_JDBC_TABLE=landing_harness.sdh_lease`). The demo pipeline is stopped while it runs (memory), its
+  items left waiting. `harness-down` deletes the namespace, drops its schemas, deletes its rows in the shared
+  lease and catalog tables, its topics, consumer groups and objects, and starts the demo pipeline again. After a
+  full run nothing named for it was left in Postgres (every text column of every public table searched), Kafka
+  or SeaweedFS.
+- **`SandboxTarget`** (`.sandbox`; `Kubectl`, `PortForward`): runs `kubectl` through `minikube -p <profile>
+  kubectl --`; reaches each control API and the store through a port-forward, started again on the same port
+  whenever it ends (a forward dies with its pod); pushes from the producer pod with `curl -i`, as `sandbox.sh
+  push` does, a push that couldn't connect answering status 0; cuts a service off by pausing its containers on
+  their node (`docker pause` through `minikube ssh`; Postgres, the three Kafka brokers, SeaweedFS, Vault);
+  restarts a stage by deleting its pods and kills it by force-deleting them, then waits for a new pod to be ready
+  or to exit; lists the store with the stage's own S3 key. `TestIssuer.signingWith` signs with the key
+  `harness-up` keeps in `state/keys/harness-issuer.pem`, under the kid of the JWKS it serves.
+- **Added to both levels:** `Target.kill` and the `failover` scenario (each stage's workers killed with items on
+  their way: three items before split's, three before convert's, one pushed while the landing node's
+  replacement takes over its lease; every item then converted and split exactly as many times as it has
+  records); erasure first checks each stage has something stored, so its emptiness after shows something;
+  `Steps.pushOpen` tries again on status 0. `HarnessIT` picks its target from `sdh.harness.target`.
+- **Running it:** `scripts/harness.sh sandbox [scenario,…]`: `harness-up`, `HarnessIT` under `-Pit` on this
+  machine, `harness-down` on exit, and the sandbox stopped after if it wasn't running before
+  (`SDH_SANDBOX_STOP=0` keeps it). The images are as `sandbox.sh images` last built them.
+- **First run** (2026-11-22, images rebuilt from the H1 commit plus this step): all ten scenarios pass (support
+  2 s, access 0 s, load 15 s, failures 42 s, break-glass 6 s, pause 134 s, keys 86 s, outages 135 s, failover
+  106 s, erasure 235 s); no item needed reprocessing after the outages. A second run, end to end through
+  `scripts/harness.sh sandbox` (a fresh harness pipeline on the Vault keys the first left), passed all ten in 13
+  minutes. No product change was needed. The control
+  pods used 250–340 MiB of their 768, the workers 360–480 MiB of theirs.
+- **Tests without the cluster:** `TestIssuerTest` (a kept key signs tokens its JWKS verifies), `SandboxTargetTest`
+  (`curl -i` answers, status 0, the pause commands and their ID check).
+- **Not as §14 first said, chosen while building:**
+  - Port-forwards, not an ingress: the sandbox has no ingress controller, and one would cost memory the nodes
+    don't have. The README's network policy is applied as written, for a namespace that doesn't exist.
+  - A JWKS pod and a key in the sandbox's state, not an `sdh-test-issuer` image: nothing need sign in the
+    cluster.
+  - Pausing containers, not a deny-all network policy: Calico keeps connections already open, so a policy cuts
+    off new ones only. Stopping a node's VM was left out; node loss was tested with the load tests
+    (2026-11-18), and the AWS level has Spot interruption.
+  - The demo pipeline is stopped during the run, and the harness pipeline is thrown away after, since erasure
+    ends it.
+  - One replica of each control API, not two.
+  - Not covered: the transform stage (its own repository), the `hipaa` profile (Vault is reached over HTTP here),
+    and per-stage Kafka rights (the sandbox's Kafka has no authentication).
+
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
 (HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1; C7's in §6.1; C8's in §8; C9's in §9.
-H1 adds no customer steps: the harness is the test team's.
+H1 adds no customer steps: the harness is the test team's. H2 adds the control Deployment to each stage README
+("Control API").

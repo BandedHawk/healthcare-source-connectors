@@ -1,0 +1,66 @@
+# The control harness's token issuer, as its control APIs see it (scripts/sandbox.sh harness-up): its key set,
+# served from the ConfigMap jwks, which the script makes from the issuer's key in the state directory. The
+# harness signs its tokens with that key itself; nothing here signs. For tests only: a customer's control APIs
+# trust their own identity provider. Filled in by scripts/sandbox.sh (${K8S_NS}).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: jwks, namespace: ${K8S_NS} }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: jwks } }
+  template:
+    metadata: { labels: { app: jwks } }
+    spec:
+      automountServiceAccountToken: false   # it doesn't use the Kubernetes API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: jwks
+          image: docker.io/library/busybox:1.37.0
+          command: [httpd, -f, -p, "8080", -h, /www]
+          ports: [{ name: http, containerPort: 8080 }]
+          readinessProbe: { tcpSocket: { port: http }, periodSeconds: 5 }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 16Mi }
+          volumeMounts:
+            - { name: jwks, mountPath: /www, readOnly: true }
+      volumes:
+        - { name: jwks, configMap: { name: jwks } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: jwks, namespace: ${K8S_NS} }
+spec:
+  selector: { app: jwks }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+# The control APIs fetch the key set, and nothing else reaches it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: jwks-from-control, namespace: ${K8S_NS} }
+spec:
+  podSelector: { matchLabels: { app: jwks } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchExpressions: [{ key: app, operator: In,
+                 values: [sdh-control-landing, sdh-control-split, sdh-control-convert] }] } }]
+      ports: [{ port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: control-to-jwks, namespace: ${K8S_NS} }
+spec:
+  podSelector: { matchExpressions: [{ key: app, operator: In,
+                 values: [sdh-control-landing, sdh-control-split, sdh-control-convert] }] }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: jwks } } }]
+      ports: [{ port: 8080 }]

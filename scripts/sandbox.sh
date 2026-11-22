@@ -16,6 +16,12 @@
 #                                  push count copies of the samples (300 by default), and follow KEDA scaling the
 #                                  transform stage out to share them, and back
 #   scripts/sandbox.sh status      pods, nodes, topics, scaling
+#   scripts/sandbox.sh harness-up  stop the demo pipelines and deploy the control harness's own pipeline, harness
+#                                  (namespace sdh-harness: landing node, split and convert stages, one pod each,
+#                                  each with its control API), for scripts/harness.sh sandbox
+#   scripts/sandbox.sh harness-down
+#                                  delete the harness pipeline and everything it stored, and start the demo
+#                                  pipelines again
 #   scripts/sandbox.sh grafana     port-forward Grafana to http://localhost:3000 (until interrupted)
 #   scripts/sandbox.sh stop        stop the cluster's VMs; `up` starts them again, with everything kept
 #   scripts/sandbox.sh delete --yes
@@ -42,6 +48,8 @@ done
 
 PROFILE="${SDH_DEMO_PROFILE:-sdh-demo}"
 PIPELINES="${SDH_PIPELINES:-ccda-push}"
+# The control harness's pipeline (harness-up): disposable, since its scenarios erase it.
+HARNESS="harness"
 DEPLOY="$ROOT/deploy/sandbox"
 TRANSFORMER="${SDH_TRANSFORMER:-$ROOT/../healthcare-data-transformer}"
 STATE="$SDH_SANDBOX/sdh-demo/state"
@@ -81,6 +89,8 @@ secret() {
 # Pipeline names: ns <pipeline> is its namespace; prefix <pipeline> its Iceberg namespace and role prefix.
 ns() { echo "sdh-$1"; }
 prefix() { echo "${1//-/_}"; }
+# all_pipelines: the demo pipelines and the harness's, once each.
+all_pipelines() { printf '%s\n' $PIPELINES "$HARNESS" | awk '!seen[$0]++'; }
 
 # --- Cluster ---------------------------------------------------------------------------------------------------
 
@@ -268,7 +278,8 @@ keep_control_plane() {
 s3_config() {
   local identities=() p
   identities+=("$(s3_identity sandbox-admin "$(secret s3-sandbox-admin)" Admin Read Write List Tagging)")
-  for p in $PIPELINES; do
+  # The harness pipeline's too, always, so that starting and ending it doesn't restart SeaweedFS.
+  for p in $(all_pipelines); do
     identities+=("$(s3_identity "landing-$p" "$(secret "s3-landing-$p")" \
       Read:sdh-bronze Write:sdh-bronze List:sdh-bronze Tagging:sdh-bronze)")
     identities+=("$(s3_identity "splitter-$p" "$(secret "s3-splitter-$p")" Read:sdh-bronze List:sdh-bronze \
@@ -404,30 +415,27 @@ setup_vault() {
   infra wait --for=condition=Ready pod/vault-0 --timeout=120s >/dev/null
   vault_sh 'vault secrets list -format=json | grep -q "\"transit/\"" || vault secrets enable transit' >/dev/null
   local p
-  for p in $PIPELINES; do
+  # The harness pipeline's keys and tokens too, made once, so that harness-up has them (its scenarios rotate
+  # its stages to the second KEKs).
+  for p in $(all_pipelines); do
     # The KEKs and signing keys never leave Vault, and can't be deleted (deletion_allowed is false).
     vault_sh "
-      for k in $p-landed-items $p-records $p-fhir; do
+      for k in $p-landed-items $p-records $p-fhir $(harness_keks "$p"); do
         vault read transit/keys/\$k >/dev/null 2>&1 || vault write -f transit/keys/\$k type=aes256-gcm96
       done
       for k in $p-landing-signing $p-splitter-signing $p-convert-signing $p-transform-signing; do
         vault read transit/keys/\$k >/dev/null 2>&1 || vault write -f transit/keys/\$k type=ecdsa-p256
       done" >/dev/null
-    vault_policy "landing-$p" "
-      path \"transit/encrypt/$p-landed-items\" { capabilities = [\"update\"] }
-      path \"transit/decrypt/$p-landed-items\" { capabilities = [\"update\"] }
+    # The harness pipeline's stages may use a second KEK each too, which its keys scenario rotates them to.
+    local landed="$p-landed-items" records="$p-records"
+    [[ "$p" != "$HARNESS" ]] || { landed+=" $p-landed-items-2"; records+=" $p-records-2"; }
+    vault_policy "landing-$p" "$(kek_paths $landed)
       path \"transit/sign/$p-landing-signing/*\" { capabilities = [\"update\"] }
       path \"transit/keys/$p-landing-signing\" { capabilities = [\"read\"] }"
-    vault_policy "splitter-$p" "
-      path \"transit/encrypt/$p-landed-items\" { capabilities = [\"update\"] }
-      path \"transit/decrypt/$p-landed-items\" { capabilities = [\"update\"] }
-      path \"transit/encrypt/$p-records\" { capabilities = [\"update\"] }
-      path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
+    vault_policy "splitter-$p" "$(kek_paths $landed $records)
       path \"transit/sign/$p-splitter-signing/*\" { capabilities = [\"update\"] }
       path \"transit/keys/$p-splitter-signing\" { capabilities = [\"read\"] }"
-    vault_policy "convert-$p" "
-      path \"transit/encrypt/$p-records\" { capabilities = [\"update\"] }
-      path \"transit/decrypt/$p-records\" { capabilities = [\"update\"] }
+    vault_policy "convert-$p" "$(kek_paths $records)
       path \"transit/sign/$p-convert-signing/*\" { capabilities = [\"update\"] }
       path \"transit/keys/$p-convert-signing\" { capabilities = [\"read\"] }"
     # Encrypt as well as decrypt with the records KEK: a stage checks each KEK at startup with a round trip.
@@ -446,6 +454,21 @@ setup_vault() {
     vault_public_key "$p-landing-signing" > "$STATE/keys/$p-landing-signing-public.pem"
     vault_public_key "$p-splitter-signing" > "$STATE/keys/$p-splitter-signing-public.pem"
     vault_public_key "$p-convert-signing" > "$STATE/keys/$p-convert-signing-public.pem"
+  done
+}
+
+# harness_keks <pipeline>: the harness pipeline's second KEKs, which its keys scenario rotates its stages to;
+# none for any other pipeline.
+harness_keks() {
+  [[ "$1" != "$HARNESS" ]] || echo "$1-landed-items-2 $1-records-2"
+}
+
+# kek_paths <kek>...: a policy's lines letting a stage wrap and unwrap with each KEK.
+kek_paths() {
+  local k
+  for k in "$@"; do
+    printf '      path "transit/encrypt/%s" { capabilities = ["update"] }\n' "$k"
+    printf '      path "transit/decrypt/%s" { capabilities = ["update"] }\n' "$k"
   done
 }
 
@@ -529,7 +552,7 @@ setup_database() {
          (SELECT FROM pg_roles WHERE rolname = 'sdh_catalog')\\gexec
        GRANT ALL ON SCHEMA public TO sdh_catalog;
        GRANT CREATE ON DATABASE sdh TO sdh_catalog;"
-  for p in $PIPELINES; do
+  for p in $(all_pipelines); do
     for role in landing splitter convert fhir; do
       local name="${role}_$(prefix "$p")"
       sql+="
@@ -566,12 +589,19 @@ pki() {
   fi
   issue "$dir/producer" "/O=SDH Sandbox/CN=producer-1" "extendedKeyUsage=clientAuth"
   local p n
-  for p in $PIPELINES; do
+  for p in $(all_pipelines); do
     n="$(ns "$p")"
     issue "$dir/landing-$p" "/O=SDH Sandbox/CN=landing.$n.svc" \
       "extendedKeyUsage=serverAuth
 subjectAltName=DNS:landing.$n.svc,DNS:landing.$n.svc.cluster.local,DNS:landing.$n"
   done
+  # The harness's control APIs, one certificate for the three: by their Services' names, and by localhost, as
+  # the harness reaches them through port-forwards.
+  n="$(ns "$HARNESS")"
+  issue "$dir/control-$HARNESS" "/O=SDH Sandbox/CN=sdh-control.$n.svc" \
+    "extendedKeyUsage=serverAuth
+subjectAltName=DNS:sdh-control-landing.$n.svc,DNS:sdh-control-split.$n.svc,DNS:sdh-control-convert.$n.svc,\
+DNS:localhost,IP:127.0.0.1"
 }
 
 # issue <stem> <subject> <extensions>: a certificate from the sandbox CA, made once.
@@ -653,23 +683,33 @@ build_images() {
 # --- Pipelines -------------------------------------------------------------------------------------------------
 
 deploy_pipelines() {
-  [[ -s "$STATE/images.env" ]] || { echo "No images yet: run scripts/sandbox.sh images" >&2; exit 1; }
-  # shellcheck source=/dev/null
-  source "$STATE/images.env"
-  [[ -n "${split_stage:-}" && -n "${convert_stage:-}" && -n "${transform_stage:-}" ]] || { echo "No split," \
-    "convert and transform stage images (made before the stages): run scripts/sandbox.sh images" >&2; exit 1; }
-  [[ -s "$STATE/wstl-us-core.tar.gz" ]] || { echo "No WSTL set: run scripts/sandbox.sh images" >&2; exit 1; }
-  pki
-  kc apply -f "$DEPLOY/producers/producer.yaml" >/dev/null
-  kc -n sdh-producers create secret generic producer --from-file=ca.crt="$STATE/pki/ca.crt" \
-    --from-file=tls.crt="$STATE/pki/producer.crt" --from-file=tls.key="$STATE/pki/producer.key" \
-    --dry-run=client -o yaml | kc apply -f - >/dev/null
+  need_images
+  deploy_producer
   kc apply -f "$DEPLOY/fhir/namespace.yaml" >/dev/null
   local p
   for p in $PIPELINES; do
     deploy_pipeline "$p"
   done
   kc -n sdh-producers rollout status deploy/producer --timeout=300s >/dev/null
+}
+
+# need_images: the images' digests, from the last `images`, and the WSTL set.
+need_images() {
+  [[ -s "$STATE/images.env" ]] || { echo "No images yet: run scripts/sandbox.sh images" >&2; exit 1; }
+  # shellcheck source=/dev/null
+  source "$STATE/images.env"
+  [[ -n "${split_stage:-}" && -n "${convert_stage:-}" && -n "${transform_stage:-}" ]] || { echo "No split," \
+    "convert and transform stage images (made before the stages): run scripts/sandbox.sh images" >&2; exit 1; }
+  [[ -s "$STATE/wstl-us-core.tar.gz" ]] || { echo "No WSTL set: run scripts/sandbox.sh images" >&2; exit 1; }
+}
+
+# deploy_producer: the certificates, and the producer that pushes to the landing nodes.
+deploy_producer() {
+  pki
+  kc apply -f "$DEPLOY/producers/producer.yaml" >/dev/null
+  kc -n sdh-producers create secret generic producer --from-file=ca.crt="$STATE/pki/ca.crt" \
+    --from-file=tls.crt="$STATE/pki/producer.crt" --from-file=tls.key="$STATE/pki/producer.key" \
+    --dry-run=client -o yaml | kc apply -f - >/dev/null
 }
 
 # deploy_pipeline <pipeline>
@@ -704,13 +744,25 @@ deploy_pipeline() {
     envsubst "$vars" < "$DEPLOY/pipeline/$stage-application.yml" > "$work/$stage-application.yml"
   done
   envsubst "$vars" < "$DEPLOY/fhir/transform-application.yml" > "$work/transform-application.yml"
+  # The harness pipeline (harness-up) has no transform stage, so no registry for the convert stage to mark items
+  # in; and each stage carries out maintenance (re-keys, purges, retention) every 20 seconds, as the harness's
+  # first level does, its landing node with its tables in a schema of its own, which harness-down drops; and
+  # the split stage stores each record as it is split.
+  local landing_extra=() splitter_extra=() convert_extra=()
+  if [[ "$p" == "$HARNESS" ]]; then
+    sed -i '/next-registry-schema:/d' "$work/convert-application.yml"
+    landing_extra=(--from-literal=SDH_MAINTENANCE_INTERVAL=20s
+      --from-literal=SDH_LEASE_JDBC_TABLE="landing_$(prefix "$p").sdh_lease")
+    splitter_extra=(--from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_STORAGE_COMMIT_MAX_RECORDS=1)
+    convert_extra=(--from-literal=SDH_MAINTENANCE_INTERVAL=20s)
+  fi
 
   apply_secret "$n" landing-keys --from-file=tls.crt="$STATE/pki/landing-$p.crt" \
     --from-file=tls.key="$STATE/pki/landing-$p.key" --from-file=producers-ca.pem="$STATE/pki/ca.crt" \
     --from-file=splitter-inbox.pem="$STATE/keys/$p-inbox-public.pem" \
     --from-file=vault-token="$STATE/secrets/vault-token-landing-$p"
   apply_secret "$n" landing-env --from-literal=S3_SECRET_ACCESS_KEY="$(secret "s3-landing-$p")" \
-    --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-landing-$p")"
+    --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-landing-$p")" "${landing_extra[@]}"
   kc -n "$n" create configmap landing-config --from-file=application.yml="$work/landing-application.yml" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
   apply_secret "$n" splitter-keys --from-file=inbox.pem="$STATE/keys/$p-inbox.pem" \
@@ -720,7 +772,7 @@ deploy_pipeline() {
     --from-file=vault-token="$STATE/secrets/vault-token-splitter-$p"
   apply_secret "$n" splitter-env --from-literal=S3_SECRET_ACCESS_KEY="$(secret "s3-splitter-$p")" \
     --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-splitter-$p")" \
-    --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "inbox-passphrase-$p")"
+    --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "inbox-passphrase-$p")" "${splitter_extra[@]}"
   kc -n "$n" create configmap splitter-config --from-file=application.yml="$work/splitter-application.yml" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
   apply_secret "$n" convert-keys --from-file=inbox.pem="$STATE/keys/$p-convert-inbox.pem" \
@@ -730,10 +782,11 @@ deploy_pipeline() {
     --from-file=vault-token="$STATE/secrets/vault-token-convert-$p"
   apply_secret "$n" convert-env --from-literal=S3_SECRET_ACCESS_KEY="$(secret "s3-convert-$p")" \
     --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-convert-$p")" \
-    --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "convert-inbox-passphrase-$p")"
+    --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "convert-inbox-passphrase-$p")" \
+    "${convert_extra[@]}"
   kc -n "$n" create configmap convert-config --from-file=application.yml="$work/convert-application.yml" \
     --dry-run=client -o yaml | kc apply -f - >/dev/null
-  transform_settings "$p" "$work/transform-application.yml"
+  [[ "$p" == "$HARNESS" ]] || transform_settings "$p" "$work/transform-application.yml"
 
   # Each stage from the Deployment in its README, renamed for the pipeline's namespace, by digest.
   mkdir -p "$work/landing" "$work/splitter" "$work/convert" "$work/transform"
@@ -764,10 +817,14 @@ deploy_pipeline() {
   CONFIG_SHA="$(settings_digest "$work/landing-application.yml")" \
     stage_kustomization landing "landing.yaml, landing-service.yaml" landing-patch.yaml \
     > "$work/landing/kustomization.yaml"
+  # The harness's stages aren't scaled: one pod each, so a scenario knows which pod it stops.
+  local scaling=scaled
+  [[ "$p" != "$HARNESS" ]] || scaling=one
   CONFIG_SHA="$(settings_digest "$work/splitter-application.yml")" \
-    stage_kustomization splitter "splitter.yaml" splitter-patch.yaml scaled > "$work/splitter/kustomization.yaml"
+    stage_kustomization splitter "splitter.yaml" splitter-patch.yaml "$scaling" \
+    > "$work/splitter/kustomization.yaml"
   CONFIG_SHA="$(settings_digest "$work/convert-application.yml")" \
-    stage_kustomization convert "convert.yaml" convert-patch.yaml scaled > "$work/convert/kustomization.yaml"
+    stage_kustomization convert "convert.yaml" convert-patch.yaml "$scaling" > "$work/convert/kustomization.yaml"
   CONFIG_SHA="$(settings_digest "$work/transform-application.yml" "$STATE/wstl-us-core.tar.gz")" \
     K8S_NS=sdh-fhir stage_kustomization "transform-$p" "transform.yaml" transform-patch.yaml scaled \
     > "$work/transform/kustomization.yaml"
@@ -788,6 +845,11 @@ deploy_pipeline() {
   if ! kc -n "$n" rollout status deploy/convert --timeout=300s >/dev/null \
       || ! wait_for 300 logged "$n" deploy/convert "Started ConvertStageApplication"; then
     kc -n "$n" get pods -o wide; kc -n "$n" logs deploy/convert --tail=60; exit 1
+  fi
+  if [[ "$p" == "$HARNESS" ]]; then
+    deploy_controls "$p" "$work"
+    say "  landing node, split and convert stages (one pod each), and their control APIs, running"
+    return
   fi
   kc apply -k "$work/transform" >/dev/null
   if ! kc -n sdh-fhir rollout status "deploy/transform-$p" --timeout=300s >/dev/null \
@@ -843,15 +905,18 @@ settings_digest() {
   cat "$@" | sha256sum | cut -c1-16
 }
 
-# stage_kustomization <stage> <resources> <patch> [scaled]: with "scaled", the Deployment's replicas are left to
-# KEDA, so a deploy doesn't reset what it has scaled to. With $CONFIG_SHA, it is put on the pods (and the
-# Deployment) as sdh.sandbox/settings, so a change to it restarts them.
+# stage_kustomization <stage> <resources> <patch> [scaled|one]: with "scaled", the Deployment's replicas are left
+# to KEDA, so a deploy doesn't reset what it has scaled to; with "one", it has one pod. With $CONFIG_SHA, it is
+# put on the pods (and the Deployment) as sdh.sandbox/settings, so a change to it restarts them.
 stage_kustomization() {
   local patches="{ path: $3 }" annotations=""
   [[ -z "${CONFIG_SHA:-}" ]] || annotations="commonAnnotations: { sdh.sandbox/settings: \"$CONFIG_SHA\" }"
   if [[ "${4:-}" == "scaled" ]]; then
     local remove='[{"op": "remove", "path": "/spec/replicas"}]'
     patches+=", { target: { kind: Deployment, name: $1 }, patch: '$remove' }"
+  elif [[ "${4:-}" == "one" ]]; then
+    local one='[{"op": "add", "path": "/spec/replicas", "value": 1}]'
+    patches+=", { target: { kind: Deployment, name: $1 }, patch: '$one' }"
   fi
   cat <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -885,6 +950,182 @@ landing_active() {
   ready="$(kc -n "$1" get pods -l app=landing \
     -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}')"
   [[ "$ready" == "true" ]]
+}
+
+# --- The control harness's pipeline ----------------------------------------------------------------------------
+
+# readme_control_yaml <readme>: its control API block, the control Deployment, Service and policy customers are
+# given (each stage README's "Control API").
+readme_control_yaml() {
+  awk '/^```yaml control$/ {on=1; next} /^```$/ {on=0} on' "$1"
+}
+
+# deploy_controls <pipeline> <work dir>: each stage's control API, from its README, by digest, with one replica,
+# the harness's issuer and its key set, and the control settings.
+deploy_controls() {
+  local p="$1" work="$2" n stage
+  n="$(ns "$p")"
+  export K8S_NS="$n"
+  envsubst '$K8S_NS' < "$DEPLOY/harness/issuer.yaml" | kc apply -f - >/dev/null
+  kc -n "$n" create configmap jwks --from-file=jwks.json="$STATE/keys/$p-issuer-jwks.json" \
+    --dry-run=client -o yaml | kc apply -f - >/dev/null
+  envsubst '$K8S_NS' < "$DEPLOY/harness/control-application.yml" > "$work/control-application.yml"
+  for stage in landing split convert; do
+    kc -n "$n" create configmap "sdh-control-$stage" --from-file=application.yml="$work/control-application.yml" \
+      --dry-run=client -o yaml | kc apply -f - >/dev/null
+    kc -n "$n" create secret tls "sdh-control-$stage-tls" --cert="$STATE/pki/control-$p.crt" \
+      --key="$STATE/pki/control-$p.key" --dry-run=client -o yaml | kc apply -f - >/dev/null
+  done
+  # One replica each, not the README's two (docs/SANDBOX.md "Memory"); no ingress here: the harness reaches
+  # them through port-forwards, which no network policy applies to.
+  local common=(-e 's/replicas: 2 /replicas: 1 /' -e 's/<ingress-namespace>/sdh-ingress/')
+  {
+    readme_control_yaml "$ROOT/landing-connector/src/dist/README.md" \
+      | sed "${common[@]}" -e "s#<registry>/landing-connector:<version>#$landing_connector#" \
+            -e 's/landing-claims-\(env\|keys\|config\)/landing-\1/g'
+    echo "---"
+    readme_control_yaml "$ROOT/file-connector/src/dist/README.md" \
+      | sed "${common[@]}" -e "s#<registry>/split-stage:<version>#$split_stage#" \
+            -e 's/file-connector-\(env\|keys\|config\)/splitter-\1/g'
+    echo "---"
+    readme_control_yaml "$ROOT/convert-stage/src/dist/README.md" \
+      | sed "${common[@]}" -e "s#<registry>/convert-stage:<version>#$convert_stage#" \
+            -e 's/convert-stage-\(env\|keys\|config\)/convert-\1/g'
+  } > "$work/controls.yaml"
+  kc -n "$n" apply -f "$work/controls.yaml" >/dev/null
+  kc -n "$n" rollout status deploy/jwks --timeout=120s >/dev/null || { kc -n "$n" get pods -o wide; exit 1; }
+  for stage in landing split convert; do
+    if ! kc -n "$n" rollout status "deploy/sdh-control-$stage" --timeout=300s >/dev/null; then
+      kc -n "$n" get pods -o wide; kc -n "$n" logs "deploy/sdh-control-$stage" --tail=60; exit 1
+    fi
+  done
+}
+
+# harness_issuer: the harness's token-signing key (EC P-256, PKCS#8, kept in the state directory, made once) and
+# its key set, which the control APIs are given. The harness reads the key from the state directory.
+harness_issuer() {
+  local key="$STATE/keys/$HARNESS-issuer.pem" jwks="$STATE/keys/$HARNESS-issuer-jwks.json"
+  if [[ ! -s "$key" ]]; then
+    (umask 077; openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 2>/dev/null \
+      | openssl pkcs8 -topk8 -nocrypt -out "$key")
+  fi
+  openssl pkey -in "$key" -pubout -outform DER | python3 -c '
+import base64, json, sys
+point = sys.stdin.buffer.read()[-65:]
+assert point[0] == 4
+b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+print(json.dumps({"keys": [{"kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256", "kid": sys.argv[1],
+                            "x": b64(point[1:33]), "y": b64(point[33:])}]}))' "$HARNESS-issuer" > "$jwks"
+}
+
+# demo_scaled <pipeline>: the demo pipeline's ScaledObjects, as "<namespace> <name>", those that exist.
+demo_scaled() {
+  local n so
+  n="$(ns "$1")"
+  for so in "$n splitter" "$n convert" "sdh-fhir transform-$1"; do
+    kc -n "${so% *}" get "scaledobject/${so#* }" >/dev/null 2>&1 && echo "$so"
+  done
+  return 0
+}
+
+# hold_demo: stops the demo pipelines, so the harness's fits in memory (docs/SANDBOX.md "Memory"): the landing
+# node scaled to none, and KEDA told to hold each stage at none. Their items wait in Kafka and the registries.
+hold_demo() {
+  local p so
+  for p in $PIPELINES; do
+    kc get ns "$(ns "$p")" >/dev/null 2>&1 || continue
+    say "Stopping pipeline $p while the harness runs"
+    kc -n "$(ns "$p")" scale deploy/landing --replicas=0 >/dev/null 2>&1 || true
+    while read -r so; do
+      [[ -n "$so" ]] || continue
+      kc -n "${so% *}" annotate "scaledobject/${so#* }" autoscaling.keda.sh/paused-replicas=0 --overwrite \
+        >/dev/null
+    done < <(demo_scaled "$p")
+    wait_for 300 demo_stopped "$p" || { echo "Pipeline $p's pods didn't stop" >&2; exit 1; }
+  done
+}
+
+# demo_stopped <pipeline>: none of its pods left.
+demo_stopped() {
+  [[ -z "$(kc -n "$(ns "$1")" get pods -l 'app in (landing,splitter,convert)' -o name)" \
+    && -z "$(kc -n sdh-fhir get pods -l "app=transform-$1" -o name)" ]]
+}
+
+# release_demo: the demo pipelines started again, as they were.
+release_demo() {
+  local p so
+  for p in $PIPELINES; do
+    kc get ns "$(ns "$p")" >/dev/null 2>&1 || continue
+    while read -r so; do
+      [[ -n "$so" ]] || continue
+      kc -n "${so% *}" annotate "scaledobject/${so#* }" autoscaling.keda.sh/paused-replicas- >/dev/null 2>&1 || true
+    done < <(demo_scaled "$p")
+    kc -n "$(ns "$p")" scale deploy/landing --replicas=1 >/dev/null 2>&1 || true
+    say "Pipeline $p started again"
+  done
+}
+
+# harness_sql <sql>: runs it in the sdh database as postgres.
+harness_sql() {
+  printf '%s\n' "$1" | infra exec -i postgres-0 -- env PGPASSWORD="" psql -q -v ON_ERROR_STOP=1 -U postgres -d sdh
+}
+
+harness_up() {
+  start_cluster
+  start_services
+  need_images
+  if kc get ns "$(ns "$HARNESS")" >/dev/null 2>&1; then
+    say "The harness pipeline is there from an earlier run: removing it first"
+    harness_clean
+  fi
+  hold_demo
+  say "Harness pipeline $HARNESS"
+  PIPELINES="$HARNESS" setup_topics
+  # The landing node's lease, control and audit tables, in a schema of its own (the others are in the stages'
+  # registries), so that harness-down can drop them.
+  harness_sql "CREATE SCHEMA IF NOT EXISTS landing_$(prefix "$HARNESS") AUTHORIZATION sdh_catalog;" >/dev/null
+  harness_issuer
+  deploy_producer
+  deploy_pipeline "$HARNESS"
+  kc -n sdh-producers rollout status deploy/producer --timeout=300s >/dev/null
+}
+
+# harness_clean: deletes the harness pipeline and everything it stored: its namespace, its tables and registry
+# schemas, its rows in the shared lease and catalog tables, its topics and groups, and its objects. Its Vault
+# keys are kept (they can't be deleted; harness-up uses them again). Synthetic data only.
+harness_clean() {
+  local n x
+  n="$(ns "$HARNESS")"; x="$(prefix "$HARNESS")"
+  kc delete ns "$n" --ignore-not-found --wait=true --timeout=300s >/dev/null
+  harness_sql "SET client_min_messages TO warning;
+    DROP SCHEMA IF EXISTS landing_$x, split_$x, convert_$x CASCADE;
+    DO \$\$ BEGIN
+      IF to_regclass('public.sdh_lease') IS NOT NULL THEN
+        DELETE FROM public.sdh_lease WHERE name LIKE '%split-$HARNESS%' OR name LIKE '%convert-$HARNESS%';
+      END IF;
+      IF to_regclass('public.iceberg_tables') IS NOT NULL THEN
+        DELETE FROM public.iceberg_tables WHERE table_namespace IN ('$x', '${x}_landing');
+      END IF;
+      IF to_regclass('public.iceberg_namespace_properties') IS NOT NULL THEN
+        DELETE FROM public.iceberg_namespace_properties WHERE namespace IN ('$x', '${x}_landing');
+      END IF;
+    END \$\$;" >/dev/null
+  infra exec kafka-0 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --if-exists \
+    --topic "$HARNESS\\..*" >/dev/null
+  local group
+  for group in "splitter-$HARNESS" "convert-$HARNESS"; do
+    infra exec kafka-0 -- /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --delete \
+      --group "$group" >/dev/null 2>&1 || true
+  done
+  infra exec statefulset/seaweedfs -- sh -c "printf '%s\n' 'fs.rm -r /buckets/sdh-bronze/warehouse/${x}_landing' \
+    'fs.rm -r /buckets/sdh-silver/warehouse/$x' | weed shell -master=localhost:9333" >/dev/null 2>&1 || true
+}
+
+harness_down() {
+  start_cluster
+  say "Removing the harness pipeline and what it stored"
+  harness_clean
+  release_demo
 }
 
 # --- Using it --------------------------------------------------------------------------------------------------
@@ -1105,6 +1346,8 @@ case "${1:-}" in
   check) check ;;
   scale-demo) scale_demo "${2:-300}" ;;
   status) status ;;
+  harness-up) harness_up ;;
+  harness-down) harness_down ;;
   grafana)
     say "Grafana at http://localhost:3000, user admin, password in $STATE/secrets/grafana (Ctrl-C to stop)"
     infra port-forward svc/lgtm 3000:3000

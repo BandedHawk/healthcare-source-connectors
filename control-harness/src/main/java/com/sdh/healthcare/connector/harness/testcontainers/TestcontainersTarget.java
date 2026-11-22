@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.harness.Reply;
 import com.sdh.healthcare.connector.harness.Target;
 import com.sdh.healthcare.connector.harness.TestIssuer;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -514,11 +515,21 @@ public final class TestcontainersTarget implements Target
                 .timeout(Duration.ofSeconds(60))
                 .header("Content-Type", "application/octet-stream");
         headers.forEach(request::header);
-        HttpResponse<String> response = HttpClient.newBuilder()
-                .sslContext(producer).connectTimeout(Duration.ofSeconds(10))
-                .build().send(request.POST(HttpRequest.BodyPublishers
-                        .ofByteArray(body)).build(),
-                        HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response;
+        try
+        {
+            response = HttpClient.newBuilder().sslContext(producer)
+                    .connectTimeout(Duration.ofSeconds(10)).build().send(
+                            request.POST(HttpRequest.BodyPublishers
+                                    .ofByteArray(body)).build(),
+                            HttpResponse.BodyHandlers.ofString());
+        }
+        catch (ConnectException down)
+        {
+            // The landing node isn't listening, as while it restarts.
+            return new Reply("intake", "POST", "/intakes/" + PIPELINE
+                    + "/items", PRODUCER, 0, Map.of(), "not listening");
+        }
         return new Reply("intake", "POST", "/intakes/" + PIPELINE + "/items",
                 PRODUCER, response.statusCode(), response.headers().map(),
                 response.body());
@@ -563,6 +574,20 @@ public final class TestcontainersTarget implements Target
             worker.close();
         }
         return start(stage, false);
+    }
+
+    @Override
+    public void kill(String stage) throws Exception
+    {
+        StageProcess worker = processes.remove(stage + "-worker");
+        if (worker != null)
+        {
+            worker.kill();
+        }
+        if (!start(stage, false))
+        {
+            throw new IllegalStateException(stage + " didn't start again");
+        }
     }
 
     @Override

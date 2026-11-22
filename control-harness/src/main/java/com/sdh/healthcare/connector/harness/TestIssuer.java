@@ -22,17 +22,26 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.GeneralSecurityException;
+import java.security.KeyFactory;
+import java.security.interfaces.ECPrivateKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.text.ParseException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 
 /**
  * Signs short-lived tokens for test principals, with the roles a scenario
- * gives them, and serves its key set (CONTROL-API-DESIGN.md §14). For
- * tests only: never part of a customer deployment, and the reference
- * settings never name it.
+ * gives them, and serves its key set (CONTROL-API-DESIGN.md §14); or, for
+ * a target that serves the key set itself, as the sandbox does, signs with
+ * the key it was given ({@link #signingWith}). For tests only: never part
+ * of a customer deployment, and the reference settings never name it.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -52,7 +61,7 @@ public final class TestIssuer implements AutoCloseable
     /** The signing key. */
     private final ECKey key;
 
-    /** Serves the key set. */
+    /** Serves the key set; null if the target serves it. */
     private final HttpServer server;
 
     /**
@@ -86,6 +95,51 @@ public final class TestIssuer implements AutoCloseable
     }
 
     /**
+     * Signs with the key given, and serves nothing.
+     *
+     * @param key the signing key, with its private half and key ID
+     */
+    private TestIssuer(ECKey key)
+    {
+        this.key = key;
+        server = null;
+    }
+
+    /**
+     * An issuer that signs with a key kept in files, whose key set the
+     * target serves.
+     *
+     * @param pem  the private key, EC P-256, as unencrypted PKCS#8 PEM
+     * @param jwks the key set served, holding the key's public half; its
+     *             first key's ID is the tokens'
+     * @return the issuer
+     * @throws IOException if the key can't be read
+     */
+    public static TestIssuer signingWith(Path pem, Path jwks)
+            throws IOException
+    {
+        String text = Files.readString(pem, UTF_8);
+        byte[] der = Base64.getMimeDecoder().decode(text
+                .replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", ""));
+        try
+        {
+            ECPrivateKey secret = (ECPrivateKey) KeyFactory.getInstance("EC")
+                    .generatePrivate(new PKCS8EncodedKeySpec(der));
+            ECKey open = JWKSet.load(jwks.toFile()).getKeys().getFirst()
+                    .toECKey();
+            return new TestIssuer(new ECKey.Builder(open).privateKey(secret)
+                    .build());
+        }
+        catch (GeneralSecurityException | ParseException
+                | RuntimeException failure)
+        {
+            throw new IOException("No EC P-256 key in " + pem + " and "
+                    + jwks, failure);
+        }
+    }
+
+    /**
      * Where the key set is served, for {@code sdh.control.auth.jwt
      * .jwk-set-uri}.
      *
@@ -93,6 +147,10 @@ public final class TestIssuer implements AutoCloseable
      */
     public String jwksUri()
     {
+        if (server == null)
+        {
+            throw new IllegalStateException("The target serves the key set");
+        }
         return "http://127.0.0.1:" + server.getAddress().getPort() + "/jwks";
     }
 
@@ -140,10 +198,13 @@ public final class TestIssuer implements AutoCloseable
         return jwt.serialize();
     }
 
-    /** Stops serving the key set. */
+    /** Stops serving the key set, if it serves it. */
     @Override
     public void close()
     {
-        server.stop(0);
+        if (server != null)
+        {
+            server.stop(0);
+        }
     }
 }

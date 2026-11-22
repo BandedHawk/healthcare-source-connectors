@@ -140,6 +140,18 @@ public interface Target extends AutoCloseable
     boolean restartWorkers(String stage) throws Exception;
 
     /**
+     * Kills a stage's workers at once, as a lost node would, with no
+     * shutdown: whatever they held is left part-way, their claims and
+     * leases held until they expire. Their replacements start as they
+     * would after a crash.
+     *
+     * @param stage the stage
+     * @throws Exception if they can't be killed, or their replacements
+     *                   don't start
+     */
+    void kill(String stage) throws Exception;
+
+    /**
      * The KEK a stage's data is wrapped with at the start.
      *
      * @param stage the stage

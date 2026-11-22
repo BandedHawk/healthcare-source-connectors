@@ -103,6 +103,12 @@ public final class RetentionScenario implements Scenario
         }
         for (String stage : harness.stages())
         {
+            // So that the store's being empty afterwards shows something.
+            HarnessFailure.check(!harness.target().stored(stage).isEmpty(),
+                    stage + ": nothing stored to erase");
+        }
+        for (String stage : harness.stages())
+        {
             String id = Steps.fourEyes(harness, stage, DATA, DATA_2,
                     "/erase", Steps.body("harness: end of contract",
                             "ticket", "END-1"));

@@ -224,4 +224,15 @@ final class StageProcess implements AutoCloseable
         }
         pump.join(Duration.ofSeconds(5));
     }
+
+    /**
+     * Kills the process at once, with no shutdown, as a lost node would.
+     *
+     * @throws InterruptedException if interrupted while it dies
+     */
+    void kill() throws InterruptedException
+    {
+        process.destroyForcibly().waitFor(30, TimeUnit.SECONDS);
+        pump.join(Duration.ofSeconds(5));
+    }
 }

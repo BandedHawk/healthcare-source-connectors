@@ -1,6 +1,6 @@
 # The pipeline control API and its test harness: intent
 
-Status: **Intent, decided 2026-11-20 with the user; designed in [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md); its query operations, actions, sealed results, four eyes, break-glass, pause, resume, drain, key rotation, re-keying, retention, purge, erase, health, settings, compliance and the support bundle built (C2–C9, 2026-11-21), the harness's Testcontainers level with every scenario (H1, 2026-11-22), the sandbox and AWS levels not** · Companion to [HIPAA.md](HIPAA.md) §11,
+Status: **Intent, decided 2026-11-20 with the user; designed in [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md); its query operations, actions, sealed results, four eyes, break-glass, pause, resume, drain, key rotation, re-keying, retention, purge, erase, health, settings, compliance and the support bundle built (C2–C9, 2026-11-21), the harness's Testcontainers level with every scenario (H1, 2026-11-22) and its sandbox level (H2, 2026-11-22), the AWS level not** · Companion to [HIPAA.md](HIPAA.md) §11,
 which lists this as outstanding work, and to DESIGN.md §11.4, the operator tools it replaces as the supported
 interface.
 

@@ -145,6 +145,24 @@ user, 2026-11-10; STAGES.md §17.10.9, 4e), which frees 2,560 MiB:
 The pods do use their memory: under load the convert pods used about 940 MiB of their 1,024, the landing pod 896
 of its 1,024, and the split pods 1,170 of their 1,536.
 
+**The control harness's pipeline** (`harness-up`, since 2026-11-22, below) doesn't fit beside the demo pipeline,
+so `harness-up` stops the demo pipeline first: its landing node scaled to none, and KEDA held at none for its
+stages (`autoscaling.keda.sh/paused-replicas: "0"`); their items wait in Kafka and the registries.
+`harness-down` starts it again. The harness pipeline has no transform stage, and a control API for each stage:
+
+| On the other two nodes, while the harness runs | MiB |
+|---|---|
+| Kafka (two brokers) | 2 × 768 |
+| Landing node, split stage, convert stage (one pod each, as above) | 1,024 + 1,536 + 1,024 |
+| Control APIs, one pod a stage (the READMEs say two; half of each is heap) | 3 × 768 |
+| The harness issuer's key set (busybox `httpd`) | 16 |
+| OpenTelemetry collector and producer | 256 + 64 |
+| Total, of 9,506 | 7,760 |
+
+However the pods are placed, a node has room: the busier holds a broker, the split pod, the landing pod, the
+collector, the producer and one control pod (4,416 of 4,753), the other a broker, the convert pod, two control
+pods and the key set (3,344).
+
 ## Using it
 
 ```sh
@@ -155,6 +173,8 @@ scripts/sandbox.sh check     # push the sample C-CDA documents through, and chec
 scripts/sandbox.sh push ccda-push some.xml   # push your own files (synthetic or de-identified only)
 scripts/sandbox.sh scale-demo [count]   # push count copies of the samples (300), and watch KEDA scale the transform stage out
 scripts/sandbox.sh status    # nodes, pods, topic counts, scaling
+scripts/sandbox.sh harness-up     # stop the demo pipeline, deploy the control harness's pipeline (scripts/harness.sh does this)
+scripts/sandbox.sh harness-down   # remove the harness pipeline and all it stored, start the demo pipeline again
 scripts/sandbox.sh grafana   # http://localhost:3000, user admin, password in state/secrets/grafana
 scripts/sandbox.sh stop      # stop the VMs; `up` starts them again with everything kept
 scripts/sandbox.sh delete --yes   # delete the cluster and its volumes (state/ is kept)
@@ -220,6 +240,18 @@ memory than their READMEs say (above). The default pipeline is `ccda-push`: C-CD
 pushed over HTTPS with mTLS.
 
 **Producers** (`sdh-producers`): a pod with its own client certificate from the sandbox CA, which pushes files.
+
+**The control harness's pipeline** (`sdh-harness`, `deploy/sandbox/harness/`; `scripts/harness.sh sandbox`,
+CONTROL-API-DESIGN.md §15.11): a pipeline named `harness`, deployed as any other but with a landing node, split
+and convert stages of one pod each (no KEDA, no transform stage), and beside each its control API, from the
+Deployment, Service and network policy in the stage's README ("Control API"), with one replica. The harness
+reaches the control APIs and the store through port-forwards, pushes from the producer pod, and signs its tokens
+with a key kept in `state/keys/harness-issuer.pem`, whose key set a pod (`jwks`) serves to the control APIs
+alone. Its stages have their own database roles, S3 keys, Vault tokens and KEKs (two each, for the rotation
+scenario), made by `up` with every pipeline's, and do maintenance every 20 seconds; the landing node keeps its
+tables in a schema of its own (`landing_harness`). Its scenarios erase it, so it is made afresh each time:
+`harness-down` drops its schemas and its rows in the shared lease and catalog tables, deletes its topics, groups
+and objects, and the namespace. Its Vault keys stay, as no Vault key can be deleted.
 
 **Network policies:** each pipeline's namespace denies everything but DNS, the shared services' ports and, for the
 landing node, pushes from `sdh-producers`. The shared services accept only namespaces labelled

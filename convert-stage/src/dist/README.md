@@ -231,6 +231,111 @@ spec:
   which expire after `sdh.stage.claim.ttl` (60 s). They are delivered again, and another pod converts them,
   about a minute late. Nothing is lost or converted twice.
 
+### Control API
+
+The control API (CONTROL-API.md) is this image in control mode: `control` after the image name. It runs as a
+Deployment of its own beside the workers, so it stays up when they crash, are paused or are scaled down, and the
+workers gain no inbound port. It takes no work, and holds only this stage's rights: the workers' Secret, keys and
+ConfigMap, as they have them, with no more granted. It also needs:
+- **Its settings:** a ConfigMap `sdh-control-convert` (below), mounted at `/control` and read after the workers' own.
+- **Its certificate:** a TLS Secret `sdh-control-convert-tls` for the name your ingress reaches it by. TLS is always on.
+- **Routing:** your ingress, inside your network only, routes `/pipelines/<pipeline>/stages/convert/` to the
+  Service `sdh-control-convert`. The network policy lets in only the ingress controller's namespace (`<ingress-namespace>`).
+
+Probes use a plain port, 8081, which serves only `/livez` and `/readyz`, with no data. It keeps no state of its
+own, so two replicas share the work; 768 MiB each, half of it heap.
+
+```yaml control
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: sdh-control-convert }
+spec:
+  replicas: 2                          # for availability; any replica answers any call
+  selector: { matchLabels: { app: sdh-control-convert } }
+  template:
+    metadata: { labels: { app: sdh-control-convert } }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: control
+          image: <registry>/convert-stage:<version>
+          args: [control]
+          env:
+            - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/config/,file:/control/" }
+          envFrom:
+            - secretRef: { name: convert-stage-env }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          ports:
+            - { name: https, containerPort: 8443 }
+            - { name: probes, containerPort: 8081 }
+          readinessProbe: { httpGet: { path: /readyz, port: probes }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /livez, port: probes }, initialDelaySeconds: 120, periodSeconds: 20 }
+          resources: { limits: { memory: 768Mi } }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: keys, mountPath: /run/secrets, readOnly: true }
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: control, mountPath: /control, readOnly: true }
+            - { name: tls, mountPath: /run/control, readOnly: true }
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 256Mi } }
+        - { name: keys, secret: { secretName: convert-stage-keys, defaultMode: 0440 } }
+        - { name: config, configMap: { name: convert-stage-config } }
+        - { name: control, configMap: { name: sdh-control-convert } }
+        - { name: tls, secret: { secretName: sdh-control-convert-tls, defaultMode: 0440 } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: sdh-control-convert }
+spec:
+  selector: { app: sdh-control-convert }
+  ports: [{ name: https, port: 8443, targetPort: https }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: sdh-control-convert }
+spec:
+  podSelector: { matchLabels: { app: sdh-control-convert } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: <ingress-namespace> } } }]
+      ports: [{ port: 8443 }]
+```
+
+Its settings, the ConfigMap's `application.yml` (CONTROL-API-DESIGN.md §2 has every one, and mTLS instead of
+tokens):
+
+```yaml settings
+sdh:
+  control:
+    tls: { certificate: /run/control/tls.crt, key: /run/control/tls.key }
+    auth:
+      mode: jwt
+      jwt: { issuer-uri: https://idp.example.org/realms/health, audience: sdh-control }
+    permissions:                       # nothing is granted unless listed; the brackets keep each name whole
+      "[pipeline.view]": [sdh-viewers, sdh-operators]
+      "[pipeline.operate]": [sdh-operators]
+      "[phi.export]": [sdh-phi-export]
+      "[phi.break-glass]": [sdh-break-glass]
+      "[audit.read]": [sdh-auditors]
+      "[audit.admin]": [sdh-audit-admins]
+      "[keys.admin]": [sdh-key-admins]
+      "[data.admin]": [sdh-data-admins]
+```
+
+```sh
+kubectl create configmap sdh-control-convert --from-file=application.yml
+kubectl create secret tls sdh-control-convert-tls --cert=control.crt --key=control.key
+```
+
 ### Operator commands
 
 The image has no shell, so run the JVM directly:

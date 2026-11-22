@@ -1,0 +1,23 @@
+# The harness pipeline's control APIs' settings (scripts/sandbox.sh harness-up), read after each stage's own, as
+# each stage README's "Control API" describes: TLS with the certificate made for the three, and tokens from the
+# harness's issuer, whose key set the pod jwks serves. Each permission is granted to the role of the same name,
+# so a scenario's principal has exactly the permissions it names (control-harness, Target.permissions). Filled
+# in by scripts/sandbox.sh (${K8S_NS}).
+sdh:
+  control:
+    tls: { certificate: /run/control/tls.crt, key: /run/control/tls.key }
+    auth:
+      mode: jwt
+      jwt:
+        issuer-uri: "https://sdh-test-issuer.invalid"
+        jwk-set-uri: "http://jwks.${K8S_NS}.svc:8080/jwks.json"
+        audience: sdh-control
+    permissions:
+      "[pipeline.view]": [pipeline.view]
+      "[pipeline.operate]": [pipeline.operate]
+      "[phi.export]": [phi.export]
+      "[phi.break-glass]": [phi.break-glass]
+      "[audit.read]": [audit.read]
+      "[audit.admin]": [audit.admin]
+      "[keys.admin]": [keys.admin]
+      "[data.admin]": [data.admin]
