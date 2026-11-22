@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.stage;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.message.MessageType;
 import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
@@ -429,6 +430,86 @@ class StageAdminTest
         assertThat(audit.attributes("admin.status"))
                 .containsEntry("sdh.result", "failed")
                 .containsEntry("sdh.reason", "Unavailable");
+    }
+
+
+    /**
+     * Settings show what is in force with every secret removed: the
+     * database password, and a JAAS option inside an endpoint URI, whose
+     * other options stay.
+     */
+    @Test
+    void showsTheSettingsWithoutTheirSecrets()
+    {
+        Result settings = admin("settings", "--sdh.input.uri=kafka:t"
+                + "?brokers=127.0.0.1:1&saslJaasConfig=secretstuff");
+        assertThat(settings.status()).as(settings.err()).isZero();
+        assertThat(settings.out())
+                .contains("sdh.lease.jdbc.password=<redacted>")
+                .contains("sdh.lease.jdbc.username=postgres")
+                .contains("sdh.input.uri=kafka:t?brokers=127.0.0.1:1"
+                        + "&saslJaasConfig=<redacted>")
+                .doesNotContain("secretstuff");
+        assertThat(audit.attributes("admin.settings"))
+                .containsEntry("sdh.result", "ok");
+    }
+
+    /**
+     * Health reaches the database and says a broker that isn't there is
+     * not reached, naming the failure's class only.
+     */
+    @Test
+    void showsWhichDependenciesAnswer()
+    {
+        Result health = admin("health", "--sdh.input.uri=kafka:t"
+                + "?brokers=127.0.0.1:1");
+        assertThat(health.out())
+                .containsPattern("database lease database: reached in \\d+")
+                .containsPattern("broker 127\\.0\\.0\\.1:1: NOT reached"
+                        + " \\([A-Za-z]+Exception\\)");
+    }
+
+    /**
+     * Compliance passes under no profile and, under HIPAA, names each
+     * refused check and its setting.
+     */
+    @Test
+    void showsTheComplianceOutcome()
+    {
+        Result none = admin("compliance");
+        assertThat(none.status()).as(none.err()).isZero();
+        assertThat(none.out()).startsWith("Profile none: passed");
+        Result hipaa = admin("compliance",
+                "--sdh.compliance.profile=hipaa");
+        assertThat(hipaa.out()).startsWith("Profile hipaa: REFUSED")
+                .containsPattern("refused [a-z-]+: sdh\\.");
+    }
+
+    /**
+     * The support bundle is one JSON document with every part, the
+     * stage's status among them, and no secret.
+     *
+     * @throws Exception if its JSON can't be read
+     */
+    @Test
+    void writesTheSupportBundle() throws Exception
+    {
+        Result bundle = admin("support-bundle", "--sdh.input.uri=kafka:t"
+                + "?brokers=127.0.0.1:1&saslJaasConfig=secretstuff");
+        assertThat(bundle.out()).doesNotContain("secretstuff")
+                .doesNotContain("password=postgres");
+        Map<String, Object> answer =
+                JSONObjectUtils.parse(bundle.out().strip());
+        assertThat(answer).containsEntry("service", "test-stage")
+                .containsKeys("build", "generatedAt", "health", "settings",
+                        "compliance", "control", "status")
+                .containsEntry("generatedBy", "alice")
+                .containsEntry("operations", null);
+        assertThat(answer.get("status").toString())
+                .contains(partway.toString());
+        assertThat(((Map<?, ?>) ((Map<?, ?>) answer.get("settings"))
+                .get("settings")).get("sdh.lease.jdbc.password"))
+                .isEqualTo("<redacted>");
     }
 
     /**

@@ -158,7 +158,7 @@ travel only in request bodies.
 | | `GET /health` | each dependency reached or not: database, broker, store, KMS, collector | query | new (P5) |
 | | `GET /settings` | effective settings, secrets removed | query | new (P5) |
 | | `GET /compliance` | the profile's outcome: passed, refused, waived | query | new (P5) |
-| | `GET /support-bundle` | all of the above, plus recent operations and metrics, as one zip; no PHI | query | new (P5) |
+| | `GET /support-bundle` | all of the above, plus recent operations and the stage's status, as one JSON document (§15.9); no PHI | query | new (P5) |
 | | `GET /failures?state=&code=&from=&to=` | failures: IDs, codes, states, times; no content | query | `failures list` |
 | | `GET /reprocess-runs`, `GET /reprocess-runs/{id}` | reprocess runs and their progress | query | `reprocess --status` |
 | | `GET /operations`, `GET /operations/{id}` | long operations and requests awaiting approval (§8) | query | new |
@@ -429,7 +429,7 @@ depends on neither of the others.
 | C6 | Pause, resume and drain (§9). **Built 2026-11-21** (§15.6) | P2 |
 | C7 | Rotate and re-key (§11). **Built 2026-11-21** (§15.7) | P3 |
 | C8 | Retention, purge and erase (§11). **Built 2026-11-21** (§15.8) | P4 |
-| C9 | Health, settings, compliance outcome, support bundle | P5 |
+| C9 | Health, settings, compliance outcome, support bundle. **Built 2026-11-21** (§15.9) | P5 |
 | H1 | The harness with its Testcontainers target, growing with C2–C9 | P6 |
 | H2 | The sandbox target | P6 |
 | H3 | The AWS target | P6 |
@@ -895,5 +895,46 @@ depends on neither of the others.
   - A store that can't list (the in-memory one in tests) leaves only what the table's metadata didn't name.
   - Everything §15.2–§15.7 list as not yet.
 
+### 15.9 C9, as built
+
+- **Commands on every stage** (`SupportCommands`, `SupportTarget`): `health`, `settings`, `compliance` and
+  `support-bundle` are common commands, held in `AdminCli` beside the audit journal's, so every stage has them on
+  the CLI and at `GET /health`, `/settings`, `/compliance` and `/support-bundle`, all `pipeline.view`, with no
+  registration per stage. They read no PHI, change nothing and never need four eyes. Their context,
+  `SupportTarget`, holds the settings in force (`ComplianceConfiguration.settings`: everything under `sdh.`,
+  `camel.component.` and `spring.rabbitmq.`, placeholders resolved), the audit journal, the stage's context, its
+  `status` command and, in the control API, its recent operations.
+- **Settings** (`SettingsView`, connector-runtime): every setting, sorted, with each secret `<redacted>`. A name is a
+  secret's if it holds a word such as password, passphrase, secret, token, credential, private, apikey,
+  access-key, jaas, connection-string, authorization or client-key, or has a part `pin`, `sas`, `pwd` or `pass`
+  between dashes, dots, underscores or brackets; a value holding a PEM private key is one whatever its name. In
+  every other value, a URI's user information and any `name=value` parameter whose name is a secret's are removed,
+  so an endpoint keeps its host and options. It errs on removing. The answer counts what was removed.
+- **Health**: each dependency the settings name, checked at once, each given 10 seconds, with its time; a problem
+  is named by the failure's class only, never its message. The database: `SELECT 1` through the audit journal's
+  pool. On a stage whose context holds keys (`KeyAdmin`): the store, each of the stage's tables refreshed; the
+  KMS, the KEK in use wrapped and unwrapped (`KeyCommands.probe`). Each broker: a TCP connection to each Kafka
+  `brokers=` option and `.brokers` setting, and to RabbitMQ's `spring.rabbitmq.addresses` or host and port. The
+  collector: a TCP connection to `sdh.telemetry.otlp.endpoint`.
+- **Compliance**: `ComplianceRules.evaluate` on the same settings, the profile with the checks refused (check,
+  setting, meaning) and waived (with the waiver's reason), as startup sees them.
+- **Support bundle**: one JSON document: service, build, when and by whom, a PHI note, then health, settings,
+  compliance, the control state (pause, KEK, re-key, retention, erasure), the stage's `status` answer and the last
+  50 operations (ID, kind, state, who asked and decided, ticket, times; no parameters or reasons). A part that
+  can't be read is `{"unavailable": "<class>"}`, so the bundle always comes back. On the CLI, `operations` is null.
+- **Tests:** `SettingsViewTest` (connector-runtime): names, values, URIs and PEM keys. `StageAdminTest`: settings
+  with the database password and a JAAS URI option redacted; health reaching the database and not an absent
+  broker; compliance under no profile and under HIPAA; the bundle parsed, with status and no secret.
+  `ControlServerTest`: the four routes with `pipeline.view`, the bundle's operations, a caller without it refused.
+- **Not done, chosen while building:**
+  - The bundle is JSON, not §5's zip: every part is already JSON, and the customer's DLP check before it is sent
+    reads JSON but not inside a zip.
+  - Metrics are not in it; they go out over OTLP to the customer's collector. The stage's `status` is in it
+    instead.
+  - It is the control pod's view: its settings (the stage's shared ConfigMap and Secret, not a worker's own
+    overrides) and the dependencies as it reaches them, not as each worker does. A worker's health is still its
+    probes'.
+  - Everything §15.2–§15.8 list as not yet.
+
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
-(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1; C7's in §6.1; C8's in §8.
+(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1; C7's in §6.1; C8's in §8; C9's in §9.

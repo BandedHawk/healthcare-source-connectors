@@ -124,6 +124,48 @@ paths:
       responses:
         "202": {$ref: "#/components/responses/Accepted"}
         default: {$ref: "#/components/responses/Problem"}
+  /health:
+    get:
+      operationId: health
+      summary: Whether each dependency answers, as the control pod reaches
+        it
+      description: Permission `pipeline.view`. The database, the store, the
+        KMS, each broker and the collector the settings name, each given
+        10 seconds; a problem is named by its class only. Reads no data.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /settings:
+    get:
+      operationId: settings
+      summary: The settings in force, each secret removed
+      description: Permission `pipeline.view`. Settings under `sdh.`,
+        `camel.component.` and `spring.rabbitmq.`, placeholders resolved;
+        a secret's value, a URI's user information and secret URI
+        parameters are `<redacted>`.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /compliance:
+    get:
+      operationId: compliance
+      summary: The compliance profile's outcome for these settings
+      description: Permission `pipeline.view`. The checks refused and
+        waived, with each waiver's reason.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /support-bundle:
+    get:
+      operationId: supportBundle
+      summary: Everything support needs, as one JSON document, no PHI
+      description: Permission `pipeline.view`. The build, health,
+        settings (secrets removed), compliance, control state, the stage's
+        status and the last 50 operations without their parameters or
+        reasons. A part that can't be read names only the failure's class.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
   /control-state:
     get:
       operationId: controlState

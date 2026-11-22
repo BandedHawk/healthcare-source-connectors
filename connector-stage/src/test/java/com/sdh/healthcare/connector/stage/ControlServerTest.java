@@ -316,6 +316,40 @@ class ControlServerTest
     }
 
     /**
+     * Health, settings, compliance and the support bundle answer with
+     * {@code pipeline.view}; the bundle holds the API's recent operations
+     * and no secret.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void answersTheSupportQueries() throws Exception
+    {
+        for (String path : List.of("/health", "/settings", "/compliance"))
+        {
+            HttpResponse<String> answer = get("/api/v1" + path,
+                    token("alice", "viewers"));
+            assertThat(answer.statusCode()).as(path + answer.body())
+                    .isEqualTo(200);
+            assertThat(answer.body()).doesNotContain("password\":\"postgres");
+        }
+        HttpResponse<String> bundle = get("/api/v1/support-bundle",
+                token("alice", "viewers"));
+        assertThat(bundle.statusCode()).as(bundle.body()).isEqualTo(200);
+        Map<String, Object> answer = JSONObjectUtils.parse(bundle.body());
+        assertThat(answer).containsEntry("generatedBy", "alice")
+                .containsKeys("health", "settings", "compliance", "control",
+                        "status");
+        assertThat(answer.get("operations")).isInstanceOf(List.class);
+        assertThat(bundle.body()).doesNotContain("password\":\"postgres");
+        assertThat(audit.attributes("control.support_bundle"))
+                .containsEntry("sdh.permission", "pipeline.view")
+                .containsEntry("sdh.result", "ok");
+        assertThat(get("/api/v1/support-bundle", token("bob", "nobody"))
+                .statusCode()).isEqualTo(403);
+    }
+
+    /**
      * A query without its permission is refused and audited as denied;
      * so is a caller with no roles. The audit journal's checks need
      * {@code audit.read}, and with it find the API's own chain.

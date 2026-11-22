@@ -103,7 +103,7 @@ insurers, and the agents of either.
   the two applies, and how.
 - **The product is built so that support never needs PHI.** Logs, telemetry and issue text carry codes, IDs and
   positions, never values (§4.1). `admin status` reads without keys (DESIGN §11.4). This keeps us out of the
-  business-associate role. A support bundle that gathers only this data is still to be built (§8.1, item 11).
+  business-associate role. The support bundle gathers only this data (§8.1, item 11; HIPAA-OPERATIONS §9).
 
 **The operator's own providers:**
 - **The operator's providers are its subcontractors or business associates:** its cloud, object store, KMS and
@@ -523,11 +523,7 @@ The outstanding work is restated, with what's decided since, in §11.
       separating it rests on the pipeline alone.
     - **To consider:** labels set from the source document's confidentiality codes, for readers that filter by
       them (minimum necessary, § 164.514(d)).
-11. **No support bundle.**
-    - Support today relies on the customer copying logs and `status` output by hand.
-    - **To consider:** a command that gathers versions, configuration with its secrets removed, `status`, error
-      codes and metrics. None of these hold PHI, by design. That keeps support out of PHI, and us out of the
-      business-associate role (§1).
+11. **Support bundle:** built 2026-11-21 (P5, CONTROL-API-DESIGN.md §15.9).
 12. **Backup and restore are not designed as a whole.**
     - The data spans the object store (Iceberg data and metadata), the catalog and registries in Postgres, and the
       KMS keys. They must be restored to the same point: a catalog pointing at metadata that isn't in the bucket,
@@ -750,7 +746,7 @@ The work still owed before a customer can run the product on real PHI, after the
 | P2 | **Pause, resume and drain** of a stage or an intake, through P1 | Contingency operations § 164.308(a)(7)(ii)(C) | Built (2026-11-21, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) C6): `pause`, `resume` and `control-state` on every stage, and `drain` on the split, convert and transform stages, through the API and the CLI. A pause is kept in the database, so it outlasts every pod; its pods stop taking new work within seconds, and what they took finishes. KEDA is paused by the runbook (HIPAA-OPERATIONS §7.1), not the API. |
 | P3 | **Key rotation and re-keying,** through P1 | §8.1 item 8; incident response, the breach safe harbour | Built (2026-11-21, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) C7): `keys`, `rotate` and `rekey` (four eyes) on every stage, through the API and the CLI. A rotation is kept in the database and taken by each pod at its next batch once it has checked the KEK; a re-key is carried out by the stage's maintenance, file by file, then its database rows and ID keys, and done only when nothing is left under the old KEK. The product never disables a KEK. |
 | P4 | **Retention and erasure,** through P1: set and run retention, purge an item, erase a pipeline's data at the end of a contract | § 164.310(d)(2)(i); § 164.504(e)(2)(ii)(J) | Built (2026-11-21, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) C8): `retention` and `retention-set` (within bounds the settings give), `purge` and `erase` (four eyes and a ticket) on every stage, through the API. Maintenance applies the retention in force at each run; a purge rewrites the files holding an item's rows and deletes the old ones, then its corrections; an erase, once the stage is paused, drops its tables and rows, marks it erased so its pods refuse to start, and answers a certificate signed with the stage's key naming the KEKs for the custodian to destroy. Per stage: no pipeline-wide approval yet. Destroying KEKs stays the KMS's (HIPAA-OPERATIONS §8). |
-| P5 | **Config and health view, and the support bundle,** through P1: settings with secrets removed, health, versions, the compliance outcome | §8.1 item 11; keeps support out of PHI (§1) | |
+| P5 | **Config and health view, and the support bundle,** through P1: settings with secrets removed, health, versions, the compliance outcome | §8.1 item 11; keeps support out of PHI (§1) | Built (2026-11-21, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) C9): `health`, `settings`, `compliance` and `support-bundle` on every stage, through the API and the CLI, `pipeline.view`. Settings have each secret removed by name and by form; health reaches each dependency in 10 seconds and names a failure by its class; the bundle is one JSON document with the build, control state, status and recent operations, no PHI and no metrics (those go to the collector). It is the control pod's view. The customer reads it before sending (HIPAA-OPERATIONS §9). |
 | P6 | **The test harness:** one set of scenarios at three levels (CONTROL-API.md) | Testing and revision § 164.308(a)(7)(ii)(D); evidence for § 164.308(a)(8) | Synthetic data only. |
 | P7 | **Backup and restore as a whole:** a consistent backup of buckets, catalog, registries and keys, a tested restore, and a check after it | §8.1 item 12; § 164.308(a)(7)(ii)(A)–(B) | Needed for the 72-hour restore the proposed rule asks for (§7). |
 | P8 | **FIPS mode:** tested under a FIPS 140-3 validated provider | §8.1 item 5; federal buyers (§8.4) | The JOSE library, HKDF, the AWS SDK and the Iceberg clients are untested under it. |

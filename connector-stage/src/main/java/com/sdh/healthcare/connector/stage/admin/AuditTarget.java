@@ -11,6 +11,9 @@ import com.sdh.healthcare.connector.core.audit.AuditTrail;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.ControlState;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.Optional;
 
@@ -115,6 +118,22 @@ public final class AuditTarget implements AutoCloseable
     public AuditTrail trailToChange()
     {
         return new AuditTrail(writing.dataSource(), tables, TIMEOUT);
+    }
+
+    /**
+     * Reaches the lease database, where the journal is: one round trip,
+     * reading nothing (CONTROL-API-DESIGN.md §5, {@code health}).
+     *
+     * @throws SQLException if it can't be reached
+     */
+    public void ping() throws SQLException
+    {
+        try (Connection connection = reading.dataSource().getConnection();
+                Statement statement = connection.createStatement())
+        {
+            statement.setQueryTimeout(10);
+            statement.execute("SELECT 1");
+        }
     }
 
     /**

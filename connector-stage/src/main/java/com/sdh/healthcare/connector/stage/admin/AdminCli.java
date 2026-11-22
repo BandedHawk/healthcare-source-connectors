@@ -8,9 +8,12 @@ package com.sdh.healthcare.connector.stage.admin;
 
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
+import com.sdh.healthcare.connector.runtime.compliance.ComplianceConfiguration;
 import com.sdh.healthcare.connector.runtime.compliance.ComplianceRules;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
+import com.sdh.healthcare.connector.stage.StageBuild;
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -19,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import org.springframework.boot.Banner;
@@ -91,6 +95,13 @@ public final class AdminCli<P, C extends AutoCloseable>
             new LinkedHashMap<>();
 
     /**
+     * The commands every stage has for support, on its settings in force:
+     * by name.
+     */
+    private final Map<String, AdminCommand<SupportTarget>> supportCommands =
+            new LinkedHashMap<>();
+
+    /**
      * What a stage gives its CLI.
      *
      * @param jar           the stage's jar, for the usage text, such as
@@ -133,6 +144,10 @@ public final class AdminCli<P, C extends AutoCloseable>
         {
             this.auditCommands.put(command.name(), command);
         }
+        for (AdminCommand<SupportTarget> command : SupportCommands.all())
+        {
+            this.supportCommands.put(command.name(), command);
+        }
     }
 
     /**
@@ -155,8 +170,7 @@ public final class AdminCli<P, C extends AutoCloseable>
      */
     public Optional<CliOperation<?, ?, ?>> operation(String name)
     {
-        AdminCommand<?> command = commands.containsKey(name)
-                ? commands.get(name) : auditCommands.get(name);
+        AdminCommand<?> command = command(name);
         return command instanceof CliOperation<?, ?, ?> operation
                 ? Optional.of(operation) : Optional.empty();
     }
@@ -172,11 +186,92 @@ public final class AdminCli<P, C extends AutoCloseable>
      */
     public AutoCloseable open(String name, P settings)
     {
+        return open(name, settings, Map.of(), null);
+    }
+
+    /**
+     * Opens what a command reads from, as {@link #open(String, Object)}
+     * does; a support command's reads the settings in force too, and the
+     * control API's recent operations.
+     *
+     * @param name       the command's name
+     * @param settings   the stage's settings
+     * @param effective  the settings in force, by canonical name
+     * @param operations the control API's recent operations; null for none
+     * @return what it reads from, to close after the command
+     */
+    public AutoCloseable open(String name, P settings,
+            Map<String, String> effective,
+            Callable<List<Map<String, Object>>> operations)
+    {
         if (auditCommands.containsKey(name))
         {
             return stage.audit().apply(settings);
         }
+        if (supportCommands.containsKey(name))
+        {
+            C context = stage.context().apply(settings);
+            return new SupportTarget(stage.service(), build(),
+                    effective, stage.audit().apply(settings), context,
+                    status(context), operations);
+        }
         return stage.context().apply(settings);
+    }
+
+    /**
+     * A command by name: the stage's own, or one every stage has.
+     *
+     * @param name its name
+     * @return it; null if there is none
+     */
+    private AdminCommand<?> command(String name)
+    {
+        if (commands.containsKey(name))
+        {
+            return commands.get(name);
+        }
+        return auditCommands.containsKey(name) ? auditCommands.get(name)
+                : supportCommands.get(name);
+    }
+
+    /**
+     * The stage's build, as its configuration's class finds it.
+     *
+     * @return it
+     */
+    private String build()
+    {
+        return StageBuild.identity(stage.configuration());
+    }
+
+    /**
+     * Reads the stage's {@code status} answer, for the support bundle.
+     *
+     * @param context the stage's context
+     * @return reads it; null if the stage has no {@code status}
+     */
+    @SuppressWarnings("unchecked")
+    private Callable<Map<String, Object>> status(C context)
+    {
+        AdminCommand<C> command = commands.get("status");
+        if (!(command instanceof CliOperation<?, ?, ?> any)
+                || !(command instanceof Answering<?> answers))
+        {
+            return null;
+        }
+        CliOperation<C, Object, Object> status =
+                (CliOperation<C, Object, Object>) any;
+        Answering<Object> answering = (Answering<Object>) answers;
+        return () ->
+        {
+            Object request = status.bind(AdminArgs.parse(List.of(
+                    status.name()), status.flags()), context);
+            AuditRecord audit = new AuditRecord(SupportCommands.READER);
+            return answering.answer(status.run(request, context,
+                    new Invocation(Caller.cli(audit.operator()), audit,
+                            CliOperation.sink(new PrintStream(
+                                    OutputStream.nullOutputStream())))));
+        };
     }
 
     /**
@@ -202,9 +297,7 @@ public final class AdminCli<P, C extends AutoCloseable>
                 out.println(usage());
                 return args.isEmpty() ? 2 : 0;
             }
-            command = commands.containsKey(args.getFirst())
-                    ? commands.get(args.getFirst())
-                    : auditCommands.get(args.getFirst());
+            command = command(args.getFirst());
             if (command == null)
             {
                 throw new AdminArgs.UsageException(
@@ -266,7 +359,9 @@ public final class AdminCli<P, C extends AutoCloseable>
                             + " a reason");
                     return 1;
                 }
-                run(command, parsed, context, target, audit, out);
+                run(command, parsed, context, target, audit, out,
+                        ComplianceConfiguration.settings(
+                                spring.getEnvironment()));
                 Telemetry.get().audit(event,
                         audit.fields().with(Attr.RESULT, "ok"));
                 return 0;
@@ -346,16 +441,27 @@ public final class AdminCli<P, C extends AutoCloseable>
      * @param target    the stage's audit journal
      * @param audit     the audit event
      * @param out       where results go
+     * @param effective the settings in force, for a support command
      * @throws Exception if the command fails
      */
     @SuppressWarnings("unchecked")
     private void run(AdminCommand<?> command, AdminArgs arguments, C context,
-            AuditTarget target, AuditRecord audit, PrintStream out)
+            AuditTarget target, AuditRecord audit, PrintStream out,
+            Map<String, String> effective)
             throws Exception
     {
         if (auditCommands.containsValue(command))
         {
             ((AdminCommand<AuditTarget>) command).run(arguments, target,
+                    audit, out);
+        }
+        else if (supportCommands.containsValue(command))
+        {
+            // Not closed here: the journal and the context are the run's.
+            SupportTarget support = new SupportTarget(stage.service(),
+                    build(), effective, target, context, status(context),
+                    null);
+            ((AdminCommand<SupportTarget>) command).run(arguments, support,
                     audit, out);
         }
         else
@@ -379,7 +485,8 @@ public final class AdminCli<P, C extends AutoCloseable>
     private boolean needsFourEyes(AdminCommand<?> command,
             AdminArgs arguments, C context, AuditTarget target)
     {
-        if (!(command instanceof CliOperation<?, ?, ?> any))
+        if (!(command instanceof CliOperation<?, ?, ?> any)
+                || supportCommands.containsValue(command))
         {
             return false;
         }
@@ -444,6 +551,8 @@ public final class AdminCli<P, C extends AutoCloseable>
                 + " override it.");
         commands.values().forEach(command -> parts.add(command.usage()));
         auditCommands.values()
+                .forEach(command -> parts.add(command.usage()));
+        supportCommands.values()
                 .forEach(command -> parts.add(command.usage()));
         return String.join("\n\n", parts);
     }

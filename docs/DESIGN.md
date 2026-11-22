@@ -248,6 +248,14 @@ Revision 2026-11-21 (em), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) 
 - A break-glass restore's plaintext is held encrypted (`ControlResults`: a data key per result, wrapped with the stage's records KEK; AES-GCM parts). The requester fetches it once within an hour from `/operations/{id}/result`, and it is then deleted.
 - Under the `hipaa` profile, the CLI refuses both unless the new check `cli-four-eyes` is waived; the waiver is shown and audited at startup.
 
+Revision 2026-11-21 (eq), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.9, step C9 of the control API, asked for by the user ("Build C9"). **Every stage answers support's questions without PHI, through the API or the CLI.**
+- `health`, `settings`, `compliance` and `support-bundle` are common commands on every stage (`SupportCommands`), `pipeline.view`, at `GET /health`, `/settings`, `/compliance` and `/support-bundle`.
+- `settings` shows the settings in force with each secret `<redacted>` (`SettingsView`, connector-runtime): by name, by a PEM private key in the value, and in URIs (user information, secret parameters).
+- `health` checks the database, the store and KMS (stages holding keys), each broker and the collector at once, 10 seconds each, a failure named by its class.
+- `support-bundle` is one JSON document: build, health, settings, compliance outcome, control state, `status` and the last 50 operations without parameters or reasons.
+
+Tested by `SettingsViewTest`, `StageAdminTest` and `ControlServerTest`; customer steps in HIPAA-OPERATIONS §9. Not done: a zip (JSON is what a DLP check reads), metrics (sent over OTLP), each worker's own view (the bundle is the control pod's).
+
 Revision 2026-11-21 (ep), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.8, step C8 of the control API, asked for by the user ("Build C8"). **A stage's retention can be set, an item purged and a stage erased, through the API.**
 - `retention-set --days | --forever` records the scope's retention in `sdh_control_state`, within the new `sdh.maintenance.retention-bounds` and the stage's floor. Maintenance reads it at each run (`RetentionPolicy`); one it can't read keeps every row that run.
 - `purge --item-id --ticket` needs a second person's approval. The duties pod's maintenance carries it out (`PurgePass`, `ItemPurge`): per table, the files whose `item_id` bounds may hold the item copied without its rows, up to 4 GiB a run, replaced in one rewrite and expired; then its corrections deleted. Done only once no table holds a row of it. The request is kept in `sdh_control_purges`. The ledger is never purged.

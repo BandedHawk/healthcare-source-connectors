@@ -23,6 +23,7 @@ import com.sdh.healthcare.connector.stage.admin.Followed;
 import com.sdh.healthcare.connector.stage.admin.Invocation;
 import com.sdh.healthcare.connector.stage.admin.Operation;
 import com.sdh.healthcare.connector.stage.admin.Permission;
+import com.sdh.healthcare.connector.stage.admin.SupportCommands;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -179,6 +180,9 @@ public final class ControlService implements AutoCloseable
     /** How long a request may wait for its approval. */
     private final ControlSettings.Approval approval;
 
+    /** The settings in force in this pod, for the support commands. */
+    private final Map<String, String> effective;
+
     /** Runs approved operations; null until started. */
     private volatile ControlRunner runner;
 
@@ -225,6 +229,26 @@ public final class ControlService implements AutoCloseable
             ControlSettings control, ControlStore store, OperatorKeys keys,
             ControlResults results)
     {
+        this(cli, settings, control, store, keys, results, Map.of());
+    }
+
+    /**
+     * Creates the service, with the settings in force for the support
+     * commands (CONTROL-API-DESIGN.md §15.9).
+     *
+     * @param cli       the stage's operator commands
+     * @param settings  the stage's settings
+     * @param control   the control API's settings
+     * @param store     the idempotency keys and operation records
+     * @param keys      the principals' sealing keys
+     * @param results   the break-glass results
+     * @param effective the settings in force, by canonical name
+     */
+    public ControlService(AdminCli<Object, ?> cli, Object settings,
+            ControlSettings control, ControlStore store, OperatorKeys keys,
+            ControlResults results, Map<String, String> effective)
+    {
+        this.effective = Map.copyOf(effective);
         this.cli = cli;
         this.settings = settings;
         this.grants = control.grants();
@@ -247,6 +271,38 @@ public final class ControlService implements AutoCloseable
                 this::execute);
         runner = started;
         started.start();
+    }
+
+    /**
+     * Opens what a stage's command reads from; a support command's with
+     * the settings in force and the stage's recent operations.
+     *
+     * @param name the command's name
+     * @return it, to close after the command
+     */
+    private AutoCloseable open(String name)
+    {
+        return cli.open(name, settings, effective, () -> store.list(scope,
+                SupportCommands.OPERATIONS, null).stream()
+                .map(ControlService::summary).toList());
+    }
+
+    /**
+     * An operation as the support bundle holds it: what, where it stands,
+     * who and when, and its counts; never its parameters or reasons.
+     *
+     * @param operation the operation
+     * @return the summary
+     */
+    static Map<String, Object> summary(ControlStore.Operation operation)
+    {
+        return Answers.object("id", operation.id(), "kind",
+                operation.kind(), "state", operation.state().wire(),
+                "requestedBy", operation.requestedBy(),
+                "requestedAt", operation.requestedAt(),
+                "decidedBy", operation.decidedBy(),
+                "ticket", operation.ticket(),
+                "updatedAt", operation.updatedAt());
     }
 
     /** Stops running approved operations. */
@@ -358,7 +414,7 @@ public final class ControlService implements AutoCloseable
                 : null);
         boolean claimed = false;
         try (AutoCloseable target = route.own() ? keys
-                : cli.open(route.operation(), settings))
+                : open(route.operation()))
         {
             Object request;
             try
@@ -977,7 +1033,7 @@ public final class ControlService implements AutoCloseable
                 }
             };
             Object result;
-            try (AutoCloseable target = cli.open(operation.kind(), settings))
+            try (AutoCloseable target = open(operation.kind()))
             {
                 AdminArgs arguments = arguments(route, variables, fields)
                         .withInput(new ByteArrayInputStream(new byte[0]));
@@ -1251,7 +1307,7 @@ public final class ControlService implements AutoCloseable
         }
         Followed<Object, Object, Object> followed =
                 (Followed<Object, Object, Object>) any;
-        try (AutoCloseable target = cli.open(operation.kind(), settings))
+        try (AutoCloseable target = open(operation.kind()))
         {
             Followed.Progress progress = followed.progress(
                     operation.parameters(), target);

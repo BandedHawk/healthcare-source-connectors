@@ -487,7 +487,29 @@ with who and the reason, and each pod records when it paused and resumed (`stage
 - **Operator key pairs** are revoked when a person leaves: the security official removes the fingerprint from the
   register, and sealed files on that person's workstation are destroyed.
 
-## 9. What stays the customer's, with no product feature
+## 9. Support and diagnostics
+
+Support never needs PHI. What a support case needs comes from four queries on each stage's control API, all
+`pipeline.view`, also on the CLI (`health`, `settings`, `compliance`, `support-bundle`):
+
+- `GET /health`: whether the control pod reaches the database, the store, the KMS, each broker and the
+  collector, each in 10 seconds, with the failure's class when not.
+- `GET /settings`: the settings in force, each password, token, key, JAAS configuration and URI user information
+  replaced by `<redacted>`.
+- `GET /compliance`: the profile's outcome, with each waiver and its reason.
+- `GET /support-bundle`: all of these as one JSON document, with the build, the control state, the stage's
+  status and its last 50 operations (who and when, no parameters or reasons). It holds IDs, counts, codes and
+  settings, and no document content.
+
+Before a bundle leaves the organization:
+1. Ask for it per stage, as the person who opens the case; the request is audited with the caller.
+2. Read it, or run it through the organization's DLP check: secrets are removed by name and by form, so a secret
+   kept under an unusual setting name could remain. Remove anything that should not go.
+3. Send it over the channel the support agreement names, and record the case in the ticket.
+
+A support engineer of the vendor is never given a role on the API, nor a sealing key.
+
+## 10. What stays the customer's, with no product feature
 
 BAAs or MOUs with every provider (cloud, KMS, broker, SIEM); the risk analysis and risk management; a named security
 official; workforce policies, training and sanctions; MFA and access reviews; the reviews in §3; the incident

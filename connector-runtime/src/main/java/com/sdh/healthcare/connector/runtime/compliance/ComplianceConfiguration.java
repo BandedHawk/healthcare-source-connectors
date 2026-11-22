@@ -98,7 +98,8 @@ public class ComplianceConfiguration
      * @param environment the node's environment
      * @return the settings, sorted by name
      */
-    static Map<String, String> settings(ConfigurableEnvironment environment)
+    public static Map<String, String> settings(
+            ConfigurableEnvironment environment)
     {
         List<ConfigurationPropertySource> sources = new ArrayList<>();
         ConfigurationPropertySources.get(environment).forEach(sources::add);
@@ -158,7 +159,7 @@ public class ComplianceConfiguration
      * @param name the option, such as {@code HeapDumpOnOutOfMemoryError}
      * @return its value; empty if the JVM doesn't have it or won't say
      */
-    static Optional<String> jvmOption(String name)
+    public static Optional<String> jvmOption(String name)
     {
         try
         {
