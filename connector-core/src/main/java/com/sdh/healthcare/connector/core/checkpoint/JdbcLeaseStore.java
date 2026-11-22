@@ -258,9 +258,24 @@ public final class JdbcLeaseStore implements LeaseStore
      */
     public long live(String prefix)
     {
+        return live(prefix, null);
+    }
+
+    /**
+     * How many leases whose names start with a prefix are held now, live,
+     * less one lease that shares the prefix but isn't an item's: a stage's
+     * duties lease, held all the time a pod runs.
+     *
+     * @param prefix the names' start, such as {@code split/<connector>/}
+     * @param except the one lease not counted; null for none
+     * @return how many; 0 if the table isn't there
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public long live(String prefix, String except)
+    {
         String sql = """
                 SELECT count(*) FROM %s
-                 WHERE name LIKE ? ESCAPE '!'
+                 WHERE name LIKE ? ESCAPE '!' AND name <> ?
                    AND expires_at > clock_timestamp()""".formatted(table);
         String pattern = prefix.replace("!", "!!").replace("%", "!%")
                 .replace("_", "!_") + "%";
@@ -269,6 +284,7 @@ public final class JdbcLeaseStore implements LeaseStore
         {
             select.setQueryTimeout(queryTimeoutSeconds);
             select.setString(1, pattern);
+            select.setString(2, except == null ? "" : except);
             try (ResultSet rows = select.executeQuery())
             {
                 rows.next();

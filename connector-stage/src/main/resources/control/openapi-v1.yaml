@@ -55,7 +55,9 @@ info:
 
     This version serves the queries (build step C2), the actions (C3),
     the sealed results and sealing keys (C4), four eyes and break-glass
-    (C5), and pause, resume and drain (C6).
+    (C5), pause, resume and drain (C6), KEK rotation and re-keying (C7),
+    retention, item purge and erasure (C8), and health, settings,
+    compliance and the support bundle (C9).
 servers:
   - url: https://{host}:8443/api/v1
     variables:

@@ -593,12 +593,15 @@ final class SplitAdminContext implements DrainAdmin, DataAdmin,
 
     /**
      * The items held now by a pod's live item lease: those being split.
+     * The stage's duties lease shares their prefix and is held all the
+     * time a pod runs, so it isn't counted.
      */
     @Override
     public long liveClaims()
     {
-        return leases().live(ItemProcessor.STAGE + "/"
-                + properties.connectorId() + "/");
+        String prefix = ItemProcessor.STAGE + "/" + properties.connectorId()
+                + "/";
+        return leases().live(prefix, prefix + "duties");
     }
 
     /** The items being split, archived or failed, as the pods find. */

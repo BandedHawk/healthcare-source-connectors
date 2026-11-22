@@ -171,15 +171,32 @@ public final class AuditTarget implements AutoCloseable
     }
 
     /**
-     * The stage's records KEK, which the control API wraps a break-glass
-     * result's data key with (CONTROL-API-DESIGN.md §6).
+     * The KEK the control API wraps a break-glass result's data key with
+     * (CONTROL-API-DESIGN.md §6): the stage's records KEK, or, on a
+     * landing node, which has none, its {@code landed_items} KEK.
      *
      * @return its reference; empty if no key settings were given
      */
     public Optional<String> recordsKek()
     {
-        return crypto == null ? Optional.empty()
-                : Optional.ofNullable(crypto.keys().recordsKek());
+        if (crypto == null)
+        {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(landing() ? crypto.keys().landedItemsKek()
+                : crypto.keys().recordsKek());
+    }
+
+    /**
+     * Whether the key settings are a landing node's: a {@code landed_items}
+     * KEK and no records KEK (design §5.3).
+     *
+     * @return true for a landing node
+     */
+    private boolean landing()
+    {
+        return crypto.keys().recordsKek() == null
+                && crypto.keys().landedItemsKek() != null;
     }
 
     /**
@@ -193,7 +210,12 @@ public final class AuditTarget implements AutoCloseable
      */
     public KeyMaterial keys() throws Exception
     {
-        return crypto == null ? null
+        if (crypto == null)
+        {
+            return null;
+        }
+        return landing()
+                ? KeyMaterial.forLanding(crypto, KeyMaterial.Providers.DEFAULT)
                 : KeyMaterial.forStage(crypto, KeyMaterial.Providers.DEFAULT);
     }
 

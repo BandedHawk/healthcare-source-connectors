@@ -109,6 +109,28 @@ class JdbcLeaseStoreTest
     }
 
     /**
+     * Live leases are counted by prefix, less the one left out, and not
+     * once released; a prefix's {@code _} matches only itself.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void countsLiveLeasesUnderAPrefixLessTheOneLeftOut() throws Exception
+    {
+        String prefix = name + "/stage_x/";
+        LeaseGrant item = store.acquire(prefix + UUID.randomUUID(), "a",
+                Duration.ofSeconds(30));
+        store.acquire(prefix + "duties", "a", Duration.ofSeconds(30));
+        store.acquire(name + "/stageXx/" + UUID.randomUUID(), "a",
+                Duration.ofSeconds(30));
+
+        assertThat(store.live(prefix)).isEqualTo(2);
+        assertThat(store.live(prefix, prefix + "duties")).isEqualTo(1);
+        store.release(item);
+        assertThat(store.live(prefix, prefix + "duties")).isZero();
+    }
+
+    /**
      * Of many callers at once, exactly one gets the lease.
      *
      * @throws Exception if the test fails to run

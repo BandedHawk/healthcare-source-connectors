@@ -404,7 +404,7 @@ depends on neither of the others.
 
   | Target | Starts or reaches | Injects faults by |
   |---|---|---|
-  | `TestcontainersTarget` | Kafka (SASL_SSL), Postgres (TLS), SeaweedFS, Vault, the test issuer, and each stage's image in worker and control modes | pausing and stopping containers |
+  | `TestcontainersTarget` | Kafka (SASL_SSL), Postgres (TLS), SeaweedFS, Vault, the test issuer, and each stage in worker and control modes (from its jar, as built: §15.10) | pausing containers |
   | `SandboxTarget` | the sandbox's Deployments, through its ingress | scaling to zero, deleting pods, a deny-all network policy, stopping a node's VM |
   | `AwsTarget` | the PoC stack's Deployments, through its internal ingress | the same, and Spot interruption |
 
@@ -430,7 +430,7 @@ depends on neither of the others.
 | C7 | Rotate and re-key (§11). **Built 2026-11-21** (§15.7) | P3 |
 | C8 | Retention, purge and erase (§11). **Built 2026-11-21** (§15.8) | P4 |
 | C9 | Health, settings, compliance outcome, support bundle. **Built 2026-11-21** (§15.9) | P5 |
-| H1 | The harness with its Testcontainers target, growing with C2–C9 | P6 |
+| H1 | The harness with its Testcontainers target, growing with C2–C9. **Built 2026-11-22** (§15.10) | part of P6 |
 | H2 | The sandbox target | P6 |
 | H3 | The AWS target | P6 |
 
@@ -936,5 +936,79 @@ depends on neither of the others.
     probes'.
   - Everything §15.2–§15.8 list as not yet.
 
+### 15.10 H1, as built
+
+- **The module** `control-harness` (this repository; the root build lists it after `file-connector`): the harness
+  core in `com.sdh.healthcare.connector.harness`, the Testcontainers target in `.testcontainers`, the scenarios in
+  `.scenario`. It depends on no stage module; it starts the stages from their jars. `HarnessIT` runs it under
+  `-Pit`; `scripts/harness.sh testcontainers [scenario,…]` builds the jars and runs it on the sdh-it VM, stopped
+  after (`SDH_IT_STOP=1`). The sandbox and AWS levels answer "not built yet" (H2, H3).
+- **Core:** `ControlClient` (`java.net.http`; a random `Idempotency-Key` per action; `follow` reads an operation's
+  record until it ends) hands each answer, a `Reply`, to the stage's `Contract`, read from the stage's own
+  `/openapi.yaml`, which checks it: an `X-Request-Id`; a route, method and status the contract lists; a refusal as
+  a problem with its type, title and status; a success in the content type declared. `TestIssuer` signs ES256
+  tokens (five minutes, `groups` as roles) and serves its JWKS on loopback. `Operator` is a test principal with
+  its roles and a P-256 sealing key; `Unsealer` opens a sealed result, checking its header, the parts' order and
+  the trailer's count and SHA-256. `Samples` tags, batches, breaks (an undeclared entity) and cuts off the
+  synthetic C-CDA documents in `connector-core/src/test/resources/ccda`. `Harness.run` runs a scenario, then
+  checks that no answer broke the contract and that every authenticated call is in the stage's journal
+  (`/audit/events`) under its request ID and principal, a refusal for want of permission as `denied`, and that
+  `/audit/verify` finds nothing changed. After a scenario fails it resumes every stage, so the next starts from a
+  running pipeline. Roles are named after the permissions.
+- **The Testcontainers target** (`TestcontainersTarget`): its own CA (`Pki`); Postgres with TLS (verify-full,
+  SCRAM), Kafka on SASL_SSL with SCRAM-SHA-512 users, SeaweedFS's S3, Vault (transit KEKs and ECDSA signing keys)
+  and the collector (`Services`); then the landing (HTTP push over mTLS), split and convert stages, each as a worker
+  and as `java -jar <stage>.jar control`, settings in `SPRING_APPLICATION_JSON`, the Kafka login in the process's
+  environment (`{{env:SDH_KAFKA_JAAS}}`), output in `control-harness/target/harness/<time>/logs`. Faults pause a
+  service's container.
+- **Scenarios** (`Scenarios.all()`, in order; erasure last, as nothing runs after it):
+  - `support`: health reaches every dependency; settings redact; the bundle has every part and no secret of the
+    target's.
+  - `access`: no credential `401`, audited; no role `403 permission-required`; a viewer refused pause, rotate,
+    erase, the audit, retention and keys.
+  - `load`: three items, four documents; each complete once at split and convert (expected = done, none failed);
+    none stuck.
+  - `failures`: a batch with an unconvertible document settles with one failure open and isn't complete; the
+    failure is listed without its content, refused for export without `phi.export`, exported sealed to the
+    exporter's key and opened, corrected, and the item completes. An item cut off fails at split, is declined, and
+    its corrected version pushed with `Replaces` completes; the declined failure stays.
+  - `breakglass`: a plaintext restore refused without the permission and without a ticket; four eyes (the
+    requester can't approve); the result refused to another, fetched once by the requester, then `410`; the ticket
+    audited.
+  - `pause`: a paused intake answers `503`, and takes pushes again once resumed; a paused convert stage completes
+    nothing for 30 s, then completes what waited; a drain of split ends, takes nothing after, and resume completes
+    it.
+  - `keys`: convert's KEK rotated; a new item completes; a re-key, four eyes, ends with nothing counted under the
+    old KEK; a failure stored before still exports and opens.
+  - `outages`: Postgres, Kafka, the store and Vault each paused for 30 s with an item on its way; every item then
+    completes (one not complete is reprocessed through the API); none stuck.
+  - `erasure`: retention set within bounds and refused below its floor; an item purged at each stage (four eyes, a
+    ticket) and listed in `/purges`; every stage paused, split and convert drained, then each erased (four eyes, a
+    ticket), answering its certificate, with nothing left of it in the store and its workers refusing to start.
+- **First run** (2026-11-22): all nine pass in about ten minutes; no item needed reprocessing after the outages.
+- **Found and fixed by it in the product:**
+  - The landing node's control mode didn't start: its journal loaded the keys of a stage after landing, which
+    need a records KEK. It now loads a landing node's keys, and wraps a break-glass result with the
+    `landed_items` KEK (`AuditTarget`; `AuditTargetTest`).
+  - A drain of the split stage never ended while a worker ran: its claim count took in the stage's duties lease,
+    which shares the item leases' prefix. It now leaves it out (`JdbcLeaseStore.live(prefix, except)`;
+    `JdbcLeaseStoreTest`).
+  - A `401` carried no request ID, though the contract says each answer's names its audit event. It now does,
+    and its `control.unauthenticated` event names it (`ControlServerTest`).
+- **Tests without Docker:** `ContractTest`, `UnsealerTest`, `IdentityTest` (token and JWKS, operator key),
+  `SamplesTest`.
+- **Not done, chosen while building:**
+  - The stages run as processes from their jars, not images, so a control API reaches the issuer in the test's
+    JVM on loopback; the images are the sandbox's and AWS's (H2, H3).
+  - One Postgres user and one S3 key serve every stage, and the stages' Kafka users are super users: the
+    per-stage grants are `KafkaSecurityIT`'s and the deployments' to test.
+  - Compliance profile `none`, as Vault is reached over HTTP; the `hipaa` checks are tested on their own.
+  - "Exactly once" is read from each stage's progress (expected = done, none failed), not by reading the topics.
+  - Faults pause a container. Stopping one, a network policy, node loss and Spot interruption are H2's and
+    H3's.
+  - The transform stage isn't in it; `healthcare-data-transformer` adds it.
+  - Pipeline-wide approval of an erasure doesn't exist yet (§15.8), so the scenario erases stage by stage.
+
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
 (HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1; C7's in §6.1; C8's in §8; C9's in §9.
+H1 adds no customer steps: the harness is the test team's.

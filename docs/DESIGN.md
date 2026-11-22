@@ -248,6 +248,14 @@ Revision 2026-11-21 (em), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) 
 - A break-glass restore's plaintext is held encrypted (`ControlResults`: a data key per result, wrapped with the stage's records KEK; AES-GCM parts). The requester fetches it once within an hour from `/operations/{id}/result`, and it is then deleted.
 - Under the `hipaa` profile, the CLI refuses both unless the new check `cli-four-eyes` is waived; the waiver is shown and audited at startup.
 
+Revision 2026-11-22 (er), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.10, step H1 of the control API, asked for by the user ("Build H1"). **The control API's scenarios run against a real pipeline on Testcontainers, and pass.**
+- New module `control-harness`: a client of the contract that checks every answer against the stage's own OpenAPI, a test token issuer, test operators with sealing keys, an unsealer, synthetic C-CDA samples, and nine scenarios (support, access, load, failures, break-glass, pause and drain, keys, outages, retention and erasure).
+- After each scenario the harness checks that every authenticated call is in the stage's audit journal with its principal, refusals as denied, and that `audit-verify` finds nothing changed.
+- The Testcontainers target starts TLS Postgres, SASL_SSL Kafka, SeaweedFS's S3, Vault and a collector, then the landing, split and convert stages from their jars, each as a worker and in control mode; faults pause a container. `scripts/harness.sh testcontainers [scenario,…]` runs it on the sdh-it VM.
+- It found three faults, fixed: the landing node's control mode didn't start (its journal wanted a records KEK; it now loads a landing node's keys and wraps break-glass results with the `landed_items` KEK); a drain of the split stage never ended (it counted the stage's duties lease as a claim); a `401` had no request ID (now in the header and its audit event).
+
+Tested by `ContractTest`, `UnsealerTest`, `IdentityTest`, `SamplesTest`, `AuditTargetTest`, `JdbcLeaseStoreTest` and `ControlServerTest`, and the harness's own first run: all nine scenarios pass. Not done: the sandbox and AWS targets (H2, H3), the transform stage (added by healthcare-data-transformer), per-stage database and Kafka grants in the harness, the `hipaa` profile in it.
+
 Revision 2026-11-21 (eq), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.9, step C9 of the control API, asked for by the user ("Build C9"). **Every stage answers support's questions without PHI, through the API or the CLI.**
 - `health`, `settings`, `compliance` and `support-bundle` are common commands on every stage (`SupportCommands`), `pipeline.view`, at `GET /health`, `/settings`, `/compliance` and `/support-bundle`.
 - `settings` shows the settings in force with each secret `<redacted>` (`SettingsView`, connector-runtime): by name, by a PEM private key in the value, and in URIs (user information, secret parameters).

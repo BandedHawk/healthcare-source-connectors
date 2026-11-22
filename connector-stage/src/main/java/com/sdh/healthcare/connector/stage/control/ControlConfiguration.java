@@ -20,6 +20,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 import org.apache.catalina.connector.Connector;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -704,9 +705,11 @@ public class ControlConfiguration
             jakarta.servlet.http.HttpServletResponse response)
             throws java.io.IOException
     {
+        String requestId = UUID.randomUUID().toString();
         Telemetry.get().auditWarn("control.unauthenticated", Fields
                 .of(Attr.AUTH, settings.auth().mode().name()
                         .toLowerCase(Locale.ROOT))
+                .with(Attr.REQUEST_ID, requestId)
                 .with(Attr.DECISION, "unauthenticated")
                 .with(Attr.REASON, failure.getClass().getSimpleName())
                 .with(Attr.RESULT, "refused"));
@@ -715,7 +718,7 @@ public class ControlConfiguration
             response.setHeader("WWW-Authenticate", "Bearer");
         }
         ControlService.send(response, ControlService.problem(401,
-                "unauthenticated", null, null), null);
+                "unauthenticated", null, requestId), requestId);
     }
 
     /** Sets up Tomcat for the control API. */

@@ -36,6 +36,8 @@
     <!-- Before file-connector, whose ThirdPartyAttributionIT checks every application's packaged jar. -->
     <module>convert-stage</module>
     <module>file-connector</module>
+    <!-- Last: the control API's test harness runs the stages' packaged jars (CONTROL-API-DESIGN.md §14). -->
+    <module>control-harness</module>
   </modules>
 
   <properties>

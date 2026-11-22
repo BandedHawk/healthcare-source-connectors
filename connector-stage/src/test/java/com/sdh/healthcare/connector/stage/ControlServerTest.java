@@ -237,7 +237,7 @@ class ControlServerTest
      * A request with no token, a token for another audience, an expired
      * one, one issued for longer than an hour, or one signed by another
      * key is refused as unauthenticated, names no detail, and is audited
-     * by the failure's class.
+     * by the failure's class with the request ID the answer carries.
      *
      * @throws Exception if the test fails to run
      */
@@ -259,6 +259,8 @@ class ControlServerTest
         assertThat(none.headers().firstValue("WWW-Authenticate"))
                 .hasValue("Bearer");
         assertThat(field(none.body(), "title")).isEqualTo("unauthenticated");
+        String first = none.headers().firstValue("X-Request-Id")
+                .orElseThrow();
         for (String token : bad)
         {
             HttpResponse<String> refused = get("/api/v1/stuck", token);
@@ -266,6 +268,8 @@ class ControlServerTest
                     .isEqualTo(401);
             assertThat(refused.body()).doesNotContain("alice")
                     .doesNotContain("audience").doesNotContain("expired");
+            assertThat(refused.headers().firstValue("X-Request-Id"))
+                    .isPresent();
         }
         assertThat(audit.names()).hasSize(5)
                 .containsOnly("control.unauthenticated");
@@ -273,6 +277,7 @@ class ControlServerTest
                 .containsEntry("sdh.auth", "jwt")
                 .containsEntry("sdh.decision", "unauthenticated")
                 .containsEntry("sdh.result", "refused")
+                .containsEntry("sdh.request_id", first)
                 .containsKey("sdh.reason");
     }
 
