@@ -10,9 +10,11 @@ import com.sdh.healthcare.connector.broker.receive.ArtemisReceiveRoute;
 import com.sdh.healthcare.connector.broker.receive.BrokerKind;
 import com.sdh.healthcare.connector.broker.receive.CamelReceiveRoute;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
+import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.landing.GivenUpItems;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.maintenance.ItemPurge;
 import com.sdh.healthcare.connector.core.maintenance.Rekey;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
@@ -28,7 +30,10 @@ import com.sdh.healthcare.connector.runtime.FatalExit;
 import com.sdh.healthcare.connector.runtime.compliance.ComplianceConfiguration;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
+import com.sdh.healthcare.connector.stage.PurgePass;
+import com.sdh.healthcare.connector.stage.PurgeRequests;
 import com.sdh.healthcare.connector.stage.RekeyPass;
+import com.sdh.healthcare.connector.stage.RetentionPolicy;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Clock;
@@ -36,6 +41,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.UnaryOperator;
 import org.apache.camel.CamelContext;
 import org.apache.camel.builder.RouteBuilder;
@@ -196,6 +202,14 @@ public class LandingConfiguration
                 "sdh.maintenance.retention.landed-items",
                 settings.retention().landedItems(),
                 LandingProperties.Maintenance.MIN_RETENTION);
+        // The setting's retention, until an operator sets another within
+        // its bounds (CONTROL-API-DESIGN.md §11); a setting outside them
+        // refuses startup.
+        RetentionPolicy retentionPolicy = RetentionPolicy.of(
+                retention.orElse(null),
+                LandingProperties.Maintenance.MIN_RETENTION,
+                settings.retentionBounds());
+        retentionPolicy.check(retentionPolicy.setting());
         LandingRuntime.Tables tables = runtime.tables();
         GivenUpItems givenUp = new GivenUpItems(tables.committer(),
                 tables.ids(), properties.landing().intake(),
@@ -216,16 +230,28 @@ public class LandingConfiguration
                 settings.toSettings(), settings.toSchedule(),
                 () -> List.of(
                         new MaintenanceScheduler.Target(tables.landedItems(),
-                                LandingTables.LANDED_AT, retention,
+                                LandingTables.LANDED_AT,
+                                retentionPolicy.forRuns(tables.control())
+                                        .get(),
                                 wholeItems, givenUp),
                         MaintenanceScheduler.Target.of(tables.ledger(),
                                 LandingTables.LANDED_AT, Optional.empty())),
                 runtime.intake().writerLock(), fatal, Clock.systemUTC(),
-                // A re-key asked for (CONTROL-API-DESIGN.md §11), carried
-                // out here: the node holds no database rows with keys.
-                new RekeyPass(tables.control(), tables.committer(),
-                        tables.keys(), tables.database(), "landing",
-                        List.of(), Rekey.BUDGET));
+                // A re-key or purges asked for (CONTROL-API-DESIGN.md
+                // §11), carried out here: the node holds no database rows
+                // with keys, and no corrections. A purge leaves the ledger,
+                // which holds no PHI.
+                MaintenanceScheduler.Pass.of(
+                        new RekeyPass(tables.control(), tables.committer(),
+                                tables.keys(), tables.database(), "landing",
+                                List.of(), Rekey.BUDGET),
+                        new PurgePass(PurgeRequests.of(tables.database(),
+                                AuditTables.besideLeaseTable(properties
+                                        .lease().jdbc().table()).schema(),
+                                tables.control()), tables.committer(),
+                                tables.database(), null, "landing",
+                                ItemPurge.BUDGET,
+                                Set.of(tables.ledger().name()))));
     }
 
     /**

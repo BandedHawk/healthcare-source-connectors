@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.file.config.ConnectorProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditTarget;
+import com.sdh.healthcare.connector.stage.admin.DataCommands;
 import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
 import com.sdh.healthcare.connector.stage.admin.DrainCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
@@ -75,6 +76,7 @@ public final class SplitAdmin
                         new VersionCommand<SplitAdminContext>()));
         commands.addAll(FailureCommands.<SplitAdminContext>all());
         commands.addAll(KeyCommands.<SplitAdminContext>all());
+        commands.addAll(DataCommands.<SplitAdminContext>all());
         return List.copyOf(commands);
     }
 

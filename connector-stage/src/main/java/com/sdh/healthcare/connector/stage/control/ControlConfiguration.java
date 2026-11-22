@@ -128,7 +128,8 @@ public class ControlConfiguration
     static final String OPENAPI_RESOURCE = "control/openapi-v1.yaml";
 
     /** The methods the API serves. */
-    static final Set<String> API_METHODS = Set.of("GET", "POST", "DELETE");
+    static final Set<String> API_METHODS = Set.of("GET", "POST", "PUT",
+            "DELETE");
 
     /** The control API's connections to the database. */
     static final int POOL = 4;

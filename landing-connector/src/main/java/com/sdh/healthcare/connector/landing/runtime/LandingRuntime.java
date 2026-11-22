@@ -397,6 +397,8 @@ public final class LandingRuntime implements AutoCloseable
                     AuditTables.besideLeaseTable(properties.lease().jdbc()
                             .table()).schema(),
                     "landing/" + properties.connectorId());
+            // An erased intake's node never starts again (§11).
+            control.refuseIfErased();
             // The KEK each new batch is wrapped with, as rotated
             // (CONTROL-API-DESIGN.md §11), read before the first batch.
             kekWatch = KekWatch.of(control, kek, keys.wrap());

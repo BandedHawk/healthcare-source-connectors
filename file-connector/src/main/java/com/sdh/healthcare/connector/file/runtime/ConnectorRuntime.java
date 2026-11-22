@@ -23,6 +23,7 @@ import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
+import com.sdh.healthcare.connector.core.maintenance.ItemPurge;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.Rekey;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
@@ -56,8 +57,11 @@ import com.sdh.healthcare.connector.stage.ItemEndResender;
 import com.sdh.healthcare.connector.stage.KekWatch;
 import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.PauseWatch;
+import com.sdh.healthcare.connector.stage.PurgePass;
+import com.sdh.healthcare.connector.stage.PurgeRequests;
 import com.sdh.healthcare.connector.stage.RekeyPass;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.RetentionPolicy;
 import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
@@ -316,6 +320,13 @@ public final class ConnectorRuntime implements AutoCloseable
         Optional<Duration> retention = MaintenanceScheduler.retention(
                 "sdh.maintenance.retention.records",
                 maintenance.retention().records(), Duration.ofDays(1));
+        // The setting's retention, until an operator sets another within
+        // its bounds (CONTROL-API-DESIGN.md §11); a setting outside them
+        // refuses startup.
+        RetentionPolicy retentionPolicy = RetentionPolicy.of(
+                retention.orElse(null), Duration.ofDays(1),
+                maintenance.retentionBounds());
+        retentionPolicy.check(retentionPolicy.setting());
         KeyMaterial keys = KeyMaterial.load(properties.crypto());
 
         HikariDataSource dataSource = null;
@@ -354,6 +365,8 @@ public final class ConnectorRuntime implements AutoCloseable
             ControlState control = new ControlState(dataSource,
                     stage.registrySchema(), ItemProcessor.STAGE + "/"
                             + properties.connectorId());
+            // An erased stage's pods never start again (§11).
+            control.refuseIfErased();
             // The KEK each new batch is wrapped with, as rotated
             // (CONTROL-API-DESIGN.md §11), read before the first batch.
             kek = KekWatch.of(control, recordsKek, keys.wrap());
@@ -500,16 +513,27 @@ public final class ConnectorRuntime implements AutoCloseable
                     (committer, dutiesFatal) -> new MaintenanceScheduler(
                             committer, maintenanceSettings,
                             maintenance.toSchedule(),
+                            // The retention in force, read at each run.
                             () -> List.of(MaintenanceScheduler.Target.of(
                                     splitRecords, RecordsTable.INGESTED_AT,
-                                    retention)),
+                                    retentionPolicy.forRuns(control).get())),
                             new ReentrantLock(), dutiesFatal, clock,
-                            // A re-key asked for, carried out here.
-                            new RekeyPass(control, committer, keys.wrap(),
-                                    database, ItemProcessor.STAGE,
-                                    StageKeys.splitRows(
-                                            stage.registrySchema()),
-                                    Rekey.BUDGET)),
+                            // A re-key or purges asked for, carried out
+                            // here.
+                            MaintenanceScheduler.Pass.of(
+                                    new RekeyPass(control, committer,
+                                            keys.wrap(), database,
+                                            ItemProcessor.STAGE,
+                                            StageKeys.splitRows(
+                                                    stage.registrySchema()),
+                                            Rekey.BUDGET),
+                                    new PurgePass(PurgeRequests.of(database,
+                                            stage.registrySchema(), control),
+                                            committer, database,
+                                            CorrectionStore.table(
+                                                    stage.registrySchema()),
+                                            ItemProcessor.STAGE,
+                                            ItemPurge.BUDGET))),
                     fatal).placed(stage.duties());
             PauseWatch watch = PauseWatch.of(control,
                     List.of(receiver, correcting));

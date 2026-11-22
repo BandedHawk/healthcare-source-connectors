@@ -7,8 +7,8 @@
 package com.sdh.healthcare.connector.runtime.maintenance;
 
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointTamperedException;
-import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import com.sdh.healthcare.connector.core.checkpoint.LeaseLostException;
+import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.core.maintenance.TableMaintenance;
 import com.sdh.healthcare.connector.runtime.FatalExit;
@@ -17,12 +17,16 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -224,6 +228,65 @@ public final class MaintenanceScheduler implements AutoCloseable
          * @param failure why
          */
         void failed(TableMaintenance.Purge purge, RuntimeException failure);
+
+        /**
+         * Several passes, taking turns: each tick they are asked in order
+         * from the one after the last that ran, and the first due runs, so
+         * a long re-key doesn't hold a purge back until it ends.
+         *
+         * @param passes the passes
+         * @return them as one
+         */
+        static Pass of(Pass... passes)
+        {
+            List<Pass> all = List.of(passes);
+            Map<TableMaintenance.Purge, Pass> owners = Collections
+                    .synchronizedMap(new IdentityHashMap<>());
+            AtomicInteger next = new AtomicInteger();
+            return new Pass()
+            {
+                @Override
+                public Optional<TableMaintenance.Purge> due()
+                {
+                    int first = next.get();
+                    for (int i = 0; i < all.size(); i++)
+                    {
+                        int at = (first + i) % all.size();
+                        Pass pass = all.get(at);
+                        Optional<TableMaintenance.Purge> due = pass.due();
+                        if (due.isPresent())
+                        {
+                            owners.put(due.get(), pass);
+                            next.set((at + 1) % all.size());
+                            return due;
+                        }
+                    }
+                    return Optional.empty();
+                }
+
+                @Override
+                public void ran(TableMaintenance.Purge purge,
+                        List<TableMaintenance.Report> reports)
+                {
+                    Pass owner = owners.remove(purge);
+                    if (owner != null)
+                    {
+                        owner.ran(purge, reports);
+                    }
+                }
+
+                @Override
+                public void failed(TableMaintenance.Purge purge,
+                        RuntimeException failure)
+                {
+                    Pass owner = owners.remove(purge);
+                    if (owner != null)
+                    {
+                        owner.failed(purge, failure);
+                    }
+                }
+            };
+        }
     }
 
     /** Runs maintenance on one table. */

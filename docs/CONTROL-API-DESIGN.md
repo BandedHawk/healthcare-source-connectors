@@ -428,7 +428,7 @@ depends on neither of the others.
 | C5 | Four eyes and break-glass (§6). **Built 2026-11-21** (§15.5) | P1 |
 | C6 | Pause, resume and drain (§9). **Built 2026-11-21** (§15.6) | P2 |
 | C7 | Rotate and re-key (§11). **Built 2026-11-21** (§15.7) | P3 |
-| C8 | Retention, purge and erase (§11) | P4 |
+| C8 | Retention, purge and erase (§11). **Built 2026-11-21** (§15.8) | P4 |
 | C9 | Health, settings, compliance outcome, support bundle | P5 |
 | H1 | The harness with its Testcontainers target, growing with C2–C9 | P6 |
 | H2 | The sandbox target | P6 |
@@ -829,5 +829,71 @@ depends on neither of the others.
     supplier, the maintenance pass on a real table).
   - Everything §15.2–§15.6 list as not yet.
 
+### 15.8 C8, as built
+
+- **Retention** (`ControlState`, `RetentionPolicy`): `sdh_control_state` gains, per scope, `retention` (an ISO-8601
+  duration, or `forever`), `retention_by` and `retention_at`. It is per stage, so per table class: landed items
+  (landing), split records (split), records and gold (convert, transform, their sinks). A scope never set uses its
+  setting's (`sdh.maintenance.retention`, `.retention.records`, `.retention.landed-items`). The bounds are the new
+  settings `sdh.maintenance.retention-bounds.minimum` and `.maximum` (not §11's `sdh.retention.*`, so they sit
+  beside the retention they bound), unset by default. The minimum is the longer of the bounds' and the stage's
+  floor (1 day; 7 days for landed items); a maximum forbids forever. A setting outside the bounds refuses startup.
+  - Maintenance reads the retention in force at each run, through `Target`'s supplier: the operator's if set,
+    else the setting's, never below the minimum. One that can't be read keeps every row that run
+    (`maintenance.retention_unread`), so a database outage never shortens it.
+  - `retention` (`GET /retention`) and `retention-set --days | --forever` (`PUT /retention`; `PUT` added to the
+    API's methods), both `data.admin`. Outside the bounds is `400`. Audited with `sdh.retention`.
+  - The ledger and the failure tables keep their own rules: the ledger is kept forever, failures until handled.
+- **Purge** (`PurgeRequests`, `PurgePass`, `ItemPurge`): `purge --item-id --ticket [--wait]`
+  (`POST /items/{itemId}/purge`), four eyes, `data.admin`, the ticket required. Its run records the request in
+  the new `sdh_control_purges` table (operation ID, scope, item, who, when, ticket, state, files, rows, failure),
+  under the operation's ID so a run taken over finds it, and waits as a re-key's does. `purges [--limit]`
+  (`GET /purges`) lists the latest. The row is kept once ended: the record that the item was purged, by item ID
+  only.
+  - `PurgePass`, a `MaintenanceScheduler.Pass` on the duties pod, takes every active purge of the scope (up to
+    100) into one run, an `ItemPurge` added to each table. Per table, the data files whose `item_id` bounds may
+    hold an item are copied without its rows, up to 4 GiB a run, counted per item and checked to add up; the
+    files are replaced in one `RewriteFiles` validated from the run's start, and the run's snapshot expiry deletes
+    the old ones. A file with delete files is refused.
+  - Once a run rewrites nothing, each item's corrections (`stage_correction`, which hold a document's content)
+    are deleted; then, only if no table holds a row of the item (`ItemPurge.left`), its purge is `done`, audited
+    as `data.purged` with the files, rows and corrections deleted. Rows found by a quiet run count as a failed
+    run. After 12 failed runs in a row the purges are `failed` (`data.purge_failed`).
+  - The landing node purges `landed_items` and leaves its ledger, which holds no PHI.
+  - `MaintenanceScheduler.Pass.of(rekey, purge)` takes turns, so a long re-key doesn't hold a purge back.
+- **Erase** (`DataCommands.Erase`): `erase --ticket` (`POST /erase`), four eyes, `data.admin`. It runs in the
+  control pod, the stage's admin rights. Refused unless the scope is paused; for a stage that drains (split,
+  convert, transform), also until the pause is older than the drain's settle time with no live claim. Then:
+  1. The KEKs (the setting's, the rotated, a re-key's, each table's rows' and ID key's, the database rows') and the
+     journal's heads (`sdh_audit_chain` of the scope: chain, last seq, last hash) are read.
+  2. The scope is marked erased (`erase_id`, `erased_by`, `erased_at`; the first erasure kept). Every runtime
+     calls `refuseIfErased` at startup, before its first batch.
+  3. Each table the stage writes is dropped with its data (`dropTable(id, true)`), then what is left under its
+     location removed where the store can list (`SupportsPrefixOperations`, S3's), counted. Landing: `landed_items`
+     and the ledger; split: `split_records`; convert and transform: the sink.
+  4. The stage's rows in the database tables with wrapped keys (`StageKeys`) are deleted.
+  5. The result is the certificate: a JWS (`sdh-erasure+jwt`, ES256) signed with the stage's own key, naming the
+     scope, operation, requester, approver, ticket, the tables with their location and objects, rows deleted per
+     table, the KEKs and the signing key for the custodian to destroy, and the journal's heads. Audited with
+     `sdh.tables`, `sdh.objects`, `sdh.rows`. Asked again, it carries on with what is left.
+- **Tests:** `DataLifecycleTest` (connector-stage): the retention and erasure rows; the policy's bounds, floor and
+  fallback when the state can't be read; the purge pass on `landed_items` to `done` a file a run, with the other
+  items reading back, the correction gone and the failure kept; failing after 12 tries; the commands (bounds,
+  ticket, four eyes, `--wait 0`, `purges`) and their routes; and erase refused unpaused and unsettled, then
+  dropping the table and only its own stage's rows, its certificate verified with the stage's public key.
+  `MaintenanceSchedulerTest`: passes taking turns.
+- **Not done, chosen while building:**
+  - Purge and erase are per stage, approved once per stage. §8.2's pipeline-wide approval is not built: purge an
+    item at each stage it passed through, landing included.
+  - Failures are kept on purge: their reasons never quote a document's values (DESIGN.md). The failure tables
+    have no retention of their own yet.
+  - On erase, the registry's and checkpoints' rows (IDs, offsets, digests, no content) and the purge records are
+    kept, as is the audit journal; export it first (`audit-export`), as §11 says. The erase does not export it.
+  - A purge needs table maintenance enabled; while it is off, it stays `requested`. A pod retired while a purge
+    runs is the next duties holder's to carry on.
+  - Erase checks the pause itself; it does not drain the stage (`drain` does).
+  - A store that can't list (the in-memory one in tests) leaves only what the table's metadata didn't name.
+  - Everything §15.2–§15.7 list as not yet.
+
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
-(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1; C7's in §6.1.
+(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1; C7's in §6.1; C8's in §8.

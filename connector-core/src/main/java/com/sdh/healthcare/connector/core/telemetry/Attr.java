@@ -397,7 +397,19 @@ public enum Attr
     FILES("sdh.files"),
 
     /** Rows changed, such as by a re-key. */
-    ROWS("sdh.rows");
+    ROWS("sdh.rows"),
+
+    /**
+     * How long a stage keeps its rows (CONTROL-API-DESIGN.md §11), as an
+     * ISO-8601 duration, or {@code forever}.
+     */
+    RETENTION("sdh.retention"),
+
+    /** Tables dropped, such as by an erasure. */
+    TABLES("sdh.tables"),
+
+    /** Stored objects removed, such as by an erasure. */
+    OBJECTS("sdh.objects");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

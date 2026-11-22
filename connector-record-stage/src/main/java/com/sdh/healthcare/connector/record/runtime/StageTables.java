@@ -275,6 +275,16 @@ public final class StageTables implements AutoCloseable
     }
 
     /**
+     * The sink's name in its catalog, whether or not it exists.
+     *
+     * @return it
+     */
+    public TableIdentifier sinkId()
+    {
+        return TableIdentifier.of(sink.namespace(), sink.table());
+    }
+
+    /**
      * The sink's catalog: the source's, unless the sink has its own.
      *
      * @return the catalog

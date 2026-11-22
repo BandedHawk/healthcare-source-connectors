@@ -12,6 +12,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
@@ -39,7 +40,10 @@ import javax.sql.DataSource;
  * ({@link #rotate}), which its pods read as they read the pause
  * ({@link KekWatch}), and its last re-key ({@link #requestRekey}), which
  * its maintenance carries out ({@link RekeyPass}) (CONTROL-API-DESIGN.md
- * §11). They hold KEK references, never key material.
+ * §11). They hold KEK references, never key material. It holds the
+ * retention an operator set ({@link #setRetention}), which its maintenance
+ * applies ({@link RetentionPolicy}), and whether the scope's data was
+ * erased ({@link #erase}), when its pods refuse to start.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -87,6 +91,46 @@ public final class ControlState
      * @param setAt when
      */
     public record Kek(String scope, String kek, String setBy, Instant setAt)
+    {
+    }
+
+    /** The retention value that keeps rows forever. */
+    public static final String FOREVER = "forever";
+
+    /**
+     * The retention an operator set for a scope (CONTROL-API-DESIGN.md
+     * §11).
+     *
+     * @param scope  the scope
+     * @param keep   how long rows are kept; empty keeps them forever
+     * @param setBy  who set it
+     * @param setAt  when
+     */
+    public record Retention(String scope, Optional<Duration> keep,
+            String setBy, Instant setAt)
+    {
+
+        /**
+         * The value as stored, answered and audited.
+         *
+         * @return an ISO-8601 duration, or {@value ControlState#FOREVER}
+         */
+        public String wire()
+        {
+            return keep.map(Duration::toString).orElse(FOREVER);
+        }
+    }
+
+    /**
+     * A scope whose data was erased (CONTROL-API-DESIGN.md §11).
+     *
+     * @param scope    the scope
+     * @param id       the operation that erased it
+     * @param erasedBy who asked for it
+     * @param erasedAt when it was marked erased
+     */
+    public record Erased(String scope, String id, String erasedBy,
+            Instant erasedAt)
     {
     }
 
@@ -243,15 +287,24 @@ public final class ControlState
                       rekey_rows    bigint,
                       rekey_failure text,
                       rekey_updated timestamptz,
+                      retention     text,
+                      retention_by  text,
+                      retention_at  timestamptz,
+                      erase_id      text,
+                      erased_by     text,
+                      erased_at     timestamptz,
                       updated_at    timestamptz NOT NULL
                     )""".formatted(table));
-            // Added 2026-11-21 (C7) to a table C6 made.
+            // Added 2026-11-21 (C7, C8) to a table C6 made.
             for (String column : List.of("kek text", "kek_by text",
                     "kek_at timestamptz", "rekey_id text", "rekey_from text",
                     "rekey_to text", "rekey_state text", "rekey_by text",
                     "rekey_at timestamptz", "rekey_files bigint",
                     "rekey_rows bigint", "rekey_failure text",
-                    "rekey_updated timestamptz"))
+                    "rekey_updated timestamptz", "retention text",
+                    "retention_by text", "retention_at timestamptz",
+                    "erase_id text", "erased_by text",
+                    "erased_at timestamptz"))
             {
                 statement.execute("ALTER TABLE " + table
                         + " ADD COLUMN IF NOT EXISTS " + column);
@@ -460,6 +513,157 @@ public final class ControlState
         update(sql, scope, kek, by);
         return kek().orElseThrow(() -> new IllegalStateException(
                 "Control state unavailable"));
+    }
+
+    /**
+     * The retention an operator last set for the scope.
+     *
+     * @return it; empty if none was set, or the table isn't there
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Optional<Retention> retention()
+    {
+        String sql = "SELECT retention, retention_by, retention_at FROM "
+                + table + " WHERE scope = ? AND retention IS NOT NULL";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(TIMEOUT_SECONDS);
+            select.setString(1, scope);
+            try (ResultSet rows = select.executeQuery())
+            {
+                if (!rows.next())
+                {
+                    return Optional.empty();
+                }
+                String value = rows.getString(1);
+                return Optional.of(new Retention(scope,
+                        FOREVER.equals(value) ? Optional.empty()
+                                : Optional.of(Duration.parse(value)),
+                        rows.getString(2), instant(rows.getTimestamp(3))));
+            }
+        }
+        catch (SQLException failure)
+        {
+            if (UNDEFINED_TABLE.equals(failure.getSQLState()))
+            {
+                return Optional.empty();
+            }
+            throw new IllegalStateException("Control state unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Sets how long the scope keeps its rows, in place of its setting's;
+     * its maintenance applies it at its next run. The caller checks it is
+     * within the bounds.
+     *
+     * @param by   who sets it
+     * @param keep how long; empty keeps rows forever
+     * @return the retention in force
+     * @throws IllegalArgumentException if it isn't positive
+     * @throws IllegalStateException    if the database can't be reached
+     */
+    public Retention setRetention(String by, Optional<Duration> keep)
+    {
+        if (keep.isPresent() && (keep.get().isNegative()
+                || keep.get().isZero()))
+        {
+            throw new IllegalArgumentException("A retention must be"
+                    + " positive");
+        }
+        createTableIfMissing();
+        String sql = """
+                INSERT INTO %1$s AS s (scope, paused, retention,
+                       retention_by, retention_at, updated_at)
+                VALUES (?, false, ?, ?, clock_timestamp(), clock_timestamp())
+                ON CONFLICT (scope) DO UPDATE
+                   SET retention = EXCLUDED.retention,
+                       retention_by = EXCLUDED.retention_by,
+                       retention_at = EXCLUDED.retention_at,
+                       updated_at = EXCLUDED.updated_at""".formatted(table);
+        update(sql, scope, keep.map(Duration::toString).orElse(FOREVER), by);
+        return retention().orElseThrow(() -> new IllegalStateException(
+                "Control state unavailable"));
+    }
+
+    /**
+     * Whether the scope's data was erased.
+     *
+     * @return the erasure; empty if it wasn't, or the table isn't there
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Optional<Erased> erased()
+    {
+        String sql = "SELECT erase_id, erased_by, erased_at FROM " + table
+                + " WHERE scope = ? AND erase_id IS NOT NULL";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(TIMEOUT_SECONDS);
+            select.setString(1, scope);
+            try (ResultSet rows = select.executeQuery())
+            {
+                if (!rows.next())
+                {
+                    return Optional.empty();
+                }
+                return Optional.of(new Erased(scope, rows.getString(1),
+                        rows.getString(2), instant(rows.getTimestamp(3))));
+            }
+        }
+        catch (SQLException failure)
+        {
+            if (UNDEFINED_TABLE.equals(failure.getSQLState()))
+            {
+                return Optional.empty();
+            }
+            throw new IllegalStateException("Control state unavailable",
+                    failure);
+        }
+    }
+
+    /**
+     * Marks the scope erased, before its data is removed, so no pod starts
+     * on it again. Marking it again keeps the first erasure.
+     *
+     * @param id the operation erasing it
+     * @param by who asked for it
+     * @return the erasure in force
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public Erased erase(String id, String by)
+    {
+        createTableIfMissing();
+        String sql = """
+                INSERT INTO %1$s AS s (scope, paused, erase_id, erased_by,
+                       erased_at, updated_at)
+                VALUES (?, false, ?, ?, clock_timestamp(), clock_timestamp())
+                ON CONFLICT (scope) DO UPDATE
+                   SET erase_id = EXCLUDED.erase_id,
+                       erased_by = EXCLUDED.erased_by,
+                       erased_at = EXCLUDED.erased_at,
+                       updated_at = EXCLUDED.updated_at
+                 WHERE s.erase_id IS NULL""".formatted(table);
+        update(sql, scope, id, by);
+        return erased().orElseThrow(() -> new IllegalStateException(
+                "Control state unavailable"));
+    }
+
+    /**
+     * Refuses to start a pod on a scope whose data was erased.
+     *
+     * @throws IllegalStateException if it was erased, or the database
+     *                               can't be reached
+     */
+    public void refuseIfErased()
+    {
+        if (erased().isPresent())
+        {
+            throw new IllegalStateException("The data of " + scope
+                    + " was erased: this deployment is retired");
+        }
     }
 
     /**

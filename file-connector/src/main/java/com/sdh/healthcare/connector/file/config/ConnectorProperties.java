@@ -11,10 +11,11 @@ import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Compaction;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Crypto;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Lease;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings.Orphans;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Queue;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings.RetentionBounds;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Retry;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Telemetry;
-import com.sdh.healthcare.connector.runtime.config.CommonSettings.Orphans;
 import com.sdh.healthcare.connector.runtime.config.ConnectorSettings;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.stage.StageProperties;
@@ -296,6 +297,8 @@ public record ConnectorProperties(
      * @param compaction        compaction of small files
      * @param orphans           removal of unreferenced files
      * @param retention         how long rows are kept
+     * @param retentionBounds   the bounds the control API may set the
+     *                          retention within
      */
     public record Maintenance(@DefaultValue("true") boolean enabled,
             @DefaultValue("1h") Duration interval,
@@ -304,7 +307,8 @@ public record ConnectorProperties(
             @DefaultValue("5m") Duration manifests,
             @DefaultValue Compaction compaction,
             @DefaultValue Orphans orphans,
-            @DefaultValue Retention retention)
+            @DefaultValue Retention retention,
+            @DefaultValue RetentionBounds retentionBounds)
     {
 
         /**

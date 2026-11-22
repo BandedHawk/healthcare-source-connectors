@@ -7,9 +7,10 @@
 package com.sdh.healthcare.connector.record.config;
 
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
-import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Compaction;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings.Orphans;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings.RetentionBounds;
+import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import com.sdh.healthcare.connector.runtime.config.ConnectorSettings;
 import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.stage.StageProperties;
@@ -175,6 +176,8 @@ public interface RecordStageSettings extends ConnectorSettings
      * @param orphans           removal of unreferenced files
      * @param retention         how long rows are kept, in whole days;
      *                          unset keeps them forever
+     * @param retentionBounds   the bounds the control API may set the
+     *                          retention within
      */
     record Maintenance(@DefaultValue("true") boolean enabled,
             @DefaultValue("1h") Duration interval,
@@ -183,7 +186,8 @@ public interface RecordStageSettings extends ConnectorSettings
             @DefaultValue("5m") Duration manifests,
             @DefaultValue Compaction compaction,
             @DefaultValue Orphans orphans,
-            Duration retention)
+            Duration retention,
+            @DefaultValue RetentionBounds retentionBounds)
     {
 
         /**

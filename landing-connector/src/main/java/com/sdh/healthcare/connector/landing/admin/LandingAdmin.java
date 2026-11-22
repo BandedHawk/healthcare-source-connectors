@@ -11,6 +11,7 @@ import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditTarget;
+import com.sdh.healthcare.connector.stage.admin.DataCommands;
 import com.sdh.healthcare.connector.stage.admin.KeyCommands;
 import java.util.ArrayList;
 import java.util.List;
@@ -64,6 +65,7 @@ public final class LandingAdmin
         List<AdminCommand<LandingAdminContext>> commands =
                 new ArrayList<>(List.of(new ResubmitCommand()));
         commands.addAll(KeyCommands.<LandingAdminContext>all());
+        commands.addAll(DataCommands.<LandingAdminContext>all());
         return List.copyOf(commands);
     }
 

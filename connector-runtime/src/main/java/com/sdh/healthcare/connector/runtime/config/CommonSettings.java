@@ -403,4 +403,38 @@ public final class CommonSettings
             @DefaultValue("3d") Duration minAge)
     {
     }
+
+    /**
+     * The bounds an operator may set a stage's retention within, through
+     * the control API (CONTROL-API-DESIGN.md §11), so a mistake can't
+     * remove what a law or a contract says to keep, or keep what it says
+     * to remove. The setting's retention is the starting value.
+     *
+     * @param minimum the shortest retention allowed; unset for the stage's
+     *                own floor
+     * @param maximum the longest allowed; unset to allow keeping rows
+     *                forever
+     */
+    public record RetentionBounds(Duration minimum, Duration maximum)
+    {
+
+        /**
+         * Checks the bounds.
+         *
+         * @param minimum the shortest allowed
+         * @param maximum the longest allowed
+         * @throws IllegalArgumentException if the minimum is longer than
+         *                                  the maximum
+         */
+        public RetentionBounds
+        {
+            if (minimum != null && maximum != null
+                    && minimum.compareTo(maximum) > 0)
+            {
+                throw new IllegalArgumentException(
+                        "sdh.maintenance.retention-bounds.minimum is longer"
+                                + " than its maximum");
+            }
+        }
+    }
 }

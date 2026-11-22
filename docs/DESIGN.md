@@ -248,6 +248,13 @@ Revision 2026-11-21 (em), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) 
 - A break-glass restore's plaintext is held encrypted (`ControlResults`: a data key per result, wrapped with the stage's records KEK; AES-GCM parts). The requester fetches it once within an hour from `/operations/{id}/result`, and it is then deleted.
 - Under the `hipaa` profile, the CLI refuses both unless the new check `cli-four-eyes` is waived; the waiver is shown and audited at startup.
 
+Revision 2026-11-21 (ep), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.8, step C8 of the control API, asked for by the user ("Build C8"). **A stage's retention can be set, an item purged and a stage erased, through the API.**
+- `retention-set --days | --forever` records the scope's retention in `sdh_control_state`, within the new `sdh.maintenance.retention-bounds` and the stage's floor. Maintenance reads it at each run (`RetentionPolicy`); one it can't read keeps every row that run.
+- `purge --item-id --ticket` needs a second person's approval. The duties pod's maintenance carries it out (`PurgePass`, `ItemPurge`): per table, the files whose `item_id` bounds may hold the item copied without its rows, up to 4 GiB a run, replaced in one rewrite and expired; then its corrections deleted. Done only once no table holds a row of it. The request is kept in `sdh_control_purges`. The ledger is never purged.
+- `erase --ticket` needs a second person's approval and a paused, settled stage. It marks the scope erased (its pods refuse to start), drops its tables with their files and prefixes, deletes its rows with wrapped keys, and answers a certificate signed with the stage's key naming the KEKs to destroy and the journal's heads.
+
+Tested by `DataLifecycleTest` and `MaintenanceSchedulerTest`; customer steps in HIPAA-OPERATIONS §8. Not done: pipeline-wide approval; retention of the failure tables; the registry's rows on erase; the journal exported by the erase itself.
+
 Revision 2026-11-21 (eo), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.7, step C7 of the control API, asked for by the user ("Build C7"). **A stage's KEK can be rotated, and what it stores re-keyed, through the API or the CLI.**
 - `rotate --kek` records the KEK for a scope's new data in `sdh_control_state`, after checking the stage can wrap and unwrap with it. Each pod reads it every 5 s (`KekWatch`), probes it, and wraps each batch it starts after with it; one it can't use is refused and audited, and the old KEK kept.
 - `rekey --from --to` needs a second person's approval. The duties pod's maintenance carries it out (`RekeyPass`, `Rekey`): per table, up to 4 GiB of files a run, each file's rows' data keys re-wrapped and the file replaced in one rewrite, the old files expired; then the database rows with wrapped keys (`WrappedRows`) and the ID keys. It is done only once nothing is left under the old KEK.
@@ -2456,6 +2463,7 @@ sdh:
     compaction: { enabled: true, small-file-fraction: 0.75, min-input-files: 5, max-bytes-per-run: 8GB }
     orphans: { enabled: true, interval: 24h, min-age: 3d }
     retention: { records: 30d }   # unset = keep forever (default); landed items: the landing node's settings
+    retention-bounds: { minimum: 7d, maximum: 3650d }   # what the control API may set (CONTROL-API-DESIGN §15.8)
 ```
 
 Compared with the earlier sketch:

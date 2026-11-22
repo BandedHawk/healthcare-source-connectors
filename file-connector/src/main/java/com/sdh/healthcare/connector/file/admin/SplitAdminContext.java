@@ -9,6 +9,7 @@ package com.sdh.healthcare.connector.file.admin;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage.StorageRef;
 import com.sdh.healthcare.connector.contract.message.Lineage;
+import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.audit.TelemetryReadAudit;
 import com.sdh.healthcare.connector.core.checkpoint.CheckpointCodec;
 import com.sdh.healthcare.connector.core.checkpoint.HoldReleases;
@@ -35,16 +36,18 @@ import com.sdh.healthcare.connector.reader.QueueReader;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.PartWay;
+import com.sdh.healthcare.connector.stage.PurgeRequests;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.RetentionPolicy;
 import com.sdh.healthcare.connector.stage.StageKeys;
 import com.sdh.healthcare.connector.stage.StageReleases;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
+import com.sdh.healthcare.connector.stage.admin.DataAdmin;
 import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
-import com.sdh.healthcare.connector.stage.admin.KeyAdmin;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
@@ -67,12 +70,14 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * the database connection is read-only (design §11.4). Only the commands
  * that change the stage's tables ({@code decline}, {@code reopen},
  * {@code correct}, {@code retry}, {@code release}, {@code reprocess}) write,
- * over a connection of their own.
+ * over a connection of their own, as do the data commands
+ * ({@code retention-set}, {@code purge}, {@code erase}); only {@code erase},
+ * once the stage is drained, drops a table.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class SplitAdminContext implements DrainAdmin, KeyAdmin,
+final class SplitAdminContext implements DrainAdmin, DataAdmin,
         AutoCloseable
 {
 
@@ -350,6 +355,50 @@ final class SplitAdminContext implements DrainAdmin, KeyAdmin,
     public DataSource keyDatabase()
     {
         return database.dataSource();
+    }
+
+    /** {@code split_records}'s retention, within its bounds. */
+    @Override
+    public RetentionPolicy retentionPolicy()
+    {
+        ConnectorProperties.Maintenance maintenance =
+                properties.maintenance();
+        return RetentionPolicy.of(maintenance.retention().records(),
+                Duration.ofDays(1), maintenance.retentionBounds());
+    }
+
+    @Override
+    public PurgeRequests purgeRequests(boolean change)
+    {
+        return PurgeRequests.of((change ? writing : database).dataSource(),
+                properties.stage().registrySchema(), controlState(change));
+    }
+
+    /** {@code split_records}: landing's tables are the landing node's. */
+    @Override
+    public List<DataAdmin.Erasable> erasable()
+    {
+        return List.of(new DataAdmin.Erasable(catalog(), TableIdentifier.of(
+                properties.storage().namespace(),
+                IngestTables.SPLIT_RECORDS)));
+    }
+
+    @Override
+    public DataSource dataToChange()
+    {
+        return writing.dataSource();
+    }
+
+    @Override
+    public KeyMaterial signingKeys() throws Exception
+    {
+        return keys();
+    }
+
+    @Override
+    public AuditTables auditTables()
+    {
+        return new AuditTables(properties.stage().registrySchema());
     }
 
     @Override

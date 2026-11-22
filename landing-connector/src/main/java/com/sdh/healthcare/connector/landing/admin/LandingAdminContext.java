@@ -13,8 +13,10 @@ import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.intake.ResubmitRequests;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.ControlState;
+import com.sdh.healthcare.connector.stage.PurgeRequests;
+import com.sdh.healthcare.connector.stage.RetentionPolicy;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
-import com.sdh.healthcare.connector.stage.admin.KeyAdmin;
+import com.sdh.healthcare.connector.stage.admin.DataAdmin;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -34,12 +36,13 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * to a broker, so the admin needs no broker settings (STAGES.md §15.8.10
  * step 5); only the key commands load the node's keys, to check a KEK
  * rotated to (CONTROL-API-DESIGN.md §11), and the node's maintenance, not
- * the admin, carries out a re-key.
+ * the admin, carries out a re-key or a purge. Only {@code erase}
+ * (CONTROL-API-DESIGN.md §11), once the node is paused, drops its tables.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class LandingAdminContext implements KeyAdmin, AutoCloseable
+final class LandingAdminContext implements DataAdmin, AutoCloseable
 {
 
     /** The node's settings. */
@@ -76,13 +79,12 @@ final class LandingAdminContext implements KeyAdmin, AutoCloseable
     }
 
     /**
-     * The landing node's {@code landed_items}, which must exist.
+     * The landing catalog, built on first use.
      *
-     * @return the table
+     * @return it
      * @throws IllegalArgumentException if no catalog is configured
-     * @throws IllegalStateException    if the table doesn't exist
      */
-    Table landedItems()
+    private Catalog catalog()
     {
         if (catalog == null)
         {
@@ -95,9 +97,21 @@ final class LandingAdminContext implements KeyAdmin, AutoCloseable
             catalog = CatalogUtil.buildIcebergCatalog(
                     properties.storage().catalogName(), settings, null);
         }
+        return catalog;
+    }
+
+    /**
+     * The landing node's {@code landed_items}, which must exist.
+     *
+     * @return the table
+     * @throws IllegalArgumentException if no catalog is configured
+     * @throws IllegalStateException    if the table doesn't exist
+     */
+    Table landedItems()
+    {
         try
         {
-            return catalog.loadTable(TableIdentifier.of(
+            return catalog().loadTable(TableIdentifier.of(
                     properties.storage().namespace(),
                     LandingTables.LANDED_ITEMS));
         }
@@ -141,12 +155,68 @@ final class LandingAdminContext implements KeyAdmin, AutoCloseable
     @Override
     public KeyProvider keyProvider() throws Exception
     {
+        return signingKeys().wrap();
+    }
+
+    /** The node's keys, loaded on first use, as the node loads them. */
+    @Override
+    public KeyMaterial signingKeys() throws Exception
+    {
         if (keys == null)
         {
             keys = KeyMaterial.forLanding(properties.crypto(),
                     KeyMaterial.Providers.DEFAULT);
         }
-        return keys.wrap();
+        return keys;
+    }
+
+    /** {@code landed_items}' retention, within its bounds. */
+    @Override
+    public RetentionPolicy retentionPolicy()
+    {
+        LandingProperties.Maintenance maintenance = properties.maintenance();
+        return RetentionPolicy.of(maintenance.retention().landedItems(),
+                LandingProperties.Maintenance.MIN_RETENTION,
+                maintenance.retentionBounds());
+    }
+
+    @Override
+    public PurgeRequests purgeRequests(boolean change)
+    {
+        return PurgeRequests.of(database.dataSource(),
+                AuditTables.besideLeaseTable(properties.lease().jdbc()
+                        .table()).schema(), controlState(change));
+    }
+
+    /** {@code landed_items} and the ledger. */
+    @Override
+    public List<DataAdmin.Erasable> erasable()
+    {
+        String namespace = properties.storage().namespace();
+        return List.of(new DataAdmin.Erasable(catalog(), TableIdentifier.of(
+                namespace, LandingTables.LANDED_ITEMS)),
+                new DataAdmin.Erasable(catalog(), TableIdentifier.of(
+                        namespace, LandingTables.LEDGER)));
+    }
+
+    @Override
+    public DataSource dataToChange()
+    {
+        return database.dataSource();
+    }
+
+    @Override
+    public AuditTables auditTables()
+    {
+        return AuditTables.besideLeaseTable(properties.lease().jdbc()
+                .table());
+    }
+
+    /** A landing node has no claims: its pause is enough. */
+    @Override
+    public boolean drains()
+    {
+        return false;
     }
 
     /** {@code landed_items}: the ledger holds no keys. */

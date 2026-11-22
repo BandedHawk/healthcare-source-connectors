@@ -25,9 +25,11 @@ import com.sdh.healthcare.connector.record.runtime.StageTables;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.PartWay;
+import com.sdh.healthcare.connector.stage.PurgeRequests;
 import com.sdh.healthcare.connector.stage.RegistryReport;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.RetentionPolicy;
 import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageKeys;
 import com.sdh.healthcare.connector.stage.StageRegistry;
@@ -37,11 +39,12 @@ import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.AuditTarget;
+import com.sdh.healthcare.connector.stage.admin.DataAdmin;
+import com.sdh.healthcare.connector.stage.admin.DataCommands;
 import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
 import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
 import com.sdh.healthcare.connector.stage.admin.DrainCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
-import com.sdh.healthcare.connector.stage.admin.KeyAdmin;
 import com.sdh.healthcare.connector.stage.admin.KeyCommands;
 import com.sdh.healthcare.connector.stage.admin.PatientAdmin;
 import com.sdh.healthcare.connector.stage.admin.PatientsCommand;
@@ -79,7 +82,7 @@ import org.apache.iceberg.Table;
  * @since 0.1.0
  */
 public final class RecordStageAdmin<P extends RecordStageSettings>
-        implements StageAdmin, DrainAdmin, PatientAdmin, KeyAdmin,
+        implements StageAdmin, DrainAdmin, PatientAdmin, DataAdmin,
         AutoCloseable
 {
 
@@ -175,6 +178,7 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
                         new PatientsCommand<>()));
         commands.addAll(FailureCommands.<RecordStageAdmin<P>>all());
         commands.addAll(KeyCommands.<RecordStageAdmin<P>>all());
+        commands.addAll(DataCommands.<RecordStageAdmin<P>>all());
         return List.copyOf(commands);
     }
 
@@ -399,6 +403,48 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
     public DataSource keyDatabase()
     {
         return database.dataSource();
+    }
+
+    /** The sink's retention, within the bounds its settings give. */
+    @Override
+    public RetentionPolicy retentionPolicy()
+    {
+        RecordStageSettings.Maintenance maintenance = settings.maintenance();
+        return RetentionPolicy.of(maintenance.retention(),
+                Duration.ofDays(1), maintenance.retentionBounds());
+    }
+
+    @Override
+    public PurgeRequests purgeRequests(boolean change)
+    {
+        return PurgeRequests.of((change ? writing : database).dataSource(),
+                settings.stage().registrySchema(), controlState(change));
+    }
+
+    /** The sink: the source is the stage before's. */
+    @Override
+    public List<DataAdmin.Erasable> erasable()
+    {
+        return List.of(new DataAdmin.Erasable(tables().sinkCatalog(),
+                tables().sinkId()));
+    }
+
+    @Override
+    public DataSource dataToChange()
+    {
+        return writing.dataSource();
+    }
+
+    @Override
+    public KeyMaterial signingKeys() throws Exception
+    {
+        return keys();
+    }
+
+    @Override
+    public AuditTables auditTables()
+    {
+        return new AuditTables(settings.stage().registrySchema());
     }
 
     @Override

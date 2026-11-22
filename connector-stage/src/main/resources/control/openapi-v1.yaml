@@ -222,6 +222,138 @@ paths:
       responses:
         "202": {$ref: "#/components/responses/Accepted"}
         default: {$ref: "#/components/responses/Problem"}
+  /retention:
+    get:
+      operationId: retention
+      summary: How long the stage keeps its rows, and the bounds
+      description: >-
+        The retention the stage's maintenance applies (`days`, or
+        `forever`), whether an operator set it (by whom and when) or it is
+        the setting's (`settingDays`), and the bounds it may be set within
+        (`minimumDays`, `maximumDays`; no maximum allows forever). One the
+        state can't give is never applied: maintenance then keeps every
+        row that run. Permission `data.admin`.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+    put:
+      operationId: setRetention
+      summary: Sets how long the stage keeps its rows
+      description: >-
+        Takes effect at the stage's next maintenance run, which then
+        removes rows older than it: they can't be brought back. Refused
+        `400` outside the bounds `sdh.maintenance.retention-bounds` gives
+        and below the stage's own floor (1 day; 7 days for landed items),
+        so a mistake can't remove what a law or contract says to keep. Give
+        `days` or `forever`. Permission `data.admin`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  properties:
+                    days: {type: integer, minimum: 1, maximum: 36525}
+                    forever: {type: boolean}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /purges:
+    get:
+      operationId: purges
+      summary: The stage's latest item purges, newest first
+      description: >-
+        Each purge asked for: its item, who asked, when and under which
+        ticket, where it stands, and the files and rows it has removed.
+        Kept once it ends, as the record the item was purged. Permission
+        `data.admin`.
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 20}
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /items/{itemId}/purge:
+    post:
+      operationId: purgeItem
+      summary: Removes an item's rows from every table the stage writes
+      description: >-
+        Needs four eyes and a ticket: answered `202` with its record
+        awaiting approval, and run once another data admin approves it.
+        The run asks the stage's maintenance, on the pod holding its
+        duties, to rewrite each data file holding a row of the item
+        without it (4 GiB a table each maintenance run), each table's in
+        one commit, and the files replaced are deleted; then the item's
+        corrections, which hold a document's content, are deleted. Its
+        failures are kept: they hold no document values. It is done once
+        no table holds a row of the item; the record follows it until
+        then, and `/purges` shows its progress. The landing node's ledger,
+        which holds no PHI, is kept. Copies delivered out of the pipeline
+        are the receiver's to purge. Ask each stage the item passed
+        through. Needs table maintenance enabled. Permission `data.admin`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+        - {$ref: "#/components/parameters/itemIdPath"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [ticket]
+                  properties:
+                    ticket:
+                      type: string
+                      description: The change or incident it is for.
+                      pattern: "^[A-Za-z0-9._:/-]{1,64}$"
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
+  /erase:
+    post:
+      operationId: erase
+      summary: Erases everything the stage keeps, at the end of a contract
+      description: >-
+        Needs four eyes and a ticket: answered `202` with its record
+        awaiting approval, and run once another data admin approves it.
+        Refused `400` unless the stage is paused and, for a stage that
+        drains, paused long enough to have settled with no live claim.
+        The run marks the stage erased, so its pods refuse to start; drops
+        every table it writes, with its data files, and removes what is
+        left under each table's location where the store can list; and
+        deletes its database rows that hold wrapped keys. The audit
+        journal is kept: export it first (`/audit/events`). Its result is
+        an erasure certificate, a JWS signed with the stage's key (type
+        `sdh-erasure+jwt`), naming the tables, objects and rows removed,
+        the KEKs and signing key for the key custodian to destroy, and the
+        journal's last heads. Destroying the KEKs is the custodian's act,
+        in the KMS. Can't be undone. Permission `data.admin`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [ticket]
+                  properties:
+                    ticket:
+                      type: string
+                      description: The change or incident it is for.
+                      pattern: "^[A-Za-z0-9._:/-]{1,64}$"
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
   /pause:
     post:
       operationId: pause

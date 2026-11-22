@@ -455,13 +455,34 @@ with who and the reason, and each pod records when it paused and resumed (`stage
 
 - **Retention** is off by default; each table keeps rows forever until a period is set (DESIGN §8.4, §5.3.13). The
   security official sets it from state law and contracts. Retention deletes whole days and their files, audited.
+  - Before real PHI, set the bounds a law or contract allows on every stage:
+    `sdh.maintenance.retention-bounds.minimum` and `.maximum` (a maximum forbids keeping rows forever). A setting
+    outside them refuses startup.
+  - A data admin (`data.admin`) reads it with `GET /retention` and sets it with `PUT /retention` (`days`, or
+    `forever`), per stage, within the bounds. It takes effect at the stage's next maintenance run, which removes
+    older rows for good: check `days` against the contract before sending. Audited with `sdh.retention`.
+- **Purging one item** (an individual's request the covered entity has granted, or data sent in error):
+  1. Find the item's ID (§4.1) and open a ticket.
+  2. At each stage the item passed through, landing included, a data admin asks
+     `POST /items/{itemId}/purge` with the ticket and a reason; a second data admin approves it (§5's flow).
+  3. The stage's maintenance rewrites each file holding the item's rows without them and deletes the old files,
+     then deletes its corrections. `GET /purges` shows each purge's state; the operation's record ends `done`
+     only once no table holds a row of the item, audited as `data.purged`.
+  4. Kept: the item's failures (no document values), the landing ledger (hashes and sizes), the registry's IDs and
+     the audit journal. Copies already delivered (a FHIR server, a reader's store) are the receiver's to purge.
 - **Audit journal:** §3.3.
 - **End of contract, or a pipeline retired:**
   1. Export what the covered entity must get back, through its readers.
   2. `audit-export` everything, and give the archive to the covered entity's security official.
-  3. The key custodians schedule deletion of the pipeline's KEKs and signing keys (two people). Everything the
-     pipeline stored, backups included, becomes unreadable: a cryptographic erase.
-  4. The platform administrator deletes the buckets, the Postgres schemas and the topics, and records the
+  3. Pause every stage (§7.1), and drain those that drain. Then, at each stage, a data admin asks `POST /erase`
+     with the ticket and a reason, and a second approves it. It is refused until the stage is paused and settled.
+     The stage's tables are dropped with their files, its database rows with wrapped keys are deleted, and its
+     pods refuse to start from then on. Keep the result: an erasure certificate, a JWS signed with the stage's
+     key (check it with its public key), listing the tables, objects and rows removed, the KEKs and signing key,
+     and the journal's last heads.
+  4. The key custodians schedule deletion of the KEKs and signing keys each certificate names (two people).
+     Everything the pipeline stored, backups included, becomes unreadable: a cryptographic erase.
+  5. The platform administrator deletes the buckets, the Postgres schemas and the topics, and records the
      provider's media destruction terms (NIST SP 800-88).
 - **Operator key pairs** are revoked when a person leaves: the security official removes the fingerprint from the
   register, and sealed files on that person's workstation are destroyed.
