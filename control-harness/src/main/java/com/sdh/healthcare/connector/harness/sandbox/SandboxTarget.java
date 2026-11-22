@@ -14,6 +14,9 @@ import com.sdh.healthcare.connector.harness.Harness;
 import com.sdh.healthcare.connector.harness.Reply;
 import com.sdh.healthcare.connector.harness.Target;
 import com.sdh.healthcare.connector.harness.TestIssuer;
+import com.sdh.healthcare.connector.harness.kube.Kubectl;
+import com.sdh.healthcare.connector.harness.kube.PortForward;
+import com.sdh.healthcare.connector.harness.kube.Workers;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -78,14 +81,14 @@ public final class SandboxTarget implements Target
             Dependency.STORE, List.of("seaweedfs-0"),
             Dependency.KMS, List.of("vault-0"));
 
-    /** How long workers may take to be ready again. */
-    static final Duration READY = Duration.ofMinutes(5);
-
     /** Reads the cluster's answers. */
     private static final ObjectMapper JSON = new ObjectMapper();
 
     /** The cluster. */
     private final Kubectl kubectl;
+
+    /** The stages' worker pods. */
+    private final Workers workers;
 
     /** The sandbox's state directory. */
     private final Path state;
@@ -120,7 +123,8 @@ public final class SandboxTarget implements Target
     public SandboxTarget(Path state, String profile) throws Exception
     {
         this.state = state;
-        kubectl = new Kubectl(profile);
+        kubectl = Kubectl.minikube(profile);
+        workers = new Workers(kubectl, NAMESPACE, WORKERS);
         Path keys = state.resolve("keys");
         issuer = TestIssuer.signingWith(keys.resolve(PIPELINE
                 + "-issuer.pem"), keys.resolve(PIPELINE + "-issuer-jwks.json"));
@@ -350,104 +354,16 @@ public final class SandboxTarget implements Target
         throw new IllegalArgumentException("No pause for " + id);
     }
 
-    /**
-     * Deletes the stage's worker pods, gracefully, as a rollout stops
-     * them, and waits for their replacement.
-     */
     @Override
     public boolean restartWorkers(String stage) throws Exception
     {
-        Set<String> before = pods(stage);
-        kubectl.kubectl("-n", NAMESPACE, "delete", "pod", "-l", "app="
-                + WORKERS.get(stage), "--wait=true", "--timeout=180s");
-        return replaced(stage, before);
+        return workers.restart(stage);
     }
 
     @Override
     public void kill(String stage) throws Exception
     {
-        Set<String> before = pods(stage);
-        kubectl.kubectl("-n", NAMESPACE, "delete", "pod", "-l", "app="
-                + WORKERS.get(stage), "--grace-period=0", "--force",
-                "--wait=false");
-        if (!replaced(stage, before))
-        {
-            throw new IllegalStateException(stage + "'s workers didn't start"
-                    + " again after being killed");
-        }
-    }
-
-    /**
-     * A stage's worker pods.
-     *
-     * @param stage the stage
-     * @return their names
-     * @throws IOException if they can't be listed
-     */
-    private Set<String> pods(String stage) throws IOException
-    {
-        Set<String> names = new HashSet<>();
-        for (JsonNode pod : workers(stage))
-        {
-            names.add(pod.path("metadata").path("name").asText());
-        }
-        return names;
-    }
-
-    /**
-     * A stage's worker pods, as the cluster describes them.
-     *
-     * @param stage the stage
-     * @return them
-     * @throws IOException if they can't be listed
-     */
-    private JsonNode workers(String stage) throws IOException
-    {
-        return JSON.readTree(kubectl.kubectl("-n", NAMESPACE, "get", "pods",
-                "-l", "app=" + WORKERS.get(stage), "-o", "json"))
-                .path("items");
-    }
-
-    /**
-     * Waits until a new worker pod is ready, or has refused to start.
-     *
-     * @param stage  the stage
-     * @param before the pods that were there
-     * @return true once a new pod is ready; false if one exited instead
-     * @throws Exception if neither happens in time
-     */
-    private boolean replaced(String stage, Set<String> before)
-            throws Exception
-    {
-        long until = System.nanoTime() + READY.toNanos();
-        while (System.nanoTime() < until)
-        {
-            for (JsonNode pod : workers(stage))
-            {
-                if (before.contains(pod.path("metadata").path("name")
-                        .asText()) || pod.path("metadata").has(
-                                "deletionTimestamp"))
-                {
-                    continue;
-                }
-                for (JsonNode container : pod.path("status")
-                        .path("containerStatuses"))
-                {
-                    if (container.path("ready").asBoolean())
-                    {
-                        return true;
-                    }
-                    if (container.path("restartCount").asInt() > 0
-                            || container.path("state").has("terminated"))
-                    {
-                        return false;
-                    }
-                }
-            }
-            Thread.sleep(3000);
-        }
-        throw new IllegalStateException(stage + "'s workers weren't ready,"
-                + " nor stopped, in " + READY);
+        workers.kill(stage);
     }
 
     @Override

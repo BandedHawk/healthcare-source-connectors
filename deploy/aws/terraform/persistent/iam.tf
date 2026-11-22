@@ -20,22 +20,26 @@ locals {
   kek_arn    = { for k, v in aws_kms_key.kek : k => v.arn }
   sign_arn   = { for k, v in aws_kms_key.signing : k => v.arn }
 
-  # What each stage reads and writes (docs/AWS-POC.md §7), for every pipeline.
+  # What each stage reads and writes (docs/AWS-POC.md §7), for every pipeline, and for the control harness's
+  # pipeline (main.tf, harness_keks), whose stages have the same roles (compute: aws_eks_pod_identity_association
+  # .harness): each stage its pipeline's KEKs, the harness's second ones too, and its own signing key.
   stage_access = {
     landing = {
       rw_buckets = ["intake", "bronze"], ro_buckets = []
-      keks       = [for p in var.pipelines : "${p}-landed-items"]
-      signing    = [for p in var.pipelines : "${p}-landing-signing"]
+      keks = concat([for p in var.pipelines : "${p}-landed-items"],
+      ["harness-landed-items", "harness-landed-items-2"])
+      signing = concat([for p in var.pipelines : "${p}-landing-signing"], ["harness-landing-signing"])
     }
     splitter = {
       rw_buckets = ["silver"], ro_buckets = ["bronze"]
-      keks       = flatten([for p in var.pipelines : ["${p}-landed-items", "${p}-records"]])
-      signing    = [for p in var.pipelines : "${p}-splitter-signing"]
+      keks = concat(flatten([for p in var.pipelines : ["${p}-landed-items", "${p}-records"]]),
+      ["harness-landed-items", "harness-landed-items-2", "harness-records", "harness-records-2"])
+      signing = concat([for p in var.pipelines : "${p}-splitter-signing"], ["harness-splitter-signing"])
     }
     convert = {
       rw_buckets = ["silver"], ro_buckets = []
-      keks       = [for p in var.pipelines : "${p}-records"]
-      signing    = [for p in var.pipelines : "${p}-convert-signing"]
+      keks       = concat([for p in var.pipelines : "${p}-records"], ["harness-records", "harness-records-2"])
+      signing    = concat([for p in var.pipelines : "${p}-convert-signing"], ["harness-convert-signing"])
     }
     transform = {
       rw_buckets = ["gold"], ro_buckets = ["silver"]

@@ -4,7 +4,7 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.harness.sandbox;
+package com.sdh.healthcare.connector.harness.kube;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -20,31 +21,62 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Runs {@code kubectl} and {@code minikube ssh} against the sandbox's
- * cluster, as {@code scripts/sandbox.sh} does: through {@code minikube -p
- * <profile> kubectl --}, with {@code MINIKUBE_HOME} and {@code KUBECONFIG}
- * from the environment ({@code scripts/harness.sh} sets them).
+ * Runs {@code kubectl} against a cluster: the sandbox's, through {@code
+ * minikube -p <profile> kubectl --} as {@code scripts/sandbox.sh} does
+ * (with {@code MINIKUBE_HOME} and {@code KUBECONFIG} from the environment,
+ * which {@code scripts/harness.sh} sets), and {@code minikube ssh} on its
+ * nodes; or the AWS PoC's, with its kubeconfig, as {@code deploy/aws/poc.sh}
+ * does.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class Kubectl
+public final class Kubectl
 {
 
     /** How long a command may take, unless told otherwise. */
-    static final Duration COMMAND = Duration.ofMinutes(2);
+    public static final Duration COMMAND = Duration.ofMinutes(2);
 
-    /** The cluster's minikube profile. */
+    /** The command line that every {@code kubectl} command starts with. */
+    private final List<String> prefix;
+
+    /** The cluster's minikube profile; null for a cluster of another kind. */
     private final String profile;
 
     /**
      * For a cluster.
      *
-     * @param profile its minikube profile
+     * @param prefix  how {@code kubectl} is run for it
+     * @param profile its minikube profile; null if it has none
      */
-    Kubectl(String profile)
+    private Kubectl(List<String> prefix, String profile)
     {
+        this.prefix = List.copyOf(prefix);
         this.profile = profile;
+    }
+
+    /**
+     * For a minikube cluster.
+     *
+     * @param profile its profile
+     * @return the runner
+     */
+    public static Kubectl minikube(String profile)
+    {
+        return new Kubectl(List.of("minikube", "-p", profile, "kubectl", "--"),
+                profile);
+    }
+
+    /**
+     * For the cluster a kubeconfig names, such as the AWS PoC's.
+     *
+     * @param kubeconfig the file
+     * @return the runner
+     */
+    public static Kubectl kubeconfig(Path kubeconfig)
+    {
+        return new Kubectl(List.of("kubectl", "--kubeconfig",
+                kubeconfig.toString()), null);
     }
 
     /**
@@ -54,7 +86,7 @@ final class Kubectl
      * @param output what it wrote to standard output
      * @param errors what it wrote to standard error
      */
-    record Result(int exit, byte[] output, String errors)
+    public record Result(int exit, byte[] output, String errors)
     {
 
         /**
@@ -62,7 +94,7 @@ final class Kubectl
          *
          * @return the text
          */
-        String text()
+        public String text()
         {
             return new String(output, UTF_8);
         }
@@ -72,7 +104,7 @@ final class Kubectl
          *
          * @return true if it exited with 0
          */
-        boolean ok()
+        public boolean ok()
         {
             return exit == 0;
         }
@@ -84,10 +116,9 @@ final class Kubectl
      * @param args its arguments
      * @return the command line
      */
-    List<String> command(String... args)
+    public List<String> command(String... args)
     {
-        List<String> command = new ArrayList<>(List.of("minikube", "-p",
-                profile, "kubectl", "--"));
+        List<String> command = new ArrayList<>(prefix);
         command.addAll(List.of(args));
         return command;
     }
@@ -99,9 +130,23 @@ final class Kubectl
      * @return its output
      * @throws IOException if it fails
      */
-    String kubectl(String... args) throws IOException
+    public String kubectl(String... args) throws IOException
     {
-        Result result = run(command(args), null, COMMAND);
+        return given(null, args);
+    }
+
+    /**
+     * Runs {@code kubectl} with input, such as {@code apply -f -}, and
+     * fails if it does.
+     *
+     * @param input its standard input
+     * @param args  its arguments
+     * @return its output
+     * @throws IOException if it fails
+     */
+    public String given(byte[] input, String... args) throws IOException
+    {
+        Result result = run(command(args), input, COMMAND);
         if (!result.ok())
         {
             throw new IOException("kubectl " + args[0] + " failed ("
@@ -111,16 +156,20 @@ final class Kubectl
     }
 
     /**
-     * Runs a command on a node, through {@code minikube ssh}, and fails if
-     * it does.
+     * Runs a command on a minikube node, through {@code minikube ssh}, and
+     * fails if it does.
      *
      * @param node    the node, by its Kubernetes name
      * @param command the command, as the node's shell takes it
      * @return its output
      * @throws IOException if it fails
      */
-    String ssh(String node, String command) throws IOException
+    public String ssh(String node, String command) throws IOException
     {
+        if (profile == null)
+        {
+            throw new IllegalStateException("Not a minikube cluster");
+        }
         Result result = run(List.of("minikube", "-p", profile, "ssh", "-n",
                 node, "--", command), null, COMMAND);
         if (!result.ok())
@@ -140,8 +189,8 @@ final class Kubectl
      * @return what it did
      * @throws IOException if it can't be run, or doesn't end in time
      */
-    static Result run(List<String> command, byte[] input, Duration timeout)
-            throws IOException
+    public static Result run(List<String> command, byte[] input,
+            Duration timeout) throws IOException
     {
         Process process = new ProcessBuilder(command).start();
         CompletableFuture<byte[]> output = drain(process.getInputStream());

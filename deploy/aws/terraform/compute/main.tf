@@ -248,6 +248,16 @@ resource "aws_eks_pod_identity_association" "stage" {
   role_arn        = local.p.stage_role_arns[each.key]
 }
 
+# The control harness's pipeline (scripts/harness.sh aws): its namespace's service accounts get the same stage
+# roles, which also hold its own keys (persistent: harness_keks). Its control APIs run as the same accounts.
+resource "aws_eks_pod_identity_association" "harness" {
+  for_each        = toset(["landing", "splitter", "convert"])
+  cluster_name    = aws_eks_cluster.poc.name
+  namespace       = "sdh-harness"
+  service_account = each.key
+  role_arn        = local.p.stage_role_arns[each.key]
+}
+
 # The gold check's reader (deploy/aws/k8s/pipeline/gold-check.sh): read-only, in sdh-fhir. Only once the persistent
 # layer has the role (it was added after the first apply).
 resource "aws_eks_pod_identity_association" "gold_reader" {

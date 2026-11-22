@@ -11,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.sdh.healthcare.connector.harness.Reply;
+import com.sdh.healthcare.connector.harness.kube.Kubectl;
 import org.junit.jupiter.api.Test;
 
 /**

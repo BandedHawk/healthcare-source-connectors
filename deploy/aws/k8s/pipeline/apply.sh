@@ -20,7 +20,7 @@
 # (consumer), each private key encrypted with a passphrase from $SDH_POC_STATE/secrets.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../../.." && pwd)"
 TRANSFORMER="${SDH_TRANSFORMER:-$(cd "$ROOT/.." && pwd)/healthcare-data-transformer}"
 STATE="${SDH_POC_STATE:-$HOME/.local/state/sdh-poc}"
@@ -305,4 +305,7 @@ deploy_pipeline() {
   say "  intake: aws s3 cp <file> s3://$INTAKE_BUCKET/$p/"
 }
 
-for p in $PIPELINES; do deploy_pipeline "$p"; done
+# Sourced by ../harness/apply.sh for the helpers above; run, it deploys the pipelines.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  for p in $PIPELINES; do deploy_pipeline "$p"; done
+fi

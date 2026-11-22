@@ -1,5 +1,5 @@
 # The persistent layer of the AWS proof of concept (docs/AWS-POC.md). It is created once and kept while the PoC
-# is shut down, and it costs about $11 a month then:
+# is shut down, and it costs about $18 a month then (the control harness's keys $7 of it):
 #   - the S3 buckets;
 #   - the KMS keys;
 #   - the ECR repositories;
@@ -44,9 +44,19 @@ data "aws_route_tables" "default" { vpc_id = data.aws_vpc.default.id }
 # The default key policy (the account's IAM policies decide who uses a key) is kept on purpose. The deployer's own
 # policy denies it decrypting or signing with any of them.
 
+# The control harness's own pipeline, harness (scripts/harness.sh aws, docs/CONTROL-API-DESIGN.md §15.12), has
+# keys of its own, so that its scenarios (which rotate, re-key and erase) never touch ccda-push's: a KEK for its
+# landed items and one for its records, a second of each for its keys scenario to rotate to, and a signing key for
+# each of its three stages. It has no transform stage, so no fhir KEK. About $7 a month while kept; like the
+# others, they can't be deleted at once (30 days' notice). It isn't one of var.pipelines, which would make keys
+# it doesn't use.
 locals {
-  keks     = flatten([for p in var.pipelines : [for k in ["landed-items", "records", "fhir"] : "${p}-${k}"]])
-  signings = flatten([for p in var.pipelines : [for s in ["landing", "splitter", "convert", "transform"] : "${p}-${s}-signing"]])
+  harness_keks     = ["harness-landed-items", "harness-records", "harness-landed-items-2", "harness-records-2"]
+  harness_signings = ["harness-landing-signing", "harness-splitter-signing", "harness-convert-signing"]
+  keks = concat(flatten([for p in var.pipelines : [for k in ["landed-items", "records", "fhir"] : "${p}-${k}"]]),
+  local.harness_keks)
+  signings = concat(flatten([for p in var.pipelines : [for s in ["landing", "splitter", "convert", "transform"] :
+  "${p}-${s}-signing"]]), local.harness_signings)
 }
 
 resource "aws_kms_key" "kek" {

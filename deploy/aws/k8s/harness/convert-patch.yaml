@@ -1,0 +1,24 @@
+# The convert README's Deployment for the harness pipeline on AWS: one pod, not scaled, so that a scenario knows
+# which pod it stops; with its own duties (no duties pod), on the stage's Pod Identity role.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: convert }
+spec:
+  replicas: 1
+  template:
+    spec:
+      serviceAccountName: convert
+      automountServiceAccountToken: false
+      tolerations:
+        - { key: sdh-poc/burst, operator: Equal, value: "true", effect: NoSchedule }
+      terminationGracePeriodSeconds: 90
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference: { matchExpressions: [{ key: sdh-poc/pool, operator: In, values: [base] }] }
+      containers:
+        - name: convert-stage
+          resources:
+            requests: { cpu: 250m, memory: 1280Mi }
+            limits: { memory: 1280Mi }

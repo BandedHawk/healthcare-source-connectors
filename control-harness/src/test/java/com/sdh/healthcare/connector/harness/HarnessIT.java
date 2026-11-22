@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.harness;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.sdh.healthcare.connector.harness.aws.AwsTarget;
 import com.sdh.healthcare.connector.harness.sandbox.SandboxTarget;
 import com.sdh.healthcare.connector.harness.scenario.Scenarios;
 import com.sdh.healthcare.connector.harness.testcontainers.TestcontainersTarget;
@@ -19,9 +20,9 @@ import org.junit.jupiter.api.Test;
  * The harness (CONTROL-API-DESIGN.md §14): every scenario, or those
  * {@code sdh.harness.scenarios} names, against the target {@code
  * sdh.harness.target} names: {@code testcontainers} (the default), the
- * pipeline on Testcontainers, or {@code sandbox}, the sandbox's harness
- * pipeline. Run by {@code scripts/harness.sh}, which builds or deploys the
- * target first.
+ * pipeline on Testcontainers, {@code sandbox}, the sandbox's harness
+ * pipeline, or {@code aws}, the AWS PoC's. Run by {@code
+ * scripts/harness.sh}, which builds or deploys the target first.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -71,8 +72,11 @@ class HarnessIT
             case "sandbox" -> new SandboxTarget(Path.of(System.getProperty(
                     "sdh.harness.state")), System.getProperty(
                             "sdh.harness.profile", "sdh-demo"));
+            case "aws" -> new AwsTarget(Path.of(System.getProperty(
+                    "sdh.harness.state")), System.getProperty(
+                            "sdh.harness.profile", "claude-poc"));
             default -> throw new IllegalArgumentException("No target "
-                    + name + "; they are testcontainers and sandbox");
+                    + name + "; they are testcontainers, sandbox and aws");
         };
     }
 }

@@ -110,6 +110,10 @@
   KMS signing caps the pipeline at ~41 documents/s. Split slows within a pod as it runs (16 to 6 items/min in 40
   minutes after a restart); the cause is step 1's first job. The run also found the stages' metrics blocked by
   the network policies (now open on 4318) and two pods' metrics colliding in one series (now one per pod).
+- **Control harness, AWS, 2026-11-22** (`poc.sh up --hours 3 --on-demand-burst`, `scripts/harness.sh aws`, then
+  `down`; docs/CONTROL-API-DESIGN.md §15.12): the ten control API scenarios against the harness pipeline,
+  ccda-push held meanwhile, all passed in 15 minutes; `harness-down` removed what it stored and gave ccda-push
+  back.
 - The prices are approximate us-east-2 on-demand list prices, not checked against the Pricing API.
 
 **Decided with the user, 2026-11-12:**
@@ -155,7 +159,7 @@
 
 | Layer | What | Lifetime | Cost |
 |---|---|---|---|
-| **Persistent** (`deploy/aws/terraform/persistent`) | KMS keys, S3 buckets, ECR, the Postgres and Kafka EBS volumes and their snapshots, IAM roles, the S3 gateway endpoint, the auto-down state machine | Created once by `poc.sh bootstrap`, never destroyed (keys, buckets and volumes have `prevent_destroy`) | **About $11/month** (§3.2) |
+| **Persistent** (`deploy/aws/terraform/persistent`) | KMS keys, S3 buckets, ECR, the Postgres and Kafka EBS volumes and their snapshots, IAM roles, the S3 gateway endpoint, the auto-down state machine | Created once by `poc.sh bootstrap`, never destroyed (keys, buckets and volumes have `prevent_destroy`) | **About $18/month** (§3.2) |
 | **Compute** (`deploy/aws/terraform/compute`, plus the Kubernetes objects `poc.sh` applies) | The EKS cluster, its node groups, add-ons and Pod Identity associations, and everything running in it | Created by `poc.sh up`, destroyed by `poc.sh down` or by the guard | **About $0.25/hour** while it exists, $0 after |
 
 Why it works this way:
@@ -206,19 +210,20 @@ Why it works this way:
 | | Node root volumes | $0.005 |
 | | **Total** | **≈ $0.25/hour, ≈ $2 per 8-hour session** |
 | | Spot burst nodes, only when KEDA scales out | ≈ $0.02–0.03/hour each |
-| Per month, always | 8 KMS keys (3 KEKs, 4 signing keys, 1 infra key) | $8 |
+| Per month, always | 15 KMS keys (3 KEKs, 4 signing keys, 1 infra key; the control harness's 4 KEKs and 3 signing keys, since 2026-11-22) | $15 |
 | | 2 × 10 GiB gp3 state volumes | $1.60 |
 | | Snapshots (incremental, last 3 each) | < $0.50 |
 | | S3, ECR and Terraform state at this volume | < $1 |
-| | **Total** | **≈ $11/month** |
+| | **Total** | **≈ $18/month** |
 
 | Usage | Monthly total |
 |---|---|
-| 40 hours a month | ≈ $21 |
-| 8 hours every working day (160 h) | ≈ $51 |
+| 40 hours a month | ≈ $28 |
+| 8 hours every working day (160 h) | ≈ $58 |
 | Plus, per long test | ≈ $0.25 an hour |
 
-The budget alarm `sdh-poc-monthly` stays as a backstop: $60/month (8 hours every weekday is about $55), with
+The budget alarm `sdh-poc-monthly` stays as a backstop: $60/month (8 hours every weekday was about $55; with
+the control harness's keys, since 2026-11-22, about $62, so such a month reaches it: unchanged, for now), with
 emails at 50% and 100% of actual spend and at 100% of forecast. A cluster left running would cost about $190 a
 month, so the forecast alert catches it within days. Lowered from $250 on 2026-11-12.
 
@@ -317,6 +322,12 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 | transform | silver: read; gold: read and write | records and fhir KEKs; own signing key |
 
 All four may also read every signing key's public half, and use the infra key through S3 only (SSE-KMS).
+
+The control harness's pipeline, `harness` (CONTROL-API-DESIGN.md §15.12), has keys of its own: landed-items and
+records KEKs, a second of each for its keys scenario to rotate to, and a signing key for each of its three stages
+(`alias/sdh-poc-harness-*`). The landing, splitter and convert roles also hold those, and its namespace's service
+accounts (`sdh-harness/landing`, `splitter`, `convert`) are linked to the same roles; its control APIs run as them.
+It has no transform stage.
 Database passwords and the stages' key files are Kubernetes Secrets, made by `poc.sh` from its state directory at
 each `up`, not Secrets Manager ($0.40 per secret per month).
 

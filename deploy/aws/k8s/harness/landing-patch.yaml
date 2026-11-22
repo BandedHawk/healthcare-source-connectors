@@ -1,0 +1,31 @@
+# The landing README's Deployment for the harness pipeline on AWS: a push intake, one pod and no standby, as in
+# the sandbox's harness pipeline, so that the failover scenario knows which pod it kills. Kubernetes starts
+# another when it dies; that one lands once the old pod's lease has expired. Never more than one.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: landing }
+spec:
+  replicas: 1
+  strategy: { type: Recreate, rollingUpdate: null }
+  template:
+    spec:
+      serviceAccountName: landing        # its Pod Identity role (terraform/compute: ...association.harness)
+      automountServiceAccountToken: false
+      tolerations:
+        - { key: sdh-poc/burst, operator: Equal, value: "true", effect: NoSchedule }
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference: { matchExpressions: [{ key: sdh-poc/pool, operator: In, values: [base] }] }
+      volumes:
+        - { name: intake, $patch: delete }     # pushed, not picked up from a directory
+      containers:
+        - name: landing-connector
+          ports: [{ name: push, containerPort: 8443 }]
+          readinessProbe: { tcpSocket: { port: 8443 }, periodSeconds: 5 }
+          resources:
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { mountPath: /data/intake, $patch: delete }

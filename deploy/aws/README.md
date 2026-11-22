@@ -34,6 +34,7 @@ sudo apt-get update && sudo apt-get install -y terraform kubectl
 | `deploy/aws/poc.sh down --no-drain` | Same, but without waiting for the pipeline to catch up. |
 | `deploy/aws/poc.sh status` | Shows the cluster, its node groups, the shutdown time, today's hours and the month's cost. |
 | `deploy/aws/poc.sh reset` | With a session up: deletes all pipeline data (database, topics, offsets, buckets, intake) and deploys the pipeline again on nothing. Asks first; `--yes` doesn't. |
+| `deploy/aws/poc.sh harness-up` / `harness-down` | With a session up: holds the pipeline and deploys the control harness's own, `harness` (namespace `sdh-harness`), or removes it with everything it stored and starts the pipeline again. `scripts/harness.sh aws` runs both around the scenarios (docs/CONTROL-API-DESIGN.md §15.12). |
 | `deploy/aws/poc.sh up --on-demand-burst` | Burst nodes on demand instead of Spot, for a performance test. |
 | `deploy/aws/poc.sh up --long-test "landing failover" --hours 12` | Goes beyond the 8-hour day, for resilience or performance tests only (at most 24 h per session). |
 | `deploy/aws/check-config.sh` | Checks, offline, that the deploy settings and the load test still hold the fixes found on AWS (below). Run it before `up` and after changing anything under `deploy/aws`. |
@@ -162,7 +163,7 @@ somewhere safe.
 
 ## What's never removed automatically
 
-These stay through `down`, and cost about $11 a month in all:
+These stay through `down`, and cost about $18 a month in all (the control harness's keys $7 of it):
 - the KMS keys;
 - the S3 buckets;
 - the ECR images;

@@ -254,6 +254,11 @@ Revision 2026-11-22 (es), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) 
 - `SandboxTarget` reaches the control APIs and the store through port-forwards, pushes from the producer pod, cuts a service off by pausing its containers on their node, and restarts or kills a stage by deleting its pods.
 - New on both levels: the `failover` scenario (each stage's workers killed with items on their way; every item completes, once), and erasure first checks there is something to erase.
 
+Revision 2026-11-22 (et), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.12, step H3 of the control API, asked for by the user ("Build H3"). **The control API's scenarios run on the AWS PoC stack, and pass.**
+- `deploy/aws/poc.sh harness-up` holds the ccda-push pipeline and deploys a throwaway pipeline, `harness`, in `sdh-harness`: one pod a stage, each with its control API from its README, on keys of its own (seven KMS keys, about $7 a month while kept) and the stage roles through Pod Identity. `harness-down` removes it and everything it stored, and gives ccda-push back. `scripts/harness.sh aws [scenario,…]` does both around the run.
+- `AwsTarget` reaches the control APIs through port-forwards, pushes over mTLS, cuts the database and broker off by scaling PgBouncer and Kafka to nothing and S3 and KMS by a network policy, and restarts or kills a stage by deleting its pods. What it shares with `SandboxTarget` is now in the harness's `kube` package.
+- All ten scenarios pass, in 15 minutes; no product change was needed.
+
 Tested by `TestIssuerTest`, `SandboxTargetTest`, and the sandbox's first run: all ten scenarios pass, with no product change needed. The control pods used 250–340 MiB of their 768. Not done: the AWS target (H3), the transform stage, the `hipaa` profile and per-stage Kafka rights in the sandbox.
 
 Revision 2026-11-22 (er), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.10, step H1 of the control API, asked for by the user ("Build H1"). **The control API's scenarios run against a real pipeline on Testcontainers, and pass.**

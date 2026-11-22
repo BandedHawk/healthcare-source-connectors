@@ -3,7 +3,7 @@
 #
 #   scripts/harness.sh testcontainers [scenario,...]   # the pipeline on Testcontainers in the sdh-it VM (H1)
 #   scripts/harness.sh sandbox [scenario,...]          # the minikube sandbox's harness pipeline (H2)
-#   scripts/harness.sh aws [scenario,...]              # the AWS PoC stack (H3, not yet built)
+#   scripts/harness.sh aws [scenario,...]              # the AWS PoC stack's harness pipeline (H3)
 #
 # With no scenarios named, all run, in order: support, access, load, ... (control-harness's Scenarios). The
 # Testcontainers level builds the stages' jars, runs HarnessIT through scripts/it-minikube.sh, and stops the sdh-it
@@ -15,6 +15,13 @@
 # holds one or the other), stops the demo pipelines and deploys the harness pipeline (`sandbox.sh harness-up`),
 # runs HarnessIT from this machine against it, then removes the harness pipeline and starts the demo pipelines
 # again (`harness-down`), and stops the sandbox if it wasn't running before, unless SDH_SANDBOX_STOP=0.
+#
+# The AWS level needs a PoC session up (deploy/aws/poc.sh up; it doesn't start one, since a session costs money)
+# and the images as deploy/aws/build-images.sh last pushed them. It holds the PoC's pipelines and deploys the
+# harness pipeline (`poc.sh harness-up`), runs HarnessIT from this machine against it, through port-forwards,
+# then removes the harness pipeline and starts the pipelines again (`harness-down`). The session is left up:
+# bring it down with `poc.sh down`.
+#
 # Synthetic data only.
 set -euo pipefail
 
@@ -57,8 +64,20 @@ case "$target" in
       "-Dsdh.harness.scenarios=$scenarios")
     ;;
   aws)
-    echo "The aws target isn't built yet (CONTROL-API-DESIGN.md §15, H3)." >&2
-    exit 2
+    poc="$ROOT/deploy/aws/poc.sh"
+    state="${SDH_POC_STATE:-$HOME/.local/state/sdh-poc}"
+    finish() {
+      local status=$?
+      "$poc" harness-down || status=1
+      exit "$status"
+    }
+    trap finish EXIT
+    "$poc" harness-up
+    echo ">> Running the scenarios${scenarios:+: $scenarios}"
+    (cd "$ROOT" && ./mvnw -o -Pit -pl control-harness verify -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false \
+      -Dit.test=HarnessIT -Dfailsafe.failIfNoSpecifiedTests=false -Dsdh.harness.target=aws \
+      "-Dsdh.harness.state=$state" "-Dsdh.harness.profile=${AWS_PROFILE:-claude-poc}" \
+      "-Dsdh.harness.scenarios=$scenarios")
     ;;
   *)
     echo "usage: scripts/harness.sh <testcontainers|sandbox|aws> [scenario,...]" >&2

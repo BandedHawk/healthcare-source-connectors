@@ -12,6 +12,10 @@
 #   poc.sh status                     what's running, when it stops, today's hours, this month's cost
 #   poc.sh reset [--yes]              with a session up: delete every pipeline's data (tables, topics, offsets,
 #                                     registries, leases, intake), then start the pipeline again on nothing
+#   poc.sh harness-up                 with a session up: hold the pipelines and deploy the control harness's own,
+#                                     harness (k8s/harness/apply.sh), for scripts/harness.sh aws
+#   poc.sh harness-down               delete the harness pipeline and everything it stored, and start the
+#                                     pipelines again
 #
 # Every `up` first schedules an automatic shutdown on AWS (EventBridge Scheduler, then the sdh-poc-auto-down
 # state machine). So a session ends on time even if this machine is off or asleep, or the script fails half way.
@@ -425,7 +429,7 @@ cmd_down() {
   close_sessions
   prune_snapshots
   leftovers
-  say "down. Kept: buckets, keys, images, state volumes and snapshots (about \$11 a month)"
+  say "down. Kept: buckets, keys, images, state volumes and snapshots (about \$18 a month)"
 }
 
 # Stops intake, then waits until every stage has caught up: no consumer group has lag. Up to 20 minutes, then it
@@ -580,6 +584,136 @@ SQL
   say "reset: the pipeline runs on empty tables"
 }
 
+# --- The control harness's pipeline -------------------------------------------------------------------------
+# harness (docs/CONTROL-API-DESIGN.md §15.12): disposable, since its scenarios erase it, with keys of its own
+# (terraform/persistent: harness_keks), in namespace sdh-harness. While it runs, the PoC's own pipelines are held
+# (their landing nodes and duties pods scaled to none, KEDA told to hold their stages at none), so that the
+# harness's pods fit the base nodes, and so that its cuts of PgBouncer and Kafka touch nothing else. Their items
+# wait in the bucket intake, Kafka and the registries. Nothing of ccda-push's is deleted.
+HARNESS=harness
+
+# held_workloads <pipeline>: "<namespace> <kind/name> <replicas>" for each workload harness-up holds.
+held_workloads() {
+  local n="sdh-$1" w
+  for w in "$n deploy/landing" "$n deploy/splitter-duties" "$n deploy/convert-duties" \
+           "sdh-fhir deploy/transform-$1-duties"; do
+    kubectl -n "${w% *}" get "${w#* }" >/dev/null 2>&1 || continue
+    echo "$w $(kubectl -n "${w% *}" get "${w#* }" -o jsonpath='{.spec.replicas}')"
+  done
+}
+
+hold_pipelines() {
+  local p w so held="$STATE/harness/held"
+  mkdir -p "$STATE/harness"
+  # An earlier harness-up's record, not yet released, is kept: it has the replicas from before.
+  [[ -s "$held" ]] || for p in $PIPELINES; do held_workloads "$p"; done > "$held"
+  for p in $PIPELINES; do
+    kubectl get ns "sdh-$p" >/dev/null 2>&1 || continue
+    say "Holding pipeline $p while the harness runs"
+    for so in "sdh-$p scaledobject/splitter" "sdh-$p scaledobject/convert" "sdh-fhir scaledobject/transform-$p"; do
+      kubectl -n "${so% *}" annotate "${so#* }" autoscaling.keda.sh/paused-replicas=0 --overwrite >/dev/null \
+        2>&1 || true
+    done
+  done
+  while read -r w; do
+    [[ -n "$w" ]] || continue
+    read -r n name _ <<<"$w"
+    kubectl -n "$n" scale "$name" --replicas=0 >/dev/null
+  done < "$held"
+  for p in $PIPELINES; do
+    kubectl -n "sdh-$p" wait --for=delete pod -l 'app in (landing,splitter,convert,splitter-duties,convert-duties)' \
+      --timeout=300s >/dev/null 2>&1 || die "pipeline $p's pods didn't stop"
+    kubectl -n sdh-fhir wait --for=delete pod -l "app in (transform-$p,transform-$p-duties)" --timeout=300s \
+      >/dev/null 2>&1 || die "pipeline $p's transform pods didn't stop"
+  done
+}
+
+release_pipelines() {
+  local p w so n name replicas held="$STATE/harness/held"
+  for p in $PIPELINES; do
+    for so in "sdh-$p scaledobject/splitter" "sdh-$p scaledobject/convert" "sdh-fhir scaledobject/transform-$p"; do
+      kubectl -n "${so% *}" annotate "${so#* }" autoscaling.keda.sh/paused-replicas- >/dev/null 2>&1 || true
+    done
+  done
+  if [[ -s "$held" ]]; then
+    while read -r n name replicas; do
+      [[ -n "$name" ]] || continue
+      kubectl -n "$n" scale "$name" --replicas="${replicas:-1}" >/dev/null 2>&1 || true
+    done < "$held"
+    rm -f "$held"
+  fi
+  for p in $PIPELINES; do kubectl get ns "sdh-$p" >/dev/null 2>&1 && say "Pipeline $p started again"; done
+  return 0
+}
+
+harness_sql() { printf '%s\n' "$1" | infra exec -i postgres-0 -- psql -q -v ON_ERROR_STOP=1 -U postgres -d sdh; }
+
+# harness_clean: deletes the harness pipeline and everything it stored: its namespace, its tables and registry
+# schemas, its rows in the shared lease and catalog tables, its topics and groups, and its objects (under its own
+# prefixes only). Its keys, roles and state files are kept; harness-up uses them again. Synthetic data only.
+harness_clean() {
+  local x; x="$(prefix "$HARNESS")"
+  kubectl delete ns "sdh-$HARNESS" --ignore-not-found --wait=true --timeout=300s >/dev/null
+  harness_sql "SET client_min_messages TO warning;
+    DROP SCHEMA IF EXISTS landing_$x, split_$x, convert_$x CASCADE;
+    DO \$\$ BEGIN
+      IF to_regclass('public.sdh_lease') IS NOT NULL THEN
+        DELETE FROM public.sdh_lease WHERE name LIKE '%split-$HARNESS%' OR name LIKE '%convert-$HARNESS%';
+      END IF;
+      IF to_regclass('public.iceberg_tables') IS NOT NULL THEN
+        DELETE FROM public.iceberg_tables WHERE table_namespace IN ('$x', '${x}_landing');
+      END IF;
+      IF to_regclass('public.iceberg_namespace_properties') IS NOT NULL THEN
+        DELETE FROM public.iceberg_namespace_properties WHERE namespace IN ('$x', '${x}_landing');
+      END IF;
+    END \$\$;" >/dev/null
+  kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --if-exists \
+    --topic "$HARNESS\\..*" >/dev/null
+  local group
+  for group in "splitter-$HARNESS" "convert-$HARNESS"; do
+    kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --delete --group "$group" \
+      >/dev/null 2>&1 || true
+  done
+  aws s3 rm "s3://sdh-poc-bronze-$ACCOUNT/warehouse/${x}_landing/" --recursive --only-show-errors
+  aws s3 rm "s3://sdh-poc-silver-$ACCOUNT/warehouse/$x/" --recursive --only-show-errors
+}
+
+# Restores what the harness may have left cut off (control-harness AwsTarget): PgBouncer and Kafka stopped.
+harness_services() {
+  infra scale deploy/pgbouncer --replicas=1 >/dev/null
+  infra scale statefulset/kafka --replicas=1 >/dev/null
+  infra rollout status deploy/pgbouncer --timeout=600s >/dev/null || die "PgBouncer didn't start"
+  infra rollout status statefulset/kafka --timeout=600s >/dev/null || die "Kafka didn't start"
+}
+
+cmd_harness_up() {
+  need_tools; state_dir
+  cluster_exists || die "harness-up needs a session: poc.sh up"
+  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
+  harness_services
+  if kubectl get ns "sdh-$HARNESS" >/dev/null 2>&1; then
+    say "The harness pipeline is there from an earlier run: removing it first"
+    harness_clean
+  fi
+  hold_pipelines
+  say "Harness pipeline $HARNESS: topics, database roles, landing schema"
+  PIPELINES="$HARNESS" setup_topics
+  # The pipelines' roles and the harness's, all of them: PgBouncer's list is made whole each time.
+  PIPELINES="$PIPELINES $HARNESS" setup_database
+  harness_sql "CREATE SCHEMA IF NOT EXISTS landing_$(prefix "$HARNESS") AUTHORIZATION sdh_catalog;" >/dev/null
+  "$K8S/harness/apply.sh"
+}
+
+cmd_harness_down() {
+  need_tools; state_dir
+  cluster_exists || { say "no cluster: nothing to remove"; return 0; }
+  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
+  harness_services
+  say "Removing the harness pipeline and what it stored"
+  harness_clean
+  release_pipelines
+}
+
 # --- status --------------------------------------------------------------------------------------------------
 
 cmd_status() {
@@ -614,5 +748,7 @@ case "${1:-}" in
   down)      shift; cmd_down "$@" ;;
   status)    shift; cmd_status "$@" ;;
   reset)     shift; cmd_reset "$@" ;;
-  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  harness-up)   shift; cmd_harness_up "$@" ;;
+  harness-down) shift; cmd_harness_down "$@" ;;
+  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

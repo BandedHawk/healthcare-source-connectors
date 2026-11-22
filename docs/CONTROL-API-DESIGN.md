@@ -400,8 +400,9 @@ depends on neither of the others.
 - **`ControlClient`:** a typed client of the contract, on `java.net.http`, with its own contract check of each
   answer. It is also what the console and the customer's tools can use as a reference.
 - **`TestIssuer`:** signs short-lived JWTs for test principals with chosen roles, and serves their JWKS. In the
-  sandbox it signs with a key kept in the sandbox's state, whose JWKS a pod serves (§15.11), rather than an
-  `sdh-test-issuer` image. It is never part of a customer deployment, and the reference settings don't name it.
+  sandbox and on AWS it signs with a key kept in the level's state, whose JWKS a pod serves (§15.11, §15.12),
+  rather than an `sdh-test-issuer` image. It is never part of a customer deployment, and the reference settings
+  don't name it.
 - **`Unsealer`:** decrypts sealed results with a test principal's private key.
 - **`Target`:** what a scenario runs against:
 
@@ -409,7 +410,7 @@ depends on neither of the others.
   |---|---|---|
   | `TestcontainersTarget` | Kafka (SASL_SSL), Postgres (TLS), SeaweedFS, Vault, the test issuer, and each stage in worker and control modes (from its jar, as built: §15.10) | pausing containers |
   | `SandboxTarget` | the sandbox's harness pipeline: the customer images, each stage's Deployment and control Deployment from its README, through port-forwards (§15.11) | pausing a service's containers on their node, deleting a stage's pods gracefully or by force |
-  | `AwsTarget` | the PoC stack's Deployments, through its internal ingress | the same, and Spot interruption |
+  | `AwsTarget` | the PoC stack's harness pipeline: the same Deployments, on EKS with S3, KMS and Pod Identity, through port-forwards (§15.12) | scaling PgBouncer or Kafka to nothing, a network policy keeping a stage from S3 or KMS, deleting a stage's pods gracefully or by force |
 
 - **Scenarios:** those listed in CONTROL-API.md, each one class, run by any target. Each checks the operation's
   answers, the pipeline's results, and the audit (`audit-verify` clean; every call's event present with its
@@ -435,7 +436,7 @@ depends on neither of the others.
 | C9 | Health, settings, compliance outcome, support bundle. **Built 2026-11-21** (§15.9) | P5 |
 | H1 | The harness with its Testcontainers target, growing with C2–C9. **Built 2026-11-22** (§15.10) | part of P6 |
 | H2 | The sandbox target. **Built 2026-11-22** (§15.11) | P6 |
-| H3 | The AWS target | P6 |
+| H3 | The AWS target. **Built 2026-11-22** (§15.12) | P6 |
 
 ### 15.1 C1, as built
 
@@ -1070,6 +1071,59 @@ depends on neither of the others.
   - One replica of each control API, not two.
   - Not covered: the transform stage (its own repository), the `hipaa` profile (Vault is reached over HTTP here),
     and per-stage Kafka rights (the sandbox's Kafka has no authentication).
+
+### 15.12 H3, as built
+
+- **The AWS PoC's harness pipeline** (`deploy/aws/poc.sh harness-up`, `harness-down`; AWS-POC.md): a pipeline
+  named `harness` in the namespace `sdh-harness`, deployed by `deploy/aws/k8s/harness/apply.sh` with the
+  ccda-push pipeline's functions (`k8s/pipeline/apply.sh`, now sourceable), from the same images and README
+  blocks: one pod a stage, no KEDA, no transform stage, each stage's control Deployment from its README (one
+  replica, the stage's service account so it gets the stage's AWS role), the control settings the sandbox uses,
+  and a `busybox httpd` pod serving the harness issuer's JWKS. The landing node takes pushes over mTLS from a
+  producer certificate; `apply.sh` makes a CA, the producer, landing and control certificates and the issuer key
+  in `$STATE/harness`, and saves S3's address ranges (the region's managed prefix list) for the cuts. Its tables
+  are in schemas of its own (`landing_harness`, `split_harness`, `convert_harness`), its topics `harness.*`, its
+  objects under `warehouse/harness_landing/` and `warehouse/harness/`. ccda-push is held while it runs (KEDA
+  paused at nothing, landing and the duties Deployments scaled to nothing, what they were recorded in
+  `$STATE/harness/held`), for node room and so that cutting PgBouncer or Kafka off touches only the harness;
+  `harness-down` removes the harness pipeline and everything it stored, and gives ccda-push back.
+- **Keys and roles** (Terraform, applied 2026-11-22 with the user's approval): seven KMS keys of the harness's
+  own (`harness-landed-items`, `harness-records`, the `-2` of each for `keys`, and a signing key a stage), about
+  $7 a month while kept; each stage's role may use its harness keys; Pod Identity links the three stage roles
+  to their service accounts in `sdh-harness`. Erasing the harness pipeline never touches ccda-push's keys or
+  data.
+- **`AwsTarget`** (`.aws`), with what both Kubernetes targets share moved to `.kube` (`Kubectl`, `PortForward`,
+  `Workers`): `kubectl` with the PoC's kubeconfig; port-forwards to each control Service and the landing node;
+  pushes from this machine with Java's HTTP client and the producer's certificate, a push that couldn't connect
+  answering status 0; lists the store with the `claude-poc` profile; restarts and kills a stage as on the
+  sandbox. Its cuts:
+  - database: PgBouncer scaled to nothing (its replicas recorded) and back, waiting for its rollout;
+  - broker: Kafka's StatefulSet the same;
+  - store: the namespace's `to-services` policy with S3's ranges taken out of its HTTPS egress;
+  - KMS: that egress narrowed to S3's ranges; restored by applying the policy as it was.
+- **Running it:** `scripts/harness.sh aws [scenario,…]` with the stack up (`poc.sh up`): `harness-up`,
+  `HarnessIT` under `-Pit` on this machine (`-Dsdh.harness.target=aws`), `harness-down` on exit. It leaves the
+  stack up; `poc.sh down` is the operator's.
+- **First run** (2026-11-22, images built from the H2 commit plus this step, on two t4g.large base nodes and the
+  duties node): all ten scenarios pass in 15 minutes (support 7 s, access 2 s, load 28 s, failures 61 s,
+  break-glass 12 s, pause 132 s, keys 66 s, outages 203 s, failover 105 s, erasure 280 s), and `harness-down`
+  gave ccda-push back. An earlier attempt stopped before deploying, at a script not marked executable, and
+  `harness-down` cleaned up after it. No product change was needed.
+- **Tests without the cluster:** `AwsTargetTest` (the store and KMS cuts of the deployed policy, and back; S3's
+  ranges read and checked).
+- **Not as §14 first said, chosen while building:**
+  - Port-forwards, not the internal ingress: the PoC stack has none for the control APIs, and the README's
+    network policy, applied as written, lets in only an ingress controller's namespace.
+  - Cutting PgBouncer and Kafka by scaling them to nothing, not by policy: the VPC CNI's network policy agent
+    tracks connections, so one already open may outlast a policy. For S3 and KMS no other cut is possible from
+    the cluster, so their policy cuts refuse new connections only; the run doesn't show whether a stage's open
+    connections were cut (the pod logs go with the namespace).
+  - No Spot interruption: the failover scenario's kill covers a stage's pods lost, and node loss was tested
+    with the load tests (2026-11-18), with nothing lost.
+  - Its own pipeline and keys, not ccda-push's: erasure ends the pipeline it runs on.
+  - One replica of each control API, not two.
+  - Not covered: the transform stage (its own repository) and the `hipaa` profile (the PoC runs `none`, design
+    §7.6).
 
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
 (HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1; C7's in §6.1; C8's in §8; C9's in §9.

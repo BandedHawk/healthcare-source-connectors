@@ -1,0 +1,46 @@
+# The control harness's landing node on AWS (scripts/harness.sh aws, docs/CONTROL-API-DESIGN.md §15.12): an HTTP
+# push intake with mTLS, as the sandbox's harness pipeline has (deploy/sandbox/pipeline/landing-application.yml),
+# so that the harness pushes each item and reads the receipt, landing into the bronze bucket with S3 and AWS KMS
+# as ../pipeline/landing-application.yml does. ${...} in capitals are filled in by ../pipeline/apply.sh;
+# ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret landing-env. Keys and certificates are in the
+# secret landing-keys, at /run/secrets. Synthetic data only.
+sdh:
+  compliance: { profile: none }
+  connector-id: landing-${PIPELINE}
+  telemetry:
+    otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
+    metric-interval: 15s
+  landing:
+    intake: ${PIPELINE}
+    source: { type: http }
+    http:
+      port: 8443
+      auth: mtls
+      tls: { certificate: /run/secrets/tls.crt, private-key: /run/secrets/tls.key }
+      mtls: { trusted-cas: /run/secrets/producers-ca.pem, subjects: ["${PRODUCER_SUBJECT}"] }
+      max-item-bytes: 104857600
+  storage:
+    catalog-name: sdh
+    namespace: ${ICEBERG_PREFIX}_landing
+    catalog:
+      type: jdbc
+      uri: jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh
+      jdbc.user: landing_${ICEBERG_PREFIX}
+      jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
+      jdbc.schema-version: V1
+      warehouse: s3://${BRONZE_BUCKET}/warehouse
+      io-impl: org.apache.iceberg.aws.s3.S3FileIO
+      client: { region: ${AWS_REGION} }
+  lease:
+    jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh", username: landing_${ICEBERG_PREFIX} }
+  crypto:
+    wrap-provider: aws-kms
+    sign-provider: aws-kms
+    aws: { region: ${AWS_REGION} }
+    keys:
+      landed-items-kek: alias/sdh-poc-${PIPELINE}-landed-items
+      signing: { kid: landing-${PIPELINE}, key-ref: alias/sdh-poc-${PIPELINE}-landing-signing }
+      recipient: { kid: splitter-${PIPELINE}-inbox, pem: /run/secrets/splitter-inbox.pem, sha256: "${INBOX_SHA256}" }
+  queue:
+    type: kafka
+    uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}"

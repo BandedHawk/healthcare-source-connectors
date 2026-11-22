@@ -4,7 +4,7 @@
  * Proprietary and confidential. Use is subject to the terms in the LICENSE file
  * in the root of this project.
  */
-package com.sdh.healthcare.connector.harness.sandbox;
+package com.sdh.healthcare.connector.harness.kube;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -16,14 +16,14 @@ import java.util.List;
 /**
  * A {@code kubectl port-forward} from a local port to a Service, kept up:
  * a forward ends when the pod it reached goes (a restart, a kill), so it
- * is started again, on the same port, whenever it has ended. The sandbox
- * has no ingress; a forward reaches the pod itself, so no network policy
- * applies to it.
+ * is started again, on the same port, whenever it has ended. Neither the
+ * sandbox nor the AWS PoC has an ingress for the harness; a forward reaches
+ * the pod itself, so no network policy applies to it.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class PortForward implements AutoCloseable
+public final class PortForward implements AutoCloseable
 {
 
     /** How long a forward may take to open. */
@@ -56,7 +56,7 @@ final class PortForward implements AutoCloseable
      * @param remote    its port
      * @throws IOException if it doesn't open
      */
-    PortForward(Kubectl kubectl, String namespace, String service,
+    public PortForward(Kubectl kubectl, String namespace, String service,
             int remote) throws IOException
     {
         port = freePort();
@@ -74,7 +74,7 @@ final class PortForward implements AutoCloseable
      * @return the port
      * @throws IOException if it doesn't open
      */
-    int port() throws IOException
+    public int port() throws IOException
     {
         await();
         return port;
