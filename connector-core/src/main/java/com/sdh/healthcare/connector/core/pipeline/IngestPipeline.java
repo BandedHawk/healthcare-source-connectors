@@ -50,6 +50,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -60,6 +61,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -133,6 +135,12 @@ public final class IngestPipeline implements AutoCloseable
 
     /** The pipeline's settings. */
     private final PipelineSettings settings;
+
+    /**
+     * The KEK each new batch's data key is wrapped with: the setting's,
+     * unless rotated (CONTROL-API-DESIGN.md §11); see {@link #setActiveKek}.
+     */
+    private volatile Supplier<String> kek;
 
     /** The {@code split_records} table. */
     private final Table table;
@@ -247,6 +255,7 @@ public final class IngestPipeline implements AutoCloseable
             GroupAppender.Committer committer)
     {
         this.settings = settings;
+        this.kek = settings::kekRef;
         this.table = recordsTable;
         this.checkpoints = checkpoints;
         this.keys = keys;
@@ -291,6 +300,18 @@ public final class IngestPipeline implements AutoCloseable
     public void setInterruptions(Interruptions interruptions)
     {
         this.interruptions = interruptions;
+    }
+
+    /**
+     * Takes each new batch's KEK from a supplier, such as the stage's
+     * rotated KEK (CONTROL-API-DESIGN.md §11), instead of the setting's.
+     * A batch keeps the KEK it started with.
+     *
+     * @param active gives the KEK to wrap a new batch's data key with
+     */
+    public void setActiveKek(Supplier<String> active)
+    {
+        this.kek = Objects.requireNonNull(active, "active");
     }
 
     /**
@@ -928,7 +949,7 @@ public final class IngestPipeline implements AutoCloseable
 
         /** Writes the batch's data file. */
         private final RecordBatchWriter writer = new RecordBatchWriter(
-                table, keys, settings.kekRef(), ids, clock.instant())
+                table, keys, kek.get(), ids, clock.instant())
                 .stageVersion(settings.version());
 
         /** Records being prepared on the workers, in sequence order. */
@@ -1557,7 +1578,7 @@ public final class IngestPipeline implements AutoCloseable
                 stored.put(row.seq(), row);
             }
             RecordBatchWriter writer = new RecordBatchWriter(table, keys,
-                    settings.kekRef(), ids, clock.instant())
+                    kek.get(), ids, clock.instant())
                     .stageVersion(version);
             CommittedRecords.Row original = stored.get(pending.seq());
             if (original == null || original.errorCode() == null)

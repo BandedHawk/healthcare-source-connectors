@@ -354,6 +354,54 @@ to get a source document back when the pipeline can't process it.
    entity within 60 days (§ 164.410). Keep the audit export, the `audit-verify` result and the KMS logs: § 164.414(b)
    puts the burden of proof on the operator.
 
+### 6.1 Rotating a KEK and re-keying what is stored (§ 164.308(a)(6), § 164.312(a)(2)(iv))
+
+Rotate when a KEK may be compromised, when a key custodian leaves, or on the covered entity's schedule. A KMS's
+own automatic rotation (a new version of the same key) needs none of this: old versions still decrypt. These
+steps move a stage to a different key. Each stage is a scope of its own (`<stage>/<connector ID>`, or
+`landing/<connector ID>`), with its own KEK: the records KEK for the split, convert and transform stages, the
+landed items KEK for a landing node.
+
+1. **The key custodians** create the new KEK and grant it, to wrap and unwrap, to the stage's own identity, and,
+   to unwrap, to everything that reads the stage's tables: the split stage reads `landed_items`, the convert stage
+   `split_records`, the transform stage the convert stage's records, and gold's readers (§2.5) the transform
+   stage's. With local keys (`wrap-provider: local`), the platform administrator adds the new KEK to
+   `sdh.crypto.keys.other-keks` of the stage and of each reader, and restarts them.
+2. **Rotate**, with `keys.admin`:
+
+   ```
+   POST /api/v1/keys/rotate   {"kek": "alias/sdh-<pipeline>-records-2", "reason": "INC-1234 key rotation"}
+   GET  /api/v1/keys
+   ```
+
+   The stage checks it can use the KEK first and refuses one it can't. Within seconds each pod checks it again
+   and wraps its next batch with it. A pod that can't use it keeps the old KEK and records `keys.kek_refused`:
+   fix its grant, and it takes the new KEK at its next read. From now, nothing new is under the old KEK.
+3. **Re-key** what is stored, with a second key admin's approval:
+
+   ```
+   POST /api/v1/keys/rekey    {"from": "alias/sdh-<pipeline>-records", "to": "alias/sdh-<pipeline>-records-2",
+                               "reason": "INC-1234 re-key"}
+   POST /api/v1/operations/{id}/approve      (another key admin)
+   GET  /api/v1/keys                         (its progress)
+   ```
+
+   The stage's maintenance does it, on the pod holding its duties, up to 4 GiB of each table every maintenance
+   run (5 minutes), so a large stage takes hours. Table maintenance must be on. The stage keeps working
+   meanwhile. The operation is `done` only once nothing the stage stores is under the old KEK: its tables' rows,
+   its database rows (failures, corrections, reprocess runs, release acceptances) and its ID keys. After 12
+   failed runs in a row it is `failed`, with the failure's class: fix the cause (often a KMS grant) and ask
+   again.
+4. **Disable the old KEK** once `GET /keys` shows no rows under it on every stage that used it, and at least an
+   hour after the last re-key, when the control API's held results have expired. The product never disables or
+   destroys a KEK: the custodians do it in the KMS, two people, and keep it disabled, not deleted, for as long as
+   backups made before the re-key are kept, since those are still under it.
+
+The same through the CLI, in the stage's pod: `keys`, `rotate --kek <reference>`, and `rekey --from <reference>
+--to <reference> [--wait <minutes>]` (refused under the `hipaa` profile, which needs two people). Each is audited
+(`sdh.audit.control.rotate`, `.rekey`, with `sdh.kek_from`, `sdh.kek_to`); the pods record `keys.kek_active`,
+`keys.kek_refused`, `keys.rekeyed` and `keys.rekey_failed`.
+
 ## 7. Backups, recovery and contingency (§ 164.308(a)(7))
 
 **Not yet built as a product feature** (HIPAA.md §8.1 item 12). Until it is, the platform administrator:

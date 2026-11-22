@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.contract.message.StageMessages;
 import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.audit.TelemetryReadAudit;
 import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
+import com.sdh.healthcare.connector.core.crypto.WrappedRows;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.storage.CommittedRecords;
@@ -28,6 +29,7 @@ import com.sdh.healthcare.connector.stage.RegistryReport;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageBuild;
+import com.sdh.healthcare.connector.stage.StageKeys;
 import com.sdh.healthcare.connector.stage.StageRegistry;
 import com.sdh.healthcare.connector.stage.StageReleases;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
@@ -39,6 +41,8 @@ import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
 import com.sdh.healthcare.connector.stage.admin.DrainCheckCommand;
 import com.sdh.healthcare.connector.stage.admin.DrainCommand;
 import com.sdh.healthcare.connector.stage.admin.FailureCommands;
+import com.sdh.healthcare.connector.stage.admin.KeyAdmin;
+import com.sdh.healthcare.connector.stage.admin.KeyCommands;
 import com.sdh.healthcare.connector.stage.admin.PatientAdmin;
 import com.sdh.healthcare.connector.stage.admin.PatientsCommand;
 import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
@@ -57,6 +61,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import javax.sql.DataSource;
+import org.apache.iceberg.Table;
 
 /**
  * A record stage's operator commands (design §11.4, STAGES.md §17.3):
@@ -73,7 +79,8 @@ import java.util.stream.Collectors;
  * @since 0.1.0
  */
 public final class RecordStageAdmin<P extends RecordStageSettings>
-        implements StageAdmin, DrainAdmin, PatientAdmin, AutoCloseable
+        implements StageAdmin, DrainAdmin, PatientAdmin, KeyAdmin,
+        AutoCloseable
 {
 
     /** How long a database call may wait for a connection. */
@@ -167,6 +174,7 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
                         new DrainCommand<>(), new VersionCommand<>(),
                         new PatientsCommand<>()));
         commands.addAll(FailureCommands.<RecordStageAdmin<P>>all());
+        commands.addAll(KeyCommands.<RecordStageAdmin<P>>all());
         return List.copyOf(commands);
     }
 
@@ -350,7 +358,47 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
     @Override
     public String reasonKek()
     {
+        return controlState(false).kek().map(ControlState.Kek::kek)
+                .orElse(settingKek());
+    }
+
+    /** The sink's KEK, which the stage's records are wrapped with. */
+    @Override
+    public String settingKek()
+    {
         return StageTables.sinkKek(settings);
+    }
+
+    @Override
+    public KeyProvider keyProvider() throws Exception
+    {
+        return keys().wrap();
+    }
+
+    /** The sink: the source is the stage before's. */
+    @Override
+    public List<Table> keyTables()
+    {
+        try
+        {
+            return List.of(tables().existingSink().table());
+        }
+        catch (IllegalStateException neverRun)
+        {
+            return List.of();
+        }
+    }
+
+    @Override
+    public List<WrappedRows> wrappedRows()
+    {
+        return StageKeys.rows(settings.stage().registrySchema());
+    }
+
+    @Override
+    public DataSource keyDatabase()
+    {
+        return database.dataSource();
     }
 
     @Override

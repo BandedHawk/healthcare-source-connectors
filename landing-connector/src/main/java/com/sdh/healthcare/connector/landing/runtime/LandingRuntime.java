@@ -14,6 +14,7 @@ import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.broker.send.ClosablePublisher;
 import com.sdh.healthcare.connector.broker.send.Publishers;
 import com.sdh.healthcare.connector.broker.send.QueueType;
+import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.RecordCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageSealer;
 import com.sdh.healthcare.connector.core.audit.AuditTables;
@@ -62,6 +63,7 @@ import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
 import com.sdh.healthcare.connector.runtime.publish.ResultsChannel;
 import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import com.sdh.healthcare.connector.stage.ControlState;
+import com.sdh.healthcare.connector.stage.KekWatch;
 import com.sdh.healthcare.connector.stage.PausableRoute;
 import com.sdh.healthcare.connector.stage.PauseWatch;
 import com.zaxxer.hikari.HikariDataSource;
@@ -71,6 +73,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import javax.sql.DataSource;
 import org.apache.camel.CamelContext;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
@@ -172,6 +175,9 @@ public final class LandingRuntime implements AutoCloseable
     /** Reads whether the intake is paused (CONTROL-API-DESIGN.md §9). */
     private final PauseWatch pause;
 
+    /** The KEK new batches are wrapped with, as rotated (§11). */
+    private final KekWatch kek;
+
     /**
      * The landing tables and what writes them, for table maintenance.
      *
@@ -181,9 +187,14 @@ public final class LandingRuntime implements AutoCloseable
      * @param lander      lands items; holds the intake's checkpoint
      * @param ids         makes the MACs of what is kept in table
      *                    properties, with the ID key
+     * @param control     the intake's control state, where a re-key is
+     *                    asked for (CONTROL-API-DESIGN.md §11)
+     * @param keys        unwraps and wraps the tables' data keys
+     * @param database    the lease database's pool
      */
     public record Tables(FencedCommitter committer, Table landedItems,
-            Table ledger, ItemLander lander, RecordIds ids)
+            Table ledger, ItemLander lander, RecordIds ids,
+            ControlState control, KeyProvider keys, DataSource database)
     {
     }
 
@@ -219,6 +230,7 @@ public final class LandingRuntime implements AutoCloseable
         this.journal = journal;
         this.route = paused.route();
         this.pause = paused.watch();
+        this.kek = paused.kek();
         this.camel = camel;
         this.dataSource = dataSource;
         this.catalog = catalog;
@@ -257,12 +269,13 @@ public final class LandingRuntime implements AutoCloseable
     }
 
     /**
-     * An intake's route and pause.
+     * An intake's route, pause and KEK.
      *
      * @param route its route; null for an HTTP intake
      * @param watch reads whether it is paused, started
+     * @param kek   reads the KEK it was rotated to, started
      */
-    private record Pause(PausableRoute route, PauseWatch watch)
+    private record Pause(PausableRoute route, PauseWatch watch, KekWatch kek)
     {
     }
 
@@ -319,6 +332,7 @@ public final class LandingRuntime implements AutoCloseable
         ResultsChannel results = null;
         IntakeSource intakeSource = null;
         CachingConnectionFactory rabbitmq = null;
+        KekWatch kekWatch = null;
         try
         {
             dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
@@ -379,8 +393,16 @@ public final class LandingRuntime implements AutoCloseable
             committer.establish(items);
             committer.establish(ledgerTable);
             String kek = properties.crypto().keys().landedItemsKek();
+            ControlState control = new ControlState(dataSource,
+                    AuditTables.besideLeaseTable(properties.lease().jdbc()
+                            .table()).schema(),
+                    "landing/" + properties.connectorId());
+            // The KEK each new batch is wrapped with, as rotated
+            // (CONTROL-API-DESIGN.md §11), read before the first batch.
+            kekWatch = KekWatch.of(control, kek, keys.wrap());
+            kekWatch.start();
             RecordIds ids = new RecordIds(IdKeys.loadOrCreate(items,
-                    committer, keys.wrap(), kek));
+                    committer, keys.wrap(), kekWatch.get()));
 
             RetryPolicy retry = new RetryPolicy(
                     properties.retry().maxAttempts(),
@@ -391,7 +413,7 @@ public final class LandingRuntime implements AutoCloseable
                     kek, storageSettings.commitBytes().toBytes(), retry,
                     RecordCrypto.CHUNK_SIZE, ItemLander.DEFAULT_BLOCK);
             ItemLander lander = new ItemLander(items, committer, keys.wrap(),
-                    ids, landing, clock);
+                    ids, landing, clock).activeKek(kekWatch);
             LandingLedger ledger =
                     new LandingLedger(ledgerTable, committer, retry);
             LedgerIndex index = loadLedger(ledger, intake,
@@ -476,10 +498,7 @@ public final class LandingRuntime implements AutoCloseable
             }
             // Read before anything is taken in: a push is refused while
             // paused, and the route isn't started.
-            PauseWatch pause = PauseWatch.of(new ControlState(dataSource,
-                    AuditTables.besideLeaseTable(properties.lease().jdbc()
-                            .table()).schema(),
-                    "landing/" + properties.connectorId()),
+            PauseWatch pause = PauseWatch.of(control,
                     route == null ? List.of() : List.of(route));
             pause.start();
             Telemetry.get().audit("connector.started",
@@ -489,11 +508,12 @@ public final class LandingRuntime implements AutoCloseable
                     publisher, results, keys, source, intakeSource, service,
                     pushService, queue,
                     new Tables(committer, items, ledgerTable, lander,
-                            ids), resubmitter, journal,
-                    new Pause(route, pause));
+                            ids, control, keys.wrap(), dataSource),
+                    resubmitter, journal, new Pause(route, pause, kekWatch));
         }
         catch (Exception | Error failure)
         {
+            closeQuietly(kekWatch);
             closeQuietly(intakeSource);
             if (rabbitmq != null)
             {
@@ -747,6 +767,7 @@ public final class LandingRuntime implements AutoCloseable
     public void close()
     {
         pause.close();
+        kek.close();
         if (brokerWatch != null)
         {
             brokerWatch.close();

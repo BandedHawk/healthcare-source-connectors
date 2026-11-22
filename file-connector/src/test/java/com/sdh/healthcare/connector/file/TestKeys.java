@@ -216,7 +216,7 @@ public final class TestKeys
                 new CommonSettings.InboxKey(INBOX_KID, inboxPem,
                         INBOX_PASSPHRASE, null, null),
                 new CommonSettings.Signer(LANDING_SIGNER_KID,
-                        landingSignerPem));
+                        landingSignerPem), null);
     }
 
     /**

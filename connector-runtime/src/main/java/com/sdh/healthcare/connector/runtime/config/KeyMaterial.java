@@ -294,8 +294,10 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
             throw new IllegalArgumentException("The records KEK must differ"
                     + " from the landing KEK (design §7.1)");
         }
-        return waitingFor(crypto, providers, List.of(records),
-                List.of(landed), true, pause);
+        List<String> unwrapOnly = new ArrayList<>(List.of(landed));
+        unwrapOnly.addAll(others(keys, records, landed));
+        return waitingFor(crypto, providers, List.of(records), unwrapOnly,
+                true, pause);
     }
 
     /**
@@ -317,8 +319,8 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
     {
         String records = require(crypto.keys().recordsKek(),
                 "sdh.crypto.keys.records-kek");
-        return waitingFor(crypto, providers, List.of(records), List.of(),
-                true, Pause.SLEEP);
+        return waitingFor(crypto, providers, List.of(records),
+                others(crypto.keys(), records), true, Pause.SLEEP);
     }
 
     /**
@@ -339,8 +341,27 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
     {
         String landed = require(crypto.keys().landedItemsKek(),
                 "sdh.crypto.keys.landed-items-kek");
-        return waitingFor(crypto, providers, List.of(landed), List.of(),
-                false, Pause.SLEEP);
+        return waitingFor(crypto, providers, List.of(landed),
+                others(crypto.keys(), landed), false, Pause.SLEEP);
+    }
+
+    /**
+     * The other KEKs a stage holds (CONTROL-API-DESIGN.md §11), less its
+     * own: unwrapped with, and wrapped with once rotated to. They aren't
+     * probed at startup, as a KEK being retired may already be disabled;
+     * a rotation probes the KEK it is to wrap with.
+     *
+     * @param keys the key settings
+     * @param own  the stage's own KEKs, left out
+     * @return the others, each once, in order
+     */
+    private static List<String> others(CommonSettings.Keys keys,
+            String... own)
+    {
+        Set<String> skip = Set.of(own);
+        return keys.others().stream().filter(ref -> ref != null
+                && !ref.isBlank() && !skip.contains(ref)).distinct()
+                .toList();
     }
 
     /**
@@ -818,7 +839,7 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
      * @param ref      the KEK
      * @throws GeneralSecurityException if the KEK can't be used
      */
-    static void probeKek(KeyProvider provider, String ref)
+    public static void probeKek(KeyProvider provider, String ref)
             throws GeneralSecurityException
     {
         byte[] probe = new byte[32];

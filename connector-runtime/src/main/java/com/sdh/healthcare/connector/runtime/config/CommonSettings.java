@@ -172,11 +172,29 @@ public final class CommonSettings
      * @param landingSigner  the landing node's signing public key, which
      *                       {@code item.landed} messages must be signed
      *                       with; the splitter only
+     * @param otherKeks      KEKs the stage holds besides its own
+     *                       (CONTROL-API-DESIGN.md §11): one it may be
+     *                       rotated to, and those still wrapping its
+     *                       stored data. Only the {@code local} provider
+     *                       needs them listed, to load them from its
+     *                       keystore; a KMS reaches any key its rights
+     *                       allow. Null or empty for none
      */
     public record Keys(String recordsKek, String landedItemsKek,
             @DefaultValue Signing signing, @DefaultValue Recipient recipient,
-            @DefaultValue InboxKey inbox, @DefaultValue Signer landingSigner)
+            @DefaultValue InboxKey inbox, @DefaultValue Signer landingSigner,
+            List<String> otherKeks)
     {
+
+        /**
+         * The other KEKs, none if not set.
+         *
+         * @return them
+         */
+        public List<String> others()
+        {
+            return otherKeks == null ? List.of() : List.copyOf(otherKeks);
+        }
     }
 
     /**

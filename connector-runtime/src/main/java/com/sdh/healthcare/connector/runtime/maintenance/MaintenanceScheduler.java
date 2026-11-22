@@ -170,6 +170,62 @@ public final class MaintenanceScheduler implements AutoCloseable
         }
     }
 
+    /**
+     * Work asked for between scheduled runs, such as a re-key
+     * (CONTROL-API-DESIGN.md §11): asked at every tick whether it is due,
+     * and if so added as a purge to every table in a run at once.
+     */
+    public interface Pass
+    {
+
+        /** Asks for nothing. */
+        Pass NONE = new Pass()
+        {
+            @Override
+            public Optional<TableMaintenance.Purge> due()
+            {
+                return Optional.empty();
+            }
+
+            @Override
+            public void ran(TableMaintenance.Purge purge,
+                    List<TableMaintenance.Report> reports)
+            {
+            }
+
+            @Override
+            public void failed(TableMaintenance.Purge purge,
+                    RuntimeException failure)
+            {
+            }
+        };
+
+        /**
+         * The purge to add to every table this tick, if any is due.
+         *
+         * @return it; empty if nothing is
+         */
+        Optional<TableMaintenance.Purge> due();
+
+        /**
+         * Told once a run with the purge has run over every table.
+         *
+         * @param purge   the purge {@link #due} gave
+         * @param reports what the run did, by table
+         */
+        void ran(TableMaintenance.Purge purge,
+                List<TableMaintenance.Report> reports);
+
+        /**
+         * Told if a run with the purge failed; it is asked again at the
+         * next tick.
+         *
+         * @param purge   the purge {@link #due} gave
+         * @param failure why
+         */
+        void failed(TableMaintenance.Purge purge, RuntimeException failure);
+    }
+
     /** Runs maintenance on one table. */
     private final TableMaintenance maintenance;
 
@@ -187,6 +243,9 @@ public final class MaintenanceScheduler implements AutoCloseable
 
     /** The time. */
     private final Clock clock;
+
+    /** Work asked for between scheduled runs. */
+    private final Pass pass;
 
     /** Runs the ticks; null until started, or if disabled. */
     private ScheduledExecutorService executor;
@@ -215,6 +274,30 @@ public final class MaintenanceScheduler implements AutoCloseable
             Supplier<List<Target>> targets, ReentrantLock writer,
             FatalExit fatal, Clock clock)
     {
+        this(committer, settings, schedule, targets, writer, fatal, clock,
+                Pass.NONE);
+    }
+
+    /**
+     * Creates a scheduler with work asked for between its runs, such as a
+     * re-key; {@link #start} starts it.
+     *
+     * @param committer fences the commits with the lease
+     * @param settings  what each run does
+     * @param schedule  when it runs
+     * @param targets   the tables, asked for at each run
+     * @param writer    held by whatever writes the tables
+     * @param fatal     stops the process on a fatal error
+     * @param clock     the time
+     * @param pass      asked at every tick for work to run at once
+     * @throws IllegalArgumentException if orphan cleanup could delete files
+     *                                  less than an hour old
+     */
+    public MaintenanceScheduler(TableCommitter committer,
+            MaintenanceSettings settings, Schedule schedule,
+            Supplier<List<Target>> targets, ReentrantLock writer,
+            FatalExit fatal, Clock clock, Pass pass)
+    {
         if (settings.orphanMinAge().compareTo(Duration.ofHours(1)) < 0)
         {
             throw new IllegalArgumentException(
@@ -226,6 +309,7 @@ public final class MaintenanceScheduler implements AutoCloseable
         this.writer = writer;
         this.fatal = fatal;
         this.clock = clock;
+        this.pass = Objects.requireNonNull(pass, "pass");
     }
 
     /**
@@ -298,9 +382,25 @@ public final class MaintenanceScheduler implements AutoCloseable
         try
         {
             Instant now = clock.instant();
+            Optional<TableMaintenance.Purge> asked = asked();
             // A tick a little early still counts: ticks are a fixed delay
             // apart, after runs of their own length.
-            if (!now.plus(schedule.tick().dividedBy(2))
+            if (asked.isPresent())
+            {
+                try
+                {
+                    List<TableMaintenance.Report> reports =
+                            runOnce(asked.get());
+                    lastFullRun = now;
+                    pass.ran(asked.get(), reports);
+                }
+                catch (RuntimeException failure)
+                {
+                    pass.failed(asked.get(), failure);
+                    throw failure;
+                }
+            }
+            else if (!now.plus(schedule.tick().dividedBy(2))
                     .isBefore(lastFullRun.plus(schedule.interval())))
             {
                 runOnce();
@@ -339,15 +439,50 @@ public final class MaintenanceScheduler implements AutoCloseable
      */
     public List<TableMaintenance.Report> runOnce()
     {
+        return runOnce(TableMaintenance.Purge.NONE);
+    }
+
+    /**
+     * Asks the pass for work due, taking a failure to answer as none.
+     *
+     * @return the purge to add this tick; empty for none
+     */
+    private Optional<TableMaintenance.Purge> asked()
+    {
+        try
+        {
+            return pass.due();
+        }
+        catch (RuntimeException failure)
+        {
+            LOG.warn("maintenance.pass_check_failed error={}",
+                    failure.getClass().getSimpleName());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * One maintenance pass over every table, with a purge added to each
+     * table's own after it. The caller must hold the writer lock, or know
+     * nothing is writing.
+     *
+     * @param extra the purge added to every table's
+     * @return what was done to each table, in order
+     */
+    public List<TableMaintenance.Report> runOnce(TableMaintenance.Purge extra)
+    {
         Instant now = clock.instant();
         boolean orphans = schedule.orphans()
                 && !now.isBefore(lastOrphanRun.plus(schedule.orphanInterval()));
         List<TableMaintenance.Report> reports = new ArrayList<>();
         for (Target target : targets.get())
         {
+            TableMaintenance.Purge own = target.purge();
             reports.add(maintenance.run(target.table(), target.timeColumn(),
                     target.retention(), orphans, target.keepFrom(),
-                    target.purge()));
+                    extra == TableMaintenance.Purge.NONE ? own
+                            : (table, at) -> own.purge(table, at)
+                                    + extra.purge(table, at)));
         }
         if (orphans)
         {

@@ -24,6 +24,7 @@ import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
+import com.sdh.healthcare.connector.core.maintenance.Rekey;
 import com.sdh.healthcare.connector.core.pipeline.IngestPipeline;
 import com.sdh.healthcare.connector.core.pipeline.ItemProcessor;
 import com.sdh.healthcare.connector.core.pipeline.PipelineSettings;
@@ -52,12 +53,15 @@ import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.DrainGate;
 import com.sdh.healthcare.connector.stage.ItemEndResender;
+import com.sdh.healthcare.connector.stage.KekWatch;
 import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.PauseWatch;
+import com.sdh.healthcare.connector.stage.RekeyPass;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageBuild;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
+import com.sdh.healthcare.connector.stage.StageKeys;
 import com.sdh.healthcare.connector.stage.StageProperties;
 import com.sdh.healthcare.connector.stage.StageReceiver;
 import com.zaxxer.hikari.HikariDataSource;
@@ -178,6 +182,9 @@ public final class ConnectorRuntime implements AutoCloseable
     /** Pauses the input and the corrections (CONTROL-API-DESIGN.md §9). */
     private final PauseWatch watch;
 
+    /** The KEK new batches are wrapped with, as rotated (§11). */
+    private final KekWatch kek;
+
     /**
      * The tables the runtime uses.
      *
@@ -214,6 +221,7 @@ public final class ConnectorRuntime implements AutoCloseable
      * @param ids            makes IDs and MACs
      * @param gate           the drain check
      * @param watch          the pause's watch
+     * @param kek            the KEK's watch
      */
     private record Parts(HikariDataSource dataSource, Catalog catalog,
             Catalog landingCatalog, ClosablePublisher publisher,
@@ -222,7 +230,7 @@ public final class ConnectorRuntime implements AutoCloseable
             SplitCorrections corrections, SplitReprocess reprocess,
             StageReceiver receiver, StageHealth health, StageDuties duties,
             Tables tables, KeyMaterial keys, AuditJournals.Opened journal,
-            RecordIds ids, DrainGate gate, PauseWatch watch)
+            RecordIds ids, DrainGate gate, PauseWatch watch, KekWatch kek)
     {
     }
 
@@ -245,6 +253,7 @@ public final class ConnectorRuntime implements AutoCloseable
         this.reprocess = parts.reprocess();
         this.receiver = parts.receiver();
         this.watch = parts.watch();
+        this.kek = parts.kek();
         this.health = parts.health();
         this.duties = parts.duties();
         this.tables = parts.tables();
@@ -318,6 +327,7 @@ public final class ConnectorRuntime implements AutoCloseable
         ClosablePublisher reprocessPublisher = null;
         IngestPipeline pipeline = null;
         StageReceiver receiver = null;
+        KekWatch kek = null;
         try
         {
             dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
@@ -341,8 +351,15 @@ public final class ConnectorRuntime implements AutoCloseable
             Table splitRecords = IngestTables.splitRecords(catalog,
                     namespace);
             String recordsKek = properties.crypto().keys().recordsKek();
+            ControlState control = new ControlState(dataSource,
+                    stage.registrySchema(), ItemProcessor.STAGE + "/"
+                            + properties.connectorId());
+            // The KEK each new batch is wrapped with, as rotated
+            // (CONTROL-API-DESIGN.md §11), read before the first batch.
+            kek = KekWatch.of(control, recordsKek, keys.wrap());
+            kek.start();
             RecordIds ids = new RecordIds(IdKeys.loadOrCreateShared(
-                    splitRecords, keys.wrap(), recordsKek));
+                    splitRecords, keys.wrap(), kek.get()));
             ItemCheckpoints checkpoints = new ItemCheckpoints(dataSource,
                     stage.registrySchema(), new CheckpointCodec(ids),
                     Duration.ofSeconds(10));
@@ -398,6 +415,7 @@ public final class ConnectorRuntime implements AutoCloseable
                     new MessageSealer(keys.messages(), keys.signerKid(),
                             keys.recipient(), keys.recipientKid()),
                     publisher, clock, queued);
+            pipeline.setActiveKek(kek);
             commitPool = null;
             // The fail store's states, beside the checkpoints (STAGES.md
             // §15.3); the failed pieces stay in split_records.
@@ -472,6 +490,7 @@ public final class ConnectorRuntime implements AutoCloseable
             ItemEndResender resender = ItemEndResender.of(dataSource,
                     stage.nextRegistrySchema(), "split", splitter::resendEnd,
                     Duration.ofSeconds(10));
+            HikariDataSource database = dataSource;
             StageDuties duties = new StageDuties(leases, "split",
                     properties.connectorId(), leaseSettings,
                     StageDuties.Reconciler.both(
@@ -484,11 +503,15 @@ public final class ConnectorRuntime implements AutoCloseable
                             () -> List.of(MaintenanceScheduler.Target.of(
                                     splitRecords, RecordsTable.INGESTED_AT,
                                     retention)),
-                            new ReentrantLock(), dutiesFatal, clock),
+                            new ReentrantLock(), dutiesFatal, clock,
+                            // A re-key asked for, carried out here.
+                            new RekeyPass(control, committer, keys.wrap(),
+                                    database, ItemProcessor.STAGE,
+                                    StageKeys.splitRows(
+                                            stage.registrySchema()),
+                                    Rekey.BUDGET)),
                     fatal).placed(stage.duties());
-            PauseWatch watch = PauseWatch.of(new ControlState(dataSource,
-                    stage.registrySchema(), ItemProcessor.STAGE + "/"
-                            + properties.connectorId()),
+            PauseWatch watch = PauseWatch.of(control,
                     List.of(receiver, correcting));
             Telemetry.get().audit("connector.started",
                     Fields.of(Attr.FORMAT, format).with(Attr.INTAKE, intake));
@@ -497,11 +520,12 @@ public final class ConnectorRuntime implements AutoCloseable
                     processor, splitter, correcting, reprocess, receiver,
                     health, duties,
                     new Tables(splitRecords, landedItems, checkpoints), keys,
-                    journal, ids, gate, watch));
+                    journal, ids, gate, watch, kek));
         }
         catch (Exception | Error failure)
         {
             closeQuietly(receiver);
+            closeQuietly(kek);
             if (pipeline != null)
             {
                 pipeline.close();
@@ -799,6 +823,7 @@ public final class ConnectorRuntime implements AutoCloseable
     {
         gate.close();
         watch.close();
+        kek.close();
         receiver.close();
         corrections.close();
         duties.close();

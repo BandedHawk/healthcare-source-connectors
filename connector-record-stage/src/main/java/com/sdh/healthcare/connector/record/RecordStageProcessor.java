@@ -54,6 +54,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import org.apache.iceberg.AppendFiles;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.Snapshot;
@@ -157,12 +158,38 @@ public final class RecordStageProcessor
      * @param table  the sink table
      * @param keys   wraps the batches' data keys, and unwraps them to read
      *               the failed records' broker IDs back, in every table
-     * @param kekRef the KEK the sink's data keys are wrapped with
+     * @param kek    the KEK each new batch's data key is wrapped with: the
+     *               setting's, or the one the stage was rotated to
+     *               (CONTROL-API-DESIGN.md §11), read as each batch starts
      * @param ids    makes record IDs with the sink's ID key
      */
-    public record Sink(RecordTable table, KeyProvider keys, String kekRef,
-            RecordIds ids)
+    public record Sink(RecordTable table, KeyProvider keys,
+            Supplier<String> kek, RecordIds ids)
     {
+
+        /**
+         * A sink whose KEK never changes.
+         *
+         * @param table  the sink table
+         * @param keys   wraps and unwraps the data keys
+         * @param kekRef the KEK the sink's data keys are wrapped with
+         * @param ids    makes record IDs with the sink's ID key
+         */
+        public Sink(RecordTable table, KeyProvider keys, String kekRef,
+                RecordIds ids)
+        {
+            this(table, keys, () -> kekRef, ids);
+        }
+
+        /**
+         * The KEK a batch starting now wraps its data key with.
+         *
+         * @return its reference
+         */
+        public String kekRef()
+        {
+            return kek.get();
+        }
     }
 
     /**

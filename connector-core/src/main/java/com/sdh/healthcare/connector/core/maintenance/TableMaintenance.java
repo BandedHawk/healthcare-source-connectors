@@ -865,6 +865,27 @@ public final class TableMaintenance
     public static Copied copyRows(Table table, List<DataFile> files,
             Predicate<Record> keep, String prefix)
     {
+        return copyRows(table, files, prefix,
+                row -> keep.test(row) ? row : null);
+    }
+
+    /**
+     * Copies the rows of data files into one new file in the first one's
+     * partition, written unsorted, each as a function makes it: unchanged,
+     * changed, or left out. Nothing is committed: the caller swaps the file
+     * in, or deletes it.
+     *
+     * @param table  the table
+     * @param files  the files, all in one partition
+     * @param prefix the start of the new file's name
+     * @param change the row to write for each row read; null to leave it
+     *               out
+     * @return the new file, null if no row was kept, and the counts
+     * @throws UncheckedIOException if a file can't be read or written
+     */
+    public static Copied copyRows(Table table, List<DataFile> files,
+            String prefix, UnaryOperator<Record> change)
+    {
         DataFile first = files.getFirst();
         String location = table.locationProvider().newDataLocation(
                 table.spec(), first.partition(),
@@ -904,9 +925,10 @@ public final class TableMaintenance
                     for (Record row : rows)
                     {
                         read++;
-                        if (keep.test(row))
+                        Record written = change.apply(row);
+                        if (written != null)
                         {
-                            writer.write(row);
+                            writer.write(written);
                             kept++;
                         }
                     }

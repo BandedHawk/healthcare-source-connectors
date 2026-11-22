@@ -9,13 +9,17 @@ package com.sdh.healthcare.connector.landing.admin;
 import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
+import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditTarget;
+import com.sdh.healthcare.connector.stage.admin.KeyCommands;
+import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 /**
  * The landing node's operator commands (design §11.4): {@code resubmit},
- * on the stages' shared {@link AdminCli}. Its {@code replay} went with
+ * and the key commands (CONTROL-API-DESIGN.md §11), on the stages' shared
+ * {@link AdminCli}. Its {@code replay} went with
  * STAGES.md §15.8.10 step 5: an item is split again by a reprocess at the
  * split stage.
  *
@@ -47,7 +51,20 @@ public final class LandingAdmin
                                 AuditTables.besideLeaseTable(
                                         properties.lease().jdbc().table()),
                                 "landing/" + properties.connectorId())),
-                List.of(new ResubmitCommand()));
+                commands());
+    }
+
+    /**
+     * The node's commands: {@code resubmit}, and the key commands.
+     *
+     * @return them
+     */
+    static List<AdminCommand<LandingAdminContext>> commands()
+    {
+        List<AdminCommand<LandingAdminContext>> commands =
+                new ArrayList<>(List.of(new ResubmitCommand()));
+        commands.addAll(KeyCommands.<LandingAdminContext>all());
+        return List.copyOf(commands);
     }
 
     /**

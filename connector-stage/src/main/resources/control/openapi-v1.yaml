@@ -132,6 +132,96 @@ paths:
       responses:
         "200": {$ref: "#/components/responses/Paused"}
         default: {$ref: "#/components/responses/Problem"}
+  /keys:
+    get:
+      operationId: keys
+      summary: The KEK in use, and the rows under each KEK
+      description: >-
+        The KEK in use (`active`), whether it was rotated to (by whom and
+        when) or is the setting's; for each of the stage's tables, and
+        each of its database tables with wrapped keys, how many rows each
+        KEK wraps; each table's ID key's KEK; and the last re-key, with
+        its progress. Reads every table's KEK column, so it takes a while
+        on a large stage. Disable an old KEK only once nothing is under
+        it here. Permission `keys.admin`.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /keys/rotate:
+    post:
+      operationId: rotateKek
+      summary: Wraps the stage's new data with another KEK
+      description: >-
+        Checked first, with the stage's own rights, by wrapping and
+        unwrapping a throwaway key: a KEK the stage can't use is refused
+        `400`. Each pod reads the rotation within seconds, checks the KEK
+        again, and wraps each batch it starts after with it; a pod that
+        can't use it keeps its KEK and audits `keys.kek_refused`. Data
+        already stored stays under its KEK, which still unwraps it:
+        `/keys/rekey` moves it. A KEK already in use is left as it is
+        (`changed` false). With local keys, the KEK must be listed in
+        `sdh.crypto.keys.other-keks`. Permission `keys.admin`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [kek]
+                  properties:
+                    kek:
+                      type: string
+                      pattern: "^[A-Za-z0-9:/_.+=@-]{1,256}$"
+                      description: >-
+                        The KEK's reference: a KMS key's ARN or alias, or a
+                        local key's name.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /keys/rekey:
+    post:
+      operationId: rekey
+      summary: Moves everything the stage stores from one KEK to another
+      description: >-
+        Needs four eyes: answered `202` with its record awaiting approval,
+        and run once another key admin approves it. The run asks the
+        stage's maintenance, on the pod holding its duties, to re-wrap
+        each data key under `from` with `to`: its tables' files a share at
+        a time (4 GiB a table each maintenance run), each rewritten in one
+        commit, with the files replaced removed; then its database rows'
+        keys and its ID keys. It is done once nothing the stage stores is
+        under `from`; the record follows it until then, and `/keys` shows
+        its progress. Refused while `from` is the KEK in use: rotate first.
+        Needs table maintenance enabled. The old KEK is never disabled
+        here: that is the key custodian's, in the KMS, after. Permission
+        `keys.admin`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [from, to]
+                  properties:
+                    from:
+                      type: string
+                      pattern: "^[A-Za-z0-9:/_.+=@-]{1,256}$"
+                      description: The KEK to move from.
+                    to:
+                      type: string
+                      pattern: "^[A-Za-z0-9:/_.+=@-]{1,256}$"
+                      description: The KEK to move to.
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
   /pause:
     post:
       operationId: pause

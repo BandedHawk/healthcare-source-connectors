@@ -80,7 +80,7 @@ final class KmsItSupport
                                 keys.inboxPem, TestKeys.INBOX_PASSPHRASE,
                                 null, null),
                         new CommonSettings.Signer(TestKeys.LANDING_SIGNER_KID,
-                                keys.landingSignerPem)),
+                                keys.landingSignerPem), null),
                 aws, new CommonSettings.Gcp(null), vault, null);
     }
 

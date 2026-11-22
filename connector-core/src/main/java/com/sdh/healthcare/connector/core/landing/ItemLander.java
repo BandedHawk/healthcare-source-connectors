@@ -54,6 +54,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.function.LongConsumer;
+import java.util.function.Supplier;
 import javax.crypto.Mac;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileFormat;
@@ -272,6 +273,12 @@ public final class ItemLander
     /** Writes and reads that property with its MAC. */
     private final MacedJson<UUID> announcedCodec;
 
+    /**
+     * The KEK each new batch's data key is wrapped with: the setting's,
+     * unless rotated (CONTROL-API-DESIGN.md §11); see {@link #activeKek}.
+     */
+    private Supplier<String> kek;
+
     /** Runs after each commit; see {@link #afterCommit}. */
     private LongConsumer afterCommit = nextBlock ->
     {
@@ -295,6 +302,7 @@ public final class ItemLander
         this.keys = keys;
         this.ids = ids;
         this.settings = settings;
+        this.kek = settings::kekRef;
         this.clock = clock;
         this.codec = LandingCheckpoint.codec(ids);
         this.checkpointKey = LandingCheckpoint.propertyKey(settings.intake());
@@ -323,6 +331,20 @@ public final class ItemLander
      */
     public record GroupLanded(List<LandedItem> landed, List<NewItem> changed)
     {
+    }
+
+    /**
+     * Takes each new batch's KEK from a supplier, such as the stage's
+     * rotated KEK (CONTROL-API-DESIGN.md §11), instead of the setting's.
+     * A batch keeps the KEK it started with.
+     *
+     * @param active gives the KEK to wrap a new batch's data key with
+     * @return this lander
+     */
+    public ItemLander activeKek(Supplier<String> active)
+    {
+        this.kek = Objects.requireNonNull(active, "active");
+        return this;
     }
 
     /**
@@ -675,6 +697,7 @@ public final class ItemLander
                     last.chain(), true, last.size(), last.digest(),
                     landedAt);
             int rows = (int) batch.rows;
+            String kekRef = batch.wrappedKey.keyRef();
             long closeStarted = System.nanoTime();
             DataFile file = batch.finish();
             batch = null;
@@ -701,7 +724,7 @@ public final class ItemLander
                 landed.add(new LandedItem(item.itemId(), settings.intake(),
                         item.kind(), item.source(), each.size(),
                         each.digest(), landedAt, snapshotId(snapshot),
-                        settings.kekRef(), each.sha256(), item.replaces(),
+                        kekRef, each.sha256(), item.replaces(),
                         file.location(), file.fileSizeInBytes(),
                         each.summaryRow()));
             }
@@ -1150,6 +1173,7 @@ public final class ItemLander
                             Base64.getEncoder().encodeToString(chain), true,
                             bytesRead, digest, landedAt);
                     long summaryRow = batch.summaryRow;
+                    String kekRef = batch.wrappedKey.keyRef();
                     DataFile file = batch.finish();
                     Snapshot snapshot = commit(file, done, null);
                     batch = null;
@@ -1163,7 +1187,7 @@ public final class ItemLander
                     return new LandedItem(item.itemId(), settings.intake(),
                             item.kind(), item.source(), bytesRead, digest,
                             landedAt, snapshotId(snapshot),
-                            settings.kekRef(), plainHash, item.replaces(),
+                            kekRef, plainHash, item.replaces(),
                             file.location(), file.fileSizeInBytes(),
                             summaryRow);
                 }
@@ -1363,7 +1387,7 @@ public final class ItemLander
         Batch()
         {
             RANDOM.nextBytes(dataKey);
-            wrappedKey = keys.wrap(settings.kekRef(), dataKey);
+            wrappedKey = keys.wrap(kek.get(), dataKey);
             GenericRecord probe = GenericRecord.create(table.schema());
             probe.setField(LANDED_AT, landedAt);
             PartitionKey partition =

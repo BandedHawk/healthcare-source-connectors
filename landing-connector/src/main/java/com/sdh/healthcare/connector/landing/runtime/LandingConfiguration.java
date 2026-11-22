@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
 import com.sdh.healthcare.connector.core.landing.GivenUpItems;
 import com.sdh.healthcare.connector.core.landing.LandedItems;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
+import com.sdh.healthcare.connector.core.maintenance.Rekey;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.core.telemetry.Fields;
 import com.sdh.healthcare.connector.core.telemetry.Telemetry;
@@ -24,9 +25,10 @@ import com.sdh.healthcare.connector.landing.intake.ResubmitPoller;
 import com.sdh.healthcare.connector.landing.route.IntakeRoute;
 import com.sdh.healthcare.connector.landing.route.RemoteIntakeRoute;
 import com.sdh.healthcare.connector.runtime.FatalExit;
-import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.compliance.ComplianceConfiguration;
+import com.sdh.healthcare.connector.runtime.maintenance.MaintenanceScheduler;
 import com.sdh.healthcare.connector.runtime.telemetry.TelemetryConfiguration;
+import com.sdh.healthcare.connector.stage.RekeyPass;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Clock;
@@ -43,10 +45,10 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.ApplicationListener;
-import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.event.ContextClosedEvent;
 
 /**
  * The landing node's Spring wiring: the runtime, the intake route, its
@@ -218,7 +220,12 @@ public class LandingConfiguration
                                 wholeItems, givenUp),
                         MaintenanceScheduler.Target.of(tables.ledger(),
                                 LandingTables.LANDED_AT, Optional.empty())),
-                runtime.intake().writerLock(), fatal, Clock.systemUTC());
+                runtime.intake().writerLock(), fatal, Clock.systemUTC(),
+                // A re-key asked for (CONTROL-API-DESIGN.md §11), carried
+                // out here: the node holds no database rows with keys.
+                new RekeyPass(tables.control(), tables.committer(),
+                        tables.keys(), tables.database(), "landing",
+                        List.of(), Rekey.BUDGET));
     }
 
     /**

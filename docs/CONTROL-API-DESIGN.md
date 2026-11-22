@@ -1,6 +1,6 @@
 # The pipeline control API: design
 
-Status: **Designed 2026-11-20 with the user; steps C1 (2026-11-20) and C2–C6 (2026-11-21) built, the rest not built** · Puts into effect the intent in
+Status: **Designed 2026-11-20 with the user; steps C1 (2026-11-20) and C2–C7 (2026-11-21) built, the rest not built** · Puts into effect the intent in
 [CONTROL-API.md](CONTROL-API.md), and is the design for [HIPAA.md](HIPAA.md) §11.1 P1–P6. The operator commands
 it serves are those in DESIGN.md §11.4.
 
@@ -427,7 +427,7 @@ depends on neither of the others.
 | C4 | Sealing keys and sealed results (§7). **Built 2026-11-21** (§15.4) | P1 |
 | C5 | Four eyes and break-glass (§6). **Built 2026-11-21** (§15.5) | P1 |
 | C6 | Pause, resume and drain (§9). **Built 2026-11-21** (§15.6) | P2 |
-| C7 | Rotate and re-key (§11) | P3 |
+| C7 | Rotate and re-key (§11). **Built 2026-11-21** (§15.7) | P3 |
 | C8 | Retention, purge and erase (§11) | P4 |
 | C9 | Health, settings, compliance outcome, support bundle | P5 |
 | H1 | The harness with its Testcontainers target, growing with C2–C9 | P6 |
@@ -763,5 +763,71 @@ depends on neither of the others.
   - KEDA isn't paused by the API (§9, §13); the runbook does it.
   - Everything §15.2–§15.5 list as not yet.
 
+### 15.7 C7, as built
+
+- **The KEK in use** (`ControlState`): `sdh_control_state` gains, per scope, `kek`, `kek_by` and `kek_at`. A scope
+  never rotated uses its setting's KEK: the records KEK for the split, convert and transform stages (the sink's,
+  `sdh.sink.kek` if set), the landed items KEK for a landing node. The setting stays as the starting value.
+- **Pods** (`KekWatch`): each reads its scope's KEK as it starts, before its first batch, and every 5 s after, as
+  the pause is read. A KEK newly rotated to is probed first (a throwaway key wrapped and unwrapped). One the pod
+  can't use is refused and audited once (`keys.kek_refused`, with `sdh.kek` and the failure's class), and the KEK
+  in use is kept, so nothing is written the pod couldn't read back. One it can is taken and audited
+  (`keys.kek_active`). A batch keeps the KEK it started with: `IngestPipeline.setActiveKek` (split),
+  `RecordStageProcessor.Sink`'s `kek` (convert, transform) and `ItemLander.activeKek` (landing) read it as each
+  batch starts. Operators' reasons and corrections are wrapped with it too (`reasonKek()`).
+- **KEKs a pod may unwrap:** a KMS reaches any key its rights allow. A local provider (`wrap-provider: local`)
+  loads only the KEKs it is given, so the new setting `sdh.crypto.keys.other-keks` lists the others, loaded to
+  unwrap and to rotate to, and not probed at startup.
+- **Operations** (`KeyCommands`, on every stage, the landing node included, all `keys.admin`):
+  - `keys` (`GET /keys`): the KEK in use and whether it was rotated to, by whom and when; for each table the
+    stage writes, and each database table holding wrapped keys, the rows under each KEK; each table's ID key's
+    KEK; and the last re-key with its progress. It reads every table's `kek_ref` column.
+  - `rotate --kek` (`POST /keys/rotate`): probes the KEK with the stage's rights, then records it. Rotating to the
+    KEK in use changes nothing (`changed` false). Audited with `sdh.kek_from`, `sdh.kek_to`.
+  - `rekey --from --to [--wait]` (`POST /keys/rekey`): four eyes (§6). Refused while `from` is the KEK in use
+    ("rotate first"), or if the stage can't use `to`. Its run records the re-key under the operation's ID, so a
+    run taken over by another control pod finds it rather than asking again, and waits until it is done or
+    failed. The CLI waits for at most `--wait` minutes (until it ends if not given; `0` returns at once).
+- **The re-key** (`RekeyPass`, on the pod holding the stage's duties, as a `MaintenanceScheduler.Pass`): at each
+  maintenance tick (5 min), if a re-key is asked for, maintenance runs over every table at once, with a `Rekey`
+  added to each table's purges, under the duties' commit fence.
+  1. Per table, the data files the scan finds under `kek_ref = from` are copied, up to 4 GiB a run
+     (`Rekey.BUDGET`), each row's `bdk_wrapped` unwrapped with the old KEK and wrapped with the new, checked to
+     give the same key back; a batch's rows share one data key, re-wrapped once. The chunks' ciphertext doesn't
+     change, and its AAD names no KEK. The files are replaced in one `RewriteFiles`, validated from the snapshot
+     the run started at. A file with delete files is refused. The run's snapshot expiry deletes the old files.
+  2. Once a run rewrites nothing, the database rows with wrapped keys (`WrappedRows`, `StageKeys`: failures and
+     their events, corrections, reprocess runs, release acceptances, and on the split stage held items'
+     releases) are re-wrapped 500 to a transaction, each update conditional on the row's old key; then the
+     tables' ID keys (`IdKeys.rekey`, the same key under the new KEK).
+  3. Only once nothing the stage stores is under `from` (`Rekey.left`, the rows, the ID keys) is the re-key
+     `done`, audited by the duties pod as `keys.rekeyed` with the files and rows.
+  - Progress is kept in the row, so a duties pod taking over carries on. A run that fails is tried at the next
+    tick; after 12 in a row, the re-key is `failed`, with the failure's class (`keys.rekey_failed`).
+  - The product never disables or destroys a KEK.
+- **Tests:**
+  - `RekeyTest` (connector-core): a lander rotated at its next batch; a re-key with a one-byte budget taking a
+    file a run until quiet, with nothing left under the old KEK, the old files gone and every item reading back;
+    the ID key moved and the same; bad arguments refused.
+  - `KeyRotationTest` (connector-stage): the rotation and re-key rows (asked again by the same operation, another
+    refused while one runs, progress, ends); the watch refusing a KEK it can't probe, once, taking one it can, and
+    keeping it when a read fails; every stage table's rows counted and re-wrapped, another stage's left alone;
+    the maintenance pass carrying a re-key out on `landed_items` and the database to `done`; failing after 12
+    tries; and the commands (`rotate` probed and once, `keys`, `rekey` four eyes, refused from the KEK in use,
+    `--wait 0`), with their routes.
+- **Not done, chosen while building:**
+  - A re-key is per stage, approved once per stage. §8.2's pipeline-wide approval is not built.
+  - The check is a round trip of each data key re-wrapped, not §11's sample of chunks decrypted.
+  - The control API's held results (`sdh_control_results`) are left out: each lives an hour at most, and the
+    table is shared by every stage writing to the schema. Disable an old KEK an hour after the re-key at the
+    earliest.
+  - A re-key needs table maintenance enabled (`sdh.maintenance.enabled`); while it is off, the re-key stays
+    `requested`.
+  - `keys` reads every table's KEK column: slow on a large stage.
+  - Re-keying a reader's tables when the KEK is shared across stages: each stage re-keys its own scope.
+  - A rotation through a running stage end to end on a broker (the parts are tested: the watch, the writers' KEK
+    supplier, the maintenance pass on a real table).
+  - Everything §15.2–§15.6 list as not yet.
+
 Each step adds its scenarios to the harness as it is built, and its customer documentation to HIPAA-OPERATIONS
-(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1.
+(HIPAA.md §11.2 D13). C5's is in HIPAA-OPERATIONS §3.3 and §5; C6's in §7.1; C7's in §6.1.

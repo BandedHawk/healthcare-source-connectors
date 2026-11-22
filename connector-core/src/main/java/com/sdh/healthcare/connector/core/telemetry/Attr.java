@@ -379,7 +379,25 @@ public enum Attr
     PAUSED("sdh.paused"),
 
     /** Records or items a stage's pods hold claims on now, live. */
-    CLAIMS("sdh.claims");
+    CLAIMS("sdh.claims"),
+
+    /**
+     * A KEK's reference (CONTROL-API-DESIGN.md §11): the one a stage wraps
+     * new data with. A reference, never key material.
+     */
+    KEK("sdh.kek"),
+
+    /** The KEK a re-key moves stored data from. */
+    KEK_FROM("sdh.kek_from"),
+
+    /** The KEK a re-key moves stored data to. */
+    KEK_TO("sdh.kek_to"),
+
+    /** Data files rewritten, such as by a re-key. */
+    FILES("sdh.files"),
+
+    /** Rows changed, such as by a re-key. */
+    ROWS("sdh.rows");
 
     /**
      * The keys telemetry may carry: those of the attributes above, and

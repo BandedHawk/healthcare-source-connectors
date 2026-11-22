@@ -17,6 +17,7 @@ import com.sdh.healthcare.connector.core.checkpoint.JdbcLeaseStore;
 import com.sdh.healthcare.connector.core.checkpoint.SplitItemReport;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
+import com.sdh.healthcare.connector.core.crypto.WrappedRows;
 import com.sdh.healthcare.connector.core.failure.CorrectionStore;
 import com.sdh.healthcare.connector.core.failure.FailureStore;
 import com.sdh.healthcare.connector.core.landing.LandedItemSource;
@@ -36,12 +37,14 @@ import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.PartWay;
 import com.sdh.healthcare.connector.stage.ReprocessInputs;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
+import com.sdh.healthcare.connector.stage.StageKeys;
 import com.sdh.healthcare.connector.stage.StageReleases;
 import com.sdh.healthcare.connector.stage.admin.AdminArgs;
 import com.sdh.healthcare.connector.stage.admin.AdminCli;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
 import com.sdh.healthcare.connector.stage.admin.AuditRecord;
 import com.sdh.healthcare.connector.stage.admin.DrainAdmin;
+import com.sdh.healthcare.connector.stage.admin.KeyAdmin;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
@@ -50,6 +53,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
@@ -68,7 +72,8 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class SplitAdminContext implements DrainAdmin, AutoCloseable
+final class SplitAdminContext implements DrainAdmin, KeyAdmin,
+        AutoCloseable
 {
 
     /** The stage's settings. */
@@ -304,7 +309,47 @@ final class SplitAdminContext implements DrainAdmin, AutoCloseable
     @Override
     public String reasonKek()
     {
+        return controlState(false).kek().map(ControlState.Kek::kek)
+                .orElse(settingKek());
+    }
+
+    /** The records KEK, which {@code split_records} is wrapped with. */
+    @Override
+    public String settingKek()
+    {
         return properties.crypto().keys().recordsKek();
+    }
+
+    @Override
+    public KeyProvider keyProvider() throws Exception
+    {
+        return keys().wrap();
+    }
+
+    /** {@code split_records}: {@code landed_items} is landing's. */
+    @Override
+    public List<Table> keyTables()
+    {
+        try
+        {
+            return List.of(splitRecords());
+        }
+        catch (IllegalStateException neverRun)
+        {
+            return List.of();
+        }
+    }
+
+    @Override
+    public List<WrappedRows> wrappedRows()
+    {
+        return StageKeys.splitRows(properties.stage().registrySchema());
+    }
+
+    @Override
+    public DataSource keyDatabase()
+    {
+        return database.dataSource();
     }
 
     @Override

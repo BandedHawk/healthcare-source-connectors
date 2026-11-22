@@ -6,12 +6,19 @@
  */
 package com.sdh.healthcare.connector.landing.admin;
 
+import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
+import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.core.landing.LandingTables;
 import com.sdh.healthcare.connector.landing.config.LandingProperties;
 import com.sdh.healthcare.connector.landing.intake.ResubmitRequests;
+import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.admin.AdminDatabase;
+import com.sdh.healthcare.connector.stage.admin.KeyAdmin;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
+import javax.sql.DataSource;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
@@ -24,13 +31,15 @@ import org.apache.iceberg.exceptions.NoSuchTableException;
  * taken, so the commands are safe beside the running node: tables are
  * loaded, never created. {@code resubmit} leaves a request in the lease
  * database for the node to carry out (STAGES.md §13.5). No command sends
- * to a broker, so the admin needs no broker settings or keys (STAGES.md
- * §15.8.10 step 5).
+ * to a broker, so the admin needs no broker settings (STAGES.md §15.8.10
+ * step 5); only the key commands load the node's keys, to check a KEK
+ * rotated to (CONTROL-API-DESIGN.md §11), and the node's maintenance, not
+ * the admin, carries out a re-key.
  *
  * @author Jonas Barnett
  * @since 0.1.0
  */
-final class LandingAdminContext implements AutoCloseable
+final class LandingAdminContext implements KeyAdmin, AutoCloseable
 {
 
     /** The node's settings. */
@@ -41,6 +50,9 @@ final class LandingAdminContext implements AutoCloseable
 
     /** The lease database, opened for writing on first use. */
     private final AdminDatabase database;
+
+    /** The node's keys, once loaded. */
+    private KeyMaterial keys;
 
     /**
      * Creates the context; nothing is opened yet.
@@ -109,9 +121,67 @@ final class LandingAdminContext implements AutoCloseable
                 properties.lease().jdbc().table(), Duration.ofSeconds(10));
     }
 
+    /** Beside the lease table, under the node's chains' scope. */
+    @Override
+    public ControlState controlState(boolean change)
+    {
+        return new ControlState(database.dataSource(),
+                AuditTables.besideLeaseTable(properties.lease().jdbc()
+                        .table()).schema(),
+                "landing/" + properties.connectorId());
+    }
+
+    /** The landed items KEK. */
+    @Override
+    public String settingKek()
+    {
+        return properties.crypto().keys().landedItemsKek();
+    }
+
+    @Override
+    public KeyProvider keyProvider() throws Exception
+    {
+        if (keys == null)
+        {
+            keys = KeyMaterial.forLanding(properties.crypto(),
+                    KeyMaterial.Providers.DEFAULT);
+        }
+        return keys.wrap();
+    }
+
+    /** {@code landed_items}: the ledger holds no keys. */
+    @Override
+    public List<Table> keyTables()
+    {
+        try
+        {
+            return List.of(landedItems());
+        }
+        catch (IllegalStateException neverRun)
+        {
+            return List.of();
+        }
+    }
+
+    @Override
+    public DataSource keyDatabase()
+    {
+        return database.dataSource();
+    }
+
+    @Override
+    public String stage()
+    {
+        return "landing";
+    }
+
     @Override
     public void close() throws Exception
     {
+        if (keys != null)
+        {
+            keys.close();
+        }
         try
         {
             database.close();

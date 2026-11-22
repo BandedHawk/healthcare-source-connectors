@@ -493,11 +493,12 @@ The outstanding work is restated, with what's decided since, in §11.
      TLS, are refused.
    - **Still untested:** mTLS to Kafka (a client certificate in place of SCRAM), AWS MSK's IAM login, and TLS
      through PgBouncer. The sandbox and the AWS PoC still run both in plaintext (§8.5).
-8. **No re-keying of existing data** (DESIGN §17).
-   - KEK rotation applies to new data (`kek_ref`), and a KMS's own rotation keeps old versions.
-   - After a KEK is compromised, an operator can't re-wrap what is stored. That bears on the security incident
-     response (§ 164.308(a)(6)) and on the breach safe harbour, which needs the key "not breached".
-   - The ID key is never rotated, by design (DESIGN §7.3). Customers should be told why.
+8. **Re-keying existing data:** built 2026-11-21 (P3, CONTROL-API-DESIGN.md §15.7).
+   - `rotate` moves a stage's new data to another KEK; `rekey`, with a second person's approval, re-wraps what
+     the stage stores under the old one, and `keys` shows when nothing is left under it. The key custodian then
+     disables the old KEK. A KMS's own rotation keeps old versions and needs none of this.
+   - The ID key is never rotated, by design (DESIGN §7.3): a re-key re-wraps it, the same key, under the new
+     KEK. Customers should be told why.
 9. **Isolation per customer, component or function is supported. Document it, and check it holds.**
    - Each pipeline has its own namespaces, KEKs, signing keys, topics and roles. That is the product's answer to:
      - an agent serving several covered entities;
@@ -747,7 +748,7 @@ The work still owed before a customer can run the product on real PHI, after the
 |---|---|---|---|
 | P1 | **The control API:** authentication (OIDC or mTLS), a permission per operation, the caller audited as principal, sealed PHI results, an OpenAPI contract; every operator command on every stage, the transform stage included | §8.1 item 3; § 164.312(a)(1), (b), (d) | The CLI's commands are already shaped for it (DESIGN §11.4). Designed: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md), build steps C1–C5. C1–C5 built (2026-11-21): the query and action commands are served over HTTPS with authentication, permissions and audit; actions run once per idempotency key with a checked reason; long operations are followed through a record; PHI results are sealed to keys registered in advance for each principal by someone else; and audit prune and plaintext break-glass need a second person's approval, the break-glass result held encrypted for one fetch. The CLI refuses those two under the profile unless `cli-four-eyes` is waived. |
 | P2 | **Pause, resume and drain** of a stage or an intake, through P1 | Contingency operations § 164.308(a)(7)(ii)(C) | Built (2026-11-21, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) C6): `pause`, `resume` and `control-state` on every stage, and `drain` on the split, convert and transform stages, through the API and the CLI. A pause is kept in the database, so it outlasts every pod; its pods stop taking new work within seconds, and what they took finishes. KEDA is paused by the runbook (HIPAA-OPERATIONS §7.1), not the API. |
-| P3 | **Key rotation and re-keying,** through P1 | §8.1 item 8; incident response, the breach safe harbour | Rotation for new data exists (`kek_ref`); re-wrapping stored data doesn't. |
+| P3 | **Key rotation and re-keying,** through P1 | §8.1 item 8; incident response, the breach safe harbour | Built (2026-11-21, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) C7): `keys`, `rotate` and `rekey` (four eyes) on every stage, through the API and the CLI. A rotation is kept in the database and taken by each pod at its next batch once it has checked the KEK; a re-key is carried out by the stage's maintenance, file by file, then its database rows and ID keys, and done only when nothing is left under the old KEK. The product never disables a KEK. |
 | P4 | **Retention and erasure,** through P1: set and run retention, purge an item, erase a pipeline's data at the end of a contract | § 164.310(d)(2)(i); § 164.504(e)(2)(ii)(J) | Today retention is a setting and destruction is the KMS's (HIPAA-OPERATIONS §8). |
 | P5 | **Config and health view, and the support bundle,** through P1: settings with secrets removed, health, versions, the compliance outcome | §8.1 item 11; keeps support out of PHI (§1) | |
 | P6 | **The test harness:** one set of scenarios at three levels (CONTROL-API.md) | Testing and revision § 164.308(a)(7)(ii)(D); evidence for § 164.308(a)(8) | Synthetic data only. |

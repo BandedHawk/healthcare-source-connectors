@@ -10,12 +10,14 @@ import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
 import com.sdh.healthcare.connector.core.checkpoint.FencedCommitter;
+import com.sdh.healthcare.connector.core.checkpoint.TableCommitter;
 import java.security.SecureRandom;
 import java.text.ParseException;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.exceptions.CommitFailedException;
@@ -154,6 +156,58 @@ public final class IdKeys
                     + " connector has never started on these tables");
         }
         return unwrap(stored, keys);
+    }
+
+    /**
+     * The KEK the table's stored ID key is wrapped with.
+     *
+     * @param table the table that holds the key
+     * @return its KEK; empty if the table holds no ID key
+     * @throws IllegalStateException if the stored key can't be read
+     */
+    public static Optional<String> kek(Table table)
+    {
+        table.refresh();
+        String stored = table.properties().get(PROPERTY);
+        return stored == null ? Optional.empty()
+                : Optional.of(decode(stored).keyRef());
+    }
+
+    /**
+     * Re-wraps the table's stored ID key from one KEK to another
+     * (CONTROL-API-DESIGN.md §11), if the old one wraps it: the key itself
+     * doesn't change, so record IDs don't either. The new wrap is checked
+     * to give the key back before it is committed.
+     *
+     * @param table     the table that holds the key
+     * @param committer commits the new wrap, through the table's fence
+     * @param keys      unwraps with the old KEK and wraps with the new
+     * @param from      the old KEK
+     * @param to        the new KEK
+     * @return true if it was re-wrapped
+     * @throws IllegalStateException if the stored key can't be read, or the
+     *                               new wrap doesn't give it back
+     */
+    public static boolean rekey(Table table, TableCommitter committer,
+            KeyProvider keys, String from, String to)
+    {
+        table.refresh();
+        String stored = table.properties().get(PROPERTY);
+        if (stored == null)
+        {
+            return false;
+        }
+        WrappedKey wrapped = decode(stored);
+        if (!from.equals(wrapped.keyRef()))
+        {
+            return false;
+        }
+        WrappedKey fresh = WrappedRows.rewrap(keys, from, to,
+                wrapped.wrapped());
+        String encoded = encode(fresh);
+        committer.commit(table, transaction -> transaction
+                .updateProperties().set(PROPERTY, encoded).commit());
+        return true;
     }
 
     /**

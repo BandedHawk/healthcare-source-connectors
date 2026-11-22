@@ -17,6 +17,7 @@ import com.sdh.healthcare.connector.core.checkpoint.LeaseKeeper;
 import com.sdh.healthcare.connector.core.crypto.IdKeys;
 import com.sdh.healthcare.connector.core.crypto.RecordIds;
 import com.sdh.healthcare.connector.core.maintenance.MaintenanceSettings;
+import com.sdh.healthcare.connector.core.maintenance.Rekey;
 import com.sdh.healthcare.connector.core.pipeline.QueuedCommits;
 import com.sdh.healthcare.connector.core.pipeline.RetryPolicy;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
@@ -41,10 +42,13 @@ import com.sdh.healthcare.connector.runtime.telemetry.AuditJournals;
 import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.DrainGate;
 import com.sdh.healthcare.connector.stage.ItemEndResender;
+import com.sdh.healthcare.connector.stage.KekWatch;
 import com.sdh.healthcare.connector.stage.PauseWatch;
+import com.sdh.healthcare.connector.stage.RekeyPass;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
+import com.sdh.healthcare.connector.stage.StageKeys;
 import com.sdh.healthcare.connector.stage.StageProperties;
 import com.sdh.healthcare.connector.stage.StageReceiver;
 import com.sdh.healthcare.connector.stage.StageRegistry;
@@ -236,6 +240,14 @@ public final class RecordStageRuntime implements AutoCloseable
             registry.failureStore().gauges(Duration.ofMinutes(1));
             DrainGate gate = DrainGate.open(dataSource, stage, stageName,
                     transform.versions(), registry::partWay);
+            ControlState control = new ControlState(dataSource,
+                    stage.registrySchema(),
+                    stageName + "/" + settings.connectorId());
+            // The KEK each new batch is wrapped with, as rotated
+            // (CONTROL-API-DESIGN.md §11), read before the first batch.
+            KekWatch kek = KekWatch.of(control, sinkKek, keys.wrap());
+            kek.start();
+            opened.add(kek);
 
             StageTables tables = new StageTables(settings,
                     transform.messages());
@@ -243,7 +255,7 @@ public final class RecordStageRuntime implements AutoCloseable
             RecordTable source = tables.source();
             RecordTable sink = tables.sink();
             RecordIds ids = new RecordIds(IdKeys.loadOrCreateShared(
-                    sink.table(), keys.wrap(), sinkKek));
+                    sink.table(), keys.wrap(), kek.get()));
             QueueReader reader = QueueReader.builder()
                     .catalog(tables.sourceCatalog())
                     .expectedCatalogName(source.catalogName())
@@ -302,7 +314,7 @@ public final class RecordStageRuntime implements AutoCloseable
             RecordStageProcessor processor = new RecordStageProcessor(
                     transform, reader, new RecordStageProcessor.Tables(
                             source, new RecordStageProcessor.Sink(sink,
-                                    keys.wrap(), sinkKek, ids), earlier),
+                                    keys.wrap(), kek, ids), earlier),
                     memory, results, clock, backlog, queued);
             StageWorker.Reprocessing reprocessing = reprocessing(camel,
                     stage, keys, new ReprocessStore(dataSource,
@@ -354,12 +366,15 @@ public final class RecordStageRuntime implements AutoCloseable
                             () -> List.of(MaintenanceScheduler.Target.of(
                                     sink.table(), RecordsTable.INGESTED_AT,
                                     retention)),
-                            new ReentrantLock(), dutiesFatal, clock),
+                            new ReentrantLock(), dutiesFatal, clock,
+                            // A re-key asked for, carried out here.
+                            new RekeyPass(control, committer, keys.wrap(),
+                                    dataSource, stageName,
+                                    StageKeys.rows(stage.registrySchema()),
+                                    Rekey.BUDGET)),
                     fatal).placed(stage.duties());
             opened.add(duties);
-            PauseWatch watch = PauseWatch.of(new ControlState(dataSource,
-                    stage.registrySchema(),
-                    stageName + "/" + settings.connectorId()),
+            PauseWatch watch = PauseWatch.of(control,
                     List.of(receiver, worker));
             // Closed before the input, so no resume starts it again.
             opened.add(watch);

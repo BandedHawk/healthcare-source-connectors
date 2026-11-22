@@ -248,6 +248,13 @@ Revision 2026-11-21 (em), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) 
 - A break-glass restore's plaintext is held encrypted (`ControlResults`: a data key per result, wrapped with the stage's records KEK; AES-GCM parts). The requester fetches it once within an hour from `/operations/{id}/result`, and it is then deleted.
 - Under the `hipaa` profile, the CLI refuses both unless the new check `cli-four-eyes` is waived; the waiver is shown and audited at startup.
 
+Revision 2026-11-21 (eo), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.7, step C7 of the control API, asked for by the user ("Build C7"). **A stage's KEK can be rotated, and what it stores re-keyed, through the API or the CLI.**
+- `rotate --kek` records the KEK for a scope's new data in `sdh_control_state`, after checking the stage can wrap and unwrap with it. Each pod reads it every 5 s (`KekWatch`), probes it, and wraps each batch it starts after with it; one it can't use is refused and audited, and the old KEK kept.
+- `rekey --from --to` needs a second person's approval. The duties pod's maintenance carries it out (`RekeyPass`, `Rekey`): per table, up to 4 GiB of files a run, each file's rows' data keys re-wrapped and the file replaced in one rewrite, the old files expired; then the database rows with wrapped keys (`WrappedRows`) and the ID keys. It is done only once nothing is left under the old KEK.
+- `keys` shows the KEK in use and the rows under each KEK, table by table. A local provider unwraps the KEKs listed in the new `sdh.crypto.keys.other-keks`.
+
+Tested by `RekeyTest` and `KeyRotationTest`; customer steps in HIPAA-OPERATIONS §6.1. Not done: pipeline-wide approval; a sample-decrypt check; the control API's held results (an hour at most); a rotation end to end on a running stage.
+
 Revision 2026-11-21 (en), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) §15.6, step C6 of the control API, asked for by the user ("Build C6"). **A stage can be paused, resumed and drained, through the API or the CLI.**
 - `pause` (with a reason), `resume` and `control-state` are on every stage. The pause is a row of `sdh_control_state`, beside the audit journal, under the scope the stage's audit chains are of. It outlasts every pod.
 - Each pod reads it as it starts, before taking work, and every 5 s after (`PauseWatch`). A pause suspends the input route, stops reprocess queueing and corrections, and on the landing node stops listing, queue batches, pushes (`503`) and resubmissions. Work taken finishes, and claims and leases are still renewed.
@@ -2423,6 +2430,7 @@ sdh:
     keys:
       records-kek: records-kek/1                          # keystore alias, or the KMS key ref
       landed-items-kek: landed-items-kek/1                  # unwrap only
+      other-keks: [records-kek/2]                         # local only: rotated to, or still under data (CONTROL-API-DESIGN §15.7)
       inbox: { kid: splitter-2026, pem: /run/secrets/inbox.pem }   # opens item.landed; passphrase: env
       landing-signer: { kid: landing-2026, pem: /run/secrets/landing-signer.pem }   # public key
       signing: { kid: connector-2026, pem: /run/secrets/signing.pem }   # local; passphrase: env
@@ -2954,4 +2962,3 @@ These are checked first, in a build spike before the full implementation. Spike 
 - **Host disk capacity:** space for the inbound directory, `completed/` and `failed/` records, and the encrypted local `failed/<itemId>.enc` fallback is the operators' responsibility, through normal system monitoring. The service doesn't reserve, measure or predict disk space.
 - **MinIO:** not supported or tested. Support only if a customer pays for it, including the development and testing it needs (§8.1).
 - **GCP Cloud KMS against the real service:** untested until customer demand requires it (§7.4).
-- Re-keying existing data after a KEK compromise. KEK rotation for new data is supported through `kek_ref`.
