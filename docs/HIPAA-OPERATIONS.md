@@ -49,7 +49,9 @@ Each stage writes every audit event to two places:
    the stage's signing key every minute and when they stop. No event is ever dropped: if Postgres is unreachable the
    events queue, and when the queue is full the stage waits rather than loses one. Settings, under
    `sdh.telemetry.journal`: `enabled` (true; the profile refuses `false`), `capacity` (50000 events), `batch-size`
-   (500), `seal-interval` (1m).
+   (500), `seal-interval` (1m), `linger` (0s: how long a batch waits for more events before it is written;
+   PERFORMANCE.md §13 measured 100ms taking the journal's extra Postgres CPU away, at up to 100 ms more before an
+   event is durable).
 2. **The OTLP export** to the operator's collector, for the SIEM (DESIGN §12.1), and from there to a separate
    store (§2.7). It is best effort; the journal is the record of truth, and `audit-export` fills any gap (§3.2).
 

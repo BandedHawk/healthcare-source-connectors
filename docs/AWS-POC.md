@@ -222,10 +222,11 @@ Why it works this way:
 | 8 hours every working day (160 h) | ≈ $58 |
 | Plus, per long test | ≈ $0.25 an hour |
 
-The budget alarm `sdh-poc-monthly` stays as a backstop: $60/month (8 hours every weekday was about $55; with
-the control harness's keys, since 2026-11-22, about $62, so such a month reaches it: unchanged, for now), with
-emails at 50% and 100% of actual spend and at 100% of forecast. A cluster left running would cost about $190 a
-month, so the forecast alert catches it within days. Lowered from $250 on 2026-11-12.
+The budget alarm `sdh-poc-monthly` stays as a backstop: $80/month (8 hours every weekday is about $62 with the
+control harness's keys, so the $60 before was reached by an ordinary month), with emails at 50% and 100% of
+actual spend and at 100% of forecast. A cluster left running would cost about $190 a month, so the forecast alert
+catches it within days. Lowered from $250 on 2026-11-12; raised from $60 on 2026-11-22, by the admin's
+`deploy/aws/iam/apply-admin.sh` (it changes an existing budget's limit and keeps its alerts).
 
 ## 4. Choices, and why they are cheap
 

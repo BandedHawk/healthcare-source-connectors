@@ -108,18 +108,40 @@ public final class JdbcAuditJournal implements AuditJournal, AutoCloseable
      * @param flushWait    how long {@link #flush} waits at most
      * @param closeWait    how long {@link #close} waits at most for what is
      *                     left to be written
+     * @param linger       how long a batch waits for more entries after its
+     *                     first, up to {@code batchSize}, before it is
+     *                     written; zero writes what is waiting at once. A
+     *                     busy stage otherwise writes a transaction of a
+     *                     few entries each time one is written
+     *                     (docs/PERFORMANCE.md §13)
      */
     public record Settings(int capacity, int batchSize, Duration sealInterval,
-            Duration flushWait, Duration closeWait)
+            Duration flushWait, Duration closeWait, Duration linger)
     {
 
         /**
          * 50,000 events, batches of 500, sealed each minute; flushes wait
-         * 5 seconds, closing 10.
+         * 5 seconds, closing 10; no linger.
          */
         public static final Settings DEFAULT = new Settings(50_000, 500,
                 Duration.ofMinutes(1), Duration.ofSeconds(5),
-                Duration.ofSeconds(10));
+                Duration.ofSeconds(10), Duration.ZERO);
+
+        /**
+         * The settings without a linger, as before it was added.
+         *
+         * @param capacity     the most events waiting
+         * @param batchSize    the most entries in one transaction
+         * @param sealInterval how often the head is sealed
+         * @param flushWait    how long {@link #flush} waits at most
+         * @param closeWait    how long {@link #close} waits at most
+         */
+        public Settings(int capacity, int batchSize, Duration sealInterval,
+                Duration flushWait, Duration closeWait)
+        {
+            this(capacity, batchSize, sealInterval, flushWait, closeWait,
+                    Duration.ZERO);
+        }
 
         /**
          * Checks the settings.
@@ -140,6 +162,11 @@ public final class JdbcAuditJournal implements AuditJournal, AutoCloseable
                 throw new IllegalArgumentException(
                         "The audit journal's seal interval must be at least"
                                 + " 1 second");
+            }
+            if (linger == null || linger.isNegative())
+            {
+                throw new IllegalArgumentException(
+                        "The audit journal's linger can't be negative");
             }
         }
     }
@@ -458,6 +485,7 @@ public final class JdbcAuditJournal implements AuditJournal, AutoCloseable
                     }
                     batch.add(first);
                     queue.drainTo(batch, settings.batchSize() - 1);
+                    linger(batch);
                 }
                 try
                 {
@@ -515,6 +543,37 @@ public final class JdbcAuditJournal implements AuditJournal, AutoCloseable
         if (!closing)
         {
             wait(backoff.toMillis());
+        }
+    }
+
+    /**
+     * Waits up to the linger for more entries, until the batch is full or
+     * the journal is closing, so a busy stage writes fewer, larger
+     * transactions.
+     *
+     * @param batch the batch, with its first entries
+     * @throws InterruptedException if interrupted while waiting
+     */
+    private void linger(List<AuditEntry> batch) throws InterruptedException
+    {
+        long linger = settings.linger().toNanos();
+        if (linger == 0)
+        {
+            return;
+        }
+        long deadline = System.nanoTime() + linger;
+        long left;
+        while (batch.size() < settings.batchSize() && !isClosing()
+                && (left = deadline - System.nanoTime()) > 0)
+        {
+            AuditEntry next = queue.poll(Math.min(left,
+                    TimeUnit.MILLISECONDS.toNanos(POLL_MILLIS)),
+                    TimeUnit.NANOSECONDS);
+            if (next != null)
+            {
+                batch.add(next);
+                queue.drainTo(batch, settings.batchSize() - batch.size());
+            }
         }
     }
 

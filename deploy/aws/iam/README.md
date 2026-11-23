@@ -79,12 +79,14 @@ aws iam attach-user-policy --user-name claude-poc-deployer --policy-arn arn:aws:
 aws s3control put-public-access-block --account-id $ACCT --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 ```
 
-6. Recommended: a budget alarm at $60/month, alerting at 50% and 100% of actual spend and 100% of forecast
-   (changed from $250 on 2026-11-12, after the PoC began shutting down when idle). Replace `you@example.com` with the address that should get the
+6. Recommended: a budget alarm at $80/month, alerting at 50% and 100% of actual spend and 100% of forecast
+   (changed from $250 on 2026-11-12, after the PoC began shutting down when idle, and from $60 on 2026-11-22, when
+   the control harness's keys took a month of working days to about $62; `apply-admin.sh` changes an existing
+   budget's limit and keeps its alerts). Replace `you@example.com` with the address that should get the
    alerts. The deployer can then see the budget, but it is better owned by the admin.
 
 ```bash
-aws budgets create-budget --account-id $ACCT --budget '{"BudgetName":"sdh-poc-monthly","BudgetLimit":{"Amount":"60","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}' --notifications-with-subscribers '[{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":50,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"you@example.com"}]},{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":100,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"you@example.com"}]},{"Notification":{"NotificationType":"FORECASTED","ComparisonOperator":"GREATER_THAN","Threshold":100,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"you@example.com"}]}]'
+aws budgets create-budget --account-id $ACCT --budget '{"BudgetName":"sdh-poc-monthly","BudgetLimit":{"Amount":"80","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}' --notifications-with-subscribers '[{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":50,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"you@example.com"}]},{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":100,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"you@example.com"}]},{"Notification":{"NotificationType":"FORECASTED","ComparisonOperator":"GREATER_THAN","Threshold":100,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"you@example.com"}]}]'
 ```
 
 ## Expected gaps

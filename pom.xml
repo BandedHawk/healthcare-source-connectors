@@ -93,6 +93,14 @@
     <perf.formats>ccda,x12</perf.formats>
     <perf.storage>local</perf.storage>
     <perf.recipient>ec</perf.recipient>
+    <!-- SplitFanOutPerf (-Dperf.stages=fanout, docs/PERFORMANCE.md §13): empty keeps the test's defaults. -->
+    <perf.fanout.rows></perf.fanout.rows>
+    <perf.fanout.row-bytes></perf.fanout.row-bytes>
+    <perf.fanout.records></perf.fanout.records>
+    <perf.fanout.max-items></perf.fanout.max-items>
+    <perf.fanout.concurrency></perf.fanout.concurrency>
+    <perf.fanout.batch></perf.fanout.batch>
+    <perf.fanout.audit></perf.fanout.audit>
     <!-- The heap the connector gets in the Kubernetes sketch (§14.1); -Dperf.heap=512m to try a smaller one. -->
     <perf.heap>1024m</perf.heap>
     <!-- Demo settings (-Pdemo, never part of a normal build; design §15.3): local (one JVM) or vm (minikube). -->
@@ -1007,6 +1015,13 @@
                     <perf.formats>${perf.formats}</perf.formats>
                     <perf.storage>${perf.storage}</perf.storage>
                     <perf.recipient>${perf.recipient}</perf.recipient>
+                    <perf.fanout.rows>${perf.fanout.rows}</perf.fanout.rows>
+                    <perf.fanout.row-bytes>${perf.fanout.row-bytes}</perf.fanout.row-bytes>
+                    <perf.fanout.records>${perf.fanout.records}</perf.fanout.records>
+                    <perf.fanout.max-items>${perf.fanout.max-items}</perf.fanout.max-items>
+                    <perf.fanout.concurrency>${perf.fanout.concurrency}</perf.fanout.concurrency>
+                    <perf.fanout.batch>${perf.fanout.batch}</perf.fanout.batch>
+                    <perf.fanout.audit>${perf.fanout.audit}</perf.fanout.audit>
                     <!-- One directory for every stage's results, so they share a history and a summary. -->
                     <perf.out>${maven.multiModuleProjectDirectory}/target/perf</perf.out>
                   </systemPropertyVariables>

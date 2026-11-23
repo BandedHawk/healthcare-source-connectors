@@ -17,6 +17,7 @@ import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECGenParameterSpec;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Clock;
@@ -272,6 +273,56 @@ class JdbcAuditJournalTest
     }
 
     /**
+     * With a linger, a batch waits for more entries before it is written,
+     * and is written as soon as it is full; closing doesn't wait for the
+     * linger, and the chain is whole.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void lingersForAFullBatch() throws Exception
+    {
+        long started;
+        try (JdbcAuditJournal journal = newJournal(true,
+                Duration.ofSeconds(30)))
+        {
+            append(journal, 1);
+            Thread.sleep(500);
+            assertThat(events()).as("one entry, lingering").isZero();
+
+            append(journal, 6);
+            journal.flush();
+            assertThat(events()).as("a full batch of 7").isEqualTo(7);
+
+            append(journal, 2);
+            started = System.nanoTime();
+        }
+        assertThat(Duration.ofNanos(System.nanoTime() - started))
+                .as("closing doesn't wait for the linger")
+                .isLessThan(Duration.ofSeconds(10));
+        assertThat(events()).isEqualTo(9);
+        assertThat(verify().intact()).isTrue();
+    }
+
+    /**
+     * How many events the journal's table holds.
+     *
+     * @return the count
+     * @throws SQLException if it can't be read
+     */
+    private long events() throws SQLException
+    {
+        try (Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement();
+                ResultSet rows = statement.executeQuery(
+                        "SELECT count(*) FROM " + tables.events()))
+        {
+            rows.next();
+            return rows.getLong(1);
+        }
+    }
+
+    /**
      * Pruning removes whole chains last written before the time given.
      *
      * @throws Exception if the test fails to run
@@ -315,6 +366,18 @@ class JdbcAuditJournalTest
      */
     private JdbcAuditJournal newJournal(boolean sealed)
     {
+        return newJournal(sealed, Duration.ZERO);
+    }
+
+    /**
+     * Starts a journal, with small batches and a linger.
+     *
+     * @param sealed whether the stage's key seals it
+     * @param linger how long a batch waits for more entries
+     * @return the journal
+     */
+    private JdbcAuditJournal newJournal(boolean sealed, Duration linger)
+    {
         AuditSeal sealer;
         try
         {
@@ -328,7 +391,7 @@ class JdbcAuditJournalTest
         return new JdbcAuditJournal(dataSource, tables, "test/one", "pod-1",
                 sealer, new JdbcAuditJournal.Settings(100, 7,
                         Duration.ofHours(1), Duration.ofSeconds(10),
-                        Duration.ofSeconds(30)),
+                        Duration.ofSeconds(30), linger),
                 Clock.systemUTC()).start();
     }
 

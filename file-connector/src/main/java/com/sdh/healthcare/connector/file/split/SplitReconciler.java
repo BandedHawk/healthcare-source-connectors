@@ -335,7 +335,8 @@ public final class SplitReconciler
     /**
      * Takes on the items left part way since before the cutoff, from their
      * checkpoints. An item whose summary row is gone (purged by retention)
-     * can't be read, and is left, with a warning, for an operator.
+     * can't be read, and is left, with a warning naming the item, for an
+     * operator.
      *
      * @param table   the {@code landed_items} table, refreshed
      * @param stalled the items left part way when listed
@@ -372,7 +373,9 @@ public final class SplitReconciler
             String digest = digests.get(itemId);
             if (digest == null)
             {
-                LOG.warn("split.stalled_unreadable reason=NO_SUMMARY");
+                // The item's ID, not its key, so an operator can find it.
+                LOG.warn("split.stalled_unreadable intake={} item_id={}"
+                        + " reason=NO_SUMMARY", intake, itemId);
                 continue;
             }
             if (!checkpoints.stillStalled(itemId, cutoff))

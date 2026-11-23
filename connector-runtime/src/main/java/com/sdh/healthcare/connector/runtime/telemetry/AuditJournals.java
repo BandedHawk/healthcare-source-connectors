@@ -105,7 +105,7 @@ public final class AuditJournals
                             : new AuditSeal(keys.messages(), keys.signerKid()),
                     new JdbcAuditJournal.Settings(settings.capacity(),
                             settings.batchSize(), settings.sealInterval(),
-                            FLUSH_WAIT, CLOSE_WAIT),
+                            FLUSH_WAIT, CLOSE_WAIT, settings.linger()),
                     Clock.systemUTC()).start();
             Telemetry.journal(journal);
             return new Opened()

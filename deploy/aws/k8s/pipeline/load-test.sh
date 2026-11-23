@@ -45,7 +45,9 @@
 # and stages the inputs and stops (no cluster needed, nothing deleted); SDH_LOAD_RUN=<run> then runs that staged
 # load, with the same arguments, and deletes it at the end. Progress every 15 s; done when the intake prefix is empty, no
 # consumer group lags and the registries have stopped changing. The report (counts, codes and timings only) is
-# printed and kept in $STATE/load/<run>/report.txt. The inputs are deleted at the end, locally and in S3.
+# printed and kept in $STATE/load/<run>/report.txt. The inputs are deleted at the end, locally and in S3; a run that
+# stops before its end keeps its staging, to be run again with SDH_LOAD_RUN after a reset. A run refuses to start
+# on an earlier run's data (SDH_LOAD_UNRESET=1 overrides), and its report lists the nodes it had (the Spot mix).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -59,6 +61,7 @@ COPIES="${1:-80}" ERROR_COPIES="${2:-10}"
 RATE="${SDH_LOAD_RATE:-}"                # objects a second at t0; empty: all at once
 STAGE_ONLY="${SDH_LOAD_STAGE_ONLY:-0}"   # 1: make and stage the inputs, then stop
 REUSE="${SDH_LOAD_RUN:-}"                # a run staged with SDH_LOAD_STAGE_ONLY=1
+UNRESET="${SDH_LOAD_UNRESET:-0}"         # 1: run on an earlier run's data, which a run otherwise refuses
 SLICE=100                                # objects a slice, with SDH_LOAD_RATE
 [[ -z "$RATE" || "$RATE" =~ ^[1-9][0-9]*$ ]] || { echo "SDH_LOAD_RATE: objects a second, as 100" >&2; exit 2; }
 P="${SDH_PIPELINES:-ccda-push}"; P="${P%% *}"
@@ -141,6 +144,13 @@ docs="$TRANSFORMER/transform-stage/target/test-documents/documents"
 [[ -d "$docs" ]] || die "no test documents at $docs: build the transformer (./mvnw -o package)"
 if [[ "$STAGE_ONLY" != 1 ]]; then
   [[ "$(intake_count)" == 0 ]] || die "$INTAKE isn't empty: wait for the pipeline, or look at the landing stage"
+  # A run on an earlier run's data isn't comparable (run 60, docs/PERFORMANCE.md §10): the tables and registries
+  # it would add to are bigger, and its commits slower. SDH_LOAD_UNRESET=1 runs anyway, as a run that means to.
+  if [[ "$UNRESET" != 1 ]]; then
+    left_items="$(db "SELECT count(*) FROM split_$PREFIX.split_item" 2>/dev/null || echo 0)"
+    [[ "${left_items:-0}" == 0 ]] \
+      || die "$left_items items from an earlier run: run deploy/aws/poc.sh reset, or set SDH_LOAD_UNRESET=1"
+  fi
 fi
 
 run="${REUSE:-load-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -153,12 +163,20 @@ cleanup() {
   declare -F stop_sampler >/dev/null && stop_sampler
   [[ "${outage_state:-}" == down ]] && { outage_restore || true; }
   [[ -n "$BACKLOG" ]] && { backlog_restore || true; }
-  [[ "$STAGE_ONLY" == 1 ]] || aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
+  # Kept unless the run ended (2026-11-22): a run stopped part way, by hand or by a failure, can be run again
+  # from its staging with SDH_LOAD_RUN, after a reset, instead of being staged again.
+  if [[ "${finished:-0}" == 1 ]]; then
+    aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
+  elif [[ "$STAGE_ONLY" != 1 && -f "${out:-/nonexistent}/staged-whole" ]]; then
+    printf '>> Staging kept: run it again with SDH_LOAD_RUN=%s%s and the same arguments, after poc.sh reset\n' \
+      "$run" "${RATE:+ SDH_LOAD_RATE=$RATE}" >&2
+  fi
   rm -rf "$out/inputs"
 }
 trap cleanup EXIT
 if [[ -n "$REUSE" ]]; then
   [[ -f "$out/manifest.json" ]] || die "no staged run $REUSE ($out/manifest.json)"
+  : > "$out/staged-whole"   # staged once, whole; kept if this run stops too
   [[ -z "$RATE" || -f "$out/slices" ]] || die "$REUSE wasn't staged in slices: stage it with SDH_LOAD_RATE"
   [[ -n "$RATE" || ! -f "$out/slices" ]] || die "$REUSE was staged in slices: run it with SDH_LOAD_RATE"
 else
@@ -183,7 +201,15 @@ print(m["files"], m["bytes"], len(m["clean"]))' "$out/manifest.json")
 say "Run $run: $files objects, $((bytes / 1048576)) MB ($COPIES copies of each of $documents test documents; $ERROR_COPIES of each of 5 error inputs)"
 if [[ -z "$REUSE" ]]; then
   say "Staging them in $staging"
-  aws s3 cp --recursive --only-show-errors "$out/inputs/" "$staging"
+  # A sync, tried again after a failure (a network blip ended two uploads on 2026-11-22): each try sends only
+  # what isn't there yet, by size.
+  for try in 1 2 3 4 5; do
+    aws s3 sync --size-only --only-show-errors "$out/inputs/" "$staging" && break
+    ((try < 5)) || die "staging the inputs failed five times; run again with SDH_LOAD_STAGE_ONLY=1"
+    say "  staging failed (try $try of 5); trying again in $((try * 30))s"
+    sleep $((try * 30))
+  done
+  : > "$out/staged-whole"   # all of it: only then may a stopped run's staging be run again
   rm -rf "$out/inputs"
 fi
 if [[ "$STAGE_ONLY" == 1 ]]; then
@@ -565,6 +591,9 @@ while :; do
   nodes="$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready' || true)"
   burst="$(kubectl get nodes -l sdh-poc/pool=burst --no-headers 2>/dev/null | grep -c ' Ready' || true)"
   ((nodes > max_nodes)) && max_nodes=$nodes; ((burst > max_burst)) && max_burst=$burst
+  # Each node seen, with its pool, instance type and capacity, for the Spot mix in the report.
+  kubectl get nodes -o go-template='{{range .items}}{{.metadata.name}} {{index .metadata.labels "sdh-poc/pool"}} {{index .metadata.labels "node.kubernetes.io/instance-type"}} {{index .metadata.labels "eks.amazonaws.com/capacityType"}}{{"\n"}}{{end}}' \
+    >> "$out/nodes-seen" 2>/dev/null || true
   # What went wrong, if anything (docs/PERFORMANCE.md §10, the first steady feed): Postgres' connections by role,
   # "-" when it doesn't answer, and Kubernetes' Warning events, saved as they come (they expire after an hour).
   { printf '%s ' "$now"; db "SELECT coalesce(sum(n), 0), coalesce(string_agg(u || '=' || n, ' ' ORDER BY n DESC), '') FROM (SELECT
@@ -927,6 +956,19 @@ if [[ -n "$BACKLOG" ]]; then
   say "$(printf '  %5s %-34s %-6s %-11s %-9s %7s %6s %5s' pods pod pool type capacity rec/s cores wait)"
   for line in "${backlog_pod_lines[@]}"; do say "  $line"; done
 fi
+# The nodes the run had (docs/PERFORMANCE.md §10, runs 60 to 63): Graviton2 nodes are slower a core than
+# Graviton3, so runs are compared only on a like mix.
+if [[ -s "$out/nodes-seen" ]]; then
+  say "Nodes seen (pool, instance type, capacity: count):"
+  sort -u "$out/nodes-seen" | awk '{n[$2" "$3" "$4]++} END {for (k in n) printf "    %s: %d\n", k, n[k]}' | sort \
+    | tee -a "$report"
+  read -r g2 all < <(sort -u "$out/nodes-seen" | awk '$2 == "burst" {all++; if ($3 ~ /^(m6g|c6g|r6g|t4g)/) g2++}
+    END {print g2 + 0, all + 0}')
+  if ((g2 > 0)); then
+    say "  NOTE: $g2 of $all burst nodes were Graviton2; compare only with a run of a like mix"
+  fi
+fi
+finished=1
 say "Report kept in $report"
 
 say ""

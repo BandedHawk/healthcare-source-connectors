@@ -512,7 +512,8 @@ class ItemProcessorTest
                 });
             }
             assertThat(phases).contains("resume", "start", "first_record",
-                    "records", "write",
+                    "batch_open", "records", "records_read",
+                    "records_store", "write",
                     "publish_wait", "prepare", "append", "commit_queue",
                     "commit_group", "save", "send_wait", "archive", "open",
                     "split", "failed_rows", "announce");

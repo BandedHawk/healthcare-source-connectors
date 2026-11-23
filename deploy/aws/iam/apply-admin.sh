@@ -91,15 +91,25 @@ else
   echo "turned on (was: $bpa)"
 fi
 
-step "7. Budget alarm, \$60/month: email at 50% and 100% of actual spend, and 100% of forecast"
-if aws budgets describe-budget --account-id "$ACCT" --budget-name sdh-poc-monthly >/dev/null 2>&1; then
-  echo "sdh-poc-monthly already exists"
+# $80 since 2026-11-22: with the control harness's keys a month of working days is about $62, over the $60 before.
+BUDGET=80
+BUDGET_JSON="{\"BudgetName\":\"sdh-poc-monthly\",\"BudgetLimit\":{\"Amount\":\"$BUDGET\",\"Unit\":\"USD\"},\"TimeUnit\":\"MONTHLY\",\"BudgetType\":\"COST\"}"
+step "7. Budget alarm, \$$BUDGET/month: email at 50% and 100% of actual spend, and 100% of forecast"
+if have=$(aws budgets describe-budget --account-id "$ACCT" --budget-name sdh-poc-monthly \
+    --query 'Budget.BudgetLimit.Amount' --output text 2>/dev/null); then
+  if [ "${have%%.*}" = "$BUDGET" ]; then
+    echo "sdh-poc-monthly already exists"
+  else
+    # Its alerts, and their subscribers, are kept: only the limit changes.
+    aws budgets update-budget --account-id "$ACCT" --new-budget "$BUDGET_JSON"
+    echo "sdh-poc-monthly changed from \$${have%%.*} to \$$BUDGET"
+  fi
 else
   read -r -p "Email for budget alerts (empty to skip): " EMAIL
   if [ -n "$EMAIL" ]; then
     # Another run may have made it while this one waited at the prompt.
     if out=$(aws budgets create-budget --account-id "$ACCT" \
-      --budget '{"BudgetName":"sdh-poc-monthly","BudgetLimit":{"Amount":"60","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}' \
+      --budget "$BUDGET_JSON" \
       --notifications-with-subscribers "[{\"Notification\":{\"NotificationType\":\"ACTUAL\",\"ComparisonOperator\":\"GREATER_THAN\",\"Threshold\":50,\"ThresholdType\":\"PERCENTAGE\"},\"Subscribers\":[{\"SubscriptionType\":\"EMAIL\",\"Address\":\"$EMAIL\"}]},{\"Notification\":{\"NotificationType\":\"ACTUAL\",\"ComparisonOperator\":\"GREATER_THAN\",\"Threshold\":100,\"ThresholdType\":\"PERCENTAGE\"},\"Subscribers\":[{\"SubscriptionType\":\"EMAIL\",\"Address\":\"$EMAIL\"}]},{\"Notification\":{\"NotificationType\":\"FORECASTED\",\"ComparisonOperator\":\"GREATER_THAN\",\"Threshold\":100,\"ThresholdType\":\"PERCENTAGE\"},\"Subscribers\":[{\"SubscriptionType\":\"EMAIL\",\"Address\":\"$EMAIL\"}]}]" 2>&1); then
       echo "created"
     elif echo "$out" | grep -q DuplicateRecord; then

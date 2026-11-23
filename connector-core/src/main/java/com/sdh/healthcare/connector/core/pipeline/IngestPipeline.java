@@ -776,6 +776,11 @@ public final class IngestPipeline implements AutoCloseable
         Future<Long> inFlightPublish = null;
         // When the batch being filled was begun, for its "records" time.
         long filling = 0;
+        // Of that, the time spent reading and splitting the batch's records,
+        // and storing them (encrypting and writing each to the data file):
+        // "records_read" and "records_store" (docs/PERFORMANCE.md §13).
+        long readNanos = 0;
+        long storeNanos = 0;
         // Until the first record: reading and parsing the item's start.
         long reading = System.nanoTime();
         // Lines and columns, so failures and mapping issues can be found in
@@ -785,23 +790,36 @@ public final class IngestPipeline implements AutoCloseable
         {
             long seq = current.nextSeq();
             Optional<SplitRecord> next;
+            long asked = System.nanoTime();
             while ((next = session.next()).isPresent())
             {
+                long got = System.nanoTime();
                 if (reading != 0)
                 {
                     timed("first_record", reading);
                     reading = 0;
                 }
+                else
+                {
+                    readNanos += got - asked;
+                }
                 if (batch == null)
                 {
                     batch = new Batch(current.itemId(), current.format(),
                             refs, current.cut());
-                    filling = System.nanoTime();
+                    filling = timed("batch_open", got);
+                    got = filling;
                 }
                 batch.add(seq++, origins.withOrigin(next.get()), source);
+                asked = System.nanoTime();
+                storeNanos += asked - got;
                 if (batch.full())
                 {
                     timed("records", filling);
+                    phase("records_read", readNanos);
+                    phase("records_store", storeNanos);
+                    readNanos = 0;
+                    storeNanos = 0;
                     BatchOutcome outcome = commitBatch(batch, current,
                             inFlightPublish, lease);
                     current = outcome.checkpoint();
@@ -817,11 +835,15 @@ public final class IngestPipeline implements AutoCloseable
                         throw new ItemInterruptedException(current.itemId(),
                                 newer);
                     }
+                    // The commit isn't the next record's reading.
+                    asked = System.nanoTime();
                 }
             }
             if (batch != null)
             {
                 timed("records", filling);
+                phase("records_read", readNanos);
+                phase("records_store", storeNanos);
                 BatchOutcome outcome = commitBatch(batch, current,
                         inFlightPublish, lease);
                 current = outcome.checkpoint();
@@ -1386,7 +1408,9 @@ public final class IngestPipeline implements AutoCloseable
      * Notes how long a step of splitting an item took, from when it was
      * started to now (docs/PERFORMANCE.md §10), as a phase of the split
      * stage: {@code resume}, {@code start}, {@code first_record},
-     * {@code records}, {@code write},
+     * {@code batch_open}, {@code records} (with {@link #phase}'s
+     * {@code records_read} and
+     * {@code records_store} in it), {@code write},
      * {@code publish_wait}, {@code prepare}, {@code append}, {@code save},
      * {@code send_wait} and {@code archive}.
      *
@@ -1400,6 +1424,21 @@ public final class IngestPipeline implements AutoCloseable
         Telemetry.get().phaseDuration(ItemProcessor.STAGE, phase,
                 now - started);
         return now;
+    }
+
+    /**
+     * Notes a time summed over a batch's records as a phase of the split
+     * stage: {@code records_read}, reading and splitting them, and
+     * {@code records_store}, encrypting and writing them to the batch's
+     * data file (docs/PERFORMANCE.md §13). The two make up most of the
+     * batch's {@code records}.
+     *
+     * @param phase the step
+     * @param nanos the time, summed over the batch's records
+     */
+    private static void phase(String phase, long nanos)
+    {
+        Telemetry.get().phaseDuration(ItemProcessor.STAGE, phase, nanos);
     }
 
     /**

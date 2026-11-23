@@ -450,6 +450,24 @@ class SplitterPerf
     static String[] arguments(String workload, String intake)
             throws Exception
     {
+        return arguments(Workload.format(workload), intake, keys, storage);
+    }
+
+    /**
+     * The split stage's settings for a format, as command-line arguments so
+     * that they win over {@code application.yml}; also used by
+     * {@link SplitFanOutPerf}.
+     *
+     * @param format  the format the splitter is set to
+     * @param intake  the intake name the items landed under
+     * @param keys    the key files
+     * @param storage the tables' storage
+     * @return the arguments
+     * @throws Exception if the recipient's fingerprint can't be made
+     */
+    static String[] arguments(String format, String intake, TestKeys keys,
+            PerfStorage storage) throws Exception
+    {
         String jdbc = TestPostgres.jdbcUrl();
         Map<String, String> settings = new LinkedHashMap<>();
         settings.put("camel.main.run-controller", "false");
@@ -461,7 +479,7 @@ class SplitterPerf
                 "kafka:sdh.landed?brokers=localhost:1&groupId=split");
         settings.put("sdh.stage.output.type", "camel");
         settings.put("sdh.stage.output.uri", OUT_QUEUE);
-        settings.put("sdh.split.format", Workload.format(workload));
+        settings.put("sdh.split.format", format);
         settings.put("sdh.split.limits.max-item-bytes", "64GB");
         settings.putAll(storage.applicationSettings());
         settings.put("sdh.storage.catalog-name", TestLanding.CATALOG);

@@ -333,16 +333,23 @@ public final class CommonSettings
      *                     stage waits for the journal
      * @param batchSize    the most entries written in one transaction
      * @param sealInterval how often the chain's head is sealed
+     * @param linger       how long a batch waits for more events before it
+     *                     is written (docs/PERFORMANCE.md §13); 0 writes
+     *                     what is waiting at once
      */
     public record Journal(@DefaultValue("true") boolean enabled,
             @DefaultValue("50000") int capacity,
             @DefaultValue("500") int batchSize,
-            @DefaultValue("60s") Duration sealInterval)
+            @DefaultValue("60s") Duration sealInterval,
+            @DefaultValue("0s") Duration linger)
     {
 
-        /** The defaults: on, 50,000 events, batches of 500, each minute. */
-        public static final Journal DEFAULT =
-                new Journal(true, 50_000, 500, Duration.ofSeconds(60));
+        /**
+         * The defaults: on, 50,000 events, batches of 500, each minute, no
+         * linger.
+         */
+        public static final Journal DEFAULT = new Journal(true, 50_000, 500,
+                Duration.ofSeconds(60), Duration.ZERO);
     }
 
     /**

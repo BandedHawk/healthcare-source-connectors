@@ -23,7 +23,8 @@ Where it stands: runs of 90,000 documents sustained 52 to 72 documents/s on run 
 p99 131 to 168 s fed at 35/s and 425 s fed at 100/s, faster than split's pace. Not yet shown: the rate and p99 at a
 feed of 60/s, over hours rather than 20 minutes, and with the stores sized for 15 million (§11.1).
 With the HIPAA work (2026-11-22, runs 62 and 63): unchanged at 35/s (p99 152 s), 46 documents/s at 100/s against
-run 59's 55, split slower an item; the audit journal the likeliest cause (§10).
+run 59's 55, split slower an item; the audit journal the likeliest cause (§10; measured locally in §13: its
+small transactions add 30% to Postgres' CPU an item, which a 100 ms linger removes; not yet run on AWS).
 
 At 60 documents/s that is about 400 messages/s and, per stage, 60 items/s. A per-document p99 of 200 s leaves
 each of the four stages about 50 s, waiting included.
@@ -1447,7 +1448,8 @@ What it showed, beyond §2's predictions:
     acquired and released, item started, split and completed, batch committed, stage item completed; 144,478 for
     run 63's 21,000), landing three, transform 2.3, convert one, through Postgres beside the stages' own commits
     (1,518 commits a second on average; 1,441). Not proven: a run with fewer audit events an item, or its journal
-    in its own database, would show it.
+    in its own database, would show it. Measured locally since (§13, 2026-11-23): the journal adds about 0.5 ms of
+    Postgres CPU an item (+30%), in transactions of about two events; a 100 ms linger takes that away.
   - **Spot's mix moves the result more than the code:** runs 60 and 61 got 37% and 54% Graviton2 (`m6g`, `m6gd`),
     where runs 53 to 59 had 91–96% `m7gd`; split is CPU-bound there, and run 61 fell to 20.7 documents a second, p99
     450 s, at a load run 63 kept pace with. Runs 62 and 63 were made comparable by allowing only `m7gd.large` and
@@ -1518,3 +1520,72 @@ of that feed's batch sizes:
 5. **Large records (§9):** a record over the stage's limit fails to the fail store as `RECORD_TOO_LARGE`, kept
    and reprocessable with a larger limit.
 6. **Broker retention (§3.6, 6):** 30 days on every pipeline topic.
+
+## 13. Split fan-out: from one item to many records (measured locally, 2026-11-23)
+
+**Why:** every load so far had one record an item (C-CDA), so what an item of many records costs to split, and
+where the time goes as it writes them, was unmeasured. The formats with many records an item (X12 batches, CSV,
+EDIFACT, FHIR NDJSON, Parquet) depend on it.
+
+**How:** `SplitFanOutPerf` (file-connector, `./mvnw -Pperf -pl file-connector -am verify -Dperf.stages=fanout`),
+the real split stage in process, as `SplitterPerf`: embedded Postgres, the tables on local disk, a Camel queue in
+memory for the broker. Synthetic CSV items (a sequence number and letters, no PHI) of 1 to 100,000 rows, rows of
+200 and 2,000 bytes, 64 items at once, batches of 10,000 records (the default), the audit journal off, on, and on
+with a linger. For each point: items and records a second, each item's time to its `item.split`, the stage's own
+timers summed per item and per record, and Postgres' transactions, rows, write-ahead log and CPU. Three new
+timers split a batch's `records` time: `batch_open` (opening its data file), `records_read` (reading and
+splitting its records) and `records_store` (encrypting each and writing it to the data file). Then a Java Flight
+Recorder profile of one 100,000-row item, and a timing of one message's sealing on one thread. The host: a
+16-core (32-thread) Ryzen 9 8945HX, JDK 25.
+
+**The shape** (200-byte rows, audit journal on; 2,000-byte rows were within 10 to 20%):
+
+| Rows an item | Items | Records a second | Item p50 | Postgres CPU an item | Transactions an item | WAL an item |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 2,000 | 470 | 115 ms | 2.4 ms | 21 | 9 KB |
+| 10 | 2,000 | 4,300 | 139 ms | 2.2 ms | 21 | 10 KB |
+| 100 | 200 | 14,800 | 375 ms | 2.7 ms | 18 | 10 KB |
+| 1,000 | 20 | 20,600 | 655 ms | 4 ms | 12 | 10 KB |
+| 10,000 | 2 | 18,700 | 1.07 s | 15 ms | 45 | 12 KB |
+| 100,000 | 1 | 23,000 | 4.4 s | about 10 ms | 133 | 58 KB |
+
+- **Up to about 1,000 records an item, the item's own steps set the pace:** about 20 transactions, 20 rows and
+  10 KB of log in Postgres whatever its size, and one Iceberg commit (`append`, grouped with the other items').
+  Records a second rise with the records an item, until 1,000.
+- **From about 1,000 records an item, records a second level off at 17,000 to 23,000,** with the JVM using 18 to
+  25 of the host's 32 threads, and bytes hardly matter (37 MB/s at 2,000 bytes a row). On the item's own thread,
+  a record costs about 4 µs to read and split, 22 µs to encrypt and write to the data file, 5 µs to close the
+  file and 3 µs to commit it (batches of 10,000). Postgres does almost nothing more a record: its work is per
+  item and per batch.
+- **What levels it off is sealing the records' messages:** 72% of the CPU of a 100,000-row item, on the
+  `sdh-seal` threads, is P-256 arithmetic. Of the sealing, ECDH key agreement is 65% (half of it the JDK
+  checking the recipient's public key again for every message), the ephemeral key 10%, the ES256 signature 16%
+  and AES-GCM 1%. On one thread, a message's signature takes about 100 µs and its encryption (ECDH-ES+A256KW)
+  about 465 µs: **about 0.56 ms of CPU a message**, so a core seals about 1,800 messages a second. Parquet, the
+  records' own encryption and Postgres are each 1 to 2%. The next stage pays about as much again to open each
+  message (the same key agreement, and a verification).
+- **So a record's cost is its message, not its storage.** With one record an item, as C-CDA, sealing is about
+  1 ms of CPU an item (its `record.split` and its `item.split`), small beside the item's Postgres steps; at
+  10,000 records an item it is about 5.6 CPU-seconds an item at split, and as much again at convert.
+- `send_wait` (an item waiting for its last batch's messages) grew with the records an item, to 0.4 s for 10,000;
+  it is the messages queuing for the sealing threads. Publishing a batch a thread, in place of the one
+  `sdh-publish` thread, was tried and changed nothing, so was not kept; nor did a broker stand-in read by 16
+  threads.
+
+**The audit journal, locally:** the first sweep ran audit on before off, and showed every Postgres step of an
+item two to four times slower with it on; run again with off first, the difference went, so it was the order (the
+registry tables grow over a run), not the journal. With Postgres having CPU to spare, the journal adds no time to
+an item. It does add **about 0.5 ms of Postgres CPU an item (+30%), 6 rows and 4 KB of log**: its writer stores
+what is waiting as soon as any is, a transaction of about two events each time, so under load it commits
+continuously. On AWS, Postgres was short of CPU (§10, runs 60 to 63: up to 1.45 cores on a 0.5-core request), and
+every Postgres step of a split item grew by about half while the Iceberg commit didn't, so this is the likeliest
+cause of the HIPAA runs' slower split; it is not yet shown on AWS. **A linger** (`sdh.telemetry.journal.linger`,
+built, default 0 so unchanged: a batch waits up to that long for more events, up to 500, before it is written;
+closing doesn't wait) of 100 ms took the journal's Postgres CPU back to that of no journal (1.6 ms an item,
+against 1.7 off and 2.2 on). It changes no event and no chain; it delays an event's being durable by up to the
+linger, beyond the in-memory queue it already waits in.
+
+**Not covered:** a real broker (Kafka's acknowledgements), S3 for the data files, Postgres short of CPU, and
+fewer cores (a split pod has 1.1). Per-item Postgres counts at a few items (10,000 rows and over) are noisy.
+**Next:** the linger on AWS (a 100/s run against run 63), and a CSV fan-out run on AWS (100 and 10,000 rows an
+item), to set these against S3, KMS and Kafka.
