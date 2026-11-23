@@ -10,3 +10,6 @@
 -DZstdNativePath=/app/native/libzstd-jni.so
 -Dorg.xerial.snappy.lib.path=/app/native
 -Dorg.xerial.snappy.lib.name=libsnappyjava.so
+# The native JOSE providers (sdh.crypto.jose.provider: accp or conscrypt) load from /app/native too.
+-Djava.library.path=/app/native
+-Dcom.amazon.corretto.crypto.provider.useExternalLib=true

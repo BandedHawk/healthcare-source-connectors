@@ -38,6 +38,27 @@
       <outputDirectory>native/linux-arm64</outputDirectory>
       <fileMode>0644</fileMode>
     </file>
+    <!-- The native JOSE providers, loaded from java.library.path (container.options). -->
+    <file>
+      <source>${project.build.directory}/dist-native/accp-amd64/com/amazon/corretto/crypto/provider/libamazonCorrettoCryptoProvider.so</source>
+      <outputDirectory>native/linux-amd64</outputDirectory>
+      <fileMode>0644</fileMode>
+    </file>
+    <file>
+      <source>${project.build.directory}/dist-native/accp-arm64/com/amazon/corretto/crypto/provider/libamazonCorrettoCryptoProvider.so</source>
+      <outputDirectory>native/linux-arm64</outputDirectory>
+      <fileMode>0644</fileMode>
+    </file>
+    <file>
+      <source>${project.build.directory}/dist-native/conscrypt/META-INF/native/libconscrypt_openjdk_jni-linux-x86_64.so</source>
+      <outputDirectory>native/linux-amd64</outputDirectory>
+      <fileMode>0644</fileMode>
+    </file>
+    <file>
+      <source>${project.build.directory}/dist-native/conscrypt/META-INF/native/libconscrypt_openjdk_jni-linux-aarch_64.so</source>
+      <outputDirectory>native/linux-arm64</outputDirectory>
+      <fileMode>0644</fileMode>
+    </file>
   </files>
   <fileSets>
     <fileSet>

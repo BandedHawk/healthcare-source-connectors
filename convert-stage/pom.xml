@@ -125,6 +125,40 @@
               <outputDirectory>${project.build.directory}/dist-native</outputDirectory>
             </configuration>
           </execution>
+          <!-- The native JOSE providers (sdh.crypto.jose.provider, docs/PERFORMANCE.md §13). ACCP's two jars hold
+               their libraries at the same path, so each is unpacked on its own. -->
+          <execution>
+            <id>dist-native-accp-amd64</id>
+            <phase>prepare-package</phase>
+            <goals><goal>unpack-dependencies</goal></goals>
+            <configuration>
+              <includeArtifactIds>AmazonCorrettoCryptoProvider</includeArtifactIds>
+              <includeClassifiers>linux-x86_64</includeClassifiers>
+              <includes>com/amazon/corretto/crypto/provider/*.so</includes>
+              <outputDirectory>${project.build.directory}/dist-native/accp-amd64</outputDirectory>
+            </configuration>
+          </execution>
+          <execution>
+            <id>dist-native-accp-arm64</id>
+            <phase>prepare-package</phase>
+            <goals><goal>unpack-dependencies</goal></goals>
+            <configuration>
+              <includeArtifactIds>AmazonCorrettoCryptoProvider</includeArtifactIds>
+              <includeClassifiers>linux-aarch_64</includeClassifiers>
+              <includes>com/amazon/corretto/crypto/provider/*.so</includes>
+              <outputDirectory>${project.build.directory}/dist-native/accp-arm64</outputDirectory>
+            </configuration>
+          </execution>
+          <execution>
+            <id>dist-native-conscrypt</id>
+            <phase>prepare-package</phase>
+            <goals><goal>unpack-dependencies</goal></goals>
+            <configuration>
+              <includeArtifactIds>conscrypt-openjdk-uber</includeArtifactIds>
+              <includes>META-INF/native/libconscrypt_openjdk_jni-linux-*.so</includes>
+              <outputDirectory>${project.build.directory}/dist-native/conscrypt</outputDirectory>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
       <!-- SBOM of the jar (design §14.4), declared before the assembly so the kit can include it. -->

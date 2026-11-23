@@ -85,7 +85,8 @@ class KeyMaterialTest
                 keys.splitterKeys(recipientPin, signingPem, signingKeyRef),
                 new CommonSettings.Aws(null, null),
                 new CommonSettings.Gcp(null),
-                new CommonSettings.Vault(null, null, null, "transit", null), null);
+                new CommonSettings.Vault(null, null, null, "transit", null),
+                null, null);
     }
 
     /**
@@ -187,7 +188,7 @@ class KeyMaterialTest
         CommonSettings.Crypto crypto = crypto(keys, pin, keys.signingPem);
         assertThatThrownBy(() -> KeyMaterial.load(new CommonSettings.Crypto(
                 "hsm-x", "local", crypto.keystore(), crypto.keys(),
-                crypto.aws(), crypto.gcp(), crypto.vault(), null)))
+                crypto.aws(), crypto.gcp(), crypto.vault(), null, null)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown key provider");
     }

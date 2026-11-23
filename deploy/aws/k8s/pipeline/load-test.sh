@@ -46,8 +46,11 @@
 # load, with the same arguments, and deletes it at the end. Progress every 15 s; done when the intake prefix is empty, no
 # consumer group lags and the registries have stopped changing. The report (counts, codes and timings only) is
 # printed and kept in $STATE/load/<run>/report.txt. The inputs are deleted at the end, locally and in S3; a run that
-# stops before its end keeps its staging, to be run again with SDH_LOAD_RUN after a reset. A run refuses to start
-# on an earlier run's data (SDH_LOAD_UNRESET=1 overrides), and its report lists the nodes it had (the Spot mix).
+# stops before its end keeps its staging, to be run again with SDH_LOAD_RUN after a reset. SDH_LOAD_FROM=<run> runs
+# another staged run's load again under a run (and report) of its own, after a reset, and leaves that staging in
+# place, for A/B runs on one upload (docs/PERFORMANCE.md §13); run the staged run itself last, which deletes it. A
+# run refuses to start on an earlier run's data (SDH_LOAD_UNRESET=1 overrides), and its report lists the nodes it
+# had (the Spot mix).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -61,6 +64,7 @@ COPIES="${1:-80}" ERROR_COPIES="${2:-10}"
 RATE="${SDH_LOAD_RATE:-}"                # objects a second at t0; empty: all at once
 STAGE_ONLY="${SDH_LOAD_STAGE_ONLY:-0}"   # 1: make and stage the inputs, then stop
 REUSE="${SDH_LOAD_RUN:-}"                # a run staged with SDH_LOAD_STAGE_ONLY=1
+FROM="${SDH_LOAD_FROM:-}"                # a staged run whose load this run uses, leaving its staging
 UNRESET="${SDH_LOAD_UNRESET:-0}"         # 1: run on an earlier run's data, which a run otherwise refuses
 SLICE=100                                # objects a slice, with SDH_LOAD_RATE
 [[ -z "$RATE" || "$RATE" =~ ^[1-9][0-9]*$ ]] || { echo "SDH_LOAD_RATE: objects a second, as 100" >&2; exit 2; }
@@ -157,7 +161,7 @@ run="${REUSE:-load-$(date -u +%Y%m%dT%H%M%SZ)}"
 out="$STATE/load/$run"
 mkdir -p "$STATE/load"; chmod 700 "$STATE/load"
 report="$out/report.txt"
-staging="$BUCKET/staging/$run/"
+staging="$BUCKET/staging/${FROM:-$run}/"
 cleanup() {
   declare -F stop_logs >/dev/null && stop_logs
   declare -F stop_sampler >/dev/null && stop_sampler
@@ -165,15 +169,24 @@ cleanup() {
   [[ -n "$BACKLOG" ]] && { backlog_restore || true; }
   # Kept unless the run ended (2026-11-22): a run stopped part way, by hand or by a failure, can be run again
   # from its staging with SDH_LOAD_RUN, after a reset, instead of being staged again.
-  if [[ "${finished:-0}" == 1 ]]; then
+  if [[ "${finished:-0}" == 1 && -z "$FROM" ]]; then
     aws s3 rm --recursive --only-show-errors "$staging" 2>/dev/null || true
   elif [[ "$STAGE_ONLY" != 1 && -f "${out:-/nonexistent}/staged-whole" ]]; then
-    printf '>> Staging kept: run it again with SDH_LOAD_RUN=%s%s and the same arguments, after poc.sh reset\n' \
-      "$run" "${RATE:+ SDH_LOAD_RATE=$RATE}" >&2
+    printf '>> Staging kept: run it again with %s%s and the same arguments, after poc.sh reset\n' \
+      "$([[ -n "$FROM" ]] && echo "SDH_LOAD_FROM=$FROM" || echo "SDH_LOAD_RUN=$run")" "${RATE:+ SDH_LOAD_RATE=$RATE}" >&2
   fi
   rm -rf "$out/inputs"
 }
 trap cleanup EXIT
+if [[ -n "$FROM" ]]; then
+  [[ -z "$REUSE" && "$STAGE_ONLY" != 1 ]] || die "SDH_LOAD_FROM takes neither SDH_LOAD_RUN nor SDH_LOAD_STAGE_ONLY"
+  from="$STATE/load/$FROM"
+  [[ -f "$from/manifest.json" && -f "$from/staged-whole" ]] || die "no run $FROM staged whole ($from)"
+  mkdir -p "$out"; chmod 700 "$out"
+  cp "$from/manifest.json" "$out/"
+  [[ -f "$from/slices" ]] && cp "$from/slices" "$out/"
+  REUSE="$run"
+fi
 if [[ -n "$REUSE" ]]; then
   [[ -f "$out/manifest.json" ]] || die "no staged run $REUSE ($out/manifest.json)"
   : > "$out/staged-whole"   # staged once, whole; kept if this run stops too

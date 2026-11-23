@@ -23,6 +23,7 @@ import com.nimbusds.jose.crypto.ECDSAVerifier;
 import com.sdh.healthcare.connector.contract.crypto.AesKeyWrapProvider;
 import com.sdh.healthcare.connector.contract.crypto.KeyProvider;
 import com.sdh.healthcare.connector.contract.crypto.WrappedKey;
+import com.sdh.healthcare.connector.contract.jose.JoseCrypto;
 import com.sdh.healthcare.connector.contract.jose.MessageOpener;
 import com.sdh.healthcare.connector.contract.jose.PodSigner;
 import com.sdh.healthcare.connector.core.pipeline.Outage;
@@ -449,6 +450,7 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
             boolean inbox)
             throws IOException, GeneralSecurityException, JOSEException
     {
+        configureJose(crypto);
         CommonSettings.Keys keys = crypto.keys();
         List<String> all = new ArrayList<>(probed);
         all.addAll(unwrapOnly);
@@ -486,7 +488,7 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
                     throw new GeneralSecurityException(
                             "Signing key must be EC P-256 (ES256)");
                 }
-                signer = new ECDSASigner(ecSigning);
+                signer = JoseCrypto.apply(new ECDSASigner(ecSigning));
                 if (keys.signing().publicPem() != null)
                 {
                     ownSigning = ecPublic(pinnedKey(
@@ -750,6 +752,26 @@ public record KeyMaterial(KeyProvider wrap, JWSSigner signer,
                 Map.of(require(keys.inbox().kid(),
                         "sdh.crypto.keys.inbox.kid"), key),
                 signers, Set.copyOf(revoked));
+    }
+
+    /**
+     * Sets how this process seals and opens messages, loading the chosen
+     * provider (docs/PERFORMANCE.md §13).
+     *
+     * @param crypto the key settings
+     * @throws IllegalStateException    if the provider can't be loaded
+     * @throws IllegalArgumentException if a setting is out of range
+     */
+    private static void configureJose(CommonSettings.Crypto crypto)
+    {
+        CommonSettings.Jose jose = crypto.jose() == null
+                ? CommonSettings.Jose.DEFAULT : crypto.jose();
+        JoseCrypto.Settings settings = jose.toSettings();
+        JoseCrypto.configure(settings);
+        LOG.info("crypto.jose provider={} agreement_messages={}"
+                + " agreement_lifetime_s={}", settings.provider(),
+                settings.agreementMessages(),
+                settings.agreementLifetime().toSeconds());
     }
 
     /**

@@ -14,7 +14,6 @@ import com.nimbusds.jose.JWEObject;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSObject;
 import com.nimbusds.jose.JWSVerifier;
-import com.nimbusds.jose.crypto.ECDHDecrypter;
 import com.nimbusds.jose.crypto.ECDSAVerifier;
 import com.nimbusds.jose.crypto.RSADecrypter;
 import com.sdh.healthcare.connector.contract.jose.MessageRejectedException.Reason;
@@ -63,6 +62,14 @@ public final class MessageOpener
      * verified once (docs/PERFORMANCE.md §3.5).
      */
     private final Map<String, PodStatement> verified =
+            new ConcurrentHashMap<>();
+
+    /**
+     * The decrypters of this reader's EC keys, by key ID, each keeping
+     * the agreements of the senders' ephemeral keys it has seen
+     * (docs/PERFORMANCE.md §13).
+     */
+    private final Map<String, JWEDecrypter> ecDecrypters =
             new ConcurrentHashMap<>();
 
     /**
@@ -158,7 +165,8 @@ public final class MessageOpener
         }
         try
         {
-            jwe.decrypt(decrypter(key, jwe.getHeader().getAlgorithm()));
+            jwe.decrypt(decrypter(jwe.getHeader().getKeyID(), key,
+                    jwe.getHeader().getAlgorithm()));
         }
         catch (JOSEException | IllegalArgumentException failure)
         {
@@ -192,7 +200,8 @@ public final class MessageOpener
         }
         try
         {
-            JWSVerifier verifier = new ECDSAVerifier(signerKey);
+            JWSVerifier verifier =
+                    JoseCrypto.apply(new ECDSAVerifier(signerKey));
             if (!jws.verify(verifier))
             {
                 throw new MessageRejectedException(Reason.BAD_SIGNATURE);
@@ -258,21 +267,31 @@ public final class MessageOpener
     }
 
     /**
-     * The decrypter for a key, if its type matches the algorithm.
+     * The decrypter for a key, if its type matches the algorithm: an EC
+     * key's is kept, with its agreements.
      *
+     * @param kid       the key's ID
      * @param key       the private key
      * @param algorithm the message's key-management algorithm
      * @return the decrypter
      * @throws JOSEException if the key's type doesn't match the algorithm
      */
-    private static JWEDecrypter decrypter(PrivateKey key,
+    private JWEDecrypter decrypter(String kid, PrivateKey key,
             JWEAlgorithm algorithm) throws JOSEException
     {
         return switch (key)
         {
             case ECPrivateKey ecKey
                     when algorithm.equals(JWEAlgorithm.ECDH_ES_A256KW) ->
-                    new ECDHDecrypter(ecKey);
+            {
+                JWEDecrypter kept = ecDecrypters.get(kid);
+                if (kept == null)
+                {
+                    kept = new SharedAgreementDecrypter(ecKey);
+                    ecDecrypters.put(kid, kept);
+                }
+                yield kept;
+            }
             case RSAPrivateKey rsaKey
                     when algorithm.equals(JWEAlgorithm.RSA_OAEP_256) ->
                     new RSADecrypter(rsaKey);

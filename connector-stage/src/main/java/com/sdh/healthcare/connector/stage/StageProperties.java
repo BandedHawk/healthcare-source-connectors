@@ -59,6 +59,9 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param duties         which of the stage's pods do its duties (STAGES.md
  *                       §8): a pod for the duties alone, the others taking
  *                       them up only if it is gone
+ * @param retention      for a record stage, how long its registry keeps
+ *                       the rows of finished items (docs/DEPLOYMENT.md
+ *                       "Registry retention"); by default for ever
  * @author Jonas Barnett
  * @since 0.1.0
  */
@@ -74,17 +77,129 @@ public record StageProperties(ReceiveProperties input,
         @DefaultValue("1m") Duration versionCheckInterval,
         @DefaultValue TableSettings source, @DefaultValue TableSettings sink,
         @DefaultValue("true") boolean autostart,
-        @DefaultValue Commit commit, @DefaultValue Duties duties)
+        @DefaultValue Commit commit, @DefaultValue Duties duties,
+        @DefaultValue Retention retention)
 {
 
     /**
      * No commit settings is the default's: each pod commits its own; no
-     * duties settings, any pod does the duties.
+     * duties settings, any pod does the duties; no retention, the registry
+     * is kept for ever.
      */
     public StageProperties
     {
         commit = commit == null ? new Commit(false, Duration.ZERO) : commit;
         duties = duties == null ? Duties.ANY : duties;
+        retention = retention == null ? Retention.FOREVER : retention;
+    }
+
+    /**
+     * How long a record stage's registry keeps the rows of its finished
+     * items (docs/DEPLOYMENT.md "Registry retention"): the per-record rows
+     * ({@code stage_record}) and the item's own ({@code stage_item}) of an
+     * item complete for longer than {@code after}, with none of its
+     * failures open. Failures, their events, and everything stored in the
+     * tables are kept. Unset, the registry is kept for ever.
+     * <p>
+     * A record's row is what stops a message delivered again from being
+     * processed again, so {@code after} must be longer than the queue
+     * keeps a message ({@code queueRetention}, which the stage can't read
+     * from every broker, so the deployment states it), and longer than the
+     * reconciler looks back, each by a day at least.
+     *
+     * @param after          how long after an item is complete its rows
+     *                       are deleted; null to keep them for ever
+     * @param queueRetention the longest the stage's input queue keeps a
+     *                       message, as the broker is configured
+     * @param interval       how often the duties pod prunes
+     * @param batch          the most items deleted in one transaction
+     */
+    public record Retention(Duration after,
+            @DefaultValue("7d") Duration queueRetention,
+            @DefaultValue("1h") Duration interval,
+            @DefaultValue("100") int batch)
+    {
+
+        /** The least margin over the queue's retention and the lookback. */
+        public static final Duration MARGIN = Duration.ofDays(1);
+
+        /** Kept for ever: the default. */
+        public static final Retention FOREVER = new Retention(null,
+                Duration.ofDays(7), Duration.ofHours(1), 100);
+
+        /**
+         * Checks the settings.
+         *
+         * @param after          how long finished items' rows are kept
+         * @param queueRetention how long the queue keeps a message
+         * @param interval       how often the duties pod prunes
+         * @param batch          the most items a transaction deletes
+         * @throws IllegalArgumentException if {@code after} is shorter
+         *                                  than the queue's retention and
+         *                                  the margin, or a setting is out
+         *                                  of range
+         */
+        public Retention
+        {
+            queueRetention = queueRetention == null ? Duration.ofDays(7)
+                    : queueRetention;
+            interval = interval == null ? Duration.ofHours(1) : interval;
+            if (queueRetention.isNegative() || queueRetention.isZero())
+            {
+                throw new IllegalArgumentException(PREFIX
+                        + ".retention.queue-retention must be positive");
+            }
+            if (interval.compareTo(Duration.ofMinutes(1)) < 0)
+            {
+                throw new IllegalArgumentException(PREFIX
+                        + ".retention.interval must be at least a minute");
+            }
+            if (batch < 1 || batch > 10_000)
+            {
+                throw new IllegalArgumentException(PREFIX
+                        + ".retention.batch must be 1 to 10000");
+            }
+            if (after != null
+                    && after.compareTo(queueRetention.plus(MARGIN)) < 0)
+            {
+                throw new IllegalArgumentException(PREFIX
+                        + ".retention.after must be at least the queue's"
+                        + " retention (" + PREFIX
+                        + ".retention.queue-retention) and a day: a"
+                        + " message delivered again after its record's"
+                        + " row is gone would be processed again");
+            }
+        }
+
+        /**
+         * Whether the registry is kept for ever.
+         *
+         * @return true if nothing is pruned
+         */
+        public boolean forever()
+        {
+            return after == null;
+        }
+
+        /**
+         * Checks that rows outlive the reconciler's look back.
+         *
+         * @param lookback how far back the reconciler looks
+         * @throws IllegalArgumentException if {@code after} is shorter
+         *                                  than the look back and the
+         *                                  margin
+         */
+        public void checkLookback(Duration lookback)
+        {
+            if (after != null && lookback != null
+                    && after.compareTo(lookback.plus(MARGIN)) < 0)
+            {
+                throw new IllegalArgumentException(PREFIX
+                        + ".retention.after must be at least the"
+                        + " reconciler's lookback and a day: an item whose"
+                        + " rows were gone would look unfinished to it");
+            }
+        }
     }
 
     /** Where the settings are configured, to name them in errors. */

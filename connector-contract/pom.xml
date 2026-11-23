@@ -49,6 +49,23 @@
       <groupId>com.nimbusds</groupId>
       <artifactId>nimbus-jose-jwt</artifactId>
     </dependency>
+    <!-- The native JCA providers a customer may choose for sealing and opening messages (JoseCrypto). The
+         x86_64 jar comes first, so its classes and library are the ones found off the classpath; an image loads its
+         own architecture's library from /app/native instead. -->
+    <dependency>
+      <groupId>software.amazon.cryptools</groupId>
+      <artifactId>AmazonCorrettoCryptoProvider</artifactId>
+      <classifier>linux-x86_64</classifier>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.cryptools</groupId>
+      <artifactId>AmazonCorrettoCryptoProvider</artifactId>
+      <classifier>linux-aarch_64</classifier>
+    </dependency>
+    <dependency>
+      <groupId>org.conscrypt</groupId>
+      <artifactId>conscrypt-openjdk-uber</artifactId>
+    </dependency>
     <dependency>
       <groupId>com.github.luben</groupId>
       <artifactId>zstd-jni</artifactId>

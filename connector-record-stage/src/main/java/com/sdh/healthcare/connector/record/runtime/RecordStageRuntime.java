@@ -51,6 +51,7 @@ import com.sdh.healthcare.connector.stage.PurgeRequests;
 import com.sdh.healthcare.connector.stage.RekeyPass;
 import com.sdh.healthcare.connector.stage.ReprocessStore;
 import com.sdh.healthcare.connector.stage.RetentionPolicy;
+import com.sdh.healthcare.connector.stage.RegistryPruner;
 import com.sdh.healthcare.connector.stage.StageDuties;
 import com.sdh.healthcare.connector.stage.StageHealth;
 import com.sdh.healthcare.connector.stage.StageKeys;
@@ -359,14 +360,22 @@ public final class RecordStageRuntime implements AutoCloseable
             ItemEndResender resender = ItemEndResender.of(dataSource,
                     stage.nextRegistrySchema(), stageName, worker::resendEnd,
                     DATABASE_WAIT);
+            // Finished items' rows deleted after the customer's retention,
+            // if set (docs/DEPLOYMENT.md "Registry retention").
+            stage.retention().checkLookback(reconcile.lookback());
+            RegistryPruner pruner = stage.retention().forever() ? null
+                    : new RegistryPruner(dataSource, stage.registrySchema(),
+                            stageName, stage.retention(), clock,
+                            DATABASE_WAIT);
             CommonSettings.Lease lease = settings.lease();
             StageDuties duties = new StageDuties(leases, stageName,
                     settings.connectorId(),
                     new LeaseKeeper.Settings(lease.ttl(),
                             lease.renewInterval(), lease.safetyMargin()),
-                    StageDuties.Reconciler.both(
+                    StageDuties.Reconciler.both(StageDuties.Reconciler.both(
                             reconciler == null ? null : reconciler::reconcile,
                             resender == null ? null : resender::resend),
+                            pruner == null ? null : pruner::prune),
                     reconcile.interval(),
                     // A record whose holder stopped part way, handed in
                     // again within minutes (STAGES.md §10, 2026-11-18).

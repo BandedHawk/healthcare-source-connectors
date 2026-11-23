@@ -455,7 +455,12 @@ The outstanding work is restated, with what's decided since, in §11.
    - The result is sealed to the public key given on standard input; the output and the audit show counts only.
    - **Limit:** it finds patients by identifier, as the source gave them. Matching those to the covered entity's
      master patient index is the operator's.
-5. **FIPS 140-validated cryptography: test and document a FIPS mode.**
+5. **FIPS 140-validated cryptography: test and document a FIPS mode. Not supported today** (2026-11-23), and
+   said so in each distribution's README ("Cryptography and FIPS 140") and in DEPLOYMENT.md ("FIPS 140"), for US
+   government buyers, who need it.
+   - The native providers added for message sealing (`sdh.crypto.jose.provider`: `accp`, `conscrypt`;
+     PERFORMANCE.md §13) are their standard builds, not validated ones. ACCP has a separate FIPS build (on
+     AWS-LC's validated module), the likeliest path for AWS, untested here.
    - HIPAA's breach guidance doesn't require it for data at rest (§5). Federal buyers, however, are bound to
      validated modules (FIPS 140-3, under FISMA), and many state buyers follow them.
    - The code asks for its ciphers through standard JCA names with no provider named (`RecordCrypto`), so a

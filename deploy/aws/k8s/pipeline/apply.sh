@@ -28,6 +28,9 @@ export AWS_PROFILE="${AWS_PROFILE:-claude-poc}" AWS_REGION=us-east-2 AWS_PAGER="
 export KUBECONFIG="$STATE/kubeconfig"   # always the PoC's, never a sandbox's
 ACCOUNT=493469777520
 PIPELINES="${SDH_PIPELINES:-ccda-push}"
+# How messages are sealed (sdh.crypto.jose.provider: jdk, accp or conscrypt) and how long the audit journal waits
+# to fill a batch (sdh.telemetry.journal.linger), for every stage (docs/PERFORMANCE.md §13).
+export JOSE_PROVIDER="${SDH_JOSE_PROVIDER:-accp}" JOURNAL_LINGER="${SDH_JOURNAL_LINGER:-100ms}"
 export KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9092"
 export INTAKE_BUCKET="sdh-poc-intake-$ACCOUNT" BRONZE_BUCKET="sdh-poc-bronze-$ACCOUNT"
 export SILVER_BUCKET="sdh-poc-silver-$ACCOUNT" GOLD_BUCKET="sdh-poc-gold-$ACCOUNT"
@@ -183,6 +186,7 @@ deploy_pipeline() {
 
   local vars='$PIPELINE $ICEBERG_PREFIX $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256 $CONSUMER_SHA256'
   vars+=' $KAFKA_BROKERS $AWS_REGION $INTAKE_BUCKET $BRONZE_BUCKET $SILVER_BUCKET $GOLD_BUCKET'
+  vars+=' $JOSE_PROVIDER $JOURNAL_LINGER'
   local stage
   for stage in landing splitter convert transform; do
     envsubst "$vars" < "$HERE/$stage-application.yml" > "$work/$stage-application.yml"

@@ -193,7 +193,8 @@ public final class PodSigner implements JWSSigner
         try
         {
             current = new Signing(
-                    new ECDSASigner((ECPrivateKey) pair.getPrivate()),
+                    JoseCrypto.apply(new ECDSASigner(
+                            (ECPrivateKey) pair.getPrivate())),
                     compact, statement.id(), notAfter);
         }
         catch (JOSEException unusable)

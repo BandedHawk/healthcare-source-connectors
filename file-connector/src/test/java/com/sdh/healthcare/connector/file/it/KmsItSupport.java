@@ -81,7 +81,7 @@ final class KmsItSupport
                                 null, null),
                         new CommonSettings.Signer(TestKeys.LANDING_SIGNER_KID,
                                 keys.landingSignerPem), null),
-                aws, new CommonSettings.Gcp(null), vault, null);
+                aws, new CommonSettings.Gcp(null), vault, null, null);
     }
 
     /**

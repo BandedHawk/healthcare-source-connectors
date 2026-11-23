@@ -24,7 +24,9 @@ p99 131 to 168 s fed at 35/s and 425 s fed at 100/s, faster than split's pace. N
 feed of 60/s, over hours rather than 20 minutes, and with the stores sized for 15 million (§11.1).
 With the HIPAA work (2026-11-22, runs 62 and 63): unchanged at 35/s (p99 152 s), 46 documents/s at 100/s against
 run 59's 55, split slower an item; the audit journal the likeliest cause (§10; measured locally in §13: its
-small transactions add 30% to Postgres' CPU an item, which a 100 ms linger removes; not yet run on AWS).
+small transactions add 30% to Postgres' CPU an item, which a 100 ms linger removes). With a
+shared key agreement for sealing and a native provider (2026-11-23, runs 64 to 67, §13.1): 55.6 and 59.1
+documents/s at 100/s, p99 115 s at 35/s, so the HIPAA work's cost at saturation is recovered.
 
 At 60 documents/s that is about 400 messages/s and, per stage, 60 items/s. A per-document p99 of 200 s leaves
 each of the four stages about 50 s, waiting included.
@@ -1589,3 +1591,50 @@ linger, beyond the in-memory queue it already waits in.
 fewer cores (a split pod has 1.1). Per-item Postgres counts at a few items (10,000 rows and over) are noisy.
 **Next:** the linger on AWS (a 100/s run against run 63), and a CSV fan-out run on AWS (100 and 10,000 rows an
 item), to set these against S3, KMS and Kafka.
+
+### 13.1 Sealing and the linger on AWS (runs 64 to 67, 2026-11-23)
+
+**What ran:** images with the native JOSE provider (`sdh.crypto.jose.provider`, ACCP by default here), one ECDH
+agreement shared by up to 10,000 messages or 60 s (receivers cache it; each message keeps its own content key, IV
+and ES256 signature: DESIGN.md revision (ev)), and the audit journal's linger (`sdh.telemetry.journal.linger`).
+Run 49's maxima and only `m7gd.large`/`m7g.large` burst nodes, put back after; reset before each run; no gold
+check. The images did not yet have registry retention (off by default, so no effect). Every burst node was
+`m7gd.large` Spot in all four runs, so they compare with run 62 (93% `m7gd`) and run 63.
+
+| Run | Feed | Provider, linger | Documents/s | Landed → gold p50 / p95 / p99 s | Split item, mean s | $/M |
+|---|---|---|---|---|---|---|
+| 62 (before) | 100/s | JDK, a key agreement a message, 0 | 46.0 | 543 / 974 / 1,025 | 4.86 | 14 |
+| 64 (A) | 100/s | ACCP, 100 ms | (31.9: a 26-minute landing stall, below; 63 after it) | 242 / 418 / 444 | 3.50 | (21) |
+| 66 (C) | 100/s | JDK, 100 ms | **59.1** | 393 / 586 / 619 | 4.12 | 12 |
+| 67 (D) | 100/s | ACCP, 0 | **55.6** | 398 / 646 / 712 | 4.13 | 11 |
+| 63 (before) | 35/s | JDK, a key agreement a message, 0 | 33.2 | 31 / 121 / 152 | 2.11 | 22 |
+| 65 (B) | 35/s | ACCP, 100 ms | **32.9** | 27 / 94 / **115** | 1.70 | 21 |
+
+(Runs: 64 `load-20261123T071829Z`, 65 `load-20261123T065958Z`, 66 `load-20261123T084819Z`, 67
+`load-20261123T060527Z`.)
+
+- **The HIPAA runs' loss at saturation is recovered:** 55.6 and 59.1 documents a second against run 62's 46.0, a
+  split item 4.1 s against 4.86, back to run 59's (54.7, 4.13), at $11–12 a million. Sealing is now invisible in
+  the stages' timers (convert's and transform's `seal` under 0.5 ms a message; landing's about 0.12 s a batch).
+- **Provider and linger are not separated by these runs:** the shared agreement was in all of them, and run 64,
+  the one with both ACCP and the linger, was spoilt by the stall. JDK with the linger (66) and ACCP without it
+  (67) were within run-to-run noise of each other (runs 53 to 59 ranged 47 to 72); with the shared agreement the
+  provider's share of the CPU is small (on one core: 231 µs a seal with the JDK, 50 with ACCP, against 886 for the
+  JDK with an agreement a message), so most of the gain is the shared agreement.
+- **At 35 a second (run 65) every document kept pace,** p99 115 s, the lowest yet (152 in run 63; 131–168 before
+  the HIPAA work), a split item 1.70 s (2.11).
+- **Nothing lost in any run:** each exactly once, 0 left behind, no container restarted, the landing failover
+  test passing in each.
+- **Found: landing's startup recovery took 26 minutes (run 64).** The lease holder was deleted during a group of
+  500 items it had landed but not yet finished at the source; the standby took the lease after 70 s, then spent
+  26 minutes, silent, on its main thread before announcing them again and landing the rest (the 343/min tenth).
+  `IntakeService.ensureRecovered` calls `sameAs`, hence `LandingLedger.earliestCopy`, once for each item of the
+  last group, and each is a scan of the whole ledger table filtered on the digest, which file statistics can't
+  narrow (digests are random): about 3 s each against a ledger of some 30,000 items, so 500 cost about 25 minutes,
+  and would cost more on a larger ledger. Landing itself checks the in-memory `LedgerIndex` first; recovery doesn't.
+  In the other three runs the holder was deleted between groups, and the standby was landing within 3 s. Not yet
+  fixed: one scan for the whole group's digests (or the index first) would make it seconds.
+- **Not shown: the split reconciler fix (eu).** No pod logged a `split.reconciled` pass in any run: the duties
+  pod's first pass after a reset finds no landing table yet, and its next is 15 minutes (`interval`) later, about
+  when a run ends. Split never fell more than its grace behind for long, so no run needed it; a run long enough for
+  two or more passes under a backlog would show it.

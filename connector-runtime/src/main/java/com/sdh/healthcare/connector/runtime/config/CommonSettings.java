@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.runtime.config;
 
+import com.sdh.healthcare.connector.contract.jose.JoseCrypto;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -78,13 +79,54 @@ public final class CommonSettings
      * @param gcp          Google Cloud KMS settings
      * @param vault        Vault Transit settings
      * @param podKeys      signing with pod keys; null for the defaults
+     * @param jose         how messages are sealed and opened; null for the
+     *                     defaults
      */
     public record Crypto(@DefaultValue("local") String wrapProvider,
             @DefaultValue("local") String signProvider,
             @DefaultValue Keystore keystore, @DefaultValue Keys keys,
             @DefaultValue Aws aws, @DefaultValue Gcp gcp,
-            @DefaultValue Vault vault, @DefaultValue PodKeys podKeys)
+            @DefaultValue Vault vault, @DefaultValue PodKeys podKeys,
+            @DefaultValue Jose jose)
     {
+    }
+
+    /**
+     * How messages are sealed and opened (design §7.4,
+     * docs/PERFORMANCE.md §13).
+     *
+     * @param provider          who does the elliptic-curve work:
+     *                          {@code jdk} (the default, any platform),
+     *                          {@code accp} (Amazon Corretto Crypto
+     *                          Provider, native, Linux x86_64 and arm64)
+     *                          or {@code conscrypt} (Conscrypt, native,
+     *                          the same platforms); a native one that
+     *                          can't load stops the process at startup
+     * @param agreementMessages the most messages sealed under one key
+     *                          agreement (one ephemeral key); 1 agrees
+     *                          a key for every message
+     * @param agreementLifetime the longest one key agreement is used for
+     */
+    public record Jose(@DefaultValue("jdk") String provider,
+            @DefaultValue("10000") int agreementMessages,
+            @DefaultValue("60s") Duration agreementLifetime)
+    {
+
+        /** The defaults: the JDK, 10,000 messages or 60 seconds. */
+        public static final Jose DEFAULT = new Jose("jdk", 10_000,
+                Duration.ofSeconds(60));
+
+        /**
+         * The settings as the contract's sealer and opener take them.
+         *
+         * @return them
+         * @throws IllegalArgumentException if a setting is out of range
+         */
+        public JoseCrypto.Settings toSettings()
+        {
+            return new JoseCrypto.Settings(provider, agreementMessages,
+                    agreementLifetime);
+        }
     }
 
     /**

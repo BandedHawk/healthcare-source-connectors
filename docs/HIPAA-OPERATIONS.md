@@ -215,6 +215,15 @@ Then:
   try to read another pipeline's bucket and connect to its database, and record the refusals with the risk
   analysis.
 
+### Registry retention
+
+The stages' registries are kept for ever unless the customer sets `sdh.stage.retention.after`
+(DEPLOYMENT.md "Registry retention"), which deletes the convert and transform stages' rows of items finished
+longer ago, never an item with an open failure, never stored data, the landing ledger, failures or the audit
+journal. The registry holds no PHI. Before setting it, record the choice and its reason with the customer's
+records-management policy: after pruning, a message replayed by hand would be processed again, and registry
+queries say nothing of pruned items. Each run is audited, `stage.registry_pruned`, with a count.
+
 ## 3. Audit controls and activity review (§ 164.312(b), § 164.308(a)(1)(ii)(D))
 
 ### 3.1 Daily: the SIEM

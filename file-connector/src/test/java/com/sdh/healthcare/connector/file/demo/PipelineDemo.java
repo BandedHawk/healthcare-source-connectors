@@ -849,7 +849,8 @@ class PipelineDemo
                         keys.signingPem, null),
                 new CommonSettings.Aws(null, null),
                 new CommonSettings.Gcp(null),
-                new CommonSettings.Vault(null, null, null, "transit", null), null);
+                new CommonSettings.Vault(null, null, null, "transit", null),
+                null, null);
         try (QueueReader reader = QueueReader.builder()
                 .recipientKey(TestKeys.READER_KID, keys.reader.getPrivate())
                 .trustedSigner(TestKeys.CONVERT_SIGNER_KID,

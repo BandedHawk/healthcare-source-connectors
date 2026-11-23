@@ -194,10 +194,68 @@ keeps the login's quotes and semicolon intact, and the placeholder keeps it out 
 written value is refused (DESIGN.md §5.3.16). Output, reprocess and dead-letter URIs aren't checked yet, so keep
 to the placeholder there too.
 
+## Registry retention
+
+Each record stage (convert, transform) keeps a row in its Postgres registry for every record it has handled
+(`stage_record`) and every item (`stage_item`). By default they are **kept for ever**, so the registry grows by
+about one row and a few hundred bytes a record: some 15 GB a stage for 15 million documents of C-CDA, more for
+fan-out formats (one row a CSV row or X12 transaction). The customer may instead have finished items' rows
+deleted after a time they choose:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `sdh.stage.retention.after` | unset: for ever | How long after an item is complete its `stage_record` and `stage_item` rows are deleted, if none of its failures is open |
+| `sdh.stage.retention.queue-retention` | `7d` | The longest the stage's input queue keeps a message, as the broker is configured (Kafka `retention.ms`; SQS at most 14 days) |
+| `sdh.stage.retention.interval` | `1h` | How often the duties pod prunes |
+| `sdh.stage.retention.batch` | `100` | The most items deleted in one transaction |
+
+The stage refuses to start with `after` shorter than `queue-retention`, or than its reconciler's look back
+(`sdh.reconcile.lookback`), each plus a day. Pruning runs on the duties pod and is audited,
+`stage.registry_pruned`, with the number of items and no item's ID.
+
+What is never deleted: anything stored (the records in silver and gold, with their item, record and version), the
+landing ledger (`landed_items`: every item received, its digest and its links to items it is a copy of), failures
+and their events (open, declined or superseded), the audit journal, and the split stage's own registry, whose
+item rows its reconciler compares with the landing ledger at each start (a split item without one would be split
+again). Retention applies to the convert and transform stages only.
+
+**What the choice means:**
+- **Repeated messages.** A record's row is what makes a message delivered a second time a no-op. Once the row is
+  gone, the same message would be processed as new, and its output stored again. The minimum above stops the
+  queue redelivering one; a message replayed by hand from a backup or an older offset after that time is not
+  caught. Kept for ever, every repeat is caught.
+- **Reprocessing.** An operator's reprocess of an item (`sdh-admin reprocess`) works after pruning: it is a new
+  generation, stored as a new version beside the old, never in place of it. What is lost is the check that a
+  record's new output matches what was stored before (`record.conflict`), for that item.
+- **Questions the registry answered.** For a pruned item, the stage's `status`, `item` and latency queries
+  (time to gold) say nothing; the item's history is still in the stored tables, the ledger and the audit
+  journal, by item ID. Reports that count from the registry (PERFORMANCE.md's gold check, the load test's
+  report) count only what is kept.
+- **Failures.** An item with an open failure is kept whole until it is resolved or declined, then kept for the
+  retention again from its completion.
+- **Sizing.** With a retention, the registry holds about `after` × the daily record rate; for ever, every record
+  since the start. Postgres's own `VACUUM` reclaims the space; a large first prune can be spread by a smaller
+  `batch`.
+- **HIPAA.** The registry holds no PHI (IDs, states, digests and sealed messages to the next stage), so the
+  choice is the customer's records-management decision, not a HIPAA one; keep it at least as long as the
+  customer's own policy for operational records of processing. Deletion is audited.
+
+## FIPS 140
+
+**Not supported** (2026-11-23). No stage has been tested or configured with a FIPS 140-2 or 140-3 validated
+module, which US federal buyers (FISMA) and many state and local government buyers require; each distribution's
+README says so to customers ("Cryptography and FIPS 140"). Record encryption and message sealing run in the JVM,
+under the JDK's providers or the native one chosen with `sdh.crypto.jose.provider` (`accp`, `conscrypt`: their
+standard, non-FIPS builds). A KMS's own validation covers only what it does (wrapping data keys, the stages' KMS
+signatures). The work needed is HIPAA.md §8.1 item 5 and P8.
+
 ## Settings
 
 | Setting | Default | What it does |
 |---|---|---|
+| `sdh.crypto.jose.provider` | `jdk` | Who does message sealing's elliptic-curve work: `jdk`, `accp` (Amazon Corretto Crypto Provider, native, Linux x86_64 and arm64; for AWS) or `conscrypt` (native, the same platforms; for Google Cloud and Azure). A native one that can't load stops the stage at startup. None is a FIPS 140 validated build ("FIPS 140" above) |
+| `sdh.crypto.jose.agreement-messages` | `10000` | The most messages sealed under one key agreement (one ephemeral key) to the next stage's key; 1 for one a message (docs/PERFORMANCE.md §13) |
+| `sdh.crypto.jose.agreement-lifetime` | `60s` | The longest one key agreement is used |
 | `sdh.landing.reconcile.enabled` | `true` | Whether the splitter looks for landed items whose messages were lost |
 | `sdh.landing.reconcile.grace` | `10m` | How long an item may wait for its message before it is added without it. Keep it well above normal delivery time, and above any clock difference between the two nodes |
 | `sdh.landing.reconcile.interval` | `15m` | How often to look, after the first time at startup |

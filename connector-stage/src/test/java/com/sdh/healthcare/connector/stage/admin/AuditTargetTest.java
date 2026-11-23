@@ -39,7 +39,7 @@ class AuditTargetTest
     {
         CommonSettings.Crypto crypto = new CommonSettings.Crypto("vault",
                 "vault", null, new CommonSettings.Keys(records, landed, null,
-                        null, null, null, null), null, null, null, null);
+                        null, null, null, null), null, null, null, null, null);
         return new AuditTarget(null, crypto, new AuditTables("test"),
                 "test/stage");
     }

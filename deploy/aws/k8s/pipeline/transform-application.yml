@@ -14,6 +14,8 @@ sdh:
   telemetry:
     otlp: { endpoint: "http://otel-collector.sdh-infra.svc:4318" }
     metric-interval: 15s
+    # Waits up to this long to write a fuller batch of audit events (docs/PERFORMANCE.md §13); apply.sh fills it.
+    journal: { linger: ${JOURNAL_LINGER} }
   results: { enabled: false }
   transform:
     wstl: /etc/sdh/wstl/set.tar.gz
@@ -77,6 +79,8 @@ sdh:
   lease:
     jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh", username: fhir_${ICEBERG_PREFIX} }
   crypto:
+    # The JCA provider for message sealing (docs/PERFORMANCE.md §13): accp on AWS; apply.sh fills it.
+    jose: { provider: ${JOSE_PROVIDER} }
     wrap-provider: aws-kms
     sign-provider: aws-kms
     aws: { region: ${AWS_REGION} }

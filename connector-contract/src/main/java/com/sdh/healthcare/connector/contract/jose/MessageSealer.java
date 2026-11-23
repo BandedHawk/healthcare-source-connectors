@@ -18,7 +18,6 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.JWSObject;
 import com.nimbusds.jose.JWSSigner;
 import com.nimbusds.jose.Payload;
-import com.nimbusds.jose.crypto.ECDHEncrypter;
 import com.nimbusds.jose.crypto.RSAEncrypter;
 import com.nimbusds.jose.util.JSONObjectUtils;
 import com.sdh.healthcare.connector.contract.message.ConnectorMessage;
@@ -98,7 +97,7 @@ public final class MessageSealer
             {
                 case ECPublicKey ecKey ->
                 {
-                    this.encrypter = new ECDHEncrypter(ecKey);
+                    this.encrypter = new SharedAgreementEncrypter(ecKey);
                     this.jweAlgorithm = JWEAlgorithm.ECDH_ES_A256KW;
                 }
                 case RSAPublicKey rsaKey ->

@@ -73,6 +73,45 @@ converted in parallel across instances and no record by two at once. A record wh
 again when its message is delivered again. One instance at a time also finds split records whose message was lost
 and runs table maintenance; if it stops, another takes over within the lease's TTL (60 seconds by default).
 
+### Registry retention
+
+The stage's Postgres registry keeps a row for every record and item it has handled, **for ever by default**
+(about a few hundred bytes a record). Set `sdh.stage.retention.after` (for example `90d`) to have the rows of
+items finished longer ago deleted, hourly, by the duties pod; an item with an open failure is kept, and nothing
+stored, no failure and no audit event is ever deleted. State the broker's retention in
+`sdh.stage.retention.queue-retention` (default `7d`): the stage refuses an `after` shorter than it, or than
+`sdh.reconcile.lookback`, each plus a day. What it costs you:
+
+- a message replayed by hand (from a backup or an old offset) for a pruned item is processed again, and its output
+  stored again; kept for ever, every repeat is caught;
+- `status`, `item` and latency queries say nothing of pruned items; their history stays in the stored tables, the
+  landing ledger and the audit journal;
+- a reprocess of a pruned item still works, as a new version, but without the check that its output matches what
+  was stored before.
+
+Each run is audited, `stage.registry_pruned`, with a count only.
+
+### Cryptography and FIPS 140
+
+**FIPS 140 is not supported.** This release has not been tested or configured with a FIPS 140-2 or 140-3
+validated cryptographic module, so it does not meet the requirement that US federal agencies (under FISMA), and
+many state and local government bodies that follow them, place on the cryptography of systems they operate.
+Contact Smile Digital Health before deploying it where validated cryptography is required.
+
+What the release does today:
+
+- Data keys are wrapped and the stage's own messages signed by your KMS (AWS KMS, Azure Key Vault, Google Cloud KMS
+  or Vault Transit), whose own validation, if any, applies to those operations only. The KMS's FIPS endpoint can be
+  set (for AWS, `sdh.crypto.aws.endpoint`).
+- Records are encrypted (AES-256-GCM), and messages sealed (ES256 signatures, ECDH-ES+A256KW and A256GCM
+  encryption), inside the application, by the Java runtime's own providers or a native one you choose with
+  `sdh.crypto.jose.provider`: `jdk` (the default, any platform), `accp` (Amazon Corretto Crypto Provider, Linux
+  x86_64 and arm64; the build included is not its FIPS build) or `conscrypt` (Conscrypt, the same platforms; not a
+  FIPS build). None of these, as shipped, is a validated module.
+- `sdh.crypto.jose.agreement-messages` (10000) and `sdh.crypto.jose.agreement-lifetime` (60s) set how many
+  messages, and for how long, share one key agreement to the next stage's key; each message still has its own
+  content key, IV and signature. 1 makes a new agreement for every message, at several times the CPU.
+
 ## Configure
 
 Copy `config/application.yml.example` to `config/application.yml` and edit it. Pass secrets as environment

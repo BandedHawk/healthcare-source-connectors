@@ -34,11 +34,12 @@ RUN mkdir legal && cd legal \
  && test -s THIRD-PARTY.txt && test -s NOTICE
 # zstd-jni (record and Parquet compression) and snappy-java (an optional Kafka codec, probed at startup) normally
 # unpack their native libraries into java.io.tmpdir and load them from there, which fails on a noexec /tmp. Unpack
-# them here instead; the -D options in ENTRYPOINT point both libraries at /app/native.
+# them here instead; the -D options in ENTRYPOINT point both libraries at /app/native. The native JOSE providers
+# (ACCP, Conscrypt; sdh.crypto.jose.provider) load from there too, through java.library.path.
 RUN set -eu; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-      amd64) zstd=amd64; snappy=x86_64 ;; \
-      arm64) zstd=aarch64; snappy=aarch64 ;; \
+      amd64) zstd=amd64; snappy=x86_64; jose=x86_64 ;; \
+      arm64) zstd=aarch64; snappy=aarch64; jose=aarch_64 ;; \
       *) echo "unsupported architecture" >&2; exit 1 ;; \
     esac; \
     mkdir -p native unpack; \
@@ -46,7 +47,13 @@ RUN set -eu; \
     jar xf "$(ls ../layers/dependencies/lib/zstd-jni-*.jar)" "linux/$zstd/"; \
     jar xf "$(ls ../layers/dependencies/lib/snappy-java-*.jar)" "org/xerial/snappy/native/Linux/$snappy/"; \
     cp linux/$zstd/libzstd-jni-*.so ../native/libzstd-jni.so; \
-    cp org/xerial/snappy/native/Linux/$snappy/libsnappyjava.so ../native/libsnappyjava.so
+    cp org/xerial/snappy/native/Linux/$snappy/libsnappyjava.so ../native/libsnappyjava.so; \
+    jar xf "$(ls ../layers/dependencies/lib/AmazonCorrettoCryptoProvider-*-linux-$jose.jar)" \
+      com/amazon/corretto/crypto/provider/libamazonCorrettoCryptoProvider.so; \
+    cp com/amazon/corretto/crypto/provider/libamazonCorrettoCryptoProvider.so ../native/; \
+    jar xf "$(ls ../layers/dependencies/lib/conscrypt-openjdk-uber-*.jar)" \
+      "META-INF/native/libconscrypt_openjdk_jni-linux-$jose.so"; \
+    cp "META-INF/native/libconscrypt_openjdk_jni-linux-$jose.so" ../native/
 
 FROM ${JRE_IMAGE}
 LABEL org.opencontainers.image.title="file-connector (service)" \
