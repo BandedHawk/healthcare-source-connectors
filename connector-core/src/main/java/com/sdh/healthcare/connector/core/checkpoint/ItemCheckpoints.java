@@ -510,6 +510,41 @@ public final class ItemCheckpoints
     }
 
     /**
+     * Tells whether an item is still left part way, as {@link #stalled}
+     * lists them: in progress with a checkpoint not written since a time.
+     * A reconciler asks just before taking on an item it listed, since
+     * another pod may have finished it, or taken it on, meanwhile.
+     *
+     * @param itemId the item
+     * @param before the time its checkpoint was last written before
+     * @return whether it still is
+     * @throws IllegalStateException if the database can't be reached
+     */
+    public boolean stillStalled(UUID itemId, Instant before)
+    {
+        String sql = "SELECT 1 FROM " + table
+                + " WHERE item_id = ?"
+                + " AND state IN ('SPLITTING', 'ARCHIVING', 'FAILING')"
+                + " AND updated_at < ?";
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement select = connection.prepareStatement(sql))
+        {
+            select.setQueryTimeout(queryTimeoutSeconds);
+            select.setObject(1, itemId);
+            select.setTimestamp(2, Timestamp.from(before));
+            try (ResultSet rows = select.executeQuery())
+            {
+                return rows.next();
+            }
+        }
+        catch (SQLException failure)
+        {
+            throw new IllegalStateException("Checkpoint store unavailable",
+                    failure);
+        }
+    }
+
+    /**
      * Notes the end about to be sent for an item, and numbers it (STAGES.md
      * §15.6e): an {@code item.split} after one that wasn't is the next
      * completion, and one after one that was is the same again; an

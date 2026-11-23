@@ -71,7 +71,9 @@ import org.slf4j.LoggerFactory;
  * in progress whose checkpoint hasn't been written for longer than the
  * grace, whenever it was landed, from its checkpoint, with a
  * {@code split.recovered} warning (reason {@code CHECKPOINT_STALLED}). One
- * a pod is still splitting slowly keeps its lease, and is left to it.
+ * a pod is still splitting slowly keeps its lease, and is left to it; one
+ * finished or taken on since the run listed it is left too, each being
+ * looked up again just before.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -153,18 +155,20 @@ public final class SplitReconciler
                 : previousCutoff.minus(grace);
         List<Record> rows = rows(table, from, cutoff);
         Recovery recovery = recover(missing(rows));
-        int resumed = resumeStalled(table, cutoff);
+        Recovery resumed = resumeStalled(table, checkpoints.stalled(cutoff),
+                cutoff);
         previousCutoff = cutoff;
         LOG.info("split.reconciled checked={} recovered={} split_meanwhile={}"
-                + " resumed={} full={}", rows.size(), recovery.split(),
-                recovery.meanwhile(), resumed, from == null);
-        return recovery.split() + resumed;
+                + " resumed={} resumed_meanwhile={} full={}", rows.size(),
+                recovery.split(), recovery.meanwhile(), resumed.split(),
+                resumed.meanwhile(), from == null);
+        return recovery.split() + resumed.split();
     }
 
     /**
-     * What a run's recovery did.
+     * What a run's recovery, or its taking on of items left part way, did.
      *
-     * @param split     the items it split
+     * @param split     the items it split, or took on
      * @param meanwhile the items it found split, or being split, since it
      *                  listed them, and left
      */
@@ -297,21 +301,54 @@ public final class SplitReconciler
     }
 
     /**
+     * Lists the items a run would take on again now: left part way, their
+     * checkpoints not written for longer than the grace. Public for the
+     * stage's tests, which then let some be finished before {@link
+     * #resume} takes the list; a run of {@link #reconcile} does both.
+     *
+     * @return the items, oldest first
+     */
+    public List<UUID> stalledNow()
+    {
+        return checkpoints.stalled(clock.instant().minus(grace));
+    }
+
+    /**
+     * Takes on the items left part way, from their checkpoints, one at a
+     * time. Each is looked up again just before, as {@link #recover}
+     * does: another pod may have finished it or taken it on since it was
+     * listed, and it would then only be announced again, or taken from
+     * that pod.
+     *
+     * @param stalled the items left part way when listed
+     * @return what it did
+     * @throws Exception if an item can't be split; the next run tries again
+     */
+    public Recovery resume(List<UUID> stalled) throws Exception
+    {
+        Table table = table();
+        return table == null ? new Recovery(0, 0)
+                : resumeStalled(table, stalled,
+                        clock.instant().minus(grace));
+    }
+
+    /**
      * Takes on the items left part way since before the cutoff, from their
      * checkpoints. An item whose summary row is gone (purged by retention)
      * can't be read, and is left, with a warning, for an operator.
      *
-     * @param table  the {@code landed_items} table, refreshed
-     * @param cutoff the time their checkpoints were last written before
-     * @return how many were taken on
+     * @param table   the {@code landed_items} table, refreshed
+     * @param stalled the items left part way when listed
+     * @param cutoff  the time their checkpoints were last written before
+     * @return what it did
      * @throws Exception if an item can't be split; the next run tries again
      */
-    private int resumeStalled(Table table, Instant cutoff) throws Exception
+    private Recovery resumeStalled(Table table, List<UUID> stalled,
+            Instant cutoff) throws Exception
     {
-        List<UUID> stalled = checkpoints.stalled(cutoff);
         if (stalled.isEmpty())
         {
-            return 0;
+            return new Recovery(0, 0);
         }
         Map<UUID, String> digests = new HashMap<>();
         try (CloseableIterable<Record> read = IcebergGenerics.read(table)
@@ -329,12 +366,19 @@ public final class SplitReconciler
             }
         }
         int resumed = 0;
+        int meanwhile = 0;
         for (UUID itemId : stalled)
         {
             String digest = digests.get(itemId);
             if (digest == null)
             {
                 LOG.warn("split.stalled_unreadable reason=NO_SUMMARY");
+                continue;
+            }
+            if (!checkpoints.stillStalled(itemId, cutoff))
+            {
+                // Finished, or taken on, since it was listed.
+                meanwhile++;
                 continue;
             }
             try
@@ -344,6 +388,7 @@ public final class SplitReconciler
             catch (LeaseHeldException held)
             {
                 // Still being split, slowly, by the pod that holds it.
+                meanwhile++;
                 continue;
             }
             // Audited after: before, a slow item's pod would be reported
@@ -353,7 +398,7 @@ public final class SplitReconciler
                             .with(Attr.REASON, STALLED));
             resumed++;
         }
-        return resumed;
+        return new Recovery(resumed, meanwhile);
     }
 
     /**

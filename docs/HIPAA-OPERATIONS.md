@@ -514,5 +514,35 @@ A support engineer of the vendor is never given a role on the API, nor a sealing
 BAAs or MOUs with every provider (cloud, KMS, broker, SIEM); the risk analysis and risk management; a named security
 official; workforce policies, training and sanctions; MFA and access reviews; the reviews in §3; the incident
 response plan and breach notices; contingency plans and their tests; the retention periods; responses to
-individuals' requests; deciding whether the clearinghouse and Part 2 rules apply (HIPAA.md §1, §4.5); and keeping
+individuals' requests; the penetration test and its fixes (§11); deciding whether the clearinghouse and Part 2 rules apply (HIPAA.md §1, §4.5); and keeping
 this documentation for 6 years from when it was last in effect (§ 164.316(b)(2)(i)).
+
+## 11. Penetration testing: the customer's, and what to secure first
+
+**The penetration test is the customer's to commission,** by a third party of their choosing, against their own
+deployment: the proposed Security Rule asks for one every 12 months (HIPAA.md §7), and buyers expect one before
+real PHI. The product's vendor does not test a customer's deployment, and has not had the product itself tested by
+a third party (HIPAA.md §11.1, P13). Test a deployment built as it will run, from `deploy/reference/` with the
+profile on and nothing waived, holding **synthetic data only**; follow the cloud provider's policy on penetration
+testing, and tell the SIEM's watchers, or don't, as the rules of engagement say.
+
+**Secure these before the test,** since they are where a tester will look and where the product relies on the
+platform. Each names what the product provides and what is the customer's; HIPAA.md §11.2 lists the reference
+documents still owed for several of them (D1 to D4, D6, D13).
+
+| Area | Secure before the test | The product provides |
+|---|---|---|
+| **Network** | Private subnets, no public endpoints. The one ingress is HTTP push behind TLS or mTLS (or the file and table intakes' own sources). The control API reachable from the operator's path only (VPN, bastion or zero-trust access), never the internet. Default-deny network policies in every namespace; egress only to DNS, the KMS, the object store, the broker, the database and the collector, over private endpoints. A current network map. | Example network policies per stage (`deploy/`); the control API's policy in each stage README; no listener on a worker but its health port, and the landing node's push port. |
+| **Push ingress** | The TLS certificate and its renewal; with mTLS, the producers' certificates: who issues them, the subjects allowed (`sdh.landing.push.*`), and their revocation. Rate limits and request size at the load balancer. | mTLS with an allowed-subject list; the landing node answers `503` while paused (§7.1). |
+| **Control API** | TLS; the identity provider: issuer, audience, signing keys and token lifetime; the mapping of the customer's roles to the API's permissions (§1, §2.4); mTLS client certificates if used; operators' sealing keys registered by someone else (§2.3); approvers distinct from requesters (§5). In scope for the tester: authentication and permission bypass, reaching another pipeline's or another item's data, sealed results, replayed requests. | A permission per operation, checked on every call; every call audited with its principal, the denied ones too; PHI results sealed to the caller's registered key; four eyes for break-glass and audit prune; an OpenAPI contract to test against (`/openapi.yaml`). |
+| **Identity and access** | A workload identity per stage, no static keys; each stage's role allowed only its own buckets, keys and topics; human access through SSO with MFA; `kubectl exec` (which reaches the stages' CLI) granted per namespace to named staff only (§2.4); break-glass accounts; leavers removed. | Stages that need no static credentials on AWS, GCP or Azure; the CLI audits its operator (`--operator`). |
+| **Kubernetes** | The restricted Pod Security Standard; Secrets encrypted at rest, or an external secret store; the API server's audit log to the SIEM; admission only of signed images by digest; a private API endpoint; nodes to a CIS benchmark, patched. | Images that run as non-root with a read-only root filesystem and no shell; manifests with those settings; signed images and SBOMs (DESIGN §14.4). |
+| **Database** | TLS with `verify-full`; a database per pipeline with only its stage roles connecting (§2.8); encryption at rest; no public address; backups encrypted. | `deploy/reference/postgres.sql` (roles and grants); the profile refuses a connection without TLS. |
+| **Broker** | `SASL_SSL`; an identity per stage and ACLs giving each only its topics (`deploy/reference/kafka-acls.sh`); encryption at rest; no public listener. | The profile refuses plaintext; messages signed per stage and checked on receipt, so a forged message is rejected. |
+| **Object store** | Bucket policies refusing plaintext and public access; each stage's role on its own buckets only; versioning, or object lock, on bronze at least; KMS encryption; data events to the SIEM (§2.6). | Every object envelope-encrypted under the stage's KEK before it is written. |
+| **Keys** | KMS keys, never a local keystore; key policies naming each stage's identity; rotation on; key administrators other than the pipeline's operators. | Rotation and re-keying through the API (§6.1); erase certificates naming the KEKs to destroy (§8). |
+| **Audit and monitoring** | The collector to a store the pipeline's staff can't change (§2.7); the SIEM's alerts (§3.1) in force, so the test also shows what was detected. | Every stage's audit events over OTLP; the hash-chained audit journal and `audit-verify` (§3.2). |
+| **Settings and supply chain** | The compliance profile at `hipaa`, nothing waived (§2.1); no secrets in URIs; images at the current release, scanned, their fixes taken (HIPAA.md §11.2, D11, D12). | The profile's checks at startup; vulnerability scanning in the build (DESIGN §14.5). |
+
+After the test, keep its report and the fixes made with this documentation (§10), and repeat it after a major
+change to the deployment, and at least every 12 months.

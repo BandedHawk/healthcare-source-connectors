@@ -162,6 +162,27 @@ class ItemCheckpointsTest
     }
 
     /**
+     * An item is still stalled as {@code stalled} lists it: in progress and
+     * not written since the time; one finished or written since, or with
+     * no checkpoint, is not.
+     */
+    @Test
+    void tellsWhetherAnItemIsStillStalled()
+    {
+        UUID done = UUID.randomUUID();
+        checkpoints.save(start(item), new Held(1));
+        checkpoints.save(start(done).withState(Checkpoint.State.COMPLETED),
+                new Held(1));
+        Instant later = Instant.now().plus(Duration.ofMinutes(1));
+        assertThat(checkpoints.stillStalled(item, later)).isTrue();
+        assertThat(checkpoints.stillStalled(item,
+                Instant.now().minus(Duration.ofMinutes(1)))).isFalse();
+        assertThat(checkpoints.stillStalled(done, later)).isFalse();
+        assertThat(checkpoints.stillStalled(UUID.randomUUID(), later))
+                .isFalse();
+    }
+
+    /**
      * Items being split, archived or failed are part way under the version
      * they were begun under; held ones are listed apart, and finished ones
      * and those of no known version not at all (STAGES.md §14.4a).

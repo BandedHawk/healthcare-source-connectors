@@ -586,6 +586,54 @@ class FileConnectorApplicationTest
     }
 
     /**
+     * A listed item left part way that is finished before the reconciler
+     * reaches it, its message having turned up after all, is left, not
+     * taken on nor announced again; the other is taken on.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void leavesAStalledItemFinishedMeanwhile() throws Exception
+    {
+        TestLanding landing = new TestLanding(catalogProperties(),
+                runtime.keys().wrap(), KEYS, INTAKE);
+        String lateContent = csv(2, "late");
+        String stuckContent = csv(3, "stuck");
+        LandedItem late = landing.land(lateContent, "late.csv");
+        LandedItem stuck = landing.land(stuckContent, "stuck.csv");
+        // Pods started both and stopped before their first batch.
+        for (LandedItem item : List.of(late, stuck))
+        {
+            String content = item == late ? lateContent : stuckContent;
+            runtime.tables().checkpoints().save(Checkpoint.start(
+                    item.itemId(),
+                    IngestPipeline.itemFingerprint(item.itemId()), "csv",
+                    content.getBytes(UTF_8).length, Instant.now()),
+                    new Held());
+        }
+        SplitReconciler reconciler = reconciler(
+                Instant.now().plus(Duration.ofMinutes(11)),
+                Duration.ofMinutes(10));
+        List<UUID> stalled = reconciler.stalledNow();
+        assertThat(stalled).containsExactlyInAnyOrder(late.itemId(),
+                stuck.itemId());
+
+        // The first's message turns up, and a worker finishes it.
+        assertThat(handle(handler(), landing.announcement(late)))
+                .isEqualTo(Outcome.DONE);
+        assertThat(of(drain(), ItemSplit.class)).extracting(ItemSplit::itemId)
+                .containsExactly(late.itemId());
+
+        assertThat(reconciler.resume(stalled))
+                .isEqualTo(new SplitReconciler.Recovery(1, 1));
+        List<ConnectorMessage> messages = drain();
+        assertThat(of(messages, ItemSplit.class)).extracting(ItemSplit::itemId)
+                .containsExactly(stuck.itemId());
+        assertThat(of(messages, RecordSplit.class)).hasSize(3);
+        assertThat(FATAL).isEmpty();
+    }
+
+    /**
      * {@code item.landed} messages of other contract versions, as when the
      * landing node and the stage are upgraded at different times: a later
      * or earlier minor version is taken, and its item split; a later major

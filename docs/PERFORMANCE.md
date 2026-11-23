@@ -1462,7 +1462,7 @@ What it showed, beyond §2's predictions:
     lag never reached nothing and the load test couldn't end. Both runs were ended by restarting the duties pod
     once every item was in gold (its new first pass: 0 recovered). Nothing lost or supplanted; every run exactly
     once, 0 left behind. Fixed since (DESIGN.md revision (eu)): each item is looked up again just before it is
-    recovered, and left if it was started meanwhile; not yet run on AWS.
+    recovered, and left if it was started meanwhile, as is each item left part way; not yet run on AWS.
 
 ## 11. Order of work
 
@@ -1497,9 +1497,12 @@ of that feed's batch sizes:
 - **Hours, not minutes (a soak):** the runs so far last about 20 minutes. A day or two at a steady feed just under
   capacity shows the plateau once a day of snapshots is kept (24 hours, §12), with the commit step's own timings
   (table refresh, metadata write, catalog update) to say whether S3 or Postgres grows. Before it, the stores need
-  sizing for it: Kafka's 10 GiB holds about 500,000 documents at run 53's 21 KB each (30 days' retention is decided,
-  §12), Postgres's 10 GiB about 1 million at 9.6 KB, and the landing node's ledger index takes 36 to 72 bytes an
-  item, kept for good.
+  sizing for it: Kafka's 10 GiB holds about 500,000 documents at 21.9 KB each (30 days' retention is decided,
+  §12), Postgres's 10 GiB about 700,000 at 14.8 KB with the audit journal (9.6 KB before it), and the landing node's
+  ledger index takes 36 to 72 bytes an item, kept for good. For 15 million C-CDA documents that is at least 250 GiB
+  of Postgres volume and 370 GiB of broker disk a copy (DEPLOYMENT.md, "Sizing Postgres and Kafka").
+- **Every format other than C-CDA** (`x12`, `edifact`, `csv`, `delimited`, generic `xml`, `fhir`, `parquet`) is
+  untested end to end and at load, and has no mapping set: DEPLOYMENT.md, "Formats: what has been tested".
 
 ## 12. Decided with the user, 2026-11-13
 

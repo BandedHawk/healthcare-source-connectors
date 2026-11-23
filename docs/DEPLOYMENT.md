@@ -44,7 +44,7 @@ The demonstration (`-Pdemo`, §15.3) has the same layout: two processes and an e
 With a queue between the stages, a lost `item.landed` message would leave an item landed but never split. Two mechanisms between them make sure every landed item is split.
 
 - **A crash between landing and announcing** (the landing node). At startup, the landing node sends the last landed item's message again (§5.3.11). Items are landed and announced one at a time, in order, so only the last can be unannounced. Tested by `IntakeServiceTest.announcesTheLastItemAgainAfterACrashBeforeItsMessage`, and for pushes and message batches by `PushServiceTest` and `BatchServiceTest`.
-- **A message the broker lost after accepting it** (the splitter). This covers a purged queue, a lost broker node, a retention limit passed while the splitter was down, or a dead-letter queue. The split stage reconciles (`SplitReconciler`, [STAGES.md](STAGES.md) §8). At startup, and then every `sdh.landing.reconcile.interval` (15 minutes), it splits every item of its intake that was fully landed more than `sdh.landing.reconcile.grace` (10 minutes) ago and was never started. It also takes on every item left part way, whose checkpoint hasn't been written for longer than the grace: its pod stopped while splitting it, and its message was lost too (built 2026-11-07). Each one is audited as `split.recovered` (reason `MESSAGE_MISSING` or `CHECKPOINT_STALLED`), which flags the broker problem. If the message turns up later, it only announces the item again. Each listed item is looked up again just before it is split, and left if it has been started meanwhile: under a backlog the list can hold thousands of items whose messages are still on their way (2026-11-22, DESIGN.md revision (eu)). Tested by `FileConnectorApplicationTest.recoversLandedItemsWhoseMessagesWereLost` (not before the grace, not twice, not another intake's item, and the late message only announces), `leavesAListedItemSplitMeanwhile` and `resumesAnItemLeftPartWayWhoseMessageWasLost`. What the split stage sent on and the broker then lost is found by the convert stage's reconciler (below), or recovered by an operator with a reprocess at the convert stage (`sdh-admin reprocess --item-id`, STAGES.md §15.8.9), which reads the records from `split_records`. An item can also be split again as a whole, by a reprocess at the split stage.
+- **A message the broker lost after accepting it** (the splitter). This covers a purged queue, a lost broker node, a retention limit passed while the splitter was down, or a dead-letter queue. The split stage reconciles (`SplitReconciler`, [STAGES.md](STAGES.md) §8). At startup, and then every `sdh.landing.reconcile.interval` (15 minutes), it splits every item of its intake that was fully landed more than `sdh.landing.reconcile.grace` (10 minutes) ago and was never started. It also takes on every item left part way, whose checkpoint hasn't been written for longer than the grace: its pod stopped while splitting it, and its message was lost too (built 2026-11-07). Each one is audited as `split.recovered` (reason `MESSAGE_MISSING` or `CHECKPOINT_STALLED`), which flags the broker problem. If the message turns up later, it only announces the item again. Each listed item is looked up again just before it is split, and left if it has been started meanwhile: under a backlog the list can hold thousands of items whose messages are still on their way (2026-11-22, DESIGN.md revision (eu)). Tested by `FileConnectorApplicationTest.recoversLandedItemsWhoseMessagesWereLost` (not before the grace, not twice, not another intake's item, and the late message only announces), `leavesAListedItemSplitMeanwhile`, `resumesAnItemLeftPartWayWhoseMessageWasLost` and `leavesAStalledItemFinishedMeanwhile` (an item left part way is looked up again too, and left if it was finished or taken on meanwhile). What the split stage sent on and the broker then lost is found by the convert stage's reconciler (below), or recovered by an operator with a reprocess at the convert stage (`sdh-admin reprocess --item-id`, STAGES.md §15.8.9), which reads the records from `split_records`. An item can also be split again as a whole, by a reprocess at the split stage.
 - **A `record.split` the broker lost** (the convert stage). The convert stage's reconciler, on the pod holding its duties lease, rebuilds every record split more than `sdh.reconcile.grace` (10 minutes) ago that it hasn't converted, at startup and then every `sdh.reconcile.interval` (15 minutes), and audits each item as `stage.records_recovered`. A record a pod claimed and never stored, its claim expired, is rebuilt the same way, and an item whose records are all stored with its total, but which wasn't completed, is completed and audited `stage.item_completion_recovered` (design revision (by)). It remembers how far it has checked (`stage_reconcile`, shown by `sdh-admin status`), so after an outage it checks every day since, not only the last `sdh.reconcile.lookback` (2 days); a catch-up is audited `stage.reconcile_catching_up` and `stage.reconcile_caught_up` (design revision (bs)). Tested by `ConvertStageTest.catchesUpOnAnOutageLongerThanTheLookback`.
 
 - **A record a stopped pod left claimed** (the convert and transform stages, revision (du)). The same pod sweeps, every `sdh.reconcile.claim-sweep` (1 minute), for claims that expired at least `sdh.reconcile.claim-age` (1 minute) ago with nothing stored, and processes their records again from their stored rows, without the reconciler's waits; each item is audited `stage.claims_recovered`. A batch that would be acknowledged with one of its records still claimed by its own pod is tried again instead, audited `stage.claims_left` (an error: report it). Tested by `RecordStageTest.sweepsRecordsWhoseHolderStopped`.
@@ -88,6 +88,68 @@ Decided 2026-11-07 ([STAGES.md](STAGES.md) §10).
 - **The landing node: never more than one in service.** It lands serially, and landing in parallel could land one file twice, by the different ways a file can be retrieved. Only the node holding its lease lands; a standby waits and takes over within the lease's time if the active node fails. Run two replicas (active and standby) on different nodes, with `strategy: Recreate`, and never autoscale it.
 - **The split and convert stages: at least one pod, scaled with KEDA** on their input's backlog (each stage's README, "Autoscaling"). Never scale a stage to zero: the pod holding its duties lease reconciles, finding work whose messages were lost, and a lost message adds nothing to the backlog that would start a pod. On Kafka, give each stage's input topic at least as many partitions as its most pods; on Kafka 4.0 or later, use its group protocol (`groupProtocol=consumer` in the input's URI), so a rebalance doesn't wait for a busy pod; and set the split stage's `maxPollIntervalMs` (30 minutes by default) above the longest item's split time (revision (bz)). Tried in the sandbox with `scripts/sandbox.sh scale-demo` ([SANDBOX.md](SANDBOX.md)).
 - **Keep the convert stage's backlog under its reconciler's grace** (10 minutes) on a normal day: a backlog older than that holds its reconciler back, and `stage.reconcile_deferral_capped` is the sign that it needs more pods (STAGES.md §13.4).
+
+## Sizing Postgres and Kafka for an initial load
+
+**Size both before a large load: the PoC's 10 GiB volumes hold well under a million documents.** The estimate below
+is from C-CDA only, measured on the AWS PoC on 2026-11-22 with the HIPAA work in place (the audit journal included;
+[PERFORMANCE.md](PERFORMANCE.md) §10, runs 62 and 63), with one record a document of about 119 KB. It is a
+**minimum**, for one pipeline: nothing was pruned during the runs, and the growth was linear over them. A soak of
+hours has not been run (PERFORMANCE.md §11.1), so the numbers for 15 million are extrapolated, not observed.
+
+| | Measured, per C-CDA document | For 15 million C-CDA documents, at least | Notes |
+|---|---|---|---|
+| **Postgres** (all of a pipeline's schemas) | 14.7 to 14.8 KB (9.6 KB before the audit journal) | **about 210 GiB** of data, so a volume of **at least 250 GiB** | The PoC's volume ran about 1 GiB above the data (write-ahead log, `max_wal_size` 1 GiB); the rest of the margin is for vacuum and index bloat. By schema, a document added about 5.3 KB to transform's, 4.3 to convert's, 3.6 to split's and 1.4 to the landing node's (`public` on the PoC). About 4.5 KB of the whole is the audit journal (13 events a document across the stages, 7 of them split's). |
+| **Kafka** (the pipeline's topics, one copy) | 21.9 KB (landed 3.2, split 6.5, records 6.3, FHIR 5.9) | **about 305 GiB a copy**, so **at least 370 GiB** of broker disk a copy | With the decided 30 days' retention (PERFORMANCE.md §12), a load of 15 million at 50 to 60 documents a second (3 to 4 days) is all still held at its end. Multiply by the replication factor (3 is usual; the PoC runs 1). A shorter retention holds less; it should still outlast the longest outage expected, since messages lost to retention are rebuilt by the reconcilers (STAGES.md §8), more slowly than a backlog is read. |
+
+What changes it:
+- **Records, not bytes, drive Postgres:** each record has its registry rows at each stage, so a format with many
+  records an item (an X12 batch, a large CSV) grows Postgres by its records, and a smaller document grows it
+  about as much as a large one.
+- **The audit journal** is kept in each stage's schema until exported and pruned (HIPAA-OPERATIONS.md §3.3); a
+  pruning schedule keeps it to the export window.
+- **What the registries keep per record, and for how long, is not yet decided** (PERFORMANCE.md §10, run 53): a
+  retention on registry rows would bound Postgres; until then it grows for good.
+- **The landing node's ledger index** takes 36 to 72 bytes an item, kept for good (in the figures above).
+- **The object store** (bronze, silver, gold) is not covered here; it grows with the documents' own size, several
+  times over across the layers.
+
+## Formats: what has been tested
+
+**Only C-CDA has been tested end to end and under load.** It has a mapping set (US Core 6.1, in the mapping
+repository), and every measurement in PERFORMANCE.md is of it. The product also splits and stores the formats
+below, each with its own unit and integration tests of splitting; **none has been run end to end, at load, or
+through a mapping set, and each needs that testing before a customer relies on it** (PERFORMANCE.md §11.1 says
+what to measure):
+
+| Format (`format:`) | What a record is | Not yet tested |
+|---|---|---|
+| `x12` | a transaction set (`ST`, by default), a functional group (`GS`) or an interchange (`ISA`), each a valid standalone interchange | end to end, at load (a transaction a file, and batches such as an 837 of thousands of claims); no mapping set |
+| `edifact` | a message (`UNH`, by default) or an interchange, each a valid standalone interchange | end to end, at load; no mapping set |
+| `csv` | a row (RFC 4180), optionally with the header prepended | end to end, at load (large files of many rows); no mapping set |
+| `delimited` | a run of lines found by a pattern, for proprietary line formats | end to end, at load; no mapping set |
+| `xml` | an element by name, as a standalone document (generic XML other than C-CDA) | end to end, at load; no mapping set |
+| `fhir` | a resource (by default a `Bundle`) from a single resource, an array or NDJSON; or groups of N resources, for bulk export | end to end, at load (bulk-export NDJSON especially); the transform stage's mapping is for C-CDA |
+| `parquet` | a row, as a JSON object; how an Iceberg table intake is split | end to end, at load; no mapping set |
+
+A plugin splitter (`format: <plugin>`) is the customer's to test. Each format runs as its own pipeline, so it
+neither slows nor is slowed by another in the code, but its numbers can't be read off C-CDA's.
+
+## Transports: what has been tested
+
+Tested, and in the reference settings (`deploy/reference/`): Kafka over `SASL_SSL` with per-stage ACLs, and
+Postgres with TLS (`verify-full`) direct to the server (HIPAA.md §8.1 items 7 and 13).
+
+**Supported or expected, but not yet tested,** and planned for later iterations, as the product is prepared for
+deployment in each environment (HIPAA.md §11.1, P11):
+- **Kafka with client certificates (mTLS)** instead of SASL;
+- **AWS MSK with its IAM login;**
+- **Postgres TLS through PgBouncer** (the PoC runs PgBouncer, in plaintext). This may be tested sooner than the
+  rest, but only after performance has been reviewed further (PERFORMANCE.md §10, runs 60 to 63);
+- **GCP Cloud KMS** against the real service (its client is built and tested against a stand-in only);
+- **AWS GovCloud and Azure Government** endpoints.
+
+Until each is tested, a customer using it tests it in their own environment first, with synthetic data.
 
 ## Audit events: the collector
 
