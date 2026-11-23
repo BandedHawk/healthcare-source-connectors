@@ -18,8 +18,11 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -334,6 +337,46 @@ public final class LandingLedger
     public List<UUID> itemsWithDigest(String digest) throws IOException
     {
         return itemIds(Expressions.equal(ITEM_DIGEST, digest));
+    }
+
+    /**
+     * The items landed with any of some digests, in one scan of the table:
+     * for many items at once, as the last group startup recovery announces
+     * again, where a scan a digest would read the whole table each time
+     * (digests are random, so no data file's statistics rule one out).
+     *
+     * @param digests the digests; a null one is left out
+     * @return each digest's items' IDs, in no order; a digest with none is
+     *         absent
+     * @throws IOException if the table can't be read
+     */
+    public Map<String, List<UUID>> itemsWithDigests(
+            Collection<String> digests) throws IOException
+    {
+        Set<String> wanted = new HashSet<>();
+        for (String digest : digests)
+        {
+            if (digest != null)
+            {
+                wanted.add(digest);
+            }
+        }
+        Map<String, List<UUID>> found = new HashMap<>();
+        if (wanted.isEmpty())
+        {
+            return found;
+        }
+        table.refresh();
+        try (CloseableIterable<Record> scan = IcebergGenerics.read(table)
+                .select(ITEM_ID, ITEM_DIGEST)
+                .where(Expressions.in(ITEM_DIGEST, wanted)).build())
+        {
+            scan.forEach(row -> found.computeIfAbsent(
+                    (String) row.getField(ITEM_DIGEST),
+                    digest -> new ArrayList<>())
+                    .add((UUID) row.getField(ITEM_ID)));
+        }
+        return found;
     }
 
     /**

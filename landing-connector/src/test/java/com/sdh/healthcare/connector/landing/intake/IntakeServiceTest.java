@@ -876,6 +876,38 @@ class IntakeServiceTest
     }
 
     /**
+     * A copy in the last group, announced again after a crash, still names
+     * the earlier item it is a copy of, and an item that is no copy names
+     * none: the group's copies are found in one look at the ledger.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void theLastGroupAnnouncedAgainKeepsItsCopies() throws Exception
+    {
+        IntakeService service = grouped(
+                new LocalDirectorySource(settings("read-only")),
+                grouping(500));
+        service.onListed(write("a.csv", "first"));
+        service.onListingDone();
+        UUID original = landed().getFirst().itemId();
+        failSends.set(Integer.MAX_VALUE);
+        service.onListed(write("b.csv", "first"));
+        service.onListed(write("c.csv", "third"));
+        service.onListingDone();
+        failSends.set(0);
+        sent.clear();
+
+        grouped(new LocalDirectorySource(settings("read-only")),
+                grouping(500)).recoverAtStartup();
+        List<ConnectorMessage.ItemLanded> messages = landed();
+        assertThat(messages).hasSize(2);
+        assertThat(messages).extracting(ConnectorMessage.ItemLanded::sameAs)
+                .containsExactly(original, null);
+        assertThat(fatal).isEmpty();
+    }
+
+    /**
      * A group whose commit went through, but whose landing then failed,
      * is tried again and landed once, under the same IDs.
      *

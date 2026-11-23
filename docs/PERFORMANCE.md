@@ -1632,8 +1632,8 @@ check. The images did not yet have registry retention (off by default, so no eff
   last group, and each is a scan of the whole ledger table filtered on the digest, which file statistics can't
   narrow (digests are random): about 3 s each against a ledger of some 30,000 items, so 500 cost about 25 minutes,
   and would cost more on a larger ledger. Landing itself checks the in-memory `LedgerIndex` first; recovery doesn't.
-  In the other three runs the holder was deleted between groups, and the standby was landing within 3 s. Not yet
-  fixed: one scan for the whole group's digests (or the index first) would make it seconds.
+  In the other three runs the holder was deleted between groups, and the standby was landing within 3 s. Fixed
+  since (DESIGN.md revision (ew)): one scan for the whole group's digests; not yet run on AWS.
 - **Not shown: the split reconciler fix (eu).** No pod logged a `split.reconciled` pass in any run: the duties
   pod's first pass after a reset finds no landing table yet, and its next is 15 minutes (`interval`) later, about
   when a run ends. Split never fell more than its grace behind for long, so no run needed it; a run long enough for

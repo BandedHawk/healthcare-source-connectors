@@ -1036,10 +1036,11 @@ public final class IntakeService implements LandingIntake
         if (!lander.lastAnnounced())
         {
             List<LandedItem> last = lander.lastLandedAll();
-            for (LandedItem item : last)
+            List<UUID> copies = sameAsAll(storage, last);
+            for (int i = 0; i < last.size(); i++)
             {
-                unannounced.add(new Announcer.Announcement(item,
-                        sameAs(storage, item)));
+                unannounced.add(new Announcer.Announcement(last.get(i),
+                        copies.get(i)));
             }
             if (last.size() > 1)
             {
@@ -1207,6 +1208,39 @@ public final class IntakeService implements LandingIntake
         return landed == null ? null
                 : storage.ledger().earliestCopy(landed.itemId(),
                         landed.digest(), landed.replaces()).orElse(null);
+    }
+
+    /**
+     * The earlier item each of some landed items is an exact copy of, as
+     * {@link #sameAs}, from one scan of the ledger: a group of hundreds,
+     * found at startup, would otherwise cost a scan of the whole ledger
+     * an item.
+     *
+     * @param storage the landing storage
+     * @param landed  the items
+     * @return for each item, in the same order, the earliest earlier item
+     *         with the same content, other than the one it replaces; null
+     *         where there is none
+     * @throws IOException if the ledger can't be read
+     */
+    static List<UUID> sameAsAll(Storage storage, List<LandedItem> landed)
+            throws IOException
+    {
+        List<String> digests = new ArrayList<>(landed.size());
+        for (LandedItem item : landed)
+        {
+            digests.add(item.digest());
+        }
+        Map<String, List<UUID>> withDigest =
+                storage.ledger().itemsWithDigests(digests);
+        List<UUID> copies = new ArrayList<>(landed.size());
+        for (LandedItem item : landed)
+        {
+            copies.add(LandingLedger.earliest(
+                    withDigest.getOrDefault(item.digest(), List.of()),
+                    item.itemId(), item.replaces()).orElse(null));
+        }
+        return copies;
     }
 
     /**

@@ -29,6 +29,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -175,6 +176,20 @@ class LandingLedgerTest
         assertThat(ledger.itemsWithDigest(first.digest()))
                 .containsExactlyInAnyOrder(first.itemId(), copy.itemId());
         assertThat(ledger.load("another-intake").size()).isZero();
+
+        Map<String, List<UUID>> many = ledger.itemsWithDigests(
+                Arrays.asList(first.digest(), other.digest(),
+                        "nonesuch234567abcdef", null));
+        assertThat(many).containsOnlyKeys(first.digest(), other.digest());
+        assertThat(many.get(first.digest()))
+                .containsExactlyInAnyOrder(first.itemId(), copy.itemId());
+        assertThat(many.get(other.digest()))
+                .containsExactly(other.itemId());
+        assertThat(LandingLedger.earliest(many.get(first.digest()),
+                copy.itemId(), null))
+                .isEqualTo(ledger.earliestCopy(copy.itemId(),
+                        copy.digest(), null));
+        assertThat(ledger.itemsWithDigests(List.of())).isEmpty();
     }
 
     /**
