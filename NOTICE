@@ -16,7 +16,8 @@ in their Maven POMs and are not included in them.
 The distribution archive contains no Java runtime. The container image also contains:
 - native libraries from zstd-jni (BSD-2-Clause), snappy-java (Apache-2.0), Amazon Corretto Crypto Provider
   (Apache-2.0; built with AWS-LC) and Conscrypt (Apache-2.0; built with BoringSSL) in /app/native, so they can
-  load from a read-only filesystem; all four components are listed in THIRD-PARTY.txt;
+  load from a read-only filesystem; all four components are listed in THIRD-PARTY.txt, ACCP's and Conscrypt's
+  entries with the licenses of AWS-LC and BoringSSL (OpenSSL, SSLeay, ISC, MIT and Apache-2.0 terms);
 - the Eclipse Temurin Java runtime (GPL-2.0 with the Classpath Exception, and others) and the operating system
   packages of its base image, listed with their versions and source packages in /app/legal/os-packages.txt. Each
   package's copyright and license terms are in the copyright file named there, under /usr/share/doc/.

@@ -831,6 +831,13 @@
                     new File(licenseDir, "copyrights.properties").withReader("UTF-8") { copyrights.load(it) }
                     def together = new Properties()
                     new File(licenseDir, "licenses-apply-together.properties").withReader("UTF-8") { together.load(it) }
+                    // Native code a component carries, built from a project whose license the jar doesn't ship
+                    // (ACCP's AWS-LC, Conscrypt's BoringSSL): src/license/bundled-native.properties names its text.
+                    // Keyed by the component's version, so an upgrade fails here until the text is checked again.
+                    def nativeCode = new Properties()
+                    new File(licenseDir, "bundled-native.properties").withReader("UTF-8") { nativeCode.load(it) }
+                    def nativeKeys = nativeCode.stringPropertyNames()
+                    def nativeStale = []
                     def missingCopyright = []
                     // Components that packaging adds without their being dependencies (Spring Boot's jar mode
                     // tools), from src/license/bundled-by-packaging.properties, copied to target/packaging-extras.
@@ -898,6 +905,19 @@
                         } catch (Exception e) {
                             throw new IllegalStateException("Could not read the license files of ${gav}: ${e.message}", e)
                         }
+                        def nativeKey = "${artifact.groupId}:${artifact.artifactId}:${artifact.version}".toString()
+                        if (nativeKeys.contains(nativeKey)) {
+                            def (String nativeName, String nativeVersion, String nativeUrl, String nativeFile) =
+                                    nativeCode.getProperty(nativeKey).split("\\|")*.trim()
+                            def text = new File(new File(licenseDir, "bundled-native"), nativeFile)
+                            if (!text.isFile()) {
+                                throw new IllegalStateException("${nativeKey}: no ${text} (bundled-native.properties)")
+                            }
+                            sections << "\n--- ${nativeName} ${nativeVersion} (${nativeUrl}), built into its native " +
+                                    "libraries: its LICENSE ---\n" + text.getText("UTF-8").trim()
+                        } else if (nativeKeys.any { it.startsWith("${artifact.groupId}:${artifact.artifactId}:") }) {
+                            nativeStale << gav
+                        }
                         if (!apache && !shipsLicense) {
                             // MIT and BSD require the copyright line, and the canonical texts only have placeholders.
                             def line = copyrights.getProperty("${artifact.groupId}:${artifact.artifactId}") ?: copyrights.getProperty(artifact.groupId)
@@ -921,6 +941,11 @@
                         }
                     }
                     thirdPartyFile.text = content
+                    if (nativeStale) {
+                        throw new IllegalStateException("A new version of a component with bundled native code: "
+                                + nativeStale.join(", ") + ". Check the version of the code it is built with, and its "
+                                + "license, then update src/license/bundled-native.properties.")
+                    }
                     if (missingCopyright) {
                         throw new IllegalStateException("No license file in the jar and no copyright line in "
                                 + "src/license/copyrights.properties for: " + missingCopyright.join(", "))

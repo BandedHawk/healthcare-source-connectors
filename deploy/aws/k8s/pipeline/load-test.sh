@@ -18,9 +18,13 @@
 # deletes it with no grace, so that its standby may have to announce the group again at startup (DESIGN.md
 # revision (ew)); graceful (the default) deletes it with its grace. No grace is not always a crash: the kubelet
 # still stops the container with SIGTERM, and a holder that finishes the group's messages and gives up the lease in
-# that time leaves nothing to announce again (run 70: the standby held the lease 3 s later). A sure crash needs
-# SIGKILL inside the container (kubectl debug). The report gives each standby's recovery, from its log: lease taken to its
-# first item landed, and the items it announced again.
+# that time leaves nothing to announce again (run 70: the standby held the lease 3 s later). crash is the sure
+# one: it waits for the same window, then crashes the holder's JVM from a debug container in the pod, with SIGSEGV
+# (the JVM is PID 1 of the container, which ignores SIGKILL and SIGSTOP sent from inside its namespace; SIGTERM
+# runs its shutdown hooks; SIGSEGV is a fatal error, no hooks run, and the images write no core or error file:
+# jvm.options), then deletes the pod, so the container doesn't restart and win the lease back. The standby takes
+# the lease when it expires. The report gives each standby's recovery, from its log: lease taken to its first item
+# landed, and the items it announced again.
 #
 # SDH_LOAD_OUTAGE_AT, _MIN and _LOSE add an outage part way (below, and docs/PERFORMANCE.md §3.6); the report then
 # checks every item ended at every stage, and counts what the reconcilers rebuilt.
@@ -70,6 +74,11 @@ export AWS_PROFILE="${AWS_PROFILE:-claude-poc}" AWS_REGION=us-east-2 AWS_PAGER="
 export KUBECONFIG="$STATE/kubeconfig"   # always the PoC's, never a sandbox's
 ACCOUNT=493469777520
 COPIES="${1:-80}" ERROR_COPIES="${2:-10}"
+# CSV items in place of C-CDA (docs/PERFORMANCE.md §13.2): COPIES items of this many rows each, no error inputs, no
+# gold check; the pipeline must split CSV (apply.sh SDH_SPLIT_FORMAT=csv), and the transform stage keeps the
+# records as they came (TRANSFORM_UNSUPPORTED). 0: C-CDA.
+CSV_ROWS="${SDH_LOAD_CSV_ROWS:-0}"
+[[ "$CSV_ROWS" =~ ^[0-9]+$ ]] || { echo "SDH_LOAD_CSV_ROWS: rows an item, or 0" >&2; exit 2; }
 RATE="${SDH_LOAD_RATE:-}"                # objects a second at t0; empty: all at once
 STAGE_ONLY="${SDH_LOAD_STAGE_ONLY:-0}"   # 1: make and stage the inputs, then stop
 REUSE="${SDH_LOAD_RUN:-}"                # a run staged with SDH_LOAD_STAGE_ONLY=1
@@ -89,9 +98,10 @@ for k in ${KILLS//,/ }; do
 done
 SAMPLE_SEC="${SDH_LOAD_SAMPLE_SEC:-60}"   # seconds between samples of what the run used (resources.py)
 FAILOVER_AT="${SDH_LOAD_FAILOVER_AT:-30}"   # % of objects landed when the lease holder is deleted (a list for several); 0: never
-FAILOVER_HOW="${SDH_LOAD_FAILOVER_HOW:-graceful}"   # graceful, or midgroup: killed with no grace while landing a group
+FAILOVER_HOW="${SDH_LOAD_FAILOVER_HOW:-graceful}"   # graceful; midgroup: no grace, in a group; crash: SIGSEGV, in a group
 [[ "$FAILOVER_AT" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "SDH_LOAD_FAILOVER_AT: % landed, as 30 or 25,50,75" >&2; exit 2; }
-[[ "$FAILOVER_HOW" =~ ^(graceful|midgroup)$ ]] || { echo "SDH_LOAD_FAILOVER_HOW: graceful or midgroup" >&2; exit 2; }
+[[ "$FAILOVER_HOW" =~ ^(graceful|midgroup|crash)$ ]] \
+  || { echo "SDH_LOAD_FAILOVER_HOW: graceful, midgroup or crash" >&2; exit 2; }
 # The outage (docs/PERFORMANCE.md §3.6): at OUTAGE_AT % landed, every stage, Postgres and Kafka are killed at once,
 # with no graceful stop; they stay down OUTAGE_MIN minutes. OUTAGE_LOSE names topics whose queued messages are
 # deleted meanwhile (landed,split,records), as if the outage had outlasted the brokers' retention: the reconcilers
@@ -101,6 +111,7 @@ OUTAGE_MIN="${SDH_LOAD_OUTAGE_MIN:-10}"
 OUTAGE_LOSE="${SDH_LOAD_OUTAGE_LOSE:-}"
 SETTLE_MIN="${SDH_LOAD_SETTLE_MIN:-$([[ -n "$OUTAGE_LOSE" ]] && echo 45 || echo 0)}"
 GOLD_CHECK="${SDH_LOAD_GOLD_CHECK:-1}"
+((CSV_ROWS == 0)) || GOLD_CHECK=0   # the gold check names C-CDA documents
 # Items left behind with no outage (runs 39 and 43 of docs/PERFORMANCE.md §10, as Spot nodes were reclaimed): the
 # report notes where each is in the registries, then waits up to RECOVER_MIN minutes for the reconcilers to end them
 # (a 10-minute grace, every 15 minutes: STAGES.md §9 and §13.2), and says how long they took; 0 doesn't wait.
@@ -144,7 +155,7 @@ except Exception:
     print("-")'
 }
 replicas() { kubectl -n "$1" get deploy "$2" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0; }
-intake_count() { aws s3 ls "$INTAKE" 2>/dev/null | grep -c '\.xml$' || true; }
+intake_count() { aws s3 ls "$INTAKE" 2>/dev/null | grep -Ec '\.(xml|csv)$' || true; }
 # Items ended at a stage (a stage registry's items whose records have all ended), and its records ended.
 ended() { db "SELECT count(*), coalesce(sum(done),0), coalesce(sum(failed),0) FROM $1.stage_item
   WHERE expected IS NOT NULL AND NOT upstream_open AND done >= expected" 2>/dev/null || echo "0|0|0"; }
@@ -157,7 +168,14 @@ if [[ "$STAGE_ONLY" != 1 ]]; then
   kubectl get ns "$N" >/dev/null || die "no session: run deploy/aws/poc.sh up"
 fi
 docs="$TRANSFORMER/transform-stage/target/test-documents/documents"
-[[ -d "$docs" ]] || die "no test documents at $docs: build the transformer (./mvnw -o package)"
+((CSV_ROWS > 0)) || [[ -d "$docs" ]] || die "no test documents at $docs: build the transformer (./mvnw -o package)"
+if ((CSV_ROWS > 0)); then
+  [[ "$ERROR_COPIES" == 0 ]] || die "CSV items take no error inputs: give 0 as the second argument"
+  if [[ "$STAGE_ONLY" != 1 ]]; then
+    kubectl -n "$N" get configmap splitter-config -o jsonpath='{.data.application\.yml}' 2>/dev/null \
+      | grep -q '^    format: csv$' || die "the pipeline doesn't split CSV: apply with SDH_SPLIT_FORMAT=csv"
+  fi
+fi
 if [[ "$STAGE_ONLY" != 1 ]]; then
   [[ "$(intake_count)" == 0 ]] || die "$INTAKE isn't empty: wait for the pipeline, or look at the landing stage"
   # A run on an earlier run's data isn't comparable (run 60, docs/PERFORMANCE.md §10): the tables and registries
@@ -206,13 +224,13 @@ if [[ -n "$REUSE" ]]; then
   [[ -n "$RATE" || ! -f "$out/slices" ]] || die "$REUSE was staged in slices: run it with SDH_LOAD_RATE"
 else
   python3 -I "$HERE/load-inputs.py" "$out/inputs" "$run" "$COPIES" "$ERROR_COPIES" "$docs" \
-    "$ROOT/connector-core/src/test/resources/ccda"
+    "$ROOT/connector-core/src/test/resources/ccda" "$CSV_ROWS"
   mv "$out/inputs/manifest.json" "$out/manifest.json"
   if [[ -n "$RATE" ]]; then
     # Slices of SLICE objects, in name order (a copy of each document, then the next copy), s00000/ on.
     python3 -I -c 'import os, sys
 d, n = sys.argv[1], int(sys.argv[2])
-names = sorted(f for f in os.listdir(d) if f.endswith(".xml"))
+names = sorted(f for f in os.listdir(d) if f.endswith((".xml", ".csv")))
 for i, f in enumerate(names):
     s = os.path.join(d, "s%05d" % (i // n))
     os.makedirs(s, exist_ok=True)
@@ -220,10 +238,15 @@ for i, f in enumerate(names):
 print((len(names) + n - 1) // n)' "$out/inputs" "$SLICE" > "$out/slices"
   fi
 fi
-read -r files bytes documents < <(python3 -I -c 'import json, sys; m = json.load(open(sys.argv[1]))
-print(m["files"], m["bytes"], len(m["clean"]))' "$out/manifest.json")
+read -r files bytes documents staged_rows < <(python3 -I -c 'import json, sys; m = json.load(open(sys.argv[1]))
+print(m["files"], m["bytes"], len(m["clean"]), m.get("csv_rows", 0))' "$out/manifest.json")
+[[ "$staged_rows" == "$CSV_ROWS" ]] || die "the staged load has CSV rows $staged_rows an item: run it with SDH_LOAD_CSV_ROWS=$staged_rows"
 : > "$report"
-say "Run $run: $files objects, $((bytes / 1048576)) MB ($COPIES copies of each of $documents test documents; $ERROR_COPIES of each of 5 error inputs)"
+if ((CSV_ROWS > 0)); then
+  say "Run $run: $files objects, $((bytes / 1048576)) MB (CSV items of $CSV_ROWS rows each: $((files * CSV_ROWS)) records)"
+else
+  say "Run $run: $files objects, $((bytes / 1048576)) MB ($COPIES copies of each of $documents test documents; $ERROR_COPIES of each of 5 error inputs)"
+fi
 if [[ -z "$REUSE" ]]; then
   say "Staging them in $staging"
   # A sync, tried again after a failure (a network blip ended two uploads on 2026-11-22): each try sends only
@@ -557,11 +580,39 @@ holder() {  # the running landing pod holding the intake's lease (with two, the 
 killed="" killed_at="" takeover="" awaiting=""
 declare -A failover_done=()
 failover_lines=()
+# For crash: a debug container in the holder's pod (as for a thread dump: the restricted profile, the app's own
+# user), sharing its process namespace, so it can signal the JVM. Started before the window is looked for, as it
+# takes seconds to start. Sets crash_container; fails if it isn't running within 60 s.
+crash_n=0 crash_container=""
+crasher() {  # pod
+  local pod="${1#pod/}" app uid i running
+  crash_container=""
+  app="$(kubectl -n "$N" get pod "$pod" -o jsonpath='{.spec.containers[0].name}' 2>/dev/null)" || return 1
+  uid="$(kubectl -n "$N" get pod "$pod" \
+    -o jsonpath='{.spec.securityContext.runAsUser}{" "}{.spec.containers[0].securityContext.runAsUser}' 2>/dev/null)"
+  uid="$(awk '{print $NF}' <<< "$uid")"
+  [[ "$uid" =~ ^[0-9]+$ ]] || return 1
+  printf '{"securityContext":{"runAsUser":%s,"runAsNonRoot":true}}\n' "$uid" > "$out/crash-debug.json"
+  crash_n=$((crash_n + 1))
+  kubectl -n "$N" debug "$pod" --image=public.ecr.aws/docker/library/busybox:1.37 --target="$app" \
+    --profile=restricted --custom="$out/crash-debug.json" --container="crash$crash_n" -- sleep 900 \
+    >/dev/null 2>&1 || return 1
+  running="{.status.ephemeralContainerStatuses[?(@.name==\"crash$crash_n\")].state.running}"
+  for ((i = 0; i < 60; i++)); do
+    [[ -n "$(kubectl -n "$N" get pod "$pod" -o jsonpath="$running" 2>/dev/null)" ]] \
+      && { crash_container="crash$crash_n"; return 0; }
+    sleep 1
+  done
+  return 1
+}
 failover() {  # pct: deletes the lease holder, as FAILOVER_HOW says; awaiting is then set until a standby holds the lease
   local pod mid="" i counts
   pod="$(holder)"
   [[ -n "$pod" ]] || { unset "failover_done[$1]"; return 0; }   # none yet: the next row tries again
-  if [[ "$FAILOVER_HOW" == midgroup ]]; then
+  if [[ "$FAILOVER_HOW" == crash ]]; then
+    crasher "$pod" || { say "  failover: no debug container in the holder; deleted with no grace instead"; }
+  fi
+  if [[ "$FAILOVER_HOW" != graceful ]]; then
     # A group's items log item.landed once committed, then (about 3 s later) item.announced, then
     # item.finished_at_source. A crash once the messages are acknowledged leaves nothing to announce again (three
     # kills of 2026-11-23 that waited for any of them all came then); a crash between the commit and the messages
@@ -573,13 +624,17 @@ failover() {  # pct: deletes the lease holder, as FAILOVER_HOW says; awaiting is
         && { mid="mid-group: ${counts% *} landed, none announced in its last second"; break; }
       sleep 0.3
     done
+    if [[ -n "$crash_container" ]]; then
+      kubectl -n "$N" exec "${pod#pod/}" -c "$crash_container" -- kill -SEGV 1 >/dev/null 2>&1 \
+        && mid="${mid:+$mid; }JVM crashed (SIGSEGV)" || mid="${mid:+$mid; }the crash signal failed"
+    fi
     kubectl -n "$N" delete "$pod" --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
   else
     kubectl -n "$N" delete "$pod" --wait=false >/dev/null 2>&1 || true
   fi
   killed="$pod" killed_at=$SECONDS awaiting="$1" takeover=""
   say "  failover: deleted the lease holder ($pod, $FAILOVER_HOW${mid:+, $mid}) at $landed landed"
-  [[ "$FAILOVER_HOW" == midgroup && -z "$mid" ]] && say "  failover: no group seen in 45 s; killed between groups"
+  [[ "$FAILOVER_HOW" != graceful && "$mid" != mid-group* ]] && say "  failover: no group seen in 45 s; killed between groups"
   return 0
 }
 
@@ -915,6 +970,8 @@ say "Items ended: split $split, convert $converted, transform $transformed"
 say "Records: convert $((c_done - c_done0)) ended ($((c_failed - c_failed0)) failed);" \
   "transform $((t_done - t_done0)) ended, $((t_done - t_done0 - t_failed + t_failed0)) mapped to a bundle," \
   "$((t_failed - t_failed0)) kept as they came"
+((CSV_ROWS == 0)) || say "  expected records: $((files * CSV_ROWS)) ($files items of $CSV_ROWS rows), all kept as" \
+  "they came at transform (TRANSFORM_UNSUPPORTED: its set reads C-CDA)"
 say "Failures by stage and code, since t0 (fail stores):"
 for s in split convert transform; do
   db "SELECT stage, error_code, count(*) FROM ${s}_$PREFIX.stage_failure WHERE failed_at >= '$t0_db'

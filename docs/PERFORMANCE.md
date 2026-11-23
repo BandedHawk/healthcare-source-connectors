@@ -1685,3 +1685,41 @@ check. The images did not yet have registry retention (off by default, so no eff
     for it: since each load copy is distinct, a copy noted beyond the error inputs' resends is an object written
     twice. So exactly once reads "yes, but for N objects the feed wrote twice" when every extra item is such a
     copy, and there are no more of them than objects the feed copied again; run 70 reads so (2, of 34).
+
+### 13.2 CSV fan-out, a landing crash and registry retention on AWS (runs G, H and 71, 2026-11-23)
+
+**Asked for by the user:** items 2 to 4 of the tranche in one session. Run 49's maxima and `m7gd.large` /
+`m7g.large` burst nodes, put back after; reset before each run.
+
+- **G and H, CSV items of 100 and 10,000 rows (not run).** The user chose to switch ccda-push to CSV for the runs
+  (`apply.sh` `SDH_SPLIT_FORMAT=csv`, `SDH_SPLIT_OPTIONS` and `SDH_CONVERT_OPTIONS` with `"[csv.header]": "true"`)
+  over a pipeline of its own, which needs new KMS keys and IAM changes. In both of two tries the new splitter and
+  splitter-duties pods crashed six times each in seven minutes, while the convert pods took the same options and
+  started. Their logs were gone when read ("unable to retrieve container logs"), so the cause is not known. Run
+  locally, the split stage's jar with the same settings passed the format's checks and stopped only at AWS KMS, as
+  it does with C-CDA's, so the failure is later in startup, against the stack. `apply.sh` now prints each pod that
+  isn't ready, with its last crash's log; the pods' exit codes and the cluster's events are still to read.
+  `load-test.sh` (`SDH_LOAD_CSV_ROWS`) and `load-inputs.py` make and run the CSV loads; both loads are still staged.
+- **Run 71 (`load-20261123T204609Z`): C-CDA, 30,000 at 100 a second, the landing holder crashed at 30 and 60%**
+  (`SDH_LOAD_FAILOVER_HOW=crash`: SIGSEGV from a debug container in the pod, the JVM's PID 1 ignoring SIGKILL
+  from inside its namespace; no shutdown hook runs). 57.0 documents a second, p50 / p95 / p99 117 / 181 / 208 s,
+  $13 a million, 26 `m7gd.large` Spot nodes. Exactly once, 0 left behind, no container restarted.
+  - **Both were real crashes:** the standby took the lease only when it expired, 62 and 71 s later (3 s after
+    run 70's kill with no grace).
+  - **Neither came in the window between a group's commit and its messages.** Both came after the messages: the
+    first holder had announced all it landed, and the second had announced its last group of 500 but finished
+    none at the source. Its standby found 122 of them still in the intake and finished them as already in its
+    ledger (`in_ledger 122`). So the re-announce path is still shown only by run 68. The trigger reads the
+    holder's log over the API, then signals it, a second or two in all, longer than the window. It needs a
+    faster one.
+  - **378 items landed with no `item.finished_at_source` in the saved pod logs** ("landed but never taken: 378").
+    None was left in the intake or lost: every item reached gold. These are most likely the second holder's
+    objects that it deleted just before the crash, whose log lines (and audit events within the journal's
+    100 ms linger) died with the JVM. To be checked against the audit journal, which Postgres keeps, at the
+    retention visit.
+- **Retention, first visit.** Run 71 ran with `SDH_STAGE_RETENTION_AFTER=25h`, `SDH_STAGE_QUEUE_RETENTION=1h`
+  (the convert and transform inputs' Kafka `retention.ms` set to match), `SDH_RECONCILE_LOOKBACK=1h` and
+  `SDH_STAGE_RETENTION_INTERVAL=10m`. Noted before `down` (`retention-check.sh note`): convert 30,000 items, all
+  finished with no open failure; transform 30,000, of which 15,000 have an open failure (the US Core checks),
+  which retention must keep. The last item finished at 22:25 UTC, so the second visit can be from
+  2026-11-24 23:25 UTC on (`up`, `apply.sh` with the same settings, `retention-check.sh verify`).

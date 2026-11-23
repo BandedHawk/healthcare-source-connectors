@@ -35,6 +35,22 @@ export JOSE_PROVIDER="${SDH_JOSE_PROVIDER:-accp}" JOURNAL_LINGER="${SDH_JOURNAL_
 # (sdh.landing.reconcile.*; the product's defaults). Shorter, a load test sees its passes under a backlog.
 export SPLIT_RECONCILE_GRACE="${SDH_SPLIT_RECONCILE_GRACE:-10m}"
 export SPLIT_RECONCILE_INTERVAL="${SDH_SPLIT_RECONCILE_INTERVAL:-15m}"
+# What the split stage splits (sdh.split.format, and sdh.split.options / sdh.convert.options as JSON-style flow
+# maps): C-CDA, the pipeline's own, unless a load test of another format asks (docs/PERFORMANCE.md §13.2). The
+# transform stage's set reads C-CDA only, so it keeps another format's records as they came (TRANSFORM_UNSUPPORTED).
+export SPLIT_FORMAT="${SDH_SPLIT_FORMAT:-ccda}" SPLIT_OPTIONS="${SDH_SPLIT_OPTIONS:-{}}"
+export CONVERT_OPTIONS="${SDH_CONVERT_OPTIONS:-{}}"
+# Registry retention (sdh.stage.retention.*, the convert and transform stages; docs/DEPLOYMENT.md "Registry
+# retention"): unset, every row is kept, the product's default. SDH_STAGE_RETENTION_AFTER turns it on. The stage
+# refuses an after shorter than its input queue's retention or its reconciler's lookback, each plus a day, so a
+# test of it shortens both: SDH_STAGE_QUEUE_RETENTION, which also sets the stage inputs' Kafka retention.ms to it
+# (unset: the broker's default, 7 days, and any such override removed), and SDH_RECONCILE_LOOKBACK (2d unset). A
+# queue kept so briefly drops a backlog older than that; the reconcilers would rebuild its records.
+RETENTION_AFTER="${SDH_STAGE_RETENTION_AFTER:-}" QUEUE_RETENTION="${SDH_STAGE_QUEUE_RETENTION:-}"
+RECONCILE_LOOKBACK="${SDH_RECONCILE_LOOKBACK:-}" RETENTION_INTERVAL="${SDH_STAGE_RETENTION_INTERVAL:-1h}"
+for d in "$QUEUE_RETENTION" "$RECONCILE_LOOKBACK" "$RETENTION_INTERVAL" "${RETENTION_AFTER:-1h}"; do
+  [[ -z "$d" || "$d" =~ ^[1-9][0-9]*[smhd]$ ]] || { echo "apply.sh: a retention duration is <n><s|m|h|d>: $d" >&2; exit 2; }
+done
 export KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9092"
 export INTAKE_BUCKET="sdh-poc-intake-$ACCOUNT" BRONZE_BUCKET="sdh-poc-bronze-$ACCOUNT"
 export SILVER_BUCKET="sdh-poc-silver-$ACCOUNT" GOLD_BUCKET="sdh-poc-gold-$ACCOUNT"
@@ -88,6 +104,25 @@ apply_config() {  # <namespace> <name> <kubectl create configmap args>...
   kc -n "$n" create configmap "$name" "$@" --dry-run=client -o yaml | kc apply -f - >/dev/null
 }
 
+# queue_retention <pipeline>: the convert and transform stages' input topics kept QUEUE_RETENTION, or the
+# broker's default (any override removed) when it is unset.
+queue_retention() {
+  local topic ms="" n="${QUEUE_RETENTION%?}"
+  case "$QUEUE_RETENTION" in
+    *s) ms=$((n * 1000)) ;; *m) ms=$((n * 60000)) ;; *h) ms=$((n * 3600000)) ;; *d) ms=$((n * 86400000)) ;;
+  esac
+  for topic in "$1.split" "$1.records"; do
+    if [[ -n "$ms" ]]; then
+      kc -n sdh-infra exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter \
+        --entity-type topics --entity-name "$topic" --add-config "retention.ms=$ms" >/dev/null
+    else
+      kc -n sdh-infra exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter \
+        --entity-type topics --entity-name "$topic" --delete-config retention.ms >/dev/null 2>&1 || true
+    fi
+  done
+  [[ -z "$ms" ]] || say "  $1.split and $1.records kept $QUEUE_RETENTION (retention.ms)"
+}
+
 readme_yaml() { awk '/^```yaml$/ {on=1; next} /^```$/ {on=0} on' "$1"; }
 settings_digest() { cat "$@" | sha256sum | cut -c1-16; }
 
@@ -138,8 +173,16 @@ landing_active() {
 
 # failed <namespace> <deploy/x>: what an operator needs to see. Logs carry no document content (design §12).
 failed() {
+  local pod
   kc -n "$1" get pods -o wide
-  kc -n "$1" logs "$2" --tail=40 || true
+  # The pods that aren't ready, each with its last crashed container's log if it has one: "logs deploy/<name>"
+  # picks a pod of its own, often an old one still running (2026-11-23, the first CSV apply).
+  for pod in $(kc -n "$1" get pods -o name \
+      | grep "^pod/${2#deploy/}-" || true); do
+    [[ "$(kc -n "$1" get "$pod" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)" == true ]] && continue
+    say "  $pod, not ready:"
+    kc -n "$1" logs "$pod" --previous --tail=60 2>/dev/null || kc -n "$1" logs "$pod" --tail=60 || true
+  done
   die "$2 in $1 didn't start"
 }
 
@@ -191,10 +234,23 @@ deploy_pipeline() {
   local vars='$PIPELINE $ICEBERG_PREFIX $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256 $CONSUMER_SHA256'
   vars+=' $KAFKA_BROKERS $AWS_REGION $INTAKE_BUCKET $BRONZE_BUCKET $SILVER_BUCKET $GOLD_BUCKET'
   vars+=' $JOSE_PROVIDER $JOURNAL_LINGER $SPLIT_RECONCILE_GRACE $SPLIT_RECONCILE_INTERVAL'
+  vars+=' $SPLIT_FORMAT $SPLIT_OPTIONS $CONVERT_OPTIONS'
   local stage
   for stage in landing splitter convert transform; do
     envsubst "$vars" < "$HERE/$stage-application.yml" > "$work/$stage-application.yml"
   done
+  # Retention, when asked for, as a second YAML document, which Spring reads over the first.
+  if [[ -n "$RETENTION_AFTER" ]]; then
+    for stage in convert transform; do
+      { echo "---"; echo "sdh:"
+        echo "  stage:"
+        printf '    retention: { after: %s, queue-retention: %s, interval: %s }\n' \
+          "$RETENTION_AFTER" "${QUEUE_RETENTION:-7d}" "$RETENTION_INTERVAL"
+        [[ -z "$RECONCILE_LOOKBACK" ]] || printf '  reconcile: { lookback: %s }\n' "$RECONCILE_LOOKBACK"
+      } >> "$work/$stage-application.yml"
+    done
+  fi
+  queue_retention "$p"
 
   # Secrets: keys and database passwords only. AWS credentials come from Pod Identity.
   apply_secret "$n" landing-keys --from-file=splitter-inbox.pem="$k-inbox-public.pem"

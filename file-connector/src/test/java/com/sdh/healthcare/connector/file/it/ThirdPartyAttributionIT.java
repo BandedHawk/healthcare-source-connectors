@@ -203,6 +203,35 @@ class ThirdPartyAttributionIT
     }
 
     /**
+     * The native JOSE providers' libraries are built from other projects,
+     * whose licenses their jars don't ship: Amazon Corretto Crypto Provider
+     * from AWS-LC, Conscrypt from BoringSSL, both OpenSSL forks. Each
+     * entry carries that project's license, with OpenSSL's terms.
+     *
+     * @param module the application's module
+     * @throws Exception if the jar can't be read
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"file-connector", "landing-connector",
+            "convert-stage"})
+    void nativeCodeKeepsItsLicense(String module) throws Exception
+    {
+        try (ZipFile jar = new ZipFile(packagedJar(module).toFile()))
+        {
+            Map<String, String> entries = entries(read(jar,
+                    META_INF + "THIRD-PARTY.txt"));
+            assertThat(entryFor(entries, "AmazonCorrettoCryptoProvider-"))
+                    .contains("--- AWS-LC ")
+                    .contains("OpenSSL License")
+                    .contains("Original SSLeay License")
+                    .contains("ISC license for AWS-LC content");
+            assertThat(entryFor(entries, "conscrypt-openjdk-uber-"))
+                    .contains("--- BoringSSL ")
+                    .contains("Apache License");
+        }
+    }
+
+    /**
      * An application's packaged jar. A build of file-connector alone (as
      * {@code -Pdist -pl file-connector}) hasn't packaged the other
      * applications, so their checks are skipped then, rather than failed.

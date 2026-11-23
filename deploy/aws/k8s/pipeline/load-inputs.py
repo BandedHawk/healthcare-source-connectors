@@ -20,9 +20,13 @@
     resend     the same bytes as one of the clean copies, under another key: landed as an item of its own with an
                item.duplicate_content warning, and processed again.
 
+Or, with CSV_ROWS above 0, CSV items for the split stage's fan-out (docs/PERFORMANCE.md §13.2): COPIES items of
+CSV_ROWS rows each, under a header (seq,item,text), each row about 200 bytes of synthetic text (a sequence number,
+the item's name and letters: no PHI), so every row of every item differs. No error inputs (ERROR_COPIES must be 0).
+
 Writes the files to OUT (named by number, never by document) and OUT/manifest.json (what was made, for the report).
 
-Usage: python3 -I load-inputs.py OUT RUN COPIES ERROR_COPIES TEST_DOCUMENTS SAMPLES
+Usage: python3 -I load-inputs.py OUT RUN COPIES ERROR_COPIES TEST_DOCUMENTS SAMPLES [CSV_ROWS]
 """
 import json
 import os
@@ -67,9 +71,21 @@ def utf16(doc):
     return ("﻿" + '<?xml version="1.0" encoding="UTF-16"?>\n' + doc).encode("utf-16-le")
 
 
+LETTERS = "abcdefghijklmnopqrstuvwxyz" * 16
+
+
+def csv_item(run, c, rows):
+    """One CSV item: a header, then rows of about 200 bytes, each unique (its number and the item's name)."""
+    lines = ["seq,item,text"]
+    for i in range(rows):
+        lines.append("%d,%s-c%d,%s" % (i, run, c, LETTERS[i % 26:i % 26 + 170]))
+    return ("\r\n".join(lines) + "\r\n").encode("ascii")
+
+
 def main():
     out, run, copies, error_copies, test_documents, samples = sys.argv[1:7]
     copies, error_copies = int(copies), int(error_copies)
+    csv_rows = int(sys.argv[7]) if len(sys.argv) > 7 else 0
     os.makedirs(out, exist_ok=False)
     manifest = {"run": run, "copies": copies, "error_copies": error_copies, "files": 0, "bytes": 0,
                 "clean": {}, "errors": {}}
@@ -79,6 +95,19 @@ def main():
             f.write(data)
         manifest["files"] += 1
         manifest["bytes"] += len(data)
+
+    if csv_rows > 0:
+        if error_copies != 0:
+            sys.exit("load-inputs.py: CSV items take no error inputs (ERROR_COPIES 0)")
+        for c in range(copies):
+            write("c%06d.csv" % c, csv_item(run, c, csv_rows))
+        manifest["clean"] = {"csv-%d-rows" % csv_rows: copies}
+        manifest["csv_rows"] = csv_rows
+        manifest["records"] = copies * csv_rows
+        manifest["resent"] = {}
+        with open(os.path.join(out, "manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=1, sort_keys=True)
+        return
 
     names = sorted(n[:-4] for n in os.listdir(test_documents) if n.endswith(".xml"))
     first_copies = []

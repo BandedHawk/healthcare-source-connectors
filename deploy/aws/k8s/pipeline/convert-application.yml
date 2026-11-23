@@ -18,6 +18,8 @@ sdh:
   # The transform stage, the last, sends the producer's results; here they are off (its README). No producer
   # listens on AWS, so they are off there too (docs/AWS-POC.md §5).
   results: { enabled: false }
+  # Format options (apply.sh SDH_CONVERT_OPTIONS): none for C-CDA.
+  convert: { options: ${CONVERT_OPTIONS} }
   stage:
     input:
       type: kafka
