@@ -22,6 +22,8 @@ the steady flow afterwards is a few documents a second for a population of tens 
 Where it stands: runs of 90,000 documents sustained 52 to 72 documents/s on run 49's maxima (§10, runs 50 to 54),
 p99 131 to 168 s fed at 35/s and 425 s fed at 100/s, faster than split's pace. Not yet shown: the rate and p99 at a
 feed of 60/s, over hours rather than 20 minutes, and with the stores sized for 15 million (§11.1).
+With the HIPAA work (2026-11-22, runs 62 and 63): unchanged at 35/s (p99 152 s), 46 documents/s at 100/s against
+run 59's 55, split slower an item; the audit journal the likeliest cause (§10).
 
 At 60 documents/s that is about 400 messages/s and, per stage, 60 items/s. A per-document p99 of 200 s leaves
 each of the four stages about 50 s, waiting included.
@@ -1421,6 +1423,45 @@ What it showed, beyond §2's predictions:
     known yet whether the 15 and 26 were never written or were deleted unlanded: the next run counts both: the feed's
     acknowledged copies, by name, and landing's takes from the intake by sighting, against those it landed
     (DESIGN.md revision (ef) (7)).
+- **The HIPAA work's cost, 2026-11-22 (runs 60 to 63, asked for by the user: images of the H3 commit, so with the
+  durable audit journal (P1), the control API's watches (C6, C7) and everything since run 59; run 49's maxima, set
+  for the runs and put back after; no gold check).** Compared with run 59 (100 a second, 90,000, 2026-11-20) and
+  runs 44 and 48 (35 a second, 21,000, 2026-11-18), the last of each before the HIPAA work:
+
+  | Run | Feed | Burst nodes | Documents/s | Landed → gold p50 / p95 / p99 s | Split item, mean s | $/M |
+  |---|---|---|---|---|---|---|
+  | 59 (before) | 100/s, reset | m7gd 92% | 54.7 | 519 / 701 / 764 | 4.13 | 14 |
+  | 60 | 100/s, **not reset** (run 59's 90,000 still in the tables) | m6gd 37%, m7gd 24%, m7g 21%, m8g 16% | 41.9 | 679 / 1,057 / 1,171 | 5.07 | (31: the end held up, below) |
+  | 61 | 35/s, reset | m6g 42%, m6gd 12%, other 46% | 20.7 | 40 / 393 / 450 | 3.06 | 44 |
+  | 62 | 100/s, reset | m7gd 93%, m7g 6% | **46.0** | 543 / 974 / 1,025 | 4.86 | 14 |
+  | 63 | 35/s, reset | m7gd 53%, m7g 46% | **33.2** | 31 / 121 / **152** | 2.11 | 22 |
+  | 44, 48 (before) | 35/s | not recorded | 33.0, 33.0 | 29–35 / 100–135 / 131–168 | 2.16 (48) | 24, 29 |
+
+  - **Below saturation, no change:** at 35 a second (run 63) every document kept pace with the feed, p99 152 s
+    (131 and 168 before) and a split item took what it did (2.11 s; 2.16).
+  - **At saturation, split is the pace, and slower:** 46.0 documents a second against run 59's 54.7 (−16%), a split
+    item 4.86 s against 4.13 (+18%: append +0.23, resume +0.14, commit queue +0.09), while a splitter pod used less
+    CPU (0.48 cores on average; 0.62). The committed configuration ran 47 to 72 at 100 a second before (runs 53, 57
+    to 59), so one run doesn't settle it, but split waits more for each item rather than working harder. The
+    likeliest cause is the audit journal: split now writes seven durable, hash-chained audit events an item (lease
+    acquired and released, item started, split and completed, batch committed, stage item completed; 144,478 for
+    run 63's 21,000), landing three, transform 2.3, convert one, through Postgres beside the stages' own commits
+    (1,518 commits a second on average; 1,441). Not proven: a run with fewer audit events an item, or its journal
+    in its own database, would show it.
+  - **Spot's mix moves the result more than the code:** runs 60 and 61 got 37% and 54% Graviton2 (`m6g`, `m6gd`),
+    where runs 53 to 59 had 91–96% `m7gd`; split is CPU-bound there, and run 61 fell to 20.7 documents a second, p99
+    450 s, at a load run 63 kept pace with. Runs 62 and 63 were made comparable by allowing only `m7gd.large` and
+    `m7g.large` for them. A run's report gives its mix (`by node pool`); compare only like with like.
+  - **Run 60 measures nothing alone:** it ran on run 59's tables (`poc.sh reset` was missed) and with 37%
+    Graviton2, 9% slower than run 62; which of the two cost what isn't known. Every comparison run starts reset.
+  - **Found: the split reconciler's list goes stale under a backlog** (runs 60 and 62): once split is more than
+    its grace (10 minutes) behind landing, `SplitReconciler` lists every landed item without a checkpoint, then
+    splits them one at a time, about four a second, on the duties pod. In run 62 that did real work (1,975 items
+    split before their messages arrived); but after the backlog cleared it went on through the rest of its list,
+    whose items had been split meanwhile, announcing each again (convert takes them as copies), so the consumer
+    lag never reached nothing and the load test couldn't end. Both runs were ended by restarting the duties pod
+    once every item was in gold (its new first pass: 0 recovered). Nothing lost or supplanted; every run exactly
+    once, 0 left behind. Fix: check an item's checkpoint again just before recovering it. Not yet done.
 
 ## 11. Order of work
 
