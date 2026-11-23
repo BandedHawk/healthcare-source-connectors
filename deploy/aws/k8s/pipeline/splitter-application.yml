@@ -17,6 +17,7 @@ sdh:
     journal: { linger: ${JOURNAL_LINGER} }
   landing:
     intake: ${PIPELINE}
+    reconcile: { grace: ${SPLIT_RECONCILE_GRACE}, interval: ${SPLIT_RECONCILE_INTERVAL} }
     storage:
       catalog-name: sdh
       namespace: ${ICEBERG_PREFIX}_landing

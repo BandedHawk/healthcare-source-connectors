@@ -31,6 +31,10 @@ PIPELINES="${SDH_PIPELINES:-ccda-push}"
 # How messages are sealed (sdh.crypto.jose.provider: jdk, accp or conscrypt) and how long the audit journal waits
 # to fill a batch (sdh.telemetry.journal.linger), for every stage (docs/PERFORMANCE.md §13).
 export JOSE_PROVIDER="${SDH_JOSE_PROVIDER:-accp}" JOURNAL_LINGER="${SDH_JOURNAL_LINGER:-100ms}"
+# The split reconciler's grace (how long a landed item may wait for its message) and how often it runs
+# (sdh.landing.reconcile.*; the product's defaults). Shorter, a load test sees its passes under a backlog.
+export SPLIT_RECONCILE_GRACE="${SDH_SPLIT_RECONCILE_GRACE:-10m}"
+export SPLIT_RECONCILE_INTERVAL="${SDH_SPLIT_RECONCILE_INTERVAL:-15m}"
 export KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9092"
 export INTAKE_BUCKET="sdh-poc-intake-$ACCOUNT" BRONZE_BUCKET="sdh-poc-bronze-$ACCOUNT"
 export SILVER_BUCKET="sdh-poc-silver-$ACCOUNT" GOLD_BUCKET="sdh-poc-gold-$ACCOUNT"
@@ -186,7 +190,7 @@ deploy_pipeline() {
 
   local vars='$PIPELINE $ICEBERG_PREFIX $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256 $CONSUMER_SHA256'
   vars+=' $KAFKA_BROKERS $AWS_REGION $INTAKE_BUCKET $BRONZE_BUCKET $SILVER_BUCKET $GOLD_BUCKET'
-  vars+=' $JOSE_PROVIDER $JOURNAL_LINGER'
+  vars+=' $JOSE_PROVIDER $JOURNAL_LINGER $SPLIT_RECONCILE_GRACE $SPLIT_RECONCILE_INTERVAL'
   local stage
   for stage in landing splitter convert transform; do
     envsubst "$vars" < "$HERE/$stage-application.yml" > "$work/$stage-application.yml"

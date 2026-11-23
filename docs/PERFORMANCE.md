@@ -1592,7 +1592,7 @@ fewer cores (a split pod has 1.1). Per-item Postgres counts at a few items (10,0
 **Next:** the linger on AWS (a 100/s run against run 63), and a CSV fan-out run on AWS (100 and 10,000 rows an
 item), to set these against S3, KMS and Kafka.
 
-### 13.1 Sealing and the linger on AWS (runs 64 to 67, 2026-11-23)
+### 13.1 Sealing and the linger on AWS (runs 64 to 70, 2026-11-23)
 
 **What ran:** images with the native JOSE provider (`sdh.crypto.jose.provider`, ACCP by default here), one ECDH
 agreement shared by up to 10,000 messages or 60 s (receivers cache it; each message keeps its own content key, IV
@@ -1607,6 +1607,8 @@ check. The images did not yet have registry retention (off by default, so no eff
 | 64 (A) | 100/s | ACCP, 100 ms | (31.9: a 26-minute landing stall, below; 63 after it) | 242 / 418 / 444 | 3.50 | (21) |
 | 66 (C) | 100/s | JDK, 100 ms | **59.1** | 393 / 586 / 619 | 4.12 | 12 |
 | 67 (D) | 100/s | ACCP, 0 | **55.6** | 398 / 646 / 712 | 4.13 | 11 |
+| 69 (E) | 100/s | ACCP, 100 ms | **53.8** | 480 / 713 / 753 | 4.38 | 12 |
+| 70 (F) | 100/s, reconciler 2 / 3 min, kill at 40% | ACCP, 100 ms | **54.3** | 354 / 602 / 706 | 4.17 | 13 |
 | 63 (before) | 35/s | JDK, a key agreement a message, 0 | 33.2 | 31 / 121 / 152 | 2.11 | 22 |
 | 65 (B) | 35/s | ACCP, 100 ms | **32.9** | 27 / 94 / **115** | 1.70 | 21 |
 
@@ -1646,7 +1648,36 @@ check. The images did not yet have registry retention (off by default, so no eff
   took 1,621 s against 30,000. Exactly once (the group taken again from the intake: `in_ledger 500`), 0 left
   behind, no container restarted. `midgroup` now waits for that window itself; the report gives each standby's
   recovery from its log.
-- **Not shown: the split reconciler fix (eu).** No pod logged a `split.reconciled` pass in any run: the duties
-  pod's first pass after a reset finds no landing table yet, and its next is 15 minutes (`interval`) later, about
-  when a run ends. Split never fell more than its grace behind for long, so no run needed it; a run long enough for
-  two or more passes under a backlog would show it.
+- **Corrected: the split reconciler's passes were not looked for properly.** This bullet said no pod logged a
+  `split.reconciled` pass in runs 64 to 68. The load test's saved pod logs keep only warnings, errors and audit
+  events, and `split.reconciled` is an info line, so those runs show nothing either way. Run 70, below, read the
+  duties pod's log live.
+- **Run 69 (E, 2026-11-23, `load-20261123T175601Z`): ACCP with the 100 ms linger, clean.** The combination run
+  64 was meant to measure. 53.8 documents a second, p99 753 s, a split item 4.38 s, $12 a million, 26 `m7gd.large`
+  Spot burst nodes. That is within run-to-run noise of C (59.1) and D (55.6), so for one-record C-CDA neither the
+  provider nor the linger makes a measurable difference once the agreement is shared. Exactly once, 0 left behind,
+  no container restarted; the graceful failover at 30% left nothing to announce again (lease taken in 2 s, landing
+  37.6 s later).
+- **Run 70 (F, 2026-11-23, `load-20261123T161223Z`): the split reconciler fix (eu) under a backlog, and a
+  failover part way through a group.** As run 69, with the reconciler's grace 2 minutes and its interval 3 minutes
+  (`SDH_SPLIT_RECONCILE_GRACE`, `_INTERVAL` in `apply.sh`; 10 and 15 minutes by default), and the landing holder
+  deleted with no grace at 40% landed (`midgroup`). 54.3 documents a second, p50 / p95 / p99 354 / 602 / 706 s, a
+  split item 4.17 s, $13 a million. Results:
+  - **The reconciler works through a stale list.** Under split's backlog (at most about 43,000 items) its passes
+    logged `checked=16782 recovered=18 split_meanwhile=82`, then `checked=38449 recovered=114
+    split_meanwhile=6625`, then `checked=58943 recovered=242 split_meanwhile=14090`. Each pass took only items
+    still unsplit when it reached them, and skipped the many that split had taken meanwhile: the stale-list case
+    of runs 60 and 62. Every item was split exactly once (`COMPLETED 90002`, 0 left behind).
+  - **The kill was not a crash.** It came in the window (500 landed, none announced in the holder's last second),
+    yet the standby held the lease 3 s later and announced nothing again. With no grace the kubelet still sends
+    SIGTERM, and the holder most likely finished the group's messages and gave up the lease. It varies: run 68's
+    three such kills handed over in 99, 3 and 2 s, the 99 s one a lease left to expire. So a kill with no grace
+    tests a crash only sometimes; a sure test needs SIGKILL inside the container (`kubectl debug`). The
+    `midgroup` comment in `load-test.sh` says so now.
+  - **Two objects landed twice, from the feed, not the pipeline.** 90,002 items for 90,000 objects (the report's
+    "exactly once: NO"). Two keys each landed twice, about 60 s apart, with the same size, both before the kill;
+    the split stage noted both second items as copies of the first (`split_copy` 2), so they were linked, not
+    replaced. The feed's slice check (run 57) copied 34 objects whose copies S3 never acknowledged, each only if
+    `head-object` found it absent from the intake. Landing deletes an object once it has landed it, so an object
+    written but unacknowledged, and already landed, looks absent and is copied again. The check can't tell
+    "never written" from "landed and gone"; the load test needs another way to tell before its verdict is exact.

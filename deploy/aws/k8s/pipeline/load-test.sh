@@ -15,9 +15,12 @@
 # SDH_LOAD_FAILOVER_AT is the share landed, in %, at which it is deleted (30; a list, as 25,50,75, for several; 0 for
 # none); SDH_LOAD_FAILOVER_HOW=midgroup waits (up to 45 s) for the holder to have committed a group and not yet
 # announced it (its last second has item.landed lines and no item.announced: a window of about 3 s a group), then
-# kills it with no grace, as a crash there, so its standby must announce the group again at startup (DESIGN.md
-# revision (ew)); graceful (the default) deletes it with its grace. The report gives each standby's recovery, from
-# its log: lease taken to its first item landed, and the items it announced again.
+# deletes it with no grace, so that its standby may have to announce the group again at startup (DESIGN.md
+# revision (ew)); graceful (the default) deletes it with its grace. No grace is not always a crash: the kubelet
+# still stops the container with SIGTERM, and a holder that finishes the group's messages and gives up the lease in
+# that time leaves nothing to announce again (run 70: the standby held the lease 3 s later). A sure crash needs
+# SIGKILL inside the container (kubectl debug). The report gives each standby's recovery, from its log: lease taken to its
+# first item landed, and the items it announced again.
 #
 # SDH_LOAD_OUTAGE_AT, _MIN and _LOSE add an outage part way (below, and docs/PERFORMANCE.md §3.6); the report then
 # checks every item ended at every stage, and counts what the reconcilers rebuilt.
