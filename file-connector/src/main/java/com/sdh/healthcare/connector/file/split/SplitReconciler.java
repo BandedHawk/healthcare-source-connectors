@@ -59,8 +59,10 @@ import org.slf4j.LoggerFactory;
  * landed since the previous run's cutoff, less the grace again, in case
  * the two nodes' clocks differ.
  * <p>
- * An item another pod is splitting is left to it. If an item's message
- * turns up later, the item is only announced again.
+ * An item another pod is splitting is left to it, and so is one split
+ * since the run listed it: each is looked up again just before it is
+ * split. If an item's message turns up later, the item is only announced
+ * again.
  * <p>
  * An item can also be left part way: its pod stopped while splitting it,
  * and its message, which would have brought it to another pod, was then
@@ -142,6 +144,42 @@ public final class SplitReconciler
     public int reconcile() throws Exception
     {
         Instant cutoff = clock.instant().minus(grace);
+        Table table = table();
+        if (table == null)
+        {
+            return 0;
+        }
+        Instant from = previousCutoff == null ? null
+                : previousCutoff.minus(grace);
+        List<Record> rows = rows(table, from, cutoff);
+        Recovery recovery = recover(missing(rows));
+        int resumed = resumeStalled(table, cutoff);
+        previousCutoff = cutoff;
+        LOG.info("split.reconciled checked={} recovered={} split_meanwhile={}"
+                + " resumed={} full={}", rows.size(), recovery.split(),
+                recovery.meanwhile(), resumed, from == null);
+        return recovery.split() + resumed;
+    }
+
+    /**
+     * What a run's recovery did.
+     *
+     * @param split     the items it split
+     * @param meanwhile the items it found split, or being split, since it
+     *                  listed them, and left
+     */
+    public record Recovery(int split, int meanwhile)
+    {
+    }
+
+    /**
+     * The {@code landed_items} table, refreshed.
+     *
+     * @return it; null while nothing has been landed
+     * @throws IOException if it can't be refreshed
+     */
+    private Table table() throws IOException
+    {
         Table table;
         try
         {
@@ -150,15 +188,25 @@ public final class SplitReconciler
         catch (IOException notYet)
         {
             // Nothing has been landed yet.
-            return 0;
+            return null;
         }
         table.refresh();
-        if (table.currentSnapshot() == null)
-        {
-            return 0;
-        }
-        Instant from = previousCutoff == null ? null
-                : previousCutoff.minus(grace);
+        return table.currentSnapshot() == null ? null : table;
+    }
+
+    /**
+     * The intake's items landed before the cutoff, and, after the first
+     * run, not before {@code from}.
+     *
+     * @param table  the {@code landed_items} table, refreshed
+     * @param from   the earliest landing time; null for every item
+     * @param cutoff the latest landing time, not included
+     * @return their summary rows' item, digest and landing time
+     * @throws IOException if the table can't be read
+     */
+    private List<Record> rows(Table table, Instant from, Instant cutoff)
+            throws IOException
+    {
         List<Record> rows = new ArrayList<>();
         try (CloseableIterable<Record> read = IcebergGenerics.read(table)
                 .where(filter(from, cutoff))
@@ -170,6 +218,17 @@ public final class SplitReconciler
                 rows.add(row);
             }
         }
+        return rows;
+    }
+
+    /**
+     * The landed items with no checkpoint, in the order they were landed.
+     *
+     * @param rows the items' summary rows
+     * @return those never started
+     */
+    private List<Record> missing(List<Record> rows)
+    {
         Set<UUID> known = checkpoints.known(rows.stream()
                 .map(row -> (UUID) row.getField(ITEM_ID)).toList());
         List<Record> missing = new ArrayList<>(rows.stream()
@@ -177,10 +236,49 @@ public final class SplitReconciler
                 .toList());
         missing.sort(Comparator.comparing(row ->
                 (OffsetDateTime) row.getField(LANDED_AT)));
+        return missing;
+    }
+
+    /**
+     * Lists the items that a run would split now: landed more than the
+     * grace ago, with no checkpoint. Public for the stage's tests, which
+     * then let some be split before {@link #recover} takes the list; a
+     * run of {@link #reconcile} does both.
+     *
+     * @return their summary rows' item, digest and landing time
+     * @throws IOException if the table can't be read
+     */
+    public List<Record> missingNow() throws IOException
+    {
+        Table table = table();
+        return table == null ? List.of()
+                : missing(rows(table, null, clock.instant().minus(grace)));
+    }
+
+    /**
+     * Splits the missing items, one at a time. Each is looked up again
+     * just before: a backlog can make a list of thousands, which takes
+     * longer to split than the items' own messages take to arrive, and an
+     * item split meanwhile would only be announced again (2026-11-22,
+     * runs 60 and 62: the reconciler went on announcing items long split,
+     * and the next stage's queue never emptied).
+     *
+     * @param missing the items with no checkpoint when listed
+     * @return what it did
+     * @throws Exception if an item can't be split; the next run tries again
+     */
+    public Recovery recover(List<Record> missing) throws Exception
+    {
         int split = 0;
+        int meanwhile = 0;
         for (Record row : missing)
         {
             UUID itemId = (UUID) row.getField(ITEM_ID);
+            if (!checkpoints.known(List.of(itemId)).isEmpty())
+            {
+                meanwhile++;
+                continue;
+            }
             Telemetry.get().auditWarn("split.recovered",
                     Fields.of(Attr.ITEM_ID, itemId).with(Attr.INTAKE, intake)
                             .with(Attr.REASON, REASON));
@@ -192,13 +290,10 @@ public final class SplitReconciler
             catch (LeaseHeldException held)
             {
                 // Its message arrived meanwhile; another pod is on it.
+                meanwhile++;
             }
         }
-        int resumed = resumeStalled(table, cutoff);
-        previousCutoff = cutoff;
-        LOG.info("split.reconciled checked={} recovered={} resumed={}"
-                + " full={}", rows.size(), split, resumed, from == null);
-        return split + resumed;
+        return new Recovery(split, meanwhile);
     }
 
     /**

@@ -61,6 +61,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.camel.CamelContext;
 import org.apache.camel.ConsumerTemplate;
+import org.apache.iceberg.data.Record;
 import org.assertj.core.groups.Tuple;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -512,6 +513,42 @@ class FileConnectorApplicationTest
                 .isEqualTo(Outcome.DONE);
         assertThat(of(drain(), ItemSplit.class)).extracting(ItemSplit::itemId)
                 .containsExactly(lostFirst.itemId());
+        assertThat(FATAL).isEmpty();
+    }
+
+    /**
+     * A reconciler's list goes stale under a backlog: an item listed as
+     * missing whose message arrives, and which is split, before the
+     * reconciler reaches it, is left, neither split nor announced again;
+     * the rest of the list is split.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void leavesAListedItemSplitMeanwhile() throws Exception
+    {
+        TestLanding landing = new TestLanding(catalogProperties(),
+                runtime.keys().wrap(), KEYS, INTAKE);
+        LandedItem late = landing.land(csv(2, "late"), "late.csv");
+        LandedItem lost = landing.land(csv(3, "lost"), "lost.csv");
+        SplitReconciler reconciler = reconciler(
+                Instant.now().plus(Duration.ofMinutes(11)),
+                Duration.ofMinutes(10));
+        List<Record> missing = reconciler.missingNow();
+        assertThat(missing).hasSize(2);
+
+        // The first's message arrives, late, and it is split.
+        assertThat(handle(handler(), landing.announcement(late)))
+                .isEqualTo(Outcome.DONE);
+        assertThat(of(drain(), ItemSplit.class)).extracting(ItemSplit::itemId)
+                .containsExactly(late.itemId());
+
+        assertThat(reconciler.recover(missing))
+                .isEqualTo(new SplitReconciler.Recovery(1, 1));
+        List<ConnectorMessage> messages = drain();
+        assertThat(of(messages, ItemSplit.class)).extracting(ItemSplit::itemId)
+                .containsExactly(lost.itemId());
+        assertThat(of(messages, RecordSplit.class)).hasSize(3);
         assertThat(FATAL).isEmpty();
     }
 

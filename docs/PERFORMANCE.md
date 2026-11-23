@@ -1461,7 +1461,8 @@ What it showed, beyond §2's predictions:
     whose items had been split meanwhile, announcing each again (convert takes them as copies), so the consumer
     lag never reached nothing and the load test couldn't end. Both runs were ended by restarting the duties pod
     once every item was in gold (its new first pass: 0 recovered). Nothing lost or supplanted; every run exactly
-    once, 0 left behind. Fix: check an item's checkpoint again just before recovering it. Not yet done.
+    once, 0 left behind. Fixed since (DESIGN.md revision (eu)): each item is looked up again just before it is
+    recovered, and left if it was started meanwhile; not yet run on AWS.
 
 ## 11. Order of work
 
