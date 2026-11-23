@@ -12,6 +12,12 @@
 # a copy noted). Half the test documents fail the US Core set's checks (transform stage: TRANSFORM_CHECK_FAILED).
 # On top, 3 messages no stage can open go on each of <p>.split and <p>.records (rejected and dropped by the convert
 # and transform stages: stage.message_rejected reason=MALFORMED; a dead-letter queue is for messages that open), and the landing pod holding the lease is deleted part-way (its standby takes over).
+# SDH_LOAD_FAILOVER_AT is the share landed, in %, at which it is deleted (30; a list, as 25,50,75, for several; 0 for
+# none); SDH_LOAD_FAILOVER_HOW=midgroup waits (up to 45 s) for the holder to have committed a group and not yet
+# announced it (its last second has item.landed lines and no item.announced: a window of about 3 s a group), then
+# kills it with no grace, as a crash there, so its standby must announce the group again at startup (DESIGN.md
+# revision (ew)); graceful (the default) deletes it with its grace. The report gives each standby's recovery, from
+# its log: lease taken to its first item landed, and the items it announced again.
 #
 # SDH_LOAD_OUTAGE_AT, _MIN and _LOSE add an outage part way (below, and docs/PERFORMANCE.md §3.6); the report then
 # checks every item ended at every stage, and counts what the reconcilers rebuilt.
@@ -79,7 +85,10 @@ for k in ${KILLS//,/ }; do
     || { echo "SDH_LOAD_KILLS: $k isn't <% ended>:<force|graceful>:<splitter|convert|transform>:<n|half>" >&2; exit 2; }
 done
 SAMPLE_SEC="${SDH_LOAD_SAMPLE_SEC:-60}"   # seconds between samples of what the run used (resources.py)
-FAILOVER_AT="${SDH_LOAD_FAILOVER_AT:-30}"   # % of objects landed when the lease holder is deleted; 0: never
+FAILOVER_AT="${SDH_LOAD_FAILOVER_AT:-30}"   # % of objects landed when the lease holder is deleted (a list for several); 0: never
+FAILOVER_HOW="${SDH_LOAD_FAILOVER_HOW:-graceful}"   # graceful, or midgroup: killed with no grace while landing a group
+[[ "$FAILOVER_AT" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "SDH_LOAD_FAILOVER_AT: % landed, as 30 or 25,50,75" >&2; exit 2; }
+[[ "$FAILOVER_HOW" =~ ^(graceful|midgroup)$ ]] || { echo "SDH_LOAD_FAILOVER_HOW: graceful or midgroup" >&2; exit 2; }
 # The outage (docs/PERFORMANCE.md §3.6): at OUTAGE_AT % landed, every stage, Postgres and Kafka are killed at once,
 # with no graceful stop; they stay down OUTAGE_MIN minutes. OUTAGE_LOSE names topics whose queued messages are
 # deleted meanwhile (landed,split,records), as if the outage had outlasted the brokers' retention: the reconcilers
@@ -542,7 +551,34 @@ holder() {  # the running landing pod holding the intake's lease (with two, the 
   [[ "$(kubectl -n "$N" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)" == Running ]] && echo "pod/$pod"
   return 0
 }
-killed="" killed_at="" takeover=""
+killed="" killed_at="" takeover="" awaiting=""
+declare -A failover_done=()
+failover_lines=()
+failover() {  # pct: deletes the lease holder, as FAILOVER_HOW says; awaiting is then set until a standby holds the lease
+  local pod mid="" i counts
+  pod="$(holder)"
+  [[ -n "$pod" ]] || { unset "failover_done[$1]"; return 0; }   # none yet: the next row tries again
+  if [[ "$FAILOVER_HOW" == midgroup ]]; then
+    # A group's items log item.landed once committed, then (about 3 s later) item.announced, then
+    # item.finished_at_source. A crash once the messages are acknowledged leaves nothing to announce again (three
+    # kills of 2026-11-23 that waited for any of them all came then); a crash between the commit and the messages
+    # leaves the group for the standby to announce again, the case to test.
+    for ((i = 0; i < 150; i++)); do
+      counts="$(kubectl -n "$N" logs "${pod#pod/}" --since=1s 2>/dev/null \
+        | awk '/item\.landed /{l++} /item\.announced /{a++} END{print l+0, a+0}')"
+      [[ "${counts% *}" != 0 && "${counts#* }" == 0 ]] \
+        && { mid="mid-group: ${counts% *} landed, none announced in its last second"; break; }
+      sleep 0.3
+    done
+    kubectl -n "$N" delete "$pod" --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
+  else
+    kubectl -n "$N" delete "$pod" --wait=false >/dev/null 2>&1 || true
+  fi
+  killed="$pod" killed_at=$SECONDS awaiting="$1" takeover=""
+  say "  failover: deleted the lease holder ($pod, $FAILOVER_HOW${mid:+, $mid}) at $landed landed"
+  [[ "$FAILOVER_HOW" == midgroup && -z "$mid" ]] && say "  failover: no group seen in 45 s; killed between groups"
+  return 0
+}
 
 # The outage: KEDA paused at 0 and every pod killed, then Postgres and Kafka killed (their StatefulSets start them
 # again at once, as after a crash; the stages stay down until the outage ends).
@@ -619,16 +655,18 @@ while :; do
     [[ "${!k}" != "${seen[$k]:-}" ]] && { last_change[$k]=$now; seen[$k]=${!k}; }
   done
 
-  # The landing failover: delete the lease holder part-way, then time its standby's takeover.
-  if [[ -z "$killed" && "$FAILOVER_AT" != 0 ]] && ((landed * 100 >= files * FAILOVER_AT)); then
-    killed="$(holder)"
-    if [[ -n "$killed" ]]; then
-      kubectl -n "$N" delete "$killed" --wait=false >/dev/null; killed_at=$SECONDS
-      say "  failover: deleted the lease holder ($killed) at $landed landed"
-    fi
+  # The landing failovers: delete the lease holder part-way, then time its standby's takeover; one at a time.
+  if [[ -z "$awaiting" && "$FAILOVER_AT" != 0 ]]; then
+    for pct in ${FAILOVER_AT//,/ }; do
+      [[ -n "${failover_done[$pct]:-}" ]] && continue
+      ((landed * 100 >= files * pct)) || break
+      failover_done[$pct]=1; failover "$pct"; break
+    done
   fi
-  if [[ -n "$killed" && -z "$takeover" && -n "$(holder)" ]]; then
+  if [[ -n "$awaiting" && -n "$(holder)" ]]; then
     takeover=$((SECONDS - killed_at)); say "  failover: $(holder) took the lease ${takeover}s later"
+    failover_lines+=("at ${awaiting}% landed ($FAILOVER_HOW): standby took the lease after ${takeover}s")
+    awaiting=""
   fi
 
   # The kills: at each share ended at transform, stop that many of the stage's running pods (never its duties pod,
@@ -940,11 +978,38 @@ for key, (_, msg, uids) in sorted(groups.items(), key=lambda kv: -sum(kv[1][2].v
     print("    %5d  %s %s/%s %s: %s" % (sum(uids.values()), key[0], key[1], key[2], key[3], msg))
 if not groups:
     print("    none")' "$out/events" "$t0_iso" | head -40 | tee -a "$report"
-if [[ -n "$killed" ]]; then
-  say "Landing failover: holder deleted at ${FAILOVER_AT}% landed; standby took the lease after ${takeover:-NEVER}s"
-elif [[ "$FAILOVER_AT" != 0 ]]; then
-  say "Landing failover: NOT DONE at ${FAILOVER_AT}% landed: no lease holder found, or the run ended first"
+if ((${#failover_lines[@]})); then
+  for line in "${failover_lines[@]}"; do say "Landing failover: holder deleted $line"; done
 fi
+[[ -n "$awaiting" ]] && say "Landing failover: holder deleted at ${awaiting}% landed; NO standby took the lease"
+if [[ "$FAILOVER_AT" != 0 ]] && ((${#failover_lines[@]} < $(tr ',' '\n' <<<"$FAILOVER_AT" | wc -l))); then
+  say "Landing failover: NOT ALL DONE (${#failover_lines[@]} of $FAILOVER_AT): no lease holder found, or the run ended"
+fi
+# Each landing pod's recovery, from its log (DESIGN.md revision (ew)): from taking the lease to its first item
+# landed, and the items it announced again at startup (on its main thread, before the route starts).
+say "Landing recovery, by lease taken (pod: lease taken at, seconds to its first item landed, items announced again):"
+python3 -I -c '
+import gzip, sys
+from datetime import datetime
+def ts(line):
+    f = line.split()
+    return datetime.fromisoformat(f[1].replace("Z", "+00:00")) if len(f) > 1 else None
+for path in sorted(sys.argv[1:]):
+    pod = path.rsplit("/", 1)[-1].split("_", 1)[-1].split(".log")[0]
+    taken = again = None
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt", errors="replace") as f:
+        for line in f:
+            if "lease.acquired" in line:
+                taken, again = ts(line), 0
+            elif taken is not None and "item.announced" in line and " main] " in line:
+                again += 1
+            elif taken is not None and "item.landed " in line and " main] " not in line:
+                print("    %s: %s, %.1f s, %d" % (pod, taken.strftime("%H:%M:%S"), (ts(line) - taken).total_seconds(), again))
+                taken = None
+    if taken is not None:
+        print("    %s: %s, NO item landed after, %d" % (pod, taken.strftime("%H:%M:%S"), again))
+' "$out"/pod-logs/"${N}"_landing-*.log* | tee -a "$report"
 if [[ -n "$KILLS" ]]; then
   say "Kills (share ended at transform; when; how; stage; pods stopped of those running):"
   for line in "${kill_lines[@]}"; do say "    $line"; done

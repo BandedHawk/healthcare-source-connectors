@@ -1633,7 +1633,19 @@ check. The images did not yet have registry retention (off by default, so no eff
   narrow (digests are random): about 3 s each against a ledger of some 30,000 items, so 500 cost about 25 minutes,
   and would cost more on a larger ledger. Landing itself checks the in-memory `LedgerIndex` first; recovery doesn't.
   In the other three runs the holder was deleted between groups, and the standby was landing within 3 s. Fixed
-  since (DESIGN.md revision (ew)): one scan for the whole group's digests; not yet run on AWS.
+  since (DESIGN.md revision (ew)): one scan for the whole group's digests; shown on AWS in run 68, below.
+- **Run 68 (2026-11-23, `load-20261123T133207Z`; asked for by the user): the fix, with failovers part way through
+  a group.** 90,000 at 100 a second, the committed maxima (3, 3 and 4 pods; so 27.9 documents a second, not a
+  throughput result), the landing holder killed with no grace at 25, 50 and 75% landed
+  (`SDH_LOAD_FAILOVER_HOW=midgroup`), and once more by hand at 80%, timed by its log into a group's window between
+  its commit and its messages (item.landed with no item.announced in its last second; about 3 s a group). The
+  first three, which waited only for a group's lines, all came after the group's messages were acknowledged, so
+  their standbys had nothing to announce again and were landing 28 to 41 s after taking the lease. The fourth left
+  a group of 500: its standby announced all 500 again in 0.44 s, against a ledger of some 73,000 items, and was
+  landing 77 s after taking the lease (22 s to start, 22 s for recovery's repair and its one scan), where run 64's
+  took 1,621 s against 30,000. Exactly once (the group taken again from the intake: `in_ledger 500`), 0 left
+  behind, no container restarted. `midgroup` now waits for that window itself; the report gives each standby's
+  recovery from its log.
 - **Not shown: the split reconciler fix (eu).** No pod logged a `split.reconciled` pass in any run: the duties
   pod's first pass after a reset finds no landing table yet, and its next is 15 minutes (`interval`) later, about
   when a run ends. Split never fell more than its grace behind for long, so no run needed it; a run long enough for
