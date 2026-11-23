@@ -1679,5 +1679,9 @@ check. The images did not yet have registry retention (off by default, so no eff
     the split stage noted both second items as copies of the first (`split_copy` 2), so they were linked, not
     replaced. The feed's slice check (run 57) copied 34 objects whose copies S3 never acknowledged, each only if
     `head-object` found it absent from the intake. Landing deletes an object once it has landed it, so an object
-    written but unacknowledged, and already landed, looks absent and is copied again. The check can't tell
-    "never written" from "landed and gone"; the load test needs another way to tell before its verdict is exact.
+    written but unacknowledged, and already landed, looks absent and is copied again. The feed can't tell
+    "never written" from "landed and gone": landing logs only keyed hashes of keys. Copying again is the safe
+    side (run 57 lost objects a copy said it wrote), so the feed still does it. The report's verdict now allows
+    for it: since each load copy is distinct, a copy noted beyond the error inputs' resends is an object written
+    twice. So exactly once reads "yes, but for N objects the feed wrote twice" when every extra item is such a
+    copy, and there are no more of them than objects the feed copied again; run 70 reads so (2, of 34).

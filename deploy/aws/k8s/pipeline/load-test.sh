@@ -776,7 +776,27 @@ say "Pushed: $files objects, $bytes bytes; all in the intake after ${pushed_at:-
 # Items, not messages: a landing node that takes the lease announces the last item landed again (STAGES.md §13.2),
 # and the split stage drops the repeat, so a failover adds a .landed message but no item.
 items="$(db "SELECT count(DISTINCT item_id) FROM split_$PREFIX.split_item WHERE updated_at >= '$t0_db'" 2>/dev/null || echo '?')"
-say "Landed: $items items for $files objects (exactly once: $([[ "$items" == "$files" ]] && echo yes || echo NO));" \
+copies="$(db "SELECT count(*) FROM split_$PREFIX.split_copy WHERE noted_at >= '$t0_db'" 2>/dev/null || echo '?')"
+# An object the feed wrote twice is landed twice, and rightly: the second is a new item, linked to the first as a
+# copy (item.duplicate_content; split_copy). The feed can't always avoid it: it copies again an object whose copy
+# failed, or that S3 never acknowledged, when head-object finds it absent from the intake, and landing deletes an
+# object once landed, so one written and already landed looks absent too (run 70: 2 of the 34 the slice check
+# copied). Landing logs only keyed hashes of keys, so the feed can't ask it; copying again is the safe side (run
+# 57 lost objects a copy said it wrote). Each load copy is distinct (load-inputs.py's marker), so a copy noted
+# beyond the error inputs' resends is an object written twice. Exactly once is then: every extra item is such a
+# copy, and no more of them than objects the feed copied again.
+recopied="$(LC_ALL=C comm -23 <(sort -u "$out"/unreported/* 2>/dev/null | LC_ALL=C sort -u) \
+  <(LC_ALL=C sort -u "$out/written-anyway" 2>/dev/null) | wc -l)"
+recopied=$((recopied + $(wc -l < "$out/copied-again" 2>/dev/null || echo 0)))
+once=NO
+if [[ "$items" == "$files" ]]; then
+  once=yes
+elif [[ "$items" =~ ^[0-9]+$ && "$copies" =~ ^[0-9]+$ ]]; then
+  twice=$((items - files))
+  ((twice > 0 && copies - ERROR_COPIES == twice && twice <= recopied)) \
+    && once="yes, but for $twice objects the feed wrote twice, each landed again as a linked copy (of $recopied it copied again)"
+fi
+say "Landed: $items items for $files objects (exactly once: $once);" \
   "$landed $P.landed messages (one more per failover: the last item announced again)"
 # An object written twice is landed twice, as a new version (copy_slice says why). The feed now copies again only
 # what isn't there, so the count of items landed twice should be 0.
@@ -890,8 +910,7 @@ if [[ -n "$outage_state" ]]; then
       2>/dev/null || echo '?')"
   done
 fi
-copies="$(db "SELECT count(*) FROM split_$PREFIX.split_copy WHERE noted_at >= '$t0_db'" 2>/dev/null || echo '?')"
-say "  resends noted as copies by the split stage: $copies (expected $ERROR_COPIES)"
+say "  resends noted as copies by the split stage: $copies (expected $ERROR_COPIES, and 1 an object written twice)"
 say "Items ended: split $split, convert $converted, transform $transformed"
 say "Records: convert $((c_done - c_done0)) ended ($((c_failed - c_failed0)) failed);" \
   "transform $((t_done - t_done0)) ended, $((t_done - t_done0 - t_failed + t_failed0)) mapped to a bundle," \
