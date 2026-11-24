@@ -19,6 +19,7 @@ import com.sdh.healthcare.connector.broker.send.QueueType;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.camel.impl.DefaultCamelContext;
@@ -104,10 +105,15 @@ class SqsIT
                 interleaved(UUID.randomUUID(), UUID.randomUUID(), 25);
         try (DefaultCamelContext camel = new DefaultCamelContext())
         {
+            // A secret is a placeholder on a send URI too (§5.3.16).
+            Properties secrets = new Properties();
+            secrets.setProperty("sqs.key", "x");
+            camel.getPropertiesComponent().setInitialProperties(secrets);
             camel.start();
             String uri = QueueType.SQS.effectiveUri("aws2-sqs:sdh.fifo"
                     + "?overrideEndpoint=true&uriEndpointOverride=" + endpoint
-                    + "&region=us-east-1&accessKey=x&secretKey=x"
+                    + "&region=us-east-1&accessKey={{sqs.key}}"
+                    + "&secretKey={{sqs.key}}"
                     + "&autoCreateQueue=false");
             try (ClosablePublisher publisher =
                     Publishers.create(camel, QueueType.SQS, uri))

@@ -145,4 +145,28 @@ class StagePropertiesTest
                 .worker()).hasMessageContaining("sdh.stage")
                 .hasMessageContaining("half the claim's life");
     }
+
+    /**
+     * A secret written into the output or dead-letter URI is refused, as on
+     * the input (design §5.3.16), naming the setting but not the value.
+     */
+    @Test
+    void refusesSecretsWrittenIntoOutputAndDeadLetterUris()
+    {
+        CommonSettings.Queue written = new CommonSettings.Queue("kafka",
+                "kafka:out?brokers=k:9092&saslJaasConfig=hunter2",
+                new CommonSettings.Artemis(null, null, null));
+        assertThatThrownBy(() -> properties(INPUT, QUEUE, written, CLAIM)
+                .worker()).hasMessageStartingWith(
+                        "sdh.stage.dlq.uri option saslJaasConfig")
+                .hasMessageNotContaining("hunter2");
+        assertThatThrownBy(() -> properties(INPUT, written, QUEUE, CLAIM)
+                .worker()).hasMessageStartingWith("sdh.stage.output.uri");
+        CommonSettings.Queue placeholder = new CommonSettings.Queue("kafka",
+                "kafka:out?brokers=k:9092"
+                        + "&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})",
+                new CommonSettings.Artemis(null, null, null));
+        assertThat(properties(INPUT, placeholder, placeholder, CLAIM)
+                .worker().concurrency()).isEqualTo(4);
+    }
 }

@@ -286,7 +286,8 @@ public final class RecordStageRuntime implements AutoCloseable
                     settings.retry().initialBackoff(),
                     settings.retry().maxBackoff());
             Clock clock = Clock.systemUTC();
-            ClosablePublisher publisher = publisher(camel, output);
+            ClosablePublisher publisher = publisher(camel, output,
+                    StageProperties.PREFIX + ".output.uri");
             opened.add(publisher);
             ResultReporter results = null;
             List<RecordStageProcessor.Earlier> earlier = List.of();
@@ -477,7 +478,8 @@ public final class RecordStageRuntime implements AutoCloseable
                     + " own public keys (sdh.crypto.keys.inbox.public-pem,"
                     + " sdh.crypto.keys.signing.public-pem)");
         }
-        ClosablePublisher publisher = publisher(camel, queue);
+        ClosablePublisher publisher = publisher(camel, queue,
+                StageProperties.PREFIX + ".reprocess.uri");
         opened.add(publisher);
         return new StageWorker.Reprocessing(store, inputs,
                 new MessageSealer(keys.messages(), keys.signerKid(),
@@ -489,17 +491,19 @@ public final class RecordStageRuntime implements AutoCloseable
      * Opens a publisher to a queue.
      *
      * @param camel the Camel context
-     * @param queue the queue's settings
+     * @param queue   the queue's settings
+     * @param setting its URI's setting, for messages
      * @return the publisher
      * @throws Exception if it can't be opened
      */
     private static ClosablePublisher publisher(CamelContext camel,
-            CommonSettings.Queue queue) throws Exception
+            CommonSettings.Queue queue, String setting) throws Exception
     {
         QueueType type = QueueType.of(queue.type());
         Publishers.configureBroker(camel, type, queue.artemis().brokerUrl(),
                 queue.artemis().username(), queue.artemis().password());
-        return Publishers.create(camel, type, type.effectiveUri(queue.uri()));
+        return Publishers.create(camel, type,
+                type.effectiveUri(queue.uri(), setting));
     }
 
     /**

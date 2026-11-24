@@ -140,7 +140,7 @@ public final class ResultsChannel implements AutoCloseable
                         PREFIX + ".recipient"),
                 recipientKid);
         ClosablePublisher publisher = Publishers.create(camel, type,
-                type.effectiveUri(queue.uri()));
+                type.effectiveUri(queue.uri(), PREFIX + ".queue.uri"));
         return new ResultsChannel(sealer, publisher, publisher, retry,
                 timeout);
     }

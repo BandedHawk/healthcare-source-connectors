@@ -85,6 +85,41 @@ class QueueTypeTest
     }
 
     /**
+     * A secret written into a send URI is refused, as on an input URI
+     * (design §5.3.16), naming the setting and option but not the value;
+     * a placeholder or bean reference passes.
+     */
+    @Test
+    void refusesSecretsWrittenIntoTheUri()
+    {
+        assertThatThrownBy(() -> QueueType.SQS.effectiveUri(
+                "aws2-sqs:q.fifo?accessKey=AKIA&secretKey=s3cret",
+                "sdh.stage.dlq.uri"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("sdh.stage.dlq.uri option accessKey must be a"
+                        + " property placeholder ({{...}}), not a value")
+                .hasMessageNotContaining("AKIA");
+        assertThatThrownBy(() -> QueueType.KAFKA.effectiveUri(
+                "kafka:t?brokers=k:9093&saslJaasConfig=RAW(user pass;)"))
+                .hasMessageStartingWith("sdh.queue.uri option saslJaasConfig")
+                .hasMessageNotContaining("pass");
+        assertThatThrownBy(() -> QueueType.SERVICEBUS.effectiveUri(
+                "azure-servicebus:q?connectionString=Endpoint=sb://x",
+                "sdh.stage.reprocess.uri"))
+                .hasMessageContaining("connectionString");
+        assertThat(QueueType.SQS.effectiveUri("aws2-sqs:q?accessKey="
+                + "{{env:AK}}&secretKey=RAW({{env:SK}})",
+                "sdh.stage.output.uri"))
+                .contains("{{env:AK}}", "RAW({{env:SK}})");
+        assertThat(QueueType.KAFKA.effectiveUri("kafka:t?saslJaasConfig="
+                + "RAW({{env:SDH_KAFKA_JAAS}})"))
+                .contains("RAW({{env:SDH_KAFKA_JAAS}})");
+        assertThat(QueueType.SERVICEBUS.effectiveUri(
+                "azure-servicebus:q?connectionString=#sb", "x"))
+                .contains("connectionString=#sb");
+    }
+
+    /**
      * Each type sets its ordering key (the message's key, not its item) and
      * dedup ID, and only the allowed metadata.
      */

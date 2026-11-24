@@ -8,6 +8,7 @@ package com.sdh.healthcare.connector.stage;
 
 import com.sdh.healthcare.connector.broker.receive.ReceiveProperties;
 import com.sdh.healthcare.connector.broker.receive.ReceiveSettings;
+import com.sdh.healthcare.connector.broker.send.UriSecrets;
 import com.sdh.healthcare.connector.runtime.config.CommonSettings;
 import java.time.Duration;
 import java.util.Map;
@@ -440,7 +441,8 @@ public record StageProperties(ReceiveProperties input,
      *
      * @param queue the queue
      * @param name  its setting's name
-     * @throws IllegalArgumentException if its type or URI is missing
+     * @throws IllegalArgumentException if its type or URI is missing, or
+     *                                  a secret is written into its URI
      */
     private static void requireQueue(CommonSettings.Queue queue, String name)
     {
@@ -450,5 +452,6 @@ public record StageProperties(ReceiveProperties input,
             throw new IllegalArgumentException(PREFIX + "." + name
                     + ".type and " + PREFIX + "." + name + ".uri are required");
         }
+        UriSecrets.refuseWritten(queue.uri(), PREFIX + "." + name + ".uri");
     }
 }

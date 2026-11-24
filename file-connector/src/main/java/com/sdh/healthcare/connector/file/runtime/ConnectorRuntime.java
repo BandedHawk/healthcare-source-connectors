@@ -308,7 +308,8 @@ public final class ConnectorRuntime implements AutoCloseable
                 properties.split().consumers());
         CommonSettings.Queue output = requireQueue(stage.output());
         QueueType queueType = QueueType.of(output.type());
-        String queueUri = queueType.effectiveUri(output.uri());
+        String queueUri = queueType.effectiveUri(output.uri(),
+                StageProperties.PREFIX + ".output.uri");
         ConnectorProperties.Maintenance maintenance =
                 properties.maintenance();
         MaintenanceSettings maintenanceSettings = maintenance.toSettings();
@@ -463,7 +464,8 @@ public final class ConnectorRuntime implements AutoCloseable
             SplitReprocess reprocess = null;
             if (reprocessQueue != null)
             {
-                reprocessPublisher = publisher(camel, reprocessQueue);
+                reprocessPublisher = publisher(camel, reprocessQueue,
+                        StageProperties.PREFIX + ".reprocess.uri");
                 KeyMaterial.Self self = keys.self();
                 reprocess = new SplitReprocess(new SplitReprocess.Parts(
                         reprocessRuns, new MessageSealer(keys.messages(),
@@ -624,17 +626,19 @@ public final class ConnectorRuntime implements AutoCloseable
      * Opens a publisher to a queue.
      *
      * @param camel the Camel context
-     * @param queue the queue's settings
+     * @param queue   the queue's settings
+     * @param setting its URI's setting, for messages
      * @return the publisher
      * @throws Exception if it can't be opened
      */
     private static ClosablePublisher publisher(CamelContext camel,
-            CommonSettings.Queue queue) throws Exception
+            CommonSettings.Queue queue, String setting) throws Exception
     {
         QueueType type = QueueType.of(queue.type());
         Publishers.configureBroker(camel, type, queue.artemis().brokerUrl(),
                 queue.artemis().username(), queue.artemis().password());
-        return Publishers.create(camel, type, type.effectiveUri(queue.uri()));
+        return Publishers.create(camel, type,
+                type.effectiveUri(queue.uri(), setting));
     }
 
     /**

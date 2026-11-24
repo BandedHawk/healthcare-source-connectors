@@ -6,6 +6,7 @@
  */
 package com.sdh.healthcare.connector.broker.receive;
 
+import com.sdh.healthcare.connector.broker.send.UriSecrets;
 import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -78,18 +79,6 @@ public record ReceiveSettings(BrokerKind kind, String uri, int maxMessages,
     /** The brokers' names, as the {@code type} setting takes them. */
     private static final String TYPES = "kafka, sqs, rabbitmq, artemis,"
             + " pubsub, servicebus or eventhubs";
-
-    /** Option names that hold secrets, in lower case. */
-    private static final Set<String> SECRET_PARTS = Set.of("password",
-            "secret", "jaas", "accesskey", "sessiontoken", "token",
-            "connectionstring");
-
-    /**
-     * A property placeholder, resolved when the route starts, or a bean
-     * reference.
-     */
-    private static final Pattern PLACEHOLDER = Pattern.compile(
-            "(RAW\\()?\\{\\{[^{}]+\\}\\}\\)?|#[A-Za-z0-9_.-]+");
 
     /**
      * Creates the settings, copying the attribute names.
@@ -304,18 +293,7 @@ public record ReceiveSettings(BrokerKind kind, String uri, int maxMessages,
             throw new IllegalArgumentException(
                     prefix + ".uri has a malformed query");
         }
-        for (Map.Entry<String, Object> option : options.entrySet())
-        {
-            String name = option.getKey().toLowerCase(Locale.ROOT);
-            if (SECRET_PARTS.stream().anyMatch(name::contains)
-                    && !PLACEHOLDER.matcher(
-                            String.valueOf(option.getValue())).matches())
-            {
-                throw new IllegalArgumentException(prefix + ".uri"
-                        + " option " + option.getKey() + " must be a"
-                        + " property placeholder ({{...}}), not a value");
-            }
-        }
+        UriSecrets.refuseWritten(options, prefix + ".uri");
         switch (kind)
         {
             case KAFKA ->

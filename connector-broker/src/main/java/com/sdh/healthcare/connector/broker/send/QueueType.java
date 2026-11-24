@@ -262,26 +262,46 @@ public enum QueueType
     }
 
     /**
-     * The configured URI plus any required options it doesn't set itself;
-     * an explicit setting always wins.
+     * The configured {@code sdh.queue.uri} plus any required options it
+     * doesn't set itself; an explicit setting always wins.
      *
      * @param uri the configured URI
      * @return the URI to use
-     * @throws IllegalArgumentException if it is missing or uses another
-     *                                  component
+     * @throws IllegalArgumentException if it is missing, uses another
+     *                                  component or has a secret written
+     *                                  into it
+     * @see #effectiveUri(String, String)
      */
     public String effectiveUri(String uri)
     {
+        return effectiveUri(uri, "sdh.queue.uri");
+    }
+
+    /**
+     * The configured URI plus any required options it doesn't set itself;
+     * an explicit setting always wins. A secret written into it is refused,
+     * as on an input URI (design §5.3.16, {@link UriSecrets}).
+     *
+     * @param uri     the configured URI
+     * @param setting the setting it comes from, for the message
+     * @return the URI to use
+     * @throws IllegalArgumentException if it is missing, uses another
+     *                                  component or has a secret written
+     *                                  into it
+     */
+    public String effectiveUri(String uri, String setting)
+    {
         if (uri == null || uri.isBlank())
         {
-            throw new IllegalArgumentException("sdh.queue.uri is required");
+            throw new IllegalArgumentException(setting + " is required");
         }
         if (scheme != null && !uri.startsWith(scheme + ":"))
         {
-            throw new IllegalArgumentException("sdh.queue.uri must start with '"
+            throw new IllegalArgumentException(setting + " must start with '"
                     + scheme + ":' for type "
                     + name().toLowerCase(Locale.ROOT));
         }
+        UriSecrets.refuseWritten(uri, setting);
         Set<String> present = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         int query = uri.indexOf('?');
         if (query >= 0)

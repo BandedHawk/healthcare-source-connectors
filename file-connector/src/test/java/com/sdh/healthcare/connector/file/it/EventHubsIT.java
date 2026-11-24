@@ -23,6 +23,7 @@ import com.sdh.healthcare.connector.broker.send.QueueType;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 import java.util.UUID;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.junit.jupiter.api.AfterAll;
@@ -117,10 +118,13 @@ class EventHubsIT
                 interleaved(UUID.randomUUID(), UUID.randomUUID(), 30);
         try (DefaultCamelContext camel = new DefaultCamelContext())
         {
+            // A secret is a placeholder on a send URI too (§5.3.16).
+            Properties secrets = new Properties();
+            secrets.setProperty("eh.cs", connectionString);
+            camel.getPropertiesComponent().setInitialProperties(secrets);
             camel.start();
             String uri = QueueType.EVENTHUBS.effectiveUri(
-                    "azure-eventhubs:?connectionString=RAW("
-                            + connectionString + ")");
+                    "azure-eventhubs:?connectionString=RAW({{eh.cs}})");
             try (ClosablePublisher publisher =
                     Publishers.create(camel, QueueType.EVENTHUBS, uri))
             {

@@ -151,7 +151,8 @@ deployment in each environment (HIPAA.md §11.1, P11):
 - **GCP Cloud KMS** against the real service (its client is built and tested against a stand-in only);
 - **AWS GovCloud and Azure Government** endpoints.
 
-Until each is tested, a customer using it tests it in their own environment first, with synthetic data.
+Until each is tested, a customer using it tests it in their own environment first, with synthetic data. Kafka mTLS
+and Postgres TLS through PgBouncer are planned with the other infrastructure tests (HIPAA.md §11.4).
 
 ## Audit events: the collector
 
@@ -192,9 +193,9 @@ TLS, SASL or ACLs ([SANDBOX.md](SANDBOX.md), "Not yet as in production").
 
 **Kafka over TLS:** put `securityProtocol=SASL_SSL`, `saslMechanism`, `saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})`,
 `sslTruststoreType=PEM` and `sslTruststoreLocation` on every Kafka URI, as `deploy/reference/` does. `RAW(...)`
-keeps the login's quotes and semicolon intact, and the placeholder keeps it out of the settings. On an input URI a
-written value is refused (DESIGN.md §5.3.16). Output, reprocess and dead-letter URIs aren't checked yet, so keep
-to the placeholder there too.
+keeps the login's quotes and semicolon intact, and the placeholder keeps it out of the settings. A written value
+is refused on every broker URI, input, output, reprocess, dead-letter and results alike (DESIGN.md §5.3.16): the
+node doesn't start, and the message names the setting and option, never the value.
 
 ## Registry retention
 

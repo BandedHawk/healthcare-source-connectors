@@ -24,6 +24,7 @@ import com.sdh.healthcare.connector.broker.send.QueueType;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.camel.impl.DefaultCamelContext;
@@ -126,11 +127,15 @@ class ServiceBusIT
                 interleaved(UUID.randomUUID(), UUID.randomUUID(), 20);
         try (DefaultCamelContext camel = new DefaultCamelContext())
         {
+            // A secret is a placeholder on a send URI too (§5.3.16).
+            Properties secrets = new Properties();
+            secrets.setProperty("sb.cs", connectionString);
+            camel.getPropertiesComponent().setInitialProperties(secrets);
             camel.start();
             String uri = QueueType.SERVICEBUS.effectiveUri(
                     "azure-servicebus:sdh?serviceBusType=queue"
-                    + "&producerOperation=sendMessages&connectionString=RAW("
-                    + connectionString + ")");
+                    + "&producerOperation=sendMessages"
+                    + "&connectionString=RAW({{sb.cs}})");
             try (ClosablePublisher publisher =
                     Publishers.create(camel, QueueType.SERVICEBUS, uri))
             {
