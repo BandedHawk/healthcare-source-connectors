@@ -49,6 +49,7 @@ import com.sdh.healthcare.connector.stage.admin.KeyCommands;
 import com.sdh.healthcare.connector.stage.admin.PatientAdmin;
 import com.sdh.healthcare.connector.stage.admin.PatientsCommand;
 import com.sdh.healthcare.connector.stage.admin.ReprocessCommand;
+import com.sdh.healthcare.connector.stage.admin.RestoreCommands;
 import com.sdh.healthcare.connector.stage.admin.StageAdmin;
 import com.sdh.healthcare.connector.stage.admin.StageStatusCommand;
 import com.sdh.healthcare.connector.stage.admin.StuckCommand;
@@ -60,6 +61,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -179,6 +181,7 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
         commands.addAll(FailureCommands.<RecordStageAdmin<P>>all());
         commands.addAll(KeyCommands.<RecordStageAdmin<P>>all());
         commands.addAll(DataCommands.<RecordStageAdmin<P>>all());
+        commands.addAll(RestoreCommands.<RecordStageAdmin<P>>all());
         return List.copyOf(commands);
     }
 
@@ -422,6 +425,13 @@ public final class RecordStageAdmin<P extends RecordStageSettings>
     }
 
     /** The sink: the source is the stage before's. */
+    /** The lease table, which a restore's check looks in. */
+    @Override
+    public Optional<String> leaseTable()
+    {
+        return Optional.of(settings.lease().jdbc().table());
+    }
+
     @Override
     public List<DataAdmin.Erasable> erasable()
     {

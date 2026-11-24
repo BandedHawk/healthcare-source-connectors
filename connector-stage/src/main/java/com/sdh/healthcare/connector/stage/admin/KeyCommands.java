@@ -12,6 +12,7 @@ import com.sdh.healthcare.connector.core.crypto.WrappedRows;
 import com.sdh.healthcare.connector.core.maintenance.Rekey;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.ControlLog;
 import com.sdh.healthcare.connector.stage.ControlState;
 import java.io.PrintStream;
 import java.security.GeneralSecurityException;
@@ -406,6 +407,10 @@ public final class KeyCommands
             probe(context, request.kek());
             ControlState.Kek now = state.rotate(invocation.principal(),
                     request.kek());
+            ControlChanges.keep(context, ControlLog.Kind.ROTATE,
+                    DataCommands.operationId(invocation),
+                    invocation.principal(), Map.of("from", from, "to",
+                            request.kek()));
             return new Rotated(state.scope(), from, now, true);
         }
 
@@ -590,6 +595,9 @@ public final class KeyCommands
             String asked = id;
             ControlState.Rekeying now = state.requestRekey(asked,
                     invocation.principal(), request.from(), request.to());
+            ControlChanges.keep(context, ControlLog.Kind.REKEY, asked,
+                    invocation.principal(), Map.of("from", request.from(),
+                            "to", request.to()));
             long until = request.waitFor() == null ? Long.MAX_VALUE
                     : System.nanoTime() + request.waitFor().toNanos();
             while (now.state().active() && System.nanoTime() < until)

@@ -333,6 +333,16 @@ public final class Harness
     }
 
     /**
+     * Leaves the calls made so far out of the scenario's audit check: a
+     * restore of the database took them out of the journal, which is in
+     * it. Their events are in the exported audit store only.
+     */
+    public void forgetCalls()
+    {
+        calls.clear();
+    }
+
+    /**
      * Checks every call of the scenario is in its stage's audit journal,
      * with its principal, the denied ones as denied; and that each
      * journal checks out unchanged.

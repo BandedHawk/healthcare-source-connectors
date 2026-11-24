@@ -17,6 +17,7 @@ import com.sdh.healthcare.connector.core.crypto.WrappedRows;
 import com.sdh.healthcare.connector.core.maintenance.Rekey;
 import com.sdh.healthcare.connector.core.telemetry.Attr;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.ControlLog;
 import com.sdh.healthcare.connector.stage.ControlState;
 import com.sdh.healthcare.connector.stage.PurgeRequests;
 import com.sdh.healthcare.connector.stage.RetentionPolicy;
@@ -415,6 +416,9 @@ public final class DataCommands
             ControlState.Retention set = state.setRetention(
                     invocation.principal(), request.keep());
             invocation.audit().add(Attr.RETENTION, set.wire());
+            ControlChanges.keep(context, ControlLog.Kind.RETENTION,
+                    operationId(invocation), invocation.principal(),
+                    Map.of("retention", set.wire()));
             return RetentionState.of(state, policy);
         }
 
@@ -584,6 +588,10 @@ public final class DataCommands
             String id = operationId(invocation);
             PurgeRequests.Purge now = requests.request(id,
                     invocation.principal(), request.item(), request.ticket());
+            ControlChanges.keep(context, ControlLog.Kind.PURGE, id,
+                    invocation.principal(), Map.of("item",
+                            request.item().toString(), "ticket",
+                            request.ticket()));
             long until = request.waitFor() == null ? Long.MAX_VALUE
                     : System.nanoTime() + request.waitFor().toNanos();
             while (now.state().active() && System.nanoTime() < until)
@@ -892,6 +900,10 @@ public final class DataCommands
 
             ControlState.Erased erased = state.erase(id,
                     invocation.principal());
+            // Kept before the tables go, since the log is found by them.
+            ControlChanges.keep(context, ControlLog.Kind.ERASE, id,
+                    invocation.principal(), Map.of("ticket",
+                            request.ticket()));
             List<Dropped> dropped = new ArrayList<>();
             for (DataAdmin.Erasable each : context.erasable())
             {

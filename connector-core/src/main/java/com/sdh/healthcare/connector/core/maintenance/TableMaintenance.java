@@ -1046,6 +1046,15 @@ public final class TableMaintenance
             return 0;
         }
         long cutoff = now.minus(settings.orphanMinAge()).toEpochMilli();
+        // After a restore, no orphan is removed until an operator releases
+        // them (DESIGN.md §18.7): messages may still name them, and they
+        // are the work done after the restore's point.
+        if (table.properties().containsKey(TableRestore.KEEP_ORPHANS))
+        {
+            LOG.info("maintenance.orphans_kept table={} reason=restore",
+                    table.name());
+            return 0;
+        }
         String prefix = table.location().endsWith("/")
                 ? table.location() : table.location() + "/";
         List<String> orphans = new ArrayList<>();

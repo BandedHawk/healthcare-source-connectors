@@ -20,6 +20,7 @@ import com.sdh.healthcare.connector.stage.admin.DataAdmin;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import javax.sql.DataSource;
 import org.apache.iceberg.CatalogUtil;
 import org.apache.iceberg.Table;
@@ -186,6 +187,20 @@ final class LandingAdminContext implements DataAdmin, AutoCloseable
         return PurgeRequests.of(database.dataSource(),
                 AuditTables.besideLeaseTable(properties.lease().jdbc()
                         .table()).schema(), controlState(change));
+    }
+
+    /** The lease table, which a restore's check looks in. */
+    @Override
+    public Optional<String> leaseTable()
+    {
+        return Optional.of(properties.lease().jdbc().table());
+    }
+
+    /** Landed items are gone from the intakes, so never rolled back. */
+    @Override
+    public boolean bringsForward()
+    {
+        return true;
     }
 
     /** {@code landed_items} and the ledger. */

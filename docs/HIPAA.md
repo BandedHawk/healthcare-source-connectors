@@ -539,13 +539,19 @@ The outstanding work is restated, with what's decided since, in §11.
     - **To consider:** labels set from the source document's confidentiality codes, for readers that filter by
       them (minimum necessary, § 164.514(d)).
 11. **Support bundle:** built 2026-11-21 (P5, CONTROL-API-DESIGN.md §15.9).
-12. **Backup and restore are not designed as a whole.**
+12. **Backup and restore as a whole: built 2026-11-24** (P7, DESIGN.md §18, revision (fc)); the AWS drill at size
+    not yet run.
     - The data spans the object store (Iceberg data and metadata), the catalog and registries in Postgres, and the
       KMS keys. They must be restored to the same point: a catalog pointing at metadata that isn't in the bucket,
       or a registry ahead of its tables, breaks the pipeline.
     - § 164.308(a)(7)(ii)(A)–(B) are the operator's, but only the product can say how to back up and restore
       consistently.
-    - **To consider:** a documented, tested procedure, and a check after a restore.
+    - The restore is the database to a point, the store left as it is: `restore-check`, `restore-repair` and
+      `restore-release` on each stage bring back deleted files from the store's versions (S3 only), bring the
+      landing node forward so nothing landed is lost, keep the files done since, and make the purges and erasures
+      since again from a control log kept in the store. The procedure is HIPAA-OPERATIONS.md §7 (D8).
+    - Not built: the compliance check that versioning is on, and the store-damaged walk that opens each object
+      (`--deep`).
 13. **Reference configuration with the profile on: built 2026-11-20** (`deploy/reference/`, DESIGN revision (eh)).
     - Each stage's settings (landing, split, convert, transform), under `hipaa` with nothing waived:
       - Kafka over `SASL_SSL`, with the login from the environment;
@@ -702,7 +708,7 @@ the customer's staff does what, with which commands and settings; the roles and 
 | Clearinghouse isolation (a)(4)(ii)(A) R | A pipeline per function, with its own keys | Counsel decides whether it applies (§1 above) |
 | Awareness, malware, log-in monitoring, passwords (a)(5) | Signed images, SBOMs, scans, restricted pods | Training, patching, login monitoring |
 | Incident procedures (a)(6) R | Fatal, rejected and fenced events; `audit-verify`; `patients` by item | Security analyst detects; privacy official assesses (§6) |
-| Contingency plan (a)(7) R | Crash recovery, failover. No backup feature yet (§8.1 item 12) | Platform administrator: versioning, Postgres PITR, restore to one point, tested yearly (§7) |
+| Contingency plan (a)(7) R | Crash recovery, failover; a restore's check and repair (§8.1 item 12) | Platform administrator: versioning, Postgres PITR, the restore procedure, tested yearly (§7) |
 | Evaluation (a)(8) | — | Security official, periodically |
 | Business associate contracts (b) R | — | Counsel: BAAs or MOUs with every provider |
 
@@ -765,7 +771,7 @@ The work still owed before a customer can run the product on real PHI, after the
 | P4 | **Retention and erasure,** through P1: set and run retention, purge an item, erase a pipeline's data at the end of a contract | § 164.310(d)(2)(i); § 164.504(e)(2)(ii)(J) | Built (2026-11-21, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) C8): `retention` and `retention-set` (within bounds the settings give), `purge` and `erase` (four eyes and a ticket) on every stage, through the API. Maintenance applies the retention in force at each run; a purge rewrites the files holding an item's rows and deletes the old ones, then its corrections; an erase, once the stage is paused, drops its tables and rows, marks it erased so its pods refuse to start, and answers a certificate signed with the stage's key naming the KEKs for the custodian to destroy. Per stage: no pipeline-wide approval yet. Destroying KEKs stays the KMS's (HIPAA-OPERATIONS §8). |
 | P5 | **Config and health view, and the support bundle,** through P1: settings with secrets removed, health, versions, the compliance outcome | §8.1 item 11; keeps support out of PHI (§1) | Built (2026-11-21, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) C9): `health`, `settings`, `compliance` and `support-bundle` on every stage, through the API and the CLI, `pipeline.view`. Settings have each secret removed by name and by form; health reaches each dependency in 10 seconds and names a failure by its class; the bundle is one JSON document with the build, control state, status and recent operations, no PHI and no metrics (those go to the collector). It is the control pod's view. The customer reads it before sending (HIPAA-OPERATIONS §9). |
 | P6 | **The test harness:** one set of scenarios at three levels (CONTROL-API.md) | Testing and revision § 164.308(a)(7)(ii)(D); evidence for § 164.308(a)(8) | Synthetic data only. Testcontainers level built (2026-11-22, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) H1): `scripts/harness.sh testcontainers` runs nine scenarios (support, access, load, failures, break-glass, pause and drain, keys, outages, retention and erasure) through the control API against the landing, split and convert stages on TLS Postgres, SASL_SSL Kafka, an S3 store and Vault; each checks its answers against the contract and its calls in the audit journal, with `audit-verify` clean. Its first run found three product faults, fixed. Sandbox level built (2026-11-22, H2): `scripts/harness.sh sandbox` runs those and a failover scenario (each stage's workers killed part-way) against the customer images and the control Deployments from the stage READMEs, in a throwaway pipeline beside the demo; all ten pass. AWS level built (2026-11-22, H3): `scripts/harness.sh aws` runs the ten on the AWS PoC stack, in a throwaway pipeline with keys of its own beside the ccda-push pipeline, the database and broker cut off by scaling them to nothing and S3 and KMS by network policy; all ten pass. |
-| P7 | **Backup and restore as a whole:** a consistent backup of buckets, catalog, registries and keys, a tested restore, and a check after it | §8.1 item 12; § 164.308(a)(7)(ii)(A)–(B) | Needed for the 72-hour restore the proposed rule asks for (§7). |
+| P7 | **Backup and restore as a whole:** a consistent backup of buckets, catalog, registries and keys, a tested restore, and a check after it | §8.1 item 12; § 164.308(a)(7)(ii)(A)–(B) | Needed for the 72-hour restore the proposed rule asks for (§7). Built (2026-11-24, DESIGN.md §18, revision (fc)): a control log of purges, erasures, rotations, re-keys and retention changes in the store; `restore-check`, `restore-repair` and `restore-release` (four eyes) on every stage, through the API and the CLI; the harness's `restore` scenario at the Testcontainers level. Not built: the versioning compliance check, `--deep`, the scenario at the sandbox and AWS levels, and the AWS drill at size (needs WAL archiving in the PoC; awaits approval of its cost). |
 | P8 | **FIPS mode:** tested under a FIPS 140-3 validated provider | §8.1 item 5; federal buyers (§8.4) | The JOSE library, HKDF, the AWS SDK and the Iceberg clients are untested under it. |
 | P9 | **Security labels** from the source's confidentiality codes (`meta.security`) | §8.1 item 10; minimum necessary § 164.514(d); Part 2 | |
 | P10 | **Secrets in output URIs refused,** as they are on input URIs | § 164.312(a)(1) | Output, reprocess and dead-letter URIs aren't checked (DEPLOYMENT.md, "Broker rights"). |
@@ -788,7 +794,7 @@ the audit store wiring (§2.7 there), pipeline isolation (§2.8 there), and the 
 | D5 | **Data flows and where PHI is** | §8.2 item 5: each stage, what it holds and in what form, for the risk analysis and the asset inventory. |
 | D6 | **Security configuration guide** | §8.2 item 2: every setting that bears on HIPAA, its safe value and what it does, starting from `deploy/reference/`. |
 | D7 | **Audit event catalogue** | §8.2 item 3: every event and field, for the SIEM and the activity reviews. |
-| D8 | **Backup, restore and disaster recovery** | §8.2 item 4, from P7: what to back up, how often, how to restore, the RTO and RPO it gives. |
+| D8 | **Backup, restore and disaster recovery** | §8.2 item 4, from P7: what to back up, how often, how to restore, the RTO and RPO it gives. **Written 2026-11-24:** HIPAA-OPERATIONS.md §7; the RTO at size awaits the AWS drill. |
 | D9 | **Retention and destruction** | §8.2 item 6, completed with P4: what each removal deletes and what it leaves (backups, logs). |
 | D10 | **The clearinghouse question and Part 2** | §8.2 item 7: when X12 conversion may make the operator a clearinghouse; how to keep Part 2 records apart (§2.8 there, P9). |
 | D11 | **The vendor's security commitments** | §8.2 item 8: vulnerability scanning, how quickly fixes are released, signed images and SBOMs, how to report a vulnerability. |

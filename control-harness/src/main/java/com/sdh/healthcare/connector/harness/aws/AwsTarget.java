@@ -591,6 +591,7 @@ public final class AwsTarget implements Target
         List<String> keys = new ArrayList<>();
         s3.listObjectsV2Paginator(request -> request.bucket(bucket)
                 .prefix(prefix)).contents().stream().map(S3Object::key)
+                .filter(Target::notControlLog)
                 .forEach(keys::add);
         return keys;
     }

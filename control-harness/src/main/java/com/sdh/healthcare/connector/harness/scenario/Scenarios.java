@@ -38,7 +38,8 @@ public final class Scenarios
                 new LoadScenario(), new FailuresScenario(),
                 new BreakGlassScenario(), new PauseScenario(),
                 new KeysScenario(), new OutagesScenario(),
-                new FailoverScenario(), new RetentionScenario());
+                new FailoverScenario(), new RestoreScenario(),
+                new RetentionScenario());
     }
 
     /**

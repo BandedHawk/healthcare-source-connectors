@@ -408,6 +408,7 @@ public final class SandboxTarget implements Target
         {
             s3.listObjectsV2Paginator(request -> request.bucket(bucket)
                     .prefix(prefix)).contents().stream().map(S3Object::key)
+                    .filter(Target::notControlLog)
                     .forEach(keys::add);
         }
         return keys;

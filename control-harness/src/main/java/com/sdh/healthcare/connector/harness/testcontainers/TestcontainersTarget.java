@@ -32,7 +32,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.net.ssl.SSLContext;
+import org.testcontainers.containers.Container;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.BucketVersioningStatus;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
@@ -118,6 +121,12 @@ public final class TestcontainersTarget implements Target
     /** The intake's push port. */
     private final int pushPort;
 
+    /** Whether the buckets keep object versions, so a restore can run. */
+    private final boolean versioned;
+
+    /** The database backups taken, for their names. */
+    private int backups;
+
     /**
      * Starts the services and the pipeline.
      *
@@ -148,6 +157,7 @@ public final class TestcontainersTarget implements Target
         {
             s3.createBucket(request -> request.bucket(BRONZE));
             s3.createBucket(request -> request.bucket(SILVER));
+            versioned = versioning(s3);
         }
         for (String kek : List.of(transitKek("landed-items"),
                 transitKek("records"), transitKek("landed-items-2"),
@@ -264,6 +274,10 @@ public final class TestcontainersTarget implements Target
         split.put("sdh.landing.intake", PIPELINE);
         split.put("sdh.landing.storage.catalog-name", "sdh");
         split.put("sdh.landing.storage.namespace", PIPELINE + "_landing");
+        // Items whose message is lost or forgotten, as after a restore, are
+        // split within minutes rather than the 10 + 15 of the defaults.
+        split.put("sdh.landing.reconcile.grace", "30s");
+        split.put("sdh.landing.reconcile.interval", "1m");
         split.putAll(services.catalog("sdh.landing.storage.catalog",
                 BRONZE));
         split.put("sdh.stage.input.type", "kafka");
@@ -319,6 +333,11 @@ public final class TestcontainersTarget implements Target
         convert.put("sdh.stage.ready-port", "0");
         convert.put("sdh.stage.source.catalog-name", "sdh");
         convert.put("sdh.stage.source.namespace", PIPELINE);
+        // As for split: records the stage never received rebuilt within
+        // minutes, not after the defaults' quarter hours.
+        convert.put("sdh.reconcile.grace", "30s");
+        convert.put("sdh.reconcile.interval", "1m");
+        convert.put("sdh.reconcile.backlog-quiet", "0s");
         convert.putAll(services.catalog("sdh.stage.source.catalog", SILVER));
         convert.put("sdh.stage.sink.catalog-name", "sdh");
         convert.put("sdh.stage.sink.namespace", PIPELINE);
@@ -461,6 +480,53 @@ public final class TestcontainersTarget implements Target
     }
 
     /**
+     * Turns on versioning in the buckets, as a deployment must for a
+     * restore (DEPLOYMENT.md), if the store can.
+     *
+     * @param s3 the store
+     * @return whether it could
+     */
+    private static boolean versioning(S3Client s3)
+    {
+        try
+        {
+            for (String bucket : List.of(BRONZE, SILVER))
+            {
+                s3.putBucketVersioning(request -> request.bucket(bucket)
+                        .versioningConfiguration(configuration ->
+                                configuration.status(
+                                        BucketVersioningStatus.ENABLED)));
+            }
+            return true;
+        }
+        catch (S3Exception unsupported)
+        {
+            Harness.say("The store doesn't keep object versions ("
+                    + unsupported.statusCode() + "): no restore scenario");
+            return false;
+        }
+    }
+
+    /**
+     * Runs a command in the database's container.
+     *
+     * @param what    what it does, for a failure
+     * @param command the command
+     * @throws Exception if it fails
+     */
+    private void inDatabase(String what, String... command) throws Exception
+    {
+        Container.ExecResult result =
+                services.postgres.execInContainer(command);
+        if (result.getExitCode() != 0)
+        {
+            throw new IllegalStateException(what + " failed ("
+                    + result.getExitCode() + "): " + result.getStderr()
+                            .strip());
+        }
+    }
+
+    /**
      * A free port on the loopback interface.
      *
      * @return the port
@@ -591,6 +657,58 @@ public final class TestcontainersTarget implements Target
     }
 
     @Override
+    public boolean restores()
+    {
+        return versioned;
+    }
+
+    @Override
+    public String backUpDatabase() throws Exception
+    {
+        String backup = "/tmp/sdh-backup-" + ++backups + ".dump";
+        inDatabase("The backup", "pg_dump", "-U", "harness", "-d",
+                "harness", "-Fc", "-f", backup);
+        Harness.say("Backed up the database to " + backup);
+        return backup;
+    }
+
+    @Override
+    public void restoreDatabase(String backup) throws Exception
+    {
+        for (String stage : stages())
+        {
+            StageProcess control = processes.remove(stage + "-control");
+            if (control != null)
+            {
+                control.close();
+            }
+        }
+        inDatabase("Dropping the database", "psql", "-U", "harness", "-d",
+                "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+                "DROP DATABASE harness WITH (FORCE)");
+        inDatabase("Creating the database", "psql", "-U", "harness", "-d",
+                "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+                "CREATE DATABASE harness OWNER harness");
+        inDatabase("The restore", "pg_restore", "-U", "harness", "-d",
+                "harness", "--exit-on-error", backup);
+        Harness.say("Restored the database from " + backup);
+        for (String stage : stages())
+        {
+            start(stage, true);
+        }
+    }
+
+    @Override
+    public void stopWorkers(String stage) throws Exception
+    {
+        StageProcess worker = processes.remove(stage + "-worker");
+        if (worker != null)
+        {
+            worker.close();
+        }
+    }
+
+    @Override
     public String kek(String stage)
     {
         return transitKek(stage.equals(LANDING) ? "landed-items"
@@ -625,6 +743,7 @@ public final class TestcontainersTarget implements Target
         {
             s3.listObjectsV2Paginator(request -> request.bucket(bucket)
                     .prefix(prefix)).contents().stream().map(S3Object::key)
+                    .filter(Target::notControlLog)
                     .forEach(keys::add);
         }
         return keys;

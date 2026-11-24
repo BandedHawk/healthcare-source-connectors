@@ -172,7 +172,8 @@
   <build>
     <plugins>
       <!-- The performance test support (design §13.1): settings, workloads, measurement and results, with the
-           local-disk FileIO and embedded Postgres they use. The applications' performance tests depend on it. -->
+           local-disk FileIO and embedded Postgres they use. The applications' performance tests depend on it. Also the
+           listing and versioned in-memory stores the restore tests use (DESIGN.md §18). -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
@@ -185,6 +186,8 @@
                 <include>com/sdh/healthcare/connector/core/perf/**</include>
                 <include>com/sdh/healthcare/connector/core/LocalFileIO*</include>
                 <include>com/sdh/healthcare/connector/core/TestPostgres*</include>
+                <include>com/sdh/healthcare/connector/core/maintenance/ListingFileIO*</include>
+                <include>com/sdh/healthcare/connector/core/maintenance/VersionedFileIO*</include>
               </includes>
             </configuration>
           </execution>

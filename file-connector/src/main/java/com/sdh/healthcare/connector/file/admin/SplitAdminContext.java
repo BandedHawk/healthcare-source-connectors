@@ -54,6 +54,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import javax.sql.DataSource;
@@ -375,6 +376,13 @@ final class SplitAdminContext implements DrainAdmin, DataAdmin,
     }
 
     /** {@code split_records}: landing's tables are the landing node's. */
+    /** The lease table, which a restore's check looks in. */
+    @Override
+    public Optional<String> leaseTable()
+    {
+        return Optional.of(properties.lease().jdbc().table());
+    }
+
     @Override
     public List<DataAdmin.Erasable> erasable()
     {

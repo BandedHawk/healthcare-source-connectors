@@ -261,6 +261,10 @@ Revision 2026-11-22 (et), built: [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) 
 
 Revision 2026-11-22 (eu), built: the split reconciler leaves an item split since it listed it, asked for by the user ("Yes, fix it") after the HIPAA performance runs ([PERFORMANCE.md](PERFORMANCE.md) §10, runs 60 and 62). Once split was more than the grace behind landing, `SplitReconciler` listed every landed item without a checkpoint and split them one at a time, about four a second; long after the backlog had cleared it was still going through its list, announcing items already split, so convert's queue never emptied. Now `recover` looks each item up again just before splitting it, and leaves one started meanwhile; `split.reconciled` counts them (`split_meanwhile`). Its taking on of items left part way (`CHECKPOINT_STALLED`) works from a list too, so it does the same: `ItemCheckpoints.stillStalled` asks, just before, whether the item is still in progress and unwritten since the cutoff, and one finished or taken on meanwhile is left (`resumed_meanwhile`). Nothing was lost or supplanted before: convert took the announcements as copies. Tested by `FileConnectorApplicationTest.leavesAListedItemSplitMeanwhile` and `leavesAStalledItemFinishedMeanwhile`, and `ItemCheckpointsTest.tellsWhetherAnItemIsStillStalled`.
 
+Revision 2026-11-24 (fc), built: §18, backup and restore, with the four proposals of §18.11 taken (the user: "Yes, build it"). Each stage keeps its purges, erasures, rotations, re-keys and retention changes as one object each under `<namespace>/_control/<scope>/` once the change is made (`ControlLog`). Three operations, on the control API and the CLI, each refused while a lease of the stage is live: `restore-check` (reports, changes nothing), `restore-repair` (four eyes, a ticket) and `restore-release` (four eyes, a ticket). A repair walks every file each table's metadata needs and brings back those deleted from the store's versions (`TableRestore`, S3 only: Iceberg's GCS and Azure FileIOs can't); points the landing node's tables at their newest metadata of the same table and raises its leases' epochs to theirs, so the next holder's commits aren't fenced out; marks each table `sdh.restore.keep-orphans`, which maintenance's orphan cleanup honours until `restore-release`; asks the purges again and marks the erasure again from the control log; and tries each KEK. Built otherwise than proposed: **messages are left on the broker, not dropped** (§18.4); pauses are reported, not replayed; the store-damaged walk (`--deep`) and the versioning compliance check are not built (§18.9). Tested: `TableRestoreTest`, `RestoreCommandsTest`, `ControlLogTest`, the maintenance orphan hold; the harness's `restore` scenario at the Testcontainers level (a `pg_dump` mid-load as the point). Its runs found four things, each fixed: the KEK test read every manifest, and failed on one deleted since T (it now falls back to the KEKs the settings and control state name, and reports the tables' own unread); Iceberg's S3 `getLength` throws on a missing object where `exists` answers false (the walk counts a manifest it can't read as missing); a store may list a key written with two slashes under one (compaction of an unpartitioned table writes `…/<hash>//compact-…`), so the walk compares keys with their slashes made one and asks the store before calling a file missing; and the audit journal goes back to T with the database, so the scenario checks only the calls after the restore. The split and convert reconcilers' defaults (10-minute grace, 15-minute interval, 15-minute backlog quiet) set how long the catch-up takes: the harness shortens them, and the procedure says so. An erasure leaves the control log, by design (§18.6): the harness's store check leaves `_control/` out.
+
+Revision 2026-11-24 (fb), proposed, then built as (fc): §18, backup and restore as a whole (HIPAA.md §11.1 P7), asked for by the user. The catalog and registries are one database, so its point-in-time restore is to the pipeline a crash of every pod at that time, which it recovers from exactly once; the object store is kept, not rolled back, and repaired from its versions; the landing tables are brought forward so nothing landed is lost; messages are dropped and rebuilt by the reconcilers; control changes after the point are kept in the store and replayed, so a purge stays purged; `restore-check` proves and repairs it. Four decisions open in §18.11.
+
 Revision 2026-11-24 (fa), built: [STAGES.md](STAGES.md) §18, the split stage's registry work for many items at once, asked for by the user ("Yes, build it") after AWS runs K and L. **Part A:** a fresh, generation-1 item whose pieces all succeed starts with one `INSERT ... ON CONFLICT DO NOTHING RETURNING` instead of its reads and its `SPLITTING` write, leaves out the failure, now and correction reads (none can exist for an item this attempt made, as no path deletes a `split_item` row, which stays a rule of the design), sets its completion number with the `ARCHIVING` write and `announced_at` with `COMPLETED`; any other item, or one whose source can't be sized, takes the full path as before. **Part B:** `RegistryBatcher` gathers the checkpoint, landed, copy and lease statements of the items in flight into one statement of each kind, a group commit with no linger (a statement runs at once when none of its kind is running), one row of each item or lease, sorted by key, each row with its own fence through `RETURNING`; a failed statement fails every caller in it, each retrying as before. `sdh.split.registry-batch` (64; 1 turns it off). Measured locally, the registry's statements an item fell from 17 to 9, and to 6.3 at 64 at once; throughput unchanged locally, where statements rarely meet. On AWS (runs M, N, O, [PERFORMANCE.md](PERFORMANCE.md) §13.3) split kept up with landing, 59.4 documents a second end to end against 46.0, its pool waits gone even at 2 connections; split is no longer the pace.
 
 Revision 2026-11-24 (ez), built: a pod starting while others work no longer waits on them to make its tables (found on AWS run K, [PERFORMANCE.md](PERFORMANCE.md) §13.3; the user: "Yes, fix it"). Every process runs its tables' statements at startup, each with `IF NOT EXISTS`. Postgres locks the table for some before it looks whether there is anything to do: `CREATE INDEX IF NOT EXISTS` takes a SHARE lock, which waits for every open write, and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` and `ALTER COLUMN` take an ACCESS EXCLUSIVE lock, which waits for every open read too; each holds up every statement on the table after it while it waits. In run K, 14 split pods scaled up while the append queue was busy waited past their query timeout and exited ("Could not create the append queue's tables"), so split ran on 1.3 pods of 6 on average. `SchemaChanges.apply` now looks each index or column up in the catalogs, which locks no table, and runs the statement only if its change is missing; other statements (`CREATE TABLE IF NOT EXISTS`, which looks first; `CREATE SCHEMA`; a `DO` block that looks itself) run as before. The append queue, checkpoints, releases, audit tables, stage registry, fail and correction stores, reprocess runs, control, purge and resubmit tables use it. Two pods starting at once on a new table may both run a statement, which its `IF NOT EXISTS` settles with nothing yet using the table. `SchemaChangesTest` checks each form, left out under a writer's lock and made when missing; `QueuedCommitsTest.aStartingPodDoesNotWaitOnTheQueuesWriters` timed out before the change. Not changed: the stage registry's startup `UPDATE ... SET reported = true` and its other data moves, which take row locks only.
@@ -3023,3 +3027,203 @@ These are checked first, in a build spike before the full implementation. Spike 
 - **Host disk capacity:** space for the inbound directory, `completed/` and `failed/` records, and the encrypted local `failed/<itemId>.enc` fallback is the operators' responsibility, through normal system monitoring. The service doesn't reserve, measure or predict disk space.
 - **MinIO:** not supported or tested. Support only if a customer pays for it, including the development and testing it needs (§8.1).
 - **GCP Cloud KMS against the real service:** untested until customer demand requires it (§7.4).
+
+## 18. Backup and restore as a whole (built 2026-11-24, revision (fc); the AWS drill not yet run)
+
+Asked for by the user ("Backup and restore (P7)"): HIPAA.md §11.1 P7, §8.1 item 12; the contingency plan's data
+backup and disaster recovery specifications, § 164.308(a)(7)(ii)(A)–(B), and the proposed rule's restore within
+72 hours (HIPAA.md §7). The backups themselves are the operator's (HIPAA-OPERATIONS.md §7); what only the product
+can give is **how to restore so that nothing is lost or stored twice, and a check that proves it.**
+
+### 18.1 What a pipeline's state is, and where
+
+| State | Where | Backed up by | If it goes back in time |
+|---|---|---|---|
+| Iceberg catalog (each table's current metadata), stage registries, checkpoints, leases, reconciler watermarks, append queue, control state (pauses, KEKs in force, retention, erase marks), operators' sealing keys, the audit journal | **One Postgres database a pipeline** (`deploy/reference/postgres.sql`: the catalog role owns catalog and registries) | Point-in-time recovery (WAL archiving; RDS, Cloud SQL, Azure Flexible Server, or pgBackRest) | See §18.2 |
+| Every table's data, manifests and metadata files: bronze (`landed_items`, `landing_ledger`), silver (`split_records`, `records`), gold | The object store | Versioning, with noncurrent versions kept past the backup window; object lock against deletion; replication to another region | Not rolled back (§18.3) |
+| KEKs, signing and ID keys | The KMS | The KMS's own durability; keys never deleted (HIPAA-OPERATIONS.md §8); multi-region keys for region loss | A key gone is data gone |
+| Messages in flight | Kafka | **Not backed up:** every one can be rebuilt from the tables by the reconcilers (STAGES.md §13) | Left as they are (§18.4) |
+| Settings, secrets, manifests | The customer's configuration management | Theirs | |
+| Exported audit events | The customer's audit store | Theirs | |
+
+### 18.2 The key fact: one database, one consistent point
+
+The catalog and the registries are in the same database, so a point-in-time restore of it to time T gives the
+pipeline exactly the state it would have had **if every pod had crashed at T**, with the object store left as it
+is. That is the case the pipeline is built and tested for: a commit made but not yet registered is found by
+resume (DESIGN §9), a registry row is never ahead of the table it describes, and work after T is done again from
+the tables, exactly once (STAGES.md §8, §13; the crash and failover runs of PERFORMANCE.md §13.1, §13.2). Files
+written after T are not referenced, so they change nothing.
+
+So **the restore is: Postgres to T, the object store left where it is**, and five things that a crash at T does
+not have, each handled below:
+
+1. the object store may have **deleted** files after T that the catalog at T still references (§18.3);
+2. **landing** took items from the intakes after T, and the intakes deleted them (§18.5);
+3. **messages** newer than T name work the registries at T don't know (§18.4);
+4. **control changes** after T are undone: purges, erasures, key rotations and re-keys, retention (§18.6);
+5. **keys** a restored file needs may have been disabled since (§18.6).
+
+A customer who keeps the catalog in a database apart from the registries must restore both to the same T. The
+check doesn't yet see a catalog newer than the registries: HIPAA-OPERATIONS.md §7 makes it a step of the
+procedure.
+
+### 18.3 The object store: kept, and repaired from its versions
+
+The store is not rolled back: it is the newest copy of everything, and bronze is the only copy of what has
+landed. But maintenance deletes files after T (snapshot expiry, compaction, retention, purges), and a catalog at T
+may reference some of them. With versioning on, a deleted object is a delete marker over its last version, so the
+check finds every file the catalog references that is missing and **brings back its last version** (on S3 by
+removing the delete marker; GCS and Azure Blob have the same). A file whose version has gone too is reported by
+name, table and snapshot, never by contents, and the restore stops: T must be later, or the backup older.
+
+The same walk repairs the other case, the store damaged and the database whole (an operator's mistake, or
+ransomware deleting or overwriting objects): each object is checked to exist and, with `--deep`, to open (GCM's tag
+and the AAD, DESIGN §7.2); one that fails is restored to its last good version. Object lock in compliance mode keeps
+those versions from whoever holds the write role. **Not built:** the repair brings back deleted files only; an
+overwritten one, and `--deep`, are the store's tools for now.
+
+**As built,** a file is brought back through Iceberg's `SupportsRecoveryOperations`, which only `S3FileIO`
+implements (the newest version that isn't a delete marker, copied over the marker). On GCS or Azure Blob the check
+names each missing file, and the operator restores them with the store's own tools before repairing again.
+
+Requirement: versioning on for every bucket of the pipeline, and noncurrent versions kept at least as long as the
+database's point-in-time window (DEPLOYMENT.md). **Not built:** its check in the hipaa profile's compliance
+outcome, which reads settings only, and would need a probe of the store; until then it is a step of the
+procedure (HIPAA-OPERATIONS.md §7).
+
+### 18.4 Messages: left on the broker, and the rest rebuilt
+
+**As built, messages are left as they are,** not dropped. Every message names files in the store and records by
+their keyed IDs, and the repair keeps every file nothing references (§18.7), so a message from after T names files
+that are still there: its record is processed once, as a new one, or found done. Dropping them would lose nothing
+either, but needs each broker's admin rights, and the reconcilers rebuild what the registries at T lack anyway:
+
+- a landed item with no split row is split by the split reconciler, which looks at every landed item at startup;
+- records split or stored after T are found by the convert and transform reconcilers from their watermarks,
+  which the restore brought back to T;
+- an item end not yet announced at T is sent again by its sender (revision (do)).
+
+The proposal dropped them for messages naming records the restored tables don't have; with orphans kept, the
+files those records are in are still there. Records sent to gold readers after T are sent again,
+with the same record IDs and versions: a gold reader must take a record ID and version it has seen as a
+repeat, and D8 says so to their owners (to verify in building: what `connector-queue-reader` does with one).
+
+### 18.5 Landing: brought forward, so nothing landed is lost
+
+An item landed after T is in bronze, but the catalog at T doesn't point at it, and its intake has deleted it (a
+bucket intake deletes the object, a queue intake has acknowledged the message, HTTP push has answered 200). Left
+at T, **it would be lost**. So the landing tables alone are brought forward: for `landed_items` and
+`landing_ledger` the check finds the newest metadata file in the table's location that descends from the
+catalog's pointer at T (through its metadata log), checks that every file it references is there, and points the
+catalog at it. Landing's own checkpoint is in the table, so it moves with it; its lease is only a lease.
+
+Landing ahead of the registries is safe: an item the split registry doesn't know is a new item to it, split once.
+If two newest metadata files are rivals (a commit the catalog never took), the check stops and names both; an
+operator chooses, since either is complete.
+
+**As built:** the newest is found by listing the table's `metadata/` prefix: the highest version whose file has the
+same table UUID and no lower a sequence number than the catalog's. The catalog is re-pointed by dropping its entry,
+keeping every file, and registering the table at that file. The landing node's commits are fenced by the lease epoch
+the table records (`sdh.lease.epoch`), and the metadata brought forward may record a higher epoch than the restored
+lease table has, so the repair raises every epoch below it in the lease table, while no lease is live; epochs only
+grow, so no holder is wronged, even in a lease table shared with other stages.
+
+### 18.6 Control changes and keys after T
+
+A purge or an erasure after T would be undone by the restore: **the purged records would come back.** So each
+control change, when it commits, is also written as a small object in a control prefix of the store (`_control/`,
+versioned like the rest): its operation ID, kind, the item or stage it names, its time and its approver's ID, no
+PHI. The store isn't rolled back, so these outlast the restore. The check lists every one after T and:
+
+- **re-applies** purges and erasures, as the operation that was approved (audited as a replay of it, with its ID);
+- **reports** rotations, re-keys and retention changes for the operator to run again, since each is a choice to
+  make again with the keys as they are now; of each kind only the latest is reported, the others shown superseded;
+- reports whether the stage is paused as restored. **As built,** pauses aren't kept in the store: they change no
+  data, and the operator pauses or resumes as wanted before starting the stage.
+
+**As built:** an object is written once the change is made in the database, named by its kind and operation ID, and
+not written again if there (an operation that is retried writes it once). It holds the operation's ID, kind, scope,
+time and principal and its own fields (an item ID, a ticket, KEK references, a retention): no document's value. A
+purge is asked again with its operation's ID, so asking twice makes one purge; an erasure is marked again, so the
+stage's pods refuse to start, and `erase` is asked again to drop its tables. The log is beside the tables (the
+directory of the stage's table location), so an erasure, which drops the tables, leaves it.
+
+Every KEK that a file of the restored catalogs was written under is tried (a wrap and unwrap of a test key): one
+disabled or destroyed is reported. After a re-key the custodians disable the old KEK but keep it, not delete it
+(HIPAA-OPERATIONS.md §6.1, step 4), so a restore to before the re-key asks them to enable it again until the
+re-key is run again. A pipeline erased after T
+stays erased: its tables are dropped again and its KEKs are gone.
+
+### 18.7 The check: `restore-check`, `restore-repair` and `restore-release`
+
+**As built, three operations,** on each stage's control API (`GET /restore/check`, `POST /restore/repair`,
+`POST /restore/release`) and its CLI, run on each stage after the database is restored and before any of its pods
+starts; each refuses while a lease in the stage's lease table is live. `restore-check` changes nothing and reports;
+`restore-repair` (four eyes and a ticket: it changes what the catalog points at) does the repair below and answers
+the same report; `restore-release` (four eyes and a ticket), once the pipeline has caught up, removes each table's
+hold on its orphans. The report says, per table, the files referenced, brought back and missing (the first 20 by
+location), whether every manifest was seen, the orphans' count and bytes, and for the landing node where it is or
+would be brought forward; then each control change kept and what became of it, each KEK and whether it can be
+used, whether the stage is paused, and `whole`: whether the stage may start. As proposed, the repair:
+
+1. walks every table's current metadata, manifest lists, manifests and data files, and brings back missing ones
+   (§18.3);
+2. brings the landing tables forward (§18.5);
+3. replays the control journal after T (§18.6), and tries the KEKs;
+4. lists files after T that nothing references (orphans), by table, count and bytes, and **keeps them**: they are
+   PHI under the pipeline's keys, removed by the stage's maintenance only once the operator has released them
+   (`restore-release`); as built, a table property, `sdh.restore.keep-orphans`, that orphan cleanup honours;
+5. ~~moves the consumer groups to the end~~ (not built: §18.4), and is audited as its operation, with the scope,
+   the ticket, the tables, files brought back, orphans kept and whether the stage is whole. T itself isn't known to
+   the stage; the operator records it in the ticket.
+
+Its report has names, counts and times only: no record, no value (HIPAA.md "No values in issues"). The audit journal is in the same database, so
+it goes back to T too: what was audited between T and the restore is kept only in the exported events, which the
+procedure requires (HIPAA-OPERATIONS.md §7). The harness's `restore` scenario checks the journal only for the calls
+after the restore.
+
+### 18.8 What it gives (to be measured, §18.10)
+
+| Loss | Restore | Lost | Time |
+|---|---|---|---|
+| The database (corrupt, deleted, a bad migration) | Postgres to just before; the store as it is | **Nothing landed.** Work since T is done again | The database's restore, then the check's walk, then catching up |
+| Objects in the store (deleted, overwritten, encrypted by an attacker) | Each to its last good version; the database as it is | Nothing, while the versions last | The walk with `--deep` |
+| A region | Postgres from its cross-region copy; the store's replica; multi-region keys | Items landed in the last replication lag (S3 Replication Time Control: 15 minutes) whose intake was in the lost region | As the first row, in the other region |
+| Kafka | Topics made again | Nothing | The reconcilers' catch-up |
+| A KEK | None | Everything under it | |
+
+### 18.9 Order of building, once agreed
+
+Built 2026-11-24 (revision (fc)): steps 1 to 4, but the versioning compliance check of step 1, the consumer groups
+and `--deep` of step 2, and the sandbox and AWS levels of step 3 (the scenario skips a target whose store doesn't keep
+versions, or that has no restore of its own yet). Step 5 waits on the user's approval of its cost.
+
+1. The control journal (`_control/` objects at each control change), and the compliance check of versioning.
+2. `restore-check`: the walk and repair, landing brought forward, the replay, the KEK test, orphans, consumer
+   groups, its audit event.
+3. A harness scenario, `restore`, at all three levels: load, take the database's point at T mid-load, then
+   maintenance deletes, a purge and more landing after T; restore, check, resume; every item exactly once in
+   gold, the purged item still purged, nothing lost (H1's Testcontainers Postgres with WAL archiving and a
+   recovery target time).
+4. HIPAA-OPERATIONS.md §7 rewritten as the procedure, and D8 (HIPAA.md §11.2) from it: what to back up, the
+   order of a restore, the RPO and RTO of §18.8.
+5. An AWS drill at size, for the RTO: the PoC's Postgres has EBS snapshots at `down`, not point-in-time recovery,
+   so it needs WAL archiving to S3 first (§18.11, 4).
+
+### 18.10 Not covered
+
+- A backup of Kafka, of settings and secrets, and of the audit store: the customer's.
+- Restoring one pipeline's data into another, or to another product version: not supported.
+- Rolling one table back alone: everything but landing goes back together.
+
+### 18.11 For the user to decide
+
+1. **Landing brought forward** at a restore, as proposed, or the intakes made to keep what they deliver for the
+   database's point-in-time window (not possible for HTTP push or most queues).
+2. **The control journal in the store** (`_control/`), as proposed, or re-applying purges and erasures from the
+   customer's audit store by hand (the events are there, but a missed one brings PHI back).
+3. **Orphans kept** until the operator removes them, as proposed, or removed by maintenance after a grace once the
+   check has passed.
+4. **The AWS drill:** WAL archiving added to the PoC's Postgres (a small S3 cost), or the restore proved at the
+   Testcontainers and sandbox levels only.

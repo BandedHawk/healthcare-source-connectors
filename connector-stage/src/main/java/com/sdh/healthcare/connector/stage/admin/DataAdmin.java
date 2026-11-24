@@ -8,11 +8,14 @@ package com.sdh.healthcare.connector.stage.admin;
 
 import com.sdh.healthcare.connector.core.audit.AuditTables;
 import com.sdh.healthcare.connector.runtime.config.KeyMaterial;
+import com.sdh.healthcare.connector.stage.ControlLog;
 import com.sdh.healthcare.connector.stage.PurgeRequests;
 import com.sdh.healthcare.connector.stage.RetentionPolicy;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import javax.sql.DataSource;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
 
@@ -124,5 +127,52 @@ public interface DataAdmin extends KeyAdmin
     default long liveClaims() throws Exception
     {
         return 0;
+    }
+
+    /**
+     * Where the stage's control changes are kept in the store
+     * (DESIGN.md §18.6): beside the first of its tables there is.
+     *
+     * @return the log; empty if the stage has no table yet
+     * @throws Exception if the tables or the control state can't be read
+     */
+    default Optional<ControlLog> controlLog() throws Exception
+    {
+        for (Erasable each : erasable())
+        {
+            if (each.catalog().tableExists(each.id()))
+            {
+                Table table = each.catalog().loadTable(each.id());
+                return Optional.of(new ControlLog(table.io(),
+                        ControlLog.namespaceOf(table.location()),
+                        controlState(false).scope()));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The database table the stage's leases are in, which a restore's
+     * check looks in for a live one, and whose epochs it raises when it
+     * brings the stage's tables forward.
+     *
+     * @return it, as {@code [schema.]table}; empty if it has none
+     */
+    default Optional<String> leaseTable()
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Whether a restore's check brings the stage's tables forward to their
+     * newest metadata, rather than leaving them where the restored catalog
+     * points (DESIGN.md §18.5): true for the landing node, whose items are
+     * gone from the intakes once landed.
+     *
+     * @return false by default
+     */
+    default boolean bringsForward()
+    {
+        return false;
     }
 }

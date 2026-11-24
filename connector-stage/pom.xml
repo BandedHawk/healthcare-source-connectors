@@ -80,6 +80,13 @@
       <artifactId>opentelemetry-sdk-testing</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- The listing and versioned in-memory stores: the restore commands' tests. -->
+    <dependency>
+      <groupId>com.sdh.healthcare</groupId>
+      <artifactId>connector-core</artifactId>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
     <!-- Real Postgres binaries, no Docker needed: the registry's tests. -->
     <dependency>
       <groupId>io.zonky.test</groupId>

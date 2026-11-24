@@ -176,11 +176,78 @@ public interface Target extends AutoCloseable
     Set<String> secrets();
 
     /**
-     * The objects under a stage's tables, as the store lists them.
+     * The objects under a stage's tables, as the store lists them, its
+     * control log left out ({@link #notControlLog}).
      *
      * @param stage the stage
      * @return their keys; empty once erased
      * @throws Exception if the store can't be listed
      */
     List<String> stored(String stage) throws Exception;
+
+    /**
+     * Whether an object is not the stage's control log, which outlasts an
+     * erasure (DESIGN.md §18.6): it holds IDs and times, no PHI, so that a
+     * restore after the erasure erases again.
+     *
+     * @param key the object's key
+     * @return true unless it is under {@code _control/}
+     */
+    static boolean notControlLog(String key)
+    {
+        return !key.contains("/_control/");
+    }
+
+    /**
+     * Whether the target can take its database back to an earlier point,
+     * for the restore scenario (DESIGN.md §18): its store keeps object
+     * versions, and its database can be backed up while the pipeline runs
+     * and restored while its workers are stopped.
+     *
+     * @return false unless it can
+     */
+    default boolean restores()
+    {
+        return false;
+    }
+
+    /**
+     * Backs up the pipeline's database as it is now, in one consistent
+     * cut, while the pipeline runs.
+     *
+     * @return the backup's name, for {@link #restoreDatabase}
+     * @throws Exception if it can't be backed up
+     */
+    default String backUpDatabase() throws Exception
+    {
+        throw new UnsupportedOperationException(name() + " restores its"
+                + " database through its own procedure");
+    }
+
+    /**
+     * Restores the pipeline's database from a backup, as a new database,
+     * with every stage's workers stopped; then starts the control APIs
+     * again on it.
+     *
+     * @param backup the backup's name
+     * @throws Exception if it can't be restored
+     */
+    default void restoreDatabase(String backup) throws Exception
+    {
+        throw new UnsupportedOperationException(name() + " restores its"
+                + " database through its own procedure");
+    }
+
+    /**
+     * Stops a stage's workers and leaves them stopped, their leases
+     * released, until {@link #restartWorkers}.
+     *
+     * @param stage the stage
+     * @throws Exception if they can't be stopped
+     */
+    default void stopWorkers(String stage) throws Exception
+    {
+        throw new UnsupportedOperationException(name() + " doesn't leave"
+                + " workers stopped");
+    }
 }

@@ -486,16 +486,107 @@ The same through the CLI, in the stage's pod: `keys`, `rotate --kek <reference>`
 
 ## 7. Backups, recovery and contingency (§ 164.308(a)(7))
 
-**Not yet built as a product feature** (HIPAA.md §8.1 item 12). Until it is, the platform administrator:
+How to back up a pipeline and restore it so that nothing landed is lost and nothing is stored twice (DESIGN.md §18;
+HIPAA.md D8). The backups are the platform administrator's; the product's part is the order of the restore and the
+check after it.
 
-- turns on object store versioning (or replication, or AWS Backup) for every bucket, bronze above all: once an item
-  has landed, bronze is its only copy;
-- backs up Postgres (the catalog, registries, leases and the audit journal) with point-in-time recovery;
-- never deletes a KMS key a backup needs; the key custodian keeps keys for as long as any backup encrypted under them;
-- restores store and Postgres **to the same point**: a catalog pointing at metadata that isn't in the bucket, or a
-  registry ahead of its tables, breaks the pipeline. Test it once a year, and record the result.
+### What to back up
 
-Iceberg snapshots are not a backup: they expire after `snapshot-retention` (24 h), in the same bucket.
+| What | Where | How | Kept for |
+|---|---|---|---|
+| The catalog, registries, leases, control state, operators' sealing keys and the audit journal | The pipeline's Postgres database | Point-in-time recovery: WAL archiving, or the cloud database's own (RDS, Cloud SQL, Azure Flexible Server) | Your recovery window: 7 to 35 days |
+| Every table's data, manifests and metadata: bronze above all, since once an item has landed it is the only copy | The object store | **Versioning on** for every bucket, with noncurrent versions kept at least as long as the database's window; object lock against deletion; replication to another region for a region's loss | At least the database's window |
+| KEKs, signing and ID keys | The KMS | Never deleted while any backup needs them; multi-region keys for a region's loss | As long as any backup encrypted under them |
+| The stage's settings and secrets, and the deployment's manifests | Your configuration management | Yours | |
+| Exported audit events | Your audit store (§2.7) | Yours | Six years |
+
+Not backed up: Kafka's messages, which the stages rebuild from the tables. Iceberg snapshots are not a backup: they
+expire after `snapshot-retention` (24 h), in the same bucket.
+
+### Restoring the database to an earlier point
+
+For a corrupt or deleted database, a bad migration, or rows changed in error. **The object store is not rolled
+back:** it holds everything landed since, which the intakes no longer have. Open a ticket first, and record in it
+the time T restored to; every step below is audited under it.
+
+1. **Stop every stage's workers** (scale their Deployments to 0, and pause KEDA: §7.1), and leave the control API
+   Deployments running. Wait for their leases to end: on the way out, or after their TTL (60 s by default).
+2. **Restore the database to T,** as a new instance, and point the stages' settings at it. If the catalog is in a
+   database apart from the registries, restore both to the same T: the check can't tell a catalog newer than its
+   registries.
+3. **Check that versioning is still on** for every bucket of the pipeline, and leave the store as it is.
+4. **Restart the control APIs** on the restored database, then, on each stage, with `data.admin`:
+
+   ```
+   GET  /api/v1/restore/check
+   ```
+
+   It changes nothing, and refuses `400` while a lease of the stage is live. It answers, for each table the stage
+   writes, the files its metadata needs and whether they are there, the files nothing references, and, for the
+   landing node, the newer metadata its tables will be brought forward to; then the control changes made since T
+   that the database lacks, each KEK and whether it can be used, and `whole`. Names, counts and times only: no
+   record or value. Before repairing:
+   - a table `unloadable`: its current metadata file is gone; restore that object to its last version with the
+     store's tools, and check again;
+   - files `missing` on GCS or Azure Blob: the product brings back deleted files on S3 only; restore those with
+     the store's tools, and check again. A file whose versions have expired can't be brought back: restore to a
+     later T, or contact support;
+   - `rivals` on the landing node: two newest metadata files of one table, both complete; contact support, who
+     will help choose;
+   - a KEK that can't be used: the key custodian enables it again (a re-key since T had it disabled, §6.1).
+5. **Repair each stage,** with four eyes and the ticket:
+
+   ```
+   POST /api/v1/restore/repair   {"reason": "INC-1234 restore to T", "ticket": "INC-1234"}
+   ```
+
+   A second data admin approves it (`POST /api/v1/operations/{id}/approve`). It brings back from the store's
+   versions every file the restored catalog needs that was deleted since; points the landing node's tables at their
+   newest metadata, so no item landed since T is lost, and raises its leases' epochs to match; keeps every file
+   nothing references, which are the work done since T and still PHI under the pipeline's keys, until step 9; asks
+   again the purges made since T, so purged records stay purged, and marks again an erasure made since; and tries
+   each KEK. Its result is the report of step 4: go on only when it says `"whole": true`.
+6. **Make again what the repair reports `to-redo`:** each key rotation, re-key or retention change made since T
+   (only the latest of each kind counts), once the stage is running. A stage erased since T is erased again and its
+   pods refuse to start: ask `erase` again (§8) to drop its tables.
+7. **Pause or resume** each stage as wanted: the report says whether it is paused as restored (pauses aren't kept in
+   the store).
+8. **Start the workers,** and resume KEDA. The stages do the work since T again, from the tables: the split
+   stage splits each landed item it doesn't know, and each sender sends again the item ends it hadn't announced. A
+   record stored in gold since T is stored again with the same record ID and version: tell the owners of gold's
+   readers to take a record ID and version they have seen as a repeat. Watch `/status` and `/stuck` until every
+   item is complete. With the default settings, this takes a while: the split stage takes an item without its message
+   once it landed more than `sdh.landing.reconcile.grace` (10 minutes) ago, at runs `sdh.landing.reconcile.interval`
+   (15 minutes) apart, so an item landed just before T may wait 25 minutes; the convert and transform stages first
+   wait `sdh.reconcile.backlog-quiet` (15 minutes) for their queues, then use their own grace and interval
+   (DEPLOYMENT.md, "Keeping items from being stranded").
+9. **Release the kept files** once the pipeline has caught up, with four eyes and the ticket:
+   `POST /api/v1/restore/release`. Each stage's maintenance removes, at its next run, the files nothing references.
+10. **Record the result** in the ticket: T, the counts each report gave, and how long each step took.
+
+**The audit journal goes back to T with the database:** every event between T and the restore is then in the
+exported audit events only (§2.7), so the export must be on before you need it. Keep that export for the review of
+the incident, and run `audit-verify` on each stage after the restore: its chains check out as at T.
+
+The same through the CLI, in a pod of the stage's control API: `restore-check`, `restore-repair --ticket <ref>`
+and `restore-release --ticket <ref>`; under the hipaa profile the CLI refuses the last two unless `cli-four-eyes` is
+waived.
+
+**What it gives:** no item that landed is lost, whatever T is, and work since T is done again exactly once. How
+long it takes is the database's restore, then each stage's check (a walk of every table's files), then the
+pipeline's catching up; it has not yet been measured at size.
+
+### Other losses
+
+| Loss | What to do |
+|---|---|
+| Objects deleted from the store, the database whole | Steps 1 and 4 to 9 above, without restoring the database: the repair brings back each deleted file the catalog needs from its versions. An overwritten object is restored to its last good version with the store's tools. |
+| A region | The database from its cross-region copy, the store's replica and multi-region keys, then the steps above in the other region. Items landed within the replication's lag whose intake was in the lost region may be lost. |
+| Kafka | Make the topics again and start the stages: the reconcilers rebuild what was in flight. |
+| A KEK destroyed | Nothing under it can be read again. Keys are never deleted while a backup needs them (§8). |
+
+**Test a restore once a year,** and after each upgrade that changes a table or the registries, and record the
+result. `scripts/harness.sh testcontainers restore` runs the steps above on a throwaway pipeline.
 
 ### 7.1 Pausing and draining a stage (§ 164.308(a)(7)(ii)(C))
 
@@ -562,6 +653,9 @@ with who and the reason, and each pod records when it paused and resumed (`stage
      pods refuse to start from then on. Keep the result: an erasure certificate, a JWS signed with the stage's
      key (check it with its public key), listing the tables, objects and rows removed, the KEKs and signing key,
      and the journal's last heads.
+     It leaves the stage's control log (`_control/` beside its tables: operation IDs, item IDs, tickets,
+     principals and times, no PHI), so that a restore of the database to before the erasure erases again (§7);
+     step 5 deletes it with the buckets.
   4. The key custodians schedule deletion of the KEKs and signing keys each certificate names (two people).
      Everything the pipeline stored, backups included, becomes unreadable: a cryptographic erase.
   5. The platform administrator deletes the buckets, the Postgres schemas and the topics, and records the

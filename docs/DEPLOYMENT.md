@@ -243,6 +243,19 @@ it has just made (STAGES.md §18). Retention applies to the convert and transfor
   choice is the customer's records-management decision, not a HIPAA one; keep it at least as long as the
   customer's own policy for operational records of processing. Deletion is audited.
 
+## Object store versions: needed for a restore
+
+Turn on versioning for every bucket of a pipeline, and keep noncurrent versions at least as long as the database's
+point-in-time window. A restore of the database to an earlier point (HIPAA-OPERATIONS.md §7, DESIGN.md §18)
+references files the stages' maintenance has deleted since, and its repair brings them back from their last
+versions; without them it stops. Bronze matters most: once an item has landed, it is the only copy. The repair
+brings files back on S3 (and S3-compatible stores with versioning) only; on GCS or Azure Blob it names each missing
+file for the store's own tools. Not yet checked by the hipaa profile: check it when you deploy, and at each restore
+test.
+
+An erasure (`erase`, `purge`) deletes the current objects; their noncurrent versions stay until the lifecycle rule
+expires them. Set that rule to the shortest window your recovery plan allows, and say so in your retention policy.
+
 ## FIPS 140
 
 **Not supported** (2026-11-23). No stage has been tested or configured with a FIPS 140-2 or 140-3 validated

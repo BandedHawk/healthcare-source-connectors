@@ -398,6 +398,92 @@ paths:
       responses:
         "202": {$ref: "#/components/responses/Accepted"}
         default: {$ref: "#/components/responses/Problem"}
+  /restore/check:
+    get:
+      operationId: restoreCheck
+      summary: What a repair after a database restore would find and do
+      description: >-
+        After the pipeline's database is restored to an earlier point and
+        before any pod of the stage starts (HIPAA-OPERATIONS §7). Changes
+        nothing. For each table the stage writes: the files its restored
+        metadata references, those missing from the store (the first 20
+        by location) and whether the store's versions can bring them back;
+        for the landing node, the newer metadata its tables would be
+        pointed at, or the rivals to choose between; and the files nothing
+        references. Then the control changes kept in the store's
+        `_control/` objects that the database lacks, and whether each KEK
+        can still wrap and unwrap. `whole` says whether the stage may
+        start. Refused `400` while a lease of the stage is live. Never
+        names a record or a document's value. Permission `data.admin`.
+      responses:
+        "200": {$ref: "#/components/responses/Answer"}
+        default: {$ref: "#/components/responses/Problem"}
+  /restore/repair:
+    post:
+      operationId: restoreRepair
+      summary: Makes the stage whole after a database restore
+      description: >-
+        Needs four eyes and a ticket: answered `202` with its record
+        awaiting approval, and run once another data admin approves it.
+        Refused `400` while a lease of the stage is live. Brings back from
+        the store's object versions (S3 only) each file the restored
+        catalog references that was deleted since; for the landing node,
+        points its tables at their newest metadata, so no landed item is
+        lost, and raises the leases' epochs to match; keeps every file
+        nothing references, so maintenance leaves them until
+        `/restore/release`; asks again the purges, and marks again the
+        erasure, the store's control log holds and the database doesn't;
+        and tries each KEK. Rotations, re-keys and retention changes made
+        since are reported for the operator to make again. Its result is
+        the same report as `/restore/check`. Permission `data.admin`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [ticket]
+                  properties:
+                    ticket:
+                      type: string
+                      description: The change or incident it is for.
+                      pattern: "^[A-Za-z0-9._:/-]{1,64}$"
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
+  /restore/release:
+    post:
+      operationId: restoreRelease
+      summary: Lets maintenance remove the files a repair kept
+      description: >-
+        Needs four eyes and a ticket. Once the pipeline has caught up
+        after a restore, removes the hold `/restore/repair` put on each
+        table, so its maintenance removes, at its next run, the files
+        nothing references. Answers the tables released. Permission
+        `data.admin`.
+      parameters:
+        - {$ref: "#/components/parameters/idempotencyKey"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/Reasoned"}
+                - type: object
+                  required: [ticket]
+                  properties:
+                    ticket:
+                      type: string
+                      description: The change or incident it is for.
+                      pattern: "^[A-Za-z0-9._:/-]{1,64}$"
+      responses:
+        "202": {$ref: "#/components/responses/Accepted"}
+        default: {$ref: "#/components/responses/Problem"}
   /pause:
     post:
       operationId: pause

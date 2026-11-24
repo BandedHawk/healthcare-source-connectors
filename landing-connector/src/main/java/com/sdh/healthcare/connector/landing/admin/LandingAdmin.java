@@ -13,6 +13,7 @@ import com.sdh.healthcare.connector.stage.admin.AdminCommand;
 import com.sdh.healthcare.connector.stage.admin.AuditTarget;
 import com.sdh.healthcare.connector.stage.admin.DataCommands;
 import com.sdh.healthcare.connector.stage.admin.KeyCommands;
+import com.sdh.healthcare.connector.stage.admin.RestoreCommands;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -66,6 +67,7 @@ public final class LandingAdmin
                 new ArrayList<>(List.of(new ResubmitCommand()));
         commands.addAll(KeyCommands.<LandingAdminContext>all());
         commands.addAll(DataCommands.<LandingAdminContext>all());
+        commands.addAll(RestoreCommands.<LandingAdminContext>all());
         return List.copyOf(commands);
     }
 

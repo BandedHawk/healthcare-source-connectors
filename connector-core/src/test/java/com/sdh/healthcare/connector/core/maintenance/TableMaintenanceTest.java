@@ -738,6 +738,41 @@ class TableMaintenanceTest
     }
 
     /**
+     * After a restore's repair, orphan cleanup keeps every unreferenced
+     * file, however old, until the table is released; then it deletes them
+     * as before.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void orphanCleanupKeepsOrphansUntilARestoreReleasesThem()
+            throws Exception
+    {
+        Table table = records();
+        batch(table, RECENT_DAY, 2);
+        Path oldStray = Files.writeString(Path.of(table.location(), "data",
+                "after-the-restore-point.parquet"), "work done since");
+        Files.setLastModifiedTime(oldStray,
+                FileTime.from(NOW.minus(Duration.ofDays(4))));
+        TableRestore.keepOrphans(table, NOW);
+        MaintenanceSettings settings = new MaintenanceSettings(
+                Duration.ofDays(7), 10, false, 0.75, 5, 8L << 30,
+                Duration.ofDays(3));
+
+        TableMaintenance.Report kept = maintenance(settings).run(table,
+                INGESTED_AT, Optional.empty(), true);
+        assertThat(kept.orphansDeleted()).isZero();
+        assertThat(oldStray).exists();
+
+        assertThat(TableRestore.release(table)).isTrue();
+        assertThat(TableRestore.release(table)).isFalse();
+        TableMaintenance.Report released = maintenance(settings).run(table,
+                INGESTED_AT, Optional.empty(), true);
+        assertThat(released.orphansDeleted()).isEqualTo(1);
+        assertThat(oldStray).doesNotExist();
+    }
+
+    /**
      * Finding what is reachable leaves nothing cached on the table's
      * snapshots: with its manifest list gone, an older snapshot can't list
      * its manifests, as it could if the sweep had kept the list on it.
