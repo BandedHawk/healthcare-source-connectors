@@ -155,8 +155,9 @@ the harness's stage users are super users.
 **Supported or expected, but not yet tested,** and planned for later iterations, as the product is prepared for
 deployment in each environment (HIPAA.md §11.1, P11):
 - **AWS MSK with its IAM login;**
-- **Postgres TLS through PgBouncer** (the PoC runs PgBouncer, in plaintext). This may be tested sooner than the
-  rest, but only after performance has been reviewed further (PERFORMANCE.md §10, runs 60 to 63);
+- **Postgres TLS through PgBouncer:** the AWS PoC runs it since 2026-11-24 (`client_tls_sslmode = require`, the
+  stages with `verify-full`; `server_tls_sslmode = verify-full` to Postgres; AWS-POC.md §8.2), run there on
+  2026-11-24 at 100 documents a second (PERFORMANCE.md §10, run Q), not yet in a test of the product's own;
 - **GCP Cloud KMS** against the real service (its client is built and tested against a stand-in only);
 - **AWS GovCloud and Azure Government** endpoints.
 

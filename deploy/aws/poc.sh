@@ -241,6 +241,7 @@ cmd_up() {
   start_services
   setup_keda
   setup_topics
+  pipeline_kafka
   setup_database
   db_capacity
   db_backup
@@ -306,9 +307,10 @@ start_services() {
   infra rollout status statefulset/kafka --timeout=600s >/dev/null
 }
 
-# The PoC's own CA (state directory, pki/) and the certificates it issues to Postgres and Kafka (HIPAA.md §11.4,
-# L5), as the secrets postgres-tls and kafka-tls. A pipeline deployed from deploy/reference/ trusts the CA
-# (pki/ca.crt) and checks the server's name (verify-full; Kafka's default endpoint identification).
+# The PoC's own CA (state directory, pki/) and the certificates it issues to Postgres, PgBouncer and Kafka
+# (HIPAA.md §11.4, L2 and L5), as the secrets postgres-tls, pgbouncer-tls and kafka-tls. Every pipeline trusts
+# the CA (pki/ca.crt) and checks the server's name (verify-full; Kafka's default endpoint identification), and
+# so does PgBouncer, of Postgres.
 infra_issue() {  # <stem> <common name> <DNS names, comma-separated>
   local d="$STATE/pki" san="" name
   [[ -s "$d/$1.crt" ]] && return
@@ -331,11 +333,15 @@ infra_tls() {
   fi
   infra_issue postgres "postgres.$n" "postgres.$n,postgres.$n.cluster.local"
   infra_issue kafka "kafka-0.kafka.$n" "kafka-0.kafka.$n,kafka-0.kafka.$n.cluster.local"
+  infra_issue pgbouncer "pgbouncer.$n" "pgbouncer.$n,pgbouncer.$n.cluster.local"
   if [[ ! -s "$d/kafka.p12" ]]; then
     (umask 077; openssl pkcs12 -export -name kafka -inkey "$d/kafka.key" -in "$d/kafka.crt" -certfile "$d/ca.crt" \
       -passout "pass:$(secret kafka-keystore)" -out "$d/kafka.p12")
   fi
   infra create secret tls postgres-tls --cert="$d/postgres.crt" --key="$d/postgres.key" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  infra create secret generic pgbouncer-tls --from-file=tls.crt="$d/pgbouncer.crt" \
+    --from-file=tls.key="$d/pgbouncer.key" --from-file=ca.crt="$d/ca.crt" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   infra create secret generic kafka-tls --from-file=server.p12="$d/kafka.p12" \
     --from-literal=keystore-password="$(secret kafka-keystore)" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -534,15 +540,15 @@ setup_topics() {
     for topic in "$p.landed:$STAGE_PARTITIONS" "$p.split:$STAGE_PARTITIONS" "$p.records:$STAGE_PARTITIONS" \
         "$p.fhir:1" "$p.convert.dlq:1" "$p.fhir.dlq:1"; do
       parts="${topic##*:}"; topic="${topic%:*}"
-      kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists \
+      kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --create --if-not-exists \
         --topic "$topic" --partitions "$parts" --replication-factor 1 >/dev/null
       # A topic made with fewer, before this. Partitions are only ever added; a key's messages already queued stay
       # on their old partition, so this is done at "up", before any stage starts.
-      have="$(kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic "$topic" \
+      have="$(kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --describe --topic "$topic" \
         | sed -n 's/.*PartitionCount: *\([0-9]*\).*/\1/p' | head -n 1)"
       if [[ -n "$have" && "$have" -lt "$parts" ]]; then
         say "  $topic: $have partitions to $parts"
-        kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --alter --topic "$topic" \
+        kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --alter --topic "$topic" \
           --partitions "$parts" >/dev/null
       fi
     done
@@ -677,7 +683,7 @@ drain_pipeline() {
   say "draining (waiting for every consumer group's lag to reach 0, up to 20 min)"
   local i lag
   for i in $(seq 1 80); do
-    lag="$(kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --all-groups 2>/dev/null \
+    lag="$(kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server 127.0.0.1:9092 --describe --all-groups 2>/dev/null \
       | awk '$1 != "GROUP" && $6 ~ /^[0-9]+$/ { s += $6 } END { print s + 0 }')"
     [[ "$lag" == 0 ]] && { say "drained"; return 0; }
     (( i % 4 == 1 )) && say "  lag $lag"
@@ -769,7 +775,7 @@ cmd_reset() {
   done
 
   say "Kafka: deleting the topics and consumer groups"
-  local kt=/opt/kafka/bin/kafka-topics.sh kg=/opt/kafka/bin/kafka-consumer-groups.sh bs="--bootstrap-server localhost:9092"
+  local kt=/opt/kafka/bin/kafka-topics.sh kg=/opt/kafka/bin/kafka-consumer-groups.sh bs="--bootstrap-server 127.0.0.1:9092"
   for p in $PIPELINES; do
     # shellcheck disable=SC2086
     if kafka $kt $bs --list | grep -q "^$p\."; then
@@ -895,18 +901,50 @@ harness_database() {
   harness_sql "CREATE SCHEMA IF NOT EXISTS landing_$x AUTHORIZATION catalog_$x;" "sdh_$x" >/dev/null
 }
 
-# harness_kafka: a SCRAM user per stage, with its password from the state directory, and the rights
-# deploy/reference/kafka-acls.sh grants, run in the broker's pod over its plaintext listener (a super user's). The
-# password is an argument of kafka-configs.sh in that pod, which no one else uses (synthetic data only).
-harness_kafka() {
-  local role
-  for role in landing splitter convert; do
-    kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type users \
-      --entity-name "$role-$HARNESS" --add-config "SCRAM-SHA-512=[password=$(secret "kafka-$role-$HARNESS")]" \
-      >/dev/null
-  done
-  infra exec -i kafka-0 -- env PIPELINE="$HARNESS" KAFKA_BOOTSTRAP=localhost:9092 KAFKA_ADMIN_CONFIG=/dev/null \
+# kafka_user <user>: a SCRAM-SHA-512 user on the broker, with its password from the state directory (secret
+# kafka-<user>, which pipeline/apply.sh puts in the stage's SDH_KAFKA_JAAS), made over the broker's loopback
+# listener (a super user's). The password is an argument of kafka-configs.sh in the broker's pod, which no one
+# else uses (synthetic data only).
+kafka_user() {
+  kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server 127.0.0.1:9092 --alter --entity-type users \
+    --entity-name "$1" --add-config "SCRAM-SHA-512=[password=$(secret "kafka-$1")]" >/dev/null
+}
+
+kafka_acl() {  # <kafka-acls.sh arguments>...
+  kafka /opt/kafka/bin/kafka-acls.sh --bootstrap-server 127.0.0.1:9092 --add "$@" >/dev/null
+}
+
+# kafka_rights <pipeline> <stage>...: each stage's SCRAM user, and the rights deploy/reference/kafka-acls.sh
+# grants a pipeline's stages (run in the broker's pod; adding a right it already has changes nothing).
+kafka_rights() {
+  local p="$1" role; shift
+  for role in "$@"; do kafka_user "$role-$p"; done
+  infra exec -i kafka-0 -- env PIPELINE="$p" KAFKA_BOOTSTRAP=127.0.0.1:9092 KAFKA_ADMIN_CONFIG=/dev/null \
     bash -s < "$REFERENCE/kafka-acls.sh" >/dev/null
+}
+
+# pipeline_kafka: since DESIGN.md revision (fk) the performance pipelines use Kafka as the reference settings do,
+# over SASL_SSL with a user per stage and only the rights kafka-acls.sh grants. Also KEDA's user, keda, which may
+# only describe the stages' inputs and groups, to read their lag; and the gold check's, gold-check-<pipeline>,
+# which may only read <pipeline>.fhir, by partition, in no group (pipeline/gold-check.sh).
+pipeline_kafka() {
+  local p
+  say "Kafka: a user per stage, and their rights"
+  kafka_user keda
+  for p in $PIPELINES; do
+    kafka_rights "$p" landing splitter convert transform
+    kafka_acl --allow-principal User:keda --operation Describe \
+      --topic "$p.landed" --topic "$p.split" --topic "$p.records"
+    kafka_acl --allow-principal User:keda --operation Describe \
+      --group "splitter-$p" --group "convert-$p" --group "transform-$p"
+    kafka_user "gold-check-$p"
+    kafka_acl --allow-principal "User:gold-check-$p" --operation Read --operation Describe --topic "$p.fhir"
+  done
+}
+
+# harness_kafka: the harness pipeline's stages' users and rights (no transform stage).
+harness_kafka() {
+  kafka_rights "$HARNESS" landing splitter convert
 }
 
 # harness_clean: deletes the harness pipeline and everything it stored: its namespace, its database and roles (and
@@ -932,11 +970,11 @@ harness_clean() {
   harness_sql "SET client_min_messages TO warning;
     DROP DATABASE IF EXISTS sdh_$x WITH (FORCE);
     DROP ROLE IF EXISTS landing_$x, splitter_$x, convert_$x, fhir_$x, catalog_$x;" postgres >/dev/null
-  kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --if-exists \
+  kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --delete --if-exists \
     --topic "$HARNESS\\..*" >/dev/null
   local group
   for group in "splitter-$HARNESS" "convert-$HARNESS"; do
-    kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --delete --group "$group" \
+    kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server 127.0.0.1:9092 --delete --group "$group" \
       >/dev/null 2>&1 || true
   done
   aws s3 rm "s3://sdh-poc-bronze-$ACCOUNT/warehouse/${x}_landing/" --recursive --only-show-errors

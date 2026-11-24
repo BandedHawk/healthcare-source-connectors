@@ -52,14 +52,22 @@ burst="$(awk '/^resource "aws_eks_node_group" "burst"/ { on = 1 } on { print } o
 check "burst nodes are one node group a zone" grep -qE 'for_each += data\.aws_subnet\.burst_zone' <<<"$burst"
 check "each burst group is in one subnet" grep -qE 'subnet_ids += \[each\.value\.id\]' <<<"$burst"
 
-# The Cluster Autoscaler caps the cluster at the base nodes, the duties node and burst_max, over all the burst
-# groups.
+# The Cluster Autoscaler caps the cluster at the base nodes, the state node, the duties node and burst_max, over
+# all the burst groups.
 zones="$(awk '/^variable "zones"/ { on = 1 } on && /default/ { print; exit }' "$TF/variables.tf" \
   | grep -o '"[a-z0-9-]*"' | wc -l)"
 burst_max="$(awk '/^variable "burst_max"/ { on = 1 } on && /default/ { print $3; exit }' "$TF/variables.tf")"
 cap="$(setting "$K8S/infra/cluster-autoscaler.yaml" '^ *- --max-nodes-total=([0-9]+).*')"
-check "the autoscaler's cap is the $zones base nodes + the duties node + burst_max $burst_max (have ${cap:-none})" \
-  test "${cap:-0}" -eq $((zones + 1 + burst_max))
+check "the autoscaler's cap is the $zones base nodes + the state and duties nodes + burst_max $burst_max (have\
+ ${cap:-none})" test "${cap:-0}" -eq $((zones + 2 + burst_max))
+
+# Postgres, PgBouncer and Kafka on the on-demand state node, tainted for them alone (DESIGN.md revision (fk)).
+state_group="$(awk '/^resource "aws_eks_node_group" "state"/ { on = 1 } on { print } on && /^}/ { exit }' "$TF/main.tf")"
+check "the state node is on-demand" grep -qE 'capacity_type += "ON_DEMAND"' <<<"$state_group"
+check "the state node is tainted for the state pods alone" grep -qE 'key += "sdh-poc/state"' <<<"$state_group"
+check "Postgres, PgBouncer and Kafka need the state node and tolerate it" \
+  test "$(grep -c '"sdh-poc/pool": state' "$K8S/infra/state.yaml")" -eq 3 \
+    -a "$(grep -c 'key: sdh-poc/state' "$K8S/infra/state.yaml")" -eq 3
 check "the autoscaler balances the per-zone groups" \
   grep -qE '^ *- --balance-similar-node-groups' "$K8S/infra/cluster-autoscaler.yaml"
 
@@ -89,7 +97,7 @@ landing="$(setting "$P/landing-patch.yaml" '^  replicas: *([0-9]+).*')"
 check "landing runs at most two pods, a holder and a standby (have ${landing:-none})" test "${landing:-9}" -le 2
 check "landing isn't autoscaled" bash -c "! grep -qE 'scaleTargetRef: \{ name: landing' '$P/scaling.yaml'"
 
-# Postgres: 2 GiB (512 MiB ran out at 200 backends, 2026-11-17), and connections enough for every stage pod at
+# Postgres: 2 GiB at least (512 MiB ran out at 200 backends, 2026-11-17; 4 GiB since revision (fk)), and connections enough for every stage pod at
 # KEDA's maxima. A pod's pools, as measured at the maxima (docs/PERFORMANCE.md §10, runs 46-47): split 8, convert
 # 4, transform 8; landing, the system and psql about 15 in all.
 mem="$(sed -nE '/name: postgres, namespace/,/^---/ s/^ *limits: \{ memory: ([0-9]+)(Mi|Gi) \}.*/\1 \2/p' \
@@ -115,15 +123,35 @@ check "no stage connects to Postgres but through PgBouncer" \
   bash -c "! grep -qE 'postgres\.sdh-infra\.svc' '$P'/*-application.yml"
 # The gold check's role is made by gold-check.sh, which PgBouncer's users (poc.sh) don't include: it goes to
 # Postgres itself, as psql does (run 50, 2026-11-19: through PgBouncer its login failed).
-check "the gold check connects to Postgres itself" \
-  grep -qE 'CATALOG_URI, value: "jdbc:postgresql://postgres\.sdh-infra\.svc' "$P/gold-check.yaml"
+check "the gold check connects to Postgres itself, with verify-full" \
+  grep -qE 'value: "jdbc:postgresql://postgres\.sdh-infra\.svc:5432/sdh\?sslmode=verify-full&' "$P/gold-check.yaml"
 check "PgBouncer pools transactions and keeps pgjdbc's prepared statements" \
   bash -c "grep -qE '^ +pool_mode = transaction$' '$K8S/infra/state.yaml' \
     && grep -qE '^ +max_prepared_statements = [1-9]' '$K8S/infra/state.yaml' \
     && grep -qE 'image: edoburu/pgbouncer:v1\.(2[1-9]|[3-9][0-9])' '$K8S/infra/state.yaml'"
+# Each PgBouncer has its own max_db_connections, so all of them together (revision (fk): two).
 pooled="$(setting "$K8S/infra/state.yaml" '^ +max_db_connections = ([0-9]+)$')"
-check "PgBouncer keeps under max_connections, with room for psql (${pooled:-none} of ${max_conn:-none})" \
-  test "${pooled:-999}" -le $((${max_conn:-0} - 20))
+bouncers="$(sed -nE '/name: pgbouncer, namespace/,/^---/ s/^  replicas: ([0-9]+)$/\1/p' "$K8S/infra/state.yaml" | head -1)"
+check "PgBouncer keeps under max_connections, with room for psql (${bouncers:-?} × ${pooled:-none} of\
+ ${max_conn:-none})" test $((${bouncers:-9} * ${pooled:-999})) -le $((${max_conn:-0} - 20))
+
+# Nothing in plaintext on the network (DESIGN.md revision (fk)).
+check "Postgres refuses connections without TLS" \
+  bash -c "grep -qE '^ +hostnossl +all +all +all +reject$' '$K8S/infra/state.yaml' \
+    && ! grep -qE '^ +host +' '$K8S/infra/state.yaml'"
+check "PgBouncer takes and makes TLS connections only" \
+  bash -c "grep -qE '^ +client_tls_sslmode = require$' '$K8S/infra/state.yaml' \
+    && grep -qE '^ +server_tls_sslmode = verify-full$' '$K8S/infra/state.yaml'"
+check "Kafka's plaintext listeners are on the loopback only" \
+  bash -c "grep -qE 'KAFKA_LISTENERS, value: \"INTERNAL://127\.0\.0\.1:9092,CONTROLLER://127\.0\.0\.1:9093,SASL_SSL://:9094\"' \
+    '$K8S/infra/state.yaml'"
+check "the stages use the hipaa profile, Kafka over SASL_SSL and Postgres with verify-full" \
+  bash -c "for f in '$P'/{landing,splitter,convert,transform}-application.yml; do
+    grep -qE 'compliance: \{ profile: hipaa \}' \"\$f\" || exit 1
+    ! grep -E 'kafka:' \"\$f\" | grep -qv 'securityProtocol=SASL_SSL' || exit 1
+    ! grep -E 'jdbc:postgresql' \"\$f\" | grep -qv 'sslmode=verify-full' || exit 1
+  done"
+check "KEDA logs in to Kafka" test "$(grep -c 'authenticationRef: { name: keda-kafka }' "$P/scaling.yaml")" -eq 3
 check "the clients' network policy lets the stages reach PgBouncer" \
   grep -qE 'name: clients-to-pgbouncer' "$K8S/infra/namespace.yaml"
 

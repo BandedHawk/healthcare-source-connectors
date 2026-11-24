@@ -9,7 +9,8 @@ metadata: { name: postgres-restore, namespace: sdh-infra }
 spec:
   restartPolicy: Never
   serviceAccountName: postgres-backup
-  nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+  nodeSelector: { "sdh-poc/pool": state, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+  tolerations: [{ key: sdh-poc/state, operator: Equal, value: "true", effect: NoSchedule }]
   securityContext:
     runAsNonRoot: true
     runAsUser: 999

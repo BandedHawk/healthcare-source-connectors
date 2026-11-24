@@ -205,10 +205,11 @@ Why it works this way:
 | | Item | Approx. cost |
 |---|---|---|
 | Per running hour | EKS control plane | $0.100 |
-| | 2 × `t4g.large` on demand | $0.134 |
-| | 2 public IPv4 addresses | $0.010 |
-| | Node root volumes | $0.005 |
-| | **Total** | **≈ $0.25/hour, ≈ $2 per 8-hour session** |
+| | 3 × `t4g.large` on demand (two base nodes and, since revision (dz), the duties node) | $0.202 |
+| | 1 × `m7g.xlarge` on demand, the state node (since revision (fk)) | $0.163 |
+| | 4 public IPv4 addresses | $0.020 |
+| | Node root volumes | $0.007 |
+| | **Total** | **≈ $0.49/hour, ≈ $3.9 per 8-hour session** |
 | | Spot burst nodes, only when KEDA scales out | ≈ $0.02–0.03/hour each |
 | Per month, always | 15 KMS keys (3 KEKs, 4 signing keys, 1 infra key; the control harness's 4 KEKs and 3 signing keys, since 2026-11-22) | $15 |
 | | 2 × 10 GiB gp3 state volumes | $1.60 |
@@ -218,9 +219,12 @@ Why it works this way:
 
 | Usage | Monthly total |
 |---|---|
-| 40 hours a month | ≈ $28 |
-| 8 hours every working day (160 h) | ≈ $58 |
-| Plus, per long test | ≈ $0.25 an hour |
+| 40 hours a month | ≈ $38 |
+| 8 hours every working day (160 h) | ≈ $97 |
+| Plus, per long test | ≈ $0.49 an hour |
+
+These were ≈ $0.25 an hour, $28 and $58 before the duties node (revision (dz)) and the state node (revision
+(fk)). An every-weekday month now passes the budget alarm's $80 (below).
 
 The budget alarm `sdh-poc-monthly` stays as a backstop: $80/month (8 hours every weekday is about $62 with the
 control harness's keys, so the $60 before was reached by an ordinary month), with emails at 50% and 100% of
@@ -233,7 +237,7 @@ catches it within days. Lowered from $250 on 2026-11-12; raised from $60 on 2026
 | Concern | Choice | Rejected, and why |
 |---|---|---|
 | Kubernetes | EKS 1.37, standard support only (`upgrade_policy`: a version in extended support costs $0.60/hour) | k3s on EC2: no control-plane fee, but no second node for landing's standby |
-| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, `duties`, one more for the stages' duties pods (since revision (dz)), plus `burst-a`, `-b` and `-c`, one a zone, 0–6 Spot in all (five arm64 `.large` types, not `t4g`, whose surplus credits make it the dearest busy node: PERFORMANCE.md §10; on demand with `--on-demand-burst`), with Cluster Autoscaler (`--max-nodes-total=9`). Managed Spot groups replace a node at risk of reclaim (Capacity Rebalance, which can't be turned off for them): run 49's 25 burst nodes shut down two at a time, and the stages now take that in their stride (revisions (dy), (dz)); self-managed groups or Karpenter could turn it off. One group a zone since 2026-11-18 (DESIGN.md revision (dv)): a group over three zones let Auto Scaling end busy nodes to rebalance its zones, without a drain | Karpenter or Auto Mode: more to set up, or a fee on every instance |
+| Nodes | Managed node groups: `base-a` and `base-b`, one on-demand `t4g.large` each, `duties`, one more for the stages' duties pods (since revision (dz)), `state`, one on-demand `m7g.xlarge` for Postgres, PgBouncer and Kafka alone (since revision (fk)), plus `burst-a`, `-b` and `-c`, one a zone, 0–6 Spot in all (five arm64 `.large` types, not `t4g`, whose surplus credits make it the dearest busy node: PERFORMANCE.md §10; on demand with `--on-demand-burst`), with Cluster Autoscaler (`--max-nodes-total=10`). Managed Spot groups replace a node at risk of reclaim (Capacity Rebalance, which can't be turned off for them): run 49's 25 burst nodes shut down two at a time, and the stages now take that in their stride (revisions (dy), (dz)); self-managed groups or Karpenter could turn it off. One group a zone since 2026-11-18 (DESIGN.md revision (dv)): a group over three zones let Auto Scaling end busy nodes to rebalance its zones, without a drain | Karpenter or Auto Mode: more to set up, or a fee on every instance |
 | Postgres | `postgres:18.4` StatefulSet on a kept 10 GiB gp3 volume, snapshotted at each `down` | RDS: restarts itself after 7 days stopped, and is a second start/stop. Aurora Serverless v2: dearer while running. |
 | Kafka | 1 KRaft broker (`apache/kafka:4.2.2`) on a kept 10 GiB volume, RF 1 | MSK: ≥ $100/month, or about $540/month serverless |
 | Iceberg catalog | JDBC on that Postgres (tested) | Glue: not supported by the code. S3 Tables, Polaris: untested, or one more pod |
@@ -254,9 +258,9 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
 | split | KEDA 1–3 | 1100m | 2 Gi | `<p>.landed`, 48 partitions, lag 5, 8 consumers of 8 items a pod |
 | convert | KEDA 1–3 | 400m | 1.25 Gi | `<p>.split`, 48 partitions, lag 5, results off |
 | transform | KEDA 1–4 | 1600m | 2 Gi | `<p>.records`, 48 partitions, concurrency 4, 2 consumers, lag 5, results off (below) |
-| kafka | 1 | 200m | 768 Mi | heap 384 MiB, as in the sandbox |
-| postgres | 1 | 500m | 2 Gi | `max_connections` 300; 2 GiB since 2026-11-17 (512 MiB ran out at 200 backends) |
-| pgbouncer | 1 | 100m | 128 Mi limit | beside Postgres; every client connects through it, transaction pooling, at most 220 server connections (DESIGN.md revision (ea)) |
+| kafka | 1 | 1 | 3 Gi | on the state node; heap 1 GiB; SASL_SSL only on the network (revision (fk); 200m, 768 MiB and a 384 MiB heap before) |
+| postgres | 1 | 1500m | 4 Gi | on the state node; `max_connections` 300, `shared_buffers` 1 GiB; TLS only (revision (fk); 500m, 2 GiB and 128 MiB of buffers before) |
+| pgbouncer | 2 | 500m each | 256 Mi limit | on the state node; every stage connects through one of them, over TLS, transaction pooling, at most 110 server connections each, 220 in all (DESIGN.md revisions (ea), (fk); one of 100m before) |
 | splitter-, convert-, transform-*-duties | 1 each; never KEDA | 250m each | 1.5, 1 and 2 Gi | `SDH_STAGE_DUTIES_ONLY=true`: the duties alone, no input; required onto the duties node (revision (dz)) |
 | KEDA (3 pods), Cluster Autoscaler, CoreDNS, CNI, EBS CSI, Pod Identity agent | — | ~0.5 | ~1.5 Gi | — |
 | otel-collector, prometheus | 1 each | 150m | 768 Mi | the stages' metrics for measure.sh (docs/PERFORMANCE.md §10); Prometheus on an emptyDir, so lost at `down` |
@@ -268,24 +272,31 @@ The heap is `MaxRAMPercentage=50` of the limit in every stage. Memory request = 
   `sdh-poc/duties`, in the second zone), so a Spot reclaim no longer moves them; the stage pods take them up only
   once the duties lease has been free 3 minutes (`SDH_STAGE_DUTIES_FALLBACKAFTER`), as when the duties node is
   lost and its group replaces it, and hand them back after 30. The Cluster Autoscaler's cap counts the duties
-  node (`--max-nodes-total=9`), and the on-demand vCPU quota must cover it (2 more vCPUs).
+  and state nodes (`--max-nodes-total=10`), and the on-demand vCPU quota must cover them (2 and 4 more vCPUs:
+  10 at rest, 22 with six burst nodes on demand).
 - Producer results are off at every stage, changed from "on at transform" on 2026-11-12: with a bucket intake no
   producer listens for them, and they would need a producer key pair and a results topic. Turn them on at the
   transform stage only if a test needs them (its README).
 - The landing pods have no readiness port (a bucket intake opens none), so `apply.sh` tells the active node from
   the standby by its `lease.acquired` audit event.
-- Postgres and Kafka run on the base node in us-east-2a, where their volumes are; PgBouncer beside them. Every
+- Postgres, PgBouncer and Kafka run on the state node (`aws_eks_node_group.state`, an on-demand `m7g.xlarge`
+  in us-east-2a, where the volumes are, tainted `sdh-poc/state` for them alone; DESIGN.md revision (fk)). On
+  the burstable base node they shared there before, they had 0.6 of a CPU between them once its credits ran out,
+  so a run partly measured the node; production gives its database and broker machines of their own. Every
   stage and its Iceberg catalog clients connect to `pgbouncer.sdh-infra.svc:5432`, never to Postgres itself
   (`check-config.sh` checks it); psql, `poc.sh` and the gold check (whose role `gold-check.sh` makes, so
   PgBouncer doesn't know it) go to Postgres directly. PgBouncer's users
   are the stages' roles, written by `poc.sh` (`setup_database`) to the secret `pgbouncer-users`.
 
 **Totals:**
-- At rest, about 10.8 GiB and 5.45 vCPU requested: more CPU than the two base nodes have (about 14 GiB and 3.86
-  vCPU allocatable), so one Spot burst node stays up while the stack is (about $0.02 an hour): transform's one
-  pod asks for 1.6. What runs only on the base nodes asks for about 2.45 vCPU (landing 2 × 0.75, Kafka, Postgres,
-  the system pods, the collector), so 1.4 is left there for split's and convert's resting pods (0.9 and 0.4);
-  landing asked for 0.25 a pod until 2026-11-16 (docs/PERFORMANCE.md §3.4).
+- At rest, on the base nodes, about 8 GiB and 4.65 vCPU requested: more CPU than they have (about 14 GiB and
+  3.86 vCPU allocatable), so one Spot burst node stays up while the stack is (about $0.02 an hour): transform's
+  one pod asks for 1.6. What runs only on the base nodes asks for about 1.65 vCPU (landing 2 × 0.75, the system
+  pods, the collector), so 2.2 is left there for split's and convert's resting pods (1.1 and 0.4); landing asked
+  for 0.25 a pod until 2026-11-16 (docs/PERFORMANCE.md §3.4), and Postgres, PgBouncer and Kafka were there too
+  until revision (fk).
+- The state node holds Postgres, PgBouncer and Kafka alone: about 7.4 GiB and 3.56 vCPU of its ~14.5 GiB and
+  ~3.9 vCPU (revision (fk)); the totals here leave it out.
 - The duties node holds the three duties pods alone: 4.5 GiB and 0.75 vCPU of its ~6.9 GiB and ~1.9 vCPU
   (revision (dz)); the totals here leave it out.
 - At the maximum, about 23.3 GiB and 13.4 vCPU, which needs up to five Spot burst nodes (six allowed): the
@@ -388,35 +399,60 @@ changes it lists are reviewed.
 - **Limits.** A base backup is one object per file (`aws s3 cp`), so one over 5 TB is out of reach, which
   the PoC's databases are far from.
 
-### 8.2 TLS for a pipeline deployed from the reference settings (2026-11-24, HIPAA.md §11.4 L5)
+### 8.2 Nothing in plaintext on the network (2026-11-24, HIPAA.md §11.4 L2 and L5)
 
-Built, not yet run on AWS:
-- **A CA of the PoC's own** (state directory, `pki/`) issues Postgres's and Kafka's certificates, by their
-  Services' names, made once by `poc.sh up` (secrets `postgres-tls`, `kafka-tls`).
-- **Postgres** takes TLS (TLS 1.2 or later). `pg_hba.conf` is a ConfigMap: the harness pipeline's database,
-  `sdh_harness`, and its roles over TLS only; everything else as before, so the performance pipeline and
-  PgBouncer stay in plaintext (PgBouncer is told so: `server_tls_sslmode = disable`).
-- **Kafka** has a second listener, SASL_SSL on 9094, with SCRAM-SHA-512, and the standard authorizer with
-  `allow.everyone.if.no.acl.found=false`. The plaintext listener's principal is a super user, as the controller,
-  KEDA, `poc.sh` and the performance pipeline need; the SCRAM users get only the rights
-  `deploy/reference/kafka-acls.sh` grants.
+First for the harness's pipeline (DESIGN.md revision (fi); built, not yet run), then for every pipeline
+(revision (fk)), so a performance run measures what a production deployment does. The performance pipeline ran
+this way on AWS on 2026-11-24 (runs P and Q, PERFORMANCE.md §10), after three fixes found on the way up:
+- the Kafka image's start script (`/etc/kafka/docker/configure`) ends with "unbound variable" unless
+  `KAFKA_OPTS` is set when a SASL listener is advertised: it is now set (the listener's own login is in
+  `listener.name.sasl_ssl.scram-sha-512.sasl.jaas.config`);
+- a StatefulSet doesn't replace a pod that is crash-looping when its spec is fixed: `kafka-0` had to be deleted
+  by hand once;
+- PgBouncer's rollout added a third pod, for which the state node had no CPU: it now rolls one at a time with
+  no extra pod (`maxSurge: 0`), the other serving meanwhile.
+
+What it is:
+- **A CA of the PoC's own** (state directory, `pki/`) issues Postgres's, PgBouncer's and Kafka's certificates, by
+  their Services' names, made once by `poc.sh up` (secrets `postgres-tls`, `pgbouncer-tls`, `kafka-tls`).
+- **Postgres** takes TLS only (TLS 1.2 or later): `pg_hba.conf`, a ConfigMap, has `hostssl` lines and a
+  `hostnossl ... reject`, and the harness's database, `sdh_harness`, takes its own roles only. Only psql and
+  `pg_basebackup` in the pod use the socket.
+- **PgBouncer** (two of them since revision (fk)) takes TLS only from the stages (`client_tls_sslmode =
+  require`; the stages check its name, `verify-full`) and verifies Postgres's (`server_tls_sslmode =
+  verify-full`). This is L2 on the PoC; the Testcontainers harness doesn't try it yet.
+- **Kafka** has no plaintext listener on the network: clients use SASL_SSL on 9094, with SCRAM-SHA-512, and the
+  standard authorizer with `allow.everyone.if.no.acl.found=false`. The controller, the broker's own connections
+  and the admin tools that `poc.sh` and `load-test.sh` run in its pod use plaintext listeners on 127.0.0.1, which
+  nothing outside the pod can reach; their principal, `User:ANONYMOUS`, is the only super user. The Service and
+  the network policies have 9094 only.
+- **Every Kafka client has a user of its own** (`poc.sh` `pipeline_kafka`, at `up`): each stage of each pipeline
+  (`landing-<p>`, `splitter-<p>`, `convert-<p>`, `transform-<p>`) with the rights
+  `deploy/reference/kafka-acls.sh` grants; `keda`, which may only describe the stages' inputs and groups, to
+  read their lag (a `TriggerAuthentication`, `keda-kafka`, beside each `ScaledObject`); and
+  `gold-check-<p>`, which may only read `<p>.fhir`. Each password is in the state directory, given to its pod in
+  a secret (`SDH_KAFKA_JAAS`).
+- **The performance pipelines run the hipaa profile**, with nothing waived (`ReferenceConfigurationTest` checks
+  all four stages' settings): Kafka over SASL_SSL, Postgres through PgBouncer with `verify-full`, both servers'
+  CA at `/run/secrets`. The gold check goes to Postgres itself with `verify-full`, and to Kafka as its user.
 - **The harness pipeline** (`poc.sh harness-up`, `k8s/harness/apply.sh`) is deployed from
-  `deploy/reference/*-application.yml`, with the hipaa profile on and nothing waived, straight to Postgres with
-  `verify-full` (not through PgBouncer: HIPAA.md §11.4 L2), with its database and roles from
-  `deploy/reference/postgres.sql`, and a SCRAM user per stage. Changed from the reference files, and only: the
+  `deploy/reference/*-application.yml`, straight to Postgres with `verify-full` (not through PgBouncer), with its
+  database and roles from `deploy/reference/postgres.sql`. Changed from the reference files, and only: the
   landing source (an HTTP push intake, for the harness), the key aliases (`alias/sdh-poc-harness-...`), and the
   convert stage's next registry (there is no transform stage). `AwsTarget` cuts the database off by stopping
-  Postgres, since the harness no longer goes through PgBouncer.
-- **What the plaintext listener means:** its principal is a super user, so any client that reaches port 9092 can
-  also read and write the harness's topics and change the ACLs; the SCRAM users' ACLs bind only 9094. Fine for
-  synthetic data, not a layout for PHI (HIPAA.md §8.5; HIPAA-OPERATIONS.md §2.6, "Securing the broker").
+  Postgres, since the harness doesn't go through PgBouncer.
+- **Runs before and after aren't comparable** (PERFORMANCE.md §10): TLS, SCRAM logins, two PgBouncers and the
+  state node all change at once. The new baselines are runs P (35/s: 32.5 documents a second, p99 124 s) and Q
+  (100/s: 62.6 documents a second, $12 a million).
+- **What's left in plaintext:** the stages' metrics to the collector beside them (no PHI; the profile allows it),
+  and inside the Kafka pod, on its loopback.
 
 ## 9. If the data were real PHI
 
 This configuration is for synthetic data only. Real PHI would need:
 - a BAA;
 - private subnets with a NAT gateway or interface endpoints (about $35–100/month);
-- Kafka TLS and ACLs, and Postgres TLS, for every pipeline (built for the harness's: §8.2);
+- Kafka TLS and ACLs, and Postgres TLS, for every pipeline (built since revision (fk), run on AWS for the performance pipeline: §8.2);
 - CloudTrail data events.
 
 The full list, with the HIPAA provisions behind each item, is [HIPAA.md](HIPAA.md) §8.5; what the product itself still lacks is §8.1.

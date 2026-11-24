@@ -43,7 +43,8 @@ features built (DESIGN.md revision (eg)); and a customer mapping added (§10), w
   - Iceberg snapshots are not a backup: they expire after 24 hours, in the same bucket under the same keys (§3.2).
   - `admin restore` wrote plaintext; it now seals by default (§3.1).
   - Every shipped manifest runs `compliance.profile: none`, which is right for synthetic data but no starting point
-    for a customer (§8.1 item 13).
+    for a customer (§8.1 item 13). Since 2026-11-24 `deploy/reference/` and the AWS PoC's pipelines run `hipaa`
+    with nothing waived (DESIGN.md revision (fk)); the sandbox's still run `none`.
   - The mapping carried C-CDA `confidentialityCode` into `Composition.confidentiality` only, and set no
     `meta.security`, so readers couldn't filter on it (§8.1 item 10). Built 2026-11-24 (P9).
 - **Built** (§8.1 items 1, 2 and 4, and restore):
@@ -506,10 +507,11 @@ The outstanding work is restated, with what's decided since, in §11.
      the registries and the audit journal share) and the Iceberg JDBC catalog (with `jdbc.sslmode` and
      `jdbc.sslrootcert`) connect with `verify-full`. A certificate from another CA, and a connection without
      TLS, are refused.
-   - **Still untested:** mTLS to Kafka (a client certificate in place of SCRAM), AWS MSK's IAM login, and TLS
-     through PgBouncer. The sandbox and the AWS PoC still run both in plaintext (§8.5).
+   - **Still untested:** AWS MSK's IAM login, and TLS through PgBouncer, which the AWS PoC runs since revision
+     (fk) but hasn't yet run on AWS (§11.4 L2). The sandbox still runs Kafka and Postgres in plaintext; the AWS PoC
+     runs nothing in plaintext on the network (§8.5).
    - **The ACLs bind only the principals they name.** A broker that keeps a plaintext listener whose principal is a
-     super user (as the AWS PoC's does, for its performance pipeline: §8.5) lets anyone who reaches that listener
+     super user (as the AWS PoC's did, for its performance pipeline, until revision (fk): §8.5) lets anyone who reaches that listener
      read and write every pipeline's topics and change the ACLs; the profile can't see the broker's listeners.
      What the buyer must do to secure the broker is HIPAA-OPERATIONS.md §2.6, "Securing the broker".
 8. **Re-keying existing data:** built 2026-11-21 (P3, CONTROL-API-DESIGN.md §15.7).
@@ -673,13 +675,15 @@ What the AWS PoC would need for real PHI, as listed in AWS-POC §9. These are op
 the product must prove its capabilities:
 - a BAA;
 - private subnets;
-- Kafka TLS and ACLs, and Postgres TLS: built for a pipeline deployed from `deploy/reference/` (the harness's,
-  §11.4 L5), not yet for the performance pipeline, which keeps its plaintext paths so its runs stay comparable.
-  The broker's plaintext listener is a super user (`User:ANONYMOUS` in `super.users`), as its controller, KEDA
-  and the performance pipeline need, so anything that reaches port 9092 (the namespaces labelled as infra
-  clients) can read and write the harness's topics too, and change any ACL: the SCRAM users' ACLs bind only
-  clients on 9094. Acceptable for synthetic data; real PHI needs the listener gone (HIPAA-OPERATIONS.md §2.6,
-  "Securing the broker");
+- Kafka TLS and ACLs, and Postgres TLS: built for every pipeline (the harness's, §11.4 L5, then the performance
+  pipelines, DESIGN.md revision (fk)); the performance pipeline ran so on AWS on 2026-11-24 (runs P and Q), the
+  harness's not yet. Nothing reaches Kafka or Postgres in plaintext over
+  the network: every client (each stage, KEDA, the gold check) logs in to Kafka over SASL_SSL as a user of its
+  own, with only the rights `kafka-acls.sh` grants, and to Postgres, through PgBouncer or directly, with
+  `verify-full`. What's left short of HIPAA-OPERATIONS.md §2.6, "Securing the broker": the controller, the
+  broker's own connections and the admin tools in its pod use plaintext listeners on the pod's loopback, whose
+  principal, `User:ANONYMOUS`, is the only super user. Only someone who can run commands in the Kafka pod (a
+  cluster administrator) reaches them. Production would give those listeners TLS and principals of their own;
 - CloudTrail data events;
 - a durable audit sink: the journal now keeps every event in Postgres, which survives `down` on its EBS volume, but
   the collector's logs pipeline still exports to `nop` (`deploy/aws/k8s/infra/telemetry.yaml`), so nothing
@@ -850,17 +854,17 @@ only once the user has approved its cost, with `poc.sh up --long-test "<reason>"
 | Step | For | What |
 |---|---|---|
 | L1 | P11 | Kafka with client certificates (mTLS), in the Testcontainers harness beside SASL_SSL. **Done 2026-11-24:** every scenario passes with either login (DESIGN.md revision (fh)) |
-| L2 | P11 | Postgres TLS through PgBouncer, in the Testcontainers harness. This waits for the further performance review that P11 asks for (PERFORMANCE.md §10) |
+| L2 | P11 | Postgres TLS through PgBouncer, in the Testcontainers harness. **Built on the AWS PoC instead, 2026-11-24, and run there (A2)** (DESIGN.md revision (fk), AWS-POC.md §8.2): every stage reaches PgBouncer with `verify-full`, and PgBouncer reaches Postgres with `verify-full`, which takes nothing else. The Testcontainers harness doesn't try it yet |
 | L3 | P7 | The `restore` scenario at the sandbox level: `SandboxTarget` backs up and restores its Postgres, and its store keeps versions |
 | L4 | P7, P12 | The AWS PoC made ready: WAL archiving to S3 for its Postgres (or pgBackRest) with a recovery target time; versioning on its buckets, with a lifecycle rule for noncurrent versions; `AwsTarget` backs up and restores the database, so the `restore` scenario runs there. **Built 2026-11-24, not yet applied or run on AWS** (DESIGN.md revision (fi), AWS-POC.md §8.1): stock Postgres archives each WAL segment to an outbox on its volume, and an AWS CLI sidecar sends it to the backup bucket; a base backup at every `up`; `poc.sh db-restore --to <time>` restores to a point; versions kept 7 days |
-| L5 | P12 | The PoC able to deploy from `deploy/reference/`: TLS everywhere, and a database for each pipeline. **Built 2026-11-24, not yet run on AWS** (DESIGN.md revision (fi), AWS-POC.md §8.2): the harness pipeline is deployed from the reference files, with three named changes; Postgres takes TLS, and the harness's database (`postgres.sql`) only over TLS; Kafka has a second listener, SASL_SSL with SCRAM, and the standard authorizer, with `kafka-acls.sh`'s rights. The performance pipeline keeps its plaintext paths |
+| L5 | P12 | The PoC able to deploy from `deploy/reference/`: TLS everywhere, and a database for each pipeline. **Built 2026-11-24, not yet run on AWS** (DESIGN.md revision (fi), AWS-POC.md §8.2): the harness pipeline is deployed from the reference files, with three named changes; Postgres takes TLS, and the harness's database (`postgres.sql`) only over TLS; Kafka has a second listener, SASL_SSL with SCRAM, and the standard authorizer, with `kafka-acls.sh`'s rights. Since revision (fk) the performance pipelines too: the hipaa profile, Kafka over SASL_SSL only (its plaintext listeners on the pod's loopback), Postgres TLS only |
 
 **The session: one AWS PoC session**
 
 | Step | For | What | Proves |
 |---|---|---|---|
 | A1 | P12 | Deploy a pipeline from `deploy/reference/` (TLS everywhere, its own database), and run all the harness scenarios on it (`scripts/harness.sh aws`), `restore` included | §8.1 items 7, 9 and 13, end to end |
-| A2 | P11 | Through PgBouncer with TLS, if L2 passed | The reference settings with a pooler |
+| A2 | P11 | Through PgBouncer with TLS (the performance pipelines since revision (fk)): the new baselines at 35/s and 100/s (PERFORMANCE.md §10). **Done 2026-11-24, runs P and Q:** exactly once, 32.5 and 62.6 documents a second, no cost to throughput or latency that the runs could see | The reference settings with a pooler, and what TLS everywhere costs |
 | A3 | P7 | **The drill at size:** load the 90k documents of the performance runs; take the restore point mid-load; let maintenance, a purge and more landing run past it; restore the database to that point; check, repair and resume each stage; every item exactly once in gold, the purged item still purged. Time each step of HIPAA-OPERATIONS §7 | The RTO and RPO of DESIGN.md §18.8, for D8 |
 | A4 | P7 | Objects deleted from a bucket by hand while the database is whole, then repaired | The store-damaged row of §18.8 |
 

@@ -9,7 +9,10 @@
 #   - the bucket intake (s3://sdh-poc-intake-<account>/<pipeline>/) in place of HTTP push;
 #   - the landing node as an active pod and a hot standby;
 #   - KEDA maxima of 2, 3 and 4 pods, the scaled stages allowed onto the Spot burst nodes;
-#   - beside each scaled stage, its duties pod (<stage>-duties, duties-patch.yaml) on the on-demand duties node.
+#   - beside each scaled stage, its duties pod (<stage>-duties, duties-patch.yaml) on the on-demand duties node;
+#   - the hipaa profile on, as deploy/reference/ sets it (DESIGN.md revision (fk)): Kafka over SASL_SSL on 9094 with
+#     a SCRAM login per stage (made by poc.sh, pipeline_kafka; SDH_KAFKA_JAAS in the stage's env secret), Postgres
+#     through PgBouncer with verify-full, both servers' CA ($SDH_POC_STATE/pki/ca.crt) in the stage's keys secret.
 #
 # Needs: $SDH_POC_STATE/images.env (deploy/aws/build-images.sh), the transformer's US Core set
 # (healthcare-data-transformer/transform-stage/target/test-sets/us-core.tar.gz, made by its Maven build), and
@@ -63,7 +66,7 @@ RECONCILE_LOOKBACK="${SDH_RECONCILE_LOOKBACK:-}" RETENTION_INTERVAL="${SDH_STAGE
 for d in "$QUEUE_RETENTION" "$RECONCILE_LOOKBACK" "$RETENTION_INTERVAL" "${RETENTION_AFTER:-1h}"; do
   [[ -z "$d" || "$d" =~ ^[1-9][0-9]*[smhd]$ ]] || { echo "apply.sh: a retention duration is <n><s|m|h|d>: $d" >&2; exit 2; }
 done
-export KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9092"
+export KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9094"   # SASL_SSL, the only listener on the network
 export INTAKE_BUCKET="sdh-poc-intake-$ACCOUNT" BRONZE_BUCKET="sdh-poc-bronze-$ACCOUNT"
 export SILVER_BUCKET="sdh-poc-silver-$ACCOUNT" GOLD_BUCKET="sdh-poc-gold-$ACCOUNT"
 
@@ -92,6 +95,13 @@ ec_key() {
 }
 
 fingerprint() { openssl pkey -pubin -in "$1" -outform DER | sha256sum | cut -d' ' -f1; }
+
+# kafka_jaas <user>: a Kafka user's SCRAM login, for SDH_KAFKA_JAAS, with its password from the state directory
+# (the user is made by poc.sh pipeline_kafka, or harness_kafka, from the same file).
+kafka_jaas() {
+  printf 'org.apache.kafka.common.security.scram.ScramLoginModule required username="%s" password="%s";' \
+    "$1" "$(secret "kafka-$1")"
+}
 
 # signing_public <pipeline> <stage>: the stage's KMS signing key's public half, as PEM, exported once. The next
 # stage verifies its messages with it (sdh.crypto.keys.landing-signer).
@@ -125,10 +135,10 @@ queue_retention() {
   esac
   for topic in "$1.split" "$1.records"; do
     if [[ -n "$ms" ]]; then
-      kc -n sdh-infra exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter \
+      kc -n sdh-infra exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-server 127.0.0.1:9092 --alter \
         --entity-type topics --entity-name "$topic" --add-config "retention.ms=$ms" >/dev/null
     else
-      kc -n sdh-infra exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter \
+      kc -n sdh-infra exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-server 127.0.0.1:9092 --alter \
         --entity-type topics --entity-name "$topic" --delete-config retention.ms >/dev/null 2>&1 || true
     fi
   done
@@ -269,27 +279,35 @@ deploy_pipeline() {
   fi
   queue_retention "$p"
 
-  # Secrets: keys and database passwords only. AWS credentials come from Pod Identity.
-  apply_secret "$n" landing-keys --from-file=splitter-inbox.pem="$k-inbox-public.pem"
-  apply_secret "$n" landing-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-landing-$p")"
+  # Secrets: keys, the servers' CA, and passwords and Kafka logins only. AWS credentials come from Pod Identity.
+  local ca="$STATE/pki/ca.crt"
+  [[ -s "$ca" ]] || die "no CA at $ca: poc.sh up makes it (infra_tls)"
+  apply_secret "$n" landing-keys --from-file=splitter-inbox.pem="$k-inbox-public.pem" \
+    --from-file=kafka-ca.crt="$ca" --from-file=postgres-ca.crt="$ca"
+  apply_secret "$n" landing-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-landing-$p")" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "landing-$p")"
   apply_config "$n" landing-config --from-file=application.yml="$work/landing-application.yml"
   apply_secret "$n" splitter-keys --from-file=inbox.pem="$k-inbox.pem" \
     --from-file=inbox-public.pem="$k-inbox-public.pem" --from-file=recipient.pem="$k-convert-inbox-public.pem" \
-    --from-file=landing-signer.pem="$landing_signer"
+    --from-file=landing-signer.pem="$landing_signer" --from-file=kafka-ca.crt="$ca" --from-file=postgres-ca.crt="$ca"
   apply_secret "$n" splitter-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-splitter-$p")" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "splitter-$p")" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "inbox-passphrase-$p")"
   apply_config "$n" splitter-config --from-file=application.yml="$work/splitter-application.yml"
   apply_secret "$n" convert-keys --from-file=inbox.pem="$k-convert-inbox.pem" \
     --from-file=inbox-public.pem="$k-convert-inbox-public.pem" \
-    --from-file=recipient.pem="$k-fhir-recipient-public.pem" --from-file=split-signer.pem="$split_signer"
+    --from-file=recipient.pem="$k-fhir-recipient-public.pem" --from-file=split-signer.pem="$split_signer" \
+    --from-file=kafka-ca.crt="$ca" --from-file=postgres-ca.crt="$ca"
   apply_secret "$n" convert-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-convert-$p")" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "convert-$p")" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "convert-inbox-passphrase-$p")"
   apply_config "$n" convert-config --from-file=application.yml="$work/convert-application.yml"
   local t="transform-$p"
   apply_secret sdh-fhir "$t-keys" --from-file=inbox.pem="$k-fhir-recipient.pem" \
     --from-file=inbox-public.pem="$k-fhir-recipient-public.pem" --from-file=recipient.pem="$k-consumer-public.pem" \
-    --from-file=convert-signer.pem="$convert_signer"
+    --from-file=convert-signer.pem="$convert_signer" --from-file=kafka-ca.crt="$ca" --from-file=postgres-ca.crt="$ca"
   apply_secret sdh-fhir "$t-env" --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-fhir-$p")" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "transform-$p")" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "fhir-recipient-passphrase-$p")"
   apply_config sdh-fhir "$t-config" --from-file=application.yml="$work/transform-application.yml"
   # The set as binary data: a ConfigMap holds no folders.
@@ -376,6 +394,13 @@ deploy_pipeline() {
   done
   say "  duties pods running on the duties node, one a stage"
 
+  # KEDA's Kafka login (poc.sh pipeline_kafka: the user keda, Describe only), for the TriggerAuthentication in
+  # scaling.yaml, in each namespace with a ScaledObject.
+  local keda_ns
+  for keda_ns in "$n" sdh-fhir; do
+    apply_secret "$keda_ns" keda-kafka --from-literal=sasl=scram_sha512 --from-literal=username=keda \
+      --from-literal=password="$(secret kafka-keda)" --from-literal=tls=enable --from-file=ca="$ca"
+  done
   envsubst '$PIPELINE $K8S_NS $KAFKA_BROKERS' < "$HERE/scaling.yaml" | kc apply -f - >/dev/null
   local scaled
   for scaled in "$n splitter" "$n convert" "sdh-fhir $t"; do

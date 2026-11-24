@@ -1467,6 +1467,46 @@ What it showed, beyond §2's predictions:
     once every item was in gold (its new first pass: 0 recovered). Nothing lost or supplanted; every run exactly
     once, 0 left behind. Fixed since (DESIGN.md revision (eu)): each item is looked up again just before it is
     recovered, and left if it was started meanwhile, as is each item left part way; not yet run on AWS.
+- **TLS everywhere, and a node for the shared services (DESIGN.md revision (fk), 2026-11-24, run on AWS the same
+  day as runs P and Q; asked for by the user, so that the runs measure what production does).** The performance pipelines now run
+  the hipaa profile: Kafka over SASL_SSL with a SCRAM user per stage, Postgres through PgBouncer with TLS on both
+  sides, nothing in plaintext on the network (AWS-POC.md §8.2). Postgres (1.5 CPUs, 4 GiB, `shared_buffers` 1
+  GiB), two PgBouncers (0.5 CPU each, the same 220 server connections between them) and Kafka (1 CPU, 3 GiB, a 1
+  GiB heap) moved off the burstable base node onto an on-demand `m7g.xlarge` of their own (about $0.16 an hour,
+  some $0.75 a million documents at 60 a second, about 6% of runs M and O's $13). **Every result above is
+  before it,** so none is a baseline for what follows: TLS, the logins, two PgBouncers and the node change at
+  once. **The new baselines, runs P and Q** (images of the working tree at revision (fk), with P9, P10 and DS4P;
+  run 49's maxima, 6/12/18 pods, set for the runs and put back after; burst m7gd.large Spot, 96 and 100%; a reset
+  before each; a graceful landing failover at 30%; no gold check). The test set now has 32 documents, so 700 and
+  1,000 copies are 22,400 and 32,000 objects (21,000 and 30,000 before):
+
+  | | P: 35 a second, 22,400 | runs 44, 48 (21,000) | Q: 100 a second, 32,000 | M, O (30,000) |
+  |---|---|---|---|---|
+  | **End to end, documents a second** | **32.5** | 33.0 | **62.6** | 59.4, 57.6 |
+  | Landed → gold, p50 / p99 (s) | 25 / **124** | p99 131–168 | 95 / 332 | 124–138 / 250–257 |
+  | Landed → split ended, p99 (s) | 60 | | 111 | 103–118 |
+  | Split ended → convert's first record, p99 (s) | 60 | | 248 | |
+  | Pods at most (split / convert / transform); nodes | 6 / 12 / 18; 34 | | 6 / 12 / 18; 30 | |
+  | Postgres cores, avg / max (request 1.5) | 0.33 / 0.56 | | 0.48 / 1.34 | 0.4 / 1.3 (of 0.5) |
+  | Kafka cores, avg / max (request 1) | 0.38 / 0.71 | | 0.47 / 0.83 | |
+  | PgBouncers' cores, at their peak (0.5 each) | 0.15 | | 0.39 | |
+  | Cost, $ a million documents (on-demand prices) | 24 | | 12 | 13 |
+
+  - **TLS everywhere costs no throughput or latency that the runs can see:** P is within the spread of runs 44
+    and 48, with a lower p99; Q is above M and O. Every run exactly once, 0 left behind, no container restarted;
+    landing's failover took 2 to 3 s.
+  - **The shared services are not the limit.** Postgres peaked at 1.34 cores in Q (up to 1.45 on a 0.5 request
+    in runs 60 to 63, on the burstable base node), Kafka at 0.83, the two PgBouncers at 0.39 between them; the
+    state node was 67% busy at its peak. Q's pace is **convert**: split ended each item as landing landed it
+    (both by 353 s), and its records waited up to 248 s for convert, at its 12 pods.
+  - Three start-up faults were found and fixed in the runs (AWS-POC.md §8.2): the Kafka image's start script
+    needs `KAFKA_OPTS` set with a SASL listener; PgBouncer's rollout needs no extra pod (the state node has no
+    room for a third); and a crash-looping `kafka-0` must be deleted for a fixed StatefulSet to replace it.
+
+  **How to read the shared services:** the stages' per-pod rates,
+  CPU a document and $ a million documents carry over to a production deployment; Postgres, PgBouncer and Kafka
+  are one node's worth, not a production cluster's, so where they are the limit the result says what one such
+  node manages, not what the product can do.
 
 ## 11. Order of work
 

@@ -31,9 +31,10 @@ import org.springframework.core.io.FileSystemResource;
  * 13): under the {@code hipaa} profile, as each node applies it at startup
  * (its settings read from the environment by {@link
  * ComplianceConfiguration}, its JVM options those its image starts with),
- * nothing is refused and nothing waived. The AWS PoC's settings, which
- * turn the profile off, are refused when it is on, so the check isn't
- * empty.
+ * nothing is refused and nothing waived. So too the AWS PoC's settings,
+ * which turn the profile on since its DESIGN.md revision (fk), so that its
+ * runs measure what a production deployment does. The sandbox's settings,
+ * which turn it off, are refused when it is on, so the check isn't empty.
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -80,27 +81,71 @@ class ReferenceConfigurationTest
     }
 
     /**
-     * The AWS PoC's settings, with the profile turned on, are refused: its
+     * Each stage's AWS PoC settings, as apply.sh fills them in, pass the
+     * profile, with its image's JVM options: Kafka over SASL_SSL, Postgres
+     * with verify-full, nothing waived.
+     *
+     * @param stage the settings' file, before {@code -application.yml}
+     * @param dist  the stage's distribution, from the repository's root
+     * @throws IOException if a file can't be read
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "landing, landing-connector/src/dist",
+        "splitter, file-connector/src/dist",
+        "convert, convert-stage/src/dist",
+        "transform, ../healthcare-data-transformer/transform-stage/src/dist"})
+    void theProfileRefusesNothingInThePocsSettings(String stage, String dist)
+            throws IOException
+    {
+        Path options = ROOT.resolve(dist);
+        assumeTrue(Files.isDirectory(options), "the transformer's checkout,"
+                + " beside this one, for its image's JVM options");
+        ComplianceRules.Outcome outcome = ComplianceRules.evaluate(
+                settings(filled("deploy/aws/k8s/pipeline/" + stage
+                        + "-application.yml"), Map.of()),
+                jvmOptions(options));
+
+        assertThat(outcome.profile()).isEqualTo(ComplianceProfile.HIPAA);
+        assertThat(outcome.refused()).as("refused").isEmpty();
+        assertThat(outcome.waived()).as("waived").isEmpty();
+    }
+
+    /**
+     * The sandbox's settings, with the profile turned on, are refused: its
      * Kafka and Postgres are plaintext.
      *
      * @throws IOException if a file can't be read
      */
     @Test
-    void thePocsSettingsAreRefusedWithTheProfileOn() throws IOException
+    void theSandboxsSettingsAreRefusedWithTheProfileOn() throws IOException
     {
-        // Its ${...} are filled in by apply.sh before it is YAML.
-        String filled = Files.readString(ROOT.resolve(
-                "deploy/aws/k8s/pipeline/splitter-application.yml"))
-                .replaceAll("\\$\\{([A-Z][A-Z0-9_]*)\\}", "x");
-        Path poc = Files.writeString(Files.createTempFile("poc", ".yml"),
-                filled);
         ComplianceRules.Outcome outcome = ComplianceRules.evaluate(
-                settings(poc, Map.of(ComplianceRules.PROFILE, "hipaa")),
+                settings(filled("deploy/sandbox/pipeline/"
+                        + "splitter-application.yml"),
+                        Map.of(ComplianceRules.PROFILE, "hipaa")),
                 jvmOptions(ROOT.resolve("file-connector/src/dist")));
 
         assertThat(outcome.refused()).extracting(ComplianceRules.Finding::check)
                 .contains(ComplianceCheck.TRANSPORT_BROKER,
                         ComplianceCheck.TRANSPORT_DATABASE);
+    }
+
+    /**
+     * A deployment script's settings file, with its {@code ${...}} in
+     * capitals, which the script fills in before it is YAML, set to
+     * {@code x}.
+     *
+     * @param file the file, from the repository's root
+     * @return a temporary copy, filled in
+     * @throws IOException if the file can't be read or the copy written
+     */
+    static Path filled(String file) throws IOException
+    {
+        String text = Files.readString(ROOT.resolve(file))
+                .replaceAll("\\$\\{([A-Z][A-Z0-9_]*)\\}", "x");
+        return Files.writeString(Files.createTempFile("settings", ".yml"),
+                text);
     }
 
     /**

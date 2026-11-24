@@ -68,10 +68,10 @@ spec:
 # Postgres outright), and lifts its hold at 20%; the shipper warns when anything waits over 10 minutes; and
 # poc.sh up refuses to start without the backup role, the likeliest cause (docs/AWS-POC.md §8.1).
 #
-# TLS (HIPAA.md §11.4, L5): the server certificate is in the secret postgres-tls, which poc.sh issues from its CA
-# (state directory, pki/). pg_hba.conf is the ConfigMap postgres-hba: the reference pipeline's database (the
-# harness's, sdh_harness, deploy/reference/postgres.sql) and its roles over TLS only; the performance pipeline
-# and PgBouncer as before, in plaintext, so their runs stay comparable with the earlier ones.
+# TLS only (HIPAA.md §11.4, L5; DESIGN.md revision (fk)): the server certificate is in the secret postgres-tls,
+# which poc.sh issues from its CA (state directory, pki/). pg_hba.conf is the ConfigMap postgres-hba: every
+# connection over the network is TLS, and the harness's database (sdh_harness, deploy/reference/postgres.sql)
+# takes its own roles only. Only psql and pg_basebackup in the pod use the socket.
 apiVersion: v1
 kind: Service
 metadata: { name: postgres, namespace: sdh-infra }
@@ -195,11 +195,10 @@ data:
   pg_hba.conf: |
     local     all          all                         trust
     local     replication  all                         trust
-    hostnossl sdh_harness  all              all        reject
-    hostnossl all          +catalog_harness all        reject
     hostssl   sdh_harness  +catalog_harness all        scram-sha-256
     hostssl   sdh_harness  all              all        reject
-    host      all          all              all        scram-sha-256
+    hostssl   all          all              all        scram-sha-256
+    hostnossl all          all              all        reject
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -211,7 +210,9 @@ spec:
   template:
     metadata: { labels: { app: postgres } }
     spec:
-      nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      # The state node (terraform/compute: state): on demand, not burstable, tainted for these alone.
+      nodeSelector: { "sdh-poc/pool": state, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      tolerations: [{ key: sdh-poc/state, operator: Equal, value: "true", effect: NoSchedule }]
       terminationGracePeriodSeconds: 60   # a clean shutdown checkpoints, so the next start skips recovery
       serviceAccountName: postgres-backup  # its role reaches the backup bucket only (terraform/persistent: backup)
       securityContext:
@@ -229,10 +230,11 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom: { secretKeyRef: { name: postgres, key: password } }
           # 300 connections since 2026-11-17: with the stages scaled out (splitter 6, convert 12, transform 15) they
-          # used 188 of 200 (docs/PERFORMANCE.md §10); an idle backend is a few MB, within the 2 GiB below. Since
-          # revision (ea) the stages come through PgBouncer (below), which keeps at most 220 of them.
-          # The archive and TLS settings: see above.
-          args: [-c, max_connections=300, -c, shared_buffers=128MB,
+          # used 188 of 200 (docs/PERFORMANCE.md §10); an idle backend is a few MB. Since revision (ea) the stages
+          # come through PgBouncer (below), which keeps at most 220 of them. shared_buffers 1 GB (128 MB before
+          # revision (fk)), a quarter of the memory, as a production server would be set, with the rest left to the
+          # page cache (effective_cache_size). The archive and TLS settings: see above.
+          args: [-c, max_connections=300, -c, shared_buffers=1GB, -c, effective_cache_size=2560MB,
                  -c, archive_mode=on, -c, archive_timeout=60,
                  -c, "archive_command=/etc/postgresql/archive/archive.sh %p %f",
                  -c, ssl=on, -c, ssl_cert_file=/etc/postgresql/tls/tls.crt, -c, ssl_key_file=/etc/postgresql/tls/tls.key,
@@ -242,11 +244,12 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
-          # 2 GiB and half a CPU since 2026-11-17 (docs/PERFORMANCE.md §10, the first steady feed): with the
-          # stages scaled out, ~35 pods' pools come near max_connections, and 200 backends don't fit in 512 MiB.
+          # 1.5 CPUs and 4 GiB since revision (fk), on the state node, so the database isn't what limits a run:
+          # TLS costs it CPU, and production would give it a node of its own. (Half a CPU and 2 GiB from 2026-11-17,
+          # on a burstable base node: docs/PERFORMANCE.md §10.)
           resources:
-            requests: { cpu: 500m, memory: 2Gi }
-            limits: { memory: 2Gi }
+            requests: { cpu: 1500m, memory: 4Gi }
+            limits: { memory: 4Gi }
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql }
             - { name: run, mountPath: /var/run/postgresql }
@@ -316,7 +319,13 @@ spec:
 #
 # A pool per role, 40 each and 10 more when they wait: a transform pod's commit turn holds a connection while it
 # waits for the table's lock (QueuedCommits), two a pod at the most, so 18 pods' turns fit with room for their
-# claims. max_db_connections keeps the whole under max_connections, with room for psql and poc.sh.
+# claims. max_db_connections keeps the whole under max_connections, with room for psql and poc.sh. Since revision
+# (fk) there are two PgBouncers, each with half of each (20 and 5 a role, 110 in all), so the totals are as
+# before: PgBouncer is single-threaded, and TLS on both sides doubles its work, so one core would be the limit.
+#
+# TLS both ways since revision (fk): clients must use it (client_tls_sslmode = require; the stages verify the
+# certificate, verify-full), and PgBouncer verifies Postgres's (server_tls_sslmode = verify-full). The certificate
+# and the CA are in the secret pgbouncer-tls, which poc.sh issues.
 # The users and their passwords (userlist.txt) are in the secret pgbouncer-users, which poc.sh makes from its
 # state directory (setup_database).
 apiVersion: v1
@@ -335,14 +344,19 @@ data:
     auth_file = /etc/pgbouncer/users/userlist.txt
     pool_mode = transaction
     max_client_conn = 2000
-    default_pool_size = 40
-    reserve_pool_size = 10
+    default_pool_size = 20
+    reserve_pool_size = 5
     reserve_pool_timeout = 2
-    max_db_connections = 220
+    max_db_connections = 110
     max_prepared_statements = 200
     ignore_startup_parameters = extra_float_digits
-    ; Plaintext to Postgres, as before Postgres took TLS (L5), so the performance runs stay comparable.
-    server_tls_sslmode = disable
+    client_tls_sslmode = require
+    client_tls_cert_file = /etc/pgbouncer/tls/tls.crt
+    client_tls_key_file = /etc/pgbouncer/tls/tls.key
+    client_tls_protocols = tlsv1.2,tlsv1.3
+    server_tls_sslmode = verify-full
+    server_tls_ca_file = /etc/pgbouncer/tls/ca.crt
+    server_tls_protocols = tlsv1.2,tlsv1.3
     server_idle_timeout = 120
     query_wait_timeout = 120
     log_connections = 0
@@ -359,7 +373,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: pgbouncer, namespace: sdh-infra }
 spec:
-  replicas: 1
+  replicas: 2
+  # One at a time, with no extra pod: the state node has no room for a third (found on AWS, 2026-11-24), and the
+  # other keeps serving while one restarts.
+  strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } }
   selector: { matchLabels: { app: pgbouncer } }
   # A new pod ready before the old one goes, so a change to the settings or the users drops no client for long.
   strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }
@@ -367,7 +384,9 @@ spec:
     metadata: { labels: { app: pgbouncer } }
     spec:
       # Beside Postgres: one hop less, and nothing to lose that Postgres's node doesn't also take.
-      nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      # The state node (terraform/compute: state): on demand, not burstable, tainted for these alone.
+      nodeSelector: { "sdh-poc/pool": state, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      tolerations: [{ key: sdh-poc/state, operator: Equal, value: "true", effect: NoSchedule }]
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -387,26 +406,30 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
+          # Half a CPU each since revision (fk) (0.1 before): TLS to the stages and to Postgres.
           resources:
-            requests: { cpu: 100m, memory: 64Mi }
-            limits: { memory: 128Mi }
+            requests: { cpu: 500m, memory: 128Mi }
+            limits: { memory: 256Mi }
           volumeMounts:
             - { name: config, mountPath: /etc/pgbouncer/config, readOnly: true }
             - { name: users, mountPath: /etc/pgbouncer/users, readOnly: true }
+            - { name: tls, mountPath: /etc/pgbouncer/tls, readOnly: true }
       volumes:
         - { name: config, configMap: { name: pgbouncer } }
         - { name: users, secret: { secretName: pgbouncer-users, defaultMode: 0440 } }
+        - { name: tls, secret: { secretName: pgbouncer-tls, defaultMode: 0440 } }
 ---
 # One Kafka node in KRaft mode, a broker and a controller (docs/AWS-POC.md §3: one broker accepted for the PoC,
 # so replication factor 1). Otherwise as in the sandbox (deploy/sandbox/infra/kafka.yaml). Topics are made by
 # poc.sh; brokers don't create them.
 #
-# Two listeners for clients (HIPAA.md §11.4, L5): PLAINTEXT on 9092, for the performance pipeline, KEDA and poc.sh,
-# as before, so the performance runs stay comparable; and SASL_SSL on 9094, TLS with a SCRAM-SHA-512 login, for a
-# pipeline deployed from deploy/reference/ (the harness's). The broker's certificate is in the secret kafka-tls,
-# which poc.sh issues from its CA. The standard authorizer refuses whatever no ACL allows: the SCRAM users get only
-# the rights deploy/reference/kafka-acls.sh grants. The plaintext listener's principal (ANONYMOUS) is a super user,
-# as the controller's and the broker's own connections need, and the performance pipeline had.
+# Nothing in plaintext on the network (DESIGN.md revision (fk)): every client (every pipeline's stages, KEDA, the
+# gold check) uses SASL_SSL on 9094, TLS with a SCRAM-SHA-512 login of its own, as deploy/reference/ sets them.
+# The broker's certificate is in the secret kafka-tls, which poc.sh issues from its CA. The standard authorizer
+# refuses whatever no ACL allows: each SCRAM user gets only the rights deploy/reference/kafka-acls.sh grants (and
+# KEDA and the gold check theirs, from poc.sh). The controller, the broker's own connections and the admin tools
+# run in this pod (poc.sh, load-test.sh) use plaintext listeners bound to 127.0.0.1, which nothing outside the pod
+# can reach; their principal (ANONYMOUS) is the only super user. Before (fk), 9092 took plaintext from the cluster.
 apiVersion: v1
 kind: Service
 metadata: { name: kafka, namespace: sdh-infra }
@@ -415,8 +438,6 @@ spec:
   publishNotReadyAddresses: true
   selector: { app: kafka }
   ports:
-    - { name: broker, port: 9092 }
-    - { name: controller, port: 9093 }
     - { name: sasl-ssl, port: 9094 }
 ---
 apiVersion: apps/v1
@@ -429,7 +450,9 @@ spec:
   template:
     metadata: { labels: { app: kafka } }
     spec:
-      nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      # The state node (terraform/compute: state): on demand, not burstable, tainted for these alone.
+      nodeSelector: { "sdh-poc/pool": state, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+      tolerations: [{ key: sdh-poc/state, operator: Equal, value: "true", effect: NoSchedule }]
       terminationGracePeriodSeconds: 60   # a controlled shutdown, so the logs needn't be recovered on start
       enableServiceLinks: false           # the image turns every KAFKA_* variable into configuration
       securityContext:
@@ -445,13 +468,15 @@ spec:
             - { name: CLUSTER_ID, value: c2RoLXBvYy1rYWZrYS0wMQ }
             - { name: KAFKA_NODE_ID, value: "0" }
             - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
-            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093,SASL_SSL://:9094" }
+            # INTERNAL and CONTROLLER on the loopback only: this pod's own tools, the controller, and the broker's
+            # connections to itself.
+            - { name: KAFKA_LISTENERS, value: "INTERNAL://127.0.0.1:9092,CONTROLLER://127.0.0.1:9093,SASL_SSL://:9094" }
             - name: KAFKA_ADVERTISED_LISTENERS
-              value: "PLAINTEXT://kafka-0.kafka.sdh-infra.svc:9092,SASL_SSL://kafka-0.kafka.sdh-infra.svc:9094"
+              value: "INTERNAL://127.0.0.1:9092,SASL_SSL://kafka-0.kafka.sdh-infra.svc:9094"
             - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER }
-            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: PLAINTEXT }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: INTERNAL }
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
-              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL"
+              value: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,SASL_SSL:SASL_SSL"
             # The SASL_SSL listener: the broker's key and certificate in a PKCS12 store, SCRAM-SHA-512 logins. The
             # image's start script wants the store and its password's file in /etc/kafka/secrets (_FILENAME,
             # _CREDENTIALS); the location and password are set as well, as Kafka reads them.
@@ -468,10 +493,14 @@ spec:
             - { name: KAFKA_SASL_ENABLED_MECHANISMS, value: SCRAM-SHA-512 }
             - name: KAFKA_LISTENER_NAME_SASL__SSL_SCRAM___SHA___512_SASL_JAAS_CONFIG
               value: "org.apache.kafka.common.security.scram.ScramLoginModule required;"
+            # The image's start script (/etc/kafka/docker/configure) stops with "unbound variable" unless
+            # KAFKA_OPTS is set when a SASL listener is advertised (found on AWS, 2026-11-24). The listener's
+            # login is set above, so this only has to be there; the script warns that it names no JAAS file.
+            - { name: KAFKA_OPTS, value: "-Dsdh.poc.kafka=sasl-login-per-listener" }
             - { name: KAFKA_AUTHORIZER_CLASS_NAME, value: org.apache.kafka.metadata.authorizer.StandardAuthorizer }
             - { name: KAFKA_SUPER_USERS, value: "User:ANONYMOUS" }
             - { name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND, value: "false" }
-            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-0.kafka.sdh-infra.svc:9093" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@127.0.0.1:9093" }
             - { name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data/logs }
             - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false" }
             # 30 days on every topic, as decided (docs/PERFORMANCE.md §12, point 6): longer than an outage lasts, so a
@@ -484,18 +513,20 @@ spec:
             - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
             - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
             - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
-            - { name: KAFKA_HEAP_OPTS, value: "-Xms384m -Xmx384m" }
+            # 1 GB of heap since revision (fk) (384 MB before): TLS buffers each connection's reads and writes in
+            # the heap, which plaintext sends straight from the page cache. The rest of the memory is page cache.
+            - { name: KAFKA_HEAP_OPTS, value: "-Xms1g -Xmx1g" }
           ports:
-            - { name: broker, containerPort: 9092 }
-            - { name: controller, containerPort: 9093 }
             - { name: sasl-ssl, containerPort: 9094 }
-          readinessProbe: { tcpSocket: { port: 9092 }, periodSeconds: 5 }
+          readinessProbe: { tcpSocket: { port: 9094 }, periodSeconds: 5 }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
+          # A CPU and 3 GiB since revision (fk) (0.2 and 768 MiB before), on the state node: with TLS the broker
+          # encrypts every message it serves, so it shouldn't be what limits a run.
           resources:
-            requests: { cpu: 200m, memory: 768Mi }
-            limits: { memory: 768Mi }
+            requests: { cpu: "1", memory: 3Gi }
+            limits: { memory: 3Gi }
           volumeMounts:
             - { name: data, mountPath: /var/lib/kafka/data }
             - { name: tls, mountPath: /etc/kafka/secrets, readOnly: true }

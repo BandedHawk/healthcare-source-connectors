@@ -5,9 +5,10 @@
 # deploy/aws/k8s/pipeline/apply.sh; ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret splitter-env.
 # Keys are in the secret splitter-keys, at /run/secrets.
 sdh:
-  # The PoC holds synthetic data only (docs/AWS-POC.md §9), with Kafka, Postgres and the collector in plaintext: the
-  # HIPAA profile is off (design §7.6). Real PHI needs it at its default, hipaa, and the changes HIPAA.md §8.5 lists.
-  compliance: { profile: none }
+  # The HIPAA profile on, nothing waived, since DESIGN.md revision (fk), as deploy/reference/ sets it: Kafka over
+  # SASL_SSL with this stage's SCRAM login (SDH_KAFKA_JAAS, from its env secret), Postgres (through PgBouncer) with
+  # verify-full, both servers' CA at /run/secrets. So a run measures what a production deployment would do.
+  compliance: { profile: hipaa }
   connector-id: split-${PIPELINE}
   # Metrics for measuring the pipeline (docs/PERFORMANCE.md §10); the collector drops traces and logs.
   telemetry:
@@ -23,7 +24,7 @@ sdh:
       namespace: ${ICEBERG_PREFIX}_landing
       catalog:
         type: jdbc
-        uri: jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh
+        uri: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
         jdbc.user: splitter_${ICEBERG_PREFIX}
         jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
         jdbc.schema-version: V1
@@ -37,14 +38,14 @@ sdh:
     # groupProtocol=consumer (KIP-848, Kafka 4): the group rebalances without waiting for a pod busy splitting.
     input:
       type: kafka
-      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&groupId=splitter-${PIPELINE}&groupProtocol=consumer"
+      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&groupId=splitter-${PIPELINE}&groupProtocol=consumer&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
     output:
       type: kafka
-      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}"
+      uri: "kafka:${PIPELINE}.split?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
     # The stage's own input, which a reprocess sends its items to (STAGES.md §15.8.4).
     reprocess:
       type: kafka
-      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}"
+      uri: "kafka:${PIPELINE}.landed?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
     registry-schema: split_${ICEBERG_PREFIX}
     # The next stage's registry, where its reconciler marks items whose end from this stage never came, for this
     # stage to send it again (STAGES.md §13.2, 2026-11-16).
@@ -72,7 +73,7 @@ sdh:
     namespace: ${ICEBERG_PREFIX}
     catalog:
       type: jdbc
-      uri: jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh
+      uri: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
       jdbc.user: splitter_${ICEBERG_PREFIX}
       jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
       jdbc.schema-version: V1
@@ -82,7 +83,7 @@ sdh:
   lease:
     # pool-size: the pool for the registry, leases and checkpoints (2 unless a load test asks: apply.sh
     # SDH_SPLIT_POOL_SIZE; docs/PERFORMANCE.md §13.3).
-    jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh", username: splitter_${ICEBERG_PREFIX},
+    jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt", username: splitter_${ICEBERG_PREFIX},
             pool-size: ${SPLIT_POOL_SIZE} }
   crypto:
     # The JCA provider for message sealing (docs/PERFORMANCE.md §13): accp on AWS; apply.sh fills it.

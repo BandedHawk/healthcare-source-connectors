@@ -59,11 +59,6 @@ print("\n".join(lines[:start] + source + lines[end:]), end="")' \
     <(envsubst '$PRODUCER_SUBJECT' < "$HARNESS_DIR/landing-source.yml")
 }
 
-# kafka_jaas <role>: the stage's SCRAM login, for SDH_KAFKA_JAAS (made a broker user by poc.sh harness-up).
-kafka_jaas() {
-  printf 'org.apache.kafka.common.security.scram.ScramLoginModule required username="%s-%s" password="%s";' \
-    "$1" "$P" "$(secret "kafka-$1-$P")"
-}
 
 # issue <stem> <subject> <extensions>: a certificate from the harness CA, made once. As scripts/sandbox.sh's.
 issue() {
@@ -166,7 +161,7 @@ deploy_harness() {
     --from-file=producers-ca.pem="$d/ca.crt" --from-file=splitter-inbox.pem="$k-inbox-public.pem" \
     --from-file=kafka-ca.crt="$infra_ca" --from-file=postgres-ca.crt="$infra_ca"
   apply_secret "$n" landing-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-landing-$P")" \
-    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas landing)" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "landing-$P")" \
     --from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_LEASE_JDBC_TABLE="landing_$ICEBERG_PREFIX.sdh_lease"
   apply_config "$n" landing-config --from-file=application.yml="$work/landing-application.yml"
   apply_secret "$n" splitter-keys --from-file=inbox.pem="$k-inbox.pem" \
@@ -174,7 +169,7 @@ deploy_harness() {
     --from-file=landing-signer.pem="$landing_signer" \
     --from-file=kafka-ca.crt="$infra_ca" --from-file=postgres-ca.crt="$infra_ca"
   apply_secret "$n" splitter-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-splitter-$P")" \
-    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas splitter)" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "splitter-$P")" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "inbox-passphrase-$P")" \
     --from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_STORAGE_COMMIT_MAX_RECORDS=1
   apply_config "$n" splitter-config --from-file=application.yml="$work/splitter-application.yml"
@@ -183,7 +178,7 @@ deploy_harness() {
     --from-file=recipient.pem="$k-fhir-recipient-public.pem" --from-file=split-signer.pem="$split_signer" \
     --from-file=kafka-ca.crt="$infra_ca" --from-file=postgres-ca.crt="$infra_ca"
   apply_secret "$n" convert-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-convert-$P")" \
-    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas convert)" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas "convert-$P")" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "convert-inbox-passphrase-$P")" \
     --from-literal=SDH_MAINTENANCE_INTERVAL=20s
   apply_config "$n" convert-config --from-file=application.yml="$work/convert-application.yml"

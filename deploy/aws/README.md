@@ -48,7 +48,9 @@ state.
 
 `check-config.sh` needs no AWS or cluster. It checks the settings: the stage pods' 90 s to stop, the read-only
 catalogs' one connection, one burst node group a zone and the autoscaler's cap, the gold check's tolerance of a
-lost node, landing's two pods unscaled, and Postgres' memory and connections against KEDA's maxima. And it runs
+lost node, landing's two pods unscaled, Postgres' memory and connections against KEDA's maxima (and both
+PgBouncers' pools under them), the state node, and nothing in plaintext: Postgres and PgBouncer TLS only, Kafka's
+plaintext listeners on its loopback, the stages on the hipaa profile, KEDA logged in. And it runs
 the load test's own functions against stand-ins for `aws` and `kubectl`: stopping the log follower, its taking up
 only running pods, a failed slice copy trying again only what failed, and each copy of a document differing. A
 test run's raised maxima pass too, so long as the cap follows `burst_max` (32 with 30). The transformer's `GoldCheckTest` holds the gold check to the copies' marker.
@@ -157,12 +159,12 @@ somewhere safe.
 
 | Item | What it holds |
 |---|---|
-| `secrets/` | Database passwords and the key passphrases, made once. The kept Postgres volume has the passwords set, so without this directory nobody can log in. |
+| `secrets/` | Database passwords, Kafka users' passwords (`kafka-<user>`) and the key passphrases, made once. The kept Postgres volume has the passwords set, so without this directory nobody can log in. |
 | `keys/` | The stages' inbox key pairs and gold's readers' key pair, made once by `k8s/pipeline/apply.sh`, and the KMS signing keys' public halves. What was sealed to these keys can't be opened without them. |
 | `images.env`, `wstl-us-core.tar.gz` | The images' digests (`build-images.sh`) and the transform stage's US Core set. |
 | `sessions` | The session log behind the 8-hour day. |
 | `kubeconfig` | Access to the current cluster. |
-| `pki/` | The PoC's CA, and the certificates it issued to Postgres and Kafka (docs/AWS-POC.md §8.2). A pipeline deployed from `deploy/reference/` trusts `pki/ca.crt`. |
+| `pki/` | The PoC's CA, and the certificates it issued to Postgres, PgBouncer and Kafka (docs/AWS-POC.md §8.2). Every pipeline trusts `pki/ca.crt`. |
 | `downloads/` | Pinned downloads, checked against their checksums (KEDA). |
 
 ## What's never removed automatically
@@ -180,10 +182,12 @@ keys lost there are gone for good.
 
 ## Not yet done
 
-- Backups and TLS for the reference pipeline (docs/AWS-POC.md §8.1, §8.2, built 2026-11-24) aren't applied yet.
-  The next `poc.sh bootstrap` applies the persistent layer's part: bucket versioning and its lifecycle, the
-  backup bucket, the role `sdh-poc-postgres-backup`, and `s3:GetBucketVersioning` for the stages. The next `up`
-  then starts Postgres with archiving and TLS, and Kafka with its SASL_SSL listener.
+- Backups (docs/AWS-POC.md §8.1) are applied since 2026-11-24: bucket versioning and its lifecycle, the backup
+  bucket, the role `sdh-poc-postgres-backup`, `s3:GetBucketVersioning` for the stages; WAL archived and a base
+  backup made at `up`. A restore (`db-restore`) hasn't been tried on AWS yet.
+- Nothing in plaintext on the network, and the state node (DESIGN.md revision (fk)), ran on AWS on 2026-11-24
+  (runs P and Q, docs/PERFORMANCE.md §10), as did the persistent layer's backups part (applied that day). The
+  harness pipeline from `deploy/reference/` hasn't run yet (HIPAA.md §11.4, A1).
 - The split stage's lookups in bronze (and readers' in silver) slow with every item: a fix in the connectors
   comes before a larger load (docs/AWS-POC.md, Status).
 - Until the lookups are fixed, run the gold check after a small load on a reset pipeline: `poc.sh reset`, then

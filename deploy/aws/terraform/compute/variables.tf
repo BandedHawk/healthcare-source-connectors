@@ -8,7 +8,7 @@ variable "account_id" {
   default = "493469777520"
 }
 
-# The first zone must be the persistent layer's state_zone: Postgres and Kafka run on that zone's base node.
+# The first zone must be the persistent layer's state_zone: Postgres and Kafka run on the state node, in that zone.
 variable "zones" {
   type    = list(string)
   default = ["us-east-2a", "us-east-2b"]
@@ -23,6 +23,13 @@ variable "kubernetes_version" {
 variable "base_instance_type" {
   type    = string
   default = "t4g.large"
+}
+
+# The state node (main.tf): Postgres, PgBouncer and Kafka, 4 CPUs and 16 GiB for their 3.5 and 7.3 (DESIGN.md
+# revision (fk)). On demand, ~$0.16 an hour in us-east-2; not burstable, so its CPU is there all through a run.
+variable "state_instance_type" {
+  type    = string
+  default = "m7g.xlarge"
 }
 
 # The duties node (main.tf): the scaled stages' duties pods, one a stage, mostly idle. 8 GiB for their 4.5.

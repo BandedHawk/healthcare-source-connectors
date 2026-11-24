@@ -6,6 +6,32 @@
 # resumes them. ${...} are filled in by deploy/aws/k8s/pipeline/apply.sh.
 #
 # Each input has 24 partitions (poc.sh STAGE_PARTITIONS): at least each stage's pods times its consumers.
+#
+# KEDA reads the lag over SASL_SSL (DESIGN.md revision (fk)), as the Kafka user keda, which may only describe
+# the topics and groups (poc.sh pipeline_kafka): the TriggerAuthentication keda-kafka, from the secret of the same
+# name, which apply.sh makes in each namespace with a ScaledObject.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata: { name: keda-kafka, namespace: ${K8S_NS} }
+spec:
+  secretTargetRef:
+    - { parameter: sasl, name: keda-kafka, key: sasl }
+    - { parameter: username, name: keda-kafka, key: username }
+    - { parameter: password, name: keda-kafka, key: password }
+    - { parameter: tls, name: keda-kafka, key: tls }
+    - { parameter: ca, name: keda-kafka, key: ca }
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata: { name: keda-kafka, namespace: sdh-fhir }
+spec:
+  secretTargetRef:
+    - { parameter: sasl, name: keda-kafka, key: sasl }
+    - { parameter: username, name: keda-kafka, key: username }
+    - { parameter: password, name: keda-kafka, key: password }
+    - { parameter: tls, name: keda-kafka, key: tls }
+    - { parameter: ca, name: keda-kafka, key: ca }
+---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata: { name: splitter, namespace: ${K8S_NS} }
@@ -22,6 +48,7 @@ spec:
         scaleDown: { stabilizationWindowSeconds: 120 }
   triggers:
     - type: kafka
+      authenticationRef: { name: keda-kafka }
       metadata:
         bootstrapServers: ${KAFKA_BROKERS}
         consumerGroup: splitter-${PIPELINE}
@@ -44,6 +71,7 @@ spec:
         scaleDown: { stabilizationWindowSeconds: 120 }
   triggers:
     - type: kafka
+      authenticationRef: { name: keda-kafka }
       metadata:
         bootstrapServers: ${KAFKA_BROKERS}
         consumerGroup: convert-${PIPELINE}
@@ -66,6 +94,7 @@ spec:
         scaleDown: { stabilizationWindowSeconds: 120 }
   triggers:
     - type: kafka
+      authenticationRef: { name: keda-kafka }
       metadata:
         bootstrapServers: ${KAFKA_BROKERS}
         consumerGroup: transform-${PIPELINE}

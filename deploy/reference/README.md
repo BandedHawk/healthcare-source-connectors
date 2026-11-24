@@ -14,7 +14,9 @@ A starting point for a deployment that holds PHI (HIPAA.md §8.1 item 13). Each 
 `ReferenceConfigurationTest` (connector-runtime) runs each file through the profile as the node does at startup,
 with its image's JVM options, and expects nothing refused or waived. It doesn't start the stages. The AWS PoC's
 harness pipeline is deployed from these files (`deploy/aws/k8s/harness/apply.sh`, AWS-POC.md §8.2), with the
-changes it names, but has not been run yet (HIPAA.md §11.4, A1).
+changes it names, but has not been run yet (HIPAA.md §11.4, A1). Since DESIGN.md revision (fk) the PoC's own
+performance pipelines follow them too (the hipaa profile, Kafka over SASL_SSL, Postgres through PgBouncer with
+`verify-full`), which the same test checks.
 
 ## Files
 

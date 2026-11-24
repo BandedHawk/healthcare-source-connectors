@@ -6,9 +6,10 @@
 # for them with a bucket intake. ${...} in capitals are filled in by deploy/aws/k8s/pipeline/apply.sh;
 # ${SDH_LEASE_JDBC_PASSWORD} is left for Spring, from the secret transform-<pipeline>-env.
 sdh:
-  # The PoC holds synthetic data only (docs/AWS-POC.md §9), with Kafka, Postgres and the collector in plaintext: the
-  # HIPAA profile is off (design §7.6). Real PHI needs it at its default, hipaa, and the changes HIPAA.md §8.5 lists.
-  compliance: { profile: none }
+  # The HIPAA profile on, nothing waived, since DESIGN.md revision (fk), as deploy/reference/ sets it: Kafka over
+  # SASL_SSL with this stage's SCRAM login (SDH_KAFKA_JAAS, from its env secret), Postgres (through PgBouncer) with
+  # verify-full, both servers' CA at /run/secrets. So a run measures what a production deployment would do.
+  compliance: { profile: hipaa }
   connector-id: transform-${PIPELINE}
   # Metrics for measuring the pipeline (docs/PERFORMANCE.md §10); the collector drops traces and logs.
   telemetry:
@@ -35,16 +36,16 @@ sdh:
     commit: { shared: true }
     input:
       type: kafka
-      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&groupId=transform-${PIPELINE}&groupProtocol=consumer"
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&groupId=transform-${PIPELINE}&groupProtocol=consumer&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
     output:
       type: kafka
-      uri: "kafka:${PIPELINE}.fhir?brokers=${KAFKA_BROKERS}"
+      uri: "kafka:${PIPELINE}.fhir?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
     dlq:
       type: kafka
-      uri: "kafka:${PIPELINE}.fhir.dlq?brokers=${KAFKA_BROKERS}"
+      uri: "kafka:${PIPELINE}.fhir.dlq?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
     reprocess:
       type: kafka
-      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}"
+      uri: "kafka:${PIPELINE}.records?brokers=${KAFKA_BROKERS}&securityProtocol=SASL_SSL&saslMechanism=SCRAM-SHA-512&saslJaasConfig=RAW({{env:SDH_KAFKA_JAAS}})&sslTruststoreType=PEM&sslTruststoreLocation=/run/secrets/kafka-ca.crt"
     registry-schema: transform_${ICEBERG_PREFIX}
     source:
       catalog-name: sdh
@@ -52,7 +53,7 @@ sdh:
       table: records
       catalog:
         type: jdbc
-        uri: jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh
+        uri: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
         jdbc.user: fhir_${ICEBERG_PREFIX}
         jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
         jdbc.schema-version: V1
@@ -69,7 +70,7 @@ sdh:
       kek: alias/sdh-poc-${PIPELINE}-fhir
       catalog:
         type: jdbc
-        uri: jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh
+        uri: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
         jdbc.user: fhir_${ICEBERG_PREFIX}
         jdbc.password: ${SDH_LEASE_JDBC_PASSWORD}
         jdbc.schema-version: V1
@@ -77,7 +78,7 @@ sdh:
         io-impl: org.apache.iceberg.aws.s3.S3FileIO
         client: { region: ${AWS_REGION} }
   lease:
-    jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh", username: fhir_${ICEBERG_PREFIX} }
+    jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt", username: fhir_${ICEBERG_PREFIX} }
   crypto:
     # The JCA provider for message sealing (docs/PERFORMANCE.md §13): accp on AWS; apply.sh fills it.
     jose: { provider: ${JOSE_PROVIDER} }

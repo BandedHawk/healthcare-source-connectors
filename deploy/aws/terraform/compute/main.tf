@@ -88,8 +88,11 @@ resource "aws_eks_cluster" "poc" {
 }
 
 # --- Node groups ---------------------------------------------------------------------------------------------
-# base: one on-demand node per zone. They hold the active and standby landing pods (one per node), Postgres and
-# Kafka (on the node in the state volumes' zone), and one pod of each scaled stage.
+# base: one on-demand node per zone. They hold the active and standby landing pods (one per node) and one pod of
+# each scaled stage.
+#
+# state: one on-demand node, not burstable, in the state volumes' zone, for Postgres, PgBouncer and Kafka alone
+# (DESIGN.md revision (fk)); before, they shared the burstable base node there.
 #
 # burst: Spot nodes (on-demand for a performance test), 0 to 6 in all, in three zones and five instance types,
 # tainted so only the KEDA-scaled stages and the gold check run there. Cluster Autoscaler adds one when
@@ -98,8 +101,8 @@ resource "aws_eks_cluster" "poc" {
 # One burst group per zone (2026-11-18): a group over three zones let Auto Scaling end busy nodes to even the
 # zones out (AZRebalance), without the Cluster Autoscaler's drain: part of run 39's churn of 24 burst nodes. A
 # group in one zone has nothing to rebalance. Each may grow to burst_max; the Cluster Autoscaler's
-# --max-nodes-total (k8s/infra/cluster-autoscaler.yaml) keeps the whole cluster to the base nodes, the duties node
-# and burst_max, and --balance-similar-node-groups spreads the burst nodes over the zones.
+# --max-nodes-total (k8s/infra/cluster-autoscaler.yaml) keeps the whole cluster to the base nodes, the state node,
+# the duties node and burst_max, and --balance-similar-node-groups spreads the burst nodes over the zones.
 
 resource "aws_eks_node_group" "base" {
   for_each        = data.aws_subnet.zone
@@ -121,6 +124,39 @@ resource "aws_eks_node_group" "base" {
   update_config { max_unavailable = 1 }
 
   # The cluster has no self-managed add-ons: the nodes need the CNI and kube-proxy before they're ready.
+  depends_on = [aws_eks_addon.vpc_cni, aws_eks_addon.kube_proxy, aws_eks_addon.pod_identity]
+}
+
+# state: Postgres (1.5 CPUs, 4 GiB), two PgBouncers (half a CPU each) and Kafka (a CPU, 3 GiB), k8s/infra/state.yaml,
+# with TLS to every client since DESIGN.md revision (fk). Production gives its database and broker machines of their
+# own, not a share of a burstable node, so the PoC does too, to measure the stages rather than what's under them: on
+# the t4g.large base node they had 0.6 of a CPU between them once its credits ran out. Tainted, so nothing else
+# goes there; the EBS CSI node and the other add-ons' DaemonSets tolerate every taint. A lost node is replaced by its
+# group, and Postgres and Kafka come back on it with their volumes.
+resource "aws_eks_node_group" "state" {
+  cluster_name    = aws_eks_cluster.poc.name
+  node_group_name = "state"
+  node_role_arn   = local.p.node_role_arn
+  subnet_ids      = [data.aws_subnet.zone[var.zones[0]].id]
+  ami_type        = "AL2023_ARM_64_STANDARD"
+  capacity_type   = "ON_DEMAND"
+  instance_types  = [var.state_instance_type]
+  disk_size       = 20
+  labels          = { "sdh-poc/pool" = "state" }
+
+  taint {
+    key    = "sdh-poc/state"
+    value  = "true"
+    effect = "NO_SCHEDULE"
+  }
+
+  scaling_config {
+    min_size     = 1
+    desired_size = 1
+    max_size     = 1
+  }
+  update_config { max_unavailable = 1 }
+
   depends_on = [aws_eks_addon.vpc_cni, aws_eks_addon.kube_proxy, aws_eks_addon.pod_identity]
 }
 

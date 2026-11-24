@@ -67,10 +67,15 @@ spec:
             - { name: SILVER_CATALOG, value: sdh }
             - { name: SILVER_WAREHOUSE, value: "s3://${SILVER_BUCKET}/warehouse" }
             # Postgres itself, not PgBouncer (DESIGN.md revision (ea)): the check's role is made by gold-check.sh, not
-            # poc.sh, so PgBouncer doesn't know it, and a one-off reader needs no pool (run 50: SASL failed).
-            - { name: CATALOG_URI, value: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh" }
+            # poc.sh, so PgBouncer doesn't know it, and a one-off reader needs no pool (run 50: SASL failed). Over
+            # TLS, verify-full, since revision (fk): Postgres takes nothing else.
+            - name: CATALOG_URI
+              value: "jdbc:postgresql://postgres.sdh-infra.svc:5432/sdh?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt"
             - { name: CATALOG_USER, value: "gold_reader_${ICEBERG_PREFIX}" }
+            # SASL_SSL as the user gold-check-<pipeline> (poc.sh pipeline_kafka; KAFKA_JAAS in gold-check-env), which
+            # may only read the topic.
             - { name: KAFKA_BROKERS, value: "${KAFKA_BROKERS}" }
+            - { name: KAFKA_CA, value: /run/secrets/kafka-ca.crt }
             - { name: TOPIC, value: "${PIPELINE}.fhir" }
             - { name: CONSUMER_KID, value: "consumer-${PIPELINE}" }
             - { name: CONSUMER_KEY, value: /run/secrets/consumer.pem }

@@ -132,6 +132,10 @@ item 7). Before real PHI:
 - **On a managed broker** (AWS MSK, Confluent Cloud): unauthenticated access off, client authentication (IAM,
   SCRAM or mTLS) with TLS only, and the provider's own ACLs or policies.
 
+A plaintext listener bound to the broker's loopback (`127.0.0.1`), as the AWS PoC keeps for its controller and
+admin tools (AWS-POC.md §8.2), is reached only by whoever can run commands on the broker's host or pod: treat that
+access as broker administration, and give those listeners TLS and principals of their own in production.
+
 If a plaintext listener must stay for a while, as on a shared broker being moved over, give its principal no
 rights on any pipeline's topics (no super user), keep it on a network no stage's namespace shares, and record it as
 a risk in the risk analysis until it is removed.

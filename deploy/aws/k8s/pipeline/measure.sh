@@ -239,7 +239,7 @@ done
 # Unwrapping data keys (Decrypt) is cached per batch and not counted; CloudWatch's KMS usage is closed to the
 # deployer.
 offsets() {
-  kubectl -n sdh-infra exec -i kafka-0 -- /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 \
+  kubectl -n sdh-infra exec -i kafka-0 -- /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server 127.0.0.1:9092 \
     --topic "$1" 2>/dev/null | awk -F: '{sum += $3} END {print sum + 0}'
 }
 say "Messages written in the run (each signed once, with a pod key)"

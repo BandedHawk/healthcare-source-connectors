@@ -23,7 +23,7 @@ audited() {  # <namespace> <app> <event pattern>: audit events logged by the app
   kubectl -n "$1" logs -l "app=$2" --tail=-1 --max-log-requests=10 2>/dev/null | grep -cE "(^|[] ])$3( |$)" || true
 }
 topic_count() {
-  infra exec kafka-0 -- /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic "$1" \
+  infra exec kafka-0 -- /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server 127.0.0.1:9092 --topic "$1" \
     2>/dev/null | awk -F: '{sum += $3} END {print sum + 0}'
 }
 wait_for() {

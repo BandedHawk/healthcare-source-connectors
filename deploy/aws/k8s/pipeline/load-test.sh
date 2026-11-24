@@ -132,16 +132,16 @@ infra() { kubectl -n sdh-infra "$@"; }
 db() { infra exec -i postgres-0 -- psql -U postgres -d sdh -At -F '|' -c "$1"; }
 kafka() { infra exec -i kafka-0 -- "$@"; }
 offsets() {  # <topic>: messages ever written
-  kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic "$1" 2>/dev/null \
+  kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server 127.0.0.1:9092 --topic "$1" 2>/dev/null \
     | awk -F: '{sum += $3} END {print sum + 0}'
 }
 lag() {  # the three stages' consumer groups, summed
-  kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe \
+  kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server 127.0.0.1:9092 --describe \
     --group "splitter-$P" --group "convert-$P" --group "transform-$P" 2>/dev/null \
     | awk '$6 ~ /^[0-9]+$/ {sum += $6} END {print sum + 0}'
 }
 group_lag() {  # <consumer group>: its lag, summed over partitions
-  kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group "$1" \
+  kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server 127.0.0.1:9092 --describe --group "$1" \
     2>/dev/null | awk '$6 ~ /^[0-9]+$/ {sum += $6} END {print sum + 0}'
 }
 prom_at() {  # <unix time> <PromQL>: one number then, or "-"
@@ -363,7 +363,7 @@ if [[ -n "$BACKLOG" ]]; then
   # A group with no offset on a partition shows no lag there, so the backlog would read as nothing queued (the
   # stages read such a partition from its start: ReceiveSettings sets autoOffsetReset=earliest). So the group's
   # offsets are set to the topic's end now, before the push, and the lag counts what queues from here.
-  kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group "transform-$P" \
+  kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server 127.0.0.1:9092 --group "transform-$P" \
     --topic "$P.records" --reset-offsets --to-latest --execute >/dev/null \
     || die "couldn't set transform-$P's offsets on $P.records"
   backlog_state=held
@@ -541,7 +541,7 @@ copier=$!
 say "Putting 3 messages no stage can open on each of $P.split and $P.records"
 for t in split records; do
   printf "sdh-poc-load $run junk %s\n" 1 2 3 \
-    | kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic "$P.$t" >/dev/null
+    | kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server 127.0.0.1:9092 --topic "$P.$t" >/dev/null
 done
 
 # --- Watch -------------------------------------------------------------------------------------------------------
@@ -670,12 +670,12 @@ outage_start() {
 # Deletes every queued message of a topic (up to its end): what retention would do to a backlog it outlasted.
 lose_messages() {
   local topic="$P.$1" parts json
-  parts="$(kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic "$topic" \
+  parts="$(kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --describe --topic "$topic" \
     | awk '/PartitionCount/ {for (i = 1; i <= NF; i++) if ($i == "PartitionCount:") print $(i + 1)}')"
   json="$(python3 -I -c 'import json, sys; print(json.dumps({"version": 1, "partitions": [
     {"topic": sys.argv[1], "partition": i, "offset": -1} for i in range(int(sys.argv[2]))]}))' "$topic" "$parts")"
   printf '%s' "$json" | kafka sh -c 'cat > /tmp/sdh-lose.json && /opt/kafka/bin/kafka-delete-records.sh \
-    --bootstrap-server localhost:9092 --offset-json-file /tmp/sdh-lose.json >/dev/null && rm /tmp/sdh-lose.json'
+    --bootstrap-server 127.0.0.1:9092 --offset-json-file /tmp/sdh-lose.json >/dev/null && rm /tmp/sdh-lose.json'
 }
 outage_restore() {
   local ns

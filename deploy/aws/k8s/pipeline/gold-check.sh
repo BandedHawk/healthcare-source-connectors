@@ -11,8 +11,8 @@
 #      validator errors, resource counts, and each test document's SHA-256 (to name a bundle's source).
 #   2. Gives the reader what a downstream reader is given: the consumer key pair's private half (the transform stage
 #      seals its messages to it), the transform stage's signing public key, a read-only database role on the
-#      catalog, and the read-only AWS role gold-reader (Pod Identity: gold and silver, unwrap-only on the fhir and
-#      records KEKs).
+#      catalog (over TLS), its own Kafka login (made by poc.sh), the servers' CA, and the read-only AWS role
+#      gold-reader (Pod Identity: gold and silver, unwrap-only on the fhir and records KEKs).
 #   3. Runs the Job (gold-check.yaml) on the transform stage's image, and prints its two containers' summaries.
 set -euo pipefail
 
@@ -25,7 +25,7 @@ export AWS_PROFILE="${AWS_PROFILE:-claude-poc}" AWS_REGION=us-east-2 AWS_PAGER="
 export KUBECONFIG="$STATE/kubeconfig"   # always the PoC's, never a sandbox's
 ACCOUNT=493469777520
 export PIPELINE="${SDH_PIPELINES:-ccda-push}"; PIPELINE="${PIPELINE%% *}"
-export ICEBERG_PREFIX="${PIPELINE//-/_}" KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9092"
+export ICEBERG_PREFIX="${PIPELINE//-/_}" KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9094"
 export GOLD_BUCKET="sdh-poc-gold-$ACCOUNT" SILVER_BUCKET="sdh-poc-silver-$ACCOUNT"
 export KEEP_PER_DOCUMENT="${1:-2}"
 export VALIDATOR_SHA256=57aa43fb40cec5de41def81c927725fd85908eeb71509b7f9313e04d9b8ec79b   # 7.0.3, as mapping pins
@@ -91,12 +91,17 @@ kubectl -n sdh-fhir create configmap gold-check-docs \
   --from-file=resource-counts.json="$BASELINE/resource-counts.json" \
   --from-file=xml-sha256.json="$work/xml-sha256.json" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n sdh-fhir create secret generic gold-check-keys --from-file=consumer.pem="$k-consumer.pem" \
-  --from-file=transform-signer.pem="$k-transform-signing-public.pem" --dry-run=client -o yaml \
+  --from-file=transform-signer.pem="$k-transform-signing-public.pem" \
+  --from-file=kafka-ca.crt="$STATE/pki/ca.crt" --from-file=postgres-ca.crt="$STATE/pki/ca.crt" --dry-run=client -o yaml \
   | kubectl apply -f - >/dev/null
 url="$(aws s3 presign "$VALIDATOR_OBJECT" --expires-in 7200)"
+# Its Kafka login: the user gold-check-<pipeline>, made by poc.sh (pipeline_kafka), which may only read the topic.
+jaas="$(printf 'org.apache.kafka.common.security.scram.ScramLoginModule required username="%s" password="%s";' \
+  "gold-check-$PIPELINE" "$(secret "kafka-gold-check-$PIPELINE")")"
 kubectl -n sdh-fhir create secret generic gold-check-env \
   --from-literal=CONSUMER_PASSPHRASE="$(secret "consumer-passphrase-$PIPELINE")" \
   --from-literal=CATALOG_PASSWORD="$(secret "db-gold-reader-$PIPELINE")" \
+  --from-literal=KAFKA_JAAS="$jaas" \
   --from-literal=VALIDATOR_URL="$url" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 role="gold_reader_$ICEBERG_PREFIX"
 kubectl -n sdh-infra exec -i postgres-0 -- psql -q -v ON_ERROR_STOP=1 -U postgres -d sdh >/dev/null <<EOF
