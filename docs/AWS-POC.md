@@ -237,7 +237,7 @@ catches it within days. Lowered from $250 on 2026-11-12; raised from $60 on 2026
 | Postgres | `postgres:18.4` StatefulSet on a kept 10 GiB gp3 volume, snapshotted at each `down` | RDS: restarts itself after 7 days stopped, and is a second start/stop. Aurora Serverless v2: dearer while running. |
 | Kafka | 1 KRaft broker (`apache/kafka:4.2.2`) on a kept 10 GiB volume, RF 1 | MSK: ≥ $100/month, or about $540/month serverless |
 | Iceberg catalog | JDBC on that Postgres (tested) | Glue: not supported by the code. S3 Tables, Polaris: untested, or one more pod |
-| Object store | S3: `sdh-poc-{intake,bronze,silver,gold}-493469777520`. Intake uses SSE-S3, so the deployer can upload samples; the others SSE-KMS with a bucket key. TLS only, versioning off, unfinished uploads removed after a day | — |
+| Object store | S3: `sdh-poc-{intake,bronze,silver,gold}-493469777520`. Intake uses SSE-S3, so the deployer can upload samples; the others SSE-KMS with a bucket key. TLS only, unfinished uploads removed after a day. Bronze, silver and gold keep versions, noncurrent ones for 7 days (§8.1) | — |
 | Keys | AWS KMS (`wrap-provider: aws-kms`), the sandbox's Vault keys one for one; rotation off (it adds $1/month per key) | `local`: free, but wouldn't exercise KMS |
 | Intake | S3 bucket intake (§5.3.17, claimed by a conditional write) | EFS, Transfer Family SFTP: cost |
 | Networking | Default VPC, public subnets, inbound closed; the API endpoint open only to the operator's address, private access for the nodes; S3 gateway endpoint (free) | NAT gateway ($32/month and up) |
@@ -346,12 +346,64 @@ each `up`, not Secrets Manager ($0.40 per secret per month).
     throughput (never measured, DESIGN.md:2067), and a standby taking over a large ledger.
 - Include a few large documents (50–400 MB): they set split's memory and transform's `max-bytes`.
 
+### 8.1 Backups, and restoring to a point in time (2026-11-24, HIPAA.md §11.4 L4)
+
+Built, not yet applied on AWS: the next `poc.sh bootstrap` applies the persistent layer's part, after the IAM
+changes it lists are reviewed.
+- **Object versions.** Bronze, silver and gold keep versions. A version that stops being current is kept for
+  `versions_kept_days` (7), then expires; a delete marker with nothing under it is removed. The stages check this
+  under the hipaa profile (`store-versioning`, DESIGN.md §7.6), so their role may `s3:GetBucketVersioning`.
+  `poc.sh reset` and `harness-down` empty buckets with deletes, so what they delete stays as noncurrent versions,
+  at the usual storage price, for 7 days.
+- **WAL archiving.** Postgres (stock `postgres:18.4`) archives each WAL segment by copying it into an outbox on its
+  data volume (`archive.sh`, synced before Postgres is told it is safe), and closes a segment at least every
+  minute (`archive_timeout`). A sidecar, the official `amazon/aws-cli` image pinned by digest, sends the outbox
+  to `sdh-poc-backup-<account>` under the role `sdh-poc-postgres-backup` (Pod Identity, service account
+  `postgres-backup`), which may read and write that bucket only. A segment is written once (if-none-match), and is
+  deleted from the outbox only once it is in S3, so one archived but not yet sent outlasts a restart.
+- **Base backups.** `poc.sh up` takes one (`pg_basebackup`, tar, compressed, with the WAL it needs) after the
+  database is set up, and `poc.sh db-backup` takes one at any time. It is made on the volume and moved whole into
+  the outbox; it is skipped, with a warning, if the volume hasn't twice the databases' size free. `down` closes
+  the last segment and waits for the outbox to empty before Postgres stops.
+- **Restore.** `poc.sh db-restore --to <time>` stops every stage, flushes the WAL, stops Postgres, and runs a
+  one-off pod on the volume (`k8s/infra/restore.yaml`): the newest whole base backup before the time, every
+  archived segment, then the data directory moved aside (kept as `$PGDATA.before-<time>`), the base unpacked in
+  its place, and recovery set to the time. Postgres replays to it and is promoted; a base backup is taken on the
+  new timeline. The stages stay stopped: each stage's check and repair come next (HIPAA-OPERATIONS.md §7), then
+  `poc.sh db-resume`. The restore covers the whole server (every pipeline's database), so it refuses while the
+  harness pipeline is up. Delete the kept data directory by hand once the restore is checked.
+- **Window.** Backups expire after 7 days like the versions, so the oldest point a restore reaches is the oldest
+  base backup still kept: with no session for a week, none is left until the next `up` takes one.
+- **Limits.** The outbox shares the 10 GiB volume with the database: an outage of S3 long enough to fill it stops
+  Postgres's writes. A base backup is one object per file (`aws s3 cp`), so one over 5 TB is out of reach, which
+  the PoC's databases are far from.
+
+### 8.2 TLS for a pipeline deployed from the reference settings (2026-11-24, HIPAA.md §11.4 L5)
+
+Built, not yet run on AWS:
+- **A CA of the PoC's own** (state directory, `pki/`) issues Postgres's and Kafka's certificates, by their
+  Services' names, made once by `poc.sh up` (secrets `postgres-tls`, `kafka-tls`).
+- **Postgres** takes TLS (TLS 1.2 or later). `pg_hba.conf` is a ConfigMap: the harness pipeline's database,
+  `sdh_harness`, and its roles over TLS only; everything else as before, so the performance pipeline and
+  PgBouncer stay in plaintext (PgBouncer is told so: `server_tls_sslmode = disable`).
+- **Kafka** has a second listener, SASL_SSL on 9094, with SCRAM-SHA-512, and the standard authorizer with
+  `allow.everyone.if.no.acl.found=false`. The plaintext listener's principal is a super user, as the controller,
+  KEDA, `poc.sh` and the performance pipeline need; the SCRAM users get only the rights
+  `deploy/reference/kafka-acls.sh` grants.
+- **The harness pipeline** (`poc.sh harness-up`, `k8s/harness/apply.sh`) is deployed from
+  `deploy/reference/*-application.yml`, with the hipaa profile on and nothing waived, straight to Postgres with
+  `verify-full` (not through PgBouncer: HIPAA.md §11.4 L2), with its database and roles from
+  `deploy/reference/postgres.sql`, and a SCRAM user per stage. Changed from the reference files, and only: the
+  landing source (an HTTP push intake, for the harness), the key aliases (`alias/sdh-poc-harness-...`), and the
+  convert stage's next registry (there is no transform stage). `AwsTarget` cuts the database off by stopping
+  Postgres, since the harness no longer goes through PgBouncer.
+
 ## 9. If the data were real PHI
 
 This configuration is for synthetic data only. Real PHI would need:
 - a BAA;
 - private subnets with a NAT gateway or interface endpoints (about $35–100/month);
-- Kafka TLS and ACLs;
+- Kafka TLS and ACLs, and Postgres TLS, for every pipeline (built for the harness's: §8.2);
 - CloudTrail data events.
 
 The full list, with the HIPAA provisions behind each item, is [HIPAA.md](HIPAA.md) §8.5; what the product itself still lacks is §8.1.

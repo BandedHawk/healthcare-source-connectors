@@ -49,3 +49,10 @@ variable "stage_service_accounts" {
     transform = "sdh-fhir/transform"
   }
 }
+
+# Days a noncurrent object version is kept in bronze, silver and gold, and a base backup or archived WAL segment in
+# the backup bucket: how far back a restore can go (DESIGN.md §18.8, HIPAA.md §11.4 L4). Chosen 2026-11-24.
+variable "versions_kept_days" {
+  type    = number
+  default = 7
+}

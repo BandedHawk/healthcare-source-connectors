@@ -57,9 +57,11 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * PoC's own pipeline for the harness, {@code harness}, as {@code
  * deploy/aws/poc.sh harness-up} deploys it on the EKS cluster: the
  * customer images from ECR, each stage's Deployment and control Deployment
- * from its README, one pod each, on the PoC's Postgres (through PgBouncer)
- * and Kafka, with S3 and AWS KMS through each stage's Pod Identity role and
- * keys of the pipeline's own.
+ * from its README, one pod each, with the reference settings ({@code
+ * deploy/reference/}, HIPAA.md §11.4 L5): the hipaa profile, the
+ * pipeline's own database on the PoC's Postgres with verify-full, Kafka's
+ * SASL_SSL listener with a SCRAM login per stage, and S3 and AWS KMS
+ * through each stage's Pod Identity role and keys of the pipeline's own.
  *
  * <p>The control APIs and the push intake are reached through
  * port-forwards (the PoC has no ingress), and pushes are sent from here
@@ -67,7 +69,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * with this machine's AWS profile, the deployer's, which may list the
  * buckets but not decrypt what is in them.
  *
- * <p>The database and the broker are cut off by stopping PgBouncer and
+ * <p>The database and the broker are cut off by stopping Postgres and
  * Kafka (scaled to none, and back): {@code harness-up} holds the PoC's own
  * pipeline while the harness runs, so nothing else uses them. The store
  * and KMS are AWS's own, so they are cut off by the namespace's network
@@ -75,6 +77,13 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * taken out of the stages' HTTPS egress, or everything but them. The VPC
  * CNI's policy agent tracks connections, so one already open may outlast
  * such a cut; new connections are refused.
+ *
+ * <p>The buckets keep object versions, so the restore scenario runs here:
+ * the pipeline's database is backed up with {@code pg_dump} in the
+ * Postgres pod, onto its volume, and restored with {@code pg_restore} as a
+ * new database, the workers and control APIs stopped meanwhile. The PoC's
+ * own restore to a point in time, from the WAL archived to S3, is {@code
+ * poc.sh db-restore} (HIPAA.md §11.4, A3).
  *
  * @author Jonas Barnett
  * @since 0.1.0
@@ -97,6 +106,16 @@ public final class AwsTarget implements Target
     /** Each stage's workers' {@code app} label, and its role in state. */
     static final Map<String, String> WORKERS = Map.of(LANDING, "landing",
             SPLIT, "splitter", CONVERT, "convert");
+
+    /** The pipeline's database (deploy/reference/postgres.sql). */
+    static final String DATABASE = "sdh_" + PIPELINE;
+
+    /** Where the database's backups are kept, on Postgres's volume. */
+    static final String BACKUPS = "/var/lib/postgresql/harness-backups";
+
+    /** The control APIs' Deployments. */
+    static final List<String> CONTROLS = List.of("sdh-control-landing",
+            "sdh-control-split", "sdh-control-convert");
 
     /** How long a stopped service may take to be back. */
     static final Duration BACK = Duration.ofMinutes(10);
@@ -150,6 +169,9 @@ public final class AwsTarget implements Target
     /** Every secret the stages were given. */
     private final Set<String> secrets = new HashSet<>();
 
+    /** The backups taken, for their names. */
+    private int backups;
+
     /**
      * Reaches the harness pipeline, which {@code poc.sh harness-up} has
      * deployed.
@@ -180,6 +202,7 @@ public final class AwsTarget implements Target
         for (String role : WORKERS.values())
         {
             secrets.add(secret("db-" + role + "-" + PIPELINE));
+            secrets.add(secret("kafka-" + role + "-" + PIPELINE));
         }
         secrets.add(secret("inbox-passphrase-" + PIPELINE));
         secrets.add(secret("convert-inbox-passphrase-" + PIPELINE));
@@ -377,10 +400,10 @@ public final class AwsTarget implements Target
             case DATABASE ->
             {
                 String replicas = kubectl.kubectl("-n", INFRA, "get",
-                        "deploy/pgbouncer", "-o",
+                        "statefulset/postgres", "-o",
                         "jsonpath={.spec.replicas}").strip();
                 cut.put(dependency, replicas);
-                stop("deploy/pgbouncer", "app=pgbouncer");
+                stop("statefulset/postgres", "app=postgres");
             }
             case BROKER ->
             {
@@ -401,7 +424,7 @@ public final class AwsTarget implements Target
     /**
      * Scales a shared service to none, and waits until its pods are gone.
      *
-     * @param workload the workload, such as {@code deploy/pgbouncer}
+     * @param workload the workload, such as {@code statefulset/kafka}
      * @param selector its pods' label
      * @throws IOException if it can't be
      */
@@ -422,7 +445,7 @@ public final class AwsTarget implements Target
         }
         String workload = switch (dependency)
         {
-            case DATABASE -> "deploy/pgbouncer";
+            case DATABASE -> "statefulset/postgres";
             case BROKER -> "statefulset/kafka";
             default -> null;
         };
@@ -552,6 +575,89 @@ public final class AwsTarget implements Target
     public void kill(String stage) throws Exception
     {
         workers.kill(stage);
+    }
+
+    /** The buckets keep object versions (terraform/persistent). */
+    @Override
+    public boolean restores()
+    {
+        return true;
+    }
+
+    /**
+     * Dumps the pipeline's database with {@code pg_dump}, in the Postgres
+     * pod, to a file on its volume.
+     */
+    @Override
+    public String backUpDatabase() throws Exception
+    {
+        String backup = BACKUPS + "/" + ++backups + ".dump";
+        inPostgres("mkdir", "-p", BACKUPS);
+        inPostgres("pg_dump", "-U", "postgres", "-d", DATABASE, "-Fc", "-f",
+                backup);
+        Harness.say("Backed up the database to " + backup);
+        return backup;
+    }
+
+    /**
+     * Stops the control APIs, drops the database and restores it as it
+     * was, its owner and grants with it ({@code pg_restore --create}),
+     * then starts the control APIs again.
+     */
+    @Override
+    public void restoreDatabase(String backup) throws Exception
+    {
+        for (String control : CONTROLS)
+        {
+            kubectl.kubectl("-n", NAMESPACE, "scale", "deploy/" + control,
+                    "--replicas=0");
+        }
+        kubectl.kubectl("-n", NAMESPACE, "wait", "--for=delete", "pod", "-l",
+                "app in (" + String.join(",", CONTROLS) + ")",
+                "--timeout=110s");
+        inPostgres("psql", "-U", "postgres", "-d", "postgres", "-v",
+                "ON_ERROR_STOP=1", "-c", "DROP DATABASE " + DATABASE
+                        + " WITH (FORCE)");
+        inPostgres("pg_restore", "-U", "postgres", "-d", "postgres",
+                "--create", "--exit-on-error", backup);
+        Harness.say("Restored the database from " + backup);
+        for (String control : CONTROLS)
+        {
+            kubectl.kubectl("-n", NAMESPACE, "scale", "deploy/" + control,
+                    "--replicas=1");
+        }
+        for (String control : CONTROLS)
+        {
+            Kubectl.Result result = Kubectl.run(kubectl.command("-n",
+                    NAMESPACE, "rollout", "status", "deploy/" + control,
+                    "--timeout=" + Workers.READY.toSeconds() + "s"), null,
+                    Workers.READY.plusMinutes(1));
+            if (!result.ok())
+            {
+                throw new IOException(control + " wasn't back in "
+                        + Workers.READY + ": " + result.errors().strip());
+            }
+        }
+    }
+
+    @Override
+    public void stopWorkers(String stage) throws Exception
+    {
+        workers.stop(stage);
+    }
+
+    /**
+     * Runs a command in the Postgres pod's database container.
+     *
+     * @param command the command and its arguments
+     * @throws IOException if it fails
+     */
+    private void inPostgres(String... command) throws IOException
+    {
+        List<String> args = new ArrayList<>(List.of("-n", INFRA, "exec",
+                "postgres-0", "-c", "postgres", "--"));
+        args.addAll(List.of(command));
+        kubectl.kubectl(args.toArray(String[]::new));
     }
 
     @Override

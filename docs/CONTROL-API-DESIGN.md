@@ -410,7 +410,7 @@ depends on neither of the others.
   |---|---|---|
   | `TestcontainersTarget` | Kafka (SASL_SSL with SCRAM, or SSL with client certificates), Postgres (TLS), SeaweedFS, Vault, the test issuer, and each stage in worker and control modes (from its jar, as built: §15.10) | pausing containers |
   | `SandboxTarget` | the sandbox's harness pipeline: the customer images, each stage's Deployment and control Deployment from its README, through port-forwards (§15.11) | pausing a service's containers on their node, deleting a stage's pods gracefully or by force |
-  | `AwsTarget` | the PoC stack's harness pipeline: the same Deployments, on EKS with S3, KMS and Pod Identity, through port-forwards (§15.12) | scaling PgBouncer or Kafka to nothing, a network policy keeping a stage from S3 or KMS, deleting a stage's pods gracefully or by force |
+  | `AwsTarget` | the PoC stack's harness pipeline: the same Deployments, on EKS with S3, KMS and Pod Identity, through port-forwards (§15.12) | scaling Postgres (PgBouncer before revision (fi)) or Kafka to nothing, a network policy keeping a stage from S3 or KMS, deleting a stage's pods gracefully or by force |
 
 - **Scenarios:** those listed in CONTROL-API.md, each one class, run by any target. Each checks the operation's
   answers, the pipeline's results, and the audit (`audit-verify` clean; every call's event present with its
@@ -1086,7 +1086,7 @@ depends on neither of the others.
   are in schemas of its own (`landing_harness`, `split_harness`, `convert_harness`), its topics `harness.*`, its
   objects under `warehouse/harness_landing/` and `warehouse/harness/`. ccda-push is held while it runs (KEDA
   paused at nothing, landing and the duties Deployments scaled to nothing, what they were recorded in
-  `$STATE/harness/held`), for node room and so that cutting PgBouncer or Kafka off touches only the harness;
+  `$STATE/harness/held`), for node room and so that cutting Postgres or Kafka off touches only the harness;
   `harness-down` removes the harness pipeline and everything it stored, and gives ccda-push back.
 - **Keys and roles** (Terraform, applied 2026-11-22 with the user's approval): seven KMS keys of the harness's
   own (`harness-landed-items`, `harness-records`, the `-2` of each for `keys`, and a signing key a stage), about
@@ -1098,10 +1098,18 @@ depends on neither of the others.
   pushes from this machine with Java's HTTP client and the producer's certificate, a push that couldn't connect
   answering status 0; lists the store with the `claude-poc` profile; restarts and kills a stage as on the
   sandbox. Its cuts:
-  - database: PgBouncer scaled to nothing (its replicas recorded) and back, waiting for its rollout;
+  - database: Postgres's StatefulSet (PgBouncer's Deployment before DESIGN.md revision (fi), when the harness
+    pipeline still went through it) scaled to nothing (its replicas recorded) and back, waiting for its rollout;
   - broker: Kafka's StatefulSet the same;
   - store: the namespace's `to-services` policy with S3's ranges taken out of its HTTPS egress;
   - KMS: that egress narrowed to S3's ranges; restored by applying the policy as it was.
+- **Restore, and the reference settings** (DESIGN.md revision (fi), HIPAA.md §11.4 L4 and L5, built 2026-11-24,
+  not yet run): the harness pipeline is deployed from `deploy/reference/` (hipaa profile, its own database
+  `sdh_harness`, verify-full, Kafka's SASL_SSL listener with a SCRAM user per stage), and `AwsTarget` restores:
+  `restores()` is true, as the buckets keep versions; `backUpDatabase` runs `pg_dump -Fc` of `sdh_harness` in the
+  Postgres pod, onto its volume; `restoreDatabase` stops the control APIs, drops the database, and runs
+  `pg_restore --create`, then starts them again; `stopWorkers` scales a stage's Deployment to nothing
+  (`Workers.stop`), and `restartWorkers` starts it again.
 - **Running it:** `scripts/harness.sh aws [scenario,…]` with the stack up (`poc.sh up`): `harness-up`,
   `HarnessIT` under `-Pit` on this machine (`-Dsdh.harness.target=aws`), `harness-down` on exit. It leaves the
   stack up; `poc.sh down` is the operator's.

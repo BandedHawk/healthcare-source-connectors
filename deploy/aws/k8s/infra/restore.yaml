@@ -1,0 +1,61 @@
+# The one-off pod that poc.sh db-restore runs with Postgres stopped (HIPAA.md §11.4, L4): on the Postgres volume,
+# fetch takes the base backup ${RESTORE_BASE} and every archived WAL segment from the backup bucket (as the
+# wal-shipper's role), then prepare moves the data directory aside (kept, as $PGDATA.before-${RESTORE_NOW}),
+# unpacks the base backup in its place and sets recovery to ${RESTORE_TARGET}, promoted at the end. Postgres
+# replays the WAL when poc.sh starts it again. Filled in by poc.sh (envsubst); $PGDATA is the image's own.
+apiVersion: v1
+kind: Pod
+metadata: { name: postgres-restore, namespace: sdh-infra }
+spec:
+  restartPolicy: Never
+  serviceAccountName: postgres-backup
+  nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile: { type: RuntimeDefault }
+  initContainers:
+    - name: fetch
+      image: ${SHIPPER_IMAGE}
+      command: [/bin/bash, -c]
+      args:
+        - |
+          set -euo pipefail
+          r=${PG_HOME}/restore
+          rm -rf "$r"; mkdir -p "$r/base" "$r/wal"
+          aws s3 cp --recursive --only-show-errors "s3://${BACKUP_BUCKET}/base/${RESTORE_BASE}/" "$r/base/"
+          aws s3 sync --only-show-errors "s3://${BACKUP_BUCKET}/wal/" "$r/wal/"
+      env:
+        - { name: HOME, value: /tmp }
+        - { name: AWS_REGION, value: "${AWS_REGION}" }
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts:
+        - { name: data, mountPath: "${PG_HOME}" }
+        - { name: tmp, mountPath: /tmp }
+  containers:
+    - name: prepare
+      image: ${POSTGRES_IMAGE}
+      command: [/bin/bash, -c]
+      args:
+        - |
+          set -euo pipefail
+          r=${PG_HOME}/restore
+          d="$PGDATA"
+          mv "$d" "$d.before-${RESTORE_NOW}"
+          mkdir -m 700 "$d"
+          tar -xzf "$r/base/base.tar.gz" -C "$d"
+          tar -xzf "$r/base/pg_wal.tar.gz" -C "$d/pg_wal"
+          {
+            echo "restore_command = 'cp $r/wal/%f %p'"
+            echo "recovery_target_time = '${RESTORE_TARGET}'"
+            echo "recovery_target_action = 'promote'"
+          } >> "$d/postgresql.auto.conf"
+          touch "$d/recovery.signal"
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts:
+        - { name: data, mountPath: "${PG_HOME}" }
+  volumes:
+    - { name: data, persistentVolumeClaim: { claimName: data-postgres-0 } }
+    - { name: tmp, emptyDir: {} }

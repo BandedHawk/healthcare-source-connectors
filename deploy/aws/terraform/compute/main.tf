@@ -268,6 +268,16 @@ resource "aws_eks_pod_identity_association" "gold_reader" {
   role_arn        = local.p.gold_reader_role_arn
 }
 
+# Postgres's archiver sidecar (k8s/infra/state.yaml), in sdh-infra: writes and reads the backup bucket only. Only
+# once the persistent layer has the role (added 2026-11-24, HIPAA.md §11.4 L4).
+resource "aws_eks_pod_identity_association" "backup" {
+  count           = lookup(local.p, "backup_role_arn", null) == null ? 0 : 1
+  cluster_name    = aws_eks_cluster.poc.name
+  namespace       = "sdh-infra"
+  service_account = "postgres-backup"
+  role_arn        = local.p.backup_role_arn
+}
+
 # --- Console access ---------------------------------------------------------------------------------------------
 #
 # The cluster's creator (the deployer) is its only admin. These IAM principals may also see its workloads in the

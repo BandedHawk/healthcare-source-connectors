@@ -35,6 +35,9 @@ sudo apt-get update && sudo apt-get install -y terraform kubectl
 | `deploy/aws/poc.sh status` | Shows the cluster, its node groups, the shutdown time, today's hours and the month's cost. |
 | `deploy/aws/poc.sh reset` | With a session up: deletes all pipeline data (database, topics, offsets, buckets, intake) and deploys the pipeline again on nothing. Asks first; `--yes` doesn't. |
 | `deploy/aws/poc.sh harness-up` / `harness-down` | With a session up: holds the pipeline and deploys the control harness's own, `harness` (namespace `sdh-harness`), or removes it with everything it stored and starts the pipeline again. `scripts/harness.sh aws` runs both around the scenarios (docs/CONTROL-API-DESIGN.md §15.12). |
+| `deploy/aws/poc.sh db-backup` | With a session up: a base backup of Postgres to the backup bucket. `up` takes one too; WAL is archived all the time (docs/AWS-POC.md §8.1). |
+| `deploy/aws/poc.sh db-restore --to "2026-11-24 15:00"` | With a session up: stops every stage and takes Postgres back to that time (UTC unless a zone is given) from the backup bucket, keeping what the volume held beside it. The stages stay stopped for their checks and repairs (HIPAA-OPERATIONS.md §7). Asks first; `--yes` doesn't. |
+| `deploy/aws/poc.sh db-resume` | After a restore and its repairs: starts the stages again. |
 | `deploy/aws/poc.sh up --on-demand-burst` | Burst nodes on demand instead of Spot, for a performance test. |
 | `deploy/aws/poc.sh up --long-test "landing failover" --hours 12` | Goes beyond the 8-hour day, for resilience or performance tests only (at most 24 h per session). |
 | `deploy/aws/check-config.sh` | Checks, offline, that the deploy settings and the load test still hold the fixes found on AWS (below). Run it before `up` and after changing anything under `deploy/aws`. |
@@ -159,6 +162,7 @@ somewhere safe.
 | `images.env`, `wstl-us-core.tar.gz` | The images' digests (`build-images.sh`) and the transform stage's US Core set. |
 | `sessions` | The session log behind the 8-hour day. |
 | `kubeconfig` | Access to the current cluster. |
+| `pki/` | The PoC's CA, and the certificates it issued to Postgres and Kafka (docs/AWS-POC.md §8.2). A pipeline deployed from `deploy/reference/` trusts `pki/ca.crt`. |
 | `downloads/` | Pinned downloads, checked against their checksums (KEDA). |
 
 ## What's never removed automatically
@@ -176,6 +180,10 @@ keys lost there are gone for good.
 
 ## Not yet done
 
+- Backups and TLS for the reference pipeline (docs/AWS-POC.md §8.1, §8.2, built 2026-11-24) aren't applied yet.
+  The next `poc.sh bootstrap` applies the persistent layer's part: bucket versioning and its lifecycle, the
+  backup bucket, the role `sdh-poc-postgres-backup`, and `s3:GetBucketVersioning` for the stages. The next `up`
+  then starts Postgres with archiving and TLS, and Kafka with its SASL_SSL listener.
 - The split stage's lookups in bronze (and readers' in silver) slow with every item: a fix in the connectors
   comes before a larger load (docs/AWS-POC.md, Status).
 - Until the lookups are fixed, run the gold check after a small load on a reset pipeline: `poc.sh reset`, then

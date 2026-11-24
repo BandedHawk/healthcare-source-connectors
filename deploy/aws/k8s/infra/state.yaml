@@ -53,12 +53,100 @@ spec:
 ---
 # The catalog and lease database, as in the sandbox (deploy/sandbox/infra/postgres.yaml). The superuser
 # password is in the secret postgres, which poc.sh makes from its state directory.
+#
+# Backups (HIPAA.md §11.4, L4; DESIGN.md §18.8): every WAL segment is archived to the backup bucket, and poc.sh
+# takes a base backup at each `up` (db-backup), so `poc.sh db-restore --to <time>` can take the database back to
+# any point since the oldest base backup kept (7 days: terraform/persistent, versions_kept_days). Stock images
+# only: Postgres's archive_command copies each segment into an outbox on the data volume, and the sidecar
+# wal-shipper, the official AWS CLI image under the role sdh-poc-postgres-backup (Pod Identity, service account
+# postgres-backup), sends what is in the outbox to S3 and then deletes it. The outbox is on the volume, so a
+# segment archived but not yet sent outlasts a restart; a segment is sent once (if-none-match), never replaced.
+# archive_timeout closes a segment at least every minute, so a restore loses at most about a minute.
+#
+# TLS (HIPAA.md §11.4, L5): the server certificate is in the secret postgres-tls, which poc.sh issues from its CA
+# (state directory, pki/). pg_hba.conf is the ConfigMap postgres-hba: the reference pipeline's database (the
+# harness's, sdh_harness, deploy/reference/postgres.sql) and its roles over TLS only; the performance pipeline
+# and PgBouncer as before, in plaintext, so their runs stay comparable with the earlier ones.
 apiVersion: v1
 kind: Service
 metadata: { name: postgres, namespace: sdh-infra }
 spec:
   selector: { app: postgres }
   ports: [{ port: 5432 }]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: postgres-backup, namespace: sdh-infra }
+automountServiceAccountToken: false
+---
+# archive.sh is Postgres's archive_command; ship.sh is the wal-shipper's loop. Both name segments and backups only.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: postgres-archive, namespace: sdh-infra }
+data:
+  archive.sh: |
+    #!/bin/sh
+    # archive.sh <path> <segment>: copies a WAL segment into the outbox, synced before Postgres is told it's safe.
+    # A segment already there is accepted only if it is the same.
+    set -e
+    out=/var/lib/postgresql/backup/outbox/wal
+    mkdir -p "$out"
+    if [ -f "$out/$2" ]; then
+      cmp -s "$1" "$out/$2" && exit 0
+      echo "archive: segment $2 is in the outbox already, and differs" >&2
+      exit 1
+    fi
+    cp "$1" "$out/.$2.part"
+    sync "$out/.$2.part"
+    mv "$out/.$2.part" "$out/$2"
+    sync "$out"
+  ship.sh: |
+    #!/bin/bash
+    # Sends each file in the outbox to s3://$BACKUP_BUCKET/<its path in the outbox>, then deletes it here. A WAL
+    # segment is written once (if-none-match): one already there of the same size was sent before, and anything
+    # else is left in the outbox and reported, never replaced. Hidden files (.*.part) are still being written.
+    set -u
+    shopt -s globstar nullglob
+    outbox=/var/lib/postgresql/backup/outbox
+    while true; do
+      for f in "$outbox"/**/*; do
+        [[ -f "$f" ]] || continue
+        key="${f#"$outbox"/}"
+        if [[ "$key" == wal/* ]]; then
+          if aws s3api put-object --bucket "$BACKUP_BUCKET" --key "$key" --body "$f" --if-none-match '*' \
+              >/dev/null 2>/tmp/put.err; then
+            rm -f "$f"
+          elif grep -q PreconditionFailed /tmp/put.err && [[ "$(aws s3api head-object --bucket "$BACKUP_BUCKET" \
+              --key "$key" --query ContentLength --output text 2>/dev/null)" == "$(stat -c %s "$f")" ]]; then
+            rm -f "$f"
+          else
+            echo "wal-shipper: $key not sent; trying again" >&2
+            break
+          fi
+        elif aws s3 cp "$f" "s3://$BACKUP_BUCKET/$key" --only-show-errors >/dev/null 2>&1; then
+          rm -f "$f"
+        else
+          echo "wal-shipper: $key not sent; trying again" >&2
+          break
+        fi
+      done
+      for d in "$outbox"/base/*/; do rmdir "$d" 2>/dev/null; done
+      sleep 10
+    done
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: postgres-hba, namespace: sdh-infra }
+data:
+  # First match wins. psql in the pod (poc.sh) and pg_basebackup log in over the socket, as the image's initdb set.
+  pg_hba.conf: |
+    local     all          all                         trust
+    local     replication  all                         trust
+    hostnossl sdh_harness  all              all        reject
+    hostnossl all          +catalog_harness all        reject
+    hostssl   sdh_harness  +catalog_harness all        scram-sha-256
+    hostssl   sdh_harness  all              all        reject
+    host      all          all              all        scram-sha-256
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -72,6 +160,7 @@ spec:
     spec:
       nodeSelector: { "sdh-poc/pool": base, topology.kubernetes.io/zone: "${STATE_ZONE}" }
       terminationGracePeriodSeconds: 60   # a clean shutdown checkpoints, so the next start skips recovery
+      serviceAccountName: postgres-backup  # its role reaches the backup bucket only (terraform/persistent: backup)
       securityContext:
         runAsNonRoot: true
         runAsUser: 999
@@ -89,7 +178,12 @@ spec:
           # 300 connections since 2026-11-17: with the stages scaled out (splitter 6, convert 12, transform 15) they
           # used 188 of 200 (docs/PERFORMANCE.md §10); an idle backend is a few MB, within the 2 GiB below. Since
           # revision (ea) the stages come through PgBouncer (below), which keeps at most 220 of them.
-          args: [-c, max_connections=300, -c, shared_buffers=128MB]
+          # The archive and TLS settings: see above.
+          args: [-c, max_connections=300, -c, shared_buffers=128MB,
+                 -c, archive_mode=on, -c, archive_timeout=60,
+                 -c, "archive_command=/etc/postgresql/archive/archive.sh %p %f",
+                 -c, ssl=on, -c, ssl_cert_file=/etc/postgresql/tls/tls.crt, -c, ssl_key_file=/etc/postgresql/tls/tls.key,
+                 -c, ssl_min_protocol_version=TLSv1.2, -c, hba_file=/etc/postgresql/hba/pg_hba.conf]
           ports: [{ containerPort: 5432 }]
           readinessProbe: { exec: { command: [pg_isready, -U, postgres, -d, sdh] }, periodSeconds: 5 }
           securityContext:
@@ -103,8 +197,35 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql }
             - { name: run, mountPath: /var/run/postgresql }
+            - { name: hba, mountPath: /etc/postgresql/hba, readOnly: true }
+            - { name: tls, mountPath: /etc/postgresql/tls, readOnly: true }
+            - { name: archive, mountPath: /etc/postgresql/archive, readOnly: true }
+        # Sends the outbox (WAL segments, base backups) to the backup bucket, one object each, then deletes it.
+        - name: wal-shipper
+          image: amazon/aws-cli:2.39.3@sha256:d557b3524475d70dd3104cf44d96568ee3188897b73a6ece2b37aa50e1af362f
+          command: [/bin/bash, /etc/postgresql/archive/ship.sh]
+          env:
+            - { name: BACKUP_BUCKET, value: "${BACKUP_BUCKET}" }
+            - { name: AWS_REGION, value: "${AWS_REGION}" }
+            - { name: HOME, value: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }
+            - { name: archive, mountPath: /etc/postgresql/archive, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
       volumes:
         - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+        - { name: hba, configMap: { name: postgres-hba } }
+        - { name: archive, configMap: { name: postgres-archive, defaultMode: 0555 } }
+        # Root's, readable by the group only (fsGroup): as Postgres requires of a key it doesn't own.
+        - { name: tls, secret: { secretName: postgres-tls, defaultMode: 0440 } }
   volumeClaimTemplates:
     - metadata: { name: data }
       spec:
@@ -148,6 +269,8 @@ data:
     max_db_connections = 220
     max_prepared_statements = 200
     ignore_startup_parameters = extra_float_digits
+    ; Plaintext to Postgres, as before Postgres took TLS (L5), so the performance runs stay comparable.
+    server_tls_sslmode = disable
     server_idle_timeout = 120
     query_wait_timeout = 120
     log_connections = 0
@@ -205,6 +328,13 @@ spec:
 # One Kafka node in KRaft mode, a broker and a controller (docs/AWS-POC.md §3: one broker accepted for the PoC,
 # so replication factor 1). Otherwise as in the sandbox (deploy/sandbox/infra/kafka.yaml). Topics are made by
 # poc.sh; brokers don't create them.
+#
+# Two listeners for clients (HIPAA.md §11.4, L5): PLAINTEXT on 9092, for the performance pipeline, KEDA and poc.sh,
+# as before, so the performance runs stay comparable; and SASL_SSL on 9094, TLS with a SCRAM-SHA-512 login, for a
+# pipeline deployed from deploy/reference/ (the harness's). The broker's certificate is in the secret kafka-tls,
+# which poc.sh issues from its CA. The standard authorizer refuses whatever no ACL allows: the SCRAM users get only
+# the rights deploy/reference/kafka-acls.sh grants. The plaintext listener's principal (ANONYMOUS) is a super user,
+# as the controller's and the broker's own connections need, and the performance pipeline had.
 apiVersion: v1
 kind: Service
 metadata: { name: kafka, namespace: sdh-infra }
@@ -215,6 +345,7 @@ spec:
   ports:
     - { name: broker, port: 9092 }
     - { name: controller, port: 9093 }
+    - { name: sasl-ssl, port: 9094 }
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -242,10 +373,32 @@ spec:
             - { name: CLUSTER_ID, value: c2RoLXBvYy1rYWZrYS0wMQ }
             - { name: KAFKA_NODE_ID, value: "0" }
             - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
-            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-            - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka-0.kafka.sdh-infra.svc:9092" }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093,SASL_SSL://:9094" }
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka-0.kafka.sdh-infra.svc:9092,SASL_SSL://kafka-0.kafka.sdh-infra.svc:9094"
             - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER }
-            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: PLAINTEXT }
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL"
+            # The SASL_SSL listener: the broker's key and certificate in a PKCS12 store, SCRAM-SHA-512 logins. The
+            # image's start script wants the store and its password's file in /etc/kafka/secrets (_FILENAME,
+            # _CREDENTIALS); the location and password are set as well, as Kafka reads them.
+            - { name: KAFKA_SSL_KEYSTORE_TYPE, value: PKCS12 }
+            - { name: KAFKA_SSL_KEYSTORE_FILENAME, value: server.p12 }
+            - { name: KAFKA_SSL_KEYSTORE_CREDENTIALS, value: keystore-password }
+            - { name: KAFKA_SSL_KEY_CREDENTIALS, value: keystore-password }
+            - { name: KAFKA_SSL_KEYSTORE_LOCATION, value: /etc/kafka/secrets/server.p12 }
+            - name: KAFKA_SSL_KEYSTORE_PASSWORD
+              valueFrom: { secretKeyRef: { name: kafka-tls, key: keystore-password } }
+            - name: KAFKA_SSL_KEY_PASSWORD
+              valueFrom: { secretKeyRef: { name: kafka-tls, key: keystore-password } }
+            - { name: KAFKA_SSL_ENABLED_PROTOCOLS, value: "TLSv1.3,TLSv1.2" }
+            - { name: KAFKA_SASL_ENABLED_MECHANISMS, value: SCRAM-SHA-512 }
+            - name: KAFKA_LISTENER_NAME_SASL__SSL_SCRAM___SHA___512_SASL_JAAS_CONFIG
+              value: "org.apache.kafka.common.security.scram.ScramLoginModule required;"
+            - { name: KAFKA_AUTHORIZER_CLASS_NAME, value: org.apache.kafka.metadata.authorizer.StandardAuthorizer }
+            - { name: KAFKA_SUPER_USERS, value: "User:ANONYMOUS" }
+            - { name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND, value: "false" }
             - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-0.kafka.sdh-infra.svc:9093" }
             - { name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data/logs }
             - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false" }
@@ -263,6 +416,7 @@ spec:
           ports:
             - { name: broker, containerPort: 9092 }
             - { name: controller, containerPort: 9093 }
+            - { name: sasl-ssl, containerPort: 9094 }
           readinessProbe: { tcpSocket: { port: 9092 }, periodSeconds: 5 }
           securityContext:
             allowPrivilegeEscalation: false
@@ -272,6 +426,9 @@ spec:
             limits: { memory: 768Mi }
           volumeMounts:
             - { name: data, mountPath: /var/lib/kafka/data }
+            - { name: tls, mountPath: /etc/kafka/secrets, readOnly: true }
+      volumes:
+        - { name: tls, secret: { secretName: kafka-tls, defaultMode: 0440 } }
   volumeClaimTemplates:
     - metadata: { name: data }
       spec:

@@ -6,6 +6,15 @@
 # harness issuer's key set. No transform stage. Run by deploy/aws/poc.sh harness-up, after the pipeline's
 # topics, database roles and landing schema; poc.sh harness-down removes it and everything it stored.
 #
+# Its settings are the reference ones (deploy/reference/; HIPAA.md §11.4, L5): the hipaa profile with nothing
+# waived, Kafka over SASL_SSL with a SCRAM login per stage (the broker's second listener, 9094, and the rights
+# deploy/reference/kafka-acls.sh grants), Postgres with verify-full in the pipeline's own database, sdh_harness
+# (deploy/reference/postgres.sql), straight to Postgres rather than through PgBouncer (HIPAA.md §11.4, L2), both
+# servers' certificates from poc.sh's CA ($SDH_POC_STATE/pki/ca.crt). Changed from the reference files, and only:
+#   - the landing source: an HTTP push intake (landing-source.yml), not the bucket intake;
+#   - the key aliases: the PoC's are alias/sdh-poc-<pipeline>-..., not alias/sdh-<pipeline>-...;
+#   - the convert stage's next-registry-schema dropped: there is no transform stage.
+#
 # As ../pipeline/apply.sh deploys a pipeline (its helpers are sourced from it), with:
 #   - the pipeline's own KMS keys (terraform/persistent: harness_keks), the stages' roles through Pod Identity
 #     links for sdh-harness (terraform/compute: aws_eks_pod_identity_association.harness), the control APIs on the
@@ -27,6 +36,34 @@ SANDBOX_HARNESS="$ROOT/deploy/sandbox/harness"
 P=harness
 H="$STATE/harness"
 mkdir -p "$H/pki"; chmod 700 "$H"
+
+# reference_settings <file>: a reference stage's settings, filled in for the harness pipeline, the PoC's key aliases
+# put in.
+reference_settings() {
+  # shellcheck disable=SC2016
+  KAFKA_BROKERS="kafka-0.kafka.sdh-infra.svc:9094" POSTGRES_HOST="postgres.sdh-infra.svc" \
+    envsubst '$PIPELINE $KAFKA_BROKERS $POSTGRES_HOST $AWS_REGION $BRONZE_BUCKET $SILVER_BUCKET $GOLD_BUCKET
+              $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256' < "$ROOT/deploy/reference/$1" \
+    | sed "s#alias/sdh-$PIPELINE-#alias/sdh-poc-$PIPELINE-#g"
+}
+
+# reference_landing: the reference landing node's settings with its source replaced by landing-source.yml.
+reference_landing() {
+  reference_settings landing-application.yml | python3 -I -c '
+import sys
+lines = sys.stdin.read().split("\n")
+start = lines.index("    source:")
+end = next(i for i in range(start + 1, len(lines)) if not lines[i].startswith("      "))
+source = open(sys.argv[1]).read().rstrip("\n").split("\n")
+print("\n".join(lines[:start] + source + lines[end:]), end="")' \
+    <(envsubst '$PRODUCER_SUBJECT' < "$HARNESS_DIR/landing-source.yml")
+}
+
+# kafka_jaas <role>: the stage's SCRAM login, for SDH_KAFKA_JAAS (made a broker user by poc.sh harness-up).
+kafka_jaas() {
+  printf 'org.apache.kafka.common.security.scram.ScramLoginModule required username="%s-%s" password="%s";' \
+    "$1" "$P" "$(secret "kafka-$1-$P")"
+}
 
 # issue <stem> <subject> <extensions>: a certificate from the harness CA, made once. As scripts/sandbox.sh's.
 issue() {
@@ -111,31 +148,42 @@ deploy_harness() {
   CONVERT_INBOX_SHA256="$(fingerprint "$k-convert-inbox-public.pem")"
   RECIPIENT_SHA256="$(fingerprint "$k-fhir-recipient-public.pem")"
 
-  local vars='$PIPELINE $ICEBERG_PREFIX $PRODUCER_SUBJECT $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256'
-  vars+=' $KAFKA_BROKERS $AWS_REGION $INTAKE_BUCKET $BRONZE_BUCKET $SILVER_BUCKET $GOLD_BUCKET'
-  envsubst "$vars" < "$HARNESS_DIR/landing-application.yml" > "$work/landing-application.yml"
-  envsubst "$vars" < "$HERE/splitter-application.yml" > "$work/splitter-application.yml"
+  reference_landing > "$work/landing-application.yml"
+  reference_settings splitter-application.yml > "$work/splitter-application.yml"
   # No transform stage, so no registry for the convert stage to mark items in.
-  envsubst "$vars" < "$HERE/convert-application.yml" | sed '/next-registry-schema:/d' \
-    > "$work/convert-application.yml"
+  reference_settings convert-application.yml | sed '/next-registry-schema:/d' > "$work/convert-application.yml"
+  local f
+  for f in landing splitter convert; do
+    grep -q 'profile: hipaa' "$work/$f-application.yml" || die "the reference $f settings have no hipaa profile"
+    ! grep -q '\${[A-Z_]*}' <(grep -v SDH_ "$work/$f-application.yml") \
+      || die "the reference $f settings have a placeholder this script doesn't fill"
+  done
 
-  local d="$H/pki"
+  # The servers' CA, for verify-full and Kafka's TLS (poc.sh infra_tls).
+  local d="$H/pki" infra_ca="$STATE/pki/ca.crt"
+  [[ -s "$infra_ca" ]] || die "no PoC CA at $infra_ca: poc.sh up makes it"
   apply_secret "$n" landing-keys --from-file=tls.crt="$d/landing.crt" --from-file=tls.key="$d/landing.key" \
-    --from-file=producers-ca.pem="$d/ca.crt" --from-file=splitter-inbox.pem="$k-inbox-public.pem"
+    --from-file=producers-ca.pem="$d/ca.crt" --from-file=splitter-inbox.pem="$k-inbox-public.pem" \
+    --from-file=kafka-ca.crt="$infra_ca" --from-file=postgres-ca.crt="$infra_ca"
   apply_secret "$n" landing-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-landing-$P")" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas landing)" \
     --from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_LEASE_JDBC_TABLE="landing_$ICEBERG_PREFIX.sdh_lease"
   apply_config "$n" landing-config --from-file=application.yml="$work/landing-application.yml"
   apply_secret "$n" splitter-keys --from-file=inbox.pem="$k-inbox.pem" \
     --from-file=inbox-public.pem="$k-inbox-public.pem" --from-file=recipient.pem="$k-convert-inbox-public.pem" \
-    --from-file=landing-signer.pem="$landing_signer"
+    --from-file=landing-signer.pem="$landing_signer" \
+    --from-file=kafka-ca.crt="$infra_ca" --from-file=postgres-ca.crt="$infra_ca"
   apply_secret "$n" splitter-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-splitter-$P")" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas splitter)" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "inbox-passphrase-$P")" \
     --from-literal=SDH_MAINTENANCE_INTERVAL=20s --from-literal=SDH_STORAGE_COMMIT_MAX_RECORDS=1
   apply_config "$n" splitter-config --from-file=application.yml="$work/splitter-application.yml"
   apply_secret "$n" convert-keys --from-file=inbox.pem="$k-convert-inbox.pem" \
     --from-file=inbox-public.pem="$k-convert-inbox-public.pem" \
-    --from-file=recipient.pem="$k-fhir-recipient-public.pem" --from-file=split-signer.pem="$split_signer"
+    --from-file=recipient.pem="$k-fhir-recipient-public.pem" --from-file=split-signer.pem="$split_signer" \
+    --from-file=kafka-ca.crt="$infra_ca" --from-file=postgres-ca.crt="$infra_ca"
   apply_secret "$n" convert-env --from-literal=SDH_LEASE_JDBC_PASSWORD="$(secret "db-convert-$P")" \
+    --from-literal=SDH_KAFKA_JAAS="$(kafka_jaas convert)" \
     --from-literal=SDH_CRYPTO_KEYS_INBOX_PASSPHRASE="$(secret "convert-inbox-passphrase-$P")" \
     --from-literal=SDH_MAINTENANCE_INTERVAL=20s
   apply_config "$n" convert-config --from-file=application.yml="$work/convert-application.yml"
@@ -155,7 +203,6 @@ deploy_harness() {
           -e 's/convert-stage-\(env\|keys\|config\)/convert-\1/g' \
           -e 's/name: convert-stage }/name: convert }/' -e 's/app: convert-stage }/app: convert }/g' \
     > "$work/convert/convert.yaml"
-  local f
   for f in landing splitter convert; do
     grep -q '@sha256:' "$work/$f/$f.yaml" || die "the $f README's Deployment no longer matches (image)"
   done

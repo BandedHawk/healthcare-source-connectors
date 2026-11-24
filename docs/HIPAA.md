@@ -656,13 +656,17 @@ What the AWS PoC would need for real PHI, as listed in AWS-POC §9. These are op
 the product must prove its capabilities:
 - a BAA;
 - private subnets;
-- Kafka TLS and ACLs, and Postgres TLS;
+- Kafka TLS and ACLs, and Postgres TLS: built for a pipeline deployed from `deploy/reference/` (the harness's,
+  §11.4 L5), not yet for the performance pipeline, which keeps its plaintext paths so its runs stay comparable;
 - CloudTrail data events;
 - a durable audit sink: the journal now keeps every event in Postgres, which survives `down` on its EBS volume, but
   the collector's logs pipeline still exports to `nop` (`deploy/aws/k8s/infra/telemetry.yaml`), so nothing
   reaches a separate store; sending it to CloudWatch Logs needs an IAM role for the collector (the steps, and
   those for other clouds and self-hosted stores, are in HIPAA-OPERATIONS.md §2.7);
-- bucket backups: versioning is off, and bronze is the only copy once an object has landed;
+- bucket backups: versioning on for bronze, silver and gold, noncurrent versions kept 7 days, and Postgres's WAL
+  archived to its own bucket (§11.4 L4, built 2026-11-24, not yet applied on AWS); bronze is still the only copy
+  of a landed object once its versions expire, so a longer window, or a copy in a second region, is the
+  operator's choice;
 - KMS rotation, which is off.
 
 ## 9. Sources, and what could not be checked
@@ -821,8 +825,8 @@ only once the user has approved its cost, with `poc.sh up --long-test "<reason>"
 | L1 | P11 | Kafka with client certificates (mTLS), in the Testcontainers harness beside SASL_SSL. **Done 2026-11-24:** every scenario passes with either login (DESIGN.md revision (fh)) |
 | L2 | P11 | Postgres TLS through PgBouncer, in the Testcontainers harness. This waits for the further performance review that P11 asks for (PERFORMANCE.md §10) |
 | L3 | P7 | The `restore` scenario at the sandbox level: `SandboxTarget` backs up and restores its Postgres, and its store keeps versions |
-| L4 | P7, P12 | The AWS PoC made ready: WAL archiving to S3 for its Postgres (or pgBackRest) with a recovery target time; versioning on its buckets, with a lifecycle rule for noncurrent versions; `AwsTarget` backs up and restores the database, so the `restore` scenario runs there |
-| L5 | P12 | The PoC able to deploy from `deploy/reference/`: TLS everywhere, and a database for each pipeline |
+| L4 | P7, P12 | The AWS PoC made ready: WAL archiving to S3 for its Postgres (or pgBackRest) with a recovery target time; versioning on its buckets, with a lifecycle rule for noncurrent versions; `AwsTarget` backs up and restores the database, so the `restore` scenario runs there. **Built 2026-11-24, not yet applied or run on AWS** (DESIGN.md revision (fi), AWS-POC.md §8.1): stock Postgres archives each WAL segment to an outbox on its volume, and an AWS CLI sidecar sends it to the backup bucket; a base backup at every `up`; `poc.sh db-restore --to <time>` restores to a point; versions kept 7 days |
+| L5 | P12 | The PoC able to deploy from `deploy/reference/`: TLS everywhere, and a database for each pipeline. **Built 2026-11-24, not yet run on AWS** (DESIGN.md revision (fi), AWS-POC.md §8.2): the harness pipeline is deployed from the reference files, with three named changes; Postgres takes TLS, and the harness's database (`postgres.sql`) only over TLS; Kafka has a second listener, SASL_SSL with SCRAM, and the standard authorizer, with `kafka-acls.sh`'s rights. The performance pipeline keeps its plaintext paths |
 
 **The session: one AWS PoC session**
 

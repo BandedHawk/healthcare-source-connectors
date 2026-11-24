@@ -57,7 +57,8 @@ public final class Workers
 
     /**
      * Deletes the stage's worker pods, gracefully, as a rollout stops
-     * them, and waits for their replacement.
+     * them, and waits for their replacement; or, if {@link #stop} left the
+     * stage at none, starts one.
      *
      * @param stage the stage
      * @return whether a replacement started; false if it refused to
@@ -66,9 +67,35 @@ public final class Workers
     public boolean restart(String stage) throws Exception
     {
         Set<String> before = pods(stage);
+        if (before.isEmpty() && "0".equals(kubectl.kubectl("-n", namespace,
+                "get", "deploy/" + apps.get(stage), "-o",
+                "jsonpath={.spec.replicas}").strip()))
+        {
+            // Stopped (stop): started again, one pod.
+            kubectl.kubectl("-n", namespace, "scale", "deploy/" + apps.get(
+                    stage), "--replicas=1");
+            return replaced(stage, before);
+        }
         kubectl.kubectl("-n", namespace, "delete", "pod", "-l", "app="
                 + apps.get(stage), "--wait=true", "--timeout=180s");
         return replaced(stage, before);
+    }
+
+    /**
+     * Scales the stage's Deployment, which has the name of its workers'
+     * {@code app} label, to none, and waits until its pods have gone, so
+     * they have stopped gracefully and released their leases. {@link
+     * #restart} starts them again.
+     *
+     * @param stage the stage
+     * @throws IOException if they can't be stopped in time
+     */
+    public void stop(String stage) throws IOException
+    {
+        kubectl.kubectl("-n", namespace, "scale", "deploy/" + apps.get(stage),
+                "--replicas=0");
+        kubectl.kubectl("-n", namespace, "wait", "--for=delete", "pod", "-l",
+                "app=" + apps.get(stage), "--timeout=110s");
     }
 
     /**

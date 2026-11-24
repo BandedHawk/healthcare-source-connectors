@@ -48,7 +48,7 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from: [{ namespaceSelector: { matchLabels: { sdh.smiledigitalhealth.com/infra-client: "true" } } }]
-      ports: [{ port: 9092 }]
+      ports: [{ port: 9092 }, { port: 9094 }]   # 9094: SASL_SSL (state.yaml)
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

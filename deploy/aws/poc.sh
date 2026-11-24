@@ -16,6 +16,13 @@
 #                                     harness (k8s/harness/apply.sh), for scripts/harness.sh aws
 #   poc.sh harness-down               delete the harness pipeline and everything it stored, and start the
 #                                     pipelines again
+#   poc.sh db-backup                  with a session up: a base backup of Postgres to the backup bucket (also made
+#                                     at every up); WAL is archived there all the time
+#   poc.sh db-restore --to <time> [--yes]
+#                                     with a session up: stop the stages and take Postgres back to <time> (as
+#                                     date -d reads it; UTC if no zone) from the backup bucket. The stages stay
+#                                     stopped for their checks and repairs (HIPAA-OPERATIONS.md §7)
+#   poc.sh db-resume                  after a restore and its repairs: start the stages again
 #
 # Every `up` first schedules an automatic shutdown on AWS (EventBridge Scheduler, then the sdh-poc-auto-down
 # state machine). So a session ends on time even if this machine is off or asleep, or the script fails half way.
@@ -44,6 +51,9 @@ SCHEDULE=sdh-poc-auto-down
 DAILY_HOURS=8
 LONG_TEST_MAX_HOURS=24
 SNAPSHOTS_KEPT=3
+BACKUP_BUCKET="sdh-poc-backup-$ACCOUNT"
+# Where the Postgres volume is mounted; the data directory ($PGDATA) and the backup outbox are under it.
+PG_HOME=/var/lib/postgresql
 PIPELINES="${SDH_PIPELINES:-ccda-push}"
 KEDA_VERSION="2.21.0"
 # Partitions of each stage's input topic (setup_topics): 48 since 2026-11-15, for ~24 transform pods of 2 consumers
@@ -232,6 +242,7 @@ cmd_up() {
   setup_keda
   setup_topics
   setup_database
+  db_backup
   if [[ -x "$K8S/pipeline/apply.sh" ]]; then
     "$K8S/pipeline/apply.sh"
   else
@@ -251,14 +262,202 @@ start_services() {
   kubectl apply -f "$K8S/infra/namespace.yaml" >/dev/null
   kubectl -n sdh-infra create secret generic postgres --from-literal=password="$(secret postgres)" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  infra_tls
+  export BACKUP_BUCKET
   # shellcheck disable=SC2016
-  envsubst '$POSTGRES_VOLUME_ID $KAFKA_VOLUME_ID $STATE_ZONE' < "$K8S/infra/state.yaml" | kubectl apply -f - >/dev/null
+  envsubst '$POSTGRES_VOLUME_ID $KAFKA_VOLUME_ID $STATE_ZONE $BACKUP_BUCKET $AWS_REGION' < "$K8S/infra/state.yaml" \
+    | kubectl apply -f - >/dev/null
   infra scale statefulset/postgres statefulset/kafka --replicas=1 >/dev/null
   kubectl apply -f "$K8S/infra/cluster-autoscaler.yaml" >/dev/null
   # The stages' metrics, for measure.sh (docs/PERFORMANCE.md §10); kept only while the session is up.
   kubectl apply -f "$K8S/infra/telemetry.yaml" >/dev/null
   infra rollout status statefulset/postgres --timeout=600s >/dev/null
   infra rollout status statefulset/kafka --timeout=600s >/dev/null
+}
+
+# The PoC's own CA (state directory, pki/) and the certificates it issues to Postgres and Kafka (HIPAA.md §11.4,
+# L5), as the secrets postgres-tls and kafka-tls. A pipeline deployed from deploy/reference/ trusts the CA
+# (pki/ca.crt) and checks the server's name (verify-full; Kafka's default endpoint identification).
+infra_issue() {  # <stem> <common name> <DNS names, comma-separated>
+  local d="$STATE/pki" san="" name
+  [[ -s "$d/$1.crt" ]] && return
+  for name in ${3//,/ }; do san+="DNS:$name,"; done
+  (umask 077; openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/O=SDH PoC/CN=$2" \
+     -keyout "$d/$1.key.tmp" -out "$d/$1.csr" 2>/dev/null
+   openssl pkcs8 -topk8 -nocrypt -in "$d/$1.key.tmp" -out "$d/$1.key"
+   rm -f "$d/$1.key.tmp")
+  openssl x509 -req -in "$d/$1.csr" -CA "$d/ca.crt" -CAkey "$d/ca.key" -CAcreateserial -days 825 \
+    -extfile <(printf 'extendedKeyUsage=serverAuth\nsubjectAltName=%s\n' "${san%,}") -out "$d/$1.crt" 2>/dev/null
+  rm -f "$d/$1.csr"
+}
+
+infra_tls() {
+  local d="$STATE/pki" n=sdh-infra.svc
+  mkdir -p "$d"; chmod 700 "$d"
+  if [[ ! -s "$d/ca.crt" ]]; then
+    (umask 077; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+      -subj "/O=SDH PoC/CN=SDH PoC Infra CA" -keyout "$d/ca.key" -out "$d/ca.crt" 2>/dev/null)
+  fi
+  infra_issue postgres "postgres.$n" "postgres.$n,postgres.$n.cluster.local"
+  infra_issue kafka "kafka-0.kafka.$n" "kafka-0.kafka.$n,kafka-0.kafka.$n.cluster.local"
+  if [[ ! -s "$d/kafka.p12" ]]; then
+    (umask 077; openssl pkcs12 -export -name kafka -inkey "$d/kafka.key" -in "$d/kafka.crt" -certfile "$d/ca.crt" \
+      -passout "pass:$(secret kafka-keystore)" -out "$d/kafka.p12")
+  fi
+  infra create secret tls postgres-tls --cert="$d/postgres.crt" --key="$d/postgres.key" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  infra create secret generic kafka-tls --from-file=server.p12="$d/kafka.p12" \
+    --from-literal=keystore-password="$(secret kafka-keystore)" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
+# --- Postgres's backups (k8s/infra/state.yaml; HIPAA.md §11.4, L4) ------------------------------------------------
+
+pg() { infra exec -i postgres-0 -c postgres -- "$@"; }
+pg_sql() { pg psql -qAt -v ON_ERROR_STOP=1 -U postgres -d "${2:-postgres}" -c "$1"; }
+
+# db_backup: a base backup (pg_basebackup, tar, compressed, with the WAL it needs), made on the volume and then
+# moved whole into the outbox, which the wal-shipper sends to s3://$BACKUP_BUCKET/base/<UTC time>/. Skipped, with a
+# warning, if the volume hasn't room for it beside the database.
+db_backup() {
+  local stamp; stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  say "Base backup of Postgres ($stamp) to $BACKUP_BUCKET"
+  pg env STAMP="$stamp" HOME_DIR="$PG_HOME" bash -s < "$K8S/infra/base-backup.sh" \
+    || say "WARNING: no base backup made"
+}
+
+# db_flush: closes the WAL segment being written, and waits (up to 3 min) until it is archived and the outbox is
+# sent, so the backup bucket holds everything up to now. Before Postgres stops, and before a restore.
+db_flush() {
+  infra get pod postgres-0 >/dev/null 2>&1 || return 0
+  local seg i
+  seg="$(pg_sql "SELECT pg_walfile_name(pg_switch_wal())" 2>/dev/null)" || { say "WARNING: WAL not flushed"; return 0; }
+  for i in $(seq 1 36); do
+    if [[ "$(pg_sql "SELECT coalesce(last_archived_wal >= '$seg', false) FROM pg_stat_archiver")" == t ]] \
+        && [[ -z "$(pg find "$PG_HOME/backup/outbox" -type f 2>/dev/null | head -n 1)" ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+  say "WARNING: WAL up to $seg not all sent to $BACKUP_BUCKET after 3 min (kubectl -n sdh-infra logs postgres-0 -c wal-shipper)"
+}
+
+cmd_db_backup() {
+  need_tools; state_dir
+  cluster_exists || die "db-backup needs a session: poc.sh up"
+  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
+  db_backup
+  db_flush
+}
+
+# pause_stages: every stage at none, KEDA held there, and their pods gone (as stop_services begins).
+pause_stages() {
+  local n
+  for n in $(pipeline_namespaces); do
+    kubectl -n "$n" annotate scaledobject --all autoscaling.keda.sh/paused-replicas=0 --overwrite >/dev/null 2>&1 || true
+    kubectl -n "$n" scale deploy --all --replicas=0 >/dev/null 2>&1 || true
+  done
+  for n in $(pipeline_namespaces); do
+    kubectl -n "$n" wait --for=delete pod --all --timeout=180s >/dev/null 2>&1 || true
+  done
+}
+
+# base_before <stamp>: the newest whole base backup (its three files all sent) from before the UTC time <stamp>.
+base_before() {
+  aws s3api list-objects-v2 --bucket "$BACKUP_BUCKET" --prefix base/ --query 'Contents[].Key' --output text \
+    | tr '\t' '\n' | python3 -I -c '
+import collections, sys
+have = collections.defaultdict(set)
+for key in sys.stdin.read().split():
+    parts = key.split("/")
+    if len(parts) == 3:
+        have[parts[1]].add(parts[2])
+needed = {"base.tar.gz", "pg_wal.tar.gz", "backup_manifest"}
+whole = [s for s, f in have.items() if needed <= f and s <= sys.argv[1]]
+print(max(whole) if whole else "")' "$1"
+}
+
+# db-restore --to <time>: the latest base backup from before <time>, then the archived WAL up to it (Postgres's
+# recovery_target_time), promoted. What the volume held is kept beside it ($PGDATA.before-<UTC time>): delete it by
+# hand once the restore is checked. The stages stay stopped: each stage's check and repair come next
+# (HIPAA-OPERATIONS.md §7), then db-resume. Synthetic data only.
+cmd_db_restore() {
+  local to="" yes=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --to) to="${2:?--to needs a time}"; shift 2 ;;
+      --yes) yes=1; shift ;;
+      *) die "db-restore: unknown option $1" ;;
+    esac
+  done
+  [[ -n "$to" ]] || die "db-restore needs --to <time>"
+  need_tools; state_dir
+  cluster_exists || die "db-restore needs a session: poc.sh up"
+  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
+  ! kubectl get ns "sdh-$HARNESS" >/dev/null 2>&1 || die "the harness pipeline is up: poc.sh harness-down first"
+  local target stamp now base answer
+  target="$(TZ=UTC date -d "$to" +'%Y-%m-%d %H:%M:%S+00')" || die "not a time: $to"
+  stamp="$(TZ=UTC date -d "$to" +%Y%m%dT%H%M%SZ)"
+  now="$(date -u +%Y%m%dT%H%M%SZ)"
+  [[ "$stamp" < "$now" ]] || die "$target is not in the past"
+  base="$(base_before "$stamp")"
+  [[ -n "$base" ]] || die "no whole base backup from before $target in $BACKUP_BUCKET"
+  if (( ! yes )); then
+    printf 'This stops every stage and takes Postgres (every database) back to %s, from the base backup\n' "$target"
+    printf '%s and the WAL after it. Type restore to go on: ' "$base"
+    read -r answer
+    [[ "$answer" == restore ]] || die "not restored"
+  fi
+
+  say "Stopping the stages"
+  pause_stages
+  db_flush
+  say "Stopping Postgres"
+  infra scale statefulset/postgres --replicas=0 >/dev/null
+  infra wait --for=delete pod/postgres-0 --timeout=180s >/dev/null 2>&1 || die "Postgres didn't stop"
+
+  say "Restoring $base, with the WAL to $target, onto the volume"
+  local image shipper
+  image="$(infra get statefulset postgres -o jsonpath='{.spec.template.spec.containers[?(@.name=="postgres")].image}')"
+  shipper="$(infra get statefulset postgres -o jsonpath='{.spec.template.spec.containers[?(@.name=="wal-shipper")].image}')"
+  infra delete pod postgres-restore --ignore-not-found --wait=true >/dev/null
+  # shellcheck disable=SC2016
+  RESTORE_BASE="$base" RESTORE_TARGET="$target" RESTORE_NOW="$now" POSTGRES_IMAGE="$image" SHIPPER_IMAGE="$shipper" \
+    STATE_ZONE="$(persistent_output state_zone)" BACKUP_BUCKET="$BACKUP_BUCKET" PG_HOME="$PG_HOME" \
+    envsubst '$RESTORE_BASE $RESTORE_TARGET $RESTORE_NOW $POSTGRES_IMAGE $SHIPPER_IMAGE $STATE_ZONE $BACKUP_BUCKET $PG_HOME $AWS_REGION' \
+    < "$K8S/infra/restore.yaml" | kubectl apply -f - >/dev/null
+  if ! infra wait pod/postgres-restore --for=jsonpath='{.status.phase}'=Succeeded --timeout=1800s >/dev/null; then
+    infra logs postgres-restore --all-containers --tail=20 >&2 || true
+    die "the restore pod didn't finish; Postgres is stopped. If prepare ran, the volume's data is at PGDATA.before-$now"
+  fi
+  infra delete pod postgres-restore --wait=true >/dev/null
+
+  say "Starting Postgres: it replays the WAL to $target, then takes writes"
+  infra scale statefulset/postgres --replicas=1 >/dev/null
+  local i state=""
+  for i in $(seq 1 360); do
+    state="$(pg_sql "SELECT pg_is_in_recovery()" 2>/dev/null || true)"
+    [[ "$state" == f ]] && break
+    sleep 5
+  done
+  [[ "$state" == f ]] || die "Postgres hadn't finished recovering after 30 min (kubectl -n sdh-infra logs postgres-0 -c postgres)"
+  pg_sql "ALTER SYSTEM RESET restore_command" >/dev/null
+  pg_sql "ALTER SYSTEM RESET recovery_target_time" >/dev/null
+  pg_sql "ALTER SYSTEM RESET recovery_target_action" >/dev/null
+  pg_sql "SELECT pg_reload_conf()" >/dev/null
+  pg rm -rf "$PG_HOME/restore"
+  # A new timeline: a base backup on it, so a later restore needn't replay through this one.
+  db_backup
+  say "Restored to $target. The stages are stopped: check and repair each (HIPAA-OPERATIONS.md §7), then poc.sh db-resume"
+  say "The volume's data from before is kept at PGDATA.before-$now on the volume: delete it once this is checked"
+}
+
+cmd_db_resume() {
+  need_tools; state_dir
+  cluster_exists || die "db-resume needs a session: poc.sh up"
+  aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
+  "$K8S/pipeline/apply.sh"
+  resume_stages
+  say "the stages are running again"
 }
 
 setup_keda() {
@@ -456,17 +655,12 @@ drain_pipeline() {
   say "still lag $lag after 20 min: stopping anyway"
 }
 
-# Scales every stage to 0 (KEDA paused at 0, so it doesn't start them again), then stops Postgres and Kafka
-# cleanly so the snapshots are consistent.
+# Scales every stage to 0 (KEDA paused at 0, so it doesn't start them again), sends the last WAL to the backup
+# bucket, then stops Postgres and Kafka cleanly so the snapshots are consistent.
 stop_services() {
-  local n
-  for n in $(pipeline_namespaces); do
-    kubectl -n "$n" annotate scaledobject --all autoscaling.keda.sh/paused-replicas=0 --overwrite >/dev/null 2>&1 || true
-    kubectl -n "$n" scale deploy --all --replicas=0 >/dev/null 2>&1 || true
-  done
-  for n in $(pipeline_namespaces); do
-    kubectl -n "$n" wait --for=delete pod --all --timeout=180s >/dev/null 2>&1 || true
-  done
+  pause_stages
+  # Everything written so far into the backup bucket before Postgres stops.
+  db_flush
   if infra get statefulset postgres >/dev/null 2>&1; then
     say "stopping Kafka and Postgres"
     infra scale statefulset/kafka --replicas=0 >/dev/null
@@ -588,9 +782,14 @@ SQL
 # harness (docs/CONTROL-API-DESIGN.md §15.12): disposable, since its scenarios erase it, with keys of its own
 # (terraform/persistent: harness_keks), in namespace sdh-harness. While it runs, the PoC's own pipelines are held
 # (their landing nodes and duties pods scaled to none, KEDA told to hold their stages at none), so that the
-# harness's pods fit the base nodes, and so that its cuts of PgBouncer and Kafka touch nothing else. Their items
+# harness's pods fit the base nodes, and so that its cuts of Postgres and Kafka touch nothing else. Their items
 # wait in the bucket intake, Kafka and the registries. Nothing of ccda-push's is deleted.
+#
+# The harness pipeline is deployed from deploy/reference/ (HIPAA.md §11.4, L5): its own database, sdh_harness, made
+# by deploy/reference/postgres.sql, reached over TLS only; Kafka's SASL_SSL listener, with a SCRAM user per stage
+# and the rights deploy/reference/kafka-acls.sh grants.
 HARNESS=harness
+REFERENCE="$HERE/../reference"
 
 # held_workloads <pipeline>: "<namespace> <kind/name> <replicas>" for each workload harness-up holds.
 held_workloads() {
@@ -646,11 +845,43 @@ release_pipelines() {
   return 0
 }
 
-harness_sql() { printf '%s\n' "$1" | infra exec -i postgres-0 -- psql -q -v ON_ERROR_STOP=1 -U postgres -d sdh; }
+harness_sql() {  # <sql> [database]
+  printf '%s\n' "$1" | infra exec -i postgres-0 -c postgres -- psql -q -v ON_ERROR_STOP=1 -U postgres -d "${2:-sdh}"
+}
 
-# harness_clean: deletes the harness pipeline and everything it stored: its namespace, its tables and registry
-# schemas, its rows in the shared lease and catalog tables, its topics and groups, and its objects (under its own
-# prefixes only). Its keys, roles and state files are kept; harness-up uses them again. Synthetic data only.
+# harness_database: the harness pipeline's database and roles from deploy/reference/postgres.sql, each login role's
+# password from the state directory (given on psql's input, never in a file or an argument), and the landing node's
+# own schema.
+harness_database() {
+  local x role sql=""
+  x="$(prefix "$HARNESS")"
+  infra exec -i postgres-0 -c postgres -- psql -q -v ON_ERROR_STOP=1 -v pipeline="$x" -U postgres -d postgres \
+    < "$REFERENCE/postgres.sql" >/dev/null
+  for role in landing splitter convert fhir; do
+    sql+="ALTER ROLE ${role}_$x PASSWORD '$(secret "db-$role-$HARNESS")';"$'\n'
+  done
+  harness_sql "$sql" postgres >/dev/null
+  harness_sql "CREATE SCHEMA IF NOT EXISTS landing_$x AUTHORIZATION catalog_$x;" "sdh_$x" >/dev/null
+}
+
+# harness_kafka: a SCRAM user per stage, with its password from the state directory, and the rights
+# deploy/reference/kafka-acls.sh grants, run in the broker's pod over its plaintext listener (a super user's). The
+# password is an argument of kafka-configs.sh in that pod, which no one else uses (synthetic data only).
+harness_kafka() {
+  local role
+  for role in landing splitter convert; do
+    kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type users \
+      --entity-name "$role-$HARNESS" --add-config "SCRAM-SHA-512=[password=$(secret "kafka-$role-$HARNESS")]" \
+      >/dev/null
+  done
+  infra exec -i kafka-0 -- env PIPELINE="$HARNESS" KAFKA_BOOTSTRAP=localhost:9092 KAFKA_ADMIN_CONFIG=/dev/null \
+    bash -s < "$REFERENCE/kafka-acls.sh" >/dev/null
+}
+
+# harness_clean: deletes the harness pipeline and everything it stored: its namespace, its database and roles (and
+# what it kept in sdh before it had a database of its own), its topics and groups, and its objects (under its own
+# prefixes only; the buckets keep versions, so these stay as noncurrent versions for 7 days). Its keys, Kafka users
+# and ACLs, and state files are kept; harness-up uses them again. Synthetic data only.
 harness_clean() {
   local x; x="$(prefix "$HARNESS")"
   kubectl delete ns "sdh-$HARNESS" --ignore-not-found --wait=true --timeout=300s >/dev/null
@@ -667,6 +898,9 @@ harness_clean() {
         DELETE FROM public.iceberg_namespace_properties WHERE namespace IN ('$x', '${x}_landing');
       END IF;
     END \$\$;" >/dev/null
+  harness_sql "SET client_min_messages TO warning;
+    DROP DATABASE IF EXISTS sdh_$x WITH (FORCE);
+    DROP ROLE IF EXISTS landing_$x, splitter_$x, convert_$x, fhir_$x, catalog_$x;" postgres >/dev/null
   kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --if-exists \
     --topic "$HARNESS\\..*" >/dev/null
   local group
@@ -678,11 +912,11 @@ harness_clean() {
   aws s3 rm "s3://sdh-poc-silver-$ACCOUNT/warehouse/$x/" --recursive --only-show-errors
 }
 
-# Restores what the harness may have left cut off (control-harness AwsTarget): PgBouncer and Kafka stopped.
+# Restores what the harness may have left cut off (control-harness AwsTarget): Postgres and Kafka stopped.
 harness_services() {
-  infra scale deploy/pgbouncer --replicas=1 >/dev/null
+  infra scale statefulset/postgres --replicas=1 >/dev/null
   infra scale statefulset/kafka --replicas=1 >/dev/null
-  infra rollout status deploy/pgbouncer --timeout=600s >/dev/null || die "PgBouncer didn't start"
+  infra rollout status statefulset/postgres --timeout=600s >/dev/null || die "Postgres didn't start"
   infra rollout status statefulset/kafka --timeout=600s >/dev/null || die "Kafka didn't start"
 }
 
@@ -691,16 +925,15 @@ cmd_harness_up() {
   cluster_exists || die "harness-up needs a session: poc.sh up"
   aws eks update-kubeconfig --name "$CLUSTER" --alias "$CLUSTER" --kubeconfig "$KUBECONFIG" >/dev/null
   harness_services
-  if kubectl get ns "sdh-$HARNESS" >/dev/null 2>&1; then
-    say "The harness pipeline is there from an earlier run: removing it first"
-    harness_clean
-  fi
+  # Whatever an earlier run left: its namespace, database and roles (also those it had in sdh before L5, which
+  # would clash with postgres.sql's), topics and objects.
+  kubectl get ns "sdh-$HARNESS" >/dev/null 2>&1 && say "The harness pipeline is there from an earlier run: removing it first"
+  harness_clean
   hold_pipelines
-  say "Harness pipeline $HARNESS: topics, database roles, landing schema"
+  say "Harness pipeline $HARNESS: topics, Kafka users and rights, its database"
   PIPELINES="$HARNESS" setup_topics
-  # The pipelines' roles and the harness's, all of them: PgBouncer's list is made whole each time.
-  PIPELINES="$PIPELINES $HARNESS" setup_database
-  harness_sql "CREATE SCHEMA IF NOT EXISTS landing_$(prefix "$HARNESS") AUTHORIZATION sdh_catalog;" >/dev/null
+  harness_kafka
+  harness_database
   "$K8S/harness/apply.sh"
 }
 
@@ -750,5 +983,8 @@ case "${1:-}" in
   reset)     shift; cmd_reset "$@" ;;
   harness-up)   shift; cmd_harness_up "$@" ;;
   harness-down) shift; cmd_harness_down "$@" ;;
-  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  db-backup)    shift; cmd_db_backup "$@" ;;
+  db-restore)   shift; cmd_db_restore "$@" ;;
+  db-resume)    shift; cmd_db_resume "$@" ;;
+  *) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

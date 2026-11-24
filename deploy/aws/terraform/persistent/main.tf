@@ -104,10 +104,18 @@ resource "aws_kms_alias" "infra" {
 # intake: synthetic test C-CDA that the landing stage reads. It uses SSE-S3, so the deployer can upload to it.
 # bronze, silver, gold: the medallion layers, with SSE-KMS under the infra key and a bucket key (fewer KMS calls).
 # The pipeline also encrypts every record itself (DESIGN.md §8). tools: test tools, such as the HL7 FHIR validator
-# the gold check runs (deploy/aws/k8s/pipeline/gold-check.sh); no data, so SSE-S3.
+# the gold check runs (deploy/aws/k8s/pipeline/gold-check.sh); no data, so SSE-S3. backup: Postgres's base backups
+# and archived WAL (k8s/infra/state.yaml, the archiver sidecar), for a restore to a point in time (HIPAA.md §11.4,
+# L4), under the infra key.
+#
+# bronze, silver and gold keep object versions (DESIGN.md §18.8): a restore of the database to an earlier point
+# references files the stages' maintenance has deleted since, and its repair brings them back from their versions.
+# Noncurrent versions are kept for versions_kept_days (7: the PoC's window); the pipeline's own restore window is
+# the database's, from the backup bucket, which keeps as long.
 
 locals {
-  layers = { intake = false, bronze = true, silver = true, gold = true, tools = false } # name => SSE-KMS?
+  layers    = { intake = false, bronze = true, silver = true, gold = true, tools = false, backup = true } # SSE-KMS?
+  versioned = toset(["bronze", "silver", "gold"])
 }
 
 resource "aws_s3_bucket" "layer" {
@@ -143,16 +151,43 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "layer" {
   }
 }
 
-# Unfinished multipart uploads cost storage while invisible. Old versions aren't kept, because versioning is off:
-# Iceberg keeps its own snapshots, and the pipeline's maintenance expires them.
+resource "aws_s3_bucket_versioning" "layer" {
+  for_each = local.versioned
+  bucket   = aws_s3_bucket.layer[each.key].id
+  versioning_configuration { status = "Enabled" }
+}
+
+# Unfinished multipart uploads cost storage while invisible. In the versioned buckets, a version is kept
+# versions_kept_days after it stops being current, and a delete marker with nothing under it is removed. The backup
+# bucket's base backups and WAL expire after the same time: by then no restore point needs them.
 resource "aws_s3_bucket_lifecycle_configuration" "layer" {
-  for_each = aws_s3_bucket.layer
-  bucket   = each.value.id
+  for_each   = aws_s3_bucket.layer
+  bucket     = each.value.id
+  depends_on = [aws_s3_bucket_versioning.layer]
   rule {
     id     = "abort-incomplete-uploads"
     status = "Enabled"
     filter {}
     abort_incomplete_multipart_upload { days_after_initiation = 1 }
+  }
+  dynamic "rule" {
+    for_each = contains(local.versioned, each.key) ? [1] : []
+    content {
+      id     = "noncurrent-versions"
+      status = "Enabled"
+      filter {}
+      noncurrent_version_expiration { noncurrent_days = var.versions_kept_days }
+      expiration { expired_object_delete_marker = true }
+    }
+  }
+  dynamic "rule" {
+    for_each = each.key == "backup" ? [1] : []
+    content {
+      id     = "backups"
+      status = "Enabled"
+      filter {}
+      expiration { days = var.versions_kept_days }
+    }
   }
 }
 

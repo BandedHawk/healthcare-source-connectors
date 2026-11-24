@@ -193,9 +193,11 @@ resource "aws_iam_policy" "stage" {
     Version = "2012-10-17"
     Statement = concat(
       [{
+        # GetBucketVersioning: under the hipaa profile a stage asks whether its buckets keep versions, and won't
+        # start if they don't (store-versioning, DESIGN.md §7.6).
         Sid      = "ListBuckets"
         Effect   = "Allow"
-        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Action   = ["s3:ListBucket", "s3:GetBucketLocation", "s3:GetBucketVersioning"]
         Resource = [for b in concat(each.value.rw_buckets, each.value.ro_buckets) : local.bucket_arn[b]]
       }],
       length(each.value.ro_buckets) == 0 ? [] : [{
@@ -306,4 +308,51 @@ resource "aws_iam_policy" "gold_reader" {
 resource "aws_iam_role_policy_attachment" "gold_reader" {
   role       = aws_iam_role.gold_reader.name
   policy_arn = aws_iam_policy.gold_reader.arn
+}
+
+# --- Postgres's backups (k8s/infra/state.yaml: the archiver sidecar) ----------------------------------------------
+#
+# The archiver ships Postgres's archived WAL and base backups to the backup bucket, and a restore reads them back
+# (HIPAA.md §11.4 L4). Nothing else: no other bucket, and no pipeline key; the objects are encrypted by S3 under the
+# infra key.
+
+resource "aws_iam_role" "backup" {
+  name                 = "${var.cluster_name}-postgres-backup"
+  path                 = local.path
+  permissions_boundary = local.boundary
+  assume_role_policy   = local.pods_trust
+}
+
+resource "aws_iam_policy" "backup" {
+  name = "${var.cluster_name}-postgres-backup"
+  path = local.path
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ListBackups"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Resource = [local.bucket_arn["backup"]]
+      },
+      {
+        Sid      = "ReadWriteBackups"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"]
+        Resource = ["${local.bucket_arn["backup"]}/*"]
+      },
+      {
+        Sid       = "BucketEncryption"
+        Effect    = "Allow"
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey"]
+        Resource  = aws_kms_key.infra.arn
+        Condition = { StringEquals = { "kms:ViaService" = "s3.${var.region}.amazonaws.com" } }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "backup" {
+  role       = aws_iam_role.backup.name
+  policy_arn = aws_iam_policy.backup.arn
 }

@@ -1,0 +1,10 @@
+    # The harness's landing source, in place of the reference file's bucket intake (apply.sh, reference_landing):
+    # an HTTP push intake with mTLS, as the sandbox's harness pipeline has, so that the harness pushes each item
+    # and reads the receipt. The certificate and the producers' CA are in the secret landing-keys.
+    source: { type: http }
+    http:
+      port: 8443
+      auth: mtls
+      tls: { certificate: /run/secrets/tls.crt, private-key: /run/secrets/tls.key }
+      mtls: { trusted-cas: /run/secrets/producers-ca.pem, subjects: ["${PRODUCER_SUBJECT}"] }
+      max-item-bytes: 104857600
