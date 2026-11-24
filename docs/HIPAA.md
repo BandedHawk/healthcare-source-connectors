@@ -205,6 +205,16 @@ provider's, under its BAA, or the customer's. Device and media controls (§ 164.
 | Disposal (d)(2)(i) (R); media re-use (d)(2)(ii) (R) | **No plaintext PHI is ever written to local disk:** no temporary files, heap dumps, core dumps or `hs_err` files, no JVM attach, and a read-only root filesystem (DESIGN §7.5, §14.1). **In storage:** retention deletes whole days and expires their files in the same run. Items given up are purged after a grace period, each one audited (`item.purged`). Orphan files are removed (DESIGN §8.4, §5.3.13). Everything stored is ciphertext, so destroying a KEK makes its data unreadable: a cryptographic erase. | Retention is **off by default**, and its period is the operator's. HIPAA sets none for records; state law and contracts do. Destruction that meets HHS's guidance is "consistent with NIST Special Publication 800-88" (74 FR 42743): a written procedure for KEK destruction and cloud media at the end of a contract (§4.4). |
 | Accountability (d)(2)(iii) (A); data backup and storage (d)(2)(iv) (A) | Where data is stored is fixed by configuration, and recorded for each record (`kek_ref` and the storage refs, DESIGN §10.1). | An inventory of storage and backups. |
 
+**PHI in memory.** While a stage processes a document, the document and the records of the batch it is
+writing are in plain text in the stage's memory, with the stage's working keys: no program can parse or map what
+it can't read, and HIPAA asks for encryption at rest and in transit, not in memory. The product keeps memory off
+disk and out of logs (above, and DESIGN §7.5, §14.1) and loses nothing held there when a process dies. The rest is
+the platform's: no swap or kernel crash dumps on the nodes, the restricted Pod Security Standard, `exec` and
+`debug` for named staff only, dedicated nodes, and, where the threat model includes the cloud host, confidential
+computing nodes. Whoever can run code in a stage, or holds root on its node, can still read it: that limit is
+reduced by these controls, never removed, and belongs in the customer's risk analysis
+([HIPAA-OPERATIONS.md](HIPAA-OPERATIONS.md) §2.9).
+
 ### 3.4 Organizational, policy and documentation requirements (§§ 164.304, 164.314, 164.316)
 
 - **Security incident** (§ 164.304): "the attempted or successful unauthorized access, use, disclosure,
@@ -595,7 +605,8 @@ Items 1, 3 (in part), 4 (the break-glass part) and 6 are now in §10 and
 ### 8.3 The operator's own duties, which the product supports but cannot meet
 
 - BAAs (or MOUs between government bodies) with its providers.
-- The risk analysis and risk management.
+- The risk analysis and risk management, naming PHI in the stages' memory while processed
+  (HIPAA-OPERATIONS §2.9).
 - Workforce policies, training and sanctions, and a named security official.
 - Human access control with MFA, and the review of access.
 - Activity review.
@@ -701,6 +712,7 @@ the customer's staff does what, with which commands and settings; the roles and 
 |---|---|---|
 | Facility and workstations (a)–(c) | — | The cloud provider, under its BAA; the customer's own workstations, which hold the operator private keys (§2.3) |
 | Disposal, media re-use (d)(2)(i)–(ii) R | No plaintext on disk; retention, purges, cryptographic erase; restore and lookups sealed | Key custodians destroy KEKs; platform administrator records media destruction (§8) |
+| PHI in memory while processed (no specification; risk analysis (a)(1)(ii)(A), access control § 164.312(a)(1)) | No heap, core or crash dumps; attach off; read-only root; no PHI in logs; nothing lost if a process dies | Platform administrator: node, pod and access hardening, confidential computing where needed; security official: the residual risk (HIPAA-OPERATIONS §2.9) |
 | Accountability, backup copy (d)(2)(iii)–(iv) A | `kek_ref` and storage refs per record | Platform administrator: the inventory of storage and backups |
 
 ### 10.4 Policies and documentation (§ 164.316)
@@ -772,7 +784,7 @@ the audit store wiring (§2.7 there), pipeline isolation (§2.8 there), and the 
 | D1 | **Reference network architecture** | The zones: private subnets, no public endpoints. The one ingress: HTTP push behind TLS or mTLS. The control API inside the network only. Egress allowed only to the KMS, object store, broker, database and collector, over private endpoints. Default-deny network policies per namespace (`deploy/` has examples). DNS. The operator's path in (VPN, bastion or zero-trust access). A network map to keep and review. |
 | D2 | **Identity and access architecture** | A workload identity per stage, with no static keys. Human access through SSO with MFA. The API's permissions mapped to the customer's roles (P1). Break-glass accounts. Access reviews, and leavers. |
 | D3 | **Key management architecture** | The key hierarchy: KEKs per pipeline and layer, signing keys, inbox keys, the ID key, consumer keys, operator keys. Who holds each. Key policies. Rotation, re-keying (P3) and destruction. |
-| D4 | **Platform hardening baseline** | Kubernetes: the restricted Pod Security Standard, Secrets encrypted at rest (or an external secret store), the API server's audit log, signed-image admission, a CIS benchmark for the nodes. Encryption at rest and logging for Postgres, Kafka and the object store, and bucket versioning or object lock. |
+| D4 | **Platform hardening baseline** | Kubernetes: the restricted Pod Security Standard, Secrets encrypted at rest (or an external secret store), the API server's audit log, signed-image admission, a CIS benchmark for the nodes, with no swap, no kernel crash dumps and encrypted volumes (HIPAA-OPERATIONS §2.9). Encryption at rest and logging for Postgres, Kafka and the object store, and bucket versioning or object lock. |
 | D5 | **Data flows and where PHI is** | §8.2 item 5: each stage, what it holds and in what form, for the risk analysis and the asset inventory. |
 | D6 | **Security configuration guide** | §8.2 item 2: every setting that bears on HIPAA, its safe value and what it does, starting from `deploy/reference/`. |
 | D7 | **Audit event catalogue** | §8.2 item 3: every event and field, for the SIEM and the activity reviews. |

@@ -215,6 +215,77 @@ Then:
   try to read another pipeline's bucket and connect to its database, and record the refusals with the risk
   analysis.
 
+### 2.9 PHI in memory while it is processed
+
+**What is there.** Every stage holds the PHI it is working on in plain text in its process memory: a document
+being landed, split or converted, and the records of a batch waiting to be written. A stage gathers records into
+batches before it writes them. That changes how many records are in memory at once,
+and for how long, by about a second, not whether PHI is there: no program can parse, map or check a document it
+cannot read. The same memory holds keys: each data key once unwrapped by the KMS, the stage's inbox private key
+(which opens the messages addressed to it), its record-ID key, its pod signing key (DESIGN.md §7, §10.1), and its
+short-lived cloud credentials from the workload identity. So **whoever can read a stage's memory can read what it
+is processing, the data under the data keys it holds, and the messages sent to it; and, until those credentials
+expire, do whatever the stage's own role may**: read its buckets and ask the KMS to unwrap their data keys. The
+KEKs themselves never leave the KMS, so a copy of memory taken away is no key to the stored data once the
+credentials have expired, and every KMS call made with them is in CloudTrail. This is why each stage's role is
+kept to its own buckets and keys (§2.8).
+
+HIPAA asks for encryption of PHI at rest and in transit, not in memory. Memory is covered by the access controls
+on the host, the process and the people who can reach them (§ 164.312(a)(1), § 164.310), and by the risk analysis
+(§ 164.308(a)(1)(ii)(A)), which should name it.
+
+**What the product does,** as shipped and in `deploy/reference/`:
+
+- Nothing in memory is written to disk: no heap dumps, core dumps or `hs_err` files; an out-of-memory process
+  exits and is restarted clean; JVM attach is off, so no tool can join the process (DESIGN.md §7.5, §14.1).
+- A read-only root filesystem; the one writable directory, `/tmp`, holds only what is already encrypted.
+- Non-root, no capabilities, no privilege escalation, no shell in the image.
+- No PHI in logs, metrics, traces or audit events: no document values, object keys or exception messages.
+- A batch is acknowledged only once it is stored, so a process killed with records in memory loses none: they
+  are delivered again.
+- The byte buffers the code holds plaintext in (a decrypted item, a batch being encrypted, an unwrapped data key)
+  are overwritten once used. Java gives no such promise for every copy (the garbage collector moves objects, and
+  parsed text lives in strings that can't be cleared), so this shortens the window, no more.
+
+**What the customer does to reduce it further.** In rough order of value for effort:
+
+| Action | What it closes |
+|---|---|
+| **No swap on the nodes,** or encrypted swap (Kubernetes nodes run without swap by default; keep it so) | Memory paged out to a disk |
+| **No kernel crash dumps** on the nodes (`kdump` off, or dumps to an encrypted, access-controlled volume), and no node-level memory capture tools | The whole node's memory written to disk on a kernel crash |
+| **Encrypted node volumes** (EBS encryption, or the provider's equivalent) | Anything that reaches a node's disk all the same |
+| **Restricted Pod Security Standard** enforced on the pipeline namespaces | A privileged or `hostPID` pod on the same node reading another process's memory |
+| **`exec`, `attach`, `debug` (ephemeral containers) and `port-forward` on the pipeline namespaces granted to named staff only,** audited through the API server's audit log (§2.4) | The realistic way in: a person with cluster rights joining a running stage |
+| **No interactive access to the nodes:** no SSH, Systems Manager sessions only for named staff, audited | Root on a node can read every process on it |
+| **Dedicated nodes for the pipeline** (taints and node selectors, or a node group of its own), shared with no other workload | A compromise of another tenant's pod reaching the same kernel |
+| **Patched nodes and images,** to a CIS benchmark (§11) | Kernel and runtime flaws that let a container read across processes |
+| **Network policies and private endpoints** (§11) | An attacker reaching a stage at all |
+| **Key and bucket policies that accept a stage's identity only from the pipeline's network** (on AWS, `aws:SourceVpce` or `aws:SourceVpc` conditions on the KMS key and bucket policies), and SIEM alerts on KMS use from anywhere else | Credentials copied out of memory and used from outside |
+| **Short-lived pods:** routine node rotation, which Spot and the autoscaler already give | How long one process's keys and buffers stay readable |
+| **Confidential computing,** where the threat model includes the cloud provider's staff or a compromised hypervisor: AMD SEV-SNP or Intel TDX instances (on AWS, SEV-SNP on supported instance types; on Azure and GCP, confidential VMs and node pools), with remote attestation checked before the node joins | The hypervisor and host reading the VM's memory: memory is encrypted by the CPU with a key the host never sees. Not tested with the product; it runs unchanged on such nodes, at a cost in price and some speed. |
+
+AWS Nitro Enclaves are not a fit as they stand: an enclave has no network or disk, so a stage would have to be
+rebuilt around a narrow channel to its host. Not offered.
+
+**The limit.** A process can only work on what it can read, so while a document is being processed it is in plain
+text in that process's memory, and anything with the process's own rights can read it. No setting removes that:
+
+- **The process itself.** A flaw that lets an attacker run code in a stage (remote code execution in the stage, or
+  in a library it uses) reads that stage's memory and keys, on any hardware. Defences here are preventing and
+  detecting it: patching, scanning, the signed-message checks that refuse what a stage did not expect, network
+  policies, and the audit trail. Confidential computing does not help: the attacker is inside the protected VM.
+- **Whoever runs the code.** The operator's own administrators, with node root or `exec`, can read it; the
+  controls on them are policy, least privilege, MFA and audit (§1, §2.4), not technology that stops them.
+- **Whoever holds the hardware.** Without confidential computing, the cloud provider's hypervisor can; that
+  trust is placed in its BAA and its attestations. With it, the trust moves to the CPU vendor and its firmware,
+  which has had flaws of its own (side channels, firmware bugs); it is reduced, not removed.
+- **Processing without reading** (homomorphic encryption, secure multi-party computation) is not practical for
+  parsing and mapping clinical documents at this volume, and is not on the product's roadmap.
+
+So the exposure can be made small, short and watched, but not zero. Record it in the risk analysis as: PHI and
+the stages' working keys are in plain text in the stages' memory while processed; mitigated by the controls above;
+residual risk accepted, owned by the security official.
+
 ### Registry retention
 
 The stages' registries are kept for ever unless the customer sets `sdh.stage.retention.after`
