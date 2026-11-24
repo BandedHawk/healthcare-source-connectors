@@ -44,8 +44,8 @@ features built (DESIGN.md revision (eg)); and a customer mapping added (§10), w
   - `admin restore` wrote plaintext; it now seals by default (§3.1).
   - Every shipped manifest runs `compliance.profile: none`, which is right for synthetic data but no starting point
     for a customer (§8.1 item 13).
-  - The mapping does carry C-CDA `confidentialityCode` into `Composition.confidentiality`, but sets no
-    `meta.security`, so readers can't filter on it (§8.1 item 10).
+  - The mapping carried C-CDA `confidentialityCode` into `Composition.confidentiality` only, and set no
+    `meta.security`, so readers couldn't filter on it (§8.1 item 10). Built 2026-11-24 (P9).
 - **Built** (§8.1 items 1, 2 and 4, and restore):
   - a durable, tamper-evident audit journal in each stage's Postgres schema, hash-chained per process and sealed
     with the stage's signing key, with `audit-verify`, `audit-export` and `audit-prune` on every stage, and a
@@ -533,11 +533,15 @@ The outstanding work is restated, with what's decided since, in §11.
      pipeline's stages could change another's catalog entries. They can't read its data, which is under other
      keys and in other buckets. The reference layout (`deploy/reference/postgres.sql`) gives each pipeline a
      database. A REST catalog with grants per principal is the other way.
-10. **No security labels on sensitive data.**
-    - The mapping doesn't mark Part 2, behavioural health or similar data (for example FHIR `meta.security`), so
-      separating it rests on the pipeline alone.
-    - **To consider:** labels set from the source document's confidentiality codes, for readers that filter by
-      them (minimum necessary, § 164.514(d)).
+10. **Security labels: confidentiality built 2026-11-24** (P9, DESIGN.md revision (fe)); sensitivity markings not.
+    - The C-CDA mapping labels every resource, and the Bundle, with the document's `confidentialityCode` in
+      `meta.security`, a section's own code applying to its resources (the more restrictive winning). The gold
+      row keeps the Bundle's code in plain (`confidentiality`), so readers can filter before decrypting (minimum
+      necessary, § 164.514(d)). A missing code gives no label.
+    - **Still open:** the mapping doesn't read DS4P sensitivity, obligation or refrain markings (Part 2, HIV,
+      behavioural health, no redisclosure); the HL7 CDA DS4P guide is needed to confirm its templates. Labels are
+      never inferred from clinical codes, so separating such data still rests on the pipeline (§4.5). Only the
+      confidentiality code is in plain on the row: a sensitivity code would say what the record holds.
 11. **Support bundle:** built 2026-11-21 (P5, CONTROL-API-DESIGN.md §15.9).
 12. **Backup and restore as a whole: built 2026-11-24** (P7, DESIGN.md §18, revision (fc)); the AWS drill at size
     not yet run.
@@ -734,7 +738,7 @@ official's policies, the waivers' approvals, the review records of §3, and this
 | Access § 164.524; amendment § 164.526 | Everything kept and linked; `patients` finds a person's records | Privacy official logs the request; pipeline operator runs the lookup (§4.1) |
 | Accounting § 164.528 | `reader.record_read` with reader and purpose | Data consumer owners name their readers and purposes (§2.5); privacy official produces the accounting (§4.1) |
 | Return or destruction § 164.504(e)(2)(ii)(J) | Retention, purges, cryptographic erase, `audit-export` | The end-of-contract procedure (§8) |
-| Part 2 (§4.5); labels | A pipeline per intake; no `meta.security` yet (§8.1 item 10) | Counsel decides; an intake of its own for Part 2 records |
+| Part 2 (§4.5); labels | A pipeline per intake; confidentiality labels in `meta.security` and on gold rows, no sensitivity labels yet (§8.1 item 10) | Counsel decides; an intake of its own for Part 2 records |
 
 ### 10.6 Breach Notification Rule
 
@@ -773,7 +777,7 @@ The work still owed before a customer can run the product on real PHI, after the
 | P6 | **The test harness:** one set of scenarios at three levels (CONTROL-API.md) | Testing and revision § 164.308(a)(7)(ii)(D); evidence for § 164.308(a)(8) | Synthetic data only. Testcontainers level built (2026-11-22, [CONTROL-API-DESIGN.md](CONTROL-API-DESIGN.md) H1): `scripts/harness.sh testcontainers` runs nine scenarios (support, access, load, failures, break-glass, pause and drain, keys, outages, retention and erasure) through the control API against the landing, split and convert stages on TLS Postgres, SASL_SSL Kafka, an S3 store and Vault; each checks its answers against the contract and its calls in the audit journal, with `audit-verify` clean. Its first run found three product faults, fixed. Sandbox level built (2026-11-22, H2): `scripts/harness.sh sandbox` runs those and a failover scenario (each stage's workers killed part-way) against the customer images and the control Deployments from the stage READMEs, in a throwaway pipeline beside the demo; all ten pass. AWS level built (2026-11-22, H3): `scripts/harness.sh aws` runs the ten on the AWS PoC stack, in a throwaway pipeline with keys of its own beside the ccda-push pipeline, the database and broker cut off by scaling them to nothing and S3 and KMS by network policy; all ten pass. |
 | P7 | **Backup and restore as a whole:** a consistent backup of buckets, catalog, registries and keys, a tested restore, and a check after it | §8.1 item 12; § 164.308(a)(7)(ii)(A)–(B) | Needed for the 72-hour restore the proposed rule asks for (§7). Built (2026-11-24, DESIGN.md §18, revision (fc)): a control log of purges, erasures, rotations, re-keys and retention changes in the store; `restore-check`, `restore-repair` and `restore-release` (four eyes) on every stage, through the API and the CLI; the harness's `restore` scenario at the Testcontainers level. Not built: the versioning compliance check, `--deep`, the scenario at the sandbox and AWS levels, and the AWS drill at size: planned in the combined session of §11.4 (L3, L4, A3, A4). |
 | P8 | **FIPS mode:** tested under a FIPS 140-3 validated provider | §8.1 item 5; federal buyers (§8.4) | The JOSE library, HKDF, the AWS SDK and the Iceberg clients are untested under it. |
-| P9 | **Security labels** from the source's confidentiality codes (`meta.security`) | §8.1 item 10; minimum necessary § 164.514(d); Part 2 | |
+| P9 | **Security labels** from the source's confidentiality codes (`meta.security`) | §8.1 item 10; minimum necessary § 164.514(d); Part 2 | Built (2026-11-24, DESIGN.md revision (fe), decided with the user): the document's and sections' confidentiality codes on every resource and the Bundle, the more restrictive winning; the Bundle's code in plain on the gold row (`confidentiality`) for readers to filter by; no label invented where the source has none. Not built: DS4P sensitivity, obligation and refrain markings, until the HL7 CDA DS4P guide is to hand to confirm its templates. |
 | P10 | **Secrets in output URIs refused,** as they are on input URIs | § 164.312(a)(1) | Built (2026-11-24, DESIGN.md revision (fd)): an option holding a password, key, secret, token, JAAS login or connection string must be a `{{...}}` placeholder or a `#bean` reference on the output, reprocess, dead-letter, results and `sdh.queue.uri` URIs too; a written value stops the node at startup, the message naming the setting and option, never the value (DEPLOYMENT.md, "Broker rights"). |
 | P11 | **Transports still untested:** Kafka with client certificates (mTLS) and with AWS MSK's IAM login; Postgres TLS through PgBouncer; GCP Cloud KMS against the real service; AWS GovCloud and Azure Government endpoints | § 164.312(d), (e); §8.4 | Kafka SASL_SSL and Postgres TLS are tested (§8.1 item 7). Expected in later iterations, as the product is prepared for deployment in each environment; listed for customers in DEPLOYMENT.md, "Transports: what has been tested". Postgres TLS through PgBouncer may come sooner, after performance has been reviewed further (decided 2026-11-22 with the user). Kafka mTLS and PgBouncer TLS are planned in the combined session of §11.4 (L1, L2, A2). |
 | P12 | **A deployment run from `deploy/reference/`,** with TLS everywhere and a database per pipeline, on the sandbox or AWS | §8.1 items 7, 9 and 13, proved end to end | The sandbox and the AWS PoC share one database across pipelines (§8.1 item 9). Planned in the combined session of §11.4 (L5, A1). |

@@ -203,6 +203,9 @@ public final class RecordBatchWriter implements AutoCloseable
     /** Why each record made again was (§15.8.7), and its run's ID. */
     private final Map<Placed, String[]> causes = new HashMap<>();
 
+    /** Each labelled record's confidentiality code (HIPAA.md P9). */
+    private final Map<Placed, String> confidentialities = new HashMap<>();
+
     /**
      * A record's versions.
      *
@@ -337,6 +340,33 @@ public final class RecordBatchWriter implements AutoCloseable
         }
         causes.put(new Placed(itemId, seq), new String[] {cause,
             runId == null ? null : runId.toString()});
+    }
+
+    /**
+     * Gives a record's confidentiality code, kept on its rows
+     * ({@code confidentiality}, HIPAA.md §11.1 P9).
+     *
+     * @param itemId the record's item
+     * @param seq    its number in the item
+     * @param code   its v3 ConfidentialityClassification code; null for a
+     *               record not labelled, which clears what an earlier
+     *               record of its place in the batch was given
+     * @throws IllegalArgumentException if the code isn't one of U, L, M, N,
+     *                                  R and V
+     */
+    public void confidentiality(UUID itemId, long seq, String code)
+    {
+        if (code == null)
+        {
+            confidentialities.remove(new Placed(itemId, seq));
+            return;
+        }
+        if (!code.matches("[ULMNRV]"))
+        {
+            throw new IllegalArgumentException(
+                    "not a v3 confidentiality code");
+        }
+        confidentialities.put(new Placed(itemId, seq), code);
     }
 
     /**
@@ -791,6 +821,8 @@ public final class RecordBatchWriter implements AutoCloseable
                 record.seq()));
         row.setField(CAUSE, cause == null ? null : cause[0]);
         row.setField(RUN_ID, cause == null ? null : cause[1]);
+        row.setField(CONFIDENTIALITY, confidentialities.get(
+                new Placed(record.itemId(), record.seq())));
         if (chunkIndex == 0)
         {
             firstRows.put(record, rows);

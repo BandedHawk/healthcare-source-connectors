@@ -491,6 +491,27 @@ class RecordStageProcessorTest
     }
 
     /**
+     * The confidentiality code the transform labels its output with is kept
+     * in plain on the record's row, for readers to filter by (HIPAA.md
+     * §11.1 P9); an output without one, and a record stored as it came,
+     * have none.
+     *
+     * @throws Exception if the test fails to run
+     */
+    @Test
+    void keepsTheOutputsConfidentialityOnItsRow() throws Exception
+    {
+        run(transform(), converted("{\"restricted\":1}", "{\"a\":2}",
+                "{\"bad\":3}"));
+        gold.refresh();
+        assertThat(CommittedRecords.all(gold, item))
+                .extracting(CommittedRecords.Row::seq,
+                        CommittedRecords.Row::confidentiality)
+                .containsExactly(tuple(0L, "R"), tuple(1L, null),
+                        tuple(2L, null));
+    }
+
+    /**
      * A failure the transform gives as a line and column of the record, as
      * a mapping's issue does, is stored at that place in the item, moved by
      * the record's origin; one with no place, or a record with no origin,

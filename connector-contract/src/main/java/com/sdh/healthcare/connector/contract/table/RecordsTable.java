@@ -185,6 +185,16 @@ public final class RecordsTable
      */
     public static final String RUN_ID = "run_id";
 
+    /**
+     * The record's confidentiality (HIPAA.md §11.1 P9): its v3
+     * ConfidentialityClassification code, {@code U}, {@code L}, {@code M},
+     * {@code N}, {@code R} or {@code V}, as the step that made it labels it,
+     * so that readers can filter rows before decrypting them; null when it
+     * isn't labelled. Only the code: a sensitivity label such as HIV would
+     * say what the record holds, so those stay in the encrypted record.
+     */
+    public static final String CONFIDENTIALITY = "confidentiality";
+
     /** The table's columns, with their Iceberg field ids. */
     public static final Schema SCHEMA = new Schema(
             required(1, RECORD_ID, Types.StringType.get()),
@@ -235,7 +245,10 @@ public final class RecordsTable
                     "why the record was made again: reprocess or"
                             + " correction"),
             optional(32, RUN_ID, Types.StringType.get(),
-                    "the reprocess run that made the record"));
+                    "the reprocess run that made the record"),
+            optional(33, CONFIDENTIALITY, Types.StringType.get(),
+                    "the record's v3 confidentiality code (U, L, M, N, R,"
+                            + " V); null if unlabelled"));
 
     /** The partitioning: by the day each row was written. */
     public static final PartitionSpec SPEC =

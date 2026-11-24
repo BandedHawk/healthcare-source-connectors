@@ -130,10 +130,12 @@ final class UpperTransform implements RecordTransform
         {
             return new Result.Failed(ErrorCode.CONVERT_CSV_MALFORMED, bad);
         }
+        // Labelled as a mapping labels its output: "restricted" in the
+        // record makes it R.
         return new Result.Made(text.toUpperCase(Locale.ROOT).getBytes(UTF_8),
                 new Representation(messages == StageMessages.TRANSFORM
                         ? "application/fhir+json" : Representation.JSON,
-                        MAPPING));
+                        MAPPING), text.contains("restricted") ? "R" : null);
     }
 
     @Override

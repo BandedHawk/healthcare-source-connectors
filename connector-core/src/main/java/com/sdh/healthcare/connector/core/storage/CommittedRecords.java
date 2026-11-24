@@ -101,13 +101,17 @@ public final class CommittedRecords
      *                        {@code correction} (STAGES.md §15.8.7); null
      *                        for a record made the first time
      * @param runId           the reprocess run that made it; null if none
+     * @param confidentiality its v3 confidentiality code (HIPAA.md §11.1
+     *                        P9); null if it isn't labelled, or the table
+     *                        has no such column yet
      */
     public record Row(String recordId, long seq, long sourceOffset,
             long sourceLength, String format, String contentType,
             String mapping, String errorCode, long plaintextLength,
             int chunkCount, LocalDate ingestedDate, String kekRef,
             RecordOrigin origin, SourcePosition errorAt, String stageVersion,
-            String correctionOf, Lineage lineage, String cause, String runId)
+            String correctionOf, Lineage lineage, String cause, String runId,
+            String confidentiality)
     {
 
         /**
@@ -149,7 +153,7 @@ public final class CommittedRecords
             this(recordId, seq, sourceOffset, sourceLength, format,
                     contentType, mapping, errorCode, plaintextLength,
                     chunkCount, ingestedDate, kekRef, origin, errorAt,
-                    stageVersion, correctionOf, lineage, null, null);
+                    stageVersion, correctionOf, lineage, null, null, null);
         }
     }
 
@@ -243,7 +247,7 @@ public final class CommittedRecords
     {
         List<String> columns = new ArrayList<>(Arrays.asList(ROW_COLUMNS));
         for (String optional : List.of(CORRECTION_OF, GENERATION, LINE,
-                CAUSE, RUN_ID))
+                CAUSE, RUN_ID, CONFIDENTIALITY))
         {
             if (table.schema().findField(optional) != null)
             {
@@ -631,7 +635,9 @@ public final class CommittedRecords
                 row.struct().field(CAUSE) == null ? null
                         : (String) row.getField(CAUSE),
                 row.struct().field(RUN_ID) == null ? null
-                        : (String) row.getField(RUN_ID));
+                        : (String) row.getField(RUN_ID),
+                row.struct().field(CONFIDENTIALITY) == null ? null
+                        : (String) row.getField(CONFIDENTIALITY));
     }
 
     /**

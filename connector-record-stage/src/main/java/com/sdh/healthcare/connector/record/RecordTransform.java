@@ -75,13 +75,45 @@ public interface RecordTransform
         /**
          * The record's output.
          *
-         * @param bytes          what to store
-         * @param representation what the bytes are, and the mapping that
-         *                       made them
+         * @param bytes           what to store
+         * @param representation  what the bytes are, and the mapping that
+         *                        made them
+         * @param confidentiality the output's v3 ConfidentialityClassification
+         *                        code (U, L, M, N, R or V), kept in plain on
+         *                        its row for readers to filter by (HIPAA.md
+         *                        §11.1 P9); null if it isn't labelled
          */
-        record Made(byte[] bytes, Representation representation)
-                implements Result
+        record Made(byte[] bytes, Representation representation,
+                String confidentiality) implements Result
         {
+
+            /**
+             * Checks the confidentiality code.
+             *
+             * @throws IllegalArgumentException if it isn't one of U, L, M, N,
+             *                                  R and V
+             */
+            public Made
+            {
+                if (confidentiality != null
+                        && !confidentiality.matches("[ULMNRV]"))
+                {
+                    throw new IllegalArgumentException(
+                            "not a v3 confidentiality code");
+                }
+            }
+
+            /**
+             * An output that isn't labelled.
+             *
+             * @param bytes          what to store
+             * @param representation what the bytes are, and the mapping
+             *                       that made them
+             */
+            public Made(byte[] bytes, Representation representation)
+            {
+                this(bytes, representation, null);
+            }
         }
 
         /**

@@ -120,12 +120,39 @@ public final class RecordStageProcessor
      * @param cause          why it was made again, kept on its row
      *                       (§15.8.7); null for a record made the first
      *                       time, or from a correction
+     * @param confidentiality the output's confidentiality code, kept on
+     *                       its row (HIPAA.md §11.1 P9); null if it isn't
+     *                       labelled, or is stored as it came
      */
     public record Prepared(RecordInStorage input, byte[] bytes,
             Representation representation, ErrorCode error,
             long errorPosition, SourcePosition errorAt, String correctionOf,
-            ConnectorMessage.Cause cause)
+            ConnectorMessage.Cause cause, String confidentiality)
     {
+
+        /**
+         * A record that isn't labelled.
+         *
+         * @param input          the message it came in
+         * @param bytes          what to store; null to store it as it came
+         * @param representation what the stored bytes are
+         * @param error          why it isn't transformed; null if it is
+         * @param errorPosition  where in the record it failed; -1 without
+         *                       an error
+         * @param errorAt        where in the item it failed; null if
+         *                       unknown
+         * @param correctionOf   the failed row a correction corrects; null
+         *                       otherwise
+         * @param cause          why it was made again; null otherwise
+         */
+        public Prepared(RecordInStorage input, byte[] bytes,
+                Representation representation, ErrorCode error,
+                long errorPosition, SourcePosition errorAt,
+                String correctionOf, ConnectorMessage.Cause cause)
+        {
+            this(input, bytes, representation, error, errorPosition,
+                    errorAt, correctionOf, cause, null);
+        }
 
         /**
          * The same record, made from a correction.
@@ -136,7 +163,7 @@ public final class RecordStageProcessor
         Prepared correcting(String of)
         {
             return new Prepared(input, bytes, representation, error,
-                    errorPosition, errorAt, of, cause);
+                    errorPosition, errorAt, of, cause, confidentiality);
         }
 
         /**
@@ -148,7 +175,8 @@ public final class RecordStageProcessor
         Prepared causedBy(ConnectorMessage.Cause why)
         {
             return new Prepared(input, bytes, representation, error,
-                    errorPosition, errorAt, correctionOf, why);
+                    errorPosition, errorAt, correctionOf, why,
+                    confidentiality);
         }
     }
 
@@ -624,7 +652,8 @@ public final class RecordStageProcessor
             {
                 Arrays.fill(raw, (byte) 0);
                 yield output(new Prepared(input, made.bytes(),
-                        made.representation(), null, -1, null, null, null),
+                        made.representation(), null, -1, null, null, null,
+                        made.confidentiality()),
                         digest(made.bytes(), null,
                                 made.representation().mapping()));
             }
@@ -777,6 +806,7 @@ public final class RecordStageProcessor
         // Each given, or cleared, for every record: two of one place may
         // be in a batch.
         writer.correction(itemId, seq, prepared.correctionOf());
+        writer.confidentiality(itemId, seq, prepared.confidentiality());
         if (prepared.cause() != null)
         {
             writer.cause(itemId, seq, prepared.cause().kind(),
