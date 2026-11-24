@@ -341,7 +341,8 @@ public final class ConnectorRuntime implements AutoCloseable
         KekWatch kek = null;
         try
         {
-            dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
+            dataSource = LeaseDatabase.dataSource(properties.lease().jdbc(),
+                    ItemProcessor.STAGE);
             // Every audit event, chained and sealed (HIPAA.md §3.1).
             journal = AuditJournals.start(properties.lease(),
                     properties.telemetry(),

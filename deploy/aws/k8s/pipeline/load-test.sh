@@ -614,19 +614,34 @@ failover() {  # pct: deletes the lease holder, as FAILOVER_HOW says; awaiting is
   fi
   if [[ "$FAILOVER_HOW" != graceful ]]; then
     # A group's items log item.landed once committed, then (about 3 s later) item.announced, then
-    # item.finished_at_source. A crash once the messages are acknowledged leaves nothing to announce again (three
-    # kills of 2026-11-23 that waited for any of them all came then); a crash between the commit and the messages
-    # leaves the group for the standby to announce again, the case to test.
-    for ((i = 0; i < 150; i++)); do
-      counts="$(kubectl -n "$N" logs "${pod#pod/}" --since=1s 2>/dev/null \
-        | awk '/item\.landed /{l++} /item\.announced /{a++} END{print l+0, a+0}')"
-      [[ "${counts% *}" != 0 && "${counts#* }" == 0 ]] \
-        && { mid="mid-group: ${counts% *} landed, none announced in its last second"; break; }
-      sleep 0.3
-    done
+    # item.finished_at_source. A crash once the messages are sent leaves nothing to announce again; one between
+    # the commit and the messages leaves the group for the standby to announce again, the case to test. Reading
+    # the log every 0.3 s and then signalling took a second or two, and both of run 71's crashes came after the
+    # messages. So the signal waits ready, in an exec already open on the debug container, reading a FIFO; the
+    # log is followed, and the first item.landed line (a group committed) sends it at once.
+    local fifo="$out/crash.fifo" exec_pid=""
     if [[ -n "$crash_container" ]]; then
-      kubectl -n "$N" exec "${pod#pod/}" -c "$crash_container" -- kill -SEGV 1 >/dev/null 2>&1 \
-        && mid="${mid:+$mid; }JVM crashed (SIGSEGV)" || mid="${mid:+$mid; }the crash signal failed"
+      rm -f "$fifo"; mkfifo "$fifo"
+      kubectl -n "$N" exec -i "${pod#pod/}" -c "$crash_container" -- sh -c 'read go && kill -SEGV 1' \
+        < "$fifo" >/dev/null 2>&1 &
+      exec_pid=$!
+      exec 9> "$fifo"
+      sleep 2   # the exec open, its shell reading
+    fi
+    # The signal goes from inside the pipeline as grep finds its line: after the pipeline, it would wait for the
+    # follow to end, at its next line's SIGPIPE, seconds later (tried). The follow's status is left out.
+    rm -f "$out/crash.seen"
+    { timeout 45 kubectl -n "$N" logs -f --tail=0 "${pod#pod/}" 2>/dev/null || true; } \
+      | { grep -m1 -q ' item\.landed ' && { [[ -z "$exec_pid" ]] || echo go >&9; } && : > "$out/crash.seen"; } || true
+    [[ -f "$out/crash.seen" ]] && mid="mid-group: signalled on its first item.landed line"
+    if [[ -n "$exec_pid" ]]; then
+      exec 9>&-   # with no line sent, the shell reads end of file and signals nothing
+      if wait "$exec_pid" 2>/dev/null && [[ -n "$mid" ]]; then
+        mid+="; JVM crashed (SIGSEGV)"
+      elif [[ -n "$mid" ]]; then
+        mid+="; the crash signal failed"
+      fi
+      rm -f "$fifo"
     fi
     kubectl -n "$N" delete "$pod" --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
   else

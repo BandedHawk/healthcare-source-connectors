@@ -419,7 +419,7 @@ class PipelineIsolationIT
     {
         return LeaseDatabase.dataSource(new CommonSettings.Jdbc(
                 url(database), stage.replace('-', '_'), SECRETS.get(stage),
-                "sdh_lease"));
+                "sdh_lease", 2));
     }
 
     /**

@@ -99,7 +99,9 @@ import org.springframework.context.annotation.Primary;
  * (records a point, at least one item), {@code -Dperf.fanout.max-items=2000},
  * {@code -Dperf.fanout.concurrency=64}, {@code -Dperf.fanout.batch=10000}
  * and {@code -Dperf.fanout.audit=on,off,on:100} (on, with a 100 ms linger)
- * to choose the points. The
+ * to choose the points; {@code -Dperf.fanout.pool-size=2} sets the stage's
+ * registry pool ({@code sdh.lease.jdbc.pool-size}, docs/PERFORMANCE.md
+ * §13.3) for every point. The
  * results go to {@code target/perf/split-fanout-<time>.md}.
  *
  * @author Jonas Barnett
@@ -754,6 +756,8 @@ class SplitFanOutPerf
         arguments.add("--sdh.telemetry.journal.enabled=" + shape.audit());
         arguments.add("--sdh.telemetry.journal.linger="
                 + Math.max(0, shape.linger()) + "ms");
+        arguments.add("--sdh.lease.jdbc.pool-size="
+                + Integer.getInteger("perf.fanout.pool-size", 2));
         return arguments.toArray(String[]::new);
     }
 

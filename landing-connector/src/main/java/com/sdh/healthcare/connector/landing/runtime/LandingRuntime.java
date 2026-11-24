@@ -335,7 +335,8 @@ public final class LandingRuntime implements AutoCloseable
         KekWatch kekWatch = null;
         try
         {
-            dataSource = LeaseDatabase.dataSource(properties.lease().jdbc());
+            dataSource = LeaseDatabase.dataSource(properties.lease().jdbc(),
+                    "landing");
             // Every audit event, chained and sealed (HIPAA.md §3.1), beside
             // the lease table: the landing node has no schema of its own.
             journal = AuditJournals.start(properties.lease(),

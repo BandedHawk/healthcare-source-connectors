@@ -123,7 +123,7 @@ def vec(s, keys):
 k = ("sdh_stage", "sdh_phase")
 count, total, p95 = (vec(s, k) for s in sys.argv[1:4])
 order = ["landing", "split", "convert", "transform"]
-phases = ["read_wait", "close", "ledger", "finish", "group", "lookup", "lookup_table", "lookup_row", "refs", "open", "split", "resume", "start",
+phases = ["pool_wait", "read_wait", "close", "ledger", "finish", "group", "lookup", "lookup_table", "lookup_row", "refs", "open", "split", "resume", "start",
           "first_record", "batch_open", "records", "records_read", "records_store", "write", "publish_wait",
           "prepare", "append",
           "commit_queue", "commit_group", "save", "send_wait", "archive", "failed_rows", "fail_store",

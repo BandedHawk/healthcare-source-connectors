@@ -234,7 +234,8 @@ public final class RecordStageRuntime implements AutoCloseable
         try
         {
             HikariDataSource dataSource =
-                    LeaseDatabase.dataSource(settings.lease().jdbc());
+                    LeaseDatabase.dataSource(settings.lease().jdbc(),
+                            stageName);
             opened.add(dataSource);
             // Every audit event, chained and sealed (HIPAA.md §3.1); closed
             // after everything that emits them.

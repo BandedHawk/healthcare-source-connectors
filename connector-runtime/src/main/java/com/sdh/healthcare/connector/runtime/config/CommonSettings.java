@@ -59,10 +59,29 @@ public final class CommonSettings
      * @param username the database user
      * @param password the user's password, from the environment
      * @param table    the lease table
+     * @param poolSize the most connections a process's pool for its own
+     *                 registry, leases and checkpoints holds (2 by default;
+     *                 docs/PERFORMANCE.md §13.3); the audit journal and a
+     *                 shared commit keep pools of their own
      */
     public record Jdbc(String url, String username, String password,
-            @DefaultValue("sdh_lease") String table)
+            @DefaultValue("sdh_lease") String table,
+            @DefaultValue("2") int poolSize)
     {
+
+        /**
+         * Checks the pool size.
+         *
+         * @throws IllegalArgumentException if it is under 1
+         */
+        public Jdbc
+        {
+            if (poolSize < 1)
+            {
+                throw new IllegalArgumentException(
+                        "sdh.lease.jdbc.pool-size must be at least 1");
+            }
+        }
     }
 
     /**

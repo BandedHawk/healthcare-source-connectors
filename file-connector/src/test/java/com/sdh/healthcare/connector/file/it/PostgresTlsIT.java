@@ -208,6 +208,6 @@ class PostgresTlsIT
     static CommonSettings.Jdbc jdbc(String url)
     {
         return new CommonSettings.Jdbc(url, postgres.getUsername(),
-                postgres.getPassword(), "sdh_lease");
+                postgres.getPassword(), "sdh_lease", 2);
     }
 }

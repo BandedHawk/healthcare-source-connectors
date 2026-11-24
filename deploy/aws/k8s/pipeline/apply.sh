@@ -40,6 +40,11 @@ export SPLIT_RECONCILE_INTERVAL="${SDH_SPLIT_RECONCILE_INTERVAL:-15m}"
 # transform stage's set reads C-CDA only, so it keeps another format's records as they came (TRANSFORM_UNSUPPORTED).
 export SPLIT_FORMAT="${SDH_SPLIT_FORMAT:-ccda}" SPLIT_OPTIONS="${SDH_SPLIT_OPTIONS:-{}}"
 export CONVERT_OPTIONS="${SDH_CONVERT_OPTIONS:-{}}"
+# The split pods' pool for their registry, leases and checkpoints (sdh.lease.jdbc.pool-size; 2, the product's
+# default), each wait for one of its connections timed as split's pool_wait (docs/PERFORMANCE.md §13.3). PgBouncer
+# gives a role 40 server connections (k8s/infra/state.yaml), so 6 pods of more than 6 can queue there instead.
+export SPLIT_POOL_SIZE="${SDH_SPLIT_POOL_SIZE:-2}"
+[[ "$SPLIT_POOL_SIZE" =~ ^[1-9][0-9]*$ ]] || { echo "apply.sh: SDH_SPLIT_POOL_SIZE is a count: $SPLIT_POOL_SIZE" >&2; exit 2; }
 # Registry retention (sdh.stage.retention.*, the convert and transform stages; docs/DEPLOYMENT.md "Registry
 # retention"): unset, every row is kept, the product's default. SDH_STAGE_RETENTION_AFTER turns it on. The stage
 # refuses an after shorter than its input queue's retention or its reconciler's lookback, each plus a day, so a
@@ -181,8 +186,13 @@ failed() {
       | grep "^pod/${2#deploy/}-" || true); do
     [[ "$(kc -n "$1" get "$pod" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)" == true ]] && continue
     say "  $pod, not ready:"
+    # Its containers' last state (an exit code and reason, which outlast a log the runtime has dropped).
+    kc -n "$1" describe "$pod" 2>/dev/null | sed -n '/^Containers:/,/^Conditions:/p' \
+      | grep -E '^  [a-z]|State:|Reason:|Exit Code:|Started:|Finished:|Restart Count:' || true
     kc -n "$1" logs "$pod" --previous --tail=60 2>/dev/null || kc -n "$1" logs "$pod" --tail=60 || true
   done
+  say "  warning events in $1:"
+  kc -n "$1" get events --field-selector type=Warning --sort-by=.lastTimestamp 2>/dev/null | tail -n 20 || true
   die "$2 in $1 didn't start"
 }
 
@@ -234,7 +244,7 @@ deploy_pipeline() {
   local vars='$PIPELINE $ICEBERG_PREFIX $INBOX_SHA256 $CONVERT_INBOX_SHA256 $RECIPIENT_SHA256 $CONSUMER_SHA256'
   vars+=' $KAFKA_BROKERS $AWS_REGION $INTAKE_BUCKET $BRONZE_BUCKET $SILVER_BUCKET $GOLD_BUCKET'
   vars+=' $JOSE_PROVIDER $JOURNAL_LINGER $SPLIT_RECONCILE_GRACE $SPLIT_RECONCILE_INTERVAL'
-  vars+=' $SPLIT_FORMAT $SPLIT_OPTIONS $CONVERT_OPTIONS'
+  vars+=' $SPLIT_FORMAT $SPLIT_OPTIONS $CONVERT_OPTIONS $SPLIT_POOL_SIZE'
   local stage
   for stage in landing splitter convert transform; do
     envsubst "$vars" < "$HERE/$stage-application.yml" > "$work/$stage-application.yml"

@@ -1723,3 +1723,53 @@ check. The images did not yet have registry retention (off by default, so no eff
   finished with no open failure; transform 30,000, of which 15,000 have an open failure (the US Core checks),
   which retention must keep. The last item finished at 22:25 UTC, so the second visit can be from
   2026-11-24 23:25 UTC on (`up`, `apply.sh` with the same settings, `retention-check.sh verify`).
+
+### 13.3 Why split is slower than transform: its database pool (2026-11-24)
+
+**The question (the user's):** transform does far more work a document than split, yet split is the stage that
+sets the pace at 100 a second. Earlier timing of split's reading, splitting and storing found nothing large.
+
+**Where a split item's time goes** (run 69, `load-20261123T175601Z`, 90,000 C-CDA at 100 a second, 6 split pods,
+mean seconds an item): the item 4.38 s in all, of which:
+
+| Part | Mean s |
+|---|---|
+| reading, splitting, storing and writing its record (`first_record`, `batch_open`, `records`, `write`) | ~0.07 |
+| the Iceberg append to `split_records` (`append`: 0.44 queued for the shared commit, the group commit 0.88) | 1.33 |
+| the item's own steps on Postgres: `refs` 0.48, `announce` 0.47, `archive` 0.30, `prepare` 0.30, `save` 0.24, `correction_rows` 0.16, `checkpoint` 0.14, `fail_store` 0.13, `start` 0.11, `resume` 0.10 | ~2.4 |
+| the landed-table lookup (`lookup_row`) | 0.12 |
+
+So the splitting is under 2% of an item. The splitter pods used 0.53 of their 1.1 cores on average: they wait.
+
+**Why transform doesn't pay the same:** transform's registry steps (claim, register, complete) and its commit are
+a batch's, and its 90,000 records came in 6,040 commits, about 15 records each; its own work, 0.43 s a record,
+is spread over them. Split's steps are each item's, and a C-CDA item is one document: about ten short Postgres
+transactions a document, against well under one at transform.
+
+**Why each of those steps takes 0.1–0.5 s, not milliseconds:** every one of them runs on the pod's pool for its
+registry, leases and checkpoints (`LeaseDatabase`), which held **2 connections**, while a pod has **64 items at
+once** (8 consumers × 8). The likeliest cause is items queuing for a connection, with Postgres short of CPU at
+saturation (§10, runs 60 to 63) on top. Nothing timed that wait, so it was not shown.
+
+**Built (DESIGN.md revision (ey)):** `sdh.lease.jdbc.pool-size` (default 2, unchanged unless set), and each wait
+for one of the pool's connections timed as the stage's `pool_wait` step, which the load test's report lists with
+the other steps. `apply.sh` sets the split pods' pool from `SDH_SPLIT_POOL_SIZE`, `SplitFanOutPerf` from
+`-Dperf.fanout.pool-size`.
+
+**Locally (`SplitFanOutPerf`, one-row CSV items, 3,000 a point, 64 at once, the audit journal with its 100 ms
+linger; `target/perf/split-fanout-20261124T003254Z.md` and `…T003714Z.md`):**
+
+| Pool | Items/s | Item p50 ms | Takes a connection an item | `pool_wait` ms an item (mean a take) | `announce` / `archive` / `checkpoint` / `resume` ms |
+|---|---:|---:|---:|---:|---|
+| 2 | 472 | 120 | 19 | 30.3 (1.59) | 4.87 / 2.92 / 1.92 / 1.63 |
+| 8 | 486 | 118 | 19 | 0.47 (0.03) | 1.22 / 0.30 / 0.25 / 0.18 |
+
+- **The wait is real, and it is most of each Postgres step:** at 2 connections every step on the pool took 5 to
+  10 times as long, and the waits came to 30 ms an item; at 8 they all but went.
+- **Here it doesn't set the pace:** items a second barely moved, because an item here is mostly its append
+  (53–62 ms, the shared commit) and writing its file (27 ms), and each transaction holds a connection for
+  well under a millisecond on embedded Postgres with cores to spare.
+- **On AWS it can:** an item takes a connection 19 times. If each take holds it for about 10 ms there (PgBouncer,
+  the network, and Postgres short of CPU), 2 connections let a pod finish about 2 / (19 × 0.01) ≈ 10 items a
+  second; run 69's pods did about 9 (54 a second on 6). That fits, but it is arithmetic, not a measurement: runs K
+  and L (pool 2 and 6, the same load) at the visit will show it.

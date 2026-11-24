@@ -77,7 +77,10 @@ sdh:
       io-impl: org.apache.iceberg.aws.s3.S3FileIO
       client: { region: ${AWS_REGION} }
   lease:
-    jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh", username: splitter_${ICEBERG_PREFIX} }
+    # pool-size: the pool for the registry, leases and checkpoints (2 unless a load test asks: apply.sh
+    # SDH_SPLIT_POOL_SIZE; docs/PERFORMANCE.md §13.3).
+    jdbc: { url: "jdbc:postgresql://pgbouncer.sdh-infra.svc:5432/sdh", username: splitter_${ICEBERG_PREFIX},
+            pool-size: ${SPLIT_POOL_SIZE} }
   crypto:
     # The JCA provider for message sealing (docs/PERFORMANCE.md §13): accp on AWS; apply.sh fills it.
     jose: { provider: ${JOSE_PROVIDER} }
